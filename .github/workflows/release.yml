@@ -89,11 +89,12 @@ jobs:
           version="${RELEASE_TAG}"
           asset="hpc-compose-${version}-${{ matrix.target }}.tar.gz"
           checksum="${asset}.sha256"
+          stage_dir="$(mktemp -d)"
 
-          mkdir -p dist/package
-          cp "target/release/${{ matrix.binary_name }}" dist/package/
-          cp README.md dist/package/
-          tar -C dist/package -czf "dist/${asset}" "${{ matrix.binary_name }}" README.md
+          mkdir -p dist
+          cp "target/release/${{ matrix.binary_name }}" "${stage_dir}/"
+          cp README.md "${stage_dir}/"
+          tar -C "${stage_dir}" -czf "dist/${asset}" "${{ matrix.binary_name }}" README.md
           shasum -a 256 "dist/${asset}" > "dist/${checksum}"
 
       - name: Package Windows release assets
@@ -102,9 +103,10 @@ jobs:
         run: |
           $version = $env:RELEASE_TAG
           $asset = "hpc-compose-$version-${{ matrix.target }}.zip"
-          $stageDir = Join-Path $PWD "dist/package"
+          $stageDir = Join-Path $env:RUNNER_TEMP "release-package"
 
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $PWD "dist") | Out-Null
           Copy-Item "target/release/${{ matrix.binary_name }}" $stageDir
           Copy-Item README.md $stageDir
           Compress-Archive -Path "$stageDir/*" -DestinationPath "dist/$asset"
