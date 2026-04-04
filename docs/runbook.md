@@ -1,6 +1,6 @@
 # Runbook
 
-This runbook is for users adapting `hpc-compose` to a real workload on a Slurm cluster with Enroot and Pyxis.
+This runbook is for adapting `hpc-compose` to a real workload on a Slurm cluster with Enroot and Pyxis.
 
 Commands below assume `hpc-compose` is on your `PATH`. If you are running from a local checkout, replace `hpc-compose` with `target/release/hpc-compose`.
 
@@ -16,6 +16,15 @@ Make sure you have:
 - any required local source trees or local `.sqsh` images in place,
 - registry credentials available if your cluster or registry requires them.
 
+## Typical path
+
+For a first working run:
+
+1. Run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`, or copy the closest shipped example.
+2. Set `x-slurm.cache_dir` if you need an explicit shared cache path, and adjust any cluster-specific resource settings.
+3. Run `hpc-compose submit --watch -f compose.yaml`.
+4. If that fails, or if you are still adapting the spec, use `validate`, `inspect`, `preflight`, `prepare`, `render`, `status`, or `logs` separately.
+
 ## Pick a starting example
 
 | Example | Use it when you need | File |
@@ -23,12 +32,18 @@ Make sure you have:
 | Dev app | mounted source tree plus a small prepare step | [`examples/dev-python-app.yaml`](../examples/dev-python-app.yaml) |
 | Redis worker stack | multi-service launch ordering and readiness checks | [`examples/app-redis-worker.yaml`](../examples/app-redis-worker.yaml) |
 | LLM curl workflow | one GPU-backed LLM plus a one-shot `curl` request from a second service | [`examples/llm-curl-workflow.yaml`](../examples/llm-curl-workflow.yaml) |
-| LLM curl workflow (workdir) | the same request flow, but anchored under one login-node work directory via `HPC_COMPOSE_HOME` | [`examples/llm-curl-workflow-workdir.yaml`](../examples/llm-curl-workflow-workdir.yaml) |
+| LLM curl workflow (home) | the same request flow, but anchored under `$HOME/models` for direct use on a login node | [`examples/llm-curl-workflow-workdir.yaml`](../examples/llm-curl-workflow-workdir.yaml) |
 | GPU-backed app | one GPU service plus a dependent application | [`examples/llama-app.yaml`](../examples/llama-app.yaml) |
 
 The fastest path is usually to copy the closest example and adapt it instead of starting from scratch.
 
-## 1. Choose `x-slurm.cache_dir` first
+You can also let `hpc-compose` scaffold one of these examples directly:
+
+```bash
+hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
+```
+
+## 1. Choose `x-slurm.cache_dir` early
 
 Set `x-slurm.cache_dir` to a path that is visible from both the login node and the compute nodes.
 
@@ -41,7 +56,7 @@ Rules:
 
 - Do **not** use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm`.
 - If you leave `cache_dir` unset, the default is `$HOME/.cache/hpc-compose`.
-- A home-directory cache may work, but `preflight` warns because shared workspace storage is usually safer on real clusters.
+- The default is convenient for small or home-directory workflows, but a shared project or workspace path is usually safer on real clusters.
 
 ## 2. Adapt the example to your workload
 
@@ -80,6 +95,7 @@ If `validate` fails, fix that before doing anything more expensive.
 
 ```bash
 hpc-compose inspect -f compose.yaml
+hpc-compose inspect --verbose -f compose.yaml
 ```
 
 Check:
@@ -96,6 +112,7 @@ Check:
 
 ```bash
 hpc-compose preflight -f compose.yaml
+hpc-compose preflight --verbose -f compose.yaml
 ```
 
 `preflight` checks:
@@ -139,7 +156,7 @@ Force a refresh of imported and prepared artifacts:
 hpc-compose prepare -f compose.yaml --force
 ```
 
-## 7. Render the batch script if you want to inspect it
+## 7. Render the batch script when you need to inspect it
 
 ```bash
 hpc-compose render -f compose.yaml --output /tmp/job.sbatch
@@ -154,7 +171,7 @@ This is useful when:
 ## 8. Submit the job
 
 ```bash
-hpc-compose submit -f compose.yaml
+hpc-compose submit --watch -f compose.yaml
 ```
 
 `submit` does the normal end-to-end flow:
@@ -163,6 +180,12 @@ hpc-compose submit -f compose.yaml
 2. prepare images unless `--skip-prepare` is set,
 3. render the script,
 4. call `sbatch`.
+
+With `--watch`, `submit` also:
+
+5. records the tracked job metadata under `.hpc-compose/`,
+6. polls scheduler state with `squeue` / `sacct` when available,
+7. streams tracked service logs as they appear.
 
 Note: `submit` treats preflight **warnings** as non-fatal. If you want warnings to block submission, run `preflight --strict` separately before `submit`.
 
@@ -174,6 +197,8 @@ Useful options:
 - `--skip-prepare` reuses existing prepared artifacts.
 - `--keep-failed-prep` keeps the Enroot rootfs around when a prepare step fails.
 
+For the shipped examples, `submit --watch` is usually the only command you need in the normal path. Use the other commands when you need more visibility into planning, environment checks, image preparation, tracked job state, or the generated script.
+
 ## 9. Read logs and submission output
 
 After a successful submit, `hpc-compose` prints:
@@ -181,12 +206,27 @@ After a successful submit, `hpc-compose` prints:
 - the rendered script path,
 - the cache directory,
 - one log path per service.
+- the tracked metadata location when a numeric Slurm job id was returned.
+
+Use the tracked helpers for later inspection:
+
+```bash
+hpc-compose status -f compose.yaml
+hpc-compose logs -f compose.yaml
+hpc-compose logs -f compose.yaml --service app --follow
+```
+
+`status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created.
 
 Runtime logs live under:
 
 ```text
 ${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/logs/<service>.log
 ```
+
+That same per-job directory is also mounted inside every container at `/hpc-compose/job`. Use it for small cross-service coordination files when a workflow needs shared ephemeral state.
+
+Slurm may also write a top-level batch log such as `slurm-<jobid>.out`, or to the path configured with `x-slurm.output`. Check that file first when the job fails before any service log appears.
 
 Service names containing non-alphanumeric characters are encoded in the log filename. For example, a service named `my.app` produces `my_x2e_app.log`. Prefer `[a-zA-Z0-9_-]` in service names for readability.
 
@@ -286,6 +326,10 @@ Pyxis support appears unavailable on that node. Move to a supported login node o
 
 Remember that relative paths resolve from the compose file directory, not from the shell's current working directory.
 
+### A mounted file exists on the host but not inside the container
+
+This is often a symlink issue. If you mount a directory such as `$HOME/models:/models` and `model.gguf` is a symlink whose target lives outside `$HOME/models`, the target may not be visible inside the container. Copy the real file into the mounted directory or mount the directory that contains the symlink target.
+
 ### Anonymous pull or registry credential warnings
 
 Add the required credentials before relying on private registries or heavily rate-limited public registries.
@@ -293,6 +337,8 @@ Add the required credentials before relying on private registries or heavily rat
 ### Services start in the wrong order
 
 Use `depends_on` for launch order and `readiness` for actual startup gating. `depends_on` alone does not wait for ports or logs.
+
+When a TCP port opens before the service is fully usable, prefer log-based readiness over TCP readiness.
 
 ## Related docs
 

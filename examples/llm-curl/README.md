@@ -10,11 +10,30 @@ This example is the smallest end-to-end `hpc-compose` LLM workflow:
 ## Prerequisites
 
 - a supported login node with `enroot`, `srun`, and `sbatch`,
-- a shared `x-slurm.cache_dir`,
-- a GGUF model at [`../models/model.gguf`](../models/model.gguf).
-- a request payload at [`request.json`](request.json).
+- a GGUF model at [`../models/model.gguf`](../models/model.gguf) for the repo-local example, or at `$HOME/models/model.gguf` for the home-directory example.
 
-## Login-node flow
+## Recommended path
+
+For a real cluster, start with the home-directory variant:
+
+```bash
+mkdir -p "$HOME/models"
+# Copy the real GGUF file, not just a symlink whose target lives elsewhere.
+cp /path/to/your/model.gguf "$HOME/models/model.gguf"
+hpc-compose submit -f examples/llm-curl-workflow-workdir.yaml
+```
+
+This is the lowest-overhead path because it does not require `HPC_COMPOSE_HOME`, a helper script, or a separate request file.
+
+## Repo-local variant
+
+```bash
+hpc-compose submit -f examples/llm-curl-workflow.yaml
+```
+
+`submit` already runs preflight, prepares missing images, renders the batch script, and calls `sbatch`.
+
+## Optional debug flow
 
 ```bash
 hpc-compose validate -f examples/llm-curl-workflow.yaml
@@ -24,10 +43,23 @@ hpc-compose prepare -f examples/llm-curl-workflow.yaml
 hpc-compose submit -f examples/llm-curl-workflow.yaml
 ```
 
+If you are using the home-directory variant, replace `examples/llm-curl-workflow.yaml` with `examples/llm-curl-workflow-workdir.yaml` in the commands above.
+
 ## What to look for
 
 - `llm.log` shows `llama-server` starting and serving the request.
 - `curl_client.log` contains the JSON response from `/v1/chat/completions`.
+- If the job fails before either service starts, check Slurm's batch log such as `slurm-<jobid>.out`.
+
+## Built-in job scratch
+
+Every service automatically sees the per-job directory at `/hpc-compose/job`.
+
+The example uses that shared mount to:
+
+- wait for `curl_client` to finish,
+- signal the `llm` service to stop,
+- and avoid any extra host-side workflow directory.
 
 ## Startup gating
 
@@ -41,27 +73,22 @@ This is intentional. `llama-server` can bind its TCP port before the model is fu
 
 ## Adjusting the prompt
 
-Edit [`request.json`](request.json) to change:
+Edit the inline JSON body in `curl_client.command` inside:
+
+- [`../llm-curl-workflow.yaml`](../llm-curl-workflow.yaml), or
+- [`../llm-curl-workflow-workdir.yaml`](../llm-curl-workflow-workdir.yaml)
+
+You can change:
 
 - the system or user message,
 - generation settings such as `temperature` or `max_tokens`,
 - or the request shape entirely.
 
-The `curl` script posts that file directly, so you can make the request payload as simple or as custom as you want.
+The home-directory variant:
 
-## Running from an arbitrary work directory
-
-If you want the same workflow rooted in a login-node directory such as `/home/kastel/vy3326`, use [`../llm-curl-workflow-workdir.yaml`](../llm-curl-workflow-workdir.yaml) and set:
-
-```bash
-export HPC_COMPOSE_HOME=/home/kastel/vy3326
-```
-
-Then create:
-
-- `$HPC_COMPOSE_HOME/models/model.gguf`
-- `$HPC_COMPOSE_HOME/llm-curl/run-request.sh`
-- `$HPC_COMPOSE_HOME/llm-curl/request.json`
+- uses `$HOME/models:/models`,
+- relies on the default cache directory at `$HOME/.cache/hpc-compose` unless you set `x-slurm.cache_dir`,
+- and no longer needs `HPC_COMPOSE_HOME`, `run-request.sh`, or `request.json`.
 
 Logs land under:
 

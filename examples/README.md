@@ -2,6 +2,12 @@
 
 These examples are the fastest way to understand the intended `hpc-compose` workflows and adapt them to a real application.
 
+If you want one of these files written straight to your working directory, use:
+
+```bash
+hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
+```
+
 ## Example matrix
 
 | Example | What it demonstrates | When to start from it |
@@ -9,13 +15,16 @@ These examples are the fastest way to understand the intended `hpc-compose` work
 | [`app-redis-worker.yaml`](app-redis-worker.yaml) | Multiple services, `depends_on`, and TCP readiness checks | You need service startup ordering or a small multi-service stack |
 | [`dev-python-app.yaml`](dev-python-app.yaml) | Mounted source code plus `x-enroot.prepare.commands` for dependencies | You want an iterative development workflow |
 | [`llm-curl-workflow.yaml`](llm-curl-workflow.yaml) | End-to-end LLM request flow with a login-node prepare step and a `curl` client | You want the smallest concrete inference workflow |
-| [`llm-curl-workflow-workdir.yaml`](llm-curl-workflow-workdir.yaml) | Same LLM workflow, but parameterized around one work directory via `HPC_COMPOSE_HOME` | You want to run the example from a login-node home or project directory |
+| [`llm-curl-workflow-workdir.yaml`](llm-curl-workflow-workdir.yaml) | Same LLM workflow, but anchored under `$HOME/models` for direct use on a login node | You want the lowest-overhead path from a login-node home directory |
 | [`llama-app.yaml`](llama-app.yaml) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
+
+If you want the fastest end-to-end cluster example, start with [`llm-curl-workflow-workdir.yaml`](llm-curl-workflow-workdir.yaml). If you want a source-mounted development workflow, start with [`dev-python-app.yaml`](dev-python-app.yaml).
 
 ## How to adapt an example
 
 1. Copy the closest example to your own `compose.yaml`.
-2. Set `x-slurm.cache_dir` to a shared filesystem path.
+   Or run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
+2. Set `x-slurm.cache_dir` to a shared filesystem path when your cluster needs one. The home-directory examples can also rely on the default `$HOME/.cache/hpc-compose`.
 3. Replace the example `image`, `command`, `environment`, and `volumes` with your workload.
 4. Keep active source trees in `volumes` and reserve `x-enroot.prepare.commands` for slower-changing dependencies or tools.
 5. Add `readiness` to services that must be actually reachable before dependents continue.
@@ -39,14 +48,15 @@ These examples are the fastest way to understand the intended `hpc-compose` work
 
 - Best reference for a complete request/response path.
 - Uses `x-enroot.prepare.commands` on the login node to build a Debian-based client image with `bash` and `curl`.
-- Uses a fixed sleep readiness gate so the client does not race model loading.
-- Shares a tiny workflow directory so the LLM server can shut down after the request completes.
+- Waits for `llama.cpp` to print `main: model loaded` before launching the client.
+- Uses the built-in `/hpc-compose/job` mount to shut the server down after the request completes.
 
 ### `llm-curl-workflow-workdir.yaml`
 
-- Best reference when you already have a working directory on the login node.
-- Resolves cache and mount paths through `HPC_COMPOSE_HOME`.
-- Expects `models/` and `llm-curl/` under that work directory.
+- Best reference when you want a direct login-node example without copying helper files.
+- Expects the model at `$HOME/models/model.gguf`.
+- Uses the default cache directory under `$HOME/.cache/hpc-compose` unless you set `x-slurm.cache_dir`.
+- Best first example for a real cluster if you already have a GGUF model.
 
 ### `llama-app.yaml`
 

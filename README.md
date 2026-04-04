@@ -1,8 +1,8 @@
 # hpc-compose
 
-`hpc-compose` is a single-binary launcher that turns a Compose-like spec into one Slurm job running multiple services through Enroot and Pyxis.
+`hpc-compose` is a single-binary launcher that turns a Compose-like spec into a single Slurm job running one or more services through Enroot and Pyxis.
 
-It is intentionally **not** a full Docker Compose implementation. It targets the subset that maps cleanly to `sbatch` + `srun` + Enroot on a single node.
+It is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to `sbatch` + `srun` + Enroot on a single node.
 
 ## What it is for
 
@@ -43,13 +43,15 @@ cargo build --release
 Then try one of the examples:
 
 ```bash
-target/release/hpc-compose validate -f examples/dev-python-app.yaml
-target/release/hpc-compose inspect -f examples/dev-python-app.yaml
-target/release/hpc-compose preflight -f examples/dev-python-app.yaml
-target/release/hpc-compose render -f examples/dev-python-app.yaml --output /tmp/job.sbatch
+target/release/hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output /tmp/compose.yaml
+target/release/hpc-compose validate -f /tmp/compose.yaml
+target/release/hpc-compose inspect --verbose -f /tmp/compose.yaml
+target/release/hpc-compose submit --watch -f /tmp/compose.yaml
 ```
 
-For the full submit workflow, including prepare and log handling, use the [runbook](docs/runbook.md).
+In normal cluster use, `submit --watch` is the fastest end-to-end path. It runs preflight, prepares missing images, renders the batch script, submits it through `sbatch`, then follows scheduler state and service logs for the tracked job. Use `status` and `logs` later to revisit a tracked submission, or use `validate`, `inspect`, `preflight`, `prepare`, or `render` separately when adapting a spec or debugging a failure.
+
+For the full workflow, including example selection, cache setup, and log handling, use the [runbook](docs/runbook.md).
 
 ## Releases
 
@@ -69,12 +71,15 @@ Linux release notes:
 
 ## Command flow
 
+- `init` writes a starter compose file from one of the shipped templates.
 - `validate` checks that the spec parses and normalizes successfully.
-- `inspect` prints the normalized runtime plan and expected cache behavior.
-- `preflight` checks the login node environment before submission.
+- `inspect` prints the normalized runtime plan and expected cache behavior, with `--verbose` and `--json` output modes for deeper inspection.
+- `preflight` checks the login node environment before submission, with grouped diagnostics by default plus `--verbose` and `--json`.
 - `prepare` imports or rebuilds missing runtime artifacts on the login node.
 - `render` writes the generated `sbatch` script without submitting it.
-- `submit` runs preflight, optional prepare, render, and `sbatch`.
+- `submit` runs preflight, optional prepare, render, and `sbatch`; `submit --watch` also follows scheduler state and service logs.
+- `status` shows the tracked scheduler/log state for the latest or selected job id for a compose file, including the top-level batch log path.
+- `logs` tails tracked service logs, optionally filtered to one service and followed live.
 - `cache list|inspect|prune` inspects and manages cached artifacts.
 
 ## Examples
@@ -82,7 +87,7 @@ Linux release notes:
 - [`examples/app-redis-worker.yaml`](examples/app-redis-worker.yaml): multi-service launch ordering and readiness checks.
 - [`examples/dev-python-app.yaml`](examples/dev-python-app.yaml): mounted-code development workflow.
 - [`examples/llm-curl-workflow.yaml`](examples/llm-curl-workflow.yaml): end-to-end LLM request with a `curl` client.
-- [`examples/llm-curl-workflow-workdir.yaml`](examples/llm-curl-workflow-workdir.yaml): the same LLM flow parameterized by `HPC_COMPOSE_HOME`.
+- [`examples/llm-curl-workflow-workdir.yaml`](examples/llm-curl-workflow-workdir.yaml): the same LLM flow simplified for direct use from `$HOME/models` on a login node.
 - [`examples/llama-app.yaml`](examples/llama-app.yaml): GPU-backed service with a dependent application.
 
 ## Build and test

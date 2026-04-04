@@ -9,13 +9,26 @@ use clap::{Parser, Subcommand};
 use hpc_compose::cache::{
     CacheEntryKind, load_manifest_if_exists, prune_all_unused, prune_by_age, scan_cache,
 };
-use hpc_compose::planner::{ImageSource, build_plan, registry_host_for_remote};
+use hpc_compose::init::{
+    default_cache_dir as default_init_cache_dir, next_commands, prompt_for_init, render_template,
+    resolve_template, write_initialized_template,
+};
+use hpc_compose::job::{
+    SchedulerOptions, StatusSnapshot, WatchOutcome, build_status_snapshot, build_submission_record,
+    load_submission_record, print_logs, scheduler_source_label, watch_submission,
+    write_submission_record,
+};
+use hpc_compose::planner::{
+    ExecutionSpec, ImageSource, Plan, build_plan, registry_host_for_remote,
+};
 use hpc_compose::preflight::{Options as PreflightOptions, Report, run as run_preflight};
 use hpc_compose::prepare::{
     ArtifactAction, PrepareOptions, PrepareSummary, RuntimePlan, base_image_path,
     build_runtime_plan, prepare_runtime_plan,
 };
-use hpc_compose::render::render_script;
+use hpc_compose::render::{
+    build_srun_command, execution_argv, log_file_name_for_service, render_script,
+};
 use hpc_compose::spec::ComposeSpec;
 
 #[derive(Debug, Parser)]
@@ -56,6 +69,10 @@ enum Commands {
         file: PathBuf,
         #[arg(long)]
         strict: bool,
+        #[arg(long)]
+        verbose: bool,
+        #[arg(long)]
+        json: bool,
         #[arg(long, default_value = "enroot")]
         enroot_bin: String,
         #[arg(long, default_value = "sbatch")]
@@ -66,6 +83,10 @@ enum Commands {
     Inspect {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
+        #[arg(long)]
+        verbose: bool,
+        #[arg(long)]
+        json: bool,
     },
     Submit {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
@@ -78,6 +99,10 @@ enum Commands {
         srun_bin: String,
         #[arg(long, default_value = "enroot")]
         enroot_bin: String,
+        #[arg(long, default_value = "squeue")]
+        squeue_bin: String,
+        #[arg(long, default_value = "sacct")]
+        sacct_bin: String,
         #[arg(long)]
         keep_failed_prep: bool,
         #[arg(long)]
@@ -86,6 +111,44 @@ enum Commands {
         force_rebuild: bool,
         #[arg(long)]
         no_preflight: bool,
+        #[arg(long)]
+        watch: bool,
+    },
+    Status {
+        #[arg(short = 'f', long, default_value = "compose.yaml")]
+        file: PathBuf,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "squeue")]
+        squeue_bin: String,
+        #[arg(long, default_value = "sacct")]
+        sacct_bin: String,
+    },
+    Logs {
+        #[arg(short = 'f', long, default_value = "compose.yaml")]
+        file: PathBuf,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        service: Option<String>,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+    },
+    Init {
+        #[arg(long)]
+        template: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        cache_dir: Option<String>,
+        #[arg(long, default_value = "compose.yaml")]
+        output: PathBuf,
+        #[arg(long)]
+        force: bool,
     },
     Cache {
         #[command(subcommand)]
@@ -162,6 +225,8 @@ fn run_command(command: Commands) -> Result<()> {
         Commands::Preflight {
             file,
             strict,
+            verbose,
+            json,
             enroot_bin,
             sbatch_bin,
             srun_bin,
@@ -177,7 +242,15 @@ fn run_command(command: Commands) -> Result<()> {
                     skip_prepare: false,
                 },
             );
-            print_report(&report);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report.grouped())
+                        .context("failed to serialize preflight report")?
+                );
+            } else {
+                print_report(&report, verbose);
+            }
             if report.has_errors() {
                 bail!("preflight failed");
             }
@@ -185,9 +258,23 @@ fn run_command(command: Commands) -> Result<()> {
                 bail!("preflight reported warnings");
             }
         }
-        Commands::Inspect { file } => {
-            let runtime_plan = load_runtime_plan(&file)?;
-            print_plan_inspect(&runtime_plan);
+        Commands::Inspect {
+            file,
+            verbose,
+            json,
+        } => {
+            let (plan, runtime_plan) = load_plan_and_runtime(&file)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runtime_plan)
+                        .context("failed to serialize inspect output")?
+                );
+            } else if verbose {
+                print_plan_inspect_verbose(&plan, &runtime_plan);
+            } else {
+                print_plan_inspect(&runtime_plan);
+            }
         }
         Commands::Submit {
             file,
@@ -195,12 +282,17 @@ fn run_command(command: Commands) -> Result<()> {
             sbatch_bin,
             srun_bin,
             enroot_bin,
+            squeue_bin,
+            sacct_bin,
             keep_failed_prep,
             skip_prepare,
             force_rebuild,
             no_preflight,
+            watch,
         } => {
             let runtime_plan = load_runtime_plan(&file)?;
+            let submit_dir =
+                env::current_dir().context("failed to determine submit working directory")?;
 
             if !no_preflight {
                 let report = run_preflight(
@@ -213,7 +305,7 @@ fn run_command(command: Commands) -> Result<()> {
                         skip_prepare,
                     },
                 );
-                print_report(&report);
+                print_report(&report, false);
                 if report.has_errors() {
                     bail!("preflight failed; fix the reported errors before submitting");
                 }
@@ -253,7 +345,133 @@ fn run_command(command: Commands) -> Result<()> {
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             print!("{stdout}");
+            let tracked_submission = if let Some(job_id) = extract_job_id(stdout.trim()) {
+                let record = build_submission_record(
+                    &file,
+                    &submit_dir,
+                    &script_path,
+                    &runtime_plan,
+                    job_id,
+                )?;
+                let persisted = match write_submission_record(&record) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        let _ = writeln!(
+                            io::stderr(),
+                            "warning: job submitted, but failed to write tracking metadata: {err}"
+                        );
+                        let _ = io::stderr().flush();
+                        false
+                    }
+                };
+                Some((record, persisted))
+            } else {
+                None
+            };
             print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
+            if let Some((record, persisted)) = tracked_submission.as_ref() {
+                if *persisted {
+                    println!(
+                        "tracked job metadata: {}",
+                        hpc_compose::job::latest_record_path_for(&record.compose_file).display()
+                    );
+                } else {
+                    println!(
+                        "note: tracking metadata could not be written, so later status/logs commands will not auto-discover this submission"
+                    );
+                }
+            } else {
+                println!(
+                    "note: submit output did not include a numeric Slurm job id, so status/logs/watch are not trackable for this submission"
+                );
+            }
+            if watch {
+                let Some((record, _)) = tracked_submission.as_ref() else {
+                    println!("note: skipping watch because the submission is not trackable");
+                    return Ok(());
+                };
+                finish_watch(
+                    &record.job_id,
+                    watch_submission(
+                        record,
+                        &SchedulerOptions {
+                            squeue_bin,
+                            sacct_bin,
+                        },
+                        100,
+                    )?,
+                )?;
+            }
+        }
+        Commands::Status {
+            file,
+            job_id,
+            json,
+            squeue_bin,
+            sacct_bin,
+        } => {
+            let snapshot = build_status_snapshot(
+                &file,
+                job_id.as_deref(),
+                &SchedulerOptions {
+                    squeue_bin,
+                    sacct_bin,
+                },
+            )?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&snapshot)
+                        .context("failed to serialize status output")?
+                );
+            } else {
+                print_status_snapshot(&snapshot);
+            }
+        }
+        Commands::Logs {
+            file,
+            job_id,
+            service,
+            follow,
+            lines,
+        } => {
+            let record = load_submission_record(&file, job_id.as_deref())?;
+            print_logs(&record, service.as_deref(), lines, follow)?;
+        }
+        Commands::Init {
+            template,
+            name,
+            cache_dir,
+            output,
+            force,
+        } => {
+            let answers = if let Some(template_name) = template {
+                let template = resolve_template(&template_name)?;
+                hpc_compose::init::InitAnswers {
+                    template_name: template.name.to_string(),
+                    app_name: name.unwrap_or_else(|| template.name.to_string()),
+                    cache_dir: cache_dir.unwrap_or_else(|| default_init_cache_dir().to_string()),
+                }
+            } else {
+                let mut answers = prompt_for_init()?;
+                if let Some(name) = name {
+                    answers.app_name = name;
+                }
+                if let Some(cache_dir) = cache_dir {
+                    answers.cache_dir = cache_dir;
+                }
+                answers
+            };
+            let rendered = render_template(
+                &answers.template_name,
+                &answers.app_name,
+                &answers.cache_dir,
+            )?;
+            let path = write_initialized_template(&output, &rendered, force)?;
+            println!("wrote {}", path.display());
+            for command in next_commands(&path) {
+                println!("{command}");
+            }
         }
         Commands::Cache { command } => match command {
             CacheCommands::List { cache_dir } => {
@@ -316,10 +534,19 @@ fn render_from_path(path: &Path) -> Result<String> {
     render_script(&runtime)
 }
 
-fn load_runtime_plan(path: &Path) -> Result<RuntimePlan> {
+fn load_plan(path: &Path) -> Result<Plan> {
     let spec = ComposeSpec::load(path)?;
-    let plan = build_plan(path, spec)?;
-    Ok(build_runtime_plan(&plan))
+    build_plan(path, spec)
+}
+
+fn load_runtime_plan(path: &Path) -> Result<RuntimePlan> {
+    load_plan(path).map(|plan| build_runtime_plan(&plan))
+}
+
+fn load_plan_and_runtime(path: &Path) -> Result<(Plan, RuntimePlan)> {
+    let plan = load_plan(path)?;
+    let runtime_plan = build_runtime_plan(&plan);
+    Ok((plan, runtime_plan))
 }
 
 fn default_script_path(spec_path: &Path) -> PathBuf {
@@ -334,11 +561,16 @@ fn default_cache_dir() -> PathBuf {
         .join(".cache/hpc-compose")
 }
 
-fn print_report(report: &Report) {
+fn print_report(report: &Report, verbose: bool) {
     if report.items.is_empty() {
         return;
     }
-    let _ = writeln!(io::stderr(), "{}", report.render());
+    let text = if verbose {
+        report.render_verbose()
+    } else {
+        report.render()
+    };
+    let _ = writeln!(io::stderr(), "{text}");
     let _ = io::stderr().flush();
 }
 
@@ -379,6 +611,113 @@ fn artifact_role_label(name: &str) -> &'static str {
         "base" => "cache artifact",
         "runtime" => "artifact",
         _ => "artifact",
+    }
+}
+
+fn print_status_snapshot(snapshot: &StatusSnapshot) {
+    println!("job id: {}", snapshot.record.job_id);
+    println!(
+        "scheduler state: {} ({})",
+        snapshot.scheduler.state,
+        scheduler_source_label(snapshot.scheduler.source)
+    );
+    if let Some(detail) = &snapshot.scheduler.detail {
+        println!("scheduler note: {detail}");
+    }
+    println!("compose file: {}", snapshot.record.compose_file.display());
+    println!("script path: {}", snapshot.record.script_path.display());
+    println!("cache dir: {}", snapshot.record.cache_dir.display());
+    println!("log dir: {}", snapshot.log_dir.display());
+    println!(
+        "batch log: {} (present: {}, updated: {})",
+        snapshot.batch_log.path.display(),
+        yes_no(snapshot.batch_log.present),
+        snapshot
+            .batch_log
+            .updated_age_seconds
+            .map(format_age_seconds)
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    for service in &snapshot.services {
+        let age = service
+            .updated_age_seconds
+            .map(format_age_seconds)
+            .unwrap_or_else(|| "unknown".to_string());
+        println!(
+            "log  service '{}': {} (present: {}, updated: {})",
+            service.service_name,
+            service.path.display(),
+            yes_no(service.present),
+            age
+        );
+    }
+}
+
+fn print_plan_inspect_verbose(plan: &Plan, runtime_plan: &RuntimePlan) {
+    print_plan_inspect(runtime_plan);
+    println!();
+    println!("compose file: {}", plan.spec_path.display());
+    println!("project dir: {}", plan.project_dir.display());
+
+    for (planned, runtime) in plan
+        .ordered_services
+        .iter()
+        .zip(runtime_plan.ordered_services.iter())
+    {
+        println!();
+        println!("details for service '{}':", runtime.name);
+        println!(
+            "execution form: {}",
+            execution_form_label(&runtime.execution)
+        );
+        println!(
+            "resolved argv: {}",
+            execution_argv(&runtime.execution, runtime.working_dir.as_deref()).join(" ")
+        );
+        println!(
+            "working dir: {}",
+            runtime.working_dir.as_deref().unwrap_or("<image default>")
+        );
+        println!(
+            "volumes: {}",
+            if runtime.volumes.is_empty() {
+                "0".to_string()
+            } else {
+                runtime.volumes.join(" | ")
+            }
+        );
+        println!(
+            "environment keys: {}",
+            if runtime.environment.is_empty() {
+                "0".to_string()
+            } else {
+                runtime
+                    .environment
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }
+        );
+        println!(
+            "depends_on: {}",
+            if planned.depends_on.is_empty() {
+                "0".to_string()
+            } else {
+                planned.depends_on.join(",")
+            }
+        );
+        println!(
+            "readiness: {}",
+            readiness_description(runtime.readiness.as_ref())
+        );
+        println!(
+            "effective srun args: {}",
+            build_srun_command(runtime).join(" ")
+        );
+        if let Some(reason) = rebuild_reason(runtime) {
+            println!("rebuild reason: {reason}");
+        }
     }
 }
 
@@ -558,7 +897,7 @@ fn print_submit_details(plan: &RuntimePlan, script_path: &Path, sbatch_stdout: &
                     .join(".hpc-compose")
                     .join(job_id)
                     .join("logs")
-                    .join(format!("{}.log", sanitize_service_name(&service.name)))
+                    .join(log_file_name_for_service(&service.name))
                     .display()
             );
         }
@@ -568,7 +907,7 @@ fn print_submit_details(plan: &RuntimePlan, script_path: &Path, sbatch_stdout: &
                 "log  service '{}': {}/.hpc-compose/<job-id>/logs/{}.log",
                 service.name,
                 submit_dir.display(),
-                sanitize_service_name(&service.name)
+                log_file_name_for_service(&service.name)
             );
         }
     }
@@ -593,17 +932,88 @@ fn print_prune_result(cache_dir: &Path, removed: &[PathBuf]) {
     }
 }
 
-fn sanitize_service_name(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
+fn finish_watch(job_id: &str, outcome: WatchOutcome) -> Result<()> {
+    match outcome {
+        WatchOutcome::Completed(_) => Ok(()),
+        WatchOutcome::Unknown(status) => {
+            if let Some(detail) = status.detail {
+                bail!(
+                    "job {} could not be tracked to a terminal scheduler state ({}): {}",
+                    job_id,
+                    status.state,
+                    detail
+                );
             }
-        })
-        .collect()
+            bail!(
+                "job {} could not be tracked to a terminal scheduler state ({})",
+                job_id,
+                status.state
+            );
+        }
+        WatchOutcome::Failed(status) => {
+            bail!(
+                "job {} finished in scheduler state {}",
+                job_id,
+                status.state
+            )
+        }
+    }
+}
+
+fn execution_form_label(execution: &ExecutionSpec) -> &'static str {
+    match execution {
+        ExecutionSpec::ImageDefault => "image-default",
+        ExecutionSpec::Shell(_) => "shell",
+        ExecutionSpec::Exec(_) => "exec",
+    }
+}
+
+fn readiness_description(readiness: Option<&hpc_compose::spec::ReadinessSpec>) -> String {
+    match readiness {
+        None => "none".to_string(),
+        Some(hpc_compose::spec::ReadinessSpec::Sleep { seconds }) => {
+            format!("sleep {}s", seconds)
+        }
+        Some(hpc_compose::spec::ReadinessSpec::Tcp {
+            host,
+            port,
+            timeout_seconds,
+        }) => format!(
+            "tcp {}:{} (timeout {}s)",
+            host.as_deref().unwrap_or("127.0.0.1"),
+            port,
+            timeout_seconds.unwrap_or(60)
+        ),
+        Some(hpc_compose::spec::ReadinessSpec::Log {
+            pattern,
+            timeout_seconds,
+        }) => format!(
+            "log '{}' (timeout {}s)",
+            pattern,
+            timeout_seconds.unwrap_or(60)
+        ),
+    }
+}
+
+fn rebuild_reason(service: &hpc_compose::prepare::RuntimeService) -> Option<&'static str> {
+    service.prepare.as_ref().and_then(|prepare| {
+        if prepare.force_rebuild {
+            Some("x-enroot.prepare.mounts are present")
+        } else if !service.runtime_image.exists() {
+            Some("runtime cache artifact is missing")
+        } else {
+            None
+        }
+    })
+}
+
+fn format_age_seconds(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s ago"),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86_399 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
 }
 
 #[cfg(test)]
@@ -775,12 +1185,41 @@ services:
 
     #[test]
     fn sanitize_and_extract_job_id_work() {
-        assert_eq!(sanitize_service_name("svc/name.with spaces"), "svc_name_with_spaces");
         assert_eq!(
-            extract_job_id("Submitted batch job 12345"),
-            Some("12345")
+            log_file_name_for_service("svc/name.with spaces"),
+            "svc_x2f_name_x2e_with_x20_spaces.log"
         );
+        assert_eq!(extract_job_id("Submitted batch job 12345"), Some("12345"));
         assert_eq!(extract_job_id("no job id here"), None);
+    }
+
+    #[test]
+    fn finish_watch_requires_a_terminal_scheduler_result() {
+        finish_watch(
+            "12345",
+            WatchOutcome::Completed(hpc_compose::job::SchedulerStatus {
+                state: "COMPLETED".into(),
+                source: hpc_compose::job::SchedulerSource::Sacct,
+                terminal: true,
+                failed: false,
+                detail: None,
+            }),
+        )
+        .expect("completed watch");
+
+        let err = finish_watch(
+            "12345",
+            WatchOutcome::Unknown(hpc_compose::job::SchedulerStatus {
+                state: "unknown".into(),
+                source: hpc_compose::job::SchedulerSource::LocalOnly,
+                terminal: false,
+                failed: false,
+                detail: Some("scheduler tools were unavailable".into()),
+            }),
+        )
+        .expect_err("unknown watch should fail");
+        assert!(err.to_string().contains("could not be tracked"));
+        assert!(err.to_string().contains("scheduler tools were unavailable"));
     }
 
     #[test]
@@ -802,7 +1241,10 @@ services:
                 force_rebuild: true,
             }),
         );
-        assert_eq!(runtime_cache_state(&with_forced_prepare), "rebuild on submit");
+        assert_eq!(
+            runtime_cache_state(&with_forced_prepare),
+            "rebuild on submit"
+        );
 
         let with_cached_prepare = runtime_service(
             ImageSource::Remote("docker://redis:7".into()),
@@ -830,8 +1272,11 @@ services:
         );
         assert_eq!(runtime_cache_state(&missing_prepare), "cache miss");
 
-        let local_present =
-            runtime_service(ImageSource::LocalSqsh(local_sqsh.clone()), local_sqsh.clone(), None);
+        let local_present = runtime_service(
+            ImageSource::LocalSqsh(local_sqsh.clone()),
+            local_sqsh.clone(),
+            None,
+        );
         assert_eq!(runtime_cache_state(&local_present), "local image present");
 
         let local_missing = runtime_service(
@@ -948,14 +1393,17 @@ services:
             )],
         };
 
-        print_report(&Report { items: Vec::new() });
-        print_report(&Report {
-            items: vec![hpc_compose::preflight::Item {
-                level: hpc_compose::preflight::Level::Warn,
-                message: "warn".into(),
-                remediation: None,
-            }],
-        });
+        print_report(&Report { items: Vec::new() }, false);
+        print_report(
+            &Report {
+                items: vec![hpc_compose::preflight::Item {
+                    level: hpc_compose::preflight::Level::Warn,
+                    message: "warn".into(),
+                    remediation: None,
+                }],
+            },
+            false,
+        );
         print_prepare_summary(&PrepareSummary {
             services: vec![hpc_compose::prepare::ServicePrepareResult {
                 service_name: service.name.clone(),
@@ -979,9 +1427,14 @@ services:
         print_manifest_block(&tmpdir.path().join("missing.sqsh")).expect("missing manifest block");
         print_prune_result(tmpdir.path(), &[]);
         print_prune_result(tmpdir.path(), &[runtime_image.clone()]);
-        print_submit_details(&plan, Path::new("/tmp/job.sbatch"), "no job id").expect("submit details");
-        print_submit_details(&plan, Path::new("/tmp/job.sbatch"), "Submitted batch job 99999")
-            .expect("submit details with job id");
+        print_submit_details(&plan, Path::new("/tmp/job.sbatch"), "no job id")
+            .expect("submit details");
+        print_submit_details(
+            &plan,
+            Path::new("/tmp/job.sbatch"),
+            "Submitted batch job 99999",
+        )
+        .expect("submit details with job id");
         assert_eq!(source_image_display(&service.source), "docker://redis:7");
         assert_eq!(
             source_image_display(&ImageSource::LocalSqsh(PathBuf::from("/tmp/local.sqsh"))),
@@ -1030,6 +1483,8 @@ services:
         let err = run_command(Commands::Preflight {
             file: compose.clone(),
             strict: true,
+            verbose: false,
+            json: false,
             enroot_bin: enroot.display().to_string(),
             sbatch_bin: sbatch_ok.display().to_string(),
             srun_bin: srun.display().to_string(),
@@ -1039,6 +1494,8 @@ services:
         run_command(Commands::Preflight {
             file: compose.clone(),
             strict: false,
+            verbose: false,
+            json: false,
             enroot_bin: enroot.display().to_string(),
             sbatch_bin: sbatch_ok.display().to_string(),
             srun_bin: srun.display().to_string(),
@@ -1047,6 +1504,8 @@ services:
 
         run_command(Commands::Inspect {
             file: compose.clone(),
+            verbose: false,
+            json: false,
         })
         .expect("inspect");
 
@@ -1056,10 +1515,13 @@ services:
             sbatch_bin: sbatch_fail.display().to_string(),
             srun_bin: srun.display().to_string(),
             enroot_bin: enroot.display().to_string(),
+            squeue_bin: "squeue".into(),
+            sacct_bin: "sacct".into(),
             keep_failed_prep: false,
             skip_prepare: true,
             force_rebuild: false,
             no_preflight: true,
+            watch: false,
         })
         .expect_err("sbatch fail");
         assert!(err.to_string().contains("sbatch failed"));
@@ -1070,10 +1532,13 @@ services:
             sbatch_bin: sbatch_ok.display().to_string(),
             srun_bin: srun.display().to_string(),
             enroot_bin: enroot.display().to_string(),
+            squeue_bin: "squeue".into(),
+            sacct_bin: "sacct".into(),
             keep_failed_prep: false,
             skip_prepare: true,
             force_rebuild: false,
             no_preflight: false,
+            watch: false,
         })
         .expect("submit");
 
@@ -1115,9 +1580,10 @@ services:
             },
         })
         .expect_err("conflicting strategies");
-        assert!(err
-            .to_string()
-            .contains("cache prune accepts only one strategy at a time"));
+        assert!(
+            err.to_string()
+                .contains("cache prune accepts only one strategy at a time")
+        );
         run_command(Commands::Cache {
             command: CacheCommands::Prune {
                 file: None,

@@ -5,13 +5,14 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::cache::{touch_manifest, upsert_base_manifest, upsert_prepared_manifest};
 use crate::planner::{ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec};
 use crate::spec::{ReadinessSpec, ServiceSlurmConfig, SlurmConfig};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RuntimePlan {
     pub name: String,
     pub cache_dir: PathBuf,
@@ -19,7 +20,7 @@ pub struct RuntimePlan {
     pub ordered_services: Vec<RuntimeService>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RuntimeService {
     pub name: String,
     pub runtime_image: PathBuf,
@@ -930,7 +931,10 @@ esac
             },
         )
         .expect("local present");
-        assert_eq!(local_summary.services[0].runtime_image.action, ArtifactAction::Present);
+        assert_eq!(
+            local_summary.services[0].runtime_image.action,
+            ArtifactAction::Present
+        );
         assert_eq!(
             local_summary.services[0].runtime_image.note.as_deref(),
             Some("uses local .sqsh directly")
@@ -990,7 +994,10 @@ esac
             },
         )
         .expect("remote no prepare");
-        assert_eq!(summary.services[0].runtime_image.action, ArtifactAction::Built);
+        assert_eq!(
+            summary.services[0].runtime_image.action,
+            ArtifactAction::Built
+        );
         assert_eq!(
             summary.services[0].runtime_image.note.as_deref(),
             Some("base cache artifact is used directly at runtime")
@@ -1038,7 +1045,10 @@ esac
         )
         .expect("local prepare");
         assert!(summary.services[0].base_image.is_none());
-        assert_eq!(summary.services[0].runtime_image.action, ArtifactAction::Built);
+        assert_eq!(
+            summary.services[0].runtime_image.action,
+            ArtifactAction::Built
+        );
         let log_content = fs::read_to_string(&log).expect("log");
         assert!(!log_content.contains("import"));
         assert!(log_content.contains("--mount /host:/mnt"));
@@ -1140,7 +1150,10 @@ esac
             "run failing command",
         )
         .expect_err("failing helper");
-        assert!(err.to_string().contains("failed to run failing command: boom"));
+        assert!(
+            err.to_string()
+                .contains("failed to run failing command: boom")
+        );
         match old_path {
             Some(value) => unsafe {
                 env::set_var("PATH", value);
@@ -1196,23 +1209,35 @@ esac
             ],
         };
         let runtime = build_runtime_plan(&plan);
-        assert_eq!(runtime.ordered_services[0].runtime_image, PathBuf::from("/tmp/local.sqsh"));
-        assert!(runtime.ordered_services[1]
-            .runtime_image
-            .display()
-            .to_string()
-            .contains("/prepared/"));
-        assert!(prepared_image_cache_key_from_plan(
-            &plan.ordered_services[1],
-            plan.ordered_services[1].prepare.as_ref().expect("prepare")
-        )
-        .len()
-            > 10);
-        assert!(prepared_image_cache_key(
-            &runtime.ordered_services[1],
-            runtime.ordered_services[1].prepare.as_ref().expect("prepare")
-        )
-        .len()
-            > 10);
+        assert_eq!(
+            runtime.ordered_services[0].runtime_image,
+            PathBuf::from("/tmp/local.sqsh")
+        );
+        assert!(
+            runtime.ordered_services[1]
+                .runtime_image
+                .display()
+                .to_string()
+                .contains("/prepared/")
+        );
+        assert!(
+            prepared_image_cache_key_from_plan(
+                &plan.ordered_services[1],
+                plan.ordered_services[1].prepare.as_ref().expect("prepare")
+            )
+            .len()
+                > 10
+        );
+        assert!(
+            prepared_image_cache_key(
+                &runtime.ordered_services[1],
+                runtime.ordered_services[1]
+                    .prepare
+                    .as_ref()
+                    .expect("prepare")
+            )
+            .len()
+                > 10
+        );
     }
 }

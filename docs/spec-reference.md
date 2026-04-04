@@ -67,6 +67,7 @@ Rules:
 - Each line is emitted verbatim into the generated bash script, which runs under `set -euo pipefail`.
 - A syntax error in a setup line will abort the entire job at startup.
 - Shell quoting and escaping are the user's responsibility.
+- Prefer leaving `setup` empty unless your cluster actually requires module loads or shell initialization.
 
 ### `x-slurm.submit_args`
 
@@ -88,6 +89,7 @@ Rules:
 - Defaults to `$HOME/.cache/hpc-compose`.
 - Must resolve to shared storage visible from both login and compute nodes.
 - Paths under `/tmp`, `/var/tmp`, `/private/tmp`, and `/dev/shm` are rejected.
+- The default is convenient for simple or home-directory workflows, but shared project or workspace storage is usually a better long-term choice on real clusters.
 
 ### `gres` vs `gpus`
 
@@ -177,6 +179,10 @@ Rules:
 
 - Host paths are resolved against the compose file directory, not the shell's current working directory.
 - The planner treats them as runtime mounts for `srun --container-mounts=...`.
+- Every service also gets an automatic shared mount at `/hpc-compose/job`, backed by `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}` on the host.
+- `/hpc-compose/job` is reserved for that automatic shared mount and cannot be used as an explicit volume destination.
+- Avoid mounting over `/hpc-compose/job`; that path is reserved for the built-in per-job shared directory.
+- If a mounted file is a symlink, the symlink target must still be visible from inside the container. Otherwise the file may appear to exist on the host but fail inside the container.
 
 ## `depends_on`
 
@@ -281,6 +287,7 @@ Rules:
 - Remote base images are imported under `cache_dir/base`.
 - Prepared images are exported under `cache_dir/prepared`.
 - Unknown keys under `x-enroot` or `x-enroot.prepare` cause hard errors.
+- Prefer `x-enroot.prepare` for slower-changing dependencies or tooling, not for fast-changing application source code.
 
 ## Unsupported Compose keys
 

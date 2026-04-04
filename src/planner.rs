@@ -3,11 +3,14 @@ use std::env;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
 use crate::spec::{
     CommandSpec, ComposeSpec, PrepareSpec, ReadinessSpec, ServiceEnrootConfig, ServiceSlurmConfig,
     SlurmConfig,
 };
+
+const RESERVED_RUNTIME_MOUNT_DESTINATIONS: &[&str] = &["/hpc-compose/job"];
 
 #[derive(Debug, Clone)]
 pub struct Plan {
@@ -33,20 +36,22 @@ pub struct PlannedService {
     pub prepare: Option<PreparedImageSpec>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ImageSource {
     LocalSqsh(PathBuf),
     Remote(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutionSpec {
     ImageDefault,
     Shell(String),
     Exec(Vec<String>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PreparedImageSpec {
     pub commands: Vec<String>,
     pub mounts: Vec<String>,
@@ -85,11 +90,12 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
     for (name, service) in &spec.services {
         let depends_on = service.depends_on.names()?;
         let environment = service.environment.to_pairs()?;
-        let volumes = service
-            .volumes
-            .iter()
-            .map(|mount| normalize_mount(mount, &project_dir))
-            .collect::<Result<Vec<_>>>()?;
+        let mut volumes = Vec::with_capacity(service.volumes.len());
+        for mount in &service.volumes {
+            let mount = normalize_mount(mount, &project_dir)?;
+            ensure_runtime_mount_destination_allowed(name, &mount)?;
+            volumes.push(mount);
+        }
         let working_dir = service.working_dir.clone();
         let execution = build_execution(
             service.entrypoint.as_ref(),
@@ -344,6 +350,18 @@ fn normalize_mount(mount: &str, project_dir: &Path) -> Result<String> {
     Ok(format!("{}:{rest}", host_path.display()))
 }
 
+fn ensure_runtime_mount_destination_allowed(service_name: &str, mount: &str) -> Result<()> {
+    let Some((_, container_path)) = mount.rsplit_once(':') else {
+        bail!("mount '{mount}' must use host_path:container_path syntax");
+    };
+    if RESERVED_RUNTIME_MOUNT_DESTINATIONS.contains(&container_path) {
+        bail!(
+            "service '{service_name}' uses reserved runtime mount destination '{container_path}'; that path is provided automatically for per-job shared state"
+        );
+    }
+    Ok(())
+}
+
 fn expand_string(value: &str, project_dir: &Path) -> Result<String> {
     let expanded = shellexpand::full_with_context_no_errors(
         value,
@@ -523,6 +541,31 @@ mod tests {
     }
 
     #[test]
+    fn build_plan_rejects_reserved_runtime_mount_destination() {
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    volumes: vec!["./data:/hpc-compose/job".into()],
+                    ..service("redis:7")
+                },
+            )]),
+        };
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+        let err = build_plan(&compose, spec).expect_err("reserved mount");
+        assert!(
+            err.to_string()
+                .contains("reserved runtime mount destination")
+        );
+        assert!(err.to_string().contains("/hpc-compose/job"));
+    }
+
+    #[test]
     fn cache_dir_policy_flags_tmp() {
         let issue = cache_path_policy_issue(Path::new("/tmp/hpc-compose")).expect("issue");
         assert!(issue.contains("not shared"));
@@ -642,8 +685,13 @@ mod tests {
         assert!(!prepared.root);
 
         assert_eq!(
-            build_execution(None, Some(&CommandSpec::String("echo hi".into())), None, "svc")
-                .expect("shell"),
+            build_execution(
+                None,
+                Some(&CommandSpec::String("echo hi".into())),
+                None,
+                "svc"
+            )
+            .expect("shell"),
             ExecutionSpec::Shell("echo hi".into())
         );
         assert_eq!(
@@ -769,13 +817,18 @@ mod tests {
         let err = normalize_image("oci://redis:7", tmpdir.path()).expect_err("scheme");
         assert!(err.to_string().contains("unsupported image scheme"));
         let err = normalize_image("./Dockerfile", tmpdir.path()).expect_err("local path");
-        assert!(err.to_string().contains("Dockerfiles and build contexts are not supported"));
+        assert!(
+            err.to_string()
+                .contains("Dockerfiles and build contexts are not supported")
+        );
 
         let mount = normalize_mount("./data:/data", tmpdir.path()).expect("mount");
         assert!(mount.contains("/data"));
-        assert!(expand_string("./data", tmpdir.path())
-            .expect("expand")
-            .starts_with(tmpdir.path().to_str().expect("path")));
+        assert!(
+            expand_string("./data", tmpdir.path())
+                .expect("expand")
+                .starts_with(tmpdir.path().to_str().expect("path"))
+        );
         assert_eq!(
             resolve_path("relative/path", tmpdir.path()).expect("resolve"),
             tmpdir.path().join("relative/path")
@@ -809,7 +862,8 @@ mod tests {
             normalize_existing_path(&compose).expect("existing"),
             compose.canonicalize().expect("canon")
         );
-        let err = normalize_existing_path(&tmpdir.path().join("missing.yaml")).expect_err("missing");
+        let err =
+            normalize_existing_path(&tmpdir.path().join("missing.yaml")).expect_err("missing");
         assert!(err.to_string().contains("failed to canonicalize"));
     }
 }

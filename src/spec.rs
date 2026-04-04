@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
 const ROOT_ALLOWED_KEYS: &[&str] = &["name", "services", "version", "x-slurm"];
@@ -29,7 +29,7 @@ pub struct ComposeSpec {
     pub services: BTreeMap<String, ServiceSpec>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlurmConfig {
     #[serde(default)]
@@ -91,7 +91,7 @@ pub struct ServiceSpec {
     pub enroot: ServiceEnrootConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSlurmConfig {
     #[serde(default)]
@@ -156,7 +156,7 @@ pub enum CommandSpec {
     Vec(Vec<String>),
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReadinessSpec {
     Sleep {
@@ -401,7 +401,10 @@ services:
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let path = write_spec(tmpdir.path(), "- not-a-mapping\n");
         let err = ComposeSpec::load(&path).expect_err("should fail");
-        assert!(err.to_string().contains("top-level YAML document must be a mapping"));
+        assert!(
+            err.to_string()
+                .contains("top-level YAML document must be a mapping")
+        );
     }
 
     #[test]
@@ -482,7 +485,9 @@ services:
         );
         let spec = ComposeSpec::load(&path).expect("load");
         assert_eq!(
-            spec.services.get("tcp").and_then(|svc| svc.readiness.clone()),
+            spec.services
+                .get("tcp")
+                .and_then(|svc| svc.readiness.clone()),
             Some(ReadinessSpec::Tcp {
                 port: 6379,
                 host: Some("127.0.0.1".into()),
@@ -490,7 +495,9 @@ services:
             })
         );
         assert_eq!(
-            spec.services.get("log").and_then(|svc| svc.readiness.clone()),
+            spec.services
+                .get("log")
+                .and_then(|svc| svc.readiness.clone()),
             Some(ReadinessSpec::Log {
                 pattern: "ready".into(),
                 timeout_seconds: Some(10),
@@ -537,7 +544,10 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&root_unknown).expect_err("root unknown");
-        assert!(err.to_string().contains("root uses unsupported key 'unknown'"));
+        assert!(
+            err.to_string()
+                .contains("root uses unsupported key 'unknown'")
+        );
 
         let networks = write_spec(
             tmpdir.path(),
@@ -561,7 +571,10 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&restart).expect_err("restart");
-        assert!(err.to_string().contains("restart policies are not supported"));
+        assert!(
+            err.to_string()
+                .contains("restart policies are not supported")
+        );
 
         let deploy = write_spec(
             tmpdir.path(),
@@ -579,7 +592,10 @@ services:
     #[test]
     fn environment_map_and_command_defaults_cover_remaining_helpers() {
         let env = EnvironmentSpec::Map(BTreeMap::from([("A".into(), "B".into())]));
-        assert_eq!(env.to_pairs().expect("pairs"), vec![("A".into(), "B".into())]);
+        assert_eq!(
+            env.to_pairs().expect("pairs"),
+            vec![("A".into(), "B".into())]
+        );
         assert!(default_true());
     }
 

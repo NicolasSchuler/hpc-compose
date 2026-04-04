@@ -4,27 +4,46 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 
 use crate::planner::{ImageSource, cache_path_policy_issue, registry_host_for_remote};
 use crate::prepare::RuntimePlan;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Level {
     Ok,
     Warn,
     Error,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Item {
     pub level: Level,
     pub message: String,
     pub remediation: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub items: Vec<Item>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportSummary {
+    pub blockers: usize,
+    pub actionable_warnings: usize,
+    pub contextual_warnings: usize,
+    pub passed_checks: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupedReport {
+    pub summary: ReportSummary,
+    pub blockers: Vec<Item>,
+    pub actionable_warnings: Vec<Item>,
+    pub contextual_warnings: Vec<Item>,
+    pub passed_checks: Vec<Item>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,24 +77,100 @@ impl Report {
     }
 
     pub fn render(&self) -> String {
-        self.items
-            .iter()
-            .map(|item| {
-                let prefix = match item.level {
-                    Level::Ok => "OK",
-                    Level::Warn => "WARN",
-                    Level::Error => "ERROR",
-                };
-                match &item.remediation {
-                    Some(remediation) => {
-                        format!("{prefix}  {} Remediation: {remediation}", item.message)
-                    }
-                    None => format!("{prefix}  {}", item.message),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.render_grouped(false)
     }
+
+    pub fn render_verbose(&self) -> String {
+        self.render_grouped(true)
+    }
+
+    pub fn grouped(&self) -> GroupedReport {
+        let mut blockers = Vec::new();
+        let mut actionable_warnings = Vec::new();
+        let mut contextual_warnings = Vec::new();
+        let mut passed_checks = Vec::new();
+
+        for item in &self.items {
+            match item.level {
+                Level::Error => blockers.push(item.clone()),
+                Level::Warn if is_contextual_warning(item) => {
+                    contextual_warnings.push(item.clone())
+                }
+                Level::Warn => actionable_warnings.push(item.clone()),
+                Level::Ok => passed_checks.push(item.clone()),
+            }
+        }
+
+        GroupedReport {
+            summary: ReportSummary {
+                blockers: blockers.len(),
+                actionable_warnings: actionable_warnings.len(),
+                contextual_warnings: contextual_warnings.len(),
+                passed_checks: passed_checks.len(),
+            },
+            blockers,
+            actionable_warnings,
+            contextual_warnings,
+            passed_checks,
+        }
+    }
+
+    fn render_grouped(&self, verbose: bool) -> String {
+        if self.items.is_empty() {
+            return String::new();
+        }
+
+        let grouped = self.grouped();
+        let mut lines = vec![format!(
+            "Summary: {} blocker(s), {} actionable warning(s), {} contextual warning(s), {} passed checks",
+            grouped.summary.blockers,
+            grouped.summary.actionable_warnings,
+            grouped.summary.contextual_warnings,
+            grouped.summary.passed_checks
+        )];
+
+        render_section(&mut lines, "Blockers", &grouped.blockers);
+        render_section(
+            &mut lines,
+            "Actionable warnings",
+            &grouped.actionable_warnings,
+        );
+        render_section(
+            &mut lines,
+            "Contextual warnings",
+            &grouped.contextual_warnings,
+        );
+
+        if verbose {
+            render_section(&mut lines, "Passed checks", &grouped.passed_checks);
+        } else {
+            lines.push(format!("Passed checks: {}", grouped.summary.passed_checks));
+        }
+
+        lines.join("\n")
+    }
+}
+
+fn render_section(lines: &mut Vec<String>, title: &str, items: &[Item]) {
+    if items.is_empty() {
+        return;
+    }
+
+    lines.push(format!("{title}:"));
+    for item in items {
+        lines.push(format!("- {}", item.message));
+        if let Some(remediation) = &item.remediation {
+            lines.push(format!("  remediation: {remediation}"));
+        }
+    }
+}
+
+fn is_contextual_warning(item: &Item) -> bool {
+    matches!(item.level, Level::Warn)
+        && (item
+            .message
+            .starts_with("neither /etc/slurm/task_prolog.hk nor /etc/slurm/task_prolog exists")
+            || item.message.starts_with("HAICORE helper path is"))
 }
 
 pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
@@ -679,9 +774,16 @@ mod tests {
         assert!(report.has_errors());
         assert!(report.has_warnings());
         let rendered = report.render();
-        assert!(rendered.contains("OK  fine"));
-        assert!(rendered.contains("WARN  warn Remediation: fix"));
-        assert!(rendered.contains("ERROR  boom Remediation: repair"));
+        assert!(rendered.contains("Summary: 1 blocker(s), 1 actionable warning(s), 0 contextual warning(s), 1 passed checks"));
+        assert!(rendered.contains("Blockers:"));
+        assert!(rendered.contains("- boom"));
+        assert!(rendered.contains("remediation: repair"));
+        assert!(rendered.contains("Actionable warnings:"));
+        assert!(rendered.contains("- warn"));
+        assert!(rendered.contains("remediation: fix"));
+        let verbose = report.render_verbose();
+        assert!(verbose.contains("Passed checks:"));
+        assert!(verbose.contains("- fine"));
     }
 
     #[test]
@@ -697,8 +799,11 @@ mod tests {
             "tool is available",
             "fix it"
         ));
-        assert!(report.render().contains("tool is available"));
-        assert_eq!(find_binary(fake.to_str().expect("path")), Some(fake.clone()));
+        assert!(report.render_verbose().contains("tool is available"));
+        assert_eq!(
+            find_binary(fake.to_str().expect("path")),
+            Some(fake.clone())
+        );
 
         let missing = tmpdir.path().join("missing-tool");
         assert!(!check_binary(
@@ -729,7 +834,7 @@ mod tests {
         };
         let mut report = Report { items: Vec::new() };
         check_cache_path_policy(&mut report, &plan);
-        let text = report.render();
+        let text = report.render_verbose();
         assert!(text.contains("passes shared-path policy"));
         assert!(text.contains("defaults under HOME"));
 
@@ -786,7 +891,7 @@ mod tests {
         };
         let mut report = Report { items: Vec::new() };
         check_local_and_mount_paths(&mut report, &plan);
-        let text = report.render();
+        let text = report.render_verbose();
         assert!(text.contains("local image for service 'local' is present"));
         assert!(text.contains("runtime volume for service 'local' is present"));
         assert!(text.contains("prepare mount for service 'local' is present"));
@@ -838,7 +943,7 @@ mod tests {
             &tmpdir.path().join("fallback"),
             &[&helper_a, &helper_b, &helper_c],
         );
-        let text = report.render();
+        let text = report.render_verbose();
         assert!(text.contains("found a Slurm task_prolog helper mount"));
         assert!(text.contains("HAICORE helper path is present"));
     }
@@ -859,13 +964,16 @@ mod tests {
         assert!(entries.contains("authn.nvidia.com"));
         assert!(entries.contains("registry.scc.kit.edu"));
         assert!(entries.contains("ghcr.io"));
-        assert_eq!(registry_for_remote("docker://redis:7"), "registry-1.docker.io");
         assert_eq!(
-            host_path_from_mount("/tmp/a:/b"),
-            "/tmp/a"
+            registry_for_remote("docker://redis:7"),
+            "registry-1.docker.io"
         );
+        assert_eq!(host_path_from_mount("/tmp/a:/b"), "/tmp/a");
         assert_eq!(host_path_from_mount("/tmp/a"), "/tmp/a");
-        assert_eq!(credential_path_display(None), "ENROOT_CONFIG_PATH/.credentials");
+        assert_eq!(
+            credential_path_display(None),
+            "ENROOT_CONFIG_PATH/.credentials"
+        );
         assert_eq!(
             credential_path_display(Some(&creds)),
             creds.display().to_string()
@@ -930,7 +1038,9 @@ mod tests {
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
-                    source: ImageSource::Remote("docker://registry.scc.kit.edu#proj/app:latest".into()),
+                    source: ImageSource::Remote(
+                        "docker://registry.scc.kit.edu#proj/app:latest".into(),
+                    ),
                 },
                 RuntimeService {
                     name: "ghcr".into(),
@@ -961,18 +1071,14 @@ mod tests {
 
         let mut report = Report { items: Vec::new() };
         check_registry_credentials(&mut report, &plan);
-        let text = report.render();
+        let text = report.render_verbose();
         assert!(text.contains("Docker Hub credentials detected"));
         assert!(text.contains("NGC credentials detected"));
         assert!(text.contains("KIT registry credentials detected"));
         assert!(text.contains("registry credentials detected for 'ghcr.io'"));
         assert!(!text.contains("service 'local'"));
 
-        fs::write(
-            &creds,
-            "machine nvcr.io login x password y\n",
-        )
-        .expect("partial creds");
+        fs::write(&creds, "machine nvcr.io login x password y\n").expect("partial creds");
         let mut report = Report { items: Vec::new() };
         check_registry_credentials(&mut report, &plan);
         let text = report.render();
@@ -1012,10 +1118,17 @@ mod tests {
             env::remove_var("ENROOT_CONFIG_PATH");
             env::set_var("XDG_CONFIG_HOME", &xdg);
         }
-        assert_eq!(enroot_credentials_path(), Some(xdg.join("enroot/.credentials")));
+        assert_eq!(
+            enroot_credentials_path(),
+            Some(xdg.join("enroot/.credentials"))
+        );
 
         let missing = tmpdir.path().join("missing.credentials");
-        assert!(credential_entries(Some(&missing)).expect("missing").is_empty());
+        assert!(
+            credential_entries(Some(&missing))
+                .expect("missing")
+                .is_empty()
+        );
         let dir_err = credential_entries(Some(tmpdir.path())).expect_err("dir should fail");
         assert!(dir_err.to_string().contains("failed to read"));
         assert!(find_binary("definitely-not-on-path").is_none());

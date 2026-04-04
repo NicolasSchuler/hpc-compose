@@ -437,8 +437,7 @@ mod tests {
         assert_eq!(first.kind, CacheEntryKind::Base);
         assert_eq!(first.registry.as_deref(), Some("registry-1.docker.io"));
 
-        let second =
-            upsert_base_manifest(&artifact, "svc-b", &source, "base-key").expect("second");
+        let second = upsert_base_manifest(&artifact, "svc-b", &source, "base-key").expect("second");
         assert!(second.service_names.contains(&"svc-a".to_string()));
         assert!(second.service_names.contains(&"svc-b".to_string()));
 
@@ -448,18 +447,22 @@ mod tests {
             .expect("manifest");
         assert_eq!(loaded.cache_key, "base-key");
         touch_manifest(&tmpdir.path().join("missing-touch.sqsh")).expect("touch missing");
-        assert!(load_manifest_if_exists(&tmpdir.path().join("missing.sqsh"))
-            .expect("missing")
-            .is_none());
+        assert!(
+            load_manifest_if_exists(&tmpdir.path().join("missing.sqsh"))
+                .expect("missing")
+                .is_none()
+        );
     }
 
     #[test]
     fn scan_cache_and_prune_by_age_cover_empty_and_recent_paths() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         assert!(scan_cache(tmpdir.path()).expect("empty").is_empty());
-        assert!(scan_cache(&tmpdir.path().join("does-not-exist"))
-            .expect("missing dir")
-            .is_empty());
+        assert!(
+            scan_cache(&tmpdir.path().join("does-not-exist"))
+                .expect("missing dir")
+                .is_empty()
+        );
         let recent_artifact = tmpdir.path().join("recent.sqsh");
         fs::write(&recent_artifact, "x").expect("recent");
         let service = runtime_service();
