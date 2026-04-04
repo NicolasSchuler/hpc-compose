@@ -12,7 +12,7 @@ x-slurm:
 
 services:
   llm:
-    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     volumes:
       - ./models:/models
       - ./llm-curl:/workflow

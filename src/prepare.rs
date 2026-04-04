@@ -517,10 +517,6 @@ fn enroot_env(cache_dir: &Path) -> Vec<(String, String)> {
             "ENROOT_DATA_PATH".to_string(),
             cache_dir.join("enroot/data").display().to_string(),
         ),
-        (
-            "ENROOT_TEMP_PATH".to_string(),
-            cache_dir.join("enroot/tmp").display().to_string(),
-        ),
     ]
 }
 
@@ -895,8 +891,9 @@ esac
         assert_eq!(sanitize_name("svc/name"), "svc_name");
         assert_eq!(image_label(&service.source), "local-image");
         let envs = enroot_env(cache_dir);
-        assert_eq!(envs.len(), 3);
+        assert_eq!(envs.len(), 2);
         assert!(envs[0].1.contains("enroot/cache"));
+        assert!(!envs.iter().any(|(key, _)| key == "ENROOT_TEMP_PATH"));
     }
 
     #[test]
