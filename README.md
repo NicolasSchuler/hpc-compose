@@ -62,6 +62,11 @@ git push origin v0.1.0
 
 The release workflow runs `cargo test --locked`, builds release archives for Linux, macOS, and Windows, and attaches those archives plus SHA256 checksum files to the GitHub Release for that tag. If you already have a tag and need to backfill assets, you can also run the `Release` workflow manually from the Actions tab and provide that tag.
 
+Linux release notes:
+
+- The Linux asset is built for `x86_64-unknown-linux-musl` to avoid host glibc version mismatches on older clusters.
+- If your environment blocks downloaded binaries, build locally with `cargo build --release` on the login node or another Linux machine with a compatible toolchain.
+
 ## Command flow
 
 - `validate` checks that the spec parses and normalizes successfully.
@@ -76,6 +81,8 @@ The release workflow runs `cargo test --locked`, builds release archives for Lin
 
 - [`examples/app-redis-worker.yaml`](examples/app-redis-worker.yaml): multi-service launch ordering and readiness checks.
 - [`examples/dev-python-app.yaml`](examples/dev-python-app.yaml): mounted-code development workflow.
+- [`examples/llm-curl-workflow.yaml`](examples/llm-curl-workflow.yaml): end-to-end LLM request with a `curl` client.
+- [`examples/llm-curl-workflow-workdir.yaml`](examples/llm-curl-workflow-workdir.yaml): the same LLM flow parameterized by `HPC_COMPOSE_HOME`.
 - [`examples/llama-app.yaml`](examples/llama-app.yaml): GPU-backed service with a dependent application.
 
 ## Build and test

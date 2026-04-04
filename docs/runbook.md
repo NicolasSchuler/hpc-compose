@@ -22,6 +22,8 @@ Make sure you have:
 | --- | --- | --- |
 | Dev app | mounted source tree plus a small prepare step | [`examples/dev-python-app.yaml`](../examples/dev-python-app.yaml) |
 | Redis worker stack | multi-service launch ordering and readiness checks | [`examples/app-redis-worker.yaml`](../examples/app-redis-worker.yaml) |
+| LLM curl workflow | one GPU-backed LLM plus a one-shot `curl` request from a second service | [`examples/llm-curl-workflow.yaml`](../examples/llm-curl-workflow.yaml) |
+| LLM curl workflow (workdir) | the same request flow, but anchored under one login-node work directory via `HPC_COMPOSE_HOME` | [`examples/llm-curl-workflow-workdir.yaml`](../examples/llm-curl-workflow-workdir.yaml) |
 | GPU-backed app | one GPU service plus a dependent application | [`examples/llama-app.yaml`](../examples/llama-app.yaml) |
 
 The fastest path is usually to copy the closest example and adapt it instead of starting from scratch.

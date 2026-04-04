@@ -1,0 +1,62 @@
+name: llm-curl-workflow
+
+x-slurm:
+  job_name: llm-curl-workflow
+  time: "00:30:00"
+  mem: 32G
+  cpus_per_task: 8
+  gpus: 1
+  cache_dir: /shared/$USER/hpc-compose-cache
+  setup:
+    - module load enroot
+
+services:
+  llm:
+    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    volumes:
+      - ./models:/models
+      - ./llm-curl:/workflow
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        rm -f /workflow/request.done
+        /app/llama-server -m /models/model.gguf --host 0.0.0.0 --port 8080 &
+        server_pid=$!
+        while [ ! -f /workflow/request.done ]; do
+          if ! kill -0 "$server_pid" 2>/dev/null; then
+            wait "$server_pid"
+            exit $?
+          fi
+          sleep 1
+        done
+        kill "$server_pid" 2>/dev/null || true
+        wait "$server_pid" || true
+    readiness:
+      type: tcp
+      host: 127.0.0.1
+      port: 8080
+      timeout_seconds: 60
+    x-slurm:
+      gpus: 1
+      cpus_per_task: 4
+
+  curl_client:
+    image: alpine:3.20
+    depends_on:
+      - llm
+    working_dir: /workflow
+    volumes:
+      - ./llm-curl:/workflow
+    environment:
+      LLM_BASE_URL: http://127.0.0.1:8080
+    command:
+      - /bin/sh
+      - -lc
+      - sh /workflow/run-request.sh && touch /workflow/request.done
+    x-enroot:
+      prepare:
+        commands:
+          - apk add --no-cache curl
+    x-slurm:
+      cpus_per_task: 1
