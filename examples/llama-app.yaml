@@ -1,0 +1,49 @@
+name: llama-stack
+
+x-slurm:
+  job_name: llama-stack
+  time: "02:00:00"
+  mem: 32G
+  cpus_per_task: 8
+  gpus: 1
+  cache_dir: /shared/$USER/hpc-compose-cache
+  setup:
+    - module load enroot
+
+services:
+  llama:
+    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    volumes:
+      - ./models:/models
+    command:
+      - /bin/sh
+      - -lc
+      - exec /app/llama-server -m /models/model.gguf --host 0.0.0.0 --port 8080
+    readiness:
+      type: tcp
+      host: 127.0.0.1
+      port: 8080
+      timeout_seconds: 60
+    x-slurm:
+      gpus: 1
+      cpus_per_task: 4
+
+  app:
+    image: python:3.11-slim
+    depends_on:
+      - llama
+    working_dir: /workspace
+    volumes:
+      - ./app:/workspace
+    environment:
+      LLM_BASE_URL: http://127.0.0.1:8080/v1
+    command:
+      - python
+      - -m
+      - main
+    x-enroot:
+      prepare:
+        commands:
+          - pip install --no-cache-dir openai fastapi uvicorn
+    x-slurm:
+      cpus_per_task: 2

@@ -1,0 +1,25 @@
+name: dev-python-app
+
+x-slurm:
+  job_name: dev-python-app
+  time: "00:30:00"
+  mem: 8G
+  cpus_per_task: 2
+  cache_dir: /shared/$USER/hpc-compose-cache
+  setup:
+    - module load enroot
+
+services:
+  app:
+    image: python:3.11-slim
+    working_dir: /workspace
+    volumes:
+      - ./app:/workspace
+    command:
+      - python
+      - -m
+      - main
+    x-enroot:
+      prepare:
+        commands:
+          - pip install --no-cache-dir fastapi uvicorn openai

@@ -1,0 +1,36 @@
+name: redis-demo
+
+x-slurm:
+  job_name: redis-demo
+  time: "00:15:00"
+  mem: 8G
+  cpus_per_task: 2
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  redis:
+    image: redis:7
+    command: redis-server --save "" --appendonly no
+    readiness:
+      type: tcp
+      host: 127.0.0.1
+      port: 6379
+      timeout_seconds: 30
+    x-slurm:
+      cpus_per_task: 1
+
+  worker:
+    image: redis:7
+    depends_on:
+      - redis
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        redis-cli -h 127.0.0.1 ping
+        while true; do
+          redis-cli -h 127.0.0.1 incr jobs
+          sleep 2
+        done
+    x-slurm:
+      cpus_per_task: 1
