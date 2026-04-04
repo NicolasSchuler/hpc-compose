@@ -170,6 +170,15 @@ fn runtime_plan(path: &Path) -> RuntimePlan {
     build_runtime_plan(&plan)
 }
 
+fn safe_cache_dir() -> tempfile::TempDir {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".tmp/hpc-compose-tests");
+    fs::create_dir_all(&root).expect("cache root");
+    tempfile::Builder::new()
+        .prefix("case-")
+        .tempdir_in(root)
+        .expect("cache tempdir")
+}
+
 fn write_prepare_compose(tmpdir: &Path, cache_dir: &Path) -> PathBuf {
     fs::create_dir_all(tmpdir.join("app")).expect("app dir");
     fs::write(tmpdir.join("app/main.py"), "print('hello')\n").expect("main.py");
@@ -242,7 +251,8 @@ services:
 #[test]
 fn validate_and_render_commands_work() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_dir = tmpdir.path().join("cache");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
     let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
 
     let validate = run_cli(tmpdir.path(), &["validate", "-f", compose.to_str().expect("path")]);
@@ -269,7 +279,8 @@ fn validate_and_render_commands_work() {
 #[test]
 fn inspect_and_preflight_commands_cover_dev_workflow() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_dir = tmpdir.path().join("cache");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
     let compose = write_mount_prepare_compose(tmpdir.path(), &cache_dir);
     let enroot = write_fake_enroot(tmpdir.path());
     let srun = write_fake_srun(tmpdir.path());
@@ -320,7 +331,8 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
 #[test]
 fn prepare_and_cache_commands_manage_artifacts() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_dir = tmpdir.path().join("cache");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
     let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
     let plan = runtime_plan(&compose);
     let enroot = write_fake_enroot(tmpdir.path());
@@ -404,7 +416,8 @@ fn prepare_and_cache_commands_manage_artifacts() {
 #[test]
 fn cache_prune_argument_validation_and_all_unused_path_work() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_dir = tmpdir.path().join("cache");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
     let compose_a = write_prepare_compose(tmpdir.path(), &cache_dir);
     let enroot = write_fake_enroot(tmpdir.path());
     let plan_a = runtime_plan(&compose_a);
@@ -468,7 +481,8 @@ services:
 #[test]
 fn submit_command_runs_end_to_end_with_fake_tools() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_dir = tmpdir.path().join("cache");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
     let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
     let plan = runtime_plan(&compose);
     let enroot = write_fake_enroot(tmpdir.path());
@@ -504,7 +518,8 @@ fn submit_command_runs_end_to_end_with_fake_tools() {
 #[test]
 fn submit_skip_prepare_reuses_existing_artifact() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_dir = tmpdir.path().join("cache");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
     let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
     let enroot = write_fake_enroot(tmpdir.path());
     let srun = write_fake_srun(tmpdir.path());

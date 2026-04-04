@@ -720,6 +720,15 @@ esac
         path
     }
 
+    fn safe_cache_dir() -> tempfile::TempDir {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".tmp/hpc-compose-tests");
+        fs::create_dir_all(&root).expect("cache root");
+        tempfile::Builder::new()
+            .prefix("case-")
+            .tempdir_in(root)
+            .expect("cache tempdir")
+    }
+
     fn write_valid_compose(tmpdir: &Path, cache_dir: &Path) -> PathBuf {
         fs::create_dir_all(tmpdir.join("app")).expect("app");
         fs::write(tmpdir.join("app/main.py"), "print('hi')\n").expect("main.py");
@@ -983,7 +992,8 @@ services:
     #[test]
     fn run_command_covers_success_and_error_arms() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let cache_dir = tmpdir.path().join("cache");
+        let cache_root = safe_cache_dir();
+        let cache_dir = cache_root.path().to_path_buf();
         let compose = write_valid_compose(tmpdir.path(), &cache_dir);
         let enroot = write_fake_enroot(tmpdir.path());
         let srun = write_fake_srun(tmpdir.path());
