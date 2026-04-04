@@ -2,7 +2,7 @@
 
 This example is the smallest end-to-end `hpc-compose` LLM workflow:
 
-- the login node prepares a tiny `curl` client image,
+- the login node prepares a small Debian-based `curl` client image,
 - the Slurm job starts `llama-server` on the compute node,
 - a second service sends one request with `curl`,
 - and the stack exits cleanly after the response is written to the client log.
@@ -28,6 +28,16 @@ hpc-compose submit -f examples/llm-curl-workflow.yaml
 
 - `llm.log` shows `llama-server` starting and serving the request.
 - `curl_client.log` contains the JSON response from `/v1/chat/completions`.
+
+## Startup gating
+
+The example waits for `llama.cpp` to report that the model is ready before launching the client request:
+
+- `readiness.type: log`
+- `readiness.pattern: "main: model loaded"`
+- `readiness.timeout_seconds: 300`
+
+This is intentional. `llama-server` can bind its TCP port before the model is fully ready, which can cause early `503` responses from the client.
 
 ## Adjusting the prompt
 

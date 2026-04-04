@@ -79,8 +79,14 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str(
         "    append_unique_mount \"/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk\"\n",
     );
+    out.push_str(
+        "    append_unique_mount \"/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog\"\n",
+    );
     out.push_str("  elif [[ -e /etc/slurm/task_prolog ]]; then\n");
     out.push_str("    append_unique_mount \"/etc/slurm/task_prolog:/etc/slurm/task_prolog\"\n");
+    out.push_str(
+        "    append_unique_mount \"/etc/slurm/task_prolog:/etc/slurm/task_prolog.hk\"\n",
+    );
     out.push_str("  fi\n");
     out.push_str("  [[ -d /scratch ]] && append_unique_mount \"/scratch:/scratch\"\n");
     out.push_str("  [[ -e /usr/lib64/slurm/libslurmfull.so ]] && append_unique_mount \"/usr/lib64/slurm/libslurmfull.so\"\n");
@@ -462,6 +468,7 @@ mod tests {
         assert!(script.contains("build_pyxis_mounts"));
         assert!(script.contains("/scratch:/scratch"));
         assert!(script.contains("/usr/lib64/slurm/libslurmfull.so"));
+        assert!(script.contains("/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog"));
     }
 
     #[test]

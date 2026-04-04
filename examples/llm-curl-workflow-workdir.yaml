@@ -7,8 +7,6 @@ x-slurm:
   cpus_per_task: 8
   gpus: 1
   cache_dir: $HPC_COMPOSE_HOME/hpc-compose-cache
-  setup:
-    - module load enroot
   # Uncomment if your cluster requires them.
   # partition: gpu
   # account: my-project
@@ -38,16 +36,15 @@ services:
         kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" || true
     readiness:
-      type: tcp
-      host: 127.0.0.1
-      port: 8080
-      timeout_seconds: 60
+      type: log
+      pattern: "main: model loaded"
+      timeout_seconds: 300
     x-slurm:
       gpus: 1
       cpus_per_task: 4
 
   curl_client:
-    image: alpine:3.20
+    image: debian:bookworm-slim
     depends_on:
       - llm
     working_dir: /workflow
@@ -63,6 +60,8 @@ services:
     x-enroot:
       prepare:
         commands:
-          - apk add --no-cache curl
+          - apt-get update
+          - apt-get install -y --no-install-recommends bash ca-certificates curl
+          - rm -rf /var/lib/apt/lists/*
     x-slurm:
       cpus_per_task: 1

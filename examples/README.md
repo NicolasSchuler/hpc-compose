@@ -20,6 +20,7 @@ These examples are the fastest way to understand the intended `hpc-compose` work
 4. Keep active source trees in `volumes` and reserve `x-enroot.prepare.commands` for slower-changing dependencies or tools.
 5. Add `readiness` to services that must be actually reachable before dependents continue.
 6. Adjust `x-slurm` resource settings at the top level or per service as needed.
+7. Add `x-slurm.setup` only when your cluster actually needs module loads or shell initialization.
 
 ## Notes per example
 
@@ -37,7 +38,8 @@ These examples are the fastest way to understand the intended `hpc-compose` work
 ### `llm-curl-workflow.yaml`
 
 - Best reference for a complete request/response path.
-- Uses `x-enroot.prepare.commands` on the login node to add `curl` to the client image.
+- Uses `x-enroot.prepare.commands` on the login node to build a Debian-based client image with `bash` and `curl`.
+- Uses a fixed sleep readiness gate so the client does not race model loading.
 - Shares a tiny workflow directory so the LLM server can shut down after the request completes.
 
 ### `llm-curl-workflow-workdir.yaml`

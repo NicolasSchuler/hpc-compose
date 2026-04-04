@@ -7,8 +7,6 @@ x-slurm:
   cpus_per_task: 8
   gpus: 1
   cache_dir: /shared/$USER/hpc-compose-cache
-  setup:
-    - module load enroot
 
 services:
   llama:
