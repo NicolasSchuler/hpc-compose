@@ -51,6 +51,17 @@ target/release/hpc-compose render -f examples/dev-python-app.yaml --output /tmp/
 
 For the full submit workflow, including prepare and log handling, use the [runbook](docs/runbook.md).
 
+## Releases
+
+Push a version tag such as `v0.1.0` to publish downloadable binaries through GitHub Actions:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow runs `cargo test --locked`, builds release archives for Linux, macOS, and Windows, and attaches those archives plus SHA256 checksum files to the GitHub Release for that tag. If you already have a tag and need to backfill assets, you can also run the `Release` workflow manually from the Actions tab and provide that tag.
+
 ## Command flow
 
 - `validate` checks that the spec parses and normalizes successfully.
