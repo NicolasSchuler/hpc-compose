@@ -321,10 +321,11 @@ struct LogCursor {
 
 /// Returns the `.hpc-compose` metadata directory for a compose file.
 pub fn metadata_root_for(spec_path: &Path) -> PathBuf {
-    spec_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".hpc-compose")
+    let parent = match spec_path.parent() {
+        Some(parent) => parent,
+        None => Path::new("."),
+    };
+    parent.join(".hpc-compose")
 }
 
 /// Returns the tracked job-record directory for a compose file.
@@ -394,8 +395,7 @@ pub fn build_submission_record(
 /// Writes a submission record to the jobs directory and latest pointer.
 pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
     let jobs_dir = jobs_dir_for(&record.compose_file);
-    fs::create_dir_all(&jobs_dir)
-        .with_context(|| format!("failed to create {}", jobs_dir.display()))?;
+    fs::create_dir_all(&jobs_dir).context(format!("failed to create {}", jobs_dir.display()))?;
     write_json(&jobs_dir.join(format!("{}.json", record.job_id)), record)?;
     write_json(&latest_record_path_for(&record.compose_file), record)?;
     Ok(())
@@ -417,7 +417,7 @@ pub fn scan_job_records(spec_path: &Path) -> Result<Vec<SubmissionRecord>> {
     }
     let mut records = Vec::new();
     for entry in
-        fs::read_dir(&jobs_dir).with_context(|| format!("failed to read {}", jobs_dir.display()))?
+        fs::read_dir(&jobs_dir).context(format!("failed to read {}", jobs_dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -478,13 +478,11 @@ fn remove_job_artifacts(compose_file: &Path, job_id: &str) -> Result<()> {
     let jobs_dir = jobs_dir_for(compose_file);
     let record_path = jobs_dir.join(format!("{job_id}.json"));
     if record_path.exists() {
-        fs::remove_file(&record_path)
-            .with_context(|| format!("failed to remove {}", record_path.display()))?;
+        fs::remove_file(&record_path).context(format!("failed to remove {}", record_path.display()))?;
     }
     let job_dir = metadata_root_for(compose_file).join(job_id);
     if job_dir.is_dir() {
-        fs::remove_dir_all(&job_dir)
-            .with_context(|| format!("failed to remove {}", job_dir.display()))?;
+        fs::remove_dir_all(&job_dir).context(format!("failed to remove {}", job_dir.display()))?;
     }
     Ok(())
 }
@@ -529,20 +527,17 @@ pub fn build_status_snapshot(
     );
     let now = unix_timestamp_now();
     let batch_log = build_batch_log_status(&record.batch_log, now);
-    let services = record
-        .service_logs
-        .iter()
-        .map(|(service_name, path)| {
-            let log_status = build_log_status(path, now);
-            ServiceLogStatus {
-                service_name: service_name.clone(),
-                path: path.clone(),
-                present: log_status.present,
-                updated_age_seconds: log_status.updated_age_seconds,
-                updated_at: log_status.updated_at,
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut services = Vec::with_capacity(record.service_logs.len());
+    for (service_name, path) in &record.service_logs {
+        let log_status = build_log_status(path, now);
+        services.push(ServiceLogStatus {
+            service_name: service_name.clone(),
+            path: path.clone(),
+            present: log_status.present,
+            updated_age_seconds: log_status.updated_age_seconds,
+            updated_at: log_status.updated_at,
+        });
+    }
     Ok(StatusSnapshot {
         log_dir: log_dir_for_record(&record),
         batch_log,
@@ -720,12 +715,10 @@ pub fn artifact_payload_dir_for_record(record: &SubmissionRecord) -> PathBuf {
 /// Copies tracked artifacts for a completed job into its configured export directory.
 pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<ArtifactExportReport> {
     let record = load_submission_record(spec_path, job_id)?;
-    let export_dir_template = record.artifact_export_dir.as_deref().with_context(|| {
-        format!(
-            "tracked submission metadata for job {} does not include x-slurm.artifacts.export_dir; resubmit with artifact tracking enabled",
-            record.job_id
-        )
-    })?;
+    let export_dir_template = record.artifact_export_dir.as_deref().context(format!(
+        "tracked submission metadata for job {} does not include x-slurm.artifacts.export_dir; resubmit with artifact tracking enabled",
+        record.job_id
+    ))?;
 
     let manifest_path = artifact_manifest_path_for_record(&record);
     if !manifest_path.exists() {
@@ -746,8 +739,7 @@ pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<Artifa
 
     let payload_dir = artifact_payload_dir_for_record(&record);
     let export_dir = resolve_export_dir(&record.compose_file, export_dir_template, &record.job_id);
-    fs::create_dir_all(&export_dir)
-        .with_context(|| format!("failed to create {}", export_dir.display()))?;
+    fs::create_dir_all(&export_dir).context(format!("failed to create {}", export_dir.display()))?;
 
     let mut warnings = manifest.warnings.clone();
     let mut exported_paths = Vec::new();
@@ -762,13 +754,11 @@ pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<Artifa
             continue;
         }
         let destination = export_dir.join(relative_path);
-        copy_path_recursive(&source, &destination).with_context(|| {
-            format!(
-                "failed to export artifact '{}' to {}",
-                source.display(),
-                destination.display()
-            )
-        })?;
+        copy_path_recursive(&source, &destination).context(format!(
+            "failed to export artifact '{}' to {}",
+            source.display(),
+            destination.display()
+        ))?;
         exported_paths.push(destination);
     }
 
@@ -880,8 +870,7 @@ fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceS
     if !path.exists() {
         return Ok(None);
     }
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let raw = fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
     let mut latest_sampled_at: Option<String> = None;
     let mut devices = Vec::new();
 
@@ -891,7 +880,7 @@ fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceS
             continue;
         }
         let row: GpuDeviceSampleRow = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+            .context(format!("failed to parse {} line {}", path.display(), index + 1))?;
         match latest_sampled_at.as_deref() {
             None => {
                 latest_sampled_at = Some(row.sampled_at.clone());
@@ -942,7 +931,10 @@ fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceS
         }
     }
 
-    Ok(latest_sampled_at.map(|sampled_at| (sampled_at, devices)))
+    match latest_sampled_at {
+        Some(sampled_at) => Ok(Some((sampled_at, devices))),
+        None => Ok(None),
+    }
 }
 
 fn load_gpu_processes_for_timestamp(
@@ -952,8 +944,7 @@ fn load_gpu_processes_for_timestamp(
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let raw = fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
     let mut processes = Vec::new();
 
     for (index, raw_line) in raw.lines().enumerate() {
@@ -962,7 +953,7 @@ fn load_gpu_processes_for_timestamp(
             continue;
         }
         let row: GpuProcessSampleRow = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+            .context(format!("failed to parse {} line {}", path.display(), index + 1))?;
         if row.sampled_at != sampled_at {
             continue;
         }
@@ -982,8 +973,7 @@ fn load_slurm_sampler_snapshot(metrics_dir: &Path) -> Result<Option<SlurmSampler
     if !path.exists() {
         return Ok(None);
     }
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let raw = fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
     let mut latest_sampled_at: Option<String> = None;
     let mut steps = Vec::new();
 
@@ -993,10 +983,10 @@ fn load_slurm_sampler_snapshot(metrics_dir: &Path) -> Result<Option<SlurmSampler
             continue;
         }
         let row: SlurmSampleRow = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+            .context(format!("failed to parse {} line {}", path.display(), index + 1))?;
         let sampled_at = row.sampled_at.clone();
         let step = step_from_slurm_sample_row(row)
-            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+            .context(format!("failed to parse {} line {}", path.display(), index + 1))?;
         match latest_sampled_at.as_deref() {
             None => {
                 latest_sampled_at = Some(sampled_at);
@@ -1014,17 +1004,20 @@ fn load_slurm_sampler_snapshot(metrics_dir: &Path) -> Result<Option<SlurmSampler
         }
     }
 
-    Ok(latest_sampled_at.map(|sampled_at| SlurmSamplerSnapshot { sampled_at, steps }))
+    match latest_sampled_at {
+        Some(sampled_at) => Ok(Some(SlurmSamplerSnapshot { sampled_at, steps })),
+        None => Ok(None),
+    }
 }
 
 fn step_from_slurm_sample_row(row: SlurmSampleRow) -> Result<StepStats> {
     let step_id = required_json_string("step_id", row.step_id)?;
     let alloc_tres = row.alloc_tres.unwrap_or_default();
     let tres_usage_in_ave = row.tres_usage_in_ave.unwrap_or_default();
-    let alloc_tres_map = parse_tres_map(&alloc_tres)
-        .with_context(|| format!("failed to parse AllocTRES for step '{step_id}'"))?;
+    let alloc_tres_map =
+        parse_tres_map(&alloc_tres).context(format!("failed to parse AllocTRES for step '{step_id}'"))?;
     let usage_tres_in_ave_map = parse_tres_map(&tres_usage_in_ave)
-        .with_context(|| format!("failed to parse TRESUsageInAve for step '{step_id}'"))?;
+        .context(format!("failed to parse TRESUsageInAve for step '{step_id}'"))?;
 
     Ok(StepStats {
         step_id,
@@ -1043,7 +1036,7 @@ fn step_from_slurm_sample_row(row: SlurmSampleRow) -> Result<StepStats> {
 }
 
 fn required_json_string(field: &str, value: Option<String>) -> Result<String> {
-    value.with_context(|| format!("missing required field '{field}'"))
+    value.context(format!("missing required field '{field}'"))
 }
 
 /// Prints tracked service logs, optionally following them until interrupted.
@@ -1170,25 +1163,25 @@ fn resolve_export_dir(compose_file: &Path, template: &str, job_id: &str) -> Path
     if candidate.is_absolute() {
         candidate
     } else {
-        compose_file
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(candidate)
+        let parent = match compose_file.parent() {
+            Some(parent) => parent,
+            None => Path::new("."),
+        };
+        parent.join(candidate)
     }
 }
 
 fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("failed to read metadata for {}", source.display()))?;
+        .context(format!("failed to read metadata for {}", source.display()))?;
     if metadata.file_type().is_symlink() {
         return copy_symlink(source, destination);
     }
 
     if metadata.is_dir() {
-        fs::create_dir_all(destination)
-            .with_context(|| format!("failed to create {}", destination.display()))?;
+        fs::create_dir_all(destination).context(format!("failed to create {}", destination.display()))?;
         for entry in
-            fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+            fs::read_dir(source).context(format!("failed to read {}", source.display()))?
         {
             let entry = entry?;
             copy_path_recursive(&entry.path(), &destination.join(entry.file_name()))?;
@@ -1197,16 +1190,13 @@ fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
     }
 
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
-    fs::copy(source, destination).with_context(|| {
-        format!(
-            "failed to copy {} to {}",
-            source.display(),
-            destination.display()
-        )
-    })?;
+    fs::copy(source, destination).context(format!(
+        "failed to copy {} to {}",
+        source.display(),
+        destination.display()
+    ))?;
     Ok(())
 }
 
@@ -1215,29 +1205,25 @@ fn remove_existing_destination(path: &Path) -> Result<()> {
         return Ok(());
     };
     if metadata.file_type().is_symlink() || metadata.is_file() {
-        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+        fs::remove_file(path).context(format!("failed to remove {}", path.display()))?;
     } else if metadata.is_dir() {
-        fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))?;
+        fs::remove_dir_all(path).context(format!("failed to remove {}", path.display()))?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
 fn copy_symlink(source: &Path, destination: &Path) -> Result<()> {
-    let target = fs::read_link(source)
-        .with_context(|| format!("failed to read link {}", source.display()))?;
+    let target = fs::read_link(source).context(format!("failed to read link {}", source.display()))?;
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
     remove_existing_destination(destination)?;
-    std::os::unix::fs::symlink(&target, destination).with_context(|| {
-        format!(
-            "failed to recreate symlink {} -> {}",
-            destination.display(),
-            target.display()
-        )
-    })?;
+    std::os::unix::fs::symlink(&target, destination).context(format!(
+        "failed to recreate symlink {} -> {}",
+        destination.display(),
+        target.display()
+    ))?;
     Ok(())
 }
 
@@ -1251,18 +1237,16 @@ fn copy_symlink(source: &Path, _destination: &Path) -> Result<()> {
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
     let serialized =
         serde_json::to_vec_pretty(value).context("failed to serialize job metadata")?;
-    fs::write(path, serialized).with_context(|| format!("failed to write {}", path.display()))
+    fs::write(path, serialized).context(format!("failed to write {}", path.display()))
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    let raw = fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&raw).context(format!("failed to parse {}", path.display()))
 }
 
 fn build_batch_log_status(path: &Path, now: u64) -> BatchLogStatus {
@@ -1436,7 +1420,7 @@ fn probe_step_stats(job_id: &str, binary: &str) -> Result<Vec<StepStats>> {
             "--format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,AllocTRES,TRESUsageInAve",
         ])
         .output()
-        .with_context(|| format!("failed to execute '{binary}'"))?;
+        .context(format!("failed to execute '{binary}'"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1479,10 +1463,10 @@ fn parse_sstat_output(job_id: &str, stdout: &str) -> Result<Vec<StepStats>> {
             continue;
         }
 
-        let alloc_tres_map = parse_tres_map(fields[5])
-            .with_context(|| format!("failed to parse AllocTRES for step '{step_id}'"))?;
+        let alloc_tres_map =
+            parse_tres_map(fields[5]).context(format!("failed to parse AllocTRES for step '{step_id}'"))?;
         let usage_tres_in_ave_map = parse_tres_map(fields[6])
-            .with_context(|| format!("failed to parse TRESUsageInAve for step '{step_id}'"))?;
+            .context(format!("failed to parse TRESUsageInAve for step '{step_id}'"))?;
         steps.push(StepStats {
             step_id: step_id.to_string(),
             ntasks: fields[1].to_string(),
@@ -1511,19 +1495,23 @@ fn parse_tres_map(raw: &str) -> Result<BTreeMap<String, String>> {
         }
         let (key, value) = segment
             .split_once('=')
-            .with_context(|| format!("invalid TRES entry '{segment}'"))?;
+            .context(format!("invalid TRES entry '{segment}'"))?;
         values.insert(key.trim().to_string(), value.trim().to_string());
     }
     Ok(values)
 }
 
 fn find_tres_value(values: &BTreeMap<String, String>, key: &str) -> Option<String> {
-    values.get(key).cloned().or_else(|| {
-        values
-            .iter()
-            .find(|(candidate, _)| candidate.starts_with(&format!("{key}:")))
-            .map(|(_, value)| value.clone())
-    })
+    if let Some(value) = values.get(key) {
+        return Some(value.clone());
+    }
+    let prefix = format!("{key}:");
+    for (candidate, value) in values {
+        if candidate.starts_with(&prefix) {
+            return Some(value.clone());
+        }
+    }
+    None
 }
 
 fn is_numbered_step(job_id: &str, step_id: &str) -> bool {
@@ -1645,19 +1633,17 @@ fn selected_service_logs(
     service: Option<&str>,
 ) -> Result<Vec<(String, PathBuf)>> {
     if let Some(service) = service {
-        let path = record.service_logs.get(service).cloned().with_context(|| {
-            format!(
-                "service '{}' does not exist in tracked job {}",
-                service, record.job_id
-            )
-        })?;
+        let path = record.service_logs.get(service).cloned().context(format!(
+            "service '{}' does not exist in tracked job {}",
+            service, record.job_id
+        ))?;
         return Ok(vec![(service.to_string(), path)]);
     }
-    Ok(record
-        .service_logs
-        .iter()
-        .map(|(name, path)| (name.clone(), path.clone()))
-        .collect())
+    let mut selected = Vec::with_capacity(record.service_logs.len());
+    for (name, path) in &record.service_logs {
+        selected.push((name.clone(), path.clone()));
+    }
+    Ok(selected)
 }
 
 fn emit_initial_tail(
@@ -1685,15 +1671,20 @@ fn emit_initial_tail(
 }
 
 fn build_cursors(selected: &[(String, PathBuf)]) -> Vec<LogCursor> {
-    selected
-        .iter()
-        .map(|(service_name, path)| LogCursor {
+    let mut cursors = Vec::with_capacity(selected.len());
+    for (service_name, path) in selected {
+        let offset = match fs::metadata(path) {
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        };
+        cursors.push(LogCursor {
             service_name: service_name.clone(),
-            offset: fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+            offset,
             path: path.clone(),
             pending: String::new(),
-        })
-        .collect()
+        });
+    }
+    cursors
 }
 
 fn drain_log_cursors(cursors: &mut [LogCursor], writer: &mut impl Write) -> Result<bool> {
@@ -1714,7 +1705,7 @@ fn read_new_lines(cursor: &mut LogCursor) -> Result<Vec<String>> {
     };
     let len = file
         .metadata()
-        .with_context(|| format!("failed to read metadata for {}", cursor.path.display()))?
+        .context(format!("failed to read metadata for {}", cursor.path.display()))?
         .len();
     if cursor.offset > len {
         cursor.offset = 0;
@@ -1725,10 +1716,10 @@ fn read_new_lines(cursor: &mut LogCursor) -> Result<Vec<String>> {
     }
 
     file.seek(SeekFrom::Start(cursor.offset))
-        .with_context(|| format!("failed to seek {}", cursor.path.display()))?;
+        .context(format!("failed to seek {}", cursor.path.display()))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
-        .with_context(|| format!("failed to read {}", cursor.path.display()))?;
+        .context(format!("failed to read {}", cursor.path.display()))?;
     cursor.offset = len;
 
     let mut combined = std::mem::take(&mut cursor.pending);
@@ -1786,6 +1777,7 @@ impl StepStats {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -1862,6 +1854,86 @@ mod tests {
     }
 
     #[test]
+    fn defaults_and_path_helpers_cover_remaining_helpers() {
+        let scheduler = SchedulerOptions::default();
+        assert_eq!(scheduler.squeue_bin, "squeue");
+        assert_eq!(scheduler.sacct_bin, "sacct");
+
+        let stats = StatsOptions::default();
+        assert_eq!(stats.sstat_bin, "sstat");
+        assert_eq!(stats.scheduler.squeue_bin, "squeue");
+
+        let spec_path = Path::new("compose.yaml");
+        assert!(metadata_root_for(spec_path).ends_with(".hpc-compose"));
+        assert!(jobs_dir_for(spec_path).ends_with(".hpc-compose/jobs"));
+        assert!(latest_record_path_for(spec_path).ends_with(".hpc-compose/latest.json"));
+        assert_eq!(scheduler_source_label(SchedulerSource::Squeue), "squeue");
+        assert_eq!(scheduler_source_label(SchedulerSource::Sacct), "sacct");
+        assert_eq!(scheduler_source_label(SchedulerSource::LocalOnly), "local-only");
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.output = Some("logs/%j.out".into());
+        let record = build_submission_record(
+            &tmpdir.path().join("compose.yaml"),
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        assert_eq!(
+            metrics_dir_for_record(&record),
+            tmpdir.path().join(".hpc-compose/12345/metrics")
+        );
+        assert_eq!(
+            artifacts_dir_for_record(&record),
+            tmpdir.path().join(".hpc-compose/12345/artifacts")
+        );
+        assert_eq!(
+            artifact_manifest_path_for_record(&record),
+            tmpdir.path().join(".hpc-compose/12345/artifacts/manifest.json")
+        );
+        assert_eq!(
+            artifact_payload_dir_for_record(&record),
+            tmpdir.path().join(".hpc-compose/12345/artifacts/payload")
+        );
+        assert_eq!(
+            resolve_export_dir(&record.compose_file, "./results/${SLURM_JOB_ID}", "12345"),
+            tmpdir.path().join("results/12345")
+        );
+        assert_eq!(
+            resolve_export_dir(&record.compose_file, "/tmp/results/${SLURM_JOB_ID}", "12345"),
+            PathBuf::from("/tmp/results/12345")
+        );
+
+        let missing = build_batch_log_status(&tmpdir.path().join("missing.log"), unix_timestamp_now());
+        assert!(!missing.present);
+        let batch_log = tmpdir.path().join("slurm-12345.out");
+        fs::write(&batch_log, "hello\n").expect("batch log");
+        let present = build_batch_log_status(&batch_log, unix_timestamp_now());
+        assert!(present.present);
+
+        let fallback_record = SubmissionRecord {
+            schema_version: 1,
+            job_id: "999".into(),
+            submitted_at: 0,
+            compose_file: tmpdir.path().join("compose.yaml"),
+            submit_dir: tmpdir.path().to_path_buf(),
+            script_path: tmpdir.path().join("job.sbatch"),
+            cache_dir: tmpdir.path().join("cache"),
+            batch_log,
+            service_logs: BTreeMap::new(),
+            artifact_export_dir: None,
+        };
+        assert_eq!(
+            log_dir_for_record(&fallback_record),
+            tmpdir.path().join(".hpc-compose/999/logs")
+        );
+        let _ = current_user_name();
+    }
+
+    #[test]
     fn scheduler_status_prefers_squeue_then_sacct() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let squeue = tmpdir.path().join("squeue");
@@ -1889,6 +1961,53 @@ mod tests {
         assert_eq!(status.state, "FAILED");
         assert_eq!(status.source, SchedulerSource::Sacct);
         assert!(status.failed);
+    }
+
+    #[test]
+    fn build_status_snapshot_and_log_selection_cover_additional_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let plan = runtime_plan(tmpdir.path());
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+
+        fs::create_dir_all(log_dir_for_record(&record)).expect("log dir");
+        fs::write(&record.batch_log, "batch\n").expect("batch log");
+        for path in record.service_logs.values() {
+            fs::write(path, "line one\nline two\n").expect("service log");
+        }
+
+        let squeue = tmpdir.path().join("squeue");
+        let sacct = tmpdir.path().join("sacct");
+        write_script(&squeue, "#!/bin/bash\necho RUNNING\n");
+        write_script(&sacct, "#!/bin/bash\nexit 0\n");
+
+        let snapshot = build_status_snapshot(
+            &compose,
+            None,
+            &SchedulerOptions {
+                squeue_bin: squeue.display().to_string(),
+                sacct_bin: sacct.display().to_string(),
+            },
+        )
+        .expect("status snapshot");
+        assert_eq!(snapshot.scheduler.state, "RUNNING");
+        assert!(snapshot.batch_log.present);
+        assert_eq!(snapshot.services.len(), 2);
+
+        let selected = selected_service_logs(&record, Some("api")).expect("selected");
+        assert_eq!(selected.len(), 1);
+        let err = selected_service_logs(&record, Some("missing")).expect_err("missing service");
+        assert!(err.to_string().contains("service 'missing'"));
+
+        print_logs(&record, Some("api"), 1, false).expect("print logs");
     }
 
     #[test]
@@ -2083,6 +2202,105 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
         assert_eq!(slurm.steps.len(), 1);
         assert_eq!(slurm.steps[0].step_id, "12345.1");
         assert_eq!(slurm.steps[0].gpu_util.as_deref(), Some("91"));
+    }
+
+    #[test]
+    fn sampler_and_parser_error_paths_cover_remaining_functions() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let malformed_meta_dir = tmpdir.path().join("malformed-meta");
+        fs::create_dir_all(&malformed_meta_dir).expect("dir");
+        fs::write(malformed_meta_dir.join("meta.json"), "{not-json}\n").expect("meta");
+        let outcome = load_sampler_snapshot(&malformed_meta_dir);
+        assert!(outcome.sampler.is_none());
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|note| note.contains("failed to parse metrics sampler metadata"))
+        );
+
+        let disabled_dir = tmpdir.path().join("disabled");
+        fs::create_dir_all(&disabled_dir).expect("dir");
+        fs::write(
+            disabled_dir.join("meta.json"),
+            r#"{
+  "interval_seconds": 5,
+  "collectors": [
+    {"name":"gpu","enabled":false,"available":false,"note":"disabled","last_sampled_at":null},
+    {"name":"slurm","enabled":false,"available":false,"note":null,"last_sampled_at":null}
+  ]
+}"#,
+        )
+        .expect("meta");
+        let outcome = load_sampler_snapshot(&disabled_dir);
+        let sampler = outcome.sampler.expect("sampler");
+        assert!(sampler.gpu.is_none());
+        assert!(sampler.slurm.is_none());
+        assert!(outcome.notes.is_empty());
+
+        let broken_collectors_dir = tmpdir.path().join("broken-collectors");
+        fs::create_dir_all(&broken_collectors_dir).expect("dir");
+        fs::write(
+            broken_collectors_dir.join("meta.json"),
+            r#"{
+  "interval_seconds": 5,
+  "collectors": [
+    {"name":"gpu","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:00Z"},
+    {"name":"slurm","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:00Z"}
+  ]
+}"#,
+        )
+        .expect("meta");
+        fs::write(broken_collectors_dir.join("gpu.jsonl"), "{not-json}\n").expect("gpu");
+        fs::write(
+            broken_collectors_dir.join("slurm.jsonl"),
+            "{\"sampled_at\":\"2026-04-05T10:00:00Z\",\"step_id\":null,\"ntasks\":\"1\",\"ave_cpu\":\"\",\"ave_rss\":\"\",\"max_rss\":\"\",\"alloc_tres\":\"cpu=1,broken\",\"tres_usage_in_ave\":\"cpu=00:00:01\"}\n",
+        )
+        .expect("slurm");
+        let outcome = load_sampler_snapshot(&broken_collectors_dir);
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|note| note.contains("failed to parse GPU sampler data"))
+        );
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|note| note.contains("failed to parse Slurm sampler data"))
+        );
+
+        let err = step_from_slurm_sample_row(SlurmSampleRow {
+            sampled_at: "2026-04-05T10:00:00Z".into(),
+            step_id: None,
+            ntasks: Some("1".into()),
+            ave_cpu: Some("".into()),
+            ave_rss: Some("".into()),
+            max_rss: Some("".into()),
+            alloc_tres: Some("cpu=1".into()),
+            tres_usage_in_ave: Some("cpu=00:00:01".into()),
+        })
+        .expect_err("missing step id");
+        assert!(err.to_string().contains("missing required field 'step_id'"));
+
+        let err = step_from_slurm_sample_row(SlurmSampleRow {
+            sampled_at: "2026-04-05T10:00:00Z".into(),
+            step_id: Some("12345.0".into()),
+            ntasks: Some("1".into()),
+            ave_cpu: Some("".into()),
+            ave_rss: Some("".into()),
+            max_rss: Some("".into()),
+            alloc_tres: Some("cpu=1,broken".into()),
+            tres_usage_in_ave: Some("cpu=00:00:01".into()),
+        })
+        .expect_err("bad alloc tres");
+        assert!(err.to_string().contains("failed to parse AllocTRES"));
+
+        let sstat = tmpdir.path().join("sstat-fail");
+        write_script(&sstat, "#!/bin/bash\nset -euo pipefail\necho nope >&2\nexit 1\n");
+        let err = probe_step_stats("12345", sstat.to_str().expect("path")).expect_err("sstat");
+        assert!(err.to_string().contains("sstat failed for job 12345: nope"));
     }
 
     #[test]
@@ -2483,6 +2701,129 @@ services:
             err.to_string()
                 .contains("tracked artifact manifest does not exist")
         );
+    }
+
+    #[test]
+    fn export_artifacts_reports_manifest_mismatch_and_missing_payloads() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &compose,
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/metrics/**
+services:
+  app:
+    image: redis:7
+"#,
+        )
+        .expect("compose");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.artifacts = Some(crate::spec::ArtifactsConfig {
+            collect: crate::spec::ArtifactCollectPolicy::Always,
+            export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+            paths: vec!["/hpc-compose/job/metrics/**".into()],
+        });
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        fs::create_dir_all(artifacts_dir_for_record(&record)).expect("artifacts dir");
+
+        fs::write(
+            artifact_manifest_path_for_record(&record),
+            serde_json::to_vec_pretty(&ArtifactManifest {
+                job_id: "99999".into(),
+                collect_policy: "always".into(),
+                collected_at: "2026-04-05T10:00:00Z".into(),
+                job_outcome: "success".into(),
+                declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                matched_source_paths: vec!["/hpc-compose/job/metrics/missing.json".into()],
+                copied_relative_paths: vec!["metrics/missing.json".into()],
+                warnings: Vec::new(),
+            })
+            .expect("manifest"),
+        )
+        .expect("write manifest");
+        let err = export_artifacts(&compose, None).expect_err("mismatch");
+        assert!(err.to_string().contains("artifact manifest job id 99999 does not match"));
+
+        fs::write(
+            artifact_manifest_path_for_record(&record),
+            serde_json::to_vec_pretty(&ArtifactManifest {
+                job_id: "12345".into(),
+                collect_policy: "always".into(),
+                collected_at: "2026-04-05T10:00:00Z".into(),
+                job_outcome: "success".into(),
+                declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                matched_source_paths: vec!["/hpc-compose/job/metrics/missing.json".into()],
+                copied_relative_paths: vec!["metrics/missing.json".into()],
+                warnings: Vec::new(),
+            })
+            .expect("manifest"),
+        )
+        .expect("write manifest");
+        let report = export_artifacts(&compose, None).expect("export");
+        assert!(report.exported_paths.is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("collected payload path"))
+        );
+    }
+
+    #[test]
+    fn copy_helpers_cover_files_directories_and_symlink_overwrites() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+        let source_file = tmpdir.path().join("source.txt");
+        let dest_file = tmpdir.path().join("dest.txt");
+        fs::write(&source_file, "new").expect("source");
+        fs::write(&dest_file, "old").expect("dest");
+        copy_path_recursive(&source_file, &dest_file).expect("copy file");
+        assert_eq!(fs::read_to_string(&dest_file).expect("read"), "new");
+
+        let source_dir = tmpdir.path().join("source-dir");
+        let nested = source_dir.join("nested");
+        fs::create_dir_all(&nested).expect("dir");
+        fs::write(nested.join("data.txt"), "payload").expect("payload");
+        let dest_dir = tmpdir.path().join("dest-dir");
+        copy_path_recursive(&source_dir, &dest_dir).expect("copy dir");
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("nested/data.txt")).expect("read"),
+            "payload"
+        );
+
+        let removable_file = tmpdir.path().join("remove-file");
+        fs::write(&removable_file, "x").expect("file");
+        remove_existing_destination(&removable_file).expect("remove file");
+        assert!(!removable_file.exists());
+
+        let removable_dir = tmpdir.path().join("remove-dir");
+        fs::create_dir_all(&removable_dir).expect("dir");
+        remove_existing_destination(&removable_dir).expect("remove dir");
+        assert!(!removable_dir.exists());
+
+        #[cfg(unix)]
+        {
+            let symlink_source = tmpdir.path().join("symlink-source");
+            fs::write(&symlink_source, "target").expect("target");
+            let source_link = tmpdir.path().join("source-link");
+            std::os::unix::fs::symlink(&symlink_source, &source_link).expect("source link");
+
+            let dest_link = tmpdir.path().join("dest-link");
+            fs::write(&dest_link, "occupied").expect("occupied");
+            copy_path_recursive(&source_link, &dest_link).expect("copy symlink");
+            assert!(fs::symlink_metadata(&dest_link).expect("meta").file_type().is_symlink());
+        }
     }
 
     #[test]

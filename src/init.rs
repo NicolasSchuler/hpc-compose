@@ -1,7 +1,7 @@
 //! Interactive and non-interactive helpers for `hpc-compose init`.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -9,6 +9,7 @@ use serde_yaml::{Mapping, Value};
 
 /// A shipped compose template exposed by `hpc-compose init`.
 #[allow(missing_docs)]
+#[derive(Debug)]
 pub struct Template {
     pub name: &'static str,
     pub description: &'static str,
@@ -110,26 +111,29 @@ pub fn resolve_template(name: &str) -> Result<&'static Template> {
     TEMPLATES
         .iter()
         .find(|template| template.name == normalized)
-        .with_context(|| {
-            format!(
-                "unknown template '{}'; available templates: {}",
-                name,
-                TEMPLATES
-                    .iter()
-                    .map(|template| template.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })
+        .context(format!(
+            "unknown template '{}'; available templates: {}",
+            name,
+            TEMPLATES
+                .iter()
+                .map(|template| template.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
 }
 
 /// Prompts on stdin/stdout for template, app name, and cache directory.
 pub fn prompt_for_init() -> Result<InitAnswers> {
+    let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout();
-    writeln!(stdout, "Choose a template:").ok();
+    prompt_for_init_with_io(&mut stdin, &mut stdout)
+}
+
+fn prompt_for_init_with_io(input: &mut impl BufRead, output: &mut impl Write) -> Result<InitAnswers> {
+    writeln!(output, "Choose a template:").ok();
     for (index, template) in TEMPLATES.iter().enumerate() {
         writeln!(
-            stdout,
+            output,
             "  {}. {} - {}",
             index + 1,
             template.name,
@@ -137,9 +141,9 @@ pub fn prompt_for_init() -> Result<InitAnswers> {
         )
         .ok();
     }
-    stdout.flush().ok();
+    output.flush().ok();
 
-    let selection = prompt("Template number", "1")?;
+    let selection = prompt(input, output, "Template number", "1")?;
     let template_index = selection
         .parse::<usize>()
         .ok()
@@ -148,8 +152,8 @@ pub fn prompt_for_init() -> Result<InitAnswers> {
         .context("template selection must be one of the listed numbers")?;
     let template = &TEMPLATES[template_index];
 
-    let app_name = prompt("Application name", template.name)?;
-    let cache_dir = prompt("Cache dir", DEFAULT_CACHE_DIR)?;
+    let app_name = prompt(input, output, "Application name", template.name)?;
+    let cache_dir = prompt(input, output, "Cache dir", DEFAULT_CACHE_DIR)?;
 
     Ok(InitAnswers {
         template_name: template.name.to_string(),
@@ -161,8 +165,17 @@ pub fn prompt_for_init() -> Result<InitAnswers> {
 /// Renders a shipped template with the selected application name and cache directory.
 pub fn render_template(template_name: &str, app_name: &str, cache_dir: &str) -> Result<String> {
     let template = resolve_template(template_name)?;
-    let mut value: Value = serde_yaml::from_str(template.body)
-        .with_context(|| format!("failed to parse template {}", template.name))?;
+    render_template_body(template.body, template.name, app_name, cache_dir)
+}
+
+fn render_template_body(
+    body: &str,
+    template_name: &str,
+    app_name: &str,
+    cache_dir: &str,
+) -> Result<String> {
+    let mut value: Value =
+        serde_yaml::from_str(body).context(format!("failed to parse template {template_name}"))?;
     let root = value
         .as_mapping_mut()
         .context("template root must be a mapping")?;
@@ -201,11 +214,9 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
         );
     }
     if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
-    fs::write(&output, rendered)
-        .with_context(|| format!("failed to write {}", output.display()))?;
+    fs::write(&output, rendered).context(format!("failed to write {}", output.display()))?;
     Ok(output)
 }
 
@@ -219,16 +230,19 @@ pub fn next_commands(output: &Path) -> Vec<String> {
     ]
 }
 
-fn prompt(label: &str, default: &str) -> Result<String> {
-    let mut stdout = io::stdout();
-    write!(stdout, "{label} [{default}]: ").ok();
-    stdout.flush().ok();
-
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
+fn prompt(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    label: &str,
+    default: &str,
+) -> Result<String> {
+    write!(output, "{label} [{default}]: ").ok();
+    output.flush().ok();
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
         .context("failed to read interactive input")?;
-    let trimmed = input.trim();
+    let trimmed = line.trim();
     if trimmed.is_empty() {
         Ok(default.to_string())
     } else {
@@ -247,11 +261,15 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
     use crate::spec::ComposeSpec;
 
     #[test]
     fn templates_are_resolvable() {
+        assert!(!templates().is_empty());
+        assert_eq!(templates()[0].name, "dev-python-app");
         for template in templates() {
             let resolved = resolve_template(template.name).expect("resolve");
             assert_eq!(resolved.name, template.name);
@@ -259,6 +277,26 @@ mod tests {
                 resolve_template(&format!("{}.yaml", template.name)).expect("resolve yaml");
             assert_eq!(resolved.name, template.name);
         }
+    }
+
+    #[test]
+    fn default_cache_dir_and_next_commands_match_expected_defaults() {
+        assert_eq!(default_cache_dir(), "/shared/$USER/hpc-compose-cache");
+        assert_eq!(
+            next_commands(Path::new("/tmp/demo.yaml")),
+            vec![
+                "hpc-compose submit --watch -f /tmp/demo.yaml",
+                "hpc-compose validate -f /tmp/demo.yaml",
+                "hpc-compose inspect -f /tmp/demo.yaml",
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_template_reports_unknown_name() {
+        let err = resolve_template("missing-template").expect_err("missing");
+        assert!(err.to_string().contains("unknown template 'missing-template'"));
+        assert!(err.to_string().contains("dev-python-app"));
     }
 
     #[test]
@@ -303,5 +341,123 @@ mod tests {
                 .and_then(Value::as_str),
             Some("/cache/path")
         );
+    }
+
+    #[test]
+    fn render_template_body_inserts_x_slurm_when_missing() {
+        let rendered = render_template_body(
+            "services:\n  app:\n    image: redis:7\n",
+            "inline",
+            "custom-app",
+            "/cache/path",
+        )
+        .expect("render");
+        let value: Value = serde_yaml::from_str(&rendered).expect("yaml");
+        let root = value.as_mapping().expect("root");
+        let slurm = root
+            .get(Value::String("x-slurm".to_string()))
+            .and_then(Value::as_mapping)
+            .expect("x-slurm");
+        assert_eq!(
+            slurm
+                .get(Value::String("job_name".to_string()))
+                .and_then(Value::as_str),
+            Some("custom-app")
+        );
+    }
+
+    #[test]
+    fn render_template_body_reports_invalid_shapes() {
+        let err = render_template_body("[]\n", "inline", "custom-app", "/cache/path")
+            .expect_err("non mapping root");
+        assert!(err.to_string().contains("template root must be a mapping"));
+
+        let err = render_template_body(
+            "x-slurm: nope\nservices:\n  app:\n    image: redis:7\n",
+            "inline",
+            "custom-app",
+            "/cache/path",
+        )
+        .expect_err("invalid x-slurm");
+        assert!(err.to_string().contains("template x-slurm must be a mapping"));
+    }
+
+    #[test]
+    fn prompt_uses_defaults_and_custom_values() {
+        let mut input = Cursor::new(b"\ncustom\n");
+        let mut output = Vec::new();
+        assert_eq!(
+            prompt(&mut input, &mut output, "Application name", "demo").expect("prompt"),
+            "demo"
+        );
+        assert_eq!(
+            prompt(&mut input, &mut output, "Cache dir", "/cache").expect("prompt"),
+            "custom"
+        );
+        let transcript = String::from_utf8(output).expect("utf8");
+        assert!(transcript.contains("Application name [demo]: "));
+        assert!(transcript.contains("Cache dir [/cache]: "));
+    }
+
+    #[test]
+    fn prompt_for_init_with_io_covers_defaults_custom_values_and_validation() {
+        let mut defaults_input = Cursor::new(b"\n\n\n");
+        let mut defaults_output = Vec::new();
+        let answers =
+            prompt_for_init_with_io(&mut defaults_input, &mut defaults_output).expect("defaults");
+        assert_eq!(answers.template_name, "dev-python-app");
+        assert_eq!(answers.app_name, "dev-python-app");
+        assert_eq!(answers.cache_dir, DEFAULT_CACHE_DIR);
+        assert!(String::from_utf8(defaults_output)
+            .expect("utf8")
+            .contains("Choose a template:"));
+
+        let mut custom_input = Cursor::new(b"2\ncustom-app\n/custom-cache\n");
+        let mut custom_output = Vec::new();
+        let answers =
+            prompt_for_init_with_io(&mut custom_input, &mut custom_output).expect("custom");
+        assert_eq!(answers.template_name, "app-redis-worker");
+        assert_eq!(answers.app_name, "custom-app");
+        assert_eq!(answers.cache_dir, "/custom-cache");
+
+        let mut invalid_input = Cursor::new(b"99\n");
+        let mut invalid_output = Vec::new();
+        let err =
+            prompt_for_init_with_io(&mut invalid_input, &mut invalid_output).expect_err("invalid");
+        assert!(
+            err.to_string()
+                .contains("template selection must be one of the listed numbers")
+        );
+    }
+
+    #[test]
+    fn write_initialized_template_and_absolute_path_cover_relative_and_force_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let current_dir = std::env::current_dir().expect("current dir");
+
+        assert_eq!(
+            absolute_path(Path::new("nested/compose.yaml"))
+                .expect("absolute")
+                .strip_prefix(&current_dir)
+                .expect("relative to cwd"),
+            Path::new("nested/compose.yaml")
+        );
+        assert_eq!(
+            absolute_path(Path::new("/tmp/absolute.yaml")).expect("absolute"),
+            PathBuf::from("/tmp/absolute.yaml")
+        );
+
+        let relative = tmpdir.path().join("nested/compose.yaml");
+        let written =
+            write_initialized_template(&relative, "name: demo\n", false).expect("write relative");
+        assert_eq!(written, relative);
+        assert_eq!(fs::read_to_string(&written).expect("read"), "name: demo\n");
+
+        let err =
+            write_initialized_template(&relative, "name: other\n", false).expect_err("overwrite");
+        assert!(err.to_string().contains("refusing to overwrite"));
+
+        write_initialized_template(&relative, "name: forced\n", true).expect("force overwrite");
+        assert_eq!(fs::read_to_string(&written).expect("read"), "name: forced\n");
     }
 }

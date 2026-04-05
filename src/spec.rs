@@ -303,13 +303,13 @@ fn default_http_status_code() -> u16 {
 impl ComposeSpec {
     /// Loads, interpolates, and validates a compose file from disk.
     pub fn load(path: &Path) -> Result<Self> {
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("failed to read spec at {}", path.display()))?;
-        let value: Value = serde_yaml::from_str(&raw)
-            .with_context(|| format!("failed to parse YAML at {}", path.display()))?;
+        let raw =
+            fs::read_to_string(path).context(format!("failed to read spec at {}", path.display()))?;
+        let value: Value =
+            serde_yaml::from_str(&raw).context(format!("failed to parse YAML at {}", path.display()))?;
         validate_root(&value)?;
         let mut spec: ComposeSpec = serde_yaml::from_value(value)
-            .with_context(|| format!("failed to deserialize spec at {}", path.display()))?;
+            .context(format!("failed to deserialize spec at {}", path.display()))?;
         spec.interpolate(path)?;
         spec.validate()?;
         Ok(spec)
@@ -335,13 +335,16 @@ impl DependsOnSpec {
     pub fn entries(&self) -> Result<Vec<ServiceDependency>> {
         match self {
             DependsOnSpec::None => Ok(Vec::new()),
-            DependsOnSpec::List(items) => Ok(items
-                .iter()
-                .map(|name| ServiceDependency {
-                    name: name.clone(),
-                    condition: DependencyCondition::ServiceStarted,
-                })
-                .collect()),
+            DependsOnSpec::List(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for name in items {
+                    out.push(ServiceDependency {
+                        name: name.clone(),
+                        condition: DependencyCondition::ServiceStarted,
+                    });
+                }
+                Ok(out)
+            }
             DependsOnSpec::Map(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for (name, cfg) in items {
@@ -366,8 +369,8 @@ impl DependsOnSpec {
 
     /// Returns only the dependency names, discarding their conditions.
     pub fn names(&self) -> Result<Vec<String>> {
-        self.entries()
-            .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
+        let entries = self.entries()?;
+        Ok(entries.into_iter().map(|entry| entry.name).collect())
     }
 }
 
@@ -380,15 +383,16 @@ impl EnvironmentSpec {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect::<Vec<_>>()),
-            EnvironmentSpec::List(items) => items
-                .iter()
-                .map(|item| {
+            EnvironmentSpec::List(items) => {
+                let mut pairs = Vec::with_capacity(items.len());
+                for item in items {
                     let Some((key, value)) = item.split_once('=') else {
                         bail!("environment list items must use KEY=VALUE syntax");
                     };
-                    Ok((key.to_string(), value.to_string()))
-                })
-                .collect(),
+                    pairs.push((key.to_string(), value.to_string()));
+                }
+                Ok(pairs)
+            }
         }
     }
 
@@ -612,8 +616,8 @@ fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
         return Ok(BTreeMap::new());
     }
 
-    let raw = fs::read_to_string(&dotenv_path)
-        .with_context(|| format!("failed to read {}", dotenv_path.display()))?;
+    let raw =
+        fs::read_to_string(&dotenv_path).context(format!("failed to read {}", dotenv_path.display()))?;
     let mut vars = BTreeMap::new();
     for (line_no, line) in raw.lines().enumerate() {
         let trimmed = line.trim();
@@ -761,7 +765,7 @@ fn resolve_braced_variable(
 fn resolve_required_variable(name: &str, vars: &InterpolationVars) -> Result<String> {
     vars.get(name)
         .cloned()
-        .with_context(|| format!("missing variable '{name}'"))
+        .context(format!("missing variable '{name}'"))
 }
 
 fn is_var_start(ch: char) -> bool {
@@ -786,9 +790,9 @@ fn validate_artifact_path(path: &str) -> Result<()> {
             std::path::Component::RootDir => {}
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                normalized.pop().with_context(|| {
-                    format!("x-slurm.artifacts.paths entry '{path}' escapes the root path")
-                })?;
+                normalized
+                    .pop()
+                    .context(format!("x-slurm.artifacts.paths entry '{path}' escapes the root path"))?;
             }
             std::path::Component::Normal(part) => {
                 normalized.push(part.to_string_lossy().into_owned())

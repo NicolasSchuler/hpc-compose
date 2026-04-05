@@ -1,6 +1,7 @@
 //! Cache manifest management for imported and prepared image artifacts.
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -112,7 +113,7 @@ pub fn upsert_prepared_manifest(
             prepare_env: prepare
                 .env
                 .iter()
-                .map(|(k, v)| format!("{k}={v}"))
+                .map(format_env_entry)
                 .collect(),
             prepare_root: Some(prepare.root),
             prepare_mounts: prepare.mounts.clone(),
@@ -128,11 +129,7 @@ pub fn upsert_prepared_manifest(
     manifest.source_image = image_source_string(source);
     manifest.registry = parse_remote_registry(source);
     manifest.prepare_commands = prepare.commands.clone();
-    manifest.prepare_env = prepare
-        .env
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    manifest.prepare_env = prepare.env.iter().map(format_env_entry).collect();
     manifest.prepare_root = Some(prepare.root);
     manifest.prepare_mounts = prepare.mounts.clone();
     manifest.force_rebuild_due_to_mounts = prepare.force_rebuild;
@@ -154,9 +151,8 @@ pub fn touch_manifest(artifact_path: &Path) -> Result<()> {
 pub fn read_manifest(artifact_path: &Path) -> Result<CacheEntryManifest> {
     let manifest_path = manifest_path_for(artifact_path);
     let raw = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse {}", manifest_path.display()))
+        .context(format!("failed to read {}", manifest_path.display()))?;
+    serde_json::from_str(&raw).context(format!("failed to parse {}", manifest_path.display()))
 }
 
 /// Reads a manifest when it exists and returns `None` when it does not.
@@ -180,36 +176,30 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
             Ok(entries) => entries,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
-                return Err(err).with_context(|| format!("failed to read {}", dir.display()));
+                return Err(err).context(format!("failed to read {}", dir.display()));
             }
         };
         for entry in entries {
-            let entry =
-                entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+            let entry = entry.context(format!("failed to read entry in {}", dir.display()))?;
             let path = entry.path();
             if entry
                 .file_type()
-                .with_context(|| format!("failed to read file type for {}", path.display()))?
+                .context(format!("failed to read file type for {}", path.display()))?
                 .is_dir()
             {
                 stack.push(path);
                 continue;
             }
-            let is_manifest = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext == "json")
-                .unwrap_or(false);
+            let is_manifest = path.extension() == Some(OsStr::new("json"));
             if !is_manifest {
                 continue;
             }
             if !looks_like_manifest_path(&path) {
                 continue;
             }
-            let raw = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            let manifest: CacheEntryManifest = serde_json::from_str(&raw)
-                .with_context(|| format!("failed to parse {}", path.display()))?;
+            let raw = fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
+            let manifest: CacheEntryManifest =
+                serde_json::from_str(&raw).context(format!("failed to parse {}", path.display()))?;
             manifests.push(manifest);
         }
     }
@@ -279,7 +269,7 @@ pub fn cache_key_for_service(service: &RuntimeService, kind: CacheEntryKind) -> 
             ];
             parts.extend(prepare.commands.iter().cloned());
             parts.extend(prepare.mounts.iter().cloned());
-            parts.extend(prepare.env.iter().map(|(k, v)| format!("{k}={v}")));
+            parts.extend(prepare.env.iter().map(format_env_entry));
             parts.push(format!("root={}", prepare.root));
             parts.join("|")
         }
@@ -298,12 +288,11 @@ fn remove_manifest_and_artifact(manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = manifest_path_for(artifact);
     if artifact.exists() {
-        fs::remove_file(artifact)
-            .with_context(|| format!("failed to remove {}", artifact.display()))?;
+        fs::remove_file(artifact).context(format!("failed to remove {}", artifact.display()))?;
     }
     if manifest_path.exists() {
         fs::remove_file(&manifest_path)
-            .with_context(|| format!("failed to remove {}", manifest_path.display()))?;
+            .context(format!("failed to remove {}", manifest_path.display()))?;
     }
     Ok(())
 }
@@ -326,14 +315,16 @@ fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = manifest_path_for(artifact);
     if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
     let raw =
         serde_json::to_string_pretty(manifest).context("failed to serialize cache manifest")?;
-    fs::write(&manifest_path, raw)
-        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+    fs::write(&manifest_path, raw).context(format!("failed to write {}", manifest_path.display()))?;
     Ok(())
+}
+
+fn format_env_entry((key, value): &(String, String)) -> String {
+    format!("{key}={value}")
 }
 
 fn merge_service_name(service_names: &mut Vec<String>, service_name: &str) {

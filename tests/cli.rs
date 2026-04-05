@@ -25,6 +25,24 @@ fn run_cli(cwd: &Path, args: &[&str]) -> Output {
         .expect("run cli")
 }
 
+fn run_cli_with_stdin(cwd: &Path, args: &[&str], stdin: &str) -> Output {
+    let mut child = Command::new(bin_path())
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cli");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait output")
+}
+
 fn stdout_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
@@ -1835,6 +1853,30 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         assert!(rendered.contains("cache_dir: /tmp/custom-cache"));
         assert!(stdout_text(&init).contains("hpc-compose submit --watch -f"));
     }
+}
+
+#[test]
+fn init_interactive_uses_prompted_values() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output = tmpdir.path().join("interactive-init.yaml");
+    let init = run_cli_with_stdin(
+        tmpdir.path(),
+        &[
+            "init",
+            "--output",
+            output.to_str().expect("path"),
+            "--force",
+        ],
+        "2\ninteractive-app\n/tmp/interactive-cache\n",
+    );
+    assert_success(&init);
+    let rendered = fs::read_to_string(&output).expect("rendered");
+    assert!(rendered.contains("name: interactive-app"));
+    assert!(rendered.contains("job_name: interactive-app"));
+    assert!(rendered.contains("cache_dir: /tmp/interactive-cache"));
+    let stdout = stdout_text(&init);
+    assert!(stdout.contains("Choose a template:"));
+    assert!(stdout.contains("hpc-compose submit --watch -f"));
 }
 
 #[test]

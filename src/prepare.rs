@@ -365,12 +365,10 @@ where
     let mut command = Command::new(enroot_bin);
     command.args(&args_vec);
     command.envs(envs.iter().map(|(k, v)| (k, v)));
-    let output = command.output().with_context(|| {
-        format!(
-            "failed to execute '{}' while trying to {}",
-            enroot_bin, context
-        )
-    })?;
+    let output = command.output().context(format!(
+        "failed to execute '{}' while trying to {}",
+        enroot_bin, context
+    ))?;
     if !output.status.success() {
         bail!(
             "failed to {}: {}",
@@ -434,7 +432,7 @@ fn prepared_image_cache_key_from_plan(
     parts.extend(prepare.mounts.iter().cloned());
     parts.extend(prepare.env.iter().map(|(k, v)| format!("{k}={v}")));
     parts.push(format!("root={}", prepare.root));
-    cache_key(&parts.iter().map(|item| item.as_str()).collect::<Vec<_>>())
+    cache_key(&parts.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 fn prepared_image_cache_key(service: &RuntimeService, prepare: &PreparedImageSpec) -> String {
@@ -450,7 +448,7 @@ fn prepared_image_cache_key(service: &RuntimeService, prepare: &PreparedImageSpe
     parts.extend(prepare.mounts.iter().cloned());
     parts.extend(prepare.env.iter().map(|(k, v)| format!("{k}={v}")));
     parts.push(format!("root={}", prepare.root));
-    cache_key(&parts.iter().map(|item| item.as_str()).collect::<Vec<_>>())
+    cache_key(&parts.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 fn base_image_cache_key(service: &RuntimeService) -> String {
@@ -519,7 +517,7 @@ fn create_cache_dirs(plan: &RuntimePlan) -> Result<()> {
         plan.cache_dir.join("enroot/tmp"),
     ] {
         fs::create_dir_all(&path)
-            .with_context(|| format!("failed to create cache directory {}", path.display()))?;
+            .context(format!("failed to create cache directory {}", path.display()))?;
     }
     Ok(())
 }
@@ -527,8 +525,8 @@ fn create_cache_dirs(plan: &RuntimePlan) -> Result<()> {
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     let parent = path
         .parent()
-        .with_context(|| format!("path '{}' does not have a parent directory", path.display()))?;
-    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        .context(format!("path '{}' does not have a parent directory", path.display()))?;
+    fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     Ok(())
 }
 

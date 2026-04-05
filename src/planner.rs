@@ -84,12 +84,13 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
         .context("compose file must have a parent directory")?
         .to_path_buf();
 
-    let name = spec
-        .slurm
-        .job_name
-        .clone()
-        .or_else(|| spec.name.clone())
-        .unwrap_or_else(|| "hpc-compose".to_string());
+    let name = if let Some(job_name) = spec.slurm.job_name.clone() {
+        job_name
+    } else if let Some(spec_name) = spec.name.clone() {
+        spec_name
+    } else {
+        "hpc-compose".to_string()
+    };
 
     if spec.services.is_empty() {
         bail!("spec must define at least one service");
@@ -142,10 +143,10 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
 
     validate_dependency_conditions(&temp)?;
     let ordered_names = topo_sort(&temp)?;
-    let ordered_services = ordered_names
-        .into_iter()
-        .map(|name| temp.get(&name).cloned().expect("service exists"))
-        .collect::<Vec<_>>();
+    let mut ordered_services = Vec::with_capacity(ordered_names.len());
+    for name in ordered_names {
+        ordered_services.push(temp.get(&name).cloned().expect("service exists"));
+    }
 
     Ok(Plan {
         name,
@@ -165,7 +166,8 @@ fn normalize_prepare(
     let Some(prepare) = cfg.prepare else {
         return Ok(None);
     };
-    build_prepare_plan(prepare, project_dir, service_name).map(Some)
+    let prepare = build_prepare_plan(prepare, project_dir, service_name)?;
+    Ok(Some(prepare))
 }
 
 fn build_prepare_plan(
@@ -179,11 +181,10 @@ fn build_prepare_plan(
         );
     }
 
-    let mounts = prepare
-        .mounts
-        .iter()
-        .map(|mount| normalize_mount(mount, project_dir))
-        .collect::<Result<Vec<_>>>()?;
+    let mut mounts = Vec::with_capacity(prepare.mounts.len());
+    for mount in &prepare.mounts {
+        mounts.push(normalize_mount(mount, project_dir)?);
+    }
 
     Ok(PreparedImageSpec {
         commands: prepare.commands,
@@ -304,8 +305,10 @@ fn normalize_image(image: &str, project_dir: &Path) -> Result<ImageSource> {
     }
 
     if image.contains("://") {
-        let allowed = ["docker://", "dockerd://", "podman://"];
-        if allowed.iter().any(|scheme| image.starts_with(scheme)) {
+        if image.starts_with("docker://")
+            || image.starts_with("dockerd://")
+            || image.starts_with("podman://")
+        {
             return Ok(ImageSource::Remote(image.to_string()));
         }
         bail!(
@@ -323,10 +326,16 @@ fn normalize_image(image: &str, project_dir: &Path) -> Result<ImageSource> {
 }
 
 fn resolve_cache_dir(slurm: &SlurmConfig, project_dir: &Path) -> Result<PathBuf> {
-    let raw = slurm.cache_dir.clone().unwrap_or_else(|| {
-        let home = env::var("HOME").unwrap_or_else(|_| "~".to_string());
-        format!("{home}/.cache/hpc-compose")
-    });
+    let raw = match slurm.cache_dir.clone() {
+        Some(cache_dir) => cache_dir,
+        None => {
+            let home = match env::var("HOME") {
+                Ok(home) => home,
+                Err(_) => "~".to_string(),
+            };
+            format!("{home}/.cache/hpc-compose")
+        }
+    };
     resolve_path(&raw, project_dir)
 }
 
@@ -417,19 +426,22 @@ fn resolve_path(value: &str, project_dir: &Path) -> Result<PathBuf> {
 
 fn expand_home(value: &str) -> String {
     if value == "~" {
-        return env::var("HOME").unwrap_or_else(|_| "~".to_string());
+        return match env::var("HOME") {
+            Ok(home) => home,
+            Err(_) => "~".to_string(),
+        };
     }
-    if let Some(rest) = value.strip_prefix("~/")
-        && let Ok(home) = env::var("HOME")
-    {
-        return format!("{home}/{rest}");
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
     }
     value.to_string()
 }
 
 fn normalize_existing_path(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
-        .with_context(|| format!("failed to canonicalize {}", path.display()))
+        .context(format!("failed to canonicalize {}", path.display()))
 }
 
 fn normalize_path(path: PathBuf) -> PathBuf {

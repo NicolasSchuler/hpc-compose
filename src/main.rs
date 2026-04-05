@@ -240,12 +240,10 @@ fn run_command(command: Commands) -> Result<()> {
         Commands::Render { file, output } => {
             let script = render_from_path(&file)?;
             if let Some(output_path) = output {
-                fs::write(&output_path, script).with_context(|| {
-                    format!(
-                        "failed to write rendered script to {}",
-                        output_path.display()
-                    )
-                })?;
+                fs::write(&output_path, script).context(format!(
+                    "failed to write rendered script to {}",
+                    output_path.display()
+                ))?;
                 println!("{}", output_path.display());
             } else {
                 print!("{script}");
@@ -372,12 +370,10 @@ fn run_command(command: Commands) -> Result<()> {
 
             let script = render_script(&runtime_plan)?;
             let script_path = script_out.unwrap_or_else(|| default_script_path(&file));
-            fs::write(&script_path, script).with_context(|| {
-                format!(
-                    "failed to write rendered script to {}",
-                    script_path.display()
-                )
-            })?;
+            fs::write(&script_path, script).context(format!(
+                "failed to write rendered script to {}",
+                script_path.display()
+            ))?;
 
             if dry_run {
                 println!("  script: {}", script_path.display());
@@ -389,7 +385,7 @@ fn run_command(command: Commands) -> Result<()> {
             let output = Command::new(&sbatch_bin)
                 .arg(&script_path)
                 .output()
-                .with_context(|| format!("failed to execute '{sbatch_bin}'"))?;
+                .context(format!("failed to execute '{sbatch_bin}'"))?;
             if !output.status.success() {
                 bail!(
                     "sbatch failed: {}",
@@ -551,23 +547,7 @@ fn run_command(command: Commands) -> Result<()> {
             output,
             force,
         } => {
-            let answers = if let Some(template_name) = template {
-                let template = resolve_template(&template_name)?;
-                hpc_compose::init::InitAnswers {
-                    template_name: template.name.to_string(),
-                    app_name: name.unwrap_or_else(|| template.name.to_string()),
-                    cache_dir: cache_dir.unwrap_or_else(|| default_init_cache_dir().to_string()),
-                }
-            } else {
-                let mut answers = prompt_for_init()?;
-                if let Some(name) = name {
-                    answers.app_name = name;
-                }
-                if let Some(cache_dir) = cache_dir {
-                    answers.cache_dir = cache_dir;
-                }
-                answers
-            };
+            let answers = resolve_init_answers(template, name, cache_dir, prompt_for_init)?;
             let rendered = render_template(
                 &answers.template_name,
                 &answers.app_name,
@@ -669,7 +649,8 @@ fn load_plan(path: &Path) -> Result<Plan> {
 }
 
 fn load_runtime_plan(path: &Path) -> Result<RuntimePlan> {
-    load_plan(path).map(|plan| build_runtime_plan(&plan))
+    let plan = load_plan(path)?;
+    Ok(build_runtime_plan(&plan))
 }
 
 fn load_plan_and_runtime(path: &Path) -> Result<(Plan, RuntimePlan)> {
@@ -684,10 +665,11 @@ fn default_script_path(spec_path: &Path) -> PathBuf {
 }
 
 fn default_cache_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".cache/hpc-compose")
+    let home = match env::var_os("HOME") {
+        Some(home) => PathBuf::from(home),
+        None => PathBuf::from("."),
+    };
+    home.join(".cache/hpc-compose")
 }
 
 fn print_report(report: &Report, verbose: bool) {
@@ -744,70 +726,99 @@ fn artifact_role_label(name: &str) -> &'static str {
 }
 
 fn print_status_snapshot(snapshot: &StatusSnapshot) {
-    println!("job id: {}", snapshot.record.job_id);
-    println!(
+    let _ = write_status_snapshot(&mut io::stdout(), snapshot);
+}
+
+fn print_stats_snapshot(snapshot: &StatsSnapshot) {
+    let _ = write_stats_snapshot(&mut io::stdout(), snapshot);
+}
+
+fn print_artifact_export_report(report: &ArtifactExportReport) {
+    let _ = write_artifact_export_report(&mut io::stdout(), report);
+}
+
+fn print_plan_inspect_verbose(plan: &Plan, runtime_plan: &RuntimePlan) {
+    let _ = write_plan_inspect_verbose(&mut io::stdout(), plan, runtime_plan);
+}
+
+fn print_plan_inspect(plan: &RuntimePlan) {
+    let _ = write_plan_inspect(&mut io::stdout(), plan);
+}
+
+fn print_cache_inspect(plan: &RuntimePlan, filter: Option<&str>) -> Result<()> {
+    write_cache_inspect(&mut io::stdout(), plan, filter)
+}
+
+fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> io::Result<()> {
+    writeln!(writer, "job id: {}", snapshot.record.job_id)?;
+    writeln!(
+        writer,
         "scheduler state: {} ({})",
         snapshot.scheduler.state,
         scheduler_source_label(snapshot.scheduler.source)
-    );
+    )?;
     if let Some(detail) = &snapshot.scheduler.detail {
-        println!("scheduler note: {detail}");
+        writeln!(writer, "scheduler note: {detail}")?;
     }
-    println!("compose file: {}", snapshot.record.compose_file.display());
-    println!("script path: {}", snapshot.record.script_path.display());
-    println!("cache dir: {}", snapshot.record.cache_dir.display());
-    println!("log dir: {}", snapshot.log_dir.display());
-    println!(
+    writeln!(writer, "compose file: {}", snapshot.record.compose_file.display())?;
+    writeln!(writer, "script path: {}", snapshot.record.script_path.display())?;
+    writeln!(writer, "cache dir: {}", snapshot.record.cache_dir.display())?;
+    writeln!(writer, "log dir: {}", snapshot.log_dir.display())?;
+    writeln!(
+        writer,
         "batch log: {} (present: {}, updated: {})",
         snapshot.batch_log.path.display(),
         yes_no(snapshot.batch_log.present),
-        snapshot
-            .batch_log
-            .updated_age_seconds
-            .map(format_age_seconds)
-            .unwrap_or_else(|| "unknown".to_string())
-    );
+        match snapshot.batch_log.updated_age_seconds {
+            Some(seconds) => format_age_seconds(seconds),
+            None => "unknown".to_string(),
+        }
+    )?;
     for service in &snapshot.services {
-        let age = service
-            .updated_age_seconds
-            .map(format_age_seconds)
-            .unwrap_or_else(|| "unknown".to_string());
-        println!(
+        let age = match service.updated_age_seconds {
+            Some(seconds) => format_age_seconds(seconds),
+            None => "unknown".to_string(),
+        };
+        writeln!(
+            writer,
             "log  service '{}': {} (present: {}, updated: {})",
             service.service_name,
             service.path.display(),
             yes_no(service.present),
             age
-        );
+        )?;
     }
+    Ok(())
 }
 
-fn print_stats_snapshot(snapshot: &StatsSnapshot) {
-    println!("job id: {}", snapshot.job_id);
-    println!(
+fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io::Result<()> {
+    writeln!(writer, "job id: {}", snapshot.job_id)?;
+    writeln!(
+        writer,
         "scheduler state: {} ({})",
         snapshot.scheduler.state,
         scheduler_source_label(snapshot.scheduler.source)
-    );
+    )?;
     if let Some(detail) = &snapshot.scheduler.detail {
-        println!("scheduler note: {detail}");
+        writeln!(writer, "scheduler note: {detail}")?;
     }
-    println!("stats source: {}", snapshot.source);
+    writeln!(writer, "stats source: {}", snapshot.source)?;
     if let Some(metrics_dir) = &snapshot.metrics_dir {
-        println!("metrics dir: {}", metrics_dir.display());
+        writeln!(writer, "metrics dir: {}", metrics_dir.display())?;
     }
     if let Some(reason) = &snapshot.reason {
-        println!("stats reason: {reason}");
+        writeln!(writer, "stats reason: {reason}")?;
     }
     for note in &snapshot.notes {
-        println!("note: {note}");
+        writeln!(writer, "note: {note}")?;
     }
     if let Some(sampler) = &snapshot.sampler {
         for collector in &sampler.collectors {
             if !collector.enabled {
                 continue;
             }
-            println!(
+            writeln!(
+                writer,
                 "collector '{}': {} (last sampled: {})",
                 collector.name,
                 if collector.available {
@@ -816,13 +827,14 @@ fn print_stats_snapshot(snapshot: &StatsSnapshot) {
                     "unavailable"
                 },
                 collector.last_sampled_at.as_deref().unwrap_or("never")
-            );
+            )?;
         }
         if let Some(gpu) = &sampler.gpu {
-            println!();
-            println!("gpu snapshot: {}", gpu.sampled_at);
+            writeln!(writer)?;
+            writeln!(writer, "gpu snapshot: {}", gpu.sampled_at)?;
             for device in &gpu.gpus {
-                println!(
+                writeln!(
+                    writer,
                     "gpu {}: name={}, util={}, mem util={}, mem={} / {}, temp={}, power={} / {}",
                     display_optional_stats_value(device.index.as_deref()),
                     display_optional_stats_value(device.name.as_deref()),
@@ -833,104 +845,122 @@ fn print_stats_snapshot(snapshot: &StatsSnapshot) {
                     display_optional_stats_value(device.temperature_c.as_deref()),
                     display_optional_stats_value(device.power_draw_w.as_deref()),
                     display_optional_stats_value(device.power_limit_w.as_deref()),
-                );
+                )?;
             }
             for process in &gpu.processes {
-                println!(
+                writeln!(
+                    writer,
                     "gpu process: pid={}, name={}, gpu_uuid={}, mem={}",
                     display_optional_stats_value(process.pid.as_deref()),
                     display_optional_stats_value(process.process_name.as_deref()),
                     display_optional_stats_value(process.gpu_uuid.as_deref()),
                     display_optional_stats_value(process.used_memory_mib.as_deref()),
-                );
+                )?;
             }
         }
     }
     if !snapshot.available {
-        return;
+        return Ok(());
     }
     for step in &snapshot.steps {
-        println!();
-        println!("step: {}", step.step_id);
-        println!("ntasks: {}", display_stats_value(&step.ntasks));
-        println!("ave cpu: {}", display_stats_value(&step.ave_cpu));
-        println!("ave rss: {}", display_stats_value(&step.ave_rss));
-        println!("max rss: {}", display_stats_value(&step.max_rss));
-        println!("alloc tres: {}", display_stats_value(&step.alloc_tres));
-        println!(
+        writeln!(writer)?;
+        writeln!(writer, "step: {}", step.step_id)?;
+        writeln!(writer, "ntasks: {}", display_stats_value(&step.ntasks))?;
+        writeln!(writer, "ave cpu: {}", display_stats_value(&step.ave_cpu))?;
+        writeln!(writer, "ave rss: {}", display_stats_value(&step.ave_rss))?;
+        writeln!(writer, "max rss: {}", display_stats_value(&step.max_rss))?;
+        writeln!(writer, "alloc tres: {}", display_stats_value(&step.alloc_tres))?;
+        writeln!(
+            writer,
             "tres usage in ave: {}",
             display_stats_value(&step.tres_usage_in_ave)
-        );
+        )?;
         if let Some(gpu_count) = &step.gpu_count {
-            println!("gpu count: {gpu_count}");
+            writeln!(writer, "gpu count: {gpu_count}")?;
         }
         if let Some(gpu_util) = &step.gpu_util {
-            println!("gpu util: {gpu_util}");
+            writeln!(writer, "gpu util: {gpu_util}")?;
         }
         if let Some(gpu_mem) = &step.gpu_mem {
-            println!("gpu mem: {gpu_mem}");
+            writeln!(writer, "gpu mem: {gpu_mem}")?;
         }
     }
+    Ok(())
 }
 
-fn print_artifact_export_report(report: &ArtifactExportReport) {
-    println!("job id: {}", report.record.job_id);
-    println!("manifest: {}", report.manifest_path.display());
-    println!("payload dir: {}", report.payload_dir.display());
-    println!("export dir: {}", report.export_dir.display());
-    println!("collect policy: {}", report.manifest.collect_policy);
-    println!("job outcome: {}", report.manifest.job_outcome);
-    println!(
+fn write_artifact_export_report(
+    writer: &mut impl Write,
+    report: &ArtifactExportReport,
+) -> io::Result<()> {
+    writeln!(writer, "job id: {}", report.record.job_id)?;
+    writeln!(writer, "manifest: {}", report.manifest_path.display())?;
+    writeln!(writer, "payload dir: {}", report.payload_dir.display())?;
+    writeln!(writer, "export dir: {}", report.export_dir.display())?;
+    writeln!(writer, "collect policy: {}", report.manifest.collect_policy)?;
+    writeln!(writer, "job outcome: {}", report.manifest.job_outcome)?;
+    writeln!(
+        writer,
         "declared patterns: {}",
         report.manifest.declared_source_patterns.len()
-    );
-    println!(
+    )?;
+    writeln!(
+        writer,
         "matched source paths: {}",
         report.manifest.matched_source_paths.len()
-    );
-    println!("exported paths: {}", report.exported_paths.len());
+    )?;
+    writeln!(writer, "exported paths: {}", report.exported_paths.len())?;
     for warning in &report.warnings {
-        println!("warning: {warning}");
+        writeln!(writer, "warning: {warning}")?;
     }
     for path in &report.exported_paths {
-        println!("exported: {}", path.display());
+        writeln!(writer, "exported: {}", path.display())?;
     }
+    Ok(())
 }
 
-fn print_plan_inspect_verbose(plan: &Plan, runtime_plan: &RuntimePlan) {
-    print_plan_inspect(runtime_plan);
-    println!();
-    println!("compose file: {}", plan.spec_path.display());
-    println!("project dir: {}", plan.project_dir.display());
+fn write_plan_inspect_verbose(
+    writer: &mut impl Write,
+    plan: &Plan,
+    runtime_plan: &RuntimePlan,
+) -> io::Result<()> {
+    write_plan_inspect(writer, runtime_plan)?;
+    writeln!(writer)?;
+    writeln!(writer, "compose file: {}", plan.spec_path.display())?;
+    writeln!(writer, "project dir: {}", plan.project_dir.display())?;
 
     for (planned, runtime) in plan
         .ordered_services
         .iter()
         .zip(runtime_plan.ordered_services.iter())
     {
-        println!();
-        println!("details for service '{}':", runtime.name);
-        println!(
+        writeln!(writer)?;
+        writeln!(writer, "details for service '{}':", runtime.name)?;
+        writeln!(
+            writer,
             "execution form: {}",
             execution_form_label(&runtime.execution)
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "resolved argv: {}",
             execution_argv(&runtime.execution, runtime.working_dir.as_deref()).join(" ")
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "working dir: {}",
             runtime.working_dir.as_deref().unwrap_or("<image default>")
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "volumes: {}",
             if runtime.volumes.is_empty() {
                 "0".to_string()
             } else {
                 runtime.volumes.join(" | ")
             }
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "environment keys: {}",
             if runtime.environment.is_empty() {
                 "0".to_string()
@@ -942,71 +972,88 @@ fn print_plan_inspect_verbose(plan: &Plan, runtime_plan: &RuntimePlan) {
                     .collect::<Vec<_>>()
                     .join(",")
             }
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "depends_on: {}",
             if planned.depends_on.is_empty() {
                 "0".to_string()
             } else {
                 format_dependencies(&planned.depends_on)
             }
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "readiness: {}",
             readiness_description(runtime.readiness.as_ref())
-        );
-        println!(
+        )?;
+        writeln!(
+            writer,
             "effective srun args: {}",
             build_srun_command(runtime).join(" ")
-        );
+        )?;
         if let Some(reason) = rebuild_reason(runtime) {
-            println!("rebuild reason: {reason}");
+            writeln!(writer, "rebuild reason: {reason}")?;
         }
     }
+    Ok(())
 }
 
-fn print_plan_inspect(plan: &RuntimePlan) {
-    println!("name: {}", plan.name);
-    println!("runtime mode: pyxis");
-    println!("cache dir: {}", plan.cache_dir.display());
-    println!("service order: {}", service_names(plan).join(" -> "));
+fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result<()> {
+    writeln!(writer, "name: {}", plan.name)?;
+    writeln!(writer, "runtime mode: pyxis")?;
+    writeln!(writer, "cache dir: {}", plan.cache_dir.display())?;
+    writeln!(writer, "service order: {}", service_names(plan).join(" -> "))?;
 
     for service in &plan.ordered_services {
-        println!();
-        println!("service: {}", service.name);
-        println!("source image: {}", source_image_display(&service.source));
+        writeln!(writer)?;
+        writeln!(writer, "service: {}", service.name)?;
+        writeln!(writer, "source image: {}", source_image_display(&service.source))?;
         if let ImageSource::Remote(_) = &service.source {
             let base_path = base_image_path(&plan.cache_dir, service);
-            println!("base cache artifact: {}", base_path.display());
-            println!("base cache state: {}", hit_or_miss(base_path.exists()));
+            writeln!(writer, "base cache artifact: {}", base_path.display())?;
+            writeln!(writer, "base cache state: {}", hit_or_miss(base_path.exists()))?;
         }
-        println!("runtime image: {}", service.runtime_image.display());
-        println!("runtime image state: {}", runtime_cache_state(service));
+        writeln!(writer, "runtime image: {}", service.runtime_image.display())?;
+        writeln!(writer, "runtime image state: {}", runtime_cache_state(service))?;
         if let Some(prepare) = &service.prepare {
-            println!(
+            writeln!(
+                writer,
                 "prepare commands: {}",
                 if prepare.commands.is_empty() {
                     "0".to_string()
                 } else {
                     prepare.commands.len().to_string()
                 }
-            );
+            )?;
             if prepare.force_rebuild {
-                println!(
+                writeln!(
+                    writer,
                     "reuse policy: rebuild on submit because x-enroot.prepare.mounts are present"
-                );
+                )?;
             } else {
-                println!("reuse policy: reuse prepared image when the cached artifact exists");
+                writeln!(
+                    writer,
+                    "reuse policy: reuse prepared image when the cached artifact exists"
+                )?;
             }
         } else if matches!(service.source, ImageSource::LocalSqsh(_)) {
-            println!("reuse policy: uses local .sqsh directly");
+            writeln!(writer, "reuse policy: uses local .sqsh directly")?;
         } else {
-            println!("reuse policy: reuse imported base image when the cached artifact exists");
+            writeln!(
+                writer,
+                "reuse policy: reuse imported base image when the cached artifact exists"
+            )?;
         }
     }
+    Ok(())
 }
 
-fn print_cache_inspect(plan: &RuntimePlan, filter: Option<&str>) -> Result<()> {
+fn write_cache_inspect(
+    writer: &mut impl Write,
+    plan: &RuntimePlan,
+    filter: Option<&str>,
+) -> Result<()> {
     for service in &plan.ordered_services {
         if let Some(filter_name) = filter
             && service.name != filter_name
@@ -1014,64 +1061,75 @@ fn print_cache_inspect(plan: &RuntimePlan, filter: Option<&str>) -> Result<()> {
             continue;
         }
 
-        println!("service: {}", service.name);
-        println!("source image: {}", source_image_display(&service.source));
+        writeln!(writer, "service: {}", service.name)?;
+        writeln!(writer, "source image: {}", source_image_display(&service.source))?;
 
         if let ImageSource::Remote(remote) = &service.source {
             let base_path = base_image_path(&plan.cache_dir, service);
-            println!("base artifact: {}", base_path.display());
-            println!("base registry: {}", registry_host_for_remote(remote));
-            print_manifest_block(&base_path)?;
+            writeln!(writer, "base artifact: {}", base_path.display())?;
+            writeln!(writer, "base registry: {}", registry_host_for_remote(remote))?;
+            write_manifest_block(writer, &base_path)?;
         }
 
-        println!("runtime artifact: {}", service.runtime_image.display());
-        print_manifest_block(&service.runtime_image)?;
-        println!(
+        writeln!(writer, "runtime artifact: {}", service.runtime_image.display())?;
+        write_manifest_block(writer, &service.runtime_image)?;
+        writeln!(
+            writer,
             "current reuse expectation: {}",
             runtime_cache_state(service)
-        );
+        )?;
         if let Some(prepare) = &service.prepare
             && prepare.force_rebuild
         {
-            println!("note: this service rebuilds on submit because prepare.mounts are present");
+            writeln!(
+                writer,
+                "note: this service rebuilds on submit because prepare.mounts are present"
+            )?;
         }
-        println!();
+        writeln!(writer)?;
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn print_manifest_block(path: &Path) -> Result<()> {
-    println!("artifact present: {}", yes_no(path.exists()));
+    write_manifest_block(&mut io::stdout(), path)
+}
+
+fn write_manifest_block(writer: &mut impl Write, path: &Path) -> Result<()> {
+    writeln!(writer, "artifact present: {}", yes_no(path.exists()))?;
     let manifest_path = hpc_compose::cache::manifest_path_for(path);
-    println!("manifest path: {}", manifest_path.display());
+    writeln!(writer, "manifest path: {}", manifest_path.display())?;
     if let Some(manifest) = load_manifest_if_exists(path)? {
         let kind = match manifest.kind {
             CacheEntryKind::Base => "base",
             CacheEntryKind::Prepared => "prepared",
         };
-        println!("manifest kind: {kind}");
-        println!("manifest cache key: {}", manifest.cache_key);
-        println!("manifest source: {}", manifest.source_image);
-        println!("manifest services: {}", manifest.service_names.join(","));
-        println!("manifest created_at: {}", manifest.created_at);
-        println!("manifest last_used_at: {}", manifest.last_used_at);
+        writeln!(writer, "manifest kind: {kind}")?;
+        writeln!(writer, "manifest cache key: {}", manifest.cache_key)?;
+        writeln!(writer, "manifest source: {}", manifest.source_image)?;
+        writeln!(writer, "manifest services: {}", manifest.service_names.join(","))?;
+        writeln!(writer, "manifest created_at: {}", manifest.created_at)?;
+        writeln!(writer, "manifest last_used_at: {}", manifest.last_used_at)?;
         if manifest.kind == CacheEntryKind::Prepared {
-            println!("prepare root: {}", manifest.prepare_root.unwrap_or(true));
-            println!(
+            writeln!(writer, "prepare root: {}", manifest.prepare_root.unwrap_or(true))?;
+            writeln!(
+                writer,
                 "prepare commands: {}",
                 if manifest.prepare_commands.is_empty() {
                     "0".to_string()
                 } else {
                     manifest.prepare_commands.join(" | ")
                 }
-            );
-            println!(
+            )?;
+            writeln!(
+                writer,
                 "force rebuild due to mounts: {}",
                 yes_no(manifest.force_rebuild_due_to_mounts)
-            );
+            )?;
         }
     } else {
-        println!("manifest present: no");
+        writeln!(writer, "manifest present: no")?;
     }
     Ok(())
 }
@@ -1125,7 +1183,10 @@ fn display_stats_value(value: &str) -> &str {
 }
 
 fn display_optional_stats_value(value: Option<&str>) -> &str {
-    value.filter(|value| !value.is_empty()).unwrap_or("unknown")
+    match value {
+        Some(value) if !value.is_empty() => value,
+        _ => "unknown",
+    }
 }
 
 fn service_names(plan: &RuntimePlan) -> Vec<&str> {
@@ -1133,6 +1194,37 @@ fn service_names(plan: &RuntimePlan) -> Vec<&str> {
         .iter()
         .map(|service| service.name.as_str())
         .collect()
+}
+
+fn resolve_init_answers(
+    template: Option<String>,
+    name: Option<String>,
+    cache_dir: Option<String>,
+    prompt_for_answers: impl FnOnce() -> Result<hpc_compose::init::InitAnswers>,
+) -> Result<hpc_compose::init::InitAnswers> {
+    if let Some(template_name) = template {
+        let template = resolve_template(&template_name)?;
+        Ok(hpc_compose::init::InitAnswers {
+            template_name: template.name.to_string(),
+            app_name: match name {
+                Some(name) => name,
+                None => template.name.to_string(),
+            },
+            cache_dir: match cache_dir {
+                Some(cache_dir) => cache_dir,
+                None => default_init_cache_dir().to_string(),
+            },
+        })
+    } else {
+        let mut answers = prompt_for_answers()?;
+        if let Some(name) = name {
+            answers.app_name = name;
+        }
+        if let Some(cache_dir) = cache_dir {
+            answers.cache_dir = cache_dir;
+        }
+        Ok(answers)
+    }
 }
 
 fn print_submit_details(plan: &RuntimePlan, script_path: &Path, sbatch_stdout: &str) -> Result<()> {
@@ -1188,7 +1280,7 @@ fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
     let output = Command::new(scancel_bin)
         .arg(job_id)
         .output()
-        .with_context(|| format!("failed to execute '{scancel_bin}'"))?;
+        .context(format!("failed to execute '{scancel_bin}'"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1281,29 +1373,26 @@ fn readiness_description(readiness: Option<&hpc_compose::spec::ReadinessSpec>) -
 }
 
 fn rebuild_reason(service: &hpc_compose::prepare::RuntimeService) -> Option<&'static str> {
-    service.prepare.as_ref().and_then(|prepare| {
-        if prepare.force_rebuild {
-            Some("x-enroot.prepare.mounts are present")
-        } else if !service.runtime_image.exists() {
-            Some("runtime cache artifact is missing")
-        } else {
-            None
-        }
-    })
+    let prepare = service.prepare.as_ref()?;
+    if prepare.force_rebuild {
+        Some("x-enroot.prepare.mounts are present")
+    } else if !service.runtime_image.exists() {
+        Some("runtime cache artifact is missing")
+    } else {
+        None
+    }
 }
 
 fn format_dependencies(dependencies: &[ServiceDependency]) -> String {
-    dependencies
-        .iter()
-        .map(|dependency| {
-            let condition = match dependency.condition {
-                DependencyCondition::ServiceStarted => "service_started",
-                DependencyCondition::ServiceHealthy => "service_healthy",
-            };
-            format!("{}({condition})", dependency.name)
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut formatted = Vec::with_capacity(dependencies.len());
+    for dependency in dependencies {
+        let condition = match dependency.condition {
+            DependencyCondition::ServiceStarted => "service_started",
+            DependencyCondition::ServiceHealthy => "service_healthy",
+        };
+        formatted.push(format!("{}({condition})", dependency.name));
+    }
+    formatted.join(",")
 }
 
 fn format_age_seconds(seconds: u64) -> String {
@@ -1317,14 +1406,22 @@ fn format_age_seconds(seconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     use super::*;
     use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
+    use hpc_compose::job::{
+        ArtifactExportReport, ArtifactManifest, BatchLogStatus, CollectorStatus, GpuDeviceSample,
+        GpuProcessSample, GpuSnapshot, SamplerSnapshot, SchedulerSource, SchedulerStatus,
+        ServiceLogStatus, StatsSnapshot, StepStats, StatusSnapshot, SubmissionRecord,
+    };
     use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
-    use hpc_compose::spec::{ServiceSlurmConfig, SlurmConfig};
+    use hpc_compose::spec::{
+        DependencyCondition, ReadinessSpec, ServiceDependency, ServiceSlurmConfig, SlurmConfig,
+    };
 
     fn runtime_service(
         source: ImageSource,
@@ -1467,6 +1564,39 @@ services:
                 cache_dir.display()
             ),
         )
+    }
+
+    fn submission_record(tmpdir: &Path, plan: &RuntimePlan, job_id: &str) -> SubmissionRecord {
+        hpc_compose::job::build_submission_record(
+            &tmpdir.join("compose.yaml"),
+            tmpdir,
+            &tmpdir.join("job.sbatch"),
+            plan,
+            job_id,
+        )
+        .expect("record")
+    }
+
+    fn sample_step() -> StepStats {
+        let mut alloc_tres_map = BTreeMap::new();
+        alloc_tres_map.insert("gres/gpu".into(), "1".into());
+        let mut usage_tres_map = BTreeMap::new();
+        usage_tres_map.insert("gres/gpuutil".into(), "87".into());
+        usage_tres_map.insert("gres/gpumem".into(), "4096M".into());
+        StepStats {
+            step_id: "12345.0".into(),
+            ntasks: "1".into(),
+            ave_cpu: "00:00:03".into(),
+            ave_rss: "128M".into(),
+            max_rss: "256M".into(),
+            alloc_tres: "cpu=1,gres/gpu=1".into(),
+            tres_usage_in_ave: "cpu=00:00:03,gres/gpuutil=87,gres/gpumem=4096M".into(),
+            alloc_tres_map,
+            usage_tres_in_ave_map: usage_tres_map,
+            gpu_count: Some("1".into()),
+            gpu_util: Some("87".into()),
+            gpu_mem: Some("4096M".into()),
+        }
     }
 
     #[test]
@@ -1626,6 +1756,10 @@ services:
             default_script_path(&path),
             PathBuf::from("/tmp/project/hpc-compose.sbatch")
         );
+        assert_eq!(
+            default_script_path(Path::new("compose.yaml")),
+            PathBuf::from("hpc-compose.sbatch")
+        );
         assert!(default_cache_dir().ends_with(".cache/hpc-compose"));
         assert_eq!(
             render_from_path(Path::new("/definitely/missing/compose.yaml"))
@@ -1743,6 +1877,329 @@ services:
     }
 
     #[test]
+    fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let runtime_image = tmpdir.path().join("prepared.sqsh");
+        fs::write(&runtime_image, "x").expect("runtime");
+        let mut service = runtime_service(
+            ImageSource::Remote("docker://redis:7".into()),
+            runtime_image,
+            Some(PreparedImageSpec {
+                commands: vec!["echo hi".into()],
+                mounts: vec!["/host:/mnt".into()],
+                env: Vec::new(),
+                root: true,
+                force_rebuild: true,
+            }),
+        );
+        service.environment = vec![("TOKEN".into(), "secret".into())];
+        service.volumes = vec!["./app:/workspace".into()];
+        service.working_dir = Some("/workspace".into());
+        service.readiness = Some(ReadinessSpec::Http {
+            url: "http://127.0.0.1:8000/health".into(),
+            status_code: 200,
+            timeout_seconds: Some(30),
+        });
+        service.depends_on = vec![ServiceDependency {
+            name: "db".into(),
+            condition: DependencyCondition::ServiceHealthy,
+        }];
+
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service.clone()],
+        };
+        let record = submission_record(tmpdir.path(), &plan, "12345");
+        let status = StatusSnapshot {
+            record: record.clone(),
+            scheduler: SchedulerStatus {
+                state: "COMPLETED".into(),
+                source: SchedulerSource::Sacct,
+                terminal: true,
+                failed: false,
+                detail: Some("finished".into()),
+            },
+            log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
+            batch_log: BatchLogStatus {
+                path: tmpdir.path().join("slurm-12345.out"),
+                present: true,
+                updated_at: Some(1),
+                updated_age_seconds: Some(70),
+            },
+            services: vec![ServiceLogStatus {
+                service_name: "svc/name".into(),
+                path: tmpdir.path().join(".hpc-compose/12345/logs/svc.log"),
+                present: false,
+                updated_at: None,
+                updated_age_seconds: None,
+            }],
+        };
+        let mut status_out = Vec::new();
+        write_status_snapshot(&mut status_out, &status).expect("status");
+        let status_text = String::from_utf8(status_out).expect("utf8");
+        assert!(status_text.contains("scheduler state: COMPLETED (sacct)"));
+        assert!(status_text.contains("scheduler note: finished"));
+        assert!(status_text.contains("updated: 1m ago"));
+        assert!(status_text.contains("updated: unknown"));
+
+        let stats = StatsSnapshot {
+            job_id: "12345".into(),
+            record: Some(record.clone()),
+            metrics_dir: Some(tmpdir.path().join(".hpc-compose/12345/metrics")),
+            scheduler: SchedulerStatus {
+                state: "RUNNING".into(),
+                source: SchedulerSource::Squeue,
+                terminal: false,
+                failed: false,
+                detail: Some("visible".into()),
+            },
+            available: true,
+            reason: Some("ignored once available".into()),
+            source: "sampler+sstat".into(),
+            notes: vec!["note one".into()],
+            sampler: Some(SamplerSnapshot {
+                interval_seconds: 5,
+                collectors: vec![
+                    CollectorStatus {
+                        name: "gpu".into(),
+                        enabled: true,
+                        available: true,
+                        note: None,
+                        last_sampled_at: Some("2026-04-05T10:00:10Z".into()),
+                    },
+                    CollectorStatus {
+                        name: "slurm".into(),
+                        enabled: false,
+                        available: false,
+                        note: None,
+                        last_sampled_at: None,
+                    },
+                ],
+                gpu: Some(GpuSnapshot {
+                    sampled_at: "2026-04-05T10:00:10Z".into(),
+                    gpus: vec![GpuDeviceSample {
+                        index: Some("0".into()),
+                        uuid: Some("GPU-0".into()),
+                        name: Some("A100".into()),
+                        utilization_gpu: Some("87".into()),
+                        utilization_memory: Some("73".into()),
+                        memory_used_mib: Some("4096".into()),
+                        memory_total_mib: Some("8192".into()),
+                        temperature_c: Some("55".into()),
+                        power_draw_w: Some("220".into()),
+                        power_limit_w: Some("300".into()),
+                    }],
+                    processes: vec![GpuProcessSample {
+                        gpu_uuid: Some("GPU-0".into()),
+                        pid: Some("4242".into()),
+                        process_name: Some("python".into()),
+                        used_memory_mib: Some("2048".into()),
+                    }],
+                }),
+                slurm: None,
+            }),
+            steps: vec![sample_step()],
+        };
+        let mut stats_out = Vec::new();
+        write_stats_snapshot(&mut stats_out, &stats).expect("stats");
+        let stats_text = String::from_utf8(stats_out).expect("utf8");
+        assert!(stats_text.contains("collector 'gpu': available"));
+        assert!(!stats_text.contains("collector 'slurm'"));
+        assert!(stats_text.contains("gpu snapshot: 2026-04-05T10:00:10Z"));
+        assert!(stats_text.contains("gpu process: pid=4242"));
+        assert!(stats_text.contains("gpu count: 1"));
+
+        let unavailable_stats = StatsSnapshot {
+            available: false,
+            sampler: None,
+            steps: Vec::new(),
+            source: "sstat".into(),
+            notes: Vec::new(),
+            reason: Some("job is pending".into()),
+            metrics_dir: None,
+            record: None,
+            job_id: "12345".into(),
+            scheduler: SchedulerStatus {
+                state: "PENDING".into(),
+                source: SchedulerSource::Squeue,
+                terminal: false,
+                failed: false,
+                detail: None,
+            },
+        };
+        let mut unavailable_out = Vec::new();
+        write_stats_snapshot(&mut unavailable_out, &unavailable_stats).expect("stats");
+        let unavailable_text = String::from_utf8(unavailable_out).expect("utf8");
+        assert!(unavailable_text.contains("stats reason: job is pending"));
+        assert!(!unavailable_text.contains("step: "));
+
+        let report = ArtifactExportReport {
+            record: record.clone(),
+            manifest_path: tmpdir.path().join("manifest.json"),
+            payload_dir: tmpdir.path().join("payload"),
+            export_dir: tmpdir.path().join("results"),
+            manifest: ArtifactManifest {
+                job_id: "12345".into(),
+                collect_policy: "always".into(),
+                collected_at: "2026-04-05T10:00:00Z".into(),
+                job_outcome: "success".into(),
+                declared_source_patterns: vec!["/x/**".into()],
+                matched_source_paths: vec!["/x/a".into()],
+                copied_relative_paths: vec!["a".into()],
+                warnings: Vec::new(),
+            },
+            exported_paths: vec![tmpdir.path().join("results/a")],
+            warnings: vec!["missing optional path".into()],
+        };
+        let mut report_out = Vec::new();
+        write_artifact_export_report(&mut report_out, &report).expect("artifacts");
+        let report_text = String::from_utf8(report_out).expect("utf8");
+        assert!(report_text.contains("collect policy: always"));
+        assert!(report_text.contains("warning: missing optional path"));
+        assert!(report_text.contains("exported: "));
+
+        let plan_model = hpc_compose::planner::Plan {
+            spec_path: tmpdir.path().join("compose.yaml"),
+            project_dir: tmpdir.path().to_path_buf(),
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![hpc_compose::planner::PlannedService {
+                name: service.name.clone(),
+                image: service.source.clone(),
+                execution: service.execution.clone(),
+                environment: service.environment.clone(),
+                volumes: service.volumes.clone(),
+                working_dir: service.working_dir.clone(),
+                depends_on: service.depends_on.clone(),
+                readiness: service.readiness.clone(),
+                slurm: service.slurm.clone(),
+                prepare: service.prepare.clone(),
+            }],
+        };
+        let mut inspect_out = Vec::new();
+        write_plan_inspect_verbose(&mut inspect_out, &plan_model, &plan).expect("inspect");
+        let inspect_text = String::from_utf8(inspect_out).expect("utf8");
+        assert!(inspect_text.contains("execution form: shell"));
+        assert!(inspect_text.contains("depends_on: db(service_healthy)"));
+        assert!(inspect_text.contains("readiness: http http://127.0.0.1:8000/health (status 200 timeout 30s)"));
+        assert!(inspect_text.contains("rebuild reason: x-enroot.prepare.mounts are present"));
+    }
+
+    #[test]
+    fn helper_functions_cover_remaining_formatting_paths() {
+        assert_eq!(display_stats_value(""), "unknown");
+        assert_eq!(display_stats_value("5"), "5");
+        assert_eq!(display_optional_stats_value(None), "unknown");
+        assert_eq!(display_optional_stats_value(Some("")), "unknown");
+        assert_eq!(display_optional_stats_value(Some("x")), "x");
+        assert_eq!(execution_form_label(&ExecutionSpec::ImageDefault), "image-default");
+        assert_eq!(execution_form_label(&ExecutionSpec::Shell("echo".into())), "shell");
+        assert_eq!(execution_form_label(&ExecutionSpec::Exec(vec!["echo".into()])), "exec");
+        assert_eq!(readiness_description(None), "none");
+        assert_eq!(
+            readiness_description(Some(&ReadinessSpec::Sleep { seconds: 5 })),
+            "sleep 5s"
+        );
+        assert_eq!(
+            readiness_description(Some(&ReadinessSpec::Tcp {
+                host: None,
+                port: 5432,
+                timeout_seconds: None,
+            })),
+            "tcp 127.0.0.1:5432 (timeout 60s)"
+        );
+        assert_eq!(
+            readiness_description(Some(&ReadinessSpec::Log {
+                pattern: "ready".into(),
+                timeout_seconds: Some(9),
+            })),
+            "log 'ready' (timeout 9s)"
+        );
+        assert_eq!(format_age_seconds(59), "59s ago");
+        assert_eq!(format_age_seconds(61), "1m ago");
+        assert_eq!(format_age_seconds(7_200), "2h ago");
+        assert_eq!(format_age_seconds(172_800), "2d ago");
+        assert_eq!(
+            format_dependencies(&[
+                ServiceDependency {
+                    name: "db".into(),
+                    condition: DependencyCondition::ServiceStarted,
+                },
+                ServiceDependency {
+                    name: "cache".into(),
+                    condition: DependencyCondition::ServiceHealthy,
+                },
+            ]),
+            "db(service_started),cache(service_healthy)"
+        );
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let runtime_image = tmpdir.path().join("runtime.sqsh");
+        let service = runtime_service(
+            ImageSource::Remote("docker://redis:7".into()),
+            runtime_image.clone(),
+            Some(PreparedImageSpec {
+                commands: vec!["echo hi".into()],
+                mounts: Vec::new(),
+                env: Vec::new(),
+                root: true,
+                force_rebuild: false,
+            }),
+        );
+        assert_eq!(
+            rebuild_reason(&service),
+            Some("runtime cache artifact is missing")
+        );
+        fs::write(&runtime_image, "x").expect("runtime");
+        assert_eq!(rebuild_reason(&service), None);
+    }
+
+    #[test]
+    fn resolve_init_answers_and_cancel_job_cover_remaining_paths() {
+        let answers = resolve_init_answers(
+            Some("dev-python-app".into()),
+            None,
+            None,
+            || unreachable!("template path should not prompt"),
+        )
+        .expect("template answers");
+        assert_eq!(answers.app_name, "dev-python-app");
+        assert_eq!(answers.cache_dir, default_init_cache_dir());
+
+        let prompted = resolve_init_answers(None, Some("override".into()), Some("/cache".into()), || {
+            Ok(hpc_compose::init::InitAnswers {
+                template_name: "app-redis-worker".into(),
+                app_name: "prompted".into(),
+                cache_dir: "/default".into(),
+            })
+        })
+        .expect("prompted");
+        assert_eq!(prompted.app_name, "override");
+        assert_eq!(prompted.cache_dir, "/cache");
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let empty_fail = tmpdir.path().join("scancel-empty");
+        write_script(&empty_fail, "#!/bin/bash\nset -euo pipefail\nexit 1\n");
+        let err = cancel_job("42", empty_fail.to_str().expect("path")).expect_err("empty fail");
+        assert_eq!(err.to_string(), "scancel failed for job 42");
+
+        let stderr_fail = tmpdir.path().join("scancel-stderr");
+        write_script(
+            &stderr_fail,
+            "#!/bin/bash\nset -euo pipefail\necho boom >&2\nexit 1\n",
+        );
+        let err = cancel_job("42", stderr_fail.to_str().expect("path")).expect_err("stderr fail");
+        assert!(err.to_string().contains("scancel failed for job 42: boom"));
+
+        let err = cancel_job("42", tmpdir.path().join("missing-bin").to_str().expect("path"))
+            .expect_err("missing binary");
+        assert!(err.to_string().contains("failed to execute"));
+    }
+
+    #[test]
     fn run_command_covers_success_and_error_arms() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let cache_root = safe_cache_dir();
@@ -1754,6 +2211,15 @@ services:
         let sbatch_fail = write_fake_sbatch(tmpdir.path(), false);
         let empty_cache = tmpdir.path().join("empty-cache");
         fs::create_dir_all(&empty_cache).expect("empty cache");
+        let no_id_sbatch = tmpdir.path().join("sbatch-no-id");
+        write_script(&no_id_sbatch, "#!/bin/bash\nset -euo pipefail\necho 'submitted without id'\n");
+        let scancel_ok = tmpdir.path().join("scancel-ok");
+        write_script(&scancel_ok, "#!/bin/bash\nset -euo pipefail\necho 'cancel ok'\n");
+        let scancel_fail = tmpdir.path().join("scancel-fail");
+        write_script(
+            &scancel_fail,
+            "#!/bin/bash\nset -euo pipefail\necho 'denied' >&2\nexit 1\n",
+        );
 
         run_command(Commands::Validate {
             file: compose.clone(),
@@ -1771,6 +2237,12 @@ services:
         })
         .expect("render file");
         assert!(rendered.exists());
+        let render_err = run_command(Commands::Render {
+            file: compose.clone(),
+            output: Some(tmpdir.path().join("missing-parent/rendered.sbatch")),
+        })
+        .expect_err("render write failure");
+        assert!(render_err.to_string().contains("failed to write rendered script"));
 
         run_command(Commands::Prepare {
             file: compose.clone(),
@@ -1843,6 +2315,22 @@ services:
             dry_run: false,
         })
         .expect("submit");
+        run_command(Commands::Submit {
+            file: compose.clone(),
+            script_out: Some(tmpdir.path().join("submit-no-id.sbatch")),
+            sbatch_bin: no_id_sbatch.display().to_string(),
+            srun_bin: srun.display().to_string(),
+            enroot_bin: enroot.display().to_string(),
+            squeue_bin: "squeue".into(),
+            sacct_bin: "sacct".into(),
+            keep_failed_prep: false,
+            skip_prepare: true,
+            force_rebuild: false,
+            no_preflight: true,
+            watch: false,
+            dry_run: false,
+        })
+        .expect("submit without id");
 
         run_command(Commands::Cache {
             command: CacheCommands::List {
@@ -1875,7 +2363,7 @@ services:
         assert!(err.to_string().contains("--all-unused requires -f/--file"));
         let err = run_command(Commands::Cache {
             command: CacheCommands::Prune {
-                file: Some(compose),
+                file: Some(compose.clone()),
                 cache_dir: Some(cache_dir.clone()),
                 age: Some(7),
                 all_unused: true,
@@ -1895,5 +2383,39 @@ services:
             },
         })
         .expect("prune age");
+        run_command(Commands::Cache {
+            command: CacheCommands::Prune {
+                file: Some(compose.clone()),
+                cache_dir: None,
+                age: None,
+                all_unused: true,
+            },
+        })
+        .expect("prune all unused");
+
+        run_command(Commands::Cancel {
+            file: compose.clone(),
+            job_id: Some("12345".into()),
+            scancel_bin: scancel_ok.display().to_string(),
+        })
+        .expect("cancel ok");
+        let cancel_err = run_command(Commands::Cancel {
+            file: compose.clone(),
+            job_id: Some("12345".into()),
+            scancel_bin: scancel_fail.display().to_string(),
+        })
+        .expect_err("cancel fail");
+        assert!(cancel_err.to_string().contains("scancel failed for job 12345"));
+
+        let init_output = tmpdir.path().join("init-compose.yaml");
+        run_command(Commands::Init {
+            template: Some("dev-python-app".into()),
+            name: Some("custom-init".into()),
+            cache_dir: Some("/tmp/custom-cache".into()),
+            output: init_output.clone(),
+            force: true,
+        })
+        .expect("init");
+        assert!(init_output.exists());
     }
 }

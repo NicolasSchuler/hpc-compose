@@ -28,6 +28,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          components: llvm-tools-preview
           rustflags: ""
 
       - name: Install mdBook
@@ -101,3 +102,22 @@ jobs:
             echo "Validating $f"
             cargo run -- validate -f "$f"
           done
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          rustflags: ""
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Enforce coverage gate
+        run: cargo llvm-cov --workspace --summary-only --fail-under-lines 95 --fail-under-regions 95 --fail-under-functions 95 --locked

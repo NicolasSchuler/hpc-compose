@@ -64,6 +64,7 @@ target/release/hpc-compose submit --watch -f /tmp/compose.yaml
 ```bash
 cargo build --release
 cargo test
+cargo llvm-cov --workspace --summary-only --fail-under-lines 95 --fail-under-regions 95 --fail-under-functions 95
 cargo doc --no-deps
 mdbook build docs
 ```
