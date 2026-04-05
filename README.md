@@ -11,6 +11,14 @@
 
 It is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to `sbatch` + `srun` + Enroot on a single node.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+```
+
+The installer selects the newest GitHub release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Manual release downloads remain documented in [docs/src/installation.md](docs/src/installation.md).
+
 ## Minimal example
 
 ```yaml

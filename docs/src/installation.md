@@ -1,6 +1,30 @@
 # Installation
 
-## Download a release build
+## One-line installer
+
+For supported Linux and macOS targets, the repo now ships a small installer script that picks the newest release and the matching archive for your machine:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+```
+
+By default this installs `hpc-compose` into `~/.local/bin` and verifies the published SHA-256 checksum before placing the binary.
+
+Useful overrides:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | env HPC_COMPOSE_INSTALL_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | env HPC_COMPOSE_VERSION=v0.1.11 sh
+```
+
+Supported targets match the release workflow:
+
+- Linux x86_64
+- Linux arm64
+- macOS x86_64
+- macOS arm64
+
+## Download a release build manually
 
 Prebuilt archives are published on the project's [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases).
 
