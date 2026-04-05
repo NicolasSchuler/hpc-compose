@@ -220,6 +220,7 @@ Docker Compose supports `restart: always`, `on-failure`, etc. `hpc-compose` does
 
 ## Related docs
 
+- [Execution model](execution-model.md)
 - [Spec reference](spec-reference.md)
 - [Runbook](runbook.md)
 - [Examples](examples.md)

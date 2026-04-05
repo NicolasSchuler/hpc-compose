@@ -7,7 +7,7 @@ This example shows a common Slurm pattern:
 - `x-enroot.prepare.commands` installs `uv` once into the worker image,
 - and `uv run worker.py` executes the mounted worker code on each submit.
 
-## Normal path
+## Normal run
 
 ```bash
 hpc-compose submit --watch -f examples/vllm-uv-worker.yaml
@@ -21,7 +21,7 @@ That command already runs preflight, prepares the cached worker image when neede
 - Cached image setup: `pip install --no-cache-dir uv` runs through `x-enroot.prepare.commands` and is reused until the worker image changes.
 - Per run: `uv run worker.py` executes the mounted source tree against the in-job vLLM API.
 
-## Optional first-time or debug flow
+## Debugging flow
 
 ```bash
 hpc-compose validate -f examples/vllm-uv-worker.yaml

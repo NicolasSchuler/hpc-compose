@@ -12,7 +12,7 @@ This example is the smallest end-to-end `hpc-compose` LLM workflow:
 - a supported login node with `enroot`, `srun`, and `sbatch`,
 - a GGUF model at [`../models/model.gguf`](../models/model.gguf) for the repo-local example, or at `$HOME/models/model.gguf` for the home-directory example.
 
-## Recommended path
+## Normal run
 
 For a real cluster, start with the home-directory variant:
 
@@ -33,7 +33,7 @@ hpc-compose submit --watch -f examples/llm-curl-workflow.yaml
 
 `submit --watch` already runs preflight, prepares missing images, renders the batch script, calls `sbatch`, then follows the tracked job output.
 
-## Optional first-time or debug flow
+## Debugging flow
 
 ```bash
 hpc-compose validate -f examples/llm-curl-workflow.yaml

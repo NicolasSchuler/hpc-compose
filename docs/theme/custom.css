@@ -33,3 +33,23 @@
   justify-content: center;
   margin-top: 1rem;
 }
+
+.callout {
+  margin: 1rem 0;
+  padding: 0.9rem 1rem;
+  border-left: 0.3rem solid var(--quote-border);
+  border-radius: 0.35rem;
+  background: var(--quote-bg);
+}
+
+.callout p {
+  margin: 0.35rem 0;
+}
+
+.callout.note {
+  border-left-color: #2d6cdf;
+}
+
+.callout.warning {
+  border-left-color: #c55a11;
+}

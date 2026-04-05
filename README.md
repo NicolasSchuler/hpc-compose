@@ -9,7 +9,25 @@
 
 `hpc-compose` is a single-binary launcher that turns a Compose-like spec into a single Slurm job running one or more services through Enroot and Pyxis.
 
-It is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to `sbatch` + `srun` + Enroot on a single node.
+It is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to one Slurm allocation, one node in v1, and multiple containerized services inside that allocation.
+
+## What It Is For
+
+- one Slurm allocation per application
+- one node per allocation in v1
+- multiple services started inside that allocation
+- remote images such as `redis:7` or existing local `.sqsh` images
+- login-node image preparation through `x-enroot.prepare`
+- readiness-gated startup across dependent services
+
+## What It Does Not Support
+
+- Compose `build:`
+- `ports`
+- `networks` / `network_mode`
+- `restart`
+- `deploy`
+- multi-node service placement in v1
 
 ## Install
 
@@ -38,37 +56,16 @@ services:
 hpc-compose submit --watch -f compose.yaml
 ```
 
-## Quickstart
-
-```bash
-cargo build --release
-target/release/hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output /tmp/compose.yaml
-target/release/hpc-compose submit --watch -f /tmp/compose.yaml
-```
-
-`submit --watch` is the usual run. Use `validate`, `inspect`, `preflight`, or `prepare` mainly the first time you adapt a spec or when troubleshooting.
+`submit --watch` is the normal run. Use `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are adapting a new spec or isolating a failure.
 
 ## Documentation
 
 - Published docs: [nicolasschuler.github.io/hpc-compose](https://nicolasschuler.github.io/hpc-compose/)
-- Overview: [docs/src/README.md](docs/src/README.md)
 - Installation: [docs/src/installation.md](docs/src/installation.md)
 - Quickstart: [docs/src/quickstart.md](docs/src/quickstart.md)
+- Execution model: [docs/src/execution-model.md](docs/src/execution-model.md)
 - Runbook: [docs/src/runbook.md](docs/src/runbook.md)
-- Spec reference: [docs/src/spec-reference.md](docs/src/spec-reference.md)
 - Examples: [docs/src/examples.md](docs/src/examples.md)
+- Spec reference: [docs/src/spec-reference.md](docs/src/spec-reference.md)
 - Docker Compose migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
-
-## Build and test
-
-```bash
-cargo build --release
-cargo test
-cargo llvm-cov --workspace --summary-only --fail-under-lines 95 --fail-under-regions 95 --fail-under-functions 95
-cargo doc --no-deps
-mdbook build docs
-```
-
-## Releases
-
-Prebuilt archives are published on [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases). Push a version tag such as `v0.1.0` to publish downloadable binaries through GitHub Actions.
+- Contributor architecture notes: [docs/src/architecture.md](docs/src/architecture.md)

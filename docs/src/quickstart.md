@@ -1,75 +1,77 @@
 # Quickstart
 
-This is the shortest end-to-end path from checkout to a submitted job.
+This is the shortest install-and-run path from an empty shell to a submitted job.
 
-## Cadence
-
-| Step | When to do it |
-| --- | --- |
-| Build or install `hpc-compose` | once per checkout or upgrade |
-| `init` or copy an example | once per new spec |
-| `submit --watch` | normal run, every time you want to launch the stack |
-| `validate`, `inspect`, `preflight`, `prepare` | first-time setup or troubleshooting |
-
-## 1. Build the binary
+## 1. Install a release binary
 
 ```bash
-cargo build --release
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
 ```
+
+The installer selects the newest published release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default.
 
 ## 2. Initialize a starter spec
 
 ```bash
-target/release/hpc-compose init \
-  --template dev-python-app \
+hpc-compose init \
+  --template minimal-batch \
   --name my-app \
   --cache-dir /shared/$USER/hpc-compose-cache \
-  --output /tmp/compose.yaml
+  --output compose.yaml
 ```
 
-If you already know the closest shipped example, you can copy it directly instead.
+If you already know the closest shipped example, copy it directly instead. The [Examples](examples.md) page is the fastest way to choose one.
 
-## 3. Usual run: submit and watch
+## 3. Normal run
 
 ```bash
-target/release/hpc-compose submit --watch -f /tmp/compose.yaml
+hpc-compose submit --watch -f compose.yaml
 ```
 
-`submit --watch` is the normal fast path. It runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs.
+`submit --watch` is the normal run. It runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs.
 
-## 4. Optional first-time checks
+## 4. Debugging flow
 
 ```bash
-target/release/hpc-compose validate -f /tmp/compose.yaml
-target/release/hpc-compose inspect --verbose -f /tmp/compose.yaml
+hpc-compose validate -f compose.yaml
+hpc-compose inspect --verbose -f compose.yaml
+hpc-compose preflight -f compose.yaml
+hpc-compose prepare -f compose.yaml
 ```
 
-Use `inspect` to confirm:
+Use the debugging flow when you want to confirm:
 
 - service order
 - normalized image references
 - cache artifact paths
 - whether prepare steps will rebuild every submit
 
-## 5. Optional troubleshooting commands
+<div class="callout warning">
+  <p><strong>Warning</strong></p>
+  <p><code>inspect --verbose</code> prints resolved environment values and final mount mappings. Treat its output as sensitive when the spec contains secrets.</p>
+</div>
+
+## 5. Revisit a tracked run later
 
 ```bash
-target/release/hpc-compose preflight -f /tmp/compose.yaml
-target/release/hpc-compose prepare -f /tmp/compose.yaml
+hpc-compose status -f compose.yaml
+hpc-compose stats -f compose.yaml
+hpc-compose logs -f compose.yaml --follow
 ```
 
-Run these separately when you want to debug login-node prerequisites, inspect cache reuse, or isolate image preparation from job submission.
+## From a source checkout
 
-## 6. Revisit a tracked run later
+If you are running from a local checkout instead of an installed binary:
 
 ```bash
-target/release/hpc-compose status -f /tmp/compose.yaml
-target/release/hpc-compose stats -f /tmp/compose.yaml
-target/release/hpc-compose logs -f /tmp/compose.yaml --follow
+cargo build --release
+target/release/hpc-compose init --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
+target/release/hpc-compose submit --watch -f compose.yaml
 ```
 
-## When to leave the quickstart
+## Read next
 
+- Use the [Execution model](execution-model.md) page to understand what runs where and which paths must be shared.
 - Use the [Runbook](runbook.md) when adapting a real workload to a real cluster.
-- Use the [Spec Reference](spec-reference.md) when changing fields or validation-sensitive values.
 - Use the [Examples](examples.md) page when you want the closest known-good template.
+- Use the [Spec Reference](spec-reference.md) when changing fields or validation-sensitive values.

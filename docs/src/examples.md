@@ -2,13 +2,13 @@
 
 These examples are the fastest way to understand the intended `hpc-compose` workflows and adapt them to a real application.
 
-For almost every example, the normal path is:
+For almost every example, the normal run is:
 
 ```bash
 hpc-compose submit --watch -f examples/<example>.yaml
 ```
 
-Use `validate`, `inspect`, `preflight`, or `prepare` separately when you are wiring up the example for the first time or troubleshooting a failure.
+Use the debugging flow (`validate`, `inspect`, `preflight`, `prepare`) when you are wiring up the example for the first time or isolating a failure.
 
 If you want one of these files written straight to your working directory, use:
 
@@ -35,157 +35,34 @@ hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$US
 | [`multi-stage-pipeline.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-stage-pipeline.yaml) | Two-stage pipeline coordinating through the shared job mount | You need file-based stage-to-stage handoff |
 | [`fairseq-preprocess.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/fairseq-preprocess.yaml) | CPU-heavy NLP data preprocessing with parallel workers | You need a CPU-bound data preprocessing pipeline |
 
-If you want the fastest end-to-end cluster example, start with [`llm-curl-workflow-workdir.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow-workdir.yaml). If you want a source-mounted development workflow, start with [`dev-python-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/dev-python-app.yaml). If you are new to `hpc-compose` and want the absolute simplest file, start with [`minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml).
+## Which example should I start from?
 
-## Choose an example
+- Start with [`minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) if you are new to `hpc-compose` and want the smallest possible file.
+- Start with [`dev-python-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/dev-python-app.yaml) if you want a source-mounted development loop.
+- Start with [`llm-curl-workflow-workdir.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow-workdir.yaml) if you want the fastest real-cluster GPU inference example.
+- Start with [`training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) if you need a GPU training job with checkpoint output.
+- Start with [`app-redis-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/app-redis-worker.yaml) or [`postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) if your workload depends on multi-service startup ordering.
 
-```
-Do you need GPUs?
-├─ No
-│  ├─ Just trying hpc-compose?       → minimal-batch.yaml
-│  ├─ MPI workload?                   → mpi-hello.yaml
-│  ├─ CPU-heavy data preprocessing?   → fairseq-preprocess.yaml
-│  ├─ Multi-service with ordering?    → app-redis-worker.yaml
-│  ├─ Database-backed pipeline?       → postgres-etl.yaml
-│  └─ Multi-stage file pipeline?      → multi-stage-pipeline.yaml
-└─ Yes
-   ├─ LLM inference (llama.cpp)?      → llm-curl-workflow.yaml
-   ├─ LLM inference (llama.cpp + uv)? → llama-uv-worker.yaml
-   ├─ LLM inference (vLLM only)?      → vllm-openai.yaml
-   ├─ LLM inference (vLLM + uv app)?  → vllm-uv-worker.yaml
-   ├─ GPU training with artifacts?    → training-checkpoints.yaml
-   └─ GPU app + dependent service?    → llama-app.yaml
+Companion notes for the more involved examples live alongside the example assets:
 
-Iterative development with mounted source? → dev-python-app.yaml
-```
+- [`examples/llm-curl/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl/README.md)
+- [`examples/llama-uv-worker/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker/README.md)
+- [`examples/vllm-uv-worker/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-uv-worker/README.md)
+- [`examples/models/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/models/README.md)
 
-## One-time setup vs normal runs
+## Adaptation checklist
 
-| Cadence | Typical commands |
-| --- | --- |
-| once per new spec | copy or `init` the example, then adjust paths, models, and resource settings |
-| early validation while adapting | `hpc-compose validate -f ...` and `hpc-compose inspect --verbose -f ...` |
-| normal run | `hpc-compose submit --watch -f ...` |
-| troubleshooting | `hpc-compose preflight -f ...`, `hpc-compose prepare -f ...`, `hpc-compose render -f ... --output ...` |
-
-`inspect --verbose` is a debugging view: it prints resolved environment values and final mount mappings, so treat its output as sensitive when your spec contains secrets.
-
-## What changed?
-
-| Change | Typical next command |
-| --- | --- |
-| YAML planning/runtime settings only | `hpc-compose validate -f compose.yaml`, `hpc-compose inspect --verbose -f compose.yaml`, then `hpc-compose submit --watch -f compose.yaml` |
-| Base image, prepare commands, or prepare env | `hpc-compose submit --watch --force-rebuild -f compose.yaml` for the normal path, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
-| Mounted runtime source only | Usually just `hpc-compose submit --watch -f compose.yaml` |
-| Old cache artifacts no longer referenced by this spec | `hpc-compose cache prune --all-unused -f compose.yaml` |
-| Upgraded `hpc-compose` | Expect cache misses on the next run, then optionally prune old entries |
-
-## How to adapt an example
-
-1. Copy the closest example to your own `compose.yaml`.
-   Or run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
-2. Set `x-slurm.cache_dir` to a shared filesystem path when your cluster needs one. The home-directory examples can also rely on the default `$HOME/.cache/hpc-compose`.
+1. Copy the closest example to your own `compose.yaml`, or run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
+2. Set `x-slurm.cache_dir` to a path visible from both the login node and the compute nodes.
 3. Replace the example `image`, `command`, `environment`, and `volumes` with your workload.
-4. Keep active source trees in `volumes` and reserve `x-enroot.prepare.commands` for slower-changing dependencies or tools.
-5. Add `readiness` to services that must be actually reachable before dependents continue.
-6. Adjust `x-slurm` resource settings at the top level or per service as needed.
-7. Add `x-slurm.setup` only when your cluster actually needs module loads or shell initialization.
-
-## Notes per example
-
-### `dev-python-app.yaml`
-
-- Best reference for the preferred dev workflow.
-- Mounts `./app` into the container at runtime.
-- Uses `x-enroot.prepare.commands` only for slower-changing Python dependencies.
-- The mounted source tree is the per-run part; the prepared dependency layer is the cached part.
-
-### `app-redis-worker.yaml`
-
-- Best reference for `depends_on` plus readiness.
-- Shows one service waiting for another service's TCP port.
-
-### `llm-curl-workflow.yaml`
-
-- Best reference for a complete request/response path.
-- Uses `x-enroot.prepare.commands` on the login node to build a Debian-based client image with `bash` and `curl`.
-- Waits for `llama.cpp` to print `main: model loaded` before launching the client.
-- Uses the built-in `/hpc-compose/job` mount to shut the server down after the request completes.
-
-### `llm-curl-workflow-workdir.yaml`
-
-- Best reference when you want a direct login-node example without copying helper files.
-- Expects the model at `$HOME/models/model.gguf`.
-- Uses the default cache directory under `$HOME/.cache/hpc-compose` unless you set `x-slurm.cache_dir`.
-- Best first example for a real cluster if you already have a GGUF model.
-
-### `llama-app.yaml`
-
-- Best reference for GPU-backed services and dependent apps.
-- Expects a model file at `models/model.gguf`; see [`examples/models/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/models/README.md).
-
-### `llama-uv-worker.yaml`
-
-- Best reference for llama.cpp serving plus a source-mounted Python worker run through `uv`.
-- Expects a model file at `models/model.gguf`; see [`examples/models/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/models/README.md).
-- Uses log-based readiness so the worker waits until the GGUF model is actually loaded.
-- Uses `/hpc-compose/job/request.done` for shared in-job handoff and clean shutdown.
-
-### `minimal-batch.yaml`
-
-- Best reference when you want the absolute simplest single-service batch job.
-- No dependencies, no GPU, no prepare step.
-- Good starting point for understanding the basic file format.
-
-### `training-checkpoints.yaml`
-
-- Best reference for GPU training workflows that produce offline artifacts.
-- Writes checkpoints to a shared storage volume.
-- Pairs well with `x-slurm.artifacts` when you also want tracked result export under `.hpc-compose/<job-id>/artifacts/`.
-- Uses `x-enroot.prepare` implicitly through the PyTorch base image.
-
-### `postgres-etl.yaml`
-
-- Best reference for database-backed batch processing.
-- PostgreSQL with TCP readiness on port 5432.
-- ETL service waits for the database with `depends_on: service_healthy`.
-- Uses `x-enroot.prepare.commands` to install `psycopg2`.
-
-### `vllm-openai.yaml`
-
-- Best reference for vLLM-based model serving as an alternative to llama.cpp.
-- Serves an OpenAI-compatible API on localhost.
-- In-job client sends a test request and signals completion via `/hpc-compose/job`.
-
-### `vllm-uv-worker.yaml`
-
-- Best reference for a common LLM app stack: one vLLM server plus a source-mounted Python worker.
-- Caches `uv` into the worker image through `x-enroot.prepare.commands`.
-- Runs the mounted worker code on each submit with `uv run worker.py`.
-- Good starting point when your Python app code changes faster than the base worker image.
-
-### `mpi-hello.yaml`
-
-- Best reference for MPI workloads on a single node.
-- Compiles a C hello-world program with Open MPI during prepare.
-- Runs with `mpirun -np 4` inside the container.
-
-### `multi-stage-pipeline.yaml`
-
-- Best reference for file-based stage-to-stage coordination.
-- Producer writes a CSV to `/hpc-compose/job/output.csv`.
-- Consumer uses `depends_on: service_healthy` with log-based readiness to wait for data.
-- Shows the recommended pattern for multi-step batch workflows.
-
-### `fairseq-preprocess.yaml`
-
-- Best reference for CPU-heavy data preprocessing pipelines.
-- Reads raw `.txt` files from shared storage and writes JSONL output.
-- Uses Python's `ProcessPoolExecutor` for parallel processing.
-- No GPU, no dependencies, no prepare step — pure CPU batch work.
+4. Keep active source in `volumes` and keep slower-changing dependency installation in `x-enroot.prepare.commands`.
+5. Add `readiness` to services that must be reachable before dependents continue.
+6. Adjust top-level or per-service `x-slurm` settings for your cluster.
+7. Run the debugging flow before the first submit when you need to confirm planning, prerequisites, or cache behavior.
 
 ## Related docs
 
+- [Execution model](execution-model.md)
 - [Runbook](runbook.md)
 - [Spec reference](spec-reference.md)
 - [Docker Compose migration](docker-compose-migration.md)

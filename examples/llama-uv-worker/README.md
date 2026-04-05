@@ -7,13 +7,13 @@ This example shows the GGUF-serving pattern that commonly comes up on Slurm:
 - readiness waits for `llama.cpp` to finish loading the model,
 - and both services coordinate shutdown through `/hpc-compose/job/request.done`.
 
-## Normal path
+## Normal run
 
 ```bash
 hpc-compose submit --watch -f examples/llama-uv-worker.yaml
 ```
 
-## First-time or debug path
+## Debugging flow
 
 ```bash
 hpc-compose validate -f examples/llama-uv-worker.yaml

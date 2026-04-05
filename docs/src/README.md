@@ -5,6 +5,7 @@
   <p><code>hpc-compose</code> turns a Compose-like spec into a single Slurm job that runs one or more services through Enroot and Pyxis.</p>
   <div class="hpc-compose-links">
     <a href="quickstart.html">Quickstart</a>
+    <a href="execution-model.html">Execution model</a>
     <a href="runbook.html">Runbook</a>
     <a href="spec-reference.html">Spec reference</a>
     <a href="examples.html">Examples</a>
@@ -12,6 +13,14 @@
 </div>
 
 `hpc-compose` is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to a single-node Slurm allocation with containerized services inside that allocation.
+
+## Start Here
+
+1. Read [Quickstart](quickstart.md) for the shortest install-and-run path.
+2. Read [Execution model](execution-model.md) to understand what runs on the login node, what runs on the compute node, and which paths must be shared.
+3. Use [Runbook](runbook.md) when adapting a real workload to a real cluster.
+4. Use [Examples](examples.md) when you want the closest known-good starting point.
+5. Use [Spec reference](spec-reference.md) when you need exact field behavior or validation rules.
 
 ## What it is for
 
@@ -54,12 +63,14 @@ services:
 hpc-compose submit --watch -f compose.yaml
 ```
 
-`submit --watch` is the normal path. Break out `inspect`, `preflight`, or `prepare` when you are validating a new spec for the first time or debugging a failure.
+`submit --watch` is the normal run. Break out `inspect`, `preflight`, or `prepare` as the debugging flow when you are validating a new spec for the first time or isolating a failure.
 
 ## Read next
 
 - [Installation](installation.md) for release and source install paths
 - [Quickstart](quickstart.md) for the shortest working flow
+- [Execution model](execution-model.md) for the login-node / compute-node split
 - [Runbook](runbook.md) for real-cluster setup and debugging
+- [Examples](examples.md) for example selection and adaptation
 - [Spec Reference](spec-reference.md) for the supported Compose subset
 - [Docker Compose Migration](docker-compose-migration.md) for feature mapping and conversion guidance

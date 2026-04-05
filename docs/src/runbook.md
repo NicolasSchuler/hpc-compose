@@ -6,6 +6,8 @@ Commands below assume `hpc-compose` is on your `PATH`. If you are running from a
 
 All commands accept `-f` / `--file` to specify the compose spec path. When omitted, it defaults to `compose.yaml` in the current directory. (The `cache prune --all-unused` subcommand requires `-f` explicitly.)
 
+Read the [Execution model](execution-model.md) page first if you are still orienting on login-node prepare, compute-node runtime, shared cache paths, or localhost networking.
+
 ## Before you start
 
 Make sure you have:
@@ -24,16 +26,16 @@ Make sure you have:
 | `init` or copy a shipped example | once per new spec |
 | `validate` and `inspect` | early while adapting a spec |
 | `submit --watch` | normal run |
-| `preflight`, `prepare`, `render` | first-time cluster setup checks or troubleshooting |
+| `preflight`, `prepare`, `render` | first-time cluster setup checks or the debugging flow |
 
-## Typical path
+## Normal progression
 
 For a new spec on a real cluster:
 
 1. Run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`, or copy the closest shipped example.
 2. Set `x-slurm.cache_dir` if you need an explicit shared cache path, and adjust any cluster-specific resource settings.
 3. Run `hpc-compose validate -f compose.yaml` and `hpc-compose inspect --verbose -f compose.yaml` while you are still adapting the file.
-4. Run `hpc-compose submit --watch -f compose.yaml` for the normal end-to-end path.
+4. Run `hpc-compose submit --watch -f compose.yaml` for the normal run.
 5. If that fails, or if you need more visibility, break out `preflight`, `prepare`, `render`, `status`, `stats`, or `logs` separately.
 
 ## Pick a starting example
@@ -132,7 +134,7 @@ Check:
 `inspect` is the quickest way to confirm that the planner understood your spec the way you intended.
 `inspect --verbose` is a debugging-oriented view and can print secrets from resolved environment values.
 
-## 5. Usual run: submit the job and watch it
+## 5. Normal run: submit the job and watch it
 
 ```bash
 hpc-compose submit --watch -f compose.yaml
@@ -151,7 +153,10 @@ With `--watch`, `submit` also:
 6. polls scheduler state with `squeue` / `sacct` when available,
 7. streams tracked service logs as they appear.
 
-Note: `submit` treats preflight **warnings** as non-fatal. If you want warnings to block submission, run `preflight --strict` separately before `submit`.
+<div class="callout note">
+  <p><strong>Note</strong></p>
+  <p><code>submit</code> treats preflight warnings as non-fatal. If you want warnings to block submission, run <code>preflight --strict</code> separately before <code>submit</code>.</p>
+</div>
 
 Useful options:
 
@@ -161,7 +166,7 @@ Useful options:
 - `--skip-prepare` reuses existing prepared artifacts.
 - `--keep-failed-prep` keeps the Enroot rootfs around when a prepare step fails.
 
-For the shipped examples, `submit --watch` is usually the only command you need in the normal path. Use the other commands when you need more visibility into planning, environment checks, image preparation, tracked job state, or the generated script.
+For the shipped examples, `submit --watch` is usually the only command you need in the normal run. Use the other commands when you need more visibility into planning, environment checks, image preparation, tracked job state, or the generated script.
 
 ## 6. Run preflight checks when you need to debug cluster readiness
 
@@ -348,7 +353,7 @@ hpc-compose cache prune --age 0
 | If you changed... | Typical next step |
 | --- | --- |
 | YAML planning/runtime settings only | `hpc-compose validate -f compose.yaml`, `hpc-compose inspect --verbose -f compose.yaml`, then `hpc-compose submit --watch -f compose.yaml` |
-| The base image, `x-enroot.prepare.commands`, or prepare env | `hpc-compose submit --watch --force-rebuild -f compose.yaml` for the normal path, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
+| The base image, `x-enroot.prepare.commands`, or prepare env | `hpc-compose submit --watch --force-rebuild -f compose.yaml` for the normal run, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
 | Only mounted runtime source such as app code under `volumes` | Usually just `hpc-compose submit --watch -f compose.yaml` |
 | Cache entries you no longer want and this plan does not reference | `hpc-compose cache prune --all-unused -f compose.yaml` |
 | `hpc-compose` itself | Expect cache misses on the next `prepare` or `submit`, then optionally prune old entries |
@@ -408,6 +413,11 @@ Remember that relative paths resolve from the compose file directory, not from t
 ### A mounted file exists on the host but not inside the container
 
 This is often a symlink issue. If you mount a directory such as `$HOME/models:/models` and `model.gguf` is a symlink whose target lives outside `$HOME/models`, the target may not be visible inside the container. Copy the real file into the mounted directory or mount the directory that contains the symlink target.
+
+<div class="callout warning">
+  <p><strong>Warning</strong></p>
+  <p>The mount itself can succeed while the symlink target is still invisible inside the container. Check the target path, not just the link path.</p>
+</div>
 
 ### Anonymous pull or registry credential warnings
 
