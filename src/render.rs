@@ -1,11 +1,15 @@
+//! Batch-script rendering for prepared runtime plans.
+
 use anyhow::Result;
 
 use crate::planner::ExecutionSpec;
 use crate::prepare::{RuntimePlan, RuntimeService};
-use crate::spec::{DependencyCondition, MetricsCollector, ReadinessSpec};
+use crate::spec::{ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec};
 
+/// Renders the complete `sbatch` script for a runtime plan.
 pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     let metrics_enabled = plan.slurm.metrics_enabled();
+    let artifacts_enabled = plan.slurm.artifacts_enabled();
     let mut out = String::new();
     out.push_str("#!/bin/bash\n");
     out.push_str(&format!(
@@ -56,6 +60,11 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("JOB_TMP=\"${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}\"\n");
     out.push_str("LOG_DIR=\"$JOB_TMP/logs\"\n");
     out.push_str("STATE_FILE=\"$JOB_TMP/state.json\"\n");
+    if artifacts_enabled {
+        out.push_str("ARTIFACTS_DIR=\"$JOB_TMP/artifacts\"\n");
+        out.push_str("ARTIFACTS_PAYLOAD_DIR=\"$ARTIFACTS_DIR/payload\"\n");
+        out.push_str("ARTIFACTS_MANIFEST_FILE=\"$ARTIFACTS_DIR/manifest.json\"\n");
+    }
     if metrics_enabled {
         out.push_str("METRICS_DIR=\"$JOB_TMP/metrics\"\n");
         out.push_str("METRICS_META_FILE=\"$METRICS_DIR/meta.json\"\n");
@@ -71,6 +80,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("export ENROOT_DATA_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/data\"\n");
     out.push_str("export ENROOT_TEMP_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/tmp\"\n");
     out.push_str("mkdir -p \"$LOG_DIR\"");
+    if artifacts_enabled {
+        out.push_str(" \"$ARTIFACTS_DIR\"");
+    }
     if metrics_enabled {
         out.push_str(" \"$METRICS_DIR\"");
     }
@@ -83,6 +95,29 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("SERVICE_HEALTHY=()\n");
     out.push_str("printf '{\\n  \"services\": []\\n}\\n' > \"$STATE_FILE\"\n");
     out.push_str("declare -A SERVICE_INDEX_BY_NAME=()\n\n");
+    if artifacts_enabled {
+        out.push_str(&format!(
+            "ARTIFACTS_COLLECT_POLICY={}\n",
+            shell_quote(match plan.slurm.artifacts_collect_policy() {
+                ArtifactCollectPolicy::Always => "always",
+                ArtifactCollectPolicy::OnSuccess => "on_success",
+                ArtifactCollectPolicy::OnFailure => "on_failure",
+            })
+        ));
+        out.push_str(&format!(
+            "ARTIFACT_SOURCE_PATTERNS={}\n\n",
+            bash_array_literal(
+                &plan
+                    .slurm
+                    .artifacts
+                    .as_ref()
+                    .map(|artifacts| artifacts.paths.clone())
+                    .unwrap_or_default()
+            )
+        ));
+        out.push_str("ARTIFACT_COPIED_RELATIVE_PATHS=()\n");
+        out.push_str("ARTIFACT_WARNINGS=()\n\n");
+    }
     if metrics_enabled {
         out.push_str(&format!(
             "METRICS_INTERVAL_SECONDS={}\n",
@@ -164,6 +199,17 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  printf '%s' \"$value\"\n");
     out.push_str("}\n\n");
 
+    out.push_str("trim_whitespace() {\n");
+    out.push_str("  local value=${1-}\n");
+    out.push_str("  value=${value#\"${value%%[![:space:]]*}\"}\n");
+    out.push_str("  value=${value%\"${value##*[![:space:]]}\"}\n");
+    out.push_str("  printf '%s' \"$value\"\n");
+    out.push_str("}\n\n");
+
+    if artifacts_enabled {
+        render_artifact_helpers(&mut out);
+    }
+
     if metrics_enabled {
         render_metrics_helpers(&mut out);
     }
@@ -209,6 +255,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     }
     out.push_str("  kill_services\n");
     out.push_str("  wait || true\n");
+    if artifacts_enabled {
+        out.push_str("  collect_artifacts \"$code\" || true\n");
+    }
     out.push_str("  exit \"$code\"\n");
     out.push_str("}\n");
     out.push_str("trap cleanup EXIT INT TERM\n\n");
@@ -436,13 +485,6 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
 }
 
 fn render_metrics_helpers(out: &mut String) {
-    out.push_str("trim_whitespace() {\n");
-    out.push_str("  local value=${1-}\n");
-    out.push_str("  value=${value#\"${value%%[![:space:]]*}\"}\n");
-    out.push_str("  value=${value%\"${value##*[![:space:]]}\"}\n");
-    out.push_str("  printf '%s' \"$value\"\n");
-    out.push_str("}\n\n");
-
     out.push_str("json_string_or_null() {\n");
     out.push_str("  local value=${1-}\n");
     out.push_str("  if [[ -z \"$value\" ]]; then\n");
@@ -667,8 +709,8 @@ fn render_metrics_helpers(out: &mut String) {
 
     out.push_str("metrics_sampler_loop() {\n");
     out.push_str("  while true; do\n");
-    out.push_str("    sample_metrics_once\n");
     out.push_str("    sleep \"$METRICS_INTERVAL_SECONDS\"\n");
+    out.push_str("    sample_metrics_once\n");
     out.push_str("  done\n");
     out.push_str("}\n\n");
 
@@ -690,6 +732,161 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("    kill \"$SAMPLER_PID\" 2>/dev/null || true\n");
     out.push_str("    wait \"$SAMPLER_PID\" 2>/dev/null || true\n");
     out.push_str("  fi\n");
+    out.push_str("}\n\n");
+}
+
+fn render_artifact_helpers(out: &mut String) {
+    out.push_str("artifact_timestamp() {\n");
+    out.push_str("  date -u +%Y-%m-%dT%H:%M:%SZ\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_json_string_array() {\n");
+    out.push_str("  local label=$1\n");
+    out.push_str("  shift\n");
+    out.push_str("  printf '  \"%s\": [' \"$label\"\n");
+    out.push_str("  local first=1\n");
+    out.push_str("  local item\n");
+    out.push_str("  for item in \"$@\"; do\n");
+    out.push_str("    if (( first == 0 )); then\n");
+    out.push_str("      printf ','\n");
+    out.push_str("    fi\n");
+    out.push_str("    printf '\\n    \"%s\"' \"$(json_escape \"$item\")\"\n");
+    out.push_str("    first=0\n");
+    out.push_str("  done\n");
+    out.push_str("  if (( first == 0 )); then\n");
+    out.push_str("    printf '\\n'\n");
+    out.push_str("  fi\n");
+    out.push_str("  printf '  ]'\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_artifact_manifest() {\n");
+    out.push_str("  local job_outcome=$1\n");
+    out.push_str("  shift\n");
+    out.push_str("  local -a matched_source_paths=(\"$@\")\n");
+    out.push_str("  local -a copied_relative_paths=(\"${ARTIFACT_COPIED_RELATIVE_PATHS[@]}\")\n");
+    out.push_str("  local -a warnings=(\"${ARTIFACT_WARNINGS[@]}\")\n");
+    out.push_str("  local tmp_manifest=\"$ARTIFACTS_MANIFEST_FILE.tmp\"\n");
+    out.push_str("  {\n");
+    out.push_str("    printf '{\\n'\n");
+    out.push_str("    printf '  \"job_id\": \"%s\",\\n' \"$(json_escape \"$SLURM_JOB_ID\")\"\n");
+    out.push_str("    printf '  \"collect_policy\": \"%s\",\\n' \"$(json_escape \"$ARTIFACTS_COLLECT_POLICY\")\"\n");
+    out.push_str("    printf '  \"collected_at\": \"%s\",\\n' \"$(json_escape \"$(artifact_timestamp)\")\"\n");
+    out.push_str(
+        "    printf '  \"job_outcome\": \"%s\",\\n' \"$(json_escape \"$job_outcome\")\"\n",
+    );
+    out.push_str("    write_json_string_array \"declared_source_patterns\" \"${ARTIFACT_SOURCE_PATTERNS[@]}\"\n");
+    out.push_str("    printf ',\\n'\n");
+    out.push_str(
+        "    write_json_string_array \"matched_source_paths\" \"${matched_source_paths[@]}\"\n",
+    );
+    out.push_str("    printf ',\\n'\n");
+    out.push_str(
+        "    write_json_string_array \"copied_relative_paths\" \"${copied_relative_paths[@]}\"\n",
+    );
+    out.push_str("    printf ',\\n'\n");
+    out.push_str("    write_json_string_array \"warnings\" \"${warnings[@]}\"\n");
+    out.push_str("    printf '\\n}\\n'\n");
+    out.push_str("  } > \"$tmp_manifest\"\n");
+    out.push_str("  mv \"$tmp_manifest\" \"$ARTIFACTS_MANIFEST_FILE\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("collect_artifacts() {\n");
+    out.push_str("  local exit_code=${1:-0}\n");
+    out.push_str("  local job_outcome=success\n");
+    out.push_str("  local should_collect=0\n");
+    out.push_str("  local declared_pattern\n");
+    out.push_str("  local host_pattern\n");
+    out.push_str("  local matched\n");
+    out.push_str("  local container_match\n");
+    out.push_str("  local relative_path\n");
+    out.push_str("  local destination\n");
+    out.push_str("  local copy_output\n");
+    out.push_str("  local shopt_state\n");
+    out.push_str("  local pattern_matched\n");
+    out.push_str("  local -a matched_source_paths=()\n");
+    out.push_str("  ARTIFACT_COPIED_RELATIVE_PATHS=()\n");
+    out.push_str("  ARTIFACT_WARNINGS=()\n");
+    out.push_str("  local -A seen_matches=()\n");
+    out.push_str("  local -A seen_copied=()\n");
+    out.push_str("  if (( exit_code != 0 )); then\n");
+    out.push_str("    job_outcome=failure\n");
+    out.push_str("  fi\n");
+    out.push_str("  case \"$ARTIFACTS_COLLECT_POLICY\" in\n");
+    out.push_str("    always)\n");
+    out.push_str("      should_collect=1\n");
+    out.push_str("      ;;\n");
+    out.push_str("    on_success)\n");
+    out.push_str("      [[ \"$job_outcome\" == \"success\" ]] && should_collect=1\n");
+    out.push_str("      ;;\n");
+    out.push_str("    on_failure)\n");
+    out.push_str("      [[ \"$job_outcome\" == \"failure\" ]] && should_collect=1\n");
+    out.push_str("      ;;\n");
+    out.push_str("  esac\n");
+    out.push_str("  mkdir -p \"$ARTIFACTS_DIR\"\n");
+    out.push_str("  rm -rf \"$ARTIFACTS_PAYLOAD_DIR\"\n");
+    out.push_str("  mkdir -p \"$ARTIFACTS_PAYLOAD_DIR\"\n");
+    out.push_str("  if (( should_collect == 0 )); then\n");
+    out.push_str("    ARTIFACT_WARNINGS+=(\"collection skipped because job outcome '$job_outcome' does not match policy '$ARTIFACTS_COLLECT_POLICY'\")\n");
+    out.push_str("    write_artifact_manifest \"$job_outcome\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  shopt_state=$(shopt -p nullglob globstar dotglob)\n");
+    out.push_str("  shopt -s nullglob globstar dotglob\n");
+    out.push_str("  for declared_pattern in \"${ARTIFACT_SOURCE_PATTERNS[@]}\"; do\n");
+    out.push_str("    pattern_matched=0\n");
+    out.push_str("    host_pattern=\"$JOB_TMP${declared_pattern#/hpc-compose/job}\"\n");
+    out.push_str("    while IFS= read -r matched; do\n");
+    out.push_str("      [[ -n \"$matched\" ]] || continue\n");
+    out.push_str("      pattern_matched=1\n");
+    out.push_str("      if [[ -n \"${seen_matches[\"$matched\"]+x}\" ]]; then\n");
+    out.push_str("        continue\n");
+    out.push_str("      fi\n");
+    out.push_str("      seen_matches[\"$matched\"]=1\n");
+    out.push_str("      container_match=\"/hpc-compose/job${matched#\"$JOB_TMP\"}\"\n");
+    out.push_str("      matched_source_paths+=(\"$container_match\")\n");
+    out.push_str("      if [[ \"$matched\" == \"$JOB_TMP\" ]]; then\n");
+    out.push_str("        ARTIFACT_WARNINGS+=(\"skipped reserved root path '/hpc-compose/job'; collect a child path instead\")\n");
+    out.push_str("        continue\n");
+    out.push_str("      fi\n");
+    out.push_str("      relative_path=${matched#\"$JOB_TMP\"/}\n");
+    out.push_str(
+        "      if [[ \"$relative_path\" == \"$matched\" || -z \"$relative_path\" ]]; then\n",
+    );
+    out.push_str(
+        "        ARTIFACT_WARNINGS+=(\"skipped unsupported artifact path '$container_match'\")\n",
+    );
+    out.push_str("        continue\n");
+    out.push_str("      fi\n");
+    out.push_str("      if [[ -n \"${seen_copied[\"$relative_path\"]+x}\" ]]; then\n");
+    out.push_str("        continue\n");
+    out.push_str("      fi\n");
+    out.push_str("      destination=\"$ARTIFACTS_PAYLOAD_DIR/$relative_path\"\n");
+    out.push_str("      if [[ -d \"$matched\" ]]; then\n");
+    out.push_str("        mkdir -p \"$destination\"\n");
+    out.push_str("        if copy_output=$(cp -R \"$matched\"/. \"$destination\" 2>&1); then\n");
+    out.push_str("          seen_copied[\"$relative_path\"]=1\n");
+    out.push_str("          ARTIFACT_COPIED_RELATIVE_PATHS+=(\"$relative_path\")\n");
+    out.push_str("        else\n");
+    out.push_str("          ARTIFACT_WARNINGS+=(\"failed to copy '$container_match': $(trim_whitespace \"${copy_output//$'\\n'/; }\")\")\n");
+    out.push_str("        fi\n");
+    out.push_str("        continue\n");
+    out.push_str("      fi\n");
+    out.push_str("      mkdir -p \"$(dirname \"$destination\")\"\n");
+    out.push_str("      if copy_output=$(cp -R \"$matched\" \"$destination\" 2>&1); then\n");
+    out.push_str("        seen_copied[\"$relative_path\"]=1\n");
+    out.push_str("        ARTIFACT_COPIED_RELATIVE_PATHS+=(\"$relative_path\")\n");
+    out.push_str("      else\n");
+    out.push_str("        ARTIFACT_WARNINGS+=(\"failed to copy '$container_match': $(trim_whitespace \"${copy_output//$'\\n'/; }\")\")\n");
+    out.push_str("      fi\n");
+    out.push_str("    done < <(compgen -G \"$host_pattern\" || true)\n");
+    out.push_str("    if (( pattern_matched == 0 )); then\n");
+    out.push_str(
+        "      ARTIFACT_WARNINGS+=(\"pattern '$declared_pattern' did not match any paths\")\n",
+    );
+    out.push_str("    fi\n");
+    out.push_str("  done\n");
+    out.push_str("  eval \"$shopt_state\"\n");
+    out.push_str("  write_artifact_manifest \"$job_outcome\" \"${matched_source_paths[@]}\"\n");
     out.push_str("}\n\n");
 }
 
@@ -825,6 +1022,7 @@ fn render_dependency_waits(out: &mut String, service: &RuntimeService) {
     }
 }
 
+/// Converts an [`ExecutionSpec`] into the argv used inside the container.
 pub fn execution_argv(execution: &ExecutionSpec, working_dir: Option<&str>) -> Vec<String> {
     match (execution, working_dir) {
         (ExecutionSpec::ImageDefault, None) => Vec::new(),
@@ -855,6 +1053,7 @@ pub fn execution_argv(execution: &ExecutionSpec, working_dir: Option<&str>) -> V
     }
 }
 
+/// Builds the `srun` command line for one runtime service.
 pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
     let mut args = vec![
         "srun".to_string(),
@@ -913,6 +1112,7 @@ fn service_step_name(value: &str) -> String {
     format!("hpc-compose:{}", service_token(value))
 }
 
+/// Converts a service name into the tracked log file name used on disk.
 pub fn log_file_name_for_service(value: &str) -> String {
     format!("{}.log", service_token(value))
 }
@@ -1405,6 +1605,36 @@ mod tests {
         assert!(script.contains("stop_metrics_sampler"));
         assert!(script.contains("GPU_COLLECTOR_ENABLED=1"));
         assert!(script.contains("SLURM_COLLECTOR_ENABLED=1"));
+    }
+
+    #[test]
+    fn render_artifact_collection_helpers_when_enabled() {
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig {
+                artifacts: Some(crate::spec::ArtifactsConfig {
+                    collect: ArtifactCollectPolicy::OnFailure,
+                    export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                    paths: vec![
+                        "/hpc-compose/job/metrics/**".into(),
+                        "/hpc-compose/job/checkpoints/*.pt".into(),
+                    ],
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![runtime_service()],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("ARTIFACTS_DIR=\"$JOB_TMP/artifacts\""));
+        assert!(script.contains("ARTIFACTS_MANIFEST_FILE=\"$ARTIFACTS_DIR/manifest.json\""));
+        assert!(script.contains("ARTIFACTS_COLLECT_POLICY='on_failure'"));
+        assert!(script.contains("ARTIFACT_SOURCE_PATTERNS=('/hpc-compose/job/metrics/**' '/hpc-compose/job/checkpoints/*.pt')"));
+        assert!(script.contains("collect_artifacts \"$code\" || true"));
+        assert!(script.contains("host_pattern=\"$JOB_TMP${declared_pattern#/hpc-compose/job}\""));
+        assert!(script.contains("container_match=\"/hpc-compose/job${matched#\"$JOB_TMP\"}\""));
+        assert!(script.contains("write_artifact_manifest"));
     }
 
     #[test]

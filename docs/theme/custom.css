@@ -1,0 +1,35 @@
+.menu-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.hpc-compose-header-logo {
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 0.3rem;
+  flex: 0 0 auto;
+}
+
+.hpc-compose-hero {
+  text-align: center;
+  margin: 1rem 0 2rem;
+}
+
+.hpc-compose-hero img {
+  width: min(420px, 90%);
+  height: auto;
+}
+
+.hpc-compose-hero p {
+  margin: 0.75rem auto 0;
+  max-width: 42rem;
+}
+
+.hpc-compose-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-top: 1rem;
+}

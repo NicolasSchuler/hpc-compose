@@ -1,3 +1,5 @@
+//! Cache manifest management for imported and prepared image artifacts.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,13 +11,18 @@ use serde::{Deserialize, Serialize};
 use crate::planner::{ImageSource, PreparedImageSpec, registry_host_for_remote};
 use crate::prepare::{RuntimePlan, RuntimeService, base_image_path};
 
+/// The kind of artifact tracked in the cache manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheEntryKind {
+    /// A base image imported directly from a remote reference.
     Base,
+    /// A prepared runtime image derived from a base image.
     Prepared,
 }
 
+/// Metadata stored next to a cached artifact.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheEntryManifest {
     pub kind: CacheEntryKind,
@@ -34,11 +41,14 @@ pub struct CacheEntryManifest {
     pub tool_version: String,
 }
 
+/// Result returned by cache-pruning operations.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct CachePruneResult {
     pub removed: Vec<PathBuf>,
 }
 
+/// Returns the JSON manifest path stored next to an artifact file.
 pub fn manifest_path_for(artifact_path: &Path) -> PathBuf {
     let filename = artifact_path
         .file_name()
@@ -47,6 +57,7 @@ pub fn manifest_path_for(artifact_path: &Path) -> PathBuf {
     artifact_path.with_file_name(format!("{filename}.json"))
 }
 
+/// Creates or updates the manifest for an imported base image.
 pub fn upsert_base_manifest(
     artifact_path: &Path,
     service_name: &str,
@@ -81,6 +92,7 @@ pub fn upsert_base_manifest(
     Ok(manifest)
 }
 
+/// Creates or updates the manifest for a prepared runtime image.
 pub fn upsert_prepared_manifest(
     artifact_path: &Path,
     service_name: &str,
@@ -129,6 +141,7 @@ pub fn upsert_prepared_manifest(
     Ok(manifest)
 }
 
+/// Refreshes the `last_used_at` timestamp for an existing manifest.
 pub fn touch_manifest(artifact_path: &Path) -> Result<()> {
     let Some(mut manifest) = load_manifest_if_exists(artifact_path)? else {
         return Ok(());
@@ -137,6 +150,7 @@ pub fn touch_manifest(artifact_path: &Path) -> Result<()> {
     write_manifest(&manifest)
 }
 
+/// Reads the manifest stored next to an artifact path.
 pub fn read_manifest(artifact_path: &Path) -> Result<CacheEntryManifest> {
     let manifest_path = manifest_path_for(artifact_path);
     let raw = fs::read_to_string(&manifest_path)
@@ -145,6 +159,7 @@ pub fn read_manifest(artifact_path: &Path) -> Result<CacheEntryManifest> {
         .with_context(|| format!("failed to parse {}", manifest_path.display()))
 }
 
+/// Reads a manifest when it exists and returns `None` when it does not.
 pub fn load_manifest_if_exists(artifact_path: &Path) -> Result<Option<CacheEntryManifest>> {
     let manifest_path = manifest_path_for(artifact_path);
     if !manifest_path.exists() {
@@ -153,6 +168,7 @@ pub fn load_manifest_if_exists(artifact_path: &Path) -> Result<Option<CacheEntry
     read_manifest(artifact_path).map(Some)
 }
 
+/// Scans a cache directory recursively for tracked artifact manifests.
 pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
     let mut manifests = Vec::new();
     if !cache_dir.exists() {
@@ -201,6 +217,7 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
     Ok(manifests)
 }
 
+/// Removes cached artifacts whose last-use time is older than the cutoff.
 pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult> {
     let cutoff = unix_timestamp_now().saturating_sub(age_days.saturating_mul(24 * 60 * 60));
     let manifests = scan_cache(cache_dir)?;
@@ -216,6 +233,7 @@ pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult>
     Ok(CachePruneResult { removed })
 }
 
+/// Removes cached artifacts that are not referenced by the given runtime plan.
 pub fn prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePruneResult> {
     let referenced = referenced_artifacts(plan);
     let manifests = scan_cache(cache_dir)?;
@@ -231,6 +249,7 @@ pub fn prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePru
     Ok(CachePruneResult { removed })
 }
 
+/// Returns the artifact paths referenced by a runtime plan.
 pub fn referenced_artifacts(plan: &RuntimePlan) -> HashSet<PathBuf> {
     let mut referenced = HashSet::new();
     for service in &plan.ordered_services {
@@ -242,6 +261,7 @@ pub fn referenced_artifacts(plan: &RuntimePlan) -> HashSet<PathBuf> {
     referenced
 }
 
+/// Computes the cache key used for one service artifact kind.
 pub fn cache_key_for_service(service: &RuntimeService, kind: CacheEntryKind) -> String {
     match kind {
         CacheEntryKind::Base => {
@@ -266,6 +286,7 @@ pub fn cache_key_for_service(service: &RuntimeService, kind: CacheEntryKind) -> 
     }
 }
 
+/// Returns the remote registry hostname associated with an image source.
 pub fn parse_remote_registry(source: &ImageSource) -> Option<String> {
     let ImageSource::Remote(remote) = source else {
         return None;

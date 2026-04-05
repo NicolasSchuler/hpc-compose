@@ -1,3 +1,5 @@
+//! Interactive and non-interactive helpers for `hpc-compose init`.
+
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -5,6 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_yaml::{Mapping, Value};
 
+/// A shipped compose template exposed by `hpc-compose init`.
+#[allow(missing_docs)]
 pub struct Template {
     pub name: &'static str,
     pub description: &'static str,
@@ -60,6 +64,11 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/vllm-openai.yaml"),
     },
     Template {
+        name: "vllm-uv-worker",
+        description: "vLLM serving plus a source-mounted Python worker run through uv.",
+        body: include_str!("../examples/vllm-uv-worker.yaml"),
+    },
+    Template {
         name: "mpi-hello",
         description: "MPI hello world with Open MPI.",
         body: include_str!("../examples/mpi-hello.yaml"),
@@ -77,20 +86,25 @@ const TEMPLATES: &[Template] = &[
 ];
 
 #[derive(Debug, Clone)]
+/// Answers gathered by the interactive `init` flow.
+#[allow(missing_docs)]
 pub struct InitAnswers {
     pub template_name: String,
     pub app_name: String,
     pub cache_dir: String,
 }
 
+/// Returns the built-in compose templates bundled with the binary.
 pub fn templates() -> &'static [Template] {
     TEMPLATES
 }
 
+/// Returns the default shared cache directory suggested by `init`.
 pub fn default_cache_dir() -> &'static str {
     DEFAULT_CACHE_DIR
 }
 
+/// Resolves a template by name, accepting names with or without `.yaml`.
 pub fn resolve_template(name: &str) -> Result<&'static Template> {
     let normalized = name.trim().trim_end_matches(".yaml");
     TEMPLATES
@@ -109,6 +123,7 @@ pub fn resolve_template(name: &str) -> Result<&'static Template> {
         })
 }
 
+/// Prompts on stdin/stdout for template, app name, and cache directory.
 pub fn prompt_for_init() -> Result<InitAnswers> {
     let mut stdout = io::stdout();
     writeln!(stdout, "Choose a template:").ok();
@@ -143,6 +158,7 @@ pub fn prompt_for_init() -> Result<InitAnswers> {
     })
 }
 
+/// Renders a shipped template with the selected application name and cache directory.
 pub fn render_template(template_name: &str, app_name: &str, cache_dir: &str) -> Result<String> {
     let template = resolve_template(template_name)?;
     let mut value: Value = serde_yaml::from_str(template.body)
@@ -175,6 +191,7 @@ pub fn render_template(template_name: &str, app_name: &str, cache_dir: &str) -> 
     serde_yaml::to_string(&value).context("failed to serialize initialized template")
 }
 
+/// Writes a rendered template to disk and returns the absolute output path.
 pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) -> Result<PathBuf> {
     let output = absolute_path(output)?;
     if output.exists() && !force {
@@ -192,12 +209,13 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
     Ok(output)
 }
 
+/// Returns the next CLI commands shown after `init` writes a compose file.
 pub fn next_commands(output: &Path) -> Vec<String> {
     let path = output.display().to_string();
     vec![
+        format!("hpc-compose submit --watch -f {path}"),
         format!("hpc-compose validate -f {path}"),
         format!("hpc-compose inspect -f {path}"),
-        format!("hpc-compose submit --watch -f {path}"),
     ]
 }
 

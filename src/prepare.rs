@@ -1,3 +1,5 @@
+//! Runtime artifact preparation and runtime-plan derivation.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +14,8 @@ use crate::cache::{touch_manifest, upsert_base_manifest, upsert_prepared_manifes
 use crate::planner::{ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec};
 use crate::spec::{ReadinessSpec, ServiceDependency, ServiceSlurmConfig, SlurmConfig};
 
+/// A plan with concrete runtime image paths for every service.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimePlan {
     pub name: String,
@@ -20,6 +24,8 @@ pub struct RuntimePlan {
     pub ordered_services: Vec<RuntimeService>,
 }
 
+/// A runtime-ready service entry with resolved image artifact paths.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeService {
     pub name: String,
@@ -35,6 +41,8 @@ pub struct RuntimeService {
     pub source: ImageSource,
 }
 
+/// Options that control image import and prepare behavior.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct PrepareOptions {
     pub enroot_bin: String,
@@ -52,13 +60,19 @@ impl Default for PrepareOptions {
     }
 }
 
+/// How a runtime artifact was obtained during preparation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactAction {
+    /// The artifact already existed and was used as-is.
     Present,
+    /// The artifact existed in cache and was refreshed for tracking purposes.
     Reused,
+    /// The artifact was built or imported during this run.
     Built,
 }
 
+/// Status for one concrete artifact path produced or reused during prepare.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct ArtifactStatus {
     pub path: PathBuf,
@@ -66,6 +80,8 @@ pub struct ArtifactStatus {
     pub note: Option<String>,
 }
 
+/// Preparation results for one service.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct ServicePrepareResult {
     pub service_name: String,
@@ -73,11 +89,14 @@ pub struct ServicePrepareResult {
     pub runtime_image: ArtifactStatus,
 }
 
+/// Summary of all service preparations in a runtime plan.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Default)]
 pub struct PrepareSummary {
     pub services: Vec<ServicePrepareResult>,
 }
 
+/// Converts a normalized [`Plan`] into a runtime plan with cache artifact paths.
 pub fn build_runtime_plan(plan: &Plan) -> RuntimePlan {
     RuntimePlan {
         name: plan.name.clone(),
@@ -103,6 +122,7 @@ pub fn build_runtime_plan(plan: &Plan) -> RuntimePlan {
     }
 }
 
+/// Imports and prepares any missing runtime artifacts for the given plan.
 pub fn prepare_runtime_plan(
     plan: &RuntimePlan,
     options: &PrepareOptions,
@@ -361,6 +381,7 @@ where
     Ok(())
 }
 
+/// Returns the cache location used for a service's imported base image.
 pub fn base_image_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf {
     let key = base_image_cache_key(service);
     cache_dir.join("base").join(format!(
@@ -524,6 +545,7 @@ fn enroot_env(cache_dir: &Path) -> Vec<(String, String)> {
     ]
 }
 
+/// Verifies that an external binary is available on the current machine.
 pub fn ensure_binary_available(binary: &str, message: &str) -> Result<()> {
     if binary.contains(std::path::MAIN_SEPARATOR) {
         let path = Path::new(binary);

@@ -1,3 +1,5 @@
+//! Normalization from parsed spec into an execution plan.
+
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +14,8 @@ use crate::spec::{
 
 const RESERVED_RUNTIME_MOUNT_DESTINATIONS: &[&str] = &["/hpc-compose/job"];
 
+/// A normalized application plan derived from a compose file.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub name: String,
@@ -22,6 +26,8 @@ pub struct Plan {
     pub ordered_services: Vec<PlannedService>,
 }
 
+/// A normalized service entry inside a [`Plan`].
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct PlannedService {
     pub name: String,
@@ -36,21 +42,30 @@ pub struct PlannedService {
     pub prepare: Option<PreparedImageSpec>,
 }
 
+/// Where a service image comes from after normalization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ImageSource {
+    /// A local `.sqsh` or `.squashfs` file used directly at runtime.
     LocalSqsh(PathBuf),
+    /// A remote image reference imported through Enroot.
     Remote(String),
 }
 
+/// The final command form passed to the runtime container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutionSpec {
+    /// Use the image's default entrypoint and command.
     ImageDefault,
+    /// Run a shell-form command.
     Shell(String),
+    /// Run an exec-form argv vector.
     Exec(Vec<String>),
 }
 
+/// A normalized `x-enroot.prepare` block attached to a service.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct PreparedImageSpec {
     pub commands: Vec<String>,
@@ -60,6 +75,7 @@ pub struct PreparedImageSpec {
     pub force_rebuild: bool,
 }
 
+/// Builds a normalized plan from a validated compose spec.
 pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
     spec.slurm.validate()?;
     let spec_path = normalize_existing_path(spec_path)?;
@@ -314,6 +330,7 @@ fn resolve_cache_dir(slurm: &SlurmConfig, project_dir: &Path) -> Result<PathBuf>
     resolve_path(&raw, project_dir)
 }
 
+/// Returns a user-facing issue for cache paths that violate cluster policy.
 pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
     let banned_prefixes = [
         Path::new("/tmp"),
@@ -333,6 +350,7 @@ pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
     None
 }
 
+/// Extracts the registry hostname used by a remote image reference.
 pub fn registry_host_for_remote(remote: &str) -> String {
     let without_scheme = remote.split("://").nth(1).unwrap_or(remote);
     if let Some((host, _)) = without_scheme.split_once('#') {

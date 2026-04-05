@@ -1,3 +1,6 @@
+//! Tracking, status inspection, log streaming, metrics, and artifact export
+//! for submitted jobs.
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
@@ -18,6 +21,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS: u64 = 15;
 const ACCOUNTING_GAP_GRACE_SECONDS: u64 = 15;
 
+/// Metadata persisted for a submitted job tracked under `.hpc-compose/`.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmissionRecord {
     pub schema_version: u32,
@@ -29,16 +34,24 @@ pub struct SubmissionRecord {
     pub cache_dir: PathBuf,
     pub batch_log: PathBuf,
     pub service_logs: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    pub artifact_export_dir: Option<String>,
 }
 
+/// Source used to determine scheduler state.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulerSource {
+    /// State came from `squeue`.
     Squeue,
+    /// State came from `sacct`.
     Sacct,
+    /// No scheduler data was available; only local tracking data exists.
     LocalOnly,
 }
 
+/// Scheduler state as observed by the tracker.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchedulerStatus {
     pub state: String,
@@ -48,6 +61,8 @@ pub struct SchedulerStatus {
     pub detail: Option<String>,
 }
 
+/// Presence and freshness information for one tracked service log.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceLogStatus {
     pub service_name: String,
@@ -57,6 +72,8 @@ pub struct ServiceLogStatus {
     pub updated_age_seconds: Option<u64>,
 }
 
+/// Presence and freshness information for the top-level batch log.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchLogStatus {
     pub path: PathBuf,
@@ -65,6 +82,8 @@ pub struct BatchLogStatus {
     pub updated_age_seconds: Option<u64>,
 }
 
+/// Combined tracked-job status returned by the `status` command.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusSnapshot {
     pub record: SubmissionRecord,
@@ -74,6 +93,8 @@ pub struct StatusSnapshot {
     pub services: Vec<ServiceLogStatus>,
 }
 
+/// Combined metrics and scheduler view returned by the `stats` command.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsSnapshot {
     pub job_id: String,
@@ -88,6 +109,35 @@ pub struct StatsSnapshot {
     pub steps: Vec<StepStats>,
 }
 
+/// Manifest produced when teardown exports tracked artifacts.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactManifest {
+    pub job_id: String,
+    pub collect_policy: String,
+    pub collected_at: String,
+    pub job_outcome: String,
+    pub declared_source_patterns: Vec<String>,
+    pub matched_source_paths: Vec<String>,
+    pub copied_relative_paths: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Result of copying tracked artifacts into the configured export directory.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactExportReport {
+    pub record: SubmissionRecord,
+    pub manifest_path: PathBuf,
+    pub payload_dir: PathBuf,
+    pub export_dir: PathBuf,
+    pub manifest: ArtifactManifest,
+    pub exported_paths: Vec<PathBuf>,
+    pub warnings: Vec<String>,
+}
+
+/// One Slurm step metrics row as presented by `hpc-compose stats`.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StepStats {
     pub step_id: String,
@@ -104,6 +154,8 @@ pub struct StepStats {
     pub gpu_mem: Option<String>,
 }
 
+/// Snapshot of the job-local metrics sampler outputs.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct SamplerSnapshot {
     pub interval_seconds: u64,
@@ -112,6 +164,8 @@ pub struct SamplerSnapshot {
     pub slurm: Option<SlurmSamplerSnapshot>,
 }
 
+/// Availability metadata for one configured metrics collector.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectorStatus {
     pub name: String,
@@ -121,6 +175,8 @@ pub struct CollectorStatus {
     pub last_sampled_at: Option<String>,
 }
 
+/// GPU telemetry snapshot collected by the job-local sampler.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct GpuSnapshot {
     pub sampled_at: String,
@@ -128,6 +184,8 @@ pub struct GpuSnapshot {
     pub processes: Vec<GpuProcessSample>,
 }
 
+/// One sampled GPU device record.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GpuDeviceSample {
     pub index: Option<String>,
@@ -142,6 +200,8 @@ pub struct GpuDeviceSample {
     pub power_limit_w: Option<String>,
 }
 
+/// One sampled GPU process record.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GpuProcessSample {
     pub gpu_uuid: Option<String>,
@@ -150,12 +210,16 @@ pub struct GpuProcessSample {
     pub used_memory_mib: Option<String>,
 }
 
+/// Slurm metrics sampler output for all observed steps.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct SlurmSamplerSnapshot {
     pub sampled_at: String,
     pub steps: Vec<StepStats>,
 }
 
+/// External binaries used to query scheduler state.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct SchedulerOptions {
     pub squeue_bin: String,
@@ -171,6 +235,8 @@ impl Default for SchedulerOptions {
     }
 }
 
+/// Options for building a metrics snapshot.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct StatsOptions {
     pub scheduler: SchedulerOptions,
@@ -234,10 +300,14 @@ struct SamplerLoadOutcome {
     notes: Vec<String>,
 }
 
+/// Final outcome returned by `watch_submission`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchOutcome {
+    /// The job reached a successful terminal scheduler state.
     Completed(SchedulerStatus),
+    /// The job reached a failed terminal scheduler state.
     Failed(SchedulerStatus),
+    /// The tracker stopped with only local information available.
     Unknown(SchedulerStatus),
 }
 
@@ -249,6 +319,7 @@ struct LogCursor {
     pending: String,
 }
 
+/// Returns the `.hpc-compose` metadata directory for a compose file.
 pub fn metadata_root_for(spec_path: &Path) -> PathBuf {
     spec_path
         .parent()
@@ -256,14 +327,17 @@ pub fn metadata_root_for(spec_path: &Path) -> PathBuf {
         .join(".hpc-compose")
 }
 
+/// Returns the tracked job-record directory for a compose file.
 pub fn jobs_dir_for(spec_path: &Path) -> PathBuf {
     metadata_root_for(spec_path).join("jobs")
 }
 
+/// Returns the path to the "latest tracked job" record file.
 pub fn latest_record_path_for(spec_path: &Path) -> PathBuf {
     metadata_root_for(spec_path).join("latest.json")
 }
 
+/// Builds and persists a new submission record for a submitted job.
 pub fn persist_submission_record(
     spec_path: &Path,
     submit_dir: &Path,
@@ -276,6 +350,7 @@ pub fn persist_submission_record(
     Ok(record)
 }
 
+/// Builds the submission record structure for a job without writing it.
 pub fn build_submission_record(
     spec_path: &Path,
     submit_dir: &Path,
@@ -308,9 +383,15 @@ pub fn build_submission_record(
         cache_dir: plan.cache_dir.clone(),
         batch_log: batch_log_path_for(plan, &submit_dir, job_id),
         service_logs,
+        artifact_export_dir: plan
+            .slurm
+            .artifacts
+            .as_ref()
+            .and_then(|artifacts| artifacts.export_dir.clone()),
     })
 }
 
+/// Writes a submission record to the jobs directory and latest pointer.
 pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
     let jobs_dir = jobs_dir_for(&record.compose_file);
     fs::create_dir_all(&jobs_dir)
@@ -320,11 +401,14 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
     Ok(())
 }
 
+/// Result returned by tracked-job cleanup commands.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct CleanResult {
     pub removed_jobs: Vec<String>,
 }
 
+/// Loads every tracked job record for the given compose file.
 pub fn scan_job_records(spec_path: &Path) -> Result<Vec<SubmissionRecord>> {
     let compose_file = absolute_path(spec_path)?;
     let jobs_dir = jobs_dir_for(&compose_file);
@@ -347,6 +431,7 @@ pub fn scan_job_records(spec_path: &Path) -> Result<Vec<SubmissionRecord>> {
     Ok(records)
 }
 
+/// Removes tracked job metadata older than the given age in days.
 pub fn clean_by_age(spec_path: &Path, age_days: u64) -> Result<CleanResult> {
     let compose_file = absolute_path(spec_path)?;
     let records = scan_job_records(&compose_file)?;
@@ -363,6 +448,7 @@ pub fn clean_by_age(spec_path: &Path, age_days: u64) -> Result<CleanResult> {
     })
 }
 
+/// Removes all tracked job metadata except the latest record.
 pub fn clean_all_except_latest(spec_path: &Path) -> Result<CleanResult> {
     let compose_file = absolute_path(spec_path)?;
     let latest_path = latest_record_path_for(&compose_file);
@@ -403,6 +489,7 @@ fn remove_job_artifacts(compose_file: &Path, job_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Loads one tracked submission record, defaulting to the latest job.
 pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<SubmissionRecord> {
     let compose_file = absolute_path(spec_path)?;
     let path = match job_id {
@@ -427,6 +514,7 @@ pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<
     read_json(&path)
 }
 
+/// Builds the tracked status snapshot used by `hpc-compose status`.
 pub fn build_status_snapshot(
     spec_path: &Path,
     job_id: Option<&str>,
@@ -464,6 +552,7 @@ pub fn build_status_snapshot(
     })
 }
 
+/// Builds the tracked metrics snapshot used by `hpc-compose stats`.
 pub fn build_stats_snapshot(
     spec_path: &Path,
     job_id: Option<&str>,
@@ -568,6 +657,7 @@ pub fn build_stats_snapshot(
     })
 }
 
+/// Probes scheduler state using `squeue` first and `sacct` as fallback.
 pub fn probe_scheduler_status(job_id: &str, options: &SchedulerOptions) -> SchedulerStatus {
     probe_squeue(job_id, &options.squeue_bin)
         .or_else(|| probe_sacct(job_id, &options.sacct_bin))
@@ -583,6 +673,7 @@ pub fn probe_scheduler_status(job_id: &str, options: &SchedulerOptions) -> Sched
         })
 }
 
+/// Returns the tracked log directory for a submission record.
 pub fn log_dir_for_record(record: &SubmissionRecord) -> PathBuf {
     record
         .service_logs
@@ -598,12 +689,98 @@ pub fn log_dir_for_record(record: &SubmissionRecord) -> PathBuf {
         })
 }
 
+/// Returns the tracked metrics directory for a submission record.
 pub fn metrics_dir_for_record(record: &SubmissionRecord) -> PathBuf {
     record
         .submit_dir
         .join(".hpc-compose")
         .join(&record.job_id)
         .join("metrics")
+}
+
+/// Returns the tracked artifacts directory for a submission record.
+pub fn artifacts_dir_for_record(record: &SubmissionRecord) -> PathBuf {
+    record
+        .submit_dir
+        .join(".hpc-compose")
+        .join(&record.job_id)
+        .join("artifacts")
+}
+
+/// Returns the tracked artifact manifest path for a submission record.
+pub fn artifact_manifest_path_for_record(record: &SubmissionRecord) -> PathBuf {
+    artifacts_dir_for_record(record).join("manifest.json")
+}
+
+/// Returns the tracked artifact payload directory for a submission record.
+pub fn artifact_payload_dir_for_record(record: &SubmissionRecord) -> PathBuf {
+    artifacts_dir_for_record(record).join("payload")
+}
+
+/// Copies tracked artifacts for a completed job into its configured export directory.
+pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<ArtifactExportReport> {
+    let record = load_submission_record(spec_path, job_id)?;
+    let export_dir_template = record.artifact_export_dir.as_deref().with_context(|| {
+        format!(
+            "tracked submission metadata for job {} does not include x-slurm.artifacts.export_dir; resubmit with artifact tracking enabled",
+            record.job_id
+        )
+    })?;
+
+    let manifest_path = artifact_manifest_path_for_record(&record);
+    if !manifest_path.exists() {
+        bail!(
+            "tracked artifact manifest does not exist for job {} at {}; submit the job and wait for teardown collection to finish first",
+            record.job_id,
+            manifest_path.display()
+        );
+    }
+    let manifest: ArtifactManifest = read_json(&manifest_path)?;
+    if manifest.job_id != record.job_id {
+        bail!(
+            "artifact manifest job id {} does not match tracked job {}",
+            manifest.job_id,
+            record.job_id
+        );
+    }
+
+    let payload_dir = artifact_payload_dir_for_record(&record);
+    let export_dir = resolve_export_dir(&record.compose_file, export_dir_template, &record.job_id);
+    fs::create_dir_all(&export_dir)
+        .with_context(|| format!("failed to create {}", export_dir.display()))?;
+
+    let mut warnings = manifest.warnings.clone();
+    let mut exported_paths = Vec::new();
+    for relative_path in &manifest.copied_relative_paths {
+        let source = payload_dir.join(relative_path);
+        if !source.exists() {
+            warnings.push(format!(
+                "collected payload path '{}' is missing under {}",
+                relative_path,
+                payload_dir.display()
+            ));
+            continue;
+        }
+        let destination = export_dir.join(relative_path);
+        copy_path_recursive(&source, &destination).with_context(|| {
+            format!(
+                "failed to export artifact '{}' to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        exported_paths.push(destination);
+    }
+
+    Ok(ArtifactExportReport {
+        record,
+        manifest_path,
+        payload_dir,
+        export_dir,
+        manifest,
+        exported_paths,
+        warnings,
+    })
 }
 
 fn load_sampler_snapshot(metrics_dir: &Path) -> SamplerLoadOutcome {
@@ -869,6 +1046,7 @@ fn required_json_string(field: &str, value: Option<String>) -> Result<String> {
     value.with_context(|| format!("missing required field '{field}'"))
 }
 
+/// Prints tracked service logs, optionally following them until interrupted.
 pub fn print_logs(
     record: &SubmissionRecord,
     service: Option<&str>,
@@ -893,6 +1071,7 @@ pub fn print_logs(
     }
 }
 
+/// Streams tracked logs and scheduler state changes until the job finishes.
 pub fn watch_submission(
     record: &SubmissionRecord,
     options: &SchedulerOptions,
@@ -951,6 +1130,7 @@ pub fn watch_submission(
     }
 }
 
+/// Returns the human-readable label for a scheduler source.
 pub fn scheduler_source_label(source: SchedulerSource) -> &'static str {
     match source {
         SchedulerSource::Squeue => "squeue",
@@ -982,6 +1162,91 @@ fn normalize_path(path: PathBuf) -> PathBuf {
         }
     }
     normalized
+}
+
+fn resolve_export_dir(compose_file: &Path, template: &str, job_id: &str) -> PathBuf {
+    let rendered = template.replace("${SLURM_JOB_ID}", job_id);
+    let candidate = PathBuf::from(rendered);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        compose_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(candidate)
+    }
+}
+
+fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to read metadata for {}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        return copy_symlink(source, destination);
+    }
+
+    if metadata.is_dir() {
+        fs::create_dir_all(destination)
+            .with_context(|| format!("failed to create {}", destination.display()))?;
+        for entry in
+            fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+        {
+            let entry = entry?;
+            copy_path_recursive(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn remove_existing_destination(path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    } else if metadata.is_dir() {
+        fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(source: &Path, destination: &Path) -> Result<()> {
+    let target = fs::read_link(source)
+        .with_context(|| format!("failed to read link {}", source.display()))?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    remove_existing_destination(destination)?;
+    std::os::unix::fs::symlink(&target, destination).with_context(|| {
+        format!(
+            "failed to recreate symlink {} -> {}",
+            destination.display(),
+            target.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(source: &Path, _destination: &Path) -> Result<()> {
+    bail!(
+        "exporting symlinks is not supported on this platform: {}",
+        source.display()
+    );
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -1967,6 +2232,257 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
         );
         assert_eq!(snapshot.steps.len(), 1);
         assert_eq!(snapshot.steps[0].gpu_util.as_deref(), Some("91"));
+    }
+
+    #[test]
+    fn export_artifacts_copies_payloads_into_resolved_directory() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &compose,
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/metrics/**
+services:
+  app:
+    image: redis:7
+"#,
+        )
+        .expect("compose");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.artifacts = Some(crate::spec::ArtifactsConfig {
+            collect: crate::spec::ArtifactCollectPolicy::Always,
+            export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+            paths: vec!["/hpc-compose/job/metrics/**".into()],
+        });
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(payload_dir.join("metrics")).expect("metrics dir");
+        fs::write(payload_dir.join("metrics/meta.json"), "{\"ok\":true}\n").expect("meta");
+        fs::write(
+            artifact_manifest_path_for_record(&record),
+            serde_json::to_vec_pretty(&ArtifactManifest {
+                job_id: "12345".into(),
+                collect_policy: "always".into(),
+                collected_at: "2026-04-05T10:00:00Z".into(),
+                job_outcome: "success".into(),
+                declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
+                copied_relative_paths: vec!["metrics/meta.json".into()],
+                warnings: vec![
+                    "pattern '/hpc-compose/job/unused/*' did not match any paths".into(),
+                ],
+            })
+            .expect("manifest"),
+        )
+        .expect("write manifest");
+
+        let report = export_artifacts(&compose, None).expect("export");
+        assert_eq!(report.record.job_id, "12345");
+        assert_eq!(report.export_dir, tmpdir.path().join("results/12345"));
+        assert_eq!(report.exported_paths.len(), 1);
+        assert_eq!(
+            fs::read_to_string(report.export_dir.join("metrics/meta.json")).expect("exported"),
+            "{\"ok\":true}\n"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("did not match any paths"))
+        );
+    }
+
+    #[test]
+    fn export_artifacts_uses_tracked_export_dir_without_reparsing_compose() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &compose,
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/metrics/**
+services:
+  app:
+    image: redis:7
+"#,
+        )
+        .expect("compose");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.artifacts = Some(crate::spec::ArtifactsConfig {
+            collect: crate::spec::ArtifactCollectPolicy::Always,
+            export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+            paths: vec!["/hpc-compose/job/metrics/**".into()],
+        });
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(payload_dir.join("metrics")).expect("metrics dir");
+        fs::write(payload_dir.join("metrics/meta.json"), "{\"ok\":true}\n").expect("meta");
+        fs::write(
+            artifact_manifest_path_for_record(&record),
+            serde_json::to_vec_pretty(&ArtifactManifest {
+                job_id: "12345".into(),
+                collect_policy: "always".into(),
+                collected_at: "2026-04-05T10:00:00Z".into(),
+                job_outcome: "success".into(),
+                declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
+                copied_relative_paths: vec!["metrics/meta.json".into()],
+                warnings: Vec::new(),
+            })
+            .expect("manifest"),
+        )
+        .expect("write manifest");
+
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("mutate compose");
+
+        let report = export_artifacts(&compose, None).expect("export");
+        assert_eq!(report.export_dir, tmpdir.path().join("results/12345"));
+        assert_eq!(
+            fs::read_to_string(report.export_dir.join("metrics/meta.json")).expect("exported"),
+            "{\"ok\":true}\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_artifacts_preserves_symlinks() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &compose,
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/checkpoints/**
+services:
+  app:
+    image: redis:7
+"#,
+        )
+        .expect("compose");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.artifacts = Some(crate::spec::ArtifactsConfig {
+            collect: crate::spec::ArtifactCollectPolicy::Always,
+            export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+            paths: vec!["/hpc-compose/job/checkpoints/**".into()],
+        });
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(payload_dir.join("checkpoints")).expect("checkpoints dir");
+        fs::write(payload_dir.join("checkpoints/step-1.bin"), "weights").expect("weights");
+        std::os::unix::fs::symlink("step-1.bin", payload_dir.join("checkpoints/latest"))
+            .expect("symlink");
+        fs::write(
+            artifact_manifest_path_for_record(&record),
+            serde_json::to_vec_pretty(&ArtifactManifest {
+                job_id: "12345".into(),
+                collect_policy: "always".into(),
+                collected_at: "2026-04-05T10:00:00Z".into(),
+                job_outcome: "success".into(),
+                declared_source_patterns: vec!["/hpc-compose/job/checkpoints/**".into()],
+                matched_source_paths: vec![
+                    "/hpc-compose/job/checkpoints/step-1.bin".into(),
+                    "/hpc-compose/job/checkpoints/latest".into(),
+                ],
+                copied_relative_paths: vec!["checkpoints".into()],
+                warnings: Vec::new(),
+            })
+            .expect("manifest"),
+        )
+        .expect("write manifest");
+
+        let report = export_artifacts(&compose, None).expect("export");
+        let latest = report.export_dir.join("checkpoints/latest");
+        let metadata = fs::symlink_metadata(&latest).expect("latest metadata");
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(&latest).expect("read link"),
+            PathBuf::from("step-1.bin")
+        );
+    }
+
+    #[test]
+    fn export_artifacts_requires_manifest_and_configured_block() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let plan = runtime_plan(tmpdir.path());
+        persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+
+        let err = export_artifacts(&compose, None).expect_err("missing config");
+        assert!(err.to_string().contains("tracked submission metadata"));
+
+        let mut plan_with_artifacts = runtime_plan(tmpdir.path());
+        plan_with_artifacts.slurm.artifacts = Some(crate::spec::ArtifactsConfig {
+            collect: crate::spec::ArtifactCollectPolicy::Always,
+            export_dir: Some("./results".into()),
+            paths: vec!["/hpc-compose/job/metrics/**".into()],
+        });
+        fs::write(
+            &compose,
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results
+    paths:
+      - /hpc-compose/job/metrics/**
+services:
+  app:
+    image: redis:7
+"#,
+        )
+        .expect("compose with artifacts");
+        persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job-with-artifacts.sbatch"),
+            &plan_with_artifacts,
+            "67890",
+        )
+        .expect("record with artifacts");
+
+        let err = export_artifacts(&compose, Some("67890")).expect_err("missing manifest");
+        assert!(
+            err.to_string()
+                .contains("tracked artifact manifest does not exist")
+        );
     }
 
     #[test]

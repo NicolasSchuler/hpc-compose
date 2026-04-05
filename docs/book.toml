@@ -1,0 +1,21 @@
+[book]
+authors = ["Nicolas Schuler"]
+language = "en"
+src = "src"
+title = "hpc-compose"
+description = "User and contributor documentation for hpc-compose"
+
+[build]
+build-dir = "../target/mdbook"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+site-url = "/hpc-compose/"
+git-repository-url = "https://github.com/NicolasSchuler/hpc-compose"
+edit-url-template = "https://github.com/NicolasSchuler/hpc-compose/edit/main/docs/{path}"
+additional-css = ["theme/custom.css"]
+additional-js = ["theme/custom.js"]
+fold = { enable = true, level = 1 }
+no-section-label = true

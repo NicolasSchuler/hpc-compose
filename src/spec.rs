@@ -1,3 +1,5 @@
+//! Compose-like spec parsing, interpolation, and validation.
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -21,6 +23,8 @@ const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "x-enroot",
 ];
 
+/// Top-level compose file accepted by `hpc-compose`.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ComposeSpec {
     #[serde(default)]
@@ -30,6 +34,8 @@ pub struct ComposeSpec {
     pub services: BTreeMap<String, ServiceSpec>,
 }
 
+/// Top-level `x-slurm` configuration shared by all services.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlurmConfig {
@@ -66,18 +72,51 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
     #[serde(default)]
+    pub artifacts: Option<ArtifactsConfig>,
+    #[serde(default)]
     pub setup: Vec<String>,
     #[serde(default)]
     pub submit_args: Vec<String>,
 }
 
+/// Artifact collection policy applied during batch teardown.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactCollectPolicy {
+    /// Export artifacts after every job.
+    #[default]
+    Always,
+    /// Export artifacts only for successful jobs.
+    OnSuccess,
+    /// Export artifacts only for failed jobs.
+    OnFailure,
+}
+
+/// Top-level `x-slurm.artifacts` configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactsConfig {
+    #[serde(default)]
+    pub collect: ArtifactCollectPolicy,
+    #[serde(default)]
+    pub export_dir: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// Runtime metrics collector supported by the job sampler.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricsCollector {
+    /// Collect GPU telemetry through `nvidia-smi`.
     Gpu,
+    /// Collect Slurm step metrics through `sstat`.
     Slurm,
 }
 
+/// Top-level `x-slurm.metrics` configuration.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
@@ -89,6 +128,8 @@ pub struct MetricsConfig {
     pub collectors: Vec<MetricsCollector>,
 }
 
+/// One service entry from the compose file.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceSpec {
     pub image: String,
@@ -112,6 +153,8 @@ pub struct ServiceSpec {
     pub enroot: ServiceEnrootConfig,
 }
 
+/// Per-service `x-slurm` overrides.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSlurmConfig {
@@ -125,6 +168,8 @@ pub struct ServiceSlurmConfig {
     pub extra_srun_args: Vec<String>,
 }
 
+/// Per-service `x-enroot` configuration.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceEnrootConfig {
@@ -132,6 +177,8 @@ pub struct ServiceEnrootConfig {
     pub prepare: Option<PrepareSpec>,
 }
 
+/// `x-enroot.prepare` customization for rebuilding an image on the login node.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareSpec {
@@ -145,15 +192,21 @@ pub struct PrepareSpec {
     pub root: bool,
 }
 
+/// Accepted `depends_on` shapes.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(untagged)]
 pub enum DependsOnSpec {
+    /// No dependencies were declared.
     #[default]
     None,
+    /// Compose list shorthand, which implies `service_started`.
     List(Vec<String>),
+    /// Mapping form with explicit dependency conditions.
     Map(BTreeMap<String, DependsOnConditionSpec>),
 }
 
+/// Dependency condition declared for one dependency edge.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependsOnConditionSpec {
@@ -161,57 +214,83 @@ pub struct DependsOnConditionSpec {
     pub condition: Option<String>,
 }
 
+/// Normalized dependency conditions understood by the planner.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyCondition {
+    /// Wait only until the upstream service is started.
     ServiceStarted,
+    /// Wait until the upstream service reports readiness.
     ServiceHealthy,
 }
 
+/// A normalized service dependency edge.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceDependency {
     pub name: String,
     pub condition: DependencyCondition,
 }
 
+/// Accepted environment syntaxes for service or prepare environments.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(untagged)]
 pub enum EnvironmentSpec {
+    /// No environment variables were declared.
     #[default]
     None,
+    /// Mapping form such as `{ FOO: bar }`.
     Map(BTreeMap<String, String>),
+    /// List form such as `["FOO=bar"]`.
     List(Vec<String>),
 }
 
+/// Accepted command or entrypoint syntaxes.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum CommandSpec {
+    /// Shell form command.
     String(String),
+    /// Exec form argv vector.
     Vec(Vec<String>),
 }
 
+/// Readiness checks supported by `hpc-compose`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReadinessSpec {
+    /// Wait for a fixed amount of time.
     Sleep {
+        /// Number of seconds to sleep.
         seconds: u64,
     },
+    /// Poll a TCP port.
     Tcp {
+        /// Port to connect to.
         port: u16,
+        /// Optional host; defaults to localhost inside the job.
         #[serde(default)]
         host: Option<String>,
+        /// Optional readiness timeout.
         #[serde(default)]
         timeout_seconds: Option<u64>,
     },
+    /// Wait until a pattern appears in the service log.
     Log {
+        /// Literal pattern to look for in the log.
         pattern: String,
+        /// Optional readiness timeout.
         #[serde(default)]
         timeout_seconds: Option<u64>,
     },
+    /// Poll an HTTP endpoint.
     Http {
+        /// URL to request.
         url: String,
+        /// Expected success status code.
         #[serde(default = "default_http_status_code")]
         status_code: u16,
+        /// Optional readiness timeout.
         #[serde(default)]
         timeout_seconds: Option<u64>,
     },
@@ -222,6 +301,7 @@ fn default_http_status_code() -> u16 {
 }
 
 impl ComposeSpec {
+    /// Loads, interpolates, and validates a compose file from disk.
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read spec at {}", path.display()))?;
@@ -251,6 +331,7 @@ impl ComposeSpec {
 }
 
 impl DependsOnSpec {
+    /// Normalizes the dependency declaration into explicit dependency edges.
     pub fn entries(&self) -> Result<Vec<ServiceDependency>> {
         match self {
             DependsOnSpec::None => Ok(Vec::new()),
@@ -283,6 +364,7 @@ impl DependsOnSpec {
         }
     }
 
+    /// Returns only the dependency names, discarding their conditions.
     pub fn names(&self) -> Result<Vec<String>> {
         self.entries()
             .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
@@ -290,6 +372,7 @@ impl DependsOnSpec {
 }
 
 impl EnvironmentSpec {
+    /// Normalizes the environment declaration into key/value pairs.
     pub fn to_pairs(&self) -> Result<Vec<(String, String)>> {
         match self {
             EnvironmentSpec::None => Ok(Vec::new()),
@@ -332,10 +415,12 @@ impl EnvironmentSpec {
 }
 
 impl CommandSpec {
+    /// Returns `true` when this command uses shell-string form.
     pub fn is_string(&self) -> bool {
         matches!(self, CommandSpec::String(_))
     }
 
+    /// Returns the shell-form string when this command uses string form.
     pub fn as_string(&self) -> Option<&str> {
         match self {
             CommandSpec::String(value) => Some(value),
@@ -343,6 +428,7 @@ impl CommandSpec {
         }
     }
 
+    /// Returns the exec-form argv when this command uses vector form.
     pub fn as_vec(&self) -> Option<&[String]> {
         match self {
             CommandSpec::String(_) => None,
@@ -368,12 +454,14 @@ fn default_true() -> bool {
 }
 
 impl SlurmConfig {
+    /// Returns whether runtime metrics sampling is enabled.
     pub fn metrics_enabled(&self) -> bool {
         self.metrics
             .as_ref()
             .is_some_and(|metrics| metrics.enabled.unwrap_or(true))
     }
 
+    /// Returns the runtime metrics sampling interval in seconds.
     pub fn metrics_interval_seconds(&self) -> u64 {
         self.metrics
             .as_ref()
@@ -381,6 +469,7 @@ impl SlurmConfig {
             .unwrap_or(5)
     }
 
+    /// Returns the configured runtime metrics collectors with defaults applied.
     pub fn metrics_collectors(&self) -> Vec<MetricsCollector> {
         let Some(metrics) = &self.metrics else {
             return Vec::new();
@@ -392,11 +481,39 @@ impl SlurmConfig {
         }
     }
 
+    /// Returns whether teardown artifact collection is enabled.
+    pub fn artifacts_enabled(&self) -> bool {
+        self.artifacts.is_some()
+    }
+
+    /// Returns the configured artifact collection policy or the default.
+    pub fn artifacts_collect_policy(&self) -> ArtifactCollectPolicy {
+        self.artifacts
+            .as_ref()
+            .map(|artifacts| artifacts.collect)
+            .unwrap_or_default()
+    }
+
+    /// Validates semantic rules that serde alone cannot express.
     pub fn validate(&self) -> Result<()> {
         if let Some(metrics) = &self.metrics
             && matches!(metrics.interval_seconds, Some(0))
         {
             bail!("x-slurm.metrics.interval_seconds must be at least 1");
+        }
+        if let Some(artifacts) = &self.artifacts {
+            let Some(export_dir) = artifacts.export_dir.as_deref() else {
+                bail!("x-slurm.artifacts.export_dir is required when x-slurm.artifacts is present");
+            };
+            if export_dir.trim().is_empty() {
+                bail!("x-slurm.artifacts.export_dir must not be empty");
+            }
+            if artifacts.paths.is_empty() {
+                bail!("x-slurm.artifacts.paths must contain at least one source path");
+            }
+            for path in &artifacts.paths {
+                validate_artifact_path(path)?;
+            }
         }
         Ok(())
     }
@@ -414,7 +531,24 @@ impl SlurmConfig {
         interpolate_optional_string(&mut self.error, vars)?;
         interpolate_optional_string(&mut self.chdir, vars)?;
         interpolate_optional_string(&mut self.cache_dir, vars)?;
+        if let Some(artifacts) = &mut self.artifacts {
+            artifacts.interpolate(vars)?;
+        }
         interpolate_vec_strings(&mut self.submit_args, vars)?;
+        Ok(())
+    }
+}
+
+impl ArtifactsConfig {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        if let Some(export_dir) = &mut self.export_dir {
+            let mut vars_with_job_id = vars.clone();
+            const JOB_ID_SENTINEL: &str = "__HPC_COMPOSE_SLURM_JOB_ID__";
+            vars_with_job_id.insert("SLURM_JOB_ID".to_string(), JOB_ID_SENTINEL.to_string());
+            *export_dir = interpolate_string(export_dir, &vars_with_job_id)?
+                .replace(JOB_ID_SENTINEL, "${SLURM_JOB_ID}");
+        }
+        interpolate_vec_strings(&mut self.paths, vars)?;
         Ok(())
     }
 }
@@ -636,6 +770,44 @@ fn is_var_start(ch: char) -> bool {
 
 fn is_var_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn validate_artifact_path(path: &str) -> Result<()> {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        bail!(
+            "x-slurm.artifacts.paths entries must be absolute paths under /hpc-compose/job, got '{path}'"
+        );
+    }
+
+    let mut normalized = Vec::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop().with_context(|| {
+                    format!("x-slurm.artifacts.paths entry '{path}' escapes the root path")
+                })?;
+            }
+            std::path::Component::Normal(part) => {
+                normalized.push(part.to_string_lossy().into_owned())
+            }
+            std::path::Component::Prefix(_) => {
+                bail!("x-slurm.artifacts.paths entry '{path}' must use Unix-style absolute paths");
+            }
+        }
+    }
+
+    if normalized.first().map(String::as_str) != Some("hpc-compose")
+        || normalized.get(1).map(String::as_str) != Some("job")
+    {
+        bail!("x-slurm.artifacts.paths entries must stay under /hpc-compose/job, got '{path}'");
+    }
+    if normalized.get(2).map(String::as_str) == Some("artifacts") {
+        bail!("x-slurm.artifacts.paths must not read from /hpc-compose/job/artifacts");
+    }
+    Ok(())
 }
 
 fn validate_root(value: &Value) -> Result<()> {
@@ -925,6 +1097,138 @@ services:
         );
         let err = ComposeSpec::load(&path).expect_err("should fail");
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn artifacts_block_defaults_to_always_and_accepts_job_mount_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results
+    paths:
+      - /hpc-compose/job/metrics/**
+      - /hpc-compose/job/checkpoints/*.pt
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        assert!(spec.slurm.artifacts_enabled());
+        assert_eq!(
+            spec.slurm.artifacts_collect_policy(),
+            ArtifactCollectPolicy::Always
+        );
+        let artifacts = spec.slurm.artifacts.expect("artifacts");
+        assert_eq!(artifacts.export_dir.as_deref(), Some("./results"));
+        assert_eq!(artifacts.paths.len(), 2);
+    }
+
+    #[test]
+    fn artifacts_block_rejects_missing_export_dir() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    paths:
+      - /hpc-compose/job/metrics/**
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(err.to_string().contains("artifacts.export_dir"));
+    }
+
+    #[test]
+    fn artifacts_block_rejects_empty_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results
+    paths: []
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("must contain at least one source path")
+        );
+    }
+
+    #[test]
+    fn artifacts_block_rejects_non_absolute_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results
+    paths:
+      - ./checkpoints/*.pt
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(err.to_string().contains("must be absolute"));
+    }
+
+    #[test]
+    fn artifacts_block_rejects_paths_outside_job_mount() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results
+    paths:
+      - /tmp/output.txt
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(err.to_string().contains("/hpc-compose/job"));
+    }
+
+    #[test]
+    fn artifacts_block_rejects_recursive_artifacts_sources() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results
+    paths:
+      - /hpc-compose/job/artifacts/**
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("must not read from /hpc-compose/job/artifacts")
+        );
     }
 
     #[test]

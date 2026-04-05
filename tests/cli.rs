@@ -151,6 +151,22 @@ exit 0
     path
 }
 
+fn write_fake_srun_failure(tmpdir: &Path) -> PathBuf {
+    let path = tmpdir.join("srun-fail");
+    write_script(
+        &path,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+exit 17
+"#,
+    );
+    path
+}
+
 fn write_fake_sbatch(tmpdir: &Path) -> PathBuf {
     let path = tmpdir.join("sbatch");
     write_script(
@@ -175,6 +191,26 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_SUBMIT_DIR="$PWD"
 bash "$script_path" >/dev/null 2>&1
+echo "Submitted batch job 12345"
+"#,
+            tmpdir.display()
+        ),
+    );
+    path
+}
+
+fn write_fake_sbatch_runs_script_ignoring_job_exit(tmpdir: &Path) -> PathBuf {
+    let path = tmpdir.join("sbatch-run-script-ignore-exit");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+script_path="${{1:?missing script path}}"
+PATH="{}:$PATH"
+export SLURM_JOB_ID=12345
+export SLURM_SUBMIT_DIR="$PWD"
+bash "$script_path" >/dev/null 2>&1 || true
 echo "Submitted batch job 12345"
 "#,
             tmpdir.display()
@@ -428,6 +464,65 @@ services:
 "#,
             cache_dir.display()
         ),
+    )
+}
+
+fn write_artifacts_compose_with_paths(
+    tmpdir: &Path,
+    cache_dir: &Path,
+    collect_policy: &str,
+    paths: &[&str],
+) -> PathBuf {
+    fs::create_dir_all(tmpdir.join("app")).expect("app dir");
+    fs::write(tmpdir.join("app/main.py"), "print('hello')\n").expect("main.py");
+    let paths_yaml = paths
+        .iter()
+        .map(|path| format!("      - {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_compose(
+        tmpdir,
+        &format!("compose-artifacts-{collect_policy}.yaml"),
+        &format!(
+            r#"
+name: demo
+x-slurm:
+  job_name: demo
+  time: "00:10:00"
+  cache_dir: {}
+  metrics:
+    interval_seconds: 1
+  artifacts:
+    collect: {}
+    export_dir: ./results/${{SLURM_JOB_ID}}
+    paths:
+{}
+services:
+  app:
+    image: python:3.11-slim
+    working_dir: /workspace
+    volumes:
+      - ./app:/workspace
+    command:
+      - python
+      - main.py
+"#,
+            cache_dir.display(),
+            collect_policy,
+            paths_yaml
+        ),
+    )
+}
+
+fn write_artifacts_compose(tmpdir: &Path, cache_dir: &Path, collect_policy: &str) -> PathBuf {
+    write_artifacts_compose_with_paths(
+        tmpdir,
+        cache_dir,
+        collect_policy,
+        &[
+            "/hpc-compose/job/metrics/**",
+            "/hpc-compose/job/missing/*.txt",
+        ],
     )
 }
 
@@ -1709,6 +1804,7 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         "llm-curl-workflow",
         "llm-curl-workflow-workdir",
         "llama-app",
+        "vllm-uv-worker",
     ] {
         let output = tmpdir.path().join(format!("{template}.yaml"));
         let init = run_cli(
@@ -1774,6 +1870,240 @@ fn submit_dry_run_skips_sbatch() {
     assert!(out.contains("dry run: skipping sbatch submission"));
     assert!(!out.contains("Submitted batch job"));
     assert!(script_out.exists());
+}
+
+#[test]
+fn artifacts_command_exports_collected_metrics_and_json() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_artifacts_compose(tmpdir.path(), &cache_dir, "always");
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script(tmpdir.path());
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let tracked_manifest = tmpdir
+        .path()
+        .join(".hpc-compose/12345/artifacts/manifest.json");
+    assert!(tracked_manifest.exists(), "artifact manifest should exist");
+    let tracked_manifest_value: Value =
+        serde_json::from_str(&fs::read_to_string(&tracked_manifest).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(
+        tracked_manifest_value["job_outcome"],
+        Value::from("success")
+    );
+    assert!(
+        tracked_manifest_value["copied_relative_paths"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|item| item.as_str() == Some("metrics/meta.json"))
+    );
+    assert!(
+        tracked_manifest_value["warnings"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|item| item
+                .as_str()
+                .unwrap_or_default()
+                .contains("did not match any paths"))
+    );
+
+    let artifacts = run_cli(
+        tmpdir.path(),
+        &[
+            "artifacts",
+            "-f",
+            compose.to_str().expect("path"),
+            "--json",
+            "--job-id",
+            "12345",
+        ],
+    );
+    assert_success(&artifacts);
+    let value: Value = serde_json::from_str(&stdout_text(&artifacts)).expect("artifacts json");
+    assert!(
+        value["export_dir"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("/results/12345")
+    );
+    assert!(
+        value["exported_paths"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|item| item
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("/results/12345/metrics/meta.json"))
+    );
+    assert_eq!(
+        fs::read_to_string(tmpdir.path().join("results/12345/metrics/meta.json"))
+            .expect("exported"),
+        fs::read_to_string(
+            tmpdir
+                .path()
+                .join(".hpc-compose/12345/artifacts/payload/metrics/meta.json")
+        )
+        .expect("payload")
+    );
+}
+
+#[test]
+fn artifact_collection_handles_overlapping_paths_without_nested_directories() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    fs::create_dir_all(tmpdir.path().join("app")).expect("app dir");
+    fs::write(tmpdir.path().join("app/main.py"), "print('hello')\n").expect("main.py");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose-artifacts-overlap.yaml",
+        &format!(
+            r#"
+name: demo
+x-slurm:
+  job_name: demo
+  time: "00:10:00"
+  cache_dir: {}
+  artifacts:
+    collect: always
+    export_dir: ./results/${{SLURM_JOB_ID}}
+    paths:
+      - /hpc-compose/job/logs/app.log
+      - /hpc-compose/job/logs
+services:
+  app:
+    image: python:3.11-slim
+    working_dir: /workspace
+    volumes:
+      - ./app:/workspace
+    command:
+      - python
+      - main.py
+"#,
+            cache_dir.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script(tmpdir.path());
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let payload_root = tmpdir
+        .path()
+        .join(".hpc-compose/12345/artifacts/payload/logs");
+    assert!(payload_root.join("app.log").exists());
+    assert!(!payload_root.join("logs/app.log").exists());
+
+    let artifacts = run_cli(
+        tmpdir.path(),
+        &[
+            "artifacts",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "12345",
+        ],
+    );
+    assert_success(&artifacts);
+    assert!(tmpdir.path().join("results/12345/logs/app.log").exists());
+    assert!(
+        !tmpdir
+            .path()
+            .join("results/12345/logs/logs/app.log")
+            .exists()
+    );
+}
+
+#[test]
+fn artifact_collection_policy_skips_when_job_outcome_does_not_match() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_artifacts_compose(tmpdir.path(), &cache_dir, "on_success");
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun_failure(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script_ignoring_job_exit(tmpdir.path());
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let tracked_manifest = tmpdir
+        .path()
+        .join(".hpc-compose/12345/artifacts/manifest.json");
+    let tracked_manifest_value: Value =
+        serde_json::from_str(&fs::read_to_string(&tracked_manifest).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(
+        tracked_manifest_value["job_outcome"],
+        Value::from("failure")
+    );
+    assert!(
+        tracked_manifest_value["warnings"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|item| item
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not match policy 'on_success'"))
+    );
+
+    let artifacts = run_cli(
+        tmpdir.path(),
+        &["artifacts", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&artifacts);
+    let out = stdout_text(&artifacts);
+    assert!(out.contains("exported paths: 0"));
 }
 
 #[test]

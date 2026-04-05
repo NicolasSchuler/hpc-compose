@@ -15,10 +15,10 @@ use hpc_compose::init::{
     resolve_template, write_initialized_template,
 };
 use hpc_compose::job::{
-    SchedulerOptions, StatsOptions, StatsSnapshot, StatusSnapshot, WatchOutcome,
-    build_stats_snapshot, build_status_snapshot, build_submission_record, clean_all_except_latest,
-    clean_by_age, load_submission_record, print_logs, scheduler_source_label, watch_submission,
-    write_submission_record,
+    ArtifactExportReport, SchedulerOptions, StatsOptions, StatsSnapshot, StatusSnapshot,
+    WatchOutcome, build_stats_snapshot, build_status_snapshot, build_submission_record,
+    clean_all_except_latest, clean_by_age, export_artifacts, load_submission_record, print_logs,
+    scheduler_source_label, watch_submission, write_submission_record,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, build_plan, registry_host_for_remote,
@@ -143,6 +143,14 @@ enum Commands {
         squeue_bin: String,
         #[arg(long, default_value = "sacct")]
         sacct_bin: String,
+    },
+    Artifacts {
+        #[arg(short = 'f', long, default_value = "compose.yaml")]
+        file: PathBuf,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     Logs {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
@@ -503,6 +511,18 @@ fn run_command(command: Commands) -> Result<()> {
                 print_stats_snapshot(&snapshot);
             }
         }
+        Commands::Artifacts { file, job_id, json } => {
+            let report = export_artifacts(&file, job_id.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .context("failed to serialize artifacts output")?
+                );
+            } else {
+                print_artifact_export_report(&report);
+            }
+        }
         Commands::Logs {
             file,
             job_id,
@@ -850,6 +870,30 @@ fn print_stats_snapshot(snapshot: &StatsSnapshot) {
         if let Some(gpu_mem) = &step.gpu_mem {
             println!("gpu mem: {gpu_mem}");
         }
+    }
+}
+
+fn print_artifact_export_report(report: &ArtifactExportReport) {
+    println!("job id: {}", report.record.job_id);
+    println!("manifest: {}", report.manifest_path.display());
+    println!("payload dir: {}", report.payload_dir.display());
+    println!("export dir: {}", report.export_dir.display());
+    println!("collect policy: {}", report.manifest.collect_policy);
+    println!("job outcome: {}", report.manifest.job_outcome);
+    println!(
+        "declared patterns: {}",
+        report.manifest.declared_source_patterns.len()
+    );
+    println!(
+        "matched source paths: {}",
+        report.manifest.matched_source_paths.len()
+    );
+    println!("exported paths: {}", report.exported_paths.len());
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
+    for path in &report.exported_paths {
+        println!("exported: {}", path.display());
     }
 }
 

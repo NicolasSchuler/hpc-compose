@@ -1,3 +1,5 @@
+//! Login-node environment checks run before submission.
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,14 +12,20 @@ use crate::planner::{ImageSource, cache_path_policy_issue, registry_host_for_rem
 use crate::prepare::RuntimePlan;
 use crate::spec::{MetricsCollector, ReadinessSpec};
 
+/// Severity level for one preflight item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Level {
+    /// The check passed.
     Ok,
+    /// The check found a non-fatal issue worth surfacing.
     Warn,
+    /// The check found a blocking issue.
     Error,
 }
 
+/// One preflight finding.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct Item {
     pub level: Level,
@@ -25,11 +33,15 @@ pub struct Item {
     pub remediation: Option<String>,
 }
 
+/// Flat preflight report before items are grouped for display.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub items: Vec<Item>,
 }
 
+/// Count summary for a grouped preflight report.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportSummary {
     pub blockers: usize,
@@ -38,6 +50,8 @@ pub struct ReportSummary {
     pub passed_checks: usize,
 }
 
+/// Preflight report grouped into blockers, warnings, and passes.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct GroupedReport {
     pub summary: ReportSummary,
@@ -47,6 +61,8 @@ pub struct GroupedReport {
     pub passed_checks: Vec<Item>,
 }
 
+/// Options controlling which tools and checks preflight should require.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct Options {
     pub enroot_bin: String,
@@ -69,22 +85,27 @@ impl Default for Options {
 }
 
 impl Report {
+    /// Returns `true` when the report contains at least one blocking error.
     pub fn has_errors(&self) -> bool {
         self.items.iter().any(|item| item.level == Level::Error)
     }
 
+    /// Returns `true` when the report contains at least one warning.
     pub fn has_warnings(&self) -> bool {
         self.items.iter().any(|item| item.level == Level::Warn)
     }
 
+    /// Renders the report in the default grouped text format.
     pub fn render(&self) -> String {
         self.render_grouped(false)
     }
 
+    /// Renders the report with passed checks included.
     pub fn render_verbose(&self) -> String {
         self.render_grouped(true)
     }
 
+    /// Returns a grouped representation used by CLI and JSON output.
     pub fn grouped(&self) -> GroupedReport {
         let mut blockers = Vec::new();
         let mut actionable_warnings = Vec::new();
@@ -175,6 +196,7 @@ fn is_contextual_warning(item: &Item) -> bool {
             || item.message.starts_with("metrics collector"))
 }
 
+/// Runs all login-node preflight checks for a prepared runtime plan.
 pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
     let mut report = Report { items: Vec::new() };
 
