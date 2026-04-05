@@ -92,7 +92,8 @@ The release workflow runs `cargo test --locked`, builds release archives for Lin
 
 Linux release notes:
 
-- The Linux asset is built for `x86_64-unknown-linux-musl` to avoid host glibc version mismatches on older clusters.
+- Linux x86_64 is built for `x86_64-unknown-linux-musl` to avoid host glibc version mismatches on older clusters.
+- Linux arm64 is built for `aarch64-unknown-linux-musl` on a native GitHub-hosted ARM runner.
 - If your environment blocks downloaded binaries, build locally with `cargo build --release` on the login node or another Linux machine with a compatible toolchain.
 
 ## Command flow

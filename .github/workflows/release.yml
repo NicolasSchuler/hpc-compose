@@ -52,6 +52,10 @@ jobs:
             target: x86_64-unknown-linux-musl
             binary_name: hpc-compose
             label: Linux x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            binary_name: hpc-compose
+            label: Linux arm64
           - runner: macos-15
             target: aarch64-apple-darwin
             binary_name: hpc-compose
@@ -78,11 +82,11 @@ jobs:
           rustflags: ""
 
       - name: Install Linux musl toolchain
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: endsWith(matrix.target, '-unknown-linux-musl')
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get install -y musl-tools pkg-config
+          rustup target add ${{ matrix.target }}
 
       - name: Build release binary
         run: cargo build --locked --release --target ${{ matrix.target }}
