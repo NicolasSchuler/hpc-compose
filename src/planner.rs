@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::spec::{
-    CommandSpec, ComposeSpec, PrepareSpec, ReadinessSpec, ServiceEnrootConfig, ServiceSlurmConfig,
-    SlurmConfig,
+    CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, ServiceDependency,
+    ServiceEnrootConfig, ServiceSlurmConfig, SlurmConfig,
 };
 
 const RESERVED_RUNTIME_MOUNT_DESTINATIONS: &[&str] = &["/hpc-compose/job"];
@@ -30,7 +30,7 @@ pub struct PlannedService {
     pub environment: Vec<(String, String)>,
     pub volumes: Vec<String>,
     pub working_dir: Option<String>,
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<ServiceDependency>,
     pub readiness: Option<ReadinessSpec>,
     pub slurm: ServiceSlurmConfig,
     pub prepare: Option<PreparedImageSpec>,
@@ -61,6 +61,7 @@ pub struct PreparedImageSpec {
 }
 
 pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
+    spec.slurm.validate()?;
     let spec_path = normalize_existing_path(spec_path)?;
     let project_dir = spec_path
         .parent()
@@ -88,7 +89,7 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
 
     let mut temp = BTreeMap::new();
     for (name, service) in &spec.services {
-        let depends_on = service.depends_on.names()?;
+        let depends_on = service.depends_on.entries()?;
         let environment = service.environment.to_pairs()?;
         let mut volumes = Vec::with_capacity(service.volumes.len());
         for mount in &service.volumes {
@@ -123,6 +124,7 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
         );
     }
 
+    validate_dependency_conditions(&temp)?;
     let ordered_names = topo_sort(&temp)?;
     let ordered_services = ordered_names
         .into_iter()
@@ -236,10 +238,13 @@ fn topo_sort(services: &BTreeMap<String, PlannedService>) -> Result<Vec<String>>
         };
         marks.insert(name.to_string(), Mark::Temporary);
         for dep in &service.depends_on {
-            if !services.contains_key(dep) {
-                bail!("service '{name}' depends on undefined service '{dep}'");
+            if !services.contains_key(&dep.name) {
+                bail!(
+                    "service '{name}' depends on undefined service '{}'",
+                    dep.name
+                );
             }
-            visit(dep, services, marks, ordered)?;
+            visit(&dep.name, services, marks, ordered)?;
         }
         marks.insert(name.to_string(), Mark::Permanent);
         ordered.push(name.to_string());
@@ -254,32 +259,51 @@ fn topo_sort(services: &BTreeMap<String, PlannedService>) -> Result<Vec<String>>
     Ok(ordered)
 }
 
+fn validate_dependency_conditions(services: &BTreeMap<String, PlannedService>) -> Result<()> {
+    for (service_name, service) in services {
+        for dep in &service.depends_on {
+            let Some(dependency) = services.get(&dep.name) else {
+                bail!(
+                    "service '{service_name}' depends on undefined service '{}'",
+                    dep.name
+                );
+            };
+            if dep.condition == DependencyCondition::ServiceHealthy
+                && dependency.readiness.is_none()
+            {
+                bail!(
+                    "service '{service_name}' depends on '{}' with condition 'service_healthy', but '{}' does not define readiness",
+                    dep.name,
+                    dep.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn normalize_image(image: &str, project_dir: &Path) -> Result<ImageSource> {
-    let expanded = expand_string(image, project_dir)?;
-    if looks_like_local_sqsh(&expanded) {
-        return Ok(ImageSource::LocalSqsh(resolve_path(
-            &expanded,
-            project_dir,
-        )?));
+    if looks_like_local_sqsh(image) {
+        return Ok(ImageSource::LocalSqsh(resolve_path(image, project_dir)?));
     }
 
-    if expanded.contains("://") {
+    if image.contains("://") {
         let allowed = ["docker://", "dockerd://", "podman://"];
-        if allowed.iter().any(|scheme| expanded.starts_with(scheme)) {
-            return Ok(ImageSource::Remote(expanded));
+        if allowed.iter().any(|scheme| image.starts_with(scheme)) {
+            return Ok(ImageSource::Remote(image.to_string()));
         }
         bail!(
             "unsupported image scheme in '{image}'; use docker://, dockerd://, podman://, or a local .sqsh path"
         );
     }
 
-    if looks_like_explicit_local_path(&expanded) {
+    if looks_like_explicit_local_path(image) {
         bail!(
             "local image path '{image}' must point to a .sqsh or .squashfs file; Dockerfiles and build contexts are not supported in v1"
         );
     }
 
-    Ok(ImageSource::Remote(format!("docker://{expanded}")))
+    Ok(ImageSource::Remote(format!("docker://{image}")))
 }
 
 fn resolve_cache_dir(slurm: &SlurmConfig, project_dir: &Path) -> Result<PathBuf> {
@@ -362,32 +386,27 @@ fn ensure_runtime_mount_destination_allowed(service_name: &str, mount: &str) -> 
     Ok(())
 }
 
-fn expand_string(value: &str, project_dir: &Path) -> Result<String> {
-    let expanded = shellexpand::full_with_context_no_errors(
-        value,
-        || env::var("HOME").ok(),
-        |name| env::var(name).ok(),
-    );
-    let expanded = expanded.into_owned();
-    if looks_like_explicit_local_path(&expanded) {
-        return Ok(resolve_path(&expanded, project_dir)?.display().to_string());
-    }
-    Ok(expanded)
-}
-
 fn resolve_path(value: &str, project_dir: &Path) -> Result<PathBuf> {
-    let expanded = shellexpand::full_with_context_no_errors(
-        value,
-        || env::var("HOME").ok(),
-        |name| env::var(name).ok(),
-    );
-    let raw = PathBuf::from(expanded.as_ref());
+    let expanded = expand_home(value);
+    let raw = PathBuf::from(expanded);
     let path = if raw.is_absolute() {
         raw
     } else {
         project_dir.join(raw)
     };
     Ok(normalize_path(path))
+}
+
+fn expand_home(value: &str) -> String {
+    if value == "~" {
+        return env::var("HOME").unwrap_or_else(|_| "~".to_string());
+    }
+    if let Some(rest) = value.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME")
+    {
+        return format!("{home}/{rest}");
+    }
+    value.to_string()
 }
 
 fn normalize_existing_path(path: &Path) -> Result<PathBuf> {
@@ -412,14 +431,12 @@ fn normalize_path(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::env;
     use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
 
     use super::*;
     use crate::spec::{
-        ComposeSpec, DependsOnSpec, EnvironmentSpec, ReadinessSpec, ServiceEnrootConfig,
-        ServiceSlurmConfig, ServiceSpec,
+        ComposeSpec, DependsOnConditionSpec, DependsOnSpec, EnvironmentSpec, ReadinessSpec,
+        ServiceDependency, ServiceEnrootConfig, ServiceSlurmConfig, ServiceSpec,
     };
 
     fn service(image: &str) -> ServiceSpec {
@@ -435,11 +452,6 @@ mod tests {
             slurm: ServiceSlurmConfig::default(),
             enroot: ServiceEnrootConfig::default(),
         }
-    }
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -727,7 +739,10 @@ mod tests {
                 environment: Vec::new(),
                 volumes: Vec::new(),
                 working_dir: None,
-                depends_on: vec!["missing".into()],
+                depends_on: vec![ServiceDependency {
+                    name: "missing".into(),
+                    condition: DependencyCondition::ServiceStarted,
+                }],
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
@@ -746,7 +761,10 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
-                    depends_on: vec!["b".into()],
+                    depends_on: vec![ServiceDependency {
+                        name: "b".into(),
+                        condition: DependencyCondition::ServiceStarted,
+                    }],
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
@@ -761,7 +779,10 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
-                    depends_on: vec!["a".into()],
+                    depends_on: vec![ServiceDependency {
+                        name: "a".into(),
+                        condition: DependencyCondition::ServiceStarted,
+                    }],
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
@@ -790,30 +811,6 @@ mod tests {
             ImageSource::Remote("docker://redis:7".into())
         );
 
-        let _guard = env_lock().lock().expect("env lock");
-        let old_runtime_image = env::var_os("RUNTIME_IMAGE");
-        let old_remote_image = env::var_os("REMOTE_IMAGE");
-        unsafe {
-            env::set_var("RUNTIME_IMAGE", &local_sqsh);
-            env::set_var("REMOTE_IMAGE", "docker://ghcr.io/acme/app:latest");
-        }
-        assert_eq!(
-            normalize_image("${RUNTIME_IMAGE}", tmpdir.path()).expect("expanded local"),
-            ImageSource::LocalSqsh(local_sqsh.clone())
-        );
-        assert_eq!(
-            normalize_image("${REMOTE_IMAGE}", tmpdir.path()).expect("expanded remote"),
-            ImageSource::Remote("docker://ghcr.io/acme/app:latest".into())
-        );
-        match old_runtime_image {
-            Some(value) => unsafe { env::set_var("RUNTIME_IMAGE", value) },
-            None => unsafe { env::remove_var("RUNTIME_IMAGE") },
-        }
-        match old_remote_image {
-            Some(value) => unsafe { env::set_var("REMOTE_IMAGE", value) },
-            None => unsafe { env::remove_var("REMOTE_IMAGE") },
-        }
-
         let err = normalize_image("oci://redis:7", tmpdir.path()).expect_err("scheme");
         assert!(err.to_string().contains("unsupported image scheme"));
         let err = normalize_image("./Dockerfile", tmpdir.path()).expect_err("local path");
@@ -824,11 +821,6 @@ mod tests {
 
         let mount = normalize_mount("./data:/data", tmpdir.path()).expect("mount");
         assert!(mount.contains("/data"));
-        assert!(
-            expand_string("./data", tmpdir.path())
-                .expect("expand")
-                .starts_with(tmpdir.path().to_str().expect("path"))
-        );
         assert_eq!(
             resolve_path("relative/path", tmpdir.path()).expect("resolve"),
             tmpdir.path().join("relative/path")
@@ -865,5 +857,92 @@ mod tests {
         let err =
             normalize_existing_path(&tmpdir.path().join("missing.yaml")).expect_err("missing");
         assert!(err.to_string().contains("failed to canonicalize"));
+    }
+
+    #[test]
+    fn build_plan_rejects_service_healthy_without_readiness() {
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([
+                (
+                    "app".into(),
+                    ServiceSpec {
+                        depends_on: DependsOnSpec::Map(BTreeMap::from([(
+                            "redis".into(),
+                            DependsOnConditionSpec {
+                                condition: Some("service_healthy".into()),
+                            },
+                        )])),
+                        ..service("redis:7")
+                    },
+                ),
+                ("redis".into(), service("redis:7")),
+            ]),
+        };
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+        let err = build_plan(&compose, spec).expect_err("missing readiness");
+        assert!(err.to_string().contains("service_healthy"));
+        assert!(err.to_string().contains("does not define readiness"));
+    }
+
+    #[test]
+    fn build_plan_preserves_dependency_conditions() {
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([
+                (
+                    "app".into(),
+                    ServiceSpec {
+                        depends_on: DependsOnSpec::Map(BTreeMap::from([
+                            (
+                                "cache".into(),
+                                DependsOnConditionSpec {
+                                    condition: Some("service_started".into()),
+                                },
+                            ),
+                            (
+                                "redis".into(),
+                                DependsOnConditionSpec {
+                                    condition: Some("service_healthy".into()),
+                                },
+                            ),
+                        ])),
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "redis".into(),
+                    ServiceSpec {
+                        readiness: Some(ReadinessSpec::Log {
+                            pattern: "ready".into(),
+                            timeout_seconds: Some(5),
+                        }),
+                        ..service("redis:7")
+                    },
+                ),
+                ("cache".into(), service("redis:7")),
+            ]),
+        };
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+        let plan = build_plan(&compose, spec).expect("plan");
+        assert_eq!(
+            plan.ordered_services
+                .last()
+                .expect("app")
+                .depends_on
+                .iter()
+                .map(|dep| (&dep.name, dep.condition))
+                .collect::<Vec<_>>(),
+            vec![
+                (&"cache".to_string(), DependencyCondition::ServiceStarted),
+                (&"redis".to_string(), DependencyCondition::ServiceHealthy),
+            ]
+        );
     }
 }

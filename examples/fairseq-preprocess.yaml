@@ -1,0 +1,75 @@
+name: fairseq-preprocess
+
+x-slurm:
+  job_name: fairseq-preprocess
+  time: "02:00:00"
+  mem: 32G
+  cpus_per_task: 8
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  preprocess:
+    image: python:3.11-slim
+    volumes:
+      - /shared/$USER/data/raw:/data/raw
+      - /shared/$USER/data/processed:/data/processed
+    environment:
+      INPUT_DIR: /data/raw
+      OUTPUT_DIR: /data/processed
+      NUM_WORKERS: "8"
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python -c "
+        import os, json, hashlib, multiprocessing
+        from pathlib import Path
+        from concurrent.futures import ProcessPoolExecutor
+
+        input_dir = Path(os.environ['INPUT_DIR'])
+        output_dir = Path(os.environ['OUTPUT_DIR'])
+        num_workers = int(os.environ['NUM_WORKERS'])
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        files = sorted(input_dir.glob('*.txt'))
+        if not files:
+            print(f'No .txt files found in {input_dir}')
+            exit(1)
+        print(f'Found {len(files)} input files')
+
+        def process_file(path):
+            text = path.read_text(encoding='utf-8', errors='replace')
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            tokens = []
+            for line in lines:
+                tokens.extend(line.lower().split())
+            out = output_dir / f'{path.stem}.jsonl'
+            with open(out, 'w') as f:
+                for i, line in enumerate(lines):
+                    record = {
+                        'id': f'{path.stem}_{i}',
+                        'text': line,
+                        'tokens': len(line.split()),
+                    }
+                    f.write(json.dumps(record) + '\n')
+            return path.name, len(lines), len(tokens)
+
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            results = list(pool.map(process_file, files))
+
+        total_lines = sum(r[1] for r in results)
+        total_tokens = sum(r[2] for r in results)
+        for name, lines, tokens in results:
+            print(f'  {name}: {lines} lines, {tokens} tokens')
+        print(f'Total: {total_lines} lines, {total_tokens} tokens across {len(files)} files')
+
+        manifest = {
+            'files': len(files),
+            'total_lines': total_lines,
+            'total_tokens': total_tokens,
+        }
+        (output_dir / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+        print('Preprocessing complete')
+        "
+    x-slurm:
+      cpus_per_task: 8

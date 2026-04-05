@@ -50,6 +50,7 @@ These fields live under the top-level `x-slurm` block.
 | `error` | string | Passed through to `#SBATCH --error`. |
 | `chdir` | string | Passed through to `#SBATCH --chdir`. |
 | `cache_dir` | string | Shared cache root. Relative paths and env vars are resolved against the compose file directory. |
+| `metrics` | mapping | Optional job-level metrics sampler settings. Disabled by default. |
 | `setup` | list of strings | Raw shell lines inserted into the generated script before any service launches. |
 | `submit_args` | list of strings | Extra raw `#SBATCH ...` lines appended to the script header. |
 
@@ -91,6 +92,27 @@ Rules:
 - Paths under `/tmp`, `/var/tmp`, `/private/tmp`, and `/dev/shm` are rejected.
 - The default is convenient for simple or home-directory workflows, but shared project or workspace storage is usually a better long-term choice on real clusters.
 
+### `x-slurm.metrics`
+
+```yaml
+x-slurm:
+  metrics:
+    interval_seconds: 5
+    collectors: [gpu, slurm]
+```
+
+Rules:
+
+- Omit the block to disable runtime metrics sampling entirely.
+- If the block is present and `enabled` is omitted, metrics sampling is enabled.
+- `interval_seconds` defaults to `5` and must be at least `1`.
+- `collectors` defaults to `[gpu, slurm]`.
+- Supported collectors are:
+  - `gpu`: samples GPU/device/process telemetry through `nvidia-smi`
+  - `slurm`: samples job-step CPU/memory data through `sstat`
+- Sampler files are written under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` on the host and are also visible inside containers at `/hpc-compose/job/metrics`.
+- Collector failures are best-effort. Missing tools or unsupported queries record warnings and notes for `hpc-compose stats`, but they do not fail the job itself.
+
 ### `gres` vs `gpus`
 
 When both `gres` and `gpus` are set at the same level (top-level or per-service), `gres` takes priority and `gpus` is ignored. Use `gres` when you need the full Slurm syntax (e.g. `gres: gpu:a100:2`), or `gpus` for the simpler integer form.
@@ -105,7 +127,7 @@ When both `gres` and `gpus` are set at the same level (top-level or per-service)
 | `environment` | mapping or list of `KEY=VALUE` strings | Optional. Both forms normalize to key/value pairs. |
 | `volumes` | list of `host_path:container_path` strings | Optional runtime bind mounts. Host paths resolve against the compose file directory. |
 | `working_dir` | string | Optional. Only valid when the service also has an explicit `command` or `entrypoint`. |
-| `depends_on` | list or mapping | Optional launch-order dependency list. Only `condition: service_started` is supported in map form. |
+| `depends_on` | list or mapping | Optional dependency list with `service_started` and `service_healthy` conditions. |
 | `readiness` | mapping | Optional readiness gate run after the service launches. |
 | `x-slurm` | mapping | Optional per-service Slurm overrides. |
 | `x-enroot` | mapping | Optional per-service Enroot preparation rules. |
@@ -163,7 +185,11 @@ Rules:
 
 - List items must use `KEY=VALUE` syntax.
 - The normalized values are passed through to the runtime environment.
-- Values are **not** shell-expanded. `$PATH` in a value is the literal string `$PATH`, not the host's `$PATH`. Only image strings and volume host-paths receive `$VAR` expansion at plan time.
+- `.env` from the compose file directory is loaded automatically when present.
+- Shell environment variables override `.env`; `.env` fills only missing variables.
+- `environment` and `x-enroot.prepare.env` values support `$VAR`, `${VAR}`, `${VAR:-default}`, and `${VAR-default}` interpolation.
+- Missing variables without defaults are errors.
+- Scalar shell snippets are still literal. For example, `$PATH` inside a string-form `command` is not expanded at plan time.
 
 ## `volumes`
 
@@ -199,11 +225,19 @@ depends_on:
     condition: service_started
 ```
 
+```yaml
+depends_on:
+  redis:
+    condition: service_healthy
+```
+
 Rules:
 
-- `depends_on` controls launch order only.
-- Readiness gating is separate and configured through `readiness`.
-- In map form, only `condition: service_started` is accepted.
+- List form means `condition: service_started`.
+- Map form accepts `condition: service_started` and `condition: service_healthy`.
+- `service_healthy` requires the dependency service to define `readiness`.
+- `service_started` waits only for the dependency process to be launched and still alive.
+- `service_healthy` waits for the dependency's readiness check to succeed.
 
 ## `readiness`
 
@@ -241,6 +275,20 @@ readiness:
 
 - `timeout_seconds` defaults to `60`.
 
+### HTTP
+
+```yaml
+readiness:
+  type: http
+  url: http://127.0.0.1:8080/health
+  status_code: 200
+  timeout_seconds: 30
+```
+
+- `status_code` defaults to `200`.
+- `timeout_seconds` defaults to `60`.
+- Uses `curl` to poll the URL. The readiness check succeeds when the HTTP response code matches `status_code`.
+
 ## Service-level `x-slurm`
 
 These fields live under `services.<name>.x-slurm`.
@@ -277,7 +325,7 @@ services:
 | --- | --- | --- |
 | `commands` | list of strings | Required when `prepare` is present. Each command runs via `enroot start ... /bin/sh -lc ...`. |
 | `mounts` | list of `host_path:container_path` strings | Optional mounts visible only during prepare. Relative host paths resolve against the compose file directory. |
-| `env` | mapping or list of `KEY=VALUE` strings | Optional environment variables passed only during prepare. Values are not shell-expanded. |
+| `env` | mapping or list of `KEY=VALUE` strings | Optional environment variables passed only during prepare. Values support the same interpolation rules as `environment`. |
 | `root` | boolean | Optional. Defaults to `true`. Controls whether prepare commands run with `--root`. |
 
 Rules:
@@ -305,10 +353,10 @@ Any other unknown key at the service level is also rejected.
 ## Practical constraints to remember
 
 - v1 supports one Slurm allocation on one node.
-- `depends_on` orders startup, but readiness determines when dependents are allowed to continue.
+- `depends_on` conditions determine when each dependent service is allowed to launch.
 - The dev workflow is `volumes` for active source code and `x-enroot.prepare.commands` for slower-changing dependencies or tools.
 - Upgrading `hpc-compose` invalidates all cached artifacts because cache keys include the tool version. After an upgrade, expect a full rebuild on the next `prepare` or `submit`. Use `cache prune --age 0` or `cache prune --all-unused -f compose.yaml` to clean up orphaned artifacts.
 - `gres` takes priority over `gpus` at both the top level and per-service level. If both are set, only `gres` is emitted.
-- Environment values are literal strings — `$VAR` is not expanded in `environment` or `x-enroot.prepare.env` values.
+- Use `$$` for a literal dollar sign in interpolated fields such as list-form `command` arguments.
 - `setup` lines are raw bash. They must be syntactically correct because the generated script runs under `set -euo pipefail`.
 - Service names with non-alphanumeric characters are encoded in log filenames (e.g. `my.app` produces `my_x2e_app.log`). Prefer `[a-zA-Z0-9_-]` in service names for readability.

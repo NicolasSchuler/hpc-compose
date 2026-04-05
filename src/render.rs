@@ -2,9 +2,10 @@ use anyhow::Result;
 
 use crate::planner::ExecutionSpec;
 use crate::prepare::{RuntimePlan, RuntimeService};
-use crate::spec::ReadinessSpec;
+use crate::spec::{DependencyCondition, MetricsCollector, ReadinessSpec};
 
 pub fn render_script(plan: &RuntimePlan) -> Result<String> {
+    let metrics_enabled = plan.slurm.metrics_enabled();
     let mut out = String::new();
     out.push_str("#!/bin/bash\n");
     out.push_str(&format!(
@@ -54,6 +55,14 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("\nset -euo pipefail\n\n");
     out.push_str("JOB_TMP=\"${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}\"\n");
     out.push_str("LOG_DIR=\"$JOB_TMP/logs\"\n");
+    out.push_str("STATE_FILE=\"$JOB_TMP/state.json\"\n");
+    if metrics_enabled {
+        out.push_str("METRICS_DIR=\"$JOB_TMP/metrics\"\n");
+        out.push_str("METRICS_META_FILE=\"$METRICS_DIR/meta.json\"\n");
+        out.push_str("GPU_METRICS_FILE=\"$METRICS_DIR/gpu.jsonl\"\n");
+        out.push_str("GPU_PROCESSES_FILE=\"$METRICS_DIR/gpu_processes.jsonl\"\n");
+        out.push_str("SLURM_METRICS_FILE=\"$METRICS_DIR/slurm.jsonl\"\n");
+    }
     out.push_str(&format!(
         "CACHE_ROOT={}\n",
         shell_quote(&plan.cache_dir.display().to_string())
@@ -61,10 +70,50 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("export ENROOT_CACHE_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/cache\"\n");
     out.push_str("export ENROOT_DATA_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/data\"\n");
     out.push_str("export ENROOT_TEMP_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/tmp\"\n");
-    out.push_str("mkdir -p \"$LOG_DIR\" \"$ENROOT_CACHE_PATH\" \"$ENROOT_DATA_PATH\" \"$ENROOT_TEMP_PATH\"\n\n");
+    out.push_str("mkdir -p \"$LOG_DIR\"");
+    if metrics_enabled {
+        out.push_str(" \"$METRICS_DIR\"");
+    }
+    out.push_str(" \"$ENROOT_CACHE_PATH\" \"$ENROOT_DATA_PATH\" \"$ENROOT_TEMP_PATH\"\n\n");
 
     out.push_str("SERVICE_PIDS=()\n");
-    out.push_str("SERVICE_NAMES=()\n\n");
+    out.push_str("SERVICE_NAMES=()\n");
+    out.push_str("SERVICE_STEP_NAMES=()\n");
+    out.push_str("SERVICE_LOG_PATHS=()\n");
+    out.push_str("SERVICE_HEALTHY=()\n");
+    out.push_str("printf '{\\n  \"services\": []\\n}\\n' > \"$STATE_FILE\"\n");
+    out.push_str("declare -A SERVICE_INDEX_BY_NAME=()\n\n");
+    if metrics_enabled {
+        out.push_str(&format!(
+            "METRICS_INTERVAL_SECONDS={}\n",
+            plan.slurm.metrics_interval_seconds()
+        ));
+        out.push_str("SAMPLER_PID=\"\"\n");
+        out.push_str("GPU_WARNING_EMITTED=0\n");
+        out.push_str("SLURM_WARNING_EMITTED=0\n");
+        out.push_str(&format!(
+            "GPU_COLLECTOR_ENABLED={}\n",
+            flag(
+                plan.slurm
+                    .metrics_collectors()
+                    .contains(&MetricsCollector::Gpu)
+            )
+        ));
+        out.push_str(&format!(
+            "SLURM_COLLECTOR_ENABLED={}\n",
+            flag(
+                plan.slurm
+                    .metrics_collectors()
+                    .contains(&MetricsCollector::Slurm)
+            )
+        ));
+        out.push_str("GPU_COLLECTOR_AVAILABLE=1\n");
+        out.push_str("SLURM_COLLECTOR_AVAILABLE=1\n");
+        out.push_str("GPU_COLLECTOR_NOTE=\"\"\n");
+        out.push_str("SLURM_COLLECTOR_NOTE=\"\"\n");
+        out.push_str("GPU_COLLECTOR_LAST_SAMPLED_AT=\"\"\n");
+        out.push_str("SLURM_COLLECTOR_LAST_SAMPLED_AT=\"\"\n\n");
+    }
 
     out.push_str("append_unique_mount() {\n");
     out.push_str("  local candidate=$1\n");
@@ -105,6 +154,44 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  printf '%s' \"$joined\"\n");
     out.push_str("}\n\n");
 
+    out.push_str("json_escape() {\n");
+    out.push_str("  local value=$1\n");
+    out.push_str("  value=${value//\\\\/\\\\\\\\}\n");
+    out.push_str("  value=${value//\\\"/\\\\\\\"}\n");
+    out.push_str("  value=${value//$'\\n'/\\\\n}\n");
+    out.push_str("  value=${value//$'\\r'/\\\\r}\n");
+    out.push_str("  value=${value//$'\\t'/\\\\t}\n");
+    out.push_str("  printf '%s' \"$value\"\n");
+    out.push_str("}\n\n");
+
+    if metrics_enabled {
+        render_metrics_helpers(&mut out);
+    }
+
+    out.push_str("write_state_file() {\n");
+    out.push_str("  local tmp_state=\"$STATE_FILE.tmp\"\n");
+    out.push_str("  {\n");
+    out.push_str("    printf '{\\n  \"services\": ['\n");
+    out.push_str("    local first=1\n");
+    out.push_str("    local i\n");
+    out.push_str("    for i in \"${!SERVICE_NAMES[@]}\"; do\n");
+    out.push_str("      if (( first == 0 )); then\n");
+    out.push_str("        printf ','\n");
+    out.push_str("      fi\n");
+    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s}' \\\n");
+    out.push_str("        \"$(json_escape \"${SERVICE_NAMES[$i]}\")\" \\\n");
+    out.push_str("        \"$(json_escape \"${SERVICE_STEP_NAMES[$i]:-}\")\" \\\n");
+    out.push_str("        \"$(json_escape \"${SERVICE_LOG_PATHS[$i]:-}\")\" \\\n");
+    out.push_str("        \"$i\" \\\n");
+    out.push_str("        \"${SERVICE_PIDS[$i]:-0}\" \\\n");
+    out.push_str("        \"$(if [[ \"${SERVICE_HEALTHY[$i]:-0}\" == \"1\" ]]; then printf true; else printf false; fi)\"\n");
+    out.push_str("      first=0\n");
+    out.push_str("    done\n");
+    out.push_str("    printf '\\n  ]\\n}\\n'\n");
+    out.push_str("  } > \"$tmp_state\"\n");
+    out.push_str("  mv \"$tmp_state\" \"$STATE_FILE\"\n");
+    out.push_str("}\n\n");
+
     out.push_str("kill_services() {\n");
     out.push_str("  for pid in \"${SERVICE_PIDS[@]:-}\"; do\n");
     out.push_str("    [[ -z \"$pid\" ]] && continue\n");
@@ -117,11 +204,62 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("cleanup() {\n");
     out.push_str("  local code=$?\n");
     out.push_str("  trap - EXIT INT TERM\n");
+    if metrics_enabled {
+        out.push_str("  stop_metrics_sampler\n");
+    }
     out.push_str("  kill_services\n");
     out.push_str("  wait || true\n");
     out.push_str("  exit \"$code\"\n");
     out.push_str("}\n");
     out.push_str("trap cleanup EXIT INT TERM\n\n");
+
+    out.push_str("register_service() {\n");
+    out.push_str("  local name=$1\n");
+    out.push_str("  local pid=$2\n");
+    out.push_str("  local step_name=$3\n");
+    out.push_str("  local log_path=$4\n");
+    out.push_str("  local index=${#SERVICE_PIDS[@]}\n");
+    out.push_str("  SERVICE_PIDS+=(\"$pid\")\n");
+    out.push_str("  SERVICE_NAMES+=(\"$name\")\n");
+    out.push_str("  SERVICE_STEP_NAMES+=(\"$step_name\")\n");
+    out.push_str("  SERVICE_LOG_PATHS+=(\"$log_path\")\n");
+    out.push_str("  SERVICE_HEALTHY+=(\"0\")\n");
+    out.push_str("  SERVICE_INDEX_BY_NAME[\"$name\"]=$index\n");
+    out.push_str("  write_state_file\n");
+    out.push_str("}\n\n");
+
+    out.push_str("service_index_for() {\n");
+    out.push_str("  local name=$1\n");
+    out.push_str("  local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}\n");
+    out.push_str("  if [[ -z \"$index\" ]]; then\n");
+    out.push_str("    echo \"Dependency '$name' was not launched\" >&2\n");
+    out.push_str("    return 1\n");
+    out.push_str("  fi\n");
+    out.push_str("  printf '%s' \"$index\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("wait_for_sleep() {\n");
+    out.push_str("  local pid=$1\n");
+    out.push_str("  local name=$2\n");
+    out.push_str("  local seconds=$3\n");
+    out.push_str("  local start\n");
+    out.push_str("  start=$(date +%s)\n");
+    out.push_str("  while (( $(date +%s) - start < seconds )); do\n");
+    out.push_str("    if ! kill -0 \"$pid\" 2>/dev/null; then\n");
+    out.push_str("      local status=0\n");
+    out.push_str("      wait \"$pid\" || status=$?\n");
+    out.push_str("      echo \"Service '$name' exited with status $status before its readiness sleep completed\" >&2\n");
+    out.push_str("      return 1\n");
+    out.push_str("    fi\n");
+    out.push_str("    sleep 1\n");
+    out.push_str("  done\n");
+    out.push_str("  if ! kill -0 \"$pid\" 2>/dev/null; then\n");
+    out.push_str("    local status=0\n");
+    out.push_str("    wait \"$pid\" || status=$?\n");
+    out.push_str("    echo \"Service '$name' exited with status $status before its readiness sleep completed\" >&2\n");
+    out.push_str("    return 1\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
 
     out.push_str("wait_for_tcp() {\n");
     out.push_str("  local pid=$1\n");
@@ -173,6 +311,71 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  done\n");
     out.push_str("}\n\n");
 
+    out.push_str("wait_for_http() {\n");
+    out.push_str("  local pid=$1\n");
+    out.push_str("  local name=$2\n");
+    out.push_str("  local url=$3\n");
+    out.push_str("  local expected=$4\n");
+    out.push_str("  local timeout=${5:-60}\n");
+    out.push_str("  local start\n");
+    out.push_str("  start=$(date +%s)\n");
+    out.push_str("  while true; do\n");
+    out.push_str("    if ! kill -0 \"$pid\" 2>/dev/null; then\n");
+    out.push_str("      wait \"$pid\"\n");
+    out.push_str(
+        "      echo \"Service '$name' exited before HTTP readiness check succeeded\" >&2\n",
+    );
+    out.push_str("      return 1\n");
+    out.push_str("    fi\n");
+    out.push_str("    local code\n");
+    out.push_str("    code=$(curl --silent --output /dev/null --write-out '%{http_code}' \"$url\" 2>/dev/null || true)\n");
+    out.push_str("    if [[ \"$code\" == \"$expected\" ]]; then\n");
+    out.push_str("      return 0\n");
+    out.push_str("    fi\n");
+    out.push_str("    if (( $(date +%s) - start >= timeout )); then\n");
+    out.push_str(
+        "      echo \"Timed out waiting for HTTP $expected from $url for service '$name'\" >&2\n",
+    );
+    out.push_str("      return 1\n");
+    out.push_str("    fi\n");
+    out.push_str("    sleep 1\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+
+    out.push_str("wait_for_service_started() {\n");
+    out.push_str("  local dependency=$1\n");
+    out.push_str("  local target=$2\n");
+    out.push_str("  local index\n");
+    out.push_str("  index=$(service_index_for \"$dependency\") || return 1\n");
+    out.push_str("  local pid=${SERVICE_PIDS[$index]:-}\n");
+    out.push_str("  if [[ -z \"$pid\" ]]; then\n");
+    out.push_str("    echo \"Dependency '$dependency' for service '$target' does not have a tracked pid\" >&2\n");
+    out.push_str("    return 1\n");
+    out.push_str("  fi\n");
+    out.push_str("  if ! kill -0 \"$pid\" 2>/dev/null; then\n");
+    out.push_str("    local status=0\n");
+    out.push_str("    wait \"$pid\" || status=$?\n");
+    out.push_str("    echo \"Dependency '$dependency' exited with status $status before service '$target' could start\" >&2\n");
+    out.push_str("    return 1\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("wait_for_service_healthy() {\n");
+    out.push_str("  local dependency=$1\n");
+    out.push_str("  local target=$2\n");
+    out.push_str("  local wait_fn=$3\n");
+    out.push_str("  local index\n");
+    out.push_str("  index=$(service_index_for \"$dependency\") || return 1\n");
+    out.push_str("  wait_for_service_started \"$dependency\" \"$target\" || return 1\n");
+    out.push_str("  if [[ \"${SERVICE_HEALTHY[$index]:-0}\" == \"1\" ]]; then\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  local pid=${SERVICE_PIDS[$index]}\n");
+    out.push_str("  \"$wait_fn\" \"$pid\" \"$dependency\" || return 1\n");
+    out.push_str("  SERVICE_HEALTHY[$index]=\"1\"\n");
+    out.push_str("  write_state_file\n");
+    out.push_str("}\n\n");
+
     out.push_str("monitor_services() {\n");
     out.push_str("  while true; do\n");
     out.push_str("    local active=0\n");
@@ -207,6 +410,14 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     if !plan.slurm.setup.is_empty() {
         out.push('\n');
     }
+    if metrics_enabled {
+        out.push_str("start_metrics_sampler\n\n");
+    }
+
+    for service in &plan.ordered_services {
+        render_readiness_wait(&mut out, service);
+        out.push('\n');
+    }
 
     for service in &plan.ordered_services {
         render_service(&mut out, service);
@@ -214,9 +425,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     }
 
     for service in &plan.ordered_services {
+        render_dependency_waits(&mut out, service);
         let fn_name = format!("launch_{}", service_token(&service.name));
         out.push_str(&format!("{fn_name}\n"));
-        render_readiness(&mut out, service);
         out.push('\n');
     }
 
@@ -224,9 +435,268 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     Ok(out)
 }
 
+fn render_metrics_helpers(out: &mut String) {
+    out.push_str("trim_whitespace() {\n");
+    out.push_str("  local value=${1-}\n");
+    out.push_str("  value=${value#\"${value%%[![:space:]]*}\"}\n");
+    out.push_str("  value=${value%\"${value##*[![:space:]]}\"}\n");
+    out.push_str("  printf '%s' \"$value\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("json_string_or_null() {\n");
+    out.push_str("  local value=${1-}\n");
+    out.push_str("  if [[ -z \"$value\" ]]; then\n");
+    out.push_str("    printf 'null'\n");
+    out.push_str("  else\n");
+    out.push_str("    printf '\"%s\"' \"$(json_escape \"$value\")\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("json_number_or_null() {\n");
+    out.push_str("  local value=${1-}\n");
+    out.push_str("  if [[ -z \"$value\" ]]; then\n");
+    out.push_str("    printf 'null'\n");
+    out.push_str("  else\n");
+    out.push_str("    printf '%s' \"$value\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("json_bool_from_flag() {\n");
+    out.push_str("  if [[ \"${1:-0}\" == \"1\" ]]; then\n");
+    out.push_str("    printf true\n");
+    out.push_str("  else\n");
+    out.push_str("    printf false\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("metrics_timestamp() {\n");
+    out.push_str("  date -u +%Y-%m-%dT%H:%M:%SZ\n");
+    out.push_str("}\n\n");
+
+    out.push_str("metrics_warning_once() {\n");
+    out.push_str("  local collector=$1\n");
+    out.push_str("  local message=$2\n");
+    out.push_str("  case \"$collector\" in\n");
+    out.push_str("    gpu)\n");
+    out.push_str("      [[ \"$GPU_WARNING_EMITTED\" == \"1\" ]] && return 0\n");
+    out.push_str("      GPU_WARNING_EMITTED=1\n");
+    out.push_str("      ;;\n");
+    out.push_str("    slurm)\n");
+    out.push_str("      [[ \"$SLURM_WARNING_EMITTED\" == \"1\" ]] && return 0\n");
+    out.push_str("      SLURM_WARNING_EMITTED=1\n");
+    out.push_str("      ;;\n");
+    out.push_str("  esac\n");
+    out.push_str("  echo \"metrics warning [$collector]: $message\" >&2\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_metrics_meta() {\n");
+    out.push_str("  local tmp_meta=\"$METRICS_META_FILE.tmp\"\n");
+    out.push_str("  {\n");
+    out.push_str("    printf '{\\n'\n");
+    out.push_str(
+        "    printf '  \"sampler_pid\": %s,\\n' \"$(json_number_or_null \"$SAMPLER_PID\")\"\n",
+    );
+    out.push_str("    printf '  \"interval_seconds\": %s,\\n' \"$METRICS_INTERVAL_SECONDS\"\n");
+    out.push_str("    printf '  \"collectors\": [\\n'\n");
+    out.push_str("    printf '    {\"name\":\"gpu\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s},\\n' \\\n");
+    out.push_str("      \"$(json_bool_from_flag \"$GPU_COLLECTOR_ENABLED\")\" \\\n");
+    out.push_str("      \"$(json_bool_from_flag \"$GPU_COLLECTOR_AVAILABLE\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$GPU_COLLECTOR_NOTE\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$GPU_COLLECTOR_LAST_SAMPLED_AT\")\"\n");
+    out.push_str("    printf '    {\"name\":\"slurm\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s}\\n' \\\n");
+    out.push_str("      \"$(json_bool_from_flag \"$SLURM_COLLECTOR_ENABLED\")\" \\\n");
+    out.push_str("      \"$(json_bool_from_flag \"$SLURM_COLLECTOR_AVAILABLE\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$SLURM_COLLECTOR_NOTE\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$SLURM_COLLECTOR_LAST_SAMPLED_AT\")\"\n");
+    out.push_str("    printf '  ]\\n}\\n'\n");
+    out.push_str("  } > \"$tmp_meta\"\n");
+    out.push_str("  mv \"$tmp_meta\" \"$METRICS_META_FILE\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("mark_gpu_collector_unavailable() {\n");
+    out.push_str("  GPU_COLLECTOR_AVAILABLE=0\n");
+    out.push_str("  GPU_COLLECTOR_NOTE=$1\n");
+    out.push_str("  write_metrics_meta\n");
+    out.push_str("  metrics_warning_once gpu \"$1\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("mark_gpu_collector_success() {\n");
+    out.push_str("  GPU_COLLECTOR_AVAILABLE=1\n");
+    out.push_str("  GPU_COLLECTOR_NOTE=\"\"\n");
+    out.push_str("  GPU_COLLECTOR_LAST_SAMPLED_AT=$1\n");
+    out.push_str("  write_metrics_meta\n");
+    out.push_str("}\n\n");
+
+    out.push_str("mark_slurm_collector_unavailable() {\n");
+    out.push_str("  SLURM_COLLECTOR_AVAILABLE=0\n");
+    out.push_str("  SLURM_COLLECTOR_NOTE=$1\n");
+    out.push_str("  write_metrics_meta\n");
+    out.push_str("  metrics_warning_once slurm \"$1\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("mark_slurm_collector_success() {\n");
+    out.push_str("  SLURM_COLLECTOR_AVAILABLE=1\n");
+    out.push_str("  SLURM_COLLECTOR_NOTE=\"\"\n");
+    out.push_str("  SLURM_COLLECTOR_LAST_SAMPLED_AT=$1\n");
+    out.push_str("  write_metrics_meta\n");
+    out.push_str("}\n\n");
+
+    out.push_str("sample_gpu_metrics() {\n");
+    out.push_str("  [[ \"$GPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  if ! command -v nvidia-smi >/dev/null 2>&1; then\n");
+    out.push_str(
+        "    mark_gpu_collector_unavailable \"nvidia-smi is not available on this node\"\n",
+    );
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  local sampled_at\n");
+    out.push_str("  sampled_at=$(metrics_timestamp)\n");
+    out.push_str("  local output\n");
+    out.push_str("  if ! output=$(nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>&1); then\n");
+    out.push_str("    mark_gpu_collector_unavailable \"nvidia-smi GPU query failed: $(trim_whitespace \"${output//$'\\n'/; }\")\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  local line\n");
+    out.push_str("  while IFS= read -r line; do\n");
+    out.push_str("    [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
+    out.push_str("    IFS=',' read -r raw_index raw_uuid raw_name raw_util_gpu raw_util_mem raw_mem_used raw_mem_total raw_temp raw_power_draw raw_power_limit <<< \"$line\"\n");
+    out.push_str("    local index=$(trim_whitespace \"$raw_index\")\n");
+    out.push_str("    local uuid=$(trim_whitespace \"$raw_uuid\")\n");
+    out.push_str("    local name=$(trim_whitespace \"$raw_name\")\n");
+    out.push_str("    local util_gpu=$(trim_whitespace \"$raw_util_gpu\")\n");
+    out.push_str("    local util_mem=$(trim_whitespace \"$raw_util_mem\")\n");
+    out.push_str("    local mem_used=$(trim_whitespace \"$raw_mem_used\")\n");
+    out.push_str("    local mem_total=$(trim_whitespace \"$raw_mem_total\")\n");
+    out.push_str("    local temperature=$(trim_whitespace \"$raw_temp\")\n");
+    out.push_str("    local power_draw=$(trim_whitespace \"$raw_power_draw\")\n");
+    out.push_str("    local power_limit=$(trim_whitespace \"$raw_power_limit\")\n");
+    out.push_str("    printf '{\"sampled_at\":\"%s\",\"index\":%s,\"uuid\":%s,\"name\":%s,\"utilization_gpu\":%s,\"utilization_memory\":%s,\"memory_used_mib\":%s,\"memory_total_mib\":%s,\"temperature_c\":%s,\"power_draw_w\":%s,\"power_limit_w\":%s}\\n' \\\n");
+    out.push_str("      \"$(json_escape \"$sampled_at\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$index\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$uuid\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$name\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$util_gpu\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$util_mem\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$mem_used\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$mem_total\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$temperature\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$power_draw\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$power_limit\")\" >> \"$GPU_METRICS_FILE\"\n");
+    out.push_str("  done <<< \"$output\"\n");
+    out.push_str("  local process_output\n");
+    out.push_str("  if process_output=$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>&1); then\n");
+    out.push_str("    while IFS= read -r line; do\n");
+    out.push_str("      [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
+    out.push_str("      IFS=',' read -r raw_gpu_uuid raw_pid raw_process_name raw_used_memory <<< \"$line\"\n");
+    out.push_str("      local gpu_uuid=$(trim_whitespace \"$raw_gpu_uuid\")\n");
+    out.push_str("      local pid=$(trim_whitespace \"$raw_pid\")\n");
+    out.push_str("      local process_name=$(trim_whitespace \"$raw_process_name\")\n");
+    out.push_str("      local used_memory=$(trim_whitespace \"$raw_used_memory\")\n");
+    out.push_str("      printf '{\"sampled_at\":\"%s\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s}\\n' \\\n");
+    out.push_str("        \"$(json_escape \"$sampled_at\")\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"$gpu_uuid\")\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"$pid\")\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"$process_name\")\" \\\n");
+    out.push_str(
+        "        \"$(json_string_or_null \"$used_memory\")\" >> \"$GPU_PROCESSES_FILE\"\n",
+    );
+    out.push_str("    done <<< \"$process_output\"\n");
+    out.push_str("  else\n");
+    out.push_str("    GPU_COLLECTOR_AVAILABLE=1\n");
+    out.push_str("    GPU_COLLECTOR_NOTE=\"nvidia-smi compute process query failed: $(trim_whitespace \"${process_output//$'\\n'/; }\")\"\n");
+    out.push_str("    GPU_COLLECTOR_LAST_SAMPLED_AT=$sampled_at\n");
+    out.push_str("    write_metrics_meta\n");
+    out.push_str("    metrics_warning_once gpu \"$GPU_COLLECTOR_NOTE\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  mark_gpu_collector_success \"$sampled_at\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("sample_slurm_metrics() {\n");
+    out.push_str("  [[ \"$SLURM_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  if ! command -v sstat >/dev/null 2>&1; then\n");
+    out.push_str("    mark_slurm_collector_unavailable \"sstat is not available on this node\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  local sampled_at\n");
+    out.push_str("  sampled_at=$(metrics_timestamp)\n");
+    out.push_str("  local output\n");
+    out.push_str("  if ! output=$(sstat --allsteps --jobs \"$SLURM_JOB_ID\" --parsable2 --noconvert --format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,AllocTRES,TRESUsageInAve 2>&1); then\n");
+    out.push_str("    mark_slurm_collector_unavailable \"sstat query failed: $(trim_whitespace \"${output//$'\\n'/; }\")\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  local line\n");
+    out.push_str("  while IFS= read -r line; do\n");
+    out.push_str("    [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
+    out.push_str("    [[ \"$line\" == JobID* ]] && continue\n");
+    out.push_str("    local -a fields=()\n");
+    out.push_str("    IFS='|' read -r -a fields <<< \"$line\"\n");
+    out.push_str("    if (( ${#fields[@]} != 7 )); then\n");
+    out.push_str("      mark_slurm_collector_unavailable \"malformed sstat output while sampling metrics\"\n");
+    out.push_str("      return 0\n");
+    out.push_str("    fi\n");
+    out.push_str("    local step_id=$(trim_whitespace \"${fields[0]}\")\n");
+    out.push_str("    if [[ ! \"$step_id\" =~ ^${SLURM_JOB_ID}\\.[0-9]+$ ]]; then\n");
+    out.push_str("      continue\n");
+    out.push_str("    fi\n");
+    out.push_str("    local ntasks=$(trim_whitespace \"${fields[1]}\")\n");
+    out.push_str("    local ave_cpu=$(trim_whitespace \"${fields[2]}\")\n");
+    out.push_str("    local ave_rss=$(trim_whitespace \"${fields[3]}\")\n");
+    out.push_str("    local max_rss=$(trim_whitespace \"${fields[4]}\")\n");
+    out.push_str("    local alloc_tres=$(trim_whitespace \"${fields[5]}\")\n");
+    out.push_str("    local tres_usage_in_ave=$(trim_whitespace \"${fields[6]}\")\n");
+    out.push_str("    printf '{\"sampled_at\":\"%s\",\"step_id\":%s,\"ntasks\":%s,\"ave_cpu\":%s,\"ave_rss\":%s,\"max_rss\":%s,\"alloc_tres\":%s,\"tres_usage_in_ave\":%s}\\n' \\\n");
+    out.push_str("      \"$(json_escape \"$sampled_at\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$step_id\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$ntasks\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$ave_cpu\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$ave_rss\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$max_rss\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$alloc_tres\")\" \\\n");
+    out.push_str(
+        "      \"$(json_string_or_null \"$tres_usage_in_ave\")\" >> \"$SLURM_METRICS_FILE\"\n",
+    );
+    out.push_str("  done <<< \"$output\"\n");
+    out.push_str("  mark_slurm_collector_success \"$sampled_at\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("sample_metrics_once() {\n");
+    out.push_str("  sample_gpu_metrics\n");
+    out.push_str("  sample_slurm_metrics\n");
+    out.push_str("}\n\n");
+
+    out.push_str("metrics_sampler_loop() {\n");
+    out.push_str("  while true; do\n");
+    out.push_str("    sample_metrics_once\n");
+    out.push_str("    sleep \"$METRICS_INTERVAL_SECONDS\"\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+
+    out.push_str("start_metrics_sampler() {\n");
+    out.push_str("  mkdir -p \"$METRICS_DIR\"\n");
+    out.push_str("  : > \"$GPU_METRICS_FILE\"\n");
+    out.push_str("  : > \"$GPU_PROCESSES_FILE\"\n");
+    out.push_str("  : > \"$SLURM_METRICS_FILE\"\n");
+    out.push_str("  write_metrics_meta\n");
+    out.push_str("  sample_metrics_once\n");
+    out.push_str("  metrics_sampler_loop &\n");
+    out.push_str("  SAMPLER_PID=$!\n");
+    out.push_str("  write_metrics_meta\n");
+    out.push_str("}\n\n");
+
+    out.push_str("stop_metrics_sampler() {\n");
+    out.push_str("  [[ -n \"$SAMPLER_PID\" ]] || return 0\n");
+    out.push_str("  if kill -0 \"$SAMPLER_PID\" 2>/dev/null; then\n");
+    out.push_str("    kill \"$SAMPLER_PID\" 2>/dev/null || true\n");
+    out.push_str("    wait \"$SAMPLER_PID\" 2>/dev/null || true\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+}
+
 fn render_service(out: &mut String, service: &RuntimeService) {
     let service_id = service_token(&service.name);
     let fn_name = format!("launch_{service_id}");
+    let step_name = service_step_name(&service.name);
     let command_args = execution_argv(&service.execution, service.working_dir.as_deref());
     let srun_args = build_srun_command(service);
     let service_env = service
@@ -272,22 +742,24 @@ fn render_service(out: &mut String, service: &RuntimeService) {
         ));
         out.push_str("  env \"${service_env[@]}\" \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >\"$logfile\" 2>&1 &\n");
     }
-    out.push_str("  SERVICE_PIDS+=(\"$!\")\n");
+    out.push_str("  local pid=$!\n");
     out.push_str(&format!(
-        "  SERVICE_NAMES+=({})\n",
-        shell_quote(&service.name)
+        "  register_service {} \"$pid\" {} \"$logfile\"\n",
+        shell_quote(&service.name),
+        shell_quote(&step_name)
     ));
     out.push_str("}\n");
 }
 
-fn render_readiness(out: &mut String, service: &RuntimeService) {
-    let pid_expr = "${SERVICE_PIDS[${#SERVICE_PIDS[@]}-1]}";
-    let name_expr = "${SERVICE_NAMES[${#SERVICE_NAMES[@]}-1]}";
-
+fn render_readiness_wait(out: &mut String, service: &RuntimeService) {
+    let fn_name = format!("wait_until_{}_ready", service_token(&service.name));
+    out.push_str(&format!("{fn_name}() {{\n"));
+    out.push_str("  local pid=$1\n");
+    out.push_str("  local name=$2\n");
     if let Some(readiness) = &service.readiness {
         match readiness {
             ReadinessSpec::Sleep { seconds } => {
-                out.push_str(&format!("sleep {seconds}\n"));
+                out.push_str(&format!("  wait_for_sleep \"$pid\" \"$name\" {seconds}\n"));
             }
             ReadinessSpec::Tcp {
                 host,
@@ -297,7 +769,7 @@ fn render_readiness(out: &mut String, service: &RuntimeService) {
                 let host = host.as_deref().unwrap_or("127.0.0.1");
                 let timeout = timeout_seconds.unwrap_or(60);
                 out.push_str(&format!(
-                    "wait_for_tcp \"{pid_expr}\" \"{name_expr}\" {} {} {}\n",
+                    "  wait_for_tcp \"$pid\" \"$name\" {} {} {}\n",
                     shell_quote(host),
                     port,
                     timeout
@@ -309,12 +781,46 @@ fn render_readiness(out: &mut String, service: &RuntimeService) {
             } => {
                 let timeout = timeout_seconds.unwrap_or(60);
                 out.push_str(&format!(
-                    "wait_for_log \"{pid_expr}\" \"{name_expr}\" \"$LOG_DIR/{}\" {} {}\n",
+                    "  wait_for_log \"$pid\" \"$name\" \"$LOG_DIR/{}\" {} {}\n",
                     log_file_name_for_service(&service.name),
                     shell_quote(pattern),
                     timeout
                 ));
             }
+            ReadinessSpec::Http {
+                url,
+                status_code,
+                timeout_seconds,
+            } => {
+                let timeout = timeout_seconds.unwrap_or(60);
+                out.push_str(&format!(
+                    "  wait_for_http \"$pid\" \"$name\" {} {} {}\n",
+                    shell_quote(url),
+                    status_code,
+                    timeout
+                ));
+            }
+        }
+    } else {
+        out.push_str("  :\n");
+    }
+    out.push_str("}\n");
+}
+
+fn render_dependency_waits(out: &mut String, service: &RuntimeService) {
+    for dependency in &service.depends_on {
+        match dependency.condition {
+            DependencyCondition::ServiceStarted => out.push_str(&format!(
+                "wait_for_service_started {} {}\n",
+                shell_quote(&dependency.name),
+                shell_quote(&service.name)
+            )),
+            DependencyCondition::ServiceHealthy => out.push_str(&format!(
+                "wait_for_service_healthy {} {} wait_until_{}_ready\n",
+                shell_quote(&dependency.name),
+                shell_quote(&service.name),
+                service_token(&dependency.name)
+            )),
         }
     }
 }
@@ -356,6 +862,7 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
         "--ntasks=1".to_string(),
         "--exact".to_string(),
         "--overlap".to_string(),
+        format!("--job-name={}", service_step_name(&service.name)),
     ];
     if matches!(service.execution, ExecutionSpec::ImageDefault) {
         args.push("--container-entrypoint".to_string());
@@ -402,6 +909,10 @@ fn service_token(value: &str) -> String {
     token
 }
 
+fn service_step_name(value: &str) -> String {
+    format!("hpc-compose:{}", service_token(value))
+}
+
 pub fn log_file_name_for_service(value: &str) -> String {
     format!("{}.log", service_token(value))
 }
@@ -414,12 +925,18 @@ fn shell_quote(value: &str) -> String {
     format!("'{escaped}'")
 }
 
+fn flag(value: bool) -> &'static str {
+    if value { "1" } else { "0" }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::spec::{ReadinessSpec, ServiceSlurmConfig, SlurmConfig};
+    use crate::spec::{
+        DependencyCondition, ReadinessSpec, ServiceDependency, ServiceSlurmConfig, SlurmConfig,
+    };
 
     fn runtime_service() -> RuntimeService {
         RuntimeService {
@@ -429,6 +946,7 @@ mod tests {
             environment: vec![("A".into(), "B".into())],
             volumes: vec!["/shared/data:/data".into()],
             working_dir: Some("/workspace".into()),
+            depends_on: Vec::new(),
             readiness: Some(ReadinessSpec::Tcp {
                 host: Some("127.0.0.1".into()),
                 port: 8080,
@@ -471,9 +989,34 @@ mod tests {
         assert!(script.contains("--container-env=A"));
         assert!(script.contains("build_pyxis_mounts"));
         assert!(script.contains("$JOB_TMP:/hpc-compose/job"));
+        assert!(script.contains("STATE_FILE=\"$JOB_TMP/state.json\""));
+        assert!(script.contains("write_state_file"));
         assert!(script.contains("/scratch:/scratch"));
         assert!(script.contains("/usr/lib64/slurm/libslurmfull.so"));
         assert!(script.contains("/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog"));
+    }
+
+    #[test]
+    fn render_includes_http_readiness_helper() {
+        let mut service = runtime_service();
+        service.readiness = Some(ReadinessSpec::Http {
+            url: "http://127.0.0.1:8080/health".into(),
+            status_code: 200,
+            timeout_seconds: Some(30),
+        });
+        let plan = RuntimePlan {
+            name: "http-test".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service],
+        };
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("wait_for_http()"));
+        assert!(script.contains("curl --silent"));
+        assert!(
+            script
+                .contains("wait_for_http \"$pid\" \"$name\" 'http://127.0.0.1:8080/health' 200 30")
+        );
     }
 
     #[test]
@@ -491,6 +1034,7 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: None,
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
@@ -518,6 +1062,7 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: Some(ReadinessSpec::Log {
                 pattern: "ready".into(),
                 timeout_seconds: None,
@@ -591,13 +1136,14 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: Some(ReadinessSpec::Sleep { seconds: 3 }),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
         };
-        render_readiness(&mut out, &sleep_service);
-        assert!(out.contains("sleep 3"));
+        render_readiness_wait(&mut out, &sleep_service);
+        assert!(out.contains("wait_for_sleep \"$pid\" \"$name\" 3"));
 
         let mut out = String::new();
         let tcp_default_service = RuntimeService {
@@ -608,8 +1154,34 @@ mod tests {
             }),
             ..sleep_service.clone()
         };
-        render_readiness(&mut out, &tcp_default_service);
+        render_readiness_wait(&mut out, &tcp_default_service);
         assert!(out.contains("'127.0.0.1' 9000 60"));
+
+        let mut out = String::new();
+        let http_service = RuntimeService {
+            readiness: Some(ReadinessSpec::Http {
+                url: "http://127.0.0.1:8080/health".into(),
+                status_code: 200,
+                timeout_seconds: Some(30),
+            }),
+            ..sleep_service.clone()
+        };
+        render_readiness_wait(&mut out, &http_service);
+        assert!(out.contains("wait_for_http"));
+        assert!(out.contains("'http://127.0.0.1:8080/health'"));
+        assert!(out.contains("200 30"));
+
+        let mut out = String::new();
+        let http_default_service = RuntimeService {
+            readiness: Some(ReadinessSpec::Http {
+                url: "http://localhost:5000/ready".into(),
+                status_code: 200,
+                timeout_seconds: None,
+            }),
+            ..sleep_service.clone()
+        };
+        render_readiness_wait(&mut out, &http_default_service);
+        assert!(out.contains("200 60"));
 
         assert_eq!(
             execution_argv(&ExecutionSpec::ImageDefault, None),
@@ -634,6 +1206,7 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: None,
             slurm: ServiceSlurmConfig {
                 cpus_per_task: Some(2),
@@ -648,6 +1221,7 @@ mod tests {
         };
         let args = build_srun_command(&service);
         assert!(args.contains(&"--container-entrypoint".to_string()));
+        assert!(args.contains(&"--job-name=hpc-compose:redis_x2f_service".to_string()));
         assert!(args.contains(&"--cpus-per-task=2".to_string()));
         assert!(args.contains(&"--gres=gpu:1".to_string()));
         assert!(args.contains(&"--exclusive".to_string()));
@@ -658,6 +1232,10 @@ mod tests {
         );
         assert_eq!(service_token("redis/service"), "redis_x2f_service");
         assert_eq!(service_token("redis_service"), "redis_x5f_service");
+        assert_eq!(
+            service_step_name("redis/service"),
+            "hpc-compose:redis_x2f_service"
+        );
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
     }
@@ -671,6 +1249,7 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: Some(ReadinessSpec::Log {
                 pattern: "ready".into(),
                 timeout_seconds: Some(5),
@@ -691,6 +1270,8 @@ mod tests {
         assert!(script.contains("launch_api_x5f_v1()"));
         assert!(script.contains("$LOG_DIR/api_x2e_v1.log"));
         assert!(script.contains("$LOG_DIR/api_x5f_v1.log"));
+        assert!(script.contains("'--job-name=hpc-compose:api_x2e_v1'"));
+        assert!(script.contains("'--job-name=hpc-compose:api_x5f_v1'"));
     }
 
     #[test]
@@ -709,6 +1290,7 @@ mod tests {
                 environment: Vec::new(),
                 volumes: Vec::new(),
                 working_dir: None,
+                depends_on: Vec::new(),
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
@@ -722,5 +1304,121 @@ mod tests {
             execution_argv(&ExecutionSpec::ImageDefault, Some("/work"))
         });
         assert!(panic.is_err());
+    }
+
+    #[test]
+    fn render_waits_only_on_declared_dependencies() {
+        let provider = RuntimeService {
+            name: "a".into(),
+            runtime_image: PathBuf::from("/shared/cache/a.sqsh"),
+            execution: ExecutionSpec::Shell("echo a".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: Some(ReadinessSpec::Log {
+                pattern: "ready".into(),
+                timeout_seconds: Some(30),
+            }),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+        let unrelated = RuntimeService {
+            name: "b".into(),
+            runtime_image: PathBuf::from("/shared/cache/b.sqsh"),
+            execution: ExecutionSpec::Shell("echo b".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+        let dependent = RuntimeService {
+            name: "c".into(),
+            runtime_image: PathBuf::from("/shared/cache/c.sqsh"),
+            execution: ExecutionSpec::Shell("echo c".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: vec![ServiceDependency {
+                name: "a".into(),
+                condition: DependencyCondition::ServiceHealthy,
+            }],
+            readiness: None,
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![provider, unrelated, dependent],
+        };
+
+        let script = render_script(&plan).expect("script");
+        let launch_a = script.find("launch_a\n").expect("launch a");
+        let launch_b = script.find("launch_b\n").expect("launch b");
+        let wait_a = script
+            .find("wait_for_service_healthy 'a' 'c' wait_until_a_ready")
+            .expect("healthy wait");
+        let launch_c = script.find("launch_c\n").expect("launch c");
+        assert!(launch_a < launch_b);
+        assert!(launch_b < wait_a);
+        assert!(wait_a < launch_c);
+        let started_check = script
+            .find("wait_for_service_started \"$dependency\" \"$target\" || return 1")
+            .expect("started check");
+        let healthy_cache = script
+            .find("if [[ \"${SERVICE_HEALTHY[$index]:-0}\" == \"1\" ]]")
+            .expect("healthy cache");
+        assert!(started_check < healthy_cache);
+        assert!(script.contains("\"healthy\":"));
+    }
+
+    #[test]
+    fn render_metrics_sampler_when_enabled() {
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig {
+                metrics: Some(crate::spec::MetricsConfig {
+                    enabled: Some(true),
+                    interval_seconds: Some(3),
+                    collectors: vec![MetricsCollector::Gpu, MetricsCollector::Slurm],
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![runtime_service()],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("METRICS_DIR=\"$JOB_TMP/metrics\""));
+        assert!(script.contains("start_metrics_sampler"));
+        assert!(script.contains("metrics_sampler_loop"));
+        assert!(script.contains("nvidia-smi --query-gpu="));
+        assert!(script.contains("sstat --allsteps --jobs \"$SLURM_JOB_ID\""));
+        assert!(script.contains("stop_metrics_sampler"));
+        assert!(script.contains("GPU_COLLECTOR_ENABLED=1"));
+        assert!(script.contains("SLURM_COLLECTOR_ENABLED=1"));
+    }
+
+    #[test]
+    fn render_omits_metrics_sampler_when_disabled() {
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![runtime_service()],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(!script.contains("METRICS_DIR=\"$JOB_TMP/metrics\""));
+        assert!(!script.contains("start_metrics_sampler"));
+        assert!(!script.contains("metrics_sampler_loop"));
     }
 }

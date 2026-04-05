@@ -350,6 +350,7 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: None,
             slurm: ServiceSlurmConfig::default(),
             prepare: Some(PreparedImageSpec {
@@ -538,6 +539,7 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: None,
             slurm: ServiceSlurmConfig::default(),
             prepare: None,

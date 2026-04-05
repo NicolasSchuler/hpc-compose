@@ -74,6 +74,88 @@ pub struct StatusSnapshot {
     pub services: Vec<ServiceLogStatus>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct StatsSnapshot {
+    pub job_id: String,
+    pub record: Option<SubmissionRecord>,
+    pub metrics_dir: Option<PathBuf>,
+    pub scheduler: SchedulerStatus,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub source: String,
+    pub notes: Vec<String>,
+    pub sampler: Option<SamplerSnapshot>,
+    pub steps: Vec<StepStats>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StepStats {
+    pub step_id: String,
+    pub ntasks: String,
+    pub ave_cpu: String,
+    pub ave_rss: String,
+    pub max_rss: String,
+    pub alloc_tres: String,
+    pub tres_usage_in_ave: String,
+    pub alloc_tres_map: BTreeMap<String, String>,
+    pub usage_tres_in_ave_map: BTreeMap<String, String>,
+    pub gpu_count: Option<String>,
+    pub gpu_util: Option<String>,
+    pub gpu_mem: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SamplerSnapshot {
+    pub interval_seconds: u64,
+    pub collectors: Vec<CollectorStatus>,
+    pub gpu: Option<GpuSnapshot>,
+    pub slurm: Option<SlurmSamplerSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectorStatus {
+    pub name: String,
+    pub enabled: bool,
+    pub available: bool,
+    pub note: Option<String>,
+    pub last_sampled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GpuSnapshot {
+    pub sampled_at: String,
+    pub gpus: Vec<GpuDeviceSample>,
+    pub processes: Vec<GpuProcessSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GpuDeviceSample {
+    pub index: Option<String>,
+    pub uuid: Option<String>,
+    pub name: Option<String>,
+    pub utilization_gpu: Option<String>,
+    pub utilization_memory: Option<String>,
+    pub memory_used_mib: Option<String>,
+    pub memory_total_mib: Option<String>,
+    pub temperature_c: Option<String>,
+    pub power_draw_w: Option<String>,
+    pub power_limit_w: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GpuProcessSample {
+    pub gpu_uuid: Option<String>,
+    pub pid: Option<String>,
+    pub process_name: Option<String>,
+    pub used_memory_mib: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SlurmSamplerSnapshot {
+    pub sampled_at: String,
+    pub steps: Vec<StepStats>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SchedulerOptions {
     pub squeue_bin: String,
@@ -87,6 +169,69 @@ impl Default for SchedulerOptions {
             sacct_bin: "sacct".to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct StatsOptions {
+    pub scheduler: SchedulerOptions,
+    pub sstat_bin: String,
+}
+
+impl Default for StatsOptions {
+    fn default() -> Self {
+        Self {
+            scheduler: SchedulerOptions::default(),
+            sstat_bin: "sstat".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SamplerMetaFile {
+    interval_seconds: u64,
+    collectors: Vec<CollectorStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GpuDeviceSampleRow {
+    sampled_at: String,
+    index: Option<String>,
+    uuid: Option<String>,
+    name: Option<String>,
+    utilization_gpu: Option<String>,
+    utilization_memory: Option<String>,
+    memory_used_mib: Option<String>,
+    memory_total_mib: Option<String>,
+    temperature_c: Option<String>,
+    power_draw_w: Option<String>,
+    power_limit_w: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GpuProcessSampleRow {
+    sampled_at: String,
+    gpu_uuid: Option<String>,
+    pid: Option<String>,
+    process_name: Option<String>,
+    used_memory_mib: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlurmSampleRow {
+    sampled_at: String,
+    step_id: Option<String>,
+    ntasks: Option<String>,
+    ave_cpu: Option<String>,
+    ave_rss: Option<String>,
+    max_rss: Option<String>,
+    alloc_tres: Option<String>,
+    tres_usage_in_ave: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SamplerLoadOutcome {
+    sampler: Option<SamplerSnapshot>,
+    notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +320,89 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct CleanResult {
+    pub removed_jobs: Vec<String>,
+}
+
+pub fn scan_job_records(spec_path: &Path) -> Result<Vec<SubmissionRecord>> {
+    let compose_file = absolute_path(spec_path)?;
+    let jobs_dir = jobs_dir_for(&compose_file);
+    if !jobs_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut records = Vec::new();
+    for entry in
+        fs::read_dir(&jobs_dir).with_context(|| format!("failed to read {}", jobs_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(record) = read_json::<SubmissionRecord>(&path) {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+pub fn clean_by_age(spec_path: &Path, age_days: u64) -> Result<CleanResult> {
+    let compose_file = absolute_path(spec_path)?;
+    let records = scan_job_records(&compose_file)?;
+    let cutoff = unix_timestamp_now().saturating_sub(age_days * 86400);
+    let mut removed = Vec::new();
+    for record in &records {
+        if record.submitted_at < cutoff {
+            remove_job_artifacts(&compose_file, &record.job_id)?;
+            removed.push(record.job_id.clone());
+        }
+    }
+    Ok(CleanResult {
+        removed_jobs: removed,
+    })
+}
+
+pub fn clean_all_except_latest(spec_path: &Path) -> Result<CleanResult> {
+    let compose_file = absolute_path(spec_path)?;
+    let latest_path = latest_record_path_for(&compose_file);
+    let latest_job_id = if latest_path.exists() {
+        read_json::<SubmissionRecord>(&latest_path)
+            .ok()
+            .map(|record| record.job_id)
+    } else {
+        None
+    };
+
+    let records = scan_job_records(&compose_file)?;
+    let mut removed = Vec::new();
+    for record in &records {
+        if latest_job_id.as_deref() == Some(&record.job_id) {
+            continue;
+        }
+        remove_job_artifacts(&compose_file, &record.job_id)?;
+        removed.push(record.job_id.clone());
+    }
+    Ok(CleanResult {
+        removed_jobs: removed,
+    })
+}
+
+fn remove_job_artifacts(compose_file: &Path, job_id: &str) -> Result<()> {
+    let jobs_dir = jobs_dir_for(compose_file);
+    let record_path = jobs_dir.join(format!("{job_id}.json"));
+    if record_path.exists() {
+        fs::remove_file(&record_path)
+            .with_context(|| format!("failed to remove {}", record_path.display()))?;
+    }
+    let job_dir = metadata_root_for(compose_file).join(job_id);
+    if job_dir.is_dir() {
+        fs::remove_dir_all(&job_dir)
+            .with_context(|| format!("failed to remove {}", job_dir.display()))?;
+    }
+    Ok(())
+}
+
 pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<SubmissionRecord> {
     let compose_file = absolute_path(spec_path)?;
     let path = match job_id {
@@ -236,6 +464,110 @@ pub fn build_status_snapshot(
     })
 }
 
+pub fn build_stats_snapshot(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &StatsOptions,
+) -> Result<StatsSnapshot> {
+    let (job_id, record) = match job_id {
+        Some(job_id) => (
+            job_id.to_string(),
+            load_submission_record(spec_path, Some(job_id)).ok(),
+        ),
+        None => {
+            let record = load_submission_record(spec_path, None)?;
+            (record.job_id.clone(), Some(record))
+        }
+    };
+    let raw_scheduler = probe_scheduler_status(&job_id, &options.scheduler);
+    let scheduler = if let Some(record) = &record {
+        reconcile_scheduler_status(
+            raw_scheduler,
+            record.submitted_at,
+            None,
+            unix_timestamp_now(),
+        )
+    } else {
+        raw_scheduler
+    };
+    let metrics_dir = record.as_ref().map(metrics_dir_for_record);
+    let SamplerLoadOutcome { sampler, mut notes } = if let Some(metrics_dir) = metrics_dir.as_ref()
+    {
+        load_sampler_snapshot(metrics_dir)
+    } else {
+        SamplerLoadOutcome::default()
+    };
+
+    let mut steps = sampler
+        .as_ref()
+        .and_then(|snapshot| snapshot.slurm.as_ref())
+        .map(|snapshot| snapshot.steps.clone())
+        .unwrap_or_default();
+    let sampler_contributed = sampler.as_ref().is_some_and(|snapshot| {
+        snapshot.gpu.is_some()
+            || snapshot
+                .slurm
+                .as_ref()
+                .is_some_and(|slurm| !slurm.steps.is_empty())
+    });
+    let used_sampler_steps = !steps.is_empty();
+    let mut used_live_sstat = false;
+
+    if steps.is_empty() {
+        match probe_step_stats(&job_id, &options.sstat_bin) {
+            Ok(probed_steps) => {
+                steps = probed_steps;
+                used_live_sstat = !steps.is_empty();
+            }
+            Err(err) if sampler_contributed => {
+                notes.push(format!(
+                    "live sstat fallback failed while reading sampler-backed stats: {err}"
+                ));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    let available = !steps.is_empty()
+        || sampler
+            .as_ref()
+            .and_then(|snapshot| snapshot.gpu.as_ref())
+            .is_some();
+    if available
+        && sampler
+            .as_ref()
+            .and_then(|snapshot| snapshot.gpu.as_ref())
+            .is_none()
+        && !steps.is_empty()
+        && steps.iter().all(|step| !step.has_live_gpu_metrics())
+    {
+        notes.push(
+            "GPU accounting metrics are unavailable for this job; this cluster may not expose GPU TRES accounting via sstat".to_string(),
+        );
+    }
+    let source =
+        if sampler_contributed && (used_live_sstat || (!used_sampler_steps && !steps.is_empty())) {
+            "sampler+sstat"
+        } else if sampler_contributed {
+            "sampler"
+        } else {
+            "sstat"
+        };
+
+    Ok(StatsSnapshot {
+        job_id,
+        record,
+        metrics_dir,
+        scheduler: scheduler.clone(),
+        available,
+        reason: (!available).then(|| stats_unavailable_reason(&scheduler)),
+        source: source.to_string(),
+        notes,
+        sampler,
+        steps,
+    })
+}
+
 pub fn probe_scheduler_status(job_id: &str, options: &SchedulerOptions) -> SchedulerStatus {
     probe_squeue(job_id, &options.squeue_bin)
         .or_else(|| probe_sacct(job_id, &options.sacct_bin))
@@ -264,6 +596,277 @@ pub fn log_dir_for_record(record: &SubmissionRecord) -> PathBuf {
                 .join(&record.job_id)
                 .join("logs")
         })
+}
+
+pub fn metrics_dir_for_record(record: &SubmissionRecord) -> PathBuf {
+    record
+        .submit_dir
+        .join(".hpc-compose")
+        .join(&record.job_id)
+        .join("metrics")
+}
+
+fn load_sampler_snapshot(metrics_dir: &Path) -> SamplerLoadOutcome {
+    if !metrics_dir.is_dir() {
+        return SamplerLoadOutcome::default();
+    }
+
+    let meta_path = metrics_dir.join("meta.json");
+    let meta: SamplerMetaFile = match read_json(&meta_path) {
+        Ok(meta) => meta,
+        Err(err) => {
+            return SamplerLoadOutcome {
+                sampler: None,
+                notes: vec![format!(
+                    "failed to parse metrics sampler metadata at {}: {err}",
+                    meta_path.display()
+                )],
+            };
+        }
+    };
+
+    let mut notes = meta
+        .collectors
+        .iter()
+        .filter(|collector| collector.enabled)
+        .filter_map(|collector| {
+            collector
+                .note
+                .as_ref()
+                .map(|note| format!("metrics collector '{}': {note}", collector.name))
+        })
+        .collect::<Vec<_>>();
+
+    let gpu = if collector_enabled(&meta.collectors, "gpu") {
+        match load_gpu_snapshot(metrics_dir) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                notes.push(format!(
+                    "failed to parse GPU sampler data under {}: {err}",
+                    metrics_dir.display()
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let slurm = if collector_enabled(&meta.collectors, "slurm") {
+        match load_slurm_sampler_snapshot(metrics_dir) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                notes.push(format!(
+                    "failed to parse Slurm sampler data under {}: {err}",
+                    metrics_dir.display()
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    SamplerLoadOutcome {
+        sampler: Some(SamplerSnapshot {
+            interval_seconds: meta.interval_seconds,
+            collectors: meta.collectors,
+            gpu,
+            slurm,
+        }),
+        notes,
+    }
+}
+
+fn collector_enabled(collectors: &[CollectorStatus], name: &str) -> bool {
+    collectors
+        .iter()
+        .find(|collector| collector.name == name)
+        .is_some_and(|collector| collector.enabled)
+}
+
+fn load_gpu_snapshot(metrics_dir: &Path) -> Result<Option<GpuSnapshot>> {
+    let gpu_path = metrics_dir.join("gpu.jsonl");
+    let Some((sampled_at, devices)) = load_latest_gpu_devices(&gpu_path)? else {
+        return Ok(None);
+    };
+    let processes =
+        load_gpu_processes_for_timestamp(&metrics_dir.join("gpu_processes.jsonl"), &sampled_at)?;
+    Ok(Some(GpuSnapshot {
+        sampled_at,
+        gpus: devices,
+        processes,
+    }))
+}
+
+fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceSample>)>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut latest_sampled_at: Option<String> = None;
+    let mut devices = Vec::new();
+
+    for (index, raw_line) in raw.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let row: GpuDeviceSampleRow = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+        match latest_sampled_at.as_deref() {
+            None => {
+                latest_sampled_at = Some(row.sampled_at.clone());
+                devices.push(GpuDeviceSample {
+                    index: row.index,
+                    uuid: row.uuid,
+                    name: row.name,
+                    utilization_gpu: row.utilization_gpu,
+                    utilization_memory: row.utilization_memory,
+                    memory_used_mib: row.memory_used_mib,
+                    memory_total_mib: row.memory_total_mib,
+                    temperature_c: row.temperature_c,
+                    power_draw_w: row.power_draw_w,
+                    power_limit_w: row.power_limit_w,
+                });
+            }
+            Some(current) if row.sampled_at.as_str() > current => {
+                latest_sampled_at = Some(row.sampled_at.clone());
+                devices.clear();
+                devices.push(GpuDeviceSample {
+                    index: row.index,
+                    uuid: row.uuid,
+                    name: row.name,
+                    utilization_gpu: row.utilization_gpu,
+                    utilization_memory: row.utilization_memory,
+                    memory_used_mib: row.memory_used_mib,
+                    memory_total_mib: row.memory_total_mib,
+                    temperature_c: row.temperature_c,
+                    power_draw_w: row.power_draw_w,
+                    power_limit_w: row.power_limit_w,
+                });
+            }
+            Some(current) if row.sampled_at == current => {
+                devices.push(GpuDeviceSample {
+                    index: row.index,
+                    uuid: row.uuid,
+                    name: row.name,
+                    utilization_gpu: row.utilization_gpu,
+                    utilization_memory: row.utilization_memory,
+                    memory_used_mib: row.memory_used_mib,
+                    memory_total_mib: row.memory_total_mib,
+                    temperature_c: row.temperature_c,
+                    power_draw_w: row.power_draw_w,
+                    power_limit_w: row.power_limit_w,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(latest_sampled_at.map(|sampled_at| (sampled_at, devices)))
+}
+
+fn load_gpu_processes_for_timestamp(
+    path: &Path,
+    sampled_at: &str,
+) -> Result<Vec<GpuProcessSample>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut processes = Vec::new();
+
+    for (index, raw_line) in raw.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let row: GpuProcessSampleRow = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+        if row.sampled_at != sampled_at {
+            continue;
+        }
+        processes.push(GpuProcessSample {
+            gpu_uuid: row.gpu_uuid,
+            pid: row.pid,
+            process_name: row.process_name,
+            used_memory_mib: row.used_memory_mib,
+        });
+    }
+
+    Ok(processes)
+}
+
+fn load_slurm_sampler_snapshot(metrics_dir: &Path) -> Result<Option<SlurmSamplerSnapshot>> {
+    let path = metrics_dir.join("slurm.jsonl");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut latest_sampled_at: Option<String> = None;
+    let mut steps = Vec::new();
+
+    for (index, raw_line) in raw.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let row: SlurmSampleRow = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+        let sampled_at = row.sampled_at.clone();
+        let step = step_from_slurm_sample_row(row)
+            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+        match latest_sampled_at.as_deref() {
+            None => {
+                latest_sampled_at = Some(sampled_at);
+                steps.push(step);
+            }
+            Some(current) if sampled_at.as_str() > current => {
+                latest_sampled_at = Some(sampled_at);
+                steps.clear();
+                steps.push(step);
+            }
+            Some(current) if sampled_at == current => {
+                steps.push(step);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(latest_sampled_at.map(|sampled_at| SlurmSamplerSnapshot { sampled_at, steps }))
+}
+
+fn step_from_slurm_sample_row(row: SlurmSampleRow) -> Result<StepStats> {
+    let step_id = required_json_string("step_id", row.step_id)?;
+    let alloc_tres = row.alloc_tres.unwrap_or_default();
+    let tres_usage_in_ave = row.tres_usage_in_ave.unwrap_or_default();
+    let alloc_tres_map = parse_tres_map(&alloc_tres)
+        .with_context(|| format!("failed to parse AllocTRES for step '{step_id}'"))?;
+    let usage_tres_in_ave_map = parse_tres_map(&tres_usage_in_ave)
+        .with_context(|| format!("failed to parse TRESUsageInAve for step '{step_id}'"))?;
+
+    Ok(StepStats {
+        step_id,
+        ntasks: row.ntasks.unwrap_or_default(),
+        ave_cpu: row.ave_cpu.unwrap_or_default(),
+        ave_rss: row.ave_rss.unwrap_or_default(),
+        max_rss: row.max_rss.unwrap_or_default(),
+        alloc_tres: alloc_tres.clone(),
+        tres_usage_in_ave: tres_usage_in_ave.clone(),
+        gpu_count: find_tres_value(&alloc_tres_map, "gres/gpu"),
+        gpu_util: find_tres_value(&usage_tres_in_ave_map, "gres/gpuutil"),
+        gpu_mem: find_tres_value(&usage_tres_in_ave_map, "gres/gpumem"),
+        alloc_tres_map,
+        usage_tres_in_ave_map,
+    })
+}
+
+fn required_json_string(field: &str, value: Option<String>) -> Result<String> {
+    value.with_context(|| format!("missing required field '{field}'"))
 }
 
 pub fn print_logs(
@@ -557,6 +1160,117 @@ fn probe_sacct(job_id: &str, binary: &str) -> Option<SchedulerStatus> {
     ))
 }
 
+fn probe_step_stats(job_id: &str, binary: &str) -> Result<Vec<StepStats>> {
+    let output = Command::new(binary)
+        .args([
+            "--allsteps",
+            "--jobs",
+            job_id,
+            "--parsable2",
+            "--noconvert",
+            "--format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,AllocTRES,TRESUsageInAve",
+        ])
+        .output()
+        .with_context(|| format!("failed to execute '{binary}'"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        if detail.is_empty() {
+            bail!("sstat failed for job {job_id}");
+        }
+        bail!("sstat failed for job {job_id}: {detail}");
+    }
+
+    parse_sstat_output(job_id, &String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_sstat_output(job_id: &str, stdout: &str) -> Result<Vec<StepStats>> {
+    let mut steps = Vec::new();
+
+    for (index, raw_line) in stdout.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let fields = line.split('|').map(str::trim).collect::<Vec<_>>();
+        if fields
+            .first()
+            .is_some_and(|field| field.eq_ignore_ascii_case("JobID"))
+        {
+            continue;
+        }
+        if fields.len() != 7 {
+            bail!(
+                "malformed sstat output on line {}: expected 7 fields, found {}",
+                index + 1,
+                fields.len()
+            );
+        }
+
+        let step_id = fields[0];
+        if !is_numbered_step(job_id, step_id) {
+            continue;
+        }
+
+        let alloc_tres_map = parse_tres_map(fields[5])
+            .with_context(|| format!("failed to parse AllocTRES for step '{step_id}'"))?;
+        let usage_tres_in_ave_map = parse_tres_map(fields[6])
+            .with_context(|| format!("failed to parse TRESUsageInAve for step '{step_id}'"))?;
+        steps.push(StepStats {
+            step_id: step_id.to_string(),
+            ntasks: fields[1].to_string(),
+            ave_cpu: fields[2].to_string(),
+            ave_rss: fields[3].to_string(),
+            max_rss: fields[4].to_string(),
+            alloc_tres: fields[5].to_string(),
+            tres_usage_in_ave: fields[6].to_string(),
+            gpu_count: find_tres_value(&alloc_tres_map, "gres/gpu"),
+            gpu_util: find_tres_value(&usage_tres_in_ave_map, "gres/gpuutil"),
+            gpu_mem: find_tres_value(&usage_tres_in_ave_map, "gres/gpumem"),
+            alloc_tres_map,
+            usage_tres_in_ave_map,
+        });
+    }
+
+    Ok(steps)
+}
+
+fn parse_tres_map(raw: &str) -> Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for segment in raw.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let (key, value) = segment
+            .split_once('=')
+            .with_context(|| format!("invalid TRES entry '{segment}'"))?;
+        values.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    Ok(values)
+}
+
+fn find_tres_value(values: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    values.get(key).cloned().or_else(|| {
+        values
+            .iter()
+            .find(|(candidate, _)| candidate.starts_with(&format!("{key}:")))
+            .map(|(_, value)| value.clone())
+    })
+}
+
+fn is_numbered_step(job_id: &str, step_id: &str) -> bool {
+    let Some(suffix) = step_id
+        .strip_prefix(job_id)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+}
+
 fn build_scheduler_status(state: String, source: SchedulerSource) -> SchedulerStatus {
     let terminal = is_terminal_state(&state);
     SchedulerStatus {
@@ -641,6 +1355,24 @@ fn is_transitional_local_only(status: &SchedulerStatus) -> bool {
             status.state.as_str(),
             "WAITING_FOR_SCHEDULER" | "WAITING_FOR_ACCOUNTING"
         )
+}
+
+fn stats_unavailable_reason(scheduler: &SchedulerStatus) -> String {
+    match scheduler.state.as_str() {
+        "PENDING" | "CONFIGURING" | "WAITING_FOR_SCHEDULER" => {
+            "live step statistics are not available because the job is not running yet".to_string()
+        }
+        "WAITING_FOR_ACCOUNTING" => {
+            "live step statistics are unavailable while Slurm accounting data is catching up"
+                .to_string()
+        }
+        _ if scheduler.terminal => {
+            "live step statistics are not available because the job is no longer running"
+                .to_string()
+        }
+        "RUNNING" => "sstat did not report any numbered job steps for this running job".to_string(),
+        _ => "sstat did not report any numbered job steps for this job".to_string(),
+    }
 }
 
 fn selected_service_logs(
@@ -781,6 +1513,12 @@ fn unix_timestamp_now() -> u64 {
     system_time_to_unix(SystemTime::now()).unwrap_or(0)
 }
 
+impl StepStats {
+    fn has_live_gpu_metrics(&self) -> bool {
+        self.gpu_util.is_some() || self.gpu_mem.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -803,6 +1541,7 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
+                    depends_on: Vec::new(),
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
@@ -815,6 +1554,7 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
+                    depends_on: Vec::new(),
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
@@ -984,5 +1724,428 @@ mod tests {
         fs::write(&log, "one\ntwo\nthree\nfour\n").expect("append newline");
         let lines = read_new_lines(&mut cursor).expect("newline");
         assert_eq!(lines, vec!["four"]);
+    }
+
+    #[test]
+    fn parse_sstat_output_keeps_only_numbered_steps_and_maps_gpu_fields() {
+        let steps = parse_sstat_output(
+            "12345",
+            "\
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
+12345.batch|1|00:00:01|10M|10M|cpu=1,mem=10M|cpu=00:00:01
+12345.0|1|00:00:03|128M|256M|cpu=1,mem=512M,gres/gpu:a100=2|cpu=00:00:03,gres/gpuutil=77,gres/gpumem=4096M
+12345.extern|1|00:00:01|1M|1M|cpu=1|cpu=00:00:01
+12345.1|2|00:00:05|64M|128M|cpu=2,mem=256M|cpu=00:00:05
+",
+        )
+        .expect("steps");
+
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step_id, "12345.0");
+        assert_eq!(steps[0].gpu_count.as_deref(), Some("2"));
+        assert_eq!(steps[0].gpu_util.as_deref(), Some("77"));
+        assert_eq!(steps[0].gpu_mem.as_deref(), Some("4096M"));
+        assert_eq!(steps[1].step_id, "12345.1");
+        assert_eq!(steps[1].gpu_util, None);
+    }
+
+    #[test]
+    fn parse_sstat_output_rejects_malformed_rows_and_tres_entries() {
+        let err = parse_sstat_output("12345", "12345.0|1|00:00:01").expect_err("bad row");
+        assert!(err.to_string().contains("malformed sstat output"));
+
+        let err = parse_sstat_output(
+            "12345",
+            "12345.0|1|00:00:01|128M|256M|cpu=1,broken|cpu=00:00:01",
+        )
+        .expect_err("bad tres");
+        assert!(err.to_string().contains("failed to parse AllocTRES"));
+    }
+
+    #[test]
+    fn load_sampler_snapshot_reads_latest_groups() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let metrics_dir = tmpdir.path().join("metrics");
+        fs::create_dir_all(&metrics_dir).expect("metrics dir");
+        fs::write(
+            metrics_dir.join("meta.json"),
+            r#"{
+  "sampler_pid": 123,
+  "interval_seconds": 5,
+  "collectors": [
+    {"name":"gpu","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:10Z"},
+    {"name":"slurm","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:10Z"}
+  ]
+}"#,
+        )
+        .expect("meta");
+        fs::write(
+            metrics_dir.join("gpu.jsonl"),
+            concat!(
+                "{\"sampled_at\":\"2026-04-05T10:00:00Z\",\"index\":\"0\",\"uuid\":\"GPU-old\",\"name\":\"Old\",\"utilization_gpu\":\"11\",\"utilization_memory\":\"22\",\"memory_used_mib\":\"10\",\"memory_total_mib\":\"20\",\"temperature_c\":\"30\",\"power_draw_w\":\"40\",\"power_limit_w\":\"50\"}\n",
+                "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"index\":\"0\",\"uuid\":\"GPU-new\",\"name\":\"New\",\"utilization_gpu\":\"91\",\"utilization_memory\":\"77\",\"memory_used_mib\":\"4096\",\"memory_total_mib\":\"8192\",\"temperature_c\":\"55\",\"power_draw_w\":\"220\",\"power_limit_w\":\"300\"}\n"
+            ),
+        )
+        .expect("gpu");
+        fs::write(
+            metrics_dir.join("gpu_processes.jsonl"),
+            concat!(
+                "{\"sampled_at\":\"2026-04-05T10:00:00Z\",\"gpu_uuid\":\"GPU-old\",\"pid\":\"1\",\"process_name\":\"old\",\"used_memory_mib\":\"10\"}\n",
+                "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"gpu_uuid\":\"GPU-new\",\"pid\":\"4242\",\"process_name\":\"python\",\"used_memory_mib\":\"2048\"}\n"
+            ),
+        )
+        .expect("gpu proc");
+        fs::write(
+            metrics_dir.join("slurm.jsonl"),
+            concat!(
+                "{\"sampled_at\":\"2026-04-05T10:00:00Z\",\"step_id\":\"12345.0\",\"ntasks\":\"1\",\"ave_cpu\":\"00:00:01\",\"ave_rss\":\"10M\",\"max_rss\":\"10M\",\"alloc_tres\":\"cpu=1\",\"tres_usage_in_ave\":\"cpu=00:00:01\"}\n",
+                "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"step_id\":\"12345.1\",\"ntasks\":\"2\",\"ave_cpu\":\"00:00:11\",\"ave_rss\":\"512M\",\"max_rss\":\"1G\",\"alloc_tres\":\"cpu=2,gres/gpu=1\",\"tres_usage_in_ave\":\"cpu=00:00:11,gres/gpuutil=91,gres/gpumem=4096M\"}\n"
+            ),
+        )
+        .expect("slurm");
+
+        let outcome = load_sampler_snapshot(&metrics_dir);
+        assert!(outcome.notes.is_empty());
+        let sampler = outcome.sampler.expect("sampler");
+        assert_eq!(sampler.interval_seconds, 5);
+        let gpu = sampler.gpu.expect("gpu");
+        assert_eq!(gpu.sampled_at, "2026-04-05T10:00:10Z");
+        assert_eq!(gpu.gpus.len(), 1);
+        assert_eq!(gpu.gpus[0].uuid.as_deref(), Some("GPU-new"));
+        assert_eq!(gpu.processes[0].pid.as_deref(), Some("4242"));
+        let slurm = sampler.slurm.expect("slurm");
+        assert_eq!(slurm.sampled_at, "2026-04-05T10:00:10Z");
+        assert_eq!(slurm.steps.len(), 1);
+        assert_eq!(slurm.steps[0].step_id, "12345.1");
+        assert_eq!(slurm.steps[0].gpu_util.as_deref(), Some("91"));
+    }
+
+    #[test]
+    fn build_stats_snapshot_falls_back_when_sampler_data_is_malformed() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let plan = runtime_plan(tmpdir.path());
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        let metrics_dir = metrics_dir_for_record(&record);
+        fs::create_dir_all(&metrics_dir).expect("metrics dir");
+        fs::write(
+            metrics_dir.join("meta.json"),
+            r#"{
+  "sampler_pid": 123,
+  "interval_seconds": 5,
+  "collectors": [
+    {"name":"gpu","enabled":false,"available":false,"note":null,"last_sampled_at":null},
+    {"name":"slurm","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:10Z"}
+  ]
+}"#,
+        )
+        .expect("meta");
+        fs::write(metrics_dir.join("slurm.jsonl"), "{not-json}\n").expect("bad slurm");
+
+        let squeue = tmpdir.path().join("squeue");
+        let sacct = tmpdir.path().join("sacct");
+        let sstat = tmpdir.path().join("sstat");
+        write_script(&squeue, "#!/bin/bash\necho RUNNING\n");
+        write_script(&sacct, "#!/bin/bash\nexit 0\n");
+        write_script(
+            &sstat,
+            "#!/bin/bash\ncat <<'EOF'\n12345.0|1|00:00:03|128M|256M|cpu=1,mem=512M|cpu=00:00:03\nEOF\n",
+        );
+
+        let snapshot = build_stats_snapshot(
+            &compose,
+            None,
+            &StatsOptions {
+                scheduler: SchedulerOptions {
+                    squeue_bin: squeue.display().to_string(),
+                    sacct_bin: sacct.display().to_string(),
+                },
+                sstat_bin: sstat.display().to_string(),
+            },
+        )
+        .expect("snapshot");
+
+        assert_eq!(snapshot.source, "sstat");
+        assert_eq!(snapshot.steps.len(), 1);
+        assert!(
+            snapshot
+                .notes
+                .iter()
+                .any(|note| note.contains("failed to parse Slurm sampler data"))
+        );
+    }
+
+    #[test]
+    fn build_stats_snapshot_uses_tracked_sampler_for_explicit_job_id() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let plan = runtime_plan(tmpdir.path());
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        let metrics_dir = metrics_dir_for_record(&record);
+        fs::create_dir_all(&metrics_dir).expect("metrics dir");
+        fs::write(
+            metrics_dir.join("meta.json"),
+            r#"{
+  "sampler_pid": 123,
+  "interval_seconds": 5,
+  "collectors": [
+    {"name":"gpu","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:10Z"},
+    {"name":"slurm","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:10Z"}
+  ]
+}"#,
+        )
+        .expect("meta");
+        fs::write(
+            metrics_dir.join("gpu.jsonl"),
+            "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"index\":\"0\",\"uuid\":\"GPU-new\",\"name\":\"New\",\"utilization_gpu\":\"91\",\"utilization_memory\":\"77\",\"memory_used_mib\":\"4096\",\"memory_total_mib\":\"8192\",\"temperature_c\":\"55\",\"power_draw_w\":\"220\",\"power_limit_w\":\"300\"}\n",
+        )
+        .expect("gpu");
+        fs::write(
+            metrics_dir.join("gpu_processes.jsonl"),
+            "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"gpu_uuid\":\"GPU-new\",\"pid\":\"4242\",\"process_name\":\"python\",\"used_memory_mib\":\"2048\"}\n",
+        )
+        .expect("gpu proc");
+        fs::write(
+            metrics_dir.join("slurm.jsonl"),
+            "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"step_id\":\"12345.0\",\"ntasks\":\"1\",\"ave_cpu\":\"00:00:11\",\"ave_rss\":\"512M\",\"max_rss\":\"1G\",\"alloc_tres\":\"cpu=1,mem=4G,gres/gpu=1\",\"tres_usage_in_ave\":\"cpu=00:00:11,gres/gpuutil=91,gres/gpumem=4096M\"}\n",
+        )
+        .expect("slurm");
+
+        let squeue = tmpdir.path().join("squeue");
+        let sacct = tmpdir.path().join("sacct");
+        let sstat = tmpdir.path().join("sstat");
+        write_script(&squeue, "#!/bin/bash\necho RUNNING\n");
+        write_script(&sacct, "#!/bin/bash\nexit 0\n");
+        write_script(
+            &sstat,
+            "#!/bin/bash\necho sstat should not run >&2\nexit 1\n",
+        );
+
+        let snapshot = build_stats_snapshot(
+            &compose,
+            Some("12345"),
+            &StatsOptions {
+                scheduler: SchedulerOptions {
+                    squeue_bin: squeue.display().to_string(),
+                    sacct_bin: sacct.display().to_string(),
+                },
+                sstat_bin: sstat.display().to_string(),
+            },
+        )
+        .expect("snapshot");
+
+        assert_eq!(snapshot.source, "sampler");
+        assert_eq!(
+            snapshot.record.as_ref().map(|item| item.job_id.as_str()),
+            Some("12345")
+        );
+        assert_eq!(snapshot.metrics_dir.as_ref(), Some(&metrics_dir));
+        assert_eq!(
+            snapshot
+                .sampler
+                .as_ref()
+                .and_then(|item| item.gpu.as_ref())
+                .and_then(|gpu| gpu.processes.first())
+                .and_then(|process| process.pid.as_deref()),
+            Some("4242")
+        );
+        assert_eq!(snapshot.steps.len(), 1);
+        assert_eq!(snapshot.steps[0].gpu_util.as_deref(), Some("91"));
+    }
+
+    #[test]
+    fn stats_unavailable_reason_covers_pending_running_and_terminal_states() {
+        let pending = stats_unavailable_reason(&SchedulerStatus {
+            state: "PENDING".into(),
+            source: SchedulerSource::Squeue,
+            terminal: false,
+            failed: false,
+            detail: None,
+        });
+        assert!(pending.contains("not running yet"));
+
+        let running = stats_unavailable_reason(&SchedulerStatus {
+            state: "RUNNING".into(),
+            source: SchedulerSource::Squeue,
+            terminal: false,
+            failed: false,
+            detail: None,
+        });
+        assert!(running.contains("running job"));
+
+        let completed = stats_unavailable_reason(&SchedulerStatus {
+            state: "COMPLETED".into(),
+            source: SchedulerSource::Sacct,
+            terminal: true,
+            failed: false,
+            detail: None,
+        });
+        assert!(completed.contains("no longer running"));
+    }
+
+    #[test]
+    fn scan_job_records_returns_all_tracked_jobs() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose_path = tmpdir.path().join("compose.yaml");
+        fs::write(&compose_path, "").expect("write");
+        let plan = runtime_plan(tmpdir.path());
+
+        let record1 = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("s1"),
+            &plan,
+            "111",
+        )
+        .expect("record");
+        write_submission_record(&record1).expect("write");
+
+        let record2 = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("s2"),
+            &plan,
+            "222",
+        )
+        .expect("record");
+        write_submission_record(&record2).expect("write");
+
+        let records = scan_job_records(&compose_path).expect("scan");
+        assert_eq!(records.len(), 2);
+        let ids: Vec<&str> = records.iter().map(|r| r.job_id.as_str()).collect();
+        assert!(ids.contains(&"111"));
+        assert!(ids.contains(&"222"));
+    }
+
+    #[test]
+    fn clean_all_except_latest_preserves_latest() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose_path = tmpdir.path().join("compose.yaml");
+        fs::write(&compose_path, "").expect("write");
+        let plan = runtime_plan(tmpdir.path());
+
+        let record1 = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("s1"),
+            &plan,
+            "100",
+        )
+        .expect("record");
+        write_submission_record(&record1).expect("write");
+
+        let record2 = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("s2"),
+            &plan,
+            "200",
+        )
+        .expect("record");
+        write_submission_record(&record2).expect("write");
+
+        // latest.json should point to record2 (the last written)
+        let result = clean_all_except_latest(&compose_path).expect("clean");
+        assert_eq!(result.removed_jobs, vec!["100"]);
+
+        let remaining = scan_job_records(&compose_path).expect("scan");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].job_id, "200");
+    }
+
+    #[test]
+    fn clean_by_age_removes_old_jobs() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose_path = tmpdir.path().join("compose.yaml");
+        fs::write(&compose_path, "").expect("write");
+        let plan = runtime_plan(tmpdir.path());
+
+        let mut record = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("s1"),
+            &plan,
+            "300",
+        )
+        .expect("record");
+        // Set submitted_at to 10 days ago
+        record.submitted_at = unix_timestamp_now().saturating_sub(10 * 86400);
+        write_submission_record(&record).expect("write");
+
+        let recent = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("s2"),
+            &plan,
+            "400",
+        )
+        .expect("record");
+        write_submission_record(&recent).expect("write");
+
+        let result = clean_by_age(&compose_path, 7).expect("clean");
+        assert_eq!(result.removed_jobs, vec!["300"]);
+
+        let remaining = scan_job_records(&compose_path).expect("scan");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].job_id, "400");
+    }
+
+    #[test]
+    fn clean_removes_job_log_directories() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose_path = tmpdir.path().join("compose.yaml");
+        fs::write(&compose_path, "").expect("write");
+        let plan = runtime_plan(tmpdir.path());
+
+        let record = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("s1"),
+            &plan,
+            "500",
+        )
+        .expect("record");
+        write_submission_record(&record).expect("write");
+
+        // Create the job log directory
+        let job_dir = metadata_root_for(&compose_path).join("500");
+        fs::create_dir_all(job_dir.join("logs")).expect("mkdir");
+        fs::write(job_dir.join("logs/test.log"), "log content").expect("write log");
+        assert!(job_dir.exists());
+
+        let result = clean_all_except_latest(&compose_path).expect("clean");
+        // 500 is latest, so it should NOT be removed
+        assert!(result.removed_jobs.is_empty());
+
+        // Add another record to make 500 non-latest
+        let record2 = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("s2"),
+            &plan,
+            "600",
+        )
+        .expect("record");
+        write_submission_record(&record2).expect("write");
+
+        let result = clean_all_except_latest(&compose_path).expect("clean");
+        assert_eq!(result.removed_jobs, vec!["500"]);
+        assert!(!job_dir.exists());
     }
 }

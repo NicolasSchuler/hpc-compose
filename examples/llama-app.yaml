@@ -29,7 +29,8 @@ services:
   app:
     image: python:3.11-slim
     depends_on:
-      - llama
+      llama:
+        condition: service_healthy
     working_dir: /workspace
     volumes:
       - ./app:/workspace

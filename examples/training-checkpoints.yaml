@@ -1,0 +1,50 @@
+name: training-checkpoints
+
+x-slurm:
+  job_name: training-checkpoints
+  time: "04:00:00"
+  mem: 64G
+  cpus_per_task: 8
+  gpus: 1
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  trainer:
+    image: pytorch/pytorch:2.3.1-cuda12.1-cudnn9-runtime
+    volumes:
+      - /shared/$USER/checkpoints:/checkpoints
+    environment:
+      CHECKPOINT_DIR: /checkpoints
+      NUM_EPOCHS: "10"
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python -c "
+        import os, torch
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f'Training on {device}')
+
+        ckpt_dir = os.environ['CHECKPOINT_DIR']
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        model = torch.nn.Linear(128, 10).to(device)
+        optimizer = torch.optim.Adam(model.parameters())
+        data = torch.randn(256, 128, device=device)
+
+        for epoch in range(int(os.environ['NUM_EPOCHS'])):
+            out = model(data)
+            loss = out.sum()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            path = os.path.join(ckpt_dir, f'checkpoint_epoch_{epoch}.pt')
+            torch.save({'epoch': epoch, 'model': model.state_dict()}, path)
+            print(f'Epoch {epoch}: loss={loss.item():.4f}, saved {path}')
+
+        print('Training complete')
+        "
+    x-slurm:
+      gpus: 1
+      cpus_per_task: 4

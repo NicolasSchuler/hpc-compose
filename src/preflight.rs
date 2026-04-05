@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::planner::{ImageSource, cache_path_policy_issue, registry_host_for_remote};
 use crate::prepare::RuntimePlan;
+use crate::spec::{MetricsCollector, ReadinessSpec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -170,7 +171,8 @@ fn is_contextual_warning(item: &Item) -> bool {
         && (item
             .message
             .starts_with("neither /etc/slurm/task_prolog.hk nor /etc/slurm/task_prolog exists")
-            || item.message.starts_with("HAICORE helper path is"))
+            || item.message.starts_with("HAICORE helper path is")
+            || item.message.starts_with("metrics collector"))
 }
 
 pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
@@ -206,6 +208,8 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
     check_cache_dir_access(&mut report, &plan.cache_dir);
     check_local_and_mount_paths(&mut report, plan);
     check_registry_credentials(&mut report, plan);
+    check_readiness_host_tools(&mut report, plan);
+    check_metrics_collectors(&mut report, plan);
 
     if options.skip_prepare {
         check_skip_prepare_readiness(&mut report, plan);
@@ -226,6 +230,30 @@ fn check_binary(report: &mut Report, binary: &str, ok_message: &str, remediation
         report.items.push(Item {
             level: Level::Error,
             message: format!("required binary '{binary}' was not found"),
+            remediation: Some(remediation.to_string()),
+        });
+        false
+    }
+}
+
+fn check_optional_binary(
+    report: &mut Report,
+    binary: &str,
+    ok_message: &str,
+    missing_message: &str,
+    remediation: &str,
+) -> bool {
+    if let Some(path) = find_binary(binary) {
+        report.items.push(Item {
+            level: Level::Ok,
+            message: format!("{ok_message}: {}", path.display()),
+            remediation: None,
+        });
+        true
+    } else {
+        report.items.push(Item {
+            level: Level::Warn,
+            message: missing_message.to_string(),
             remediation: Some(remediation.to_string()),
         });
         false
@@ -279,16 +307,15 @@ fn check_cache_path_policy(report: &mut Report, plan: &RuntimePlan) {
         });
     }
 
-    if plan.slurm.cache_dir.is_none() {
-        if let Some(home) = env::var_os("HOME").map(PathBuf::from)
-            && plan.cache_dir.starts_with(&home)
-        {
-            report.items.push(Item {
-                level: Level::Warn,
-                message: format!("cache directory defaults under HOME: {}", plan.cache_dir.display()),
-                remediation: Some("On HAICORE, prefer x-slurm.cache_dir on workspace/shared storage to reduce quota and visibility issues.".to_string()),
-            });
-        }
+    if plan.slurm.cache_dir.is_none()
+        && let Some(home) = env::var_os("HOME").map(PathBuf::from)
+        && plan.cache_dir.starts_with(&home)
+    {
+        report.items.push(Item {
+            level: Level::Warn,
+            message: format!("cache directory defaults under HOME: {}", plan.cache_dir.display()),
+            remediation: Some("On HAICORE, prefer x-slurm.cache_dir on workspace/shared storage to reduce quota and visibility issues.".to_string()),
+        });
     }
 }
 
@@ -422,6 +449,53 @@ fn check_skip_prepare_readiness(report: &mut Report, plan: &RuntimePlan) {
             });
         }
     }
+}
+
+fn check_metrics_collectors(report: &mut Report, plan: &RuntimePlan) {
+    if !plan.slurm.metrics_enabled() {
+        return;
+    }
+
+    for collector in plan.slurm.metrics_collectors() {
+        match collector {
+            MetricsCollector::Gpu => {
+                check_optional_binary(
+                    report,
+                    "nvidia-smi",
+                    "metrics collector 'gpu' can query nvidia-smi",
+                    "metrics collector 'gpu' requested but 'nvidia-smi' was not found on this node",
+                    "GPU metrics are best-effort. This is expected on some login nodes; verify that compute nodes providing GPUs also provide nvidia-smi if you want runtime GPU telemetry.",
+                );
+            }
+            MetricsCollector::Slurm => {
+                check_optional_binary(
+                    report,
+                    "sstat",
+                    "metrics collector 'slurm' can query sstat",
+                    "metrics collector 'slurm' requested but 'sstat' was not found on this node",
+                    "Step-level CPU and memory telemetry is best-effort. This is expected on some login nodes; verify that compute nodes provide sstat and that Slurm accounting is enabled if you want runtime stats.",
+                );
+            }
+        }
+    }
+}
+
+fn check_readiness_host_tools(report: &mut Report, plan: &RuntimePlan) {
+    if !plan
+        .ordered_services
+        .iter()
+        .any(|service| matches!(service.readiness, Some(ReadinessSpec::Http { .. })))
+    {
+        return;
+    }
+
+    check_optional_binary(
+        report,
+        "curl",
+        "HTTP readiness checks can query curl",
+        "HTTP readiness checks require 'curl' on the host, but it was not found on this node",
+        "Install curl on the host or switch readiness.type to a probe that uses tools already available on the batch node.",
+    );
 }
 
 fn check_haicore_mount_helpers(report: &mut Report) {
@@ -644,7 +718,9 @@ mod tests {
     use super::*;
     use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
     use crate::prepare::RuntimeService;
-    use crate::spec::{ServiceSlurmConfig, SlurmConfig};
+    use crate::spec::{
+        MetricsCollector, MetricsConfig, ReadinessSpec, ServiceSlurmConfig, SlurmConfig,
+    };
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -663,6 +739,7 @@ mod tests {
                 environment: Vec::new(),
                 volumes: vec![tmpdir.join("src").display().to_string() + ":/src"],
                 working_dir: None,
+                depends_on: Vec::new(),
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: Some(PreparedImageSpec {
@@ -877,6 +954,7 @@ mod tests {
                 environment: Vec::new(),
                 volumes: vec![tmpdir.path().join("src").display().to_string() + ":/src"],
                 working_dir: None,
+                depends_on: Vec::new(),
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: Some(PreparedImageSpec {
@@ -913,6 +991,7 @@ mod tests {
                 environment: Vec::new(),
                 volumes: Vec::new(),
                 working_dir: None,
+                depends_on: Vec::new(),
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
@@ -946,6 +1025,67 @@ mod tests {
         let text = report.render_verbose();
         assert!(text.contains("found a Slurm task_prolog helper mount"));
         assert!(text.contains("HAICORE helper path is present"));
+    }
+
+    #[test]
+    fn metrics_collectors_are_reported_as_contextual_warnings() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let _guard = env_lock().lock().expect("lock");
+        let old_path = env::var_os("PATH");
+        unsafe {
+            env::set_var("PATH", tmpdir.path());
+        }
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.metrics = Some(MetricsConfig {
+            enabled: Some(true),
+            interval_seconds: Some(5),
+            collectors: vec![MetricsCollector::Gpu, MetricsCollector::Slurm],
+        });
+
+        let mut report = Report { items: Vec::new() };
+        check_metrics_collectors(&mut report, &plan);
+        let grouped = report.grouped();
+        assert_eq!(grouped.contextual_warnings.len(), 2);
+        assert!(grouped.contextual_warnings.iter().any(|item| {
+            item.message
+                .contains("metrics collector 'gpu' requested but 'nvidia-smi' was not found")
+        }));
+        assert!(grouped.contextual_warnings.iter().any(|item| {
+            item.message
+                .contains("metrics collector 'slurm' requested but 'sstat' was not found")
+        }));
+
+        match old_path {
+            Some(path) => unsafe { env::set_var("PATH", path) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+    }
+
+    #[test]
+    fn http_readiness_requires_curl_on_host() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let _guard = env_lock().lock().expect("lock");
+        let old_path = env::var_os("PATH");
+        unsafe {
+            env::set_var("PATH", tmpdir.path());
+        }
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.ordered_services[0].readiness = Some(ReadinessSpec::Http {
+            url: "http://127.0.0.1:8080/health".into(),
+            status_code: 200,
+            timeout_seconds: Some(30),
+        });
+
+        let report = run(&plan, &Options::default());
+        assert!(report.items.iter().any(|item| {
+            item.message
+                .contains("HTTP readiness checks require 'curl' on the host")
+        }));
+
+        match old_path {
+            Some(path) => unsafe { env::set_var("PATH", path) },
+            None => unsafe { env::remove_var("PATH") },
+        }
     }
 
     #[test]
@@ -1011,6 +1151,7 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
+                    depends_on: Vec::new(),
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
@@ -1023,6 +1164,7 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
+                    depends_on: Vec::new(),
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
@@ -1035,6 +1177,7 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
+                    depends_on: Vec::new(),
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
@@ -1049,6 +1192,7 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
+                    depends_on: Vec::new(),
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
@@ -1061,6 +1205,7 @@ mod tests {
                     environment: Vec::new(),
                     volumes: Vec::new(),
                     working_dir: None,
+                    depends_on: Vec::new(),
                     readiness: None,
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,

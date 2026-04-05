@@ -1,0 +1,55 @@
+name: postgres-etl
+
+x-slurm:
+  job_name: postgres-etl
+  time: "01:00:00"
+  mem: 16G
+  cpus_per_task: 4
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: etl
+      POSTGRES_PASSWORD: etl
+      POSTGRES_DB: pipeline
+    readiness:
+      type: tcp
+      host: 127.0.0.1
+      port: 5432
+      timeout_seconds: 30
+    x-slurm:
+      cpus_per_task: 2
+
+  etl:
+    image: python:3.11-slim
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://etl:etl@127.0.0.1:5432/pipeline
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python -c "
+        import psycopg2, os
+
+        conn = psycopg2.connect(os.environ['DATABASE_URL'])
+        cur = conn.cursor()
+        cur.execute('CREATE TABLE IF NOT EXISTS results (id SERIAL, value FLOAT)')
+        for i in range(100):
+            cur.execute('INSERT INTO results (value) VALUES (%s)', (i * 1.5,))
+        conn.commit()
+        cur.execute('SELECT count(*), avg(value) FROM results')
+        count, avg = cur.fetchone()
+        print(f'Inserted {count} rows, average value: {avg:.2f}')
+        conn.close()
+        "
+    x-enroot:
+      prepare:
+        commands:
+          - pip install --no-cache-dir psycopg2-binary
+    x-slurm:
+      cpus_per_task: 2

@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use hpc_compose::cache::{
     CacheEntryKind, load_manifest_if_exists, prune_all_unused, prune_by_age, scan_cache,
 };
@@ -14,8 +15,9 @@ use hpc_compose::init::{
     resolve_template, write_initialized_template,
 };
 use hpc_compose::job::{
-    SchedulerOptions, StatusSnapshot, WatchOutcome, build_status_snapshot, build_submission_record,
-    load_submission_record, print_logs, scheduler_source_label, watch_submission,
+    SchedulerOptions, StatsOptions, StatsSnapshot, StatusSnapshot, WatchOutcome,
+    build_stats_snapshot, build_status_snapshot, build_submission_record, clean_all_except_latest,
+    clean_by_age, load_submission_record, print_logs, scheduler_source_label, watch_submission,
     write_submission_record,
 };
 use hpc_compose::planner::{
@@ -29,7 +31,7 @@ use hpc_compose::prepare::{
 use hpc_compose::render::{
     build_srun_command, execution_argv, log_file_name_for_service, render_script,
 };
-use hpc_compose::spec::ComposeSpec;
+use hpc_compose::spec::{ComposeSpec, DependencyCondition, ServiceDependency};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -113,6 +115,8 @@ enum Commands {
         no_preflight: bool,
         #[arg(long)]
         watch: bool,
+        #[arg(long)]
+        dry_run: bool,
     },
     Status {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
@@ -121,6 +125,20 @@ enum Commands {
         job_id: Option<String>,
         #[arg(long)]
         json: bool,
+        #[arg(long, default_value = "squeue")]
+        squeue_bin: String,
+        #[arg(long, default_value = "sacct")]
+        sacct_bin: String,
+    },
+    Stats {
+        #[arg(short = 'f', long, default_value = "compose.yaml")]
+        file: PathBuf,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "sstat")]
+        sstat_bin: String,
         #[arg(long, default_value = "squeue")]
         squeue_bin: String,
         #[arg(long, default_value = "sacct")]
@@ -138,6 +156,14 @@ enum Commands {
         #[arg(long, default_value_t = 100)]
         lines: usize,
     },
+    Cancel {
+        #[arg(short = 'f', long, default_value = "compose.yaml")]
+        file: PathBuf,
+        #[arg(long)]
+        job_id: Option<String>,
+        #[arg(long, default_value = "scancel")]
+        scancel_bin: String,
+    },
     Init {
         #[arg(long)]
         template: Option<String>,
@@ -153,6 +179,18 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
+    },
+    Clean {
+        #[arg(short = 'f', long, default_value = "compose.yaml")]
+        file: PathBuf,
+        #[arg(long, conflicts_with = "all")]
+        age: Option<u64>,
+        #[arg(long, conflicts_with = "age")]
+        all: bool,
+    },
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
     },
 }
 
@@ -289,6 +327,7 @@ fn run_command(command: Commands) -> Result<()> {
             force_rebuild,
             no_preflight,
             watch,
+            dry_run,
         } => {
             let runtime_plan = load_runtime_plan(&file)?;
             let submit_dir =
@@ -331,6 +370,13 @@ fn run_command(command: Commands) -> Result<()> {
                     script_path.display()
                 )
             })?;
+
+            if dry_run {
+                println!("  script: {}", script_path.display());
+                println!("  cache:  {}", runtime_plan.cache_dir.display());
+                println!("dry run: skipping sbatch submission");
+                return Ok(());
+            }
 
             let output = Command::new(&sbatch_bin)
                 .arg(&script_path)
@@ -428,6 +474,35 @@ fn run_command(command: Commands) -> Result<()> {
                 print_status_snapshot(&snapshot);
             }
         }
+        Commands::Stats {
+            file,
+            job_id,
+            json,
+            sstat_bin,
+            squeue_bin,
+            sacct_bin,
+        } => {
+            let snapshot = build_stats_snapshot(
+                &file,
+                job_id.as_deref(),
+                &StatsOptions {
+                    scheduler: SchedulerOptions {
+                        squeue_bin,
+                        sacct_bin,
+                    },
+                    sstat_bin,
+                },
+            )?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&snapshot)
+                        .context("failed to serialize stats output")?
+                );
+            } else {
+                print_stats_snapshot(&snapshot);
+            }
+        }
         Commands::Logs {
             file,
             job_id,
@@ -437,6 +512,17 @@ fn run_command(command: Commands) -> Result<()> {
         } => {
             let record = load_submission_record(&file, job_id.as_deref())?;
             print_logs(&record, service.as_deref(), lines, follow)?;
+        }
+        Commands::Cancel {
+            file,
+            job_id,
+            scancel_bin,
+        } => {
+            let resolved_job_id = match job_id {
+                Some(job_id) => job_id,
+                None => load_submission_record(&file, None)?.job_id,
+            };
+            cancel_job(&resolved_job_id, &scancel_bin)?;
         }
         Commands::Init {
             template,
@@ -525,6 +611,29 @@ fn run_command(command: Commands) -> Result<()> {
                 }
             }
         },
+        Commands::Clean { file, age, all } => {
+            if age.is_none() && !all {
+                bail!("clean requires either --age DAYS or --all");
+            }
+            let result = if let Some(days) = age {
+                clean_by_age(&file, days)?
+            } else {
+                clean_all_except_latest(&file)?
+            };
+            if result.removed_jobs.is_empty() {
+                println!("no job directories to clean");
+            } else {
+                println!(
+                    "removed {} tracked job(s): {}",
+                    result.removed_jobs.len(),
+                    result.removed_jobs.join(", ")
+                );
+            }
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "hpc-compose", &mut io::stdout());
+        }
     }
     Ok(())
 }
@@ -653,6 +762,97 @@ fn print_status_snapshot(snapshot: &StatusSnapshot) {
     }
 }
 
+fn print_stats_snapshot(snapshot: &StatsSnapshot) {
+    println!("job id: {}", snapshot.job_id);
+    println!(
+        "scheduler state: {} ({})",
+        snapshot.scheduler.state,
+        scheduler_source_label(snapshot.scheduler.source)
+    );
+    if let Some(detail) = &snapshot.scheduler.detail {
+        println!("scheduler note: {detail}");
+    }
+    println!("stats source: {}", snapshot.source);
+    if let Some(metrics_dir) = &snapshot.metrics_dir {
+        println!("metrics dir: {}", metrics_dir.display());
+    }
+    if let Some(reason) = &snapshot.reason {
+        println!("stats reason: {reason}");
+    }
+    for note in &snapshot.notes {
+        println!("note: {note}");
+    }
+    if let Some(sampler) = &snapshot.sampler {
+        for collector in &sampler.collectors {
+            if !collector.enabled {
+                continue;
+            }
+            println!(
+                "collector '{}': {} (last sampled: {})",
+                collector.name,
+                if collector.available {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+                collector.last_sampled_at.as_deref().unwrap_or("never")
+            );
+        }
+        if let Some(gpu) = &sampler.gpu {
+            println!();
+            println!("gpu snapshot: {}", gpu.sampled_at);
+            for device in &gpu.gpus {
+                println!(
+                    "gpu {}: name={}, util={}, mem util={}, mem={} / {}, temp={}, power={} / {}",
+                    display_optional_stats_value(device.index.as_deref()),
+                    display_optional_stats_value(device.name.as_deref()),
+                    display_optional_stats_value(device.utilization_gpu.as_deref()),
+                    display_optional_stats_value(device.utilization_memory.as_deref()),
+                    display_optional_stats_value(device.memory_used_mib.as_deref()),
+                    display_optional_stats_value(device.memory_total_mib.as_deref()),
+                    display_optional_stats_value(device.temperature_c.as_deref()),
+                    display_optional_stats_value(device.power_draw_w.as_deref()),
+                    display_optional_stats_value(device.power_limit_w.as_deref()),
+                );
+            }
+            for process in &gpu.processes {
+                println!(
+                    "gpu process: pid={}, name={}, gpu_uuid={}, mem={}",
+                    display_optional_stats_value(process.pid.as_deref()),
+                    display_optional_stats_value(process.process_name.as_deref()),
+                    display_optional_stats_value(process.gpu_uuid.as_deref()),
+                    display_optional_stats_value(process.used_memory_mib.as_deref()),
+                );
+            }
+        }
+    }
+    if !snapshot.available {
+        return;
+    }
+    for step in &snapshot.steps {
+        println!();
+        println!("step: {}", step.step_id);
+        println!("ntasks: {}", display_stats_value(&step.ntasks));
+        println!("ave cpu: {}", display_stats_value(&step.ave_cpu));
+        println!("ave rss: {}", display_stats_value(&step.ave_rss));
+        println!("max rss: {}", display_stats_value(&step.max_rss));
+        println!("alloc tres: {}", display_stats_value(&step.alloc_tres));
+        println!(
+            "tres usage in ave: {}",
+            display_stats_value(&step.tres_usage_in_ave)
+        );
+        if let Some(gpu_count) = &step.gpu_count {
+            println!("gpu count: {gpu_count}");
+        }
+        if let Some(gpu_util) = &step.gpu_util {
+            println!("gpu util: {gpu_util}");
+        }
+        if let Some(gpu_mem) = &step.gpu_mem {
+            println!("gpu mem: {gpu_mem}");
+        }
+    }
+}
+
 fn print_plan_inspect_verbose(plan: &Plan, runtime_plan: &RuntimePlan) {
     print_plan_inspect(runtime_plan);
     println!();
@@ -704,7 +904,7 @@ fn print_plan_inspect_verbose(plan: &Plan, runtime_plan: &RuntimePlan) {
             if planned.depends_on.is_empty() {
                 "0".to_string()
             } else {
-                planned.depends_on.join(",")
+                format_dependencies(&planned.depends_on)
             }
         );
         println!(
@@ -876,6 +1076,14 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+fn display_stats_value(value: &str) -> &str {
+    if value.is_empty() { "unknown" } else { value }
+}
+
+fn display_optional_stats_value(value: Option<&str>) -> &str {
+    value.filter(|value| !value.is_empty()).unwrap_or("unknown")
+}
+
 fn service_names(plan: &RuntimePlan) -> Vec<&str> {
     plan.ordered_services
         .iter()
@@ -930,6 +1138,29 @@ fn print_prune_result(cache_dir: &Path, removed: &[PathBuf]) {
     for path in removed {
         println!("pruned: {}", path.display());
     }
+}
+
+fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
+    let output = Command::new(scancel_bin)
+        .arg(job_id)
+        .output()
+        .with_context(|| format!("failed to execute '{scancel_bin}'"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        if detail.is_empty() {
+            bail!("scancel failed for job {job_id}");
+        }
+        bail!("scancel failed for job {job_id}: {detail}");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        println!("{stdout}");
+    }
+    println!("cancelled job: {job_id}");
+    Ok(())
 }
 
 fn finish_watch(job_id: &str, outcome: WatchOutcome) -> Result<()> {
@@ -992,6 +1223,16 @@ fn readiness_description(readiness: Option<&hpc_compose::spec::ReadinessSpec>) -
             pattern,
             timeout_seconds.unwrap_or(60)
         ),
+        Some(hpc_compose::spec::ReadinessSpec::Http {
+            url,
+            status_code,
+            timeout_seconds,
+        }) => format!(
+            "http {} (status {} timeout {}s)",
+            url,
+            status_code,
+            timeout_seconds.unwrap_or(60)
+        ),
     }
 }
 
@@ -1005,6 +1246,20 @@ fn rebuild_reason(service: &hpc_compose::prepare::RuntimeService) -> Option<&'st
             None
         }
     })
+}
+
+fn format_dependencies(dependencies: &[ServiceDependency]) -> String {
+    dependencies
+        .iter()
+        .map(|dependency| {
+            let condition = match dependency.condition {
+                DependencyCondition::ServiceStarted => "service_started",
+                DependencyCondition::ServiceHealthy => "service_healthy",
+            };
+            format!("{}({condition})", dependency.name)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn format_age_seconds(seconds: u64) -> String {
@@ -1039,6 +1294,7 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: None,
             slurm: ServiceSlurmConfig::default(),
             prepare,
@@ -1426,7 +1682,7 @@ services:
         print_manifest_block(&runtime_image).expect("manifest block");
         print_manifest_block(&tmpdir.path().join("missing.sqsh")).expect("missing manifest block");
         print_prune_result(tmpdir.path(), &[]);
-        print_prune_result(tmpdir.path(), &[runtime_image.clone()]);
+        print_prune_result(tmpdir.path(), std::slice::from_ref(&runtime_image));
         print_submit_details(&plan, Path::new("/tmp/job.sbatch"), "no job id")
             .expect("submit details");
         print_submit_details(
@@ -1522,6 +1778,7 @@ services:
             force_rebuild: false,
             no_preflight: true,
             watch: false,
+            dry_run: false,
         })
         .expect_err("sbatch fail");
         assert!(err.to_string().contains("sbatch failed"));
@@ -1539,6 +1796,7 @@ services:
             force_rebuild: false,
             no_preflight: false,
             watch: false,
+            dry_run: false,
         })
         .expect("submit");
 

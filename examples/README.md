@@ -17,8 +17,35 @@ hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$US
 | [`llm-curl-workflow.yaml`](llm-curl-workflow.yaml) | End-to-end LLM request flow with a login-node prepare step and a `curl` client | You want the smallest concrete inference workflow |
 | [`llm-curl-workflow-workdir.yaml`](llm-curl-workflow-workdir.yaml) | Same LLM workflow, but anchored under `$HOME/models` for direct use on a login node | You want the lowest-overhead path from a login-node home directory |
 | [`llama-app.yaml`](llama-app.yaml) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
+| [`minimal-batch.yaml`](minimal-batch.yaml) | Single service, no dependencies, no GPU, no prepare | You want the simplest possible starting point |
+| [`training-checkpoints.yaml`](training-checkpoints.yaml) | GPU training with checkpoints written to shared storage | You need a batch training workflow with artifact collection |
+| [`postgres-etl.yaml`](postgres-etl.yaml) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
+| [`vllm-openai.yaml`](vllm-openai.yaml) | vLLM serving with an in-job Python client | You want vLLM-based inference instead of llama.cpp |
+| [`mpi-hello.yaml`](mpi-hello.yaml) | MPI hello world compiled and run with Open MPI | You need an MPI workload |
+| [`multi-stage-pipeline.yaml`](multi-stage-pipeline.yaml) | Two-stage pipeline coordinating through the shared job mount | You need file-based stage-to-stage handoff |
+| [`fairseq-preprocess.yaml`](fairseq-preprocess.yaml) | CPU-heavy NLP data preprocessing with parallel workers | You need a CPU-bound data preprocessing pipeline |
 
-If you want the fastest end-to-end cluster example, start with [`llm-curl-workflow-workdir.yaml`](llm-curl-workflow-workdir.yaml). If you want a source-mounted development workflow, start with [`dev-python-app.yaml`](dev-python-app.yaml).
+If you want the fastest end-to-end cluster example, start with [`llm-curl-workflow-workdir.yaml`](llm-curl-workflow-workdir.yaml). If you want a source-mounted development workflow, start with [`dev-python-app.yaml`](dev-python-app.yaml). If you are new to `hpc-compose` and want the absolute simplest file, start with [`minimal-batch.yaml`](minimal-batch.yaml).
+
+## Choose an example
+
+```
+Do you need GPUs?
+├─ No
+│  ├─ Just trying hpc-compose?       → minimal-batch.yaml
+│  ├─ MPI workload?                   → mpi-hello.yaml
+│  ├─ CPU-heavy data preprocessing?   → fairseq-preprocess.yaml
+│  ├─ Multi-service with ordering?    → app-redis-worker.yaml
+│  ├─ Database-backed pipeline?       → postgres-etl.yaml
+│  └─ Multi-stage file pipeline?      → multi-stage-pipeline.yaml
+└─ Yes
+   ├─ LLM inference (llama.cpp)?      → llm-curl-workflow.yaml
+   ├─ LLM inference (vLLM)?           → vllm-openai.yaml
+   ├─ GPU training with artifacts?    → training-checkpoints.yaml
+   └─ GPU app + dependent service?    → llama-app.yaml
+
+Iterative development with mounted source? → dev-python-app.yaml
+```
 
 ## How to adapt an example
 
@@ -63,7 +90,53 @@ If you want the fastest end-to-end cluster example, start with [`llm-curl-workfl
 - Best reference for GPU-backed services and dependent apps.
 - Expects a model file at `models/model.gguf`; see [`models/README.md`](models/README.md).
 
+### `minimal-batch.yaml`
+
+- Best reference when you want the absolute simplest single-service batch job.
+- No dependencies, no GPU, no prepare step.
+- Good starting point for understanding the basic file format.
+
+### `training-checkpoints.yaml`
+
+- Best reference for GPU training workflows that produce offline artifacts.
+- Writes checkpoints to a shared storage volume.
+- Uses `x-enroot.prepare` implicitly through the PyTorch base image.
+
+### `postgres-etl.yaml`
+
+- Best reference for database-backed batch processing.
+- PostgreSQL with TCP readiness on port 5432.
+- ETL service waits for the database with `depends_on: service_healthy`.
+- Uses `x-enroot.prepare.commands` to install `psycopg2`.
+
+### `vllm-openai.yaml`
+
+- Best reference for vLLM-based model serving as an alternative to llama.cpp.
+- Serves an OpenAI-compatible API on localhost.
+- In-job client sends a test request and signals completion via `/hpc-compose/job`.
+
+### `mpi-hello.yaml`
+
+- Best reference for MPI workloads on a single node.
+- Compiles a C hello-world program with Open MPI during prepare.
+- Runs with `mpirun -np 4` inside the container.
+
+### `multi-stage-pipeline.yaml`
+
+- Best reference for file-based stage-to-stage coordination.
+- Producer writes a CSV to `/hpc-compose/job/output.csv`.
+- Consumer uses `depends_on: service_healthy` with log-based readiness to wait for data.
+- Shows the recommended pattern for multi-step batch workflows.
+
+### `fairseq-preprocess.yaml`
+
+- Best reference for CPU-heavy data preprocessing pipelines.
+- Reads raw `.txt` files from shared storage and writes JSONL output.
+- Uses Python's `ProcessPoolExecutor` for parallel processing.
+- No GPU, no dependencies, no prepare step — pure CPU batch work.
+
 ## Related docs
 
 - [`../docs/runbook.md`](../docs/runbook.md)
 - [`../docs/spec-reference.md`](../docs/spec-reference.md)
+- [`../docs/docker-compose-migration.md`](../docs/docker-compose-migration.md)

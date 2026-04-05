@@ -39,6 +39,41 @@ const TEMPLATES: &[Template] = &[
         description: "GPU service with a dependent application workflow.",
         body: include_str!("../examples/llama-app.yaml"),
     },
+    Template {
+        name: "minimal-batch",
+        description: "Simplest single-service batch job.",
+        body: include_str!("../examples/minimal-batch.yaml"),
+    },
+    Template {
+        name: "training-checkpoints",
+        description: "GPU training with checkpoints written to shared storage.",
+        body: include_str!("../examples/training-checkpoints.yaml"),
+    },
+    Template {
+        name: "postgres-etl",
+        description: "PostgreSQL plus a Python data processing job.",
+        body: include_str!("../examples/postgres-etl.yaml"),
+    },
+    Template {
+        name: "vllm-openai",
+        description: "vLLM serving with an in-job Python client.",
+        body: include_str!("../examples/vllm-openai.yaml"),
+    },
+    Template {
+        name: "mpi-hello",
+        description: "MPI hello world with Open MPI.",
+        body: include_str!("../examples/mpi-hello.yaml"),
+    },
+    Template {
+        name: "multi-stage-pipeline",
+        description: "Two-stage data pipeline coordinating through shared job mount.",
+        body: include_str!("../examples/multi-stage-pipeline.yaml"),
+    },
+    Template {
+        name: "fairseq-preprocess",
+        description: "CPU-heavy NLP data preprocessing pipeline.",
+        body: include_str!("../examples/fairseq-preprocess.yaml"),
+    },
 ];
 
 #[derive(Debug, Clone)]
@@ -195,6 +230,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::ComposeSpec;
 
     #[test]
     fn templates_are_resolvable() {
@@ -204,6 +240,21 @@ mod tests {
             let resolved =
                 resolve_template(&format!("{}.yaml", template.name)).expect("resolve yaml");
             assert_eq!(resolved.name, template.name);
+        }
+    }
+
+    #[test]
+    fn template_bodies_parse_as_valid_specs() {
+        for template in templates() {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let path = tmpdir.path().join(format!("{}.yaml", template.name));
+            fs::write(&path, template.body).expect("write template");
+            ComposeSpec::load(&path).unwrap_or_else(|err| {
+                panic!(
+                    "template '{}' failed to parse as a valid ComposeSpec: {}",
+                    template.name, err
+                )
+            });
         }
     }
 

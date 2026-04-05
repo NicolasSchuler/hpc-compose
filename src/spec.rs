@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::Path;
 
@@ -63,9 +64,29 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub cache_dir: Option<String>,
     #[serde(default)]
+    pub metrics: Option<MetricsConfig>,
+    #[serde(default)]
     pub setup: Vec<String>,
     #[serde(default)]
     pub submit_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsCollector {
+    Gpu,
+    Slurm,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub collectors: Vec<MetricsCollector>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,6 +161,19 @@ pub struct DependsOnConditionSpec {
     pub condition: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyCondition {
+    ServiceStarted,
+    ServiceHealthy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceDependency {
+    pub name: String,
+    pub condition: DependencyCondition,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(untagged)]
 pub enum EnvironmentSpec {
@@ -174,6 +208,17 @@ pub enum ReadinessSpec {
         #[serde(default)]
         timeout_seconds: Option<u64>,
     },
+    Http {
+        url: String,
+        #[serde(default = "default_http_status_code")]
+        status_code: u16,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
+}
+
+fn default_http_status_code() -> u16 {
+    200
 }
 
 impl ComposeSpec {
@@ -183,32 +228,64 @@ impl ComposeSpec {
         let value: Value = serde_yaml::from_str(&raw)
             .with_context(|| format!("failed to parse YAML at {}", path.display()))?;
         validate_root(&value)?;
-        let spec: ComposeSpec = serde_yaml::from_value(value)
+        let mut spec: ComposeSpec = serde_yaml::from_value(value)
             .with_context(|| format!("failed to deserialize spec at {}", path.display()))?;
+        spec.interpolate(path)?;
+        spec.validate()?;
         Ok(spec)
+    }
+
+    fn interpolate(&mut self, path: &Path) -> Result<()> {
+        let vars = interpolation_vars(path)?;
+        interpolate_optional_string(&mut self.name, &vars)?;
+        self.slurm.interpolate(&vars)?;
+        for service in self.services.values_mut() {
+            service.interpolate(&vars)?;
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.slurm.validate()
     }
 }
 
 impl DependsOnSpec {
-    pub fn names(&self) -> Result<Vec<String>> {
+    pub fn entries(&self) -> Result<Vec<ServiceDependency>> {
         match self {
             DependsOnSpec::None => Ok(Vec::new()),
-            DependsOnSpec::List(items) => Ok(items.clone()),
+            DependsOnSpec::List(items) => Ok(items
+                .iter()
+                .map(|name| ServiceDependency {
+                    name: name.clone(),
+                    condition: DependencyCondition::ServiceStarted,
+                })
+                .collect()),
             DependsOnSpec::Map(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for (name, cfg) in items {
-                    if let Some(condition) = &cfg.condition
-                        && condition != "service_started"
-                    {
-                        bail!(
-                            "depends_on condition for service '{name}' must be 'service_started'; readiness gates are configured separately"
-                        );
-                    }
-                    out.push(name.clone());
+                    let condition = match cfg.condition.as_deref() {
+                        None | Some("service_started") => DependencyCondition::ServiceStarted,
+                        Some("service_healthy") => DependencyCondition::ServiceHealthy,
+                        Some(other) => {
+                            bail!(
+                                "depends_on condition for service '{name}' must be 'service_started' or 'service_healthy', got '{other}'"
+                            );
+                        }
+                    };
+                    out.push(ServiceDependency {
+                        name: name.clone(),
+                        condition,
+                    });
                 }
                 Ok(out)
             }
         }
+    }
+
+    pub fn names(&self) -> Result<Vec<String>> {
+        self.entries()
+            .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
     }
 }
 
@@ -231,6 +308,27 @@ impl EnvironmentSpec {
                 .collect(),
         }
     }
+
+    fn interpolate_values(&mut self, vars: &InterpolationVars) -> Result<()> {
+        match self {
+            EnvironmentSpec::None => Ok(()),
+            EnvironmentSpec::Map(map) => {
+                for value in map.values_mut() {
+                    *value = interpolate_string(value, vars)?;
+                }
+                Ok(())
+            }
+            EnvironmentSpec::List(items) => {
+                for item in items.iter_mut() {
+                    let Some((key, value)) = item.split_once('=') else {
+                        bail!("environment list items must use KEY=VALUE syntax");
+                    };
+                    *item = format!("{key}={}", interpolate_string(value, vars)?);
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl CommandSpec {
@@ -251,10 +349,293 @@ impl CommandSpec {
             CommandSpec::Vec(value) => Some(value),
         }
     }
+
+    fn interpolate_if_vec(&mut self, vars: &InterpolationVars) -> Result<()> {
+        match self {
+            CommandSpec::String(_) => Ok(()),
+            CommandSpec::Vec(items) => {
+                for item in items.iter_mut() {
+                    *item = interpolate_string(item, vars)?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 fn default_true() -> bool {
     true
+}
+
+impl SlurmConfig {
+    pub fn metrics_enabled(&self) -> bool {
+        self.metrics
+            .as_ref()
+            .is_some_and(|metrics| metrics.enabled.unwrap_or(true))
+    }
+
+    pub fn metrics_interval_seconds(&self) -> u64 {
+        self.metrics
+            .as_ref()
+            .and_then(|metrics| metrics.interval_seconds)
+            .unwrap_or(5)
+    }
+
+    pub fn metrics_collectors(&self) -> Vec<MetricsCollector> {
+        let Some(metrics) = &self.metrics else {
+            return Vec::new();
+        };
+        if metrics.collectors.is_empty() {
+            vec![MetricsCollector::Gpu, MetricsCollector::Slurm]
+        } else {
+            metrics.collectors.clone()
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(metrics) = &self.metrics
+            && matches!(metrics.interval_seconds, Some(0))
+        {
+            bail!("x-slurm.metrics.interval_seconds must be at least 1");
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_optional_string(&mut self.job_name, vars)?;
+        interpolate_optional_string(&mut self.partition, vars)?;
+        interpolate_optional_string(&mut self.account, vars)?;
+        interpolate_optional_string(&mut self.qos, vars)?;
+        interpolate_optional_string(&mut self.time, vars)?;
+        interpolate_optional_string(&mut self.mem, vars)?;
+        interpolate_optional_string(&mut self.gres, vars)?;
+        interpolate_optional_string(&mut self.constraint, vars)?;
+        interpolate_optional_string(&mut self.output, vars)?;
+        interpolate_optional_string(&mut self.error, vars)?;
+        interpolate_optional_string(&mut self.chdir, vars)?;
+        interpolate_optional_string(&mut self.cache_dir, vars)?;
+        interpolate_vec_strings(&mut self.submit_args, vars)?;
+        Ok(())
+    }
+}
+
+impl ServiceSpec {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        self.image = interpolate_string(&self.image, vars)?;
+        if let Some(command) = &mut self.command {
+            command.interpolate_if_vec(vars)?;
+        }
+        if let Some(entrypoint) = &mut self.entrypoint {
+            entrypoint.interpolate_if_vec(vars)?;
+        }
+        self.environment.interpolate_values(vars)?;
+        interpolate_vec_strings(&mut self.volumes, vars)?;
+        interpolate_optional_string(&mut self.working_dir, vars)?;
+        self.slurm.interpolate(vars)?;
+        self.enroot.interpolate(vars)?;
+        Ok(())
+    }
+}
+
+impl ServiceSlurmConfig {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_optional_string(&mut self.gres, vars)?;
+        interpolate_vec_strings(&mut self.extra_srun_args, vars)?;
+        Ok(())
+    }
+}
+
+impl ServiceEnrootConfig {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        if let Some(prepare) = &mut self.prepare {
+            prepare.interpolate(vars)?;
+        }
+        Ok(())
+    }
+}
+
+impl PrepareSpec {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_vec_strings(&mut self.mounts, vars)?;
+        self.env.interpolate_values(vars)?;
+        Ok(())
+    }
+}
+
+type InterpolationVars = BTreeMap<String, String>;
+
+fn interpolation_vars(path: &Path) -> Result<InterpolationVars> {
+    let mut vars = load_dotenv_vars(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    for (key, value) in env::vars() {
+        vars.insert(key, value);
+    }
+    Ok(vars)
+}
+
+fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
+    let dotenv_path = project_dir.join(".env");
+    if !dotenv_path.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let raw = fs::read_to_string(&dotenv_path)
+        .with_context(|| format!("failed to read {}", dotenv_path.display()))?;
+    let mut vars = BTreeMap::new();
+    for (line_no, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let Some((key, value)) = trimmed.split_once('=') else {
+            bail!(
+                "failed to parse {}: line {} must use KEY=VALUE syntax",
+                dotenv_path.display(),
+                line_no + 1
+            );
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            bail!(
+                "failed to parse {}: line {} has an empty variable name",
+                dotenv_path.display(),
+                line_no + 1
+            );
+        }
+        let value = value.trim();
+        let value = if quoted(value, '"') || quoted(value, '\'') {
+            value[1..value.len() - 1].to_string()
+        } else {
+            value.to_string()
+        };
+        vars.insert(key.to_string(), value);
+    }
+    Ok(vars)
+}
+
+fn quoted(value: &str, quote: char) -> bool {
+    value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote)
+}
+
+fn interpolate_optional_string(value: &mut Option<String>, vars: &InterpolationVars) -> Result<()> {
+    if let Some(current) = value {
+        *current = interpolate_string(current, vars)?;
+    }
+    Ok(())
+}
+
+fn interpolate_vec_strings(values: &mut [String], vars: &InterpolationVars) -> Result<()> {
+    for value in values {
+        *value = interpolate_string(value, vars)?;
+    }
+    Ok(())
+}
+
+fn interpolate_string(input: &str, vars: &InterpolationVars) -> Result<String> {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut index = 0;
+
+    while index < chars.len() {
+        if chars[index] != '$' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+
+        if matches!(chars.get(index + 1), Some('$')) {
+            out.push('$');
+            index += 2;
+            continue;
+        }
+
+        if matches!(chars.get(index + 1), Some('{')) {
+            let start = index;
+            index += 2;
+            let mut expr = String::new();
+            while index < chars.len() && chars[index] != '}' {
+                expr.push(chars[index]);
+                index += 1;
+            }
+            if index == chars.len() {
+                bail!("unterminated variable expression in '{input}'");
+            }
+            index += 1;
+            out.push_str(&resolve_braced_variable(&expr, vars, input, start)?);
+            continue;
+        }
+
+        index += 1;
+        if !matches!(chars.get(index), Some(ch) if is_var_start(*ch)) {
+            out.push('$');
+            continue;
+        }
+
+        let mut name = String::new();
+        while let Some(ch) = chars.get(index) {
+            if is_var_char(*ch) {
+                name.push(*ch);
+                index += 1;
+            } else {
+                break;
+            }
+        }
+
+        let Some(value) = vars.get(&name) else {
+            bail!("missing variable '{name}' referenced in '{input}'");
+        };
+        out.push_str(value);
+    }
+
+    Ok(out)
+}
+
+fn resolve_braced_variable(
+    expr: &str,
+    vars: &InterpolationVars,
+    input: &str,
+    start: usize,
+) -> Result<String> {
+    let mut chars = expr.chars();
+    let Some(first) = chars.next() else {
+        bail!("invalid variable expression in '{}'", &input[start..]);
+    };
+    if !is_var_start(first) {
+        bail!("invalid variable expression in '{}'", &input[start..]);
+    }
+    let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
+    let name = &expr[..name_len];
+    let suffix = &expr[name_len..];
+
+    match suffix {
+        "" => resolve_required_variable(name, vars),
+        _ if suffix.starts_with(":-") => {
+            let default = &suffix[2..];
+            match vars.get(name) {
+                Some(value) if !value.is_empty() => Ok(value.clone()),
+                _ => interpolate_string(default, vars),
+            }
+        }
+        _ if suffix.starts_with('-') => match vars.get(name) {
+            Some(value) => Ok(value.clone()),
+            None => interpolate_string(&suffix[1..], vars),
+        },
+        _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
+    }
+}
+
+fn resolve_required_variable(name: &str, vars: &InterpolationVars) -> Result<String> {
+    vars.get(name)
+        .cloned()
+        .with_context(|| format!("missing variable '{name}'"))
+}
+
+fn is_var_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_var_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 fn validate_root(value: &Value) -> Result<()> {
@@ -315,7 +696,9 @@ fn validate_mapping_keys(scope: &str, mapping: &Mapping, allowed: &[&str]) -> Re
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
 
     use super::*;
 
@@ -323,6 +706,11 @@ mod tests {
         let path = tmpdir.join("compose.yaml");
         fs::write(&path, body).expect("write compose");
         path
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -427,22 +815,42 @@ services:
         let deps = DependsOnSpec::Map(BTreeMap::from([(
             "redis".into(),
             DependsOnConditionSpec {
-                condition: Some("service_healthy".into()),
+                condition: Some("service_completed_successfully".into()),
             },
         )]));
-        let err = deps.names().expect_err("should fail");
-        assert!(err.to_string().contains("service_started"));
+        let err = deps.entries().expect_err("should fail");
+        assert!(err.to_string().contains("service_healthy"));
     }
 
     #[test]
-    fn depends_on_map_accepts_service_started() {
-        let deps = DependsOnSpec::Map(BTreeMap::from([(
-            "redis".into(),
-            DependsOnConditionSpec {
-                condition: Some("service_started".into()),
-            },
-        )]));
-        assert_eq!(deps.names().expect("names"), vec!["redis"]);
+    fn depends_on_map_accepts_service_started_and_healthy() {
+        let deps = DependsOnSpec::Map(BTreeMap::from([
+            (
+                "redis".into(),
+                DependsOnConditionSpec {
+                    condition: Some("service_started".into()),
+                },
+            ),
+            (
+                "db".into(),
+                DependsOnConditionSpec {
+                    condition: Some("service_healthy".into()),
+                },
+            ),
+        ]));
+        assert_eq!(
+            deps.entries().expect("entries"),
+            vec![
+                ServiceDependency {
+                    name: "db".into(),
+                    condition: DependencyCondition::ServiceHealthy,
+                },
+                ServiceDependency {
+                    name: "redis".into(),
+                    condition: DependencyCondition::ServiceStarted,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -459,6 +867,64 @@ services:
             vec_cmd.as_vec(),
             Some(&["python".to_string(), "-m".to_string(), "main".to_string()][..])
         );
+    }
+
+    #[test]
+    fn metrics_block_defaults_to_enabled_interval_and_collectors() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  metrics: {}
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        assert!(spec.slurm.metrics_enabled());
+        assert_eq!(spec.slurm.metrics_interval_seconds(), 5);
+        assert_eq!(
+            spec.slurm.metrics_collectors(),
+            vec![MetricsCollector::Gpu, MetricsCollector::Slurm]
+        );
+    }
+
+    #[test]
+    fn metrics_block_rejects_zero_interval() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  metrics:
+    interval_seconds: 0
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(err.to_string().contains("interval_seconds"));
+    }
+
+    #[test]
+    fn metrics_block_rejects_unknown_collectors() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  metrics:
+    collectors: [gpu, mystery]
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]
@@ -636,5 +1102,208 @@ services:
         );
         let err = ComposeSpec::load(&non_string_root_key).expect_err("non-string key");
         assert!(err.to_string().contains("root contains a non-string key"));
+    }
+
+    #[test]
+    fn env_file_interpolates_selected_fields() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::write(
+            tmpdir.path().join(".env"),
+            "IMAGE=python:3.11-slim\nSRC_DIR=app\nARG=main\nTOKEN=from-dotenv\n",
+        )
+        .expect("dotenv");
+        fs::create_dir_all(tmpdir.path().join("app")).expect("app");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: ${IMAGE}
+    working_dir: ${WORKDIR:-/workspace}
+    volumes:
+      - ./${SRC_DIR}:/workspace
+    environment:
+      SECRET_TOKEN: ${TOKEN}
+      FALLBACK: ${MISSING:-fallback}
+    command:
+      - python
+      - -m
+      - ${ARG}
+    x-enroot:
+      prepare:
+        commands:
+          - echo $TOKEN
+        env:
+          PREP_TOKEN: ${TOKEN}
+  shell:
+    image: redis:7
+    command: echo $TOKEN
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load");
+        let app = spec.services.get("app").expect("app");
+        assert_eq!(app.image, "python:3.11-slim");
+        assert_eq!(app.working_dir.as_deref(), Some("/workspace"));
+        assert_eq!(app.volumes, vec!["./app:/workspace".to_string()]);
+        assert_eq!(
+            app.environment.to_pairs().expect("env"),
+            vec![
+                ("FALLBACK".into(), "fallback".into()),
+                ("SECRET_TOKEN".into(), "from-dotenv".into()),
+            ]
+        );
+        assert_eq!(
+            app.command.as_ref().and_then(CommandSpec::as_vec),
+            Some(&["python".to_string(), "-m".to_string(), "main".to_string()][..])
+        );
+        assert_eq!(
+            app.enroot
+                .prepare
+                .as_ref()
+                .expect("prepare")
+                .env
+                .to_pairs()
+                .expect("prepare env"),
+            vec![("PREP_TOKEN".into(), "from-dotenv".into())]
+        );
+        assert_eq!(
+            app.enroot.prepare.as_ref().expect("prepare").commands,
+            vec!["echo $TOKEN".to_string()]
+        );
+        assert_eq!(
+            spec.services
+                .get("shell")
+                .and_then(|svc| svc.command.as_ref())
+                .and_then(CommandSpec::as_string),
+            Some("echo $TOKEN")
+        );
+    }
+
+    #[test]
+    fn shell_environment_overrides_dotenv_and_default_operators_work() {
+        let _guard = env_lock().lock().expect("env lock");
+        let old_image = env::var_os("IMAGE");
+        let old_empty = env::var_os("EMPTY");
+        unsafe {
+            env::set_var("IMAGE", "redis:7");
+            env::set_var("EMPTY", "");
+        }
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::write(tmpdir.path().join(".env"), "IMAGE=python:3.11-slim\n").expect("dotenv");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: ${IMAGE}
+    environment:
+      DASH: ${EMPTY-default}
+      COLON: ${EMPTY:-default}
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        let env_pairs = spec
+            .services
+            .get("app")
+            .expect("app")
+            .environment
+            .to_pairs()
+            .expect("pairs");
+        assert_eq!(spec.services.get("app").expect("app").image, "redis:7");
+        assert_eq!(
+            env_pairs,
+            vec![
+                ("COLON".into(), "default".into()),
+                ("DASH".into(), "".into())
+            ]
+        );
+
+        match old_image {
+            Some(value) => unsafe { env::set_var("IMAGE", value) },
+            None => unsafe { env::remove_var("IMAGE") },
+        }
+        match old_empty {
+            Some(value) => unsafe { env::set_var("EMPTY", value) },
+            None => unsafe { env::remove_var("EMPTY") },
+        }
+    }
+
+    #[test]
+    fn missing_variable_without_default_is_an_error() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: ${IMAGE}
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("missing");
+        assert!(err.to_string().contains("missing variable 'IMAGE'"));
+    }
+
+    #[test]
+    fn http_readiness_deserializes_with_defaults() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  api:
+    image: python:3.11
+    readiness:
+      type: http
+      url: http://127.0.0.1:8080/health
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        let service = spec.services.get("api").expect("service");
+        match service.readiness.as_ref().expect("readiness") {
+            ReadinessSpec::Http {
+                url,
+                status_code,
+                timeout_seconds,
+            } => {
+                assert_eq!(url, "http://127.0.0.1:8080/health");
+                assert_eq!(*status_code, 200);
+                assert_eq!(*timeout_seconds, None);
+            }
+            other => panic!("expected Http readiness, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn http_readiness_deserializes_with_custom_values() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  api:
+    image: python:3.11
+    readiness:
+      type: http
+      url: http://localhost:9000/ready
+      status_code: 204
+      timeout_seconds: 120
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        let service = spec.services.get("api").expect("service");
+        match service.readiness.as_ref().expect("readiness") {
+            ReadinessSpec::Http {
+                url,
+                status_code,
+                timeout_seconds,
+            } => {
+                assert_eq!(url, "http://localhost:9000/ready");
+                assert_eq!(*status_code, 204);
+                assert_eq!(*timeout_seconds, Some(120));
+            }
+            other => panic!("expected Http readiness, got {:?}", other),
+        }
     }
 }

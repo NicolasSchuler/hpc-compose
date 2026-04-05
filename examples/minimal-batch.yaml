@@ -1,0 +1,13 @@
+name: minimal-batch
+
+x-slurm:
+  job_name: minimal-batch
+  time: "00:10:00"
+  mem: 4G
+  cpus_per_task: 2
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  app:
+    image: python:3.11-slim
+    command: python -c "print('Hello from Slurm!')"

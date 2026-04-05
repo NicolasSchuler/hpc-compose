@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::cache::{touch_manifest, upsert_base_manifest, upsert_prepared_manifest};
 use crate::planner::{ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec};
-use crate::spec::{ReadinessSpec, ServiceSlurmConfig, SlurmConfig};
+use crate::spec::{ReadinessSpec, ServiceDependency, ServiceSlurmConfig, SlurmConfig};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimePlan {
@@ -28,6 +28,7 @@ pub struct RuntimeService {
     pub environment: Vec<(String, String)>,
     pub volumes: Vec<String>,
     pub working_dir: Option<String>,
+    pub depends_on: Vec<ServiceDependency>,
     pub readiness: Option<ReadinessSpec>,
     pub slurm: ServiceSlurmConfig,
     pub prepare: Option<PreparedImageSpec>,
@@ -92,6 +93,7 @@ pub fn build_runtime_plan(plan: &Plan) -> RuntimePlan {
                 environment: service.environment.clone(),
                 volumes: service.volumes.clone(),
                 working_dir: service.working_dir.clone(),
+                depends_on: service.depends_on.clone(),
                 readiness: service.readiness.clone(),
                 slurm: service.slurm.clone(),
                 prepare: service.prepare.clone(),
@@ -379,6 +381,7 @@ fn runtime_image_path(plan: &Plan, service: &PlannedService) -> PathBuf {
                 environment: service.environment.clone(),
                 volumes: service.volumes.clone(),
                 working_dir: service.working_dir.clone(),
+                depends_on: service.depends_on.clone(),
                 readiness: service.readiness.clone(),
                 slurm: service.slurm.clone(),
                 prepare: service.prepare.clone(),
@@ -564,6 +567,7 @@ mod tests {
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: None,
             slurm: ServiceSlurmConfig::default(),
             prepare: Some(PreparedImageSpec {
@@ -777,6 +781,7 @@ esac
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: None,
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
@@ -881,6 +886,7 @@ esac
             environment: Vec::new(),
             volumes: Vec::new(),
             working_dir: None,
+            depends_on: Vec::new(),
             readiness: None,
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
@@ -916,6 +922,7 @@ esac
                 environment: Vec::new(),
                 volumes: Vec::new(),
                 working_dir: None,
+                depends_on: Vec::new(),
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
@@ -951,6 +958,7 @@ esac
                 environment: Vec::new(),
                 volumes: Vec::new(),
                 working_dir: None,
+                depends_on: Vec::new(),
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
@@ -979,6 +987,7 @@ esac
                 environment: Vec::new(),
                 volumes: Vec::new(),
                 working_dir: None,
+                depends_on: Vec::new(),
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
@@ -1023,6 +1032,7 @@ esac
                 environment: Vec::new(),
                 volumes: Vec::new(),
                 working_dir: None,
+                depends_on: Vec::new(),
                 readiness: None,
                 slurm: ServiceSlurmConfig::default(),
                 prepare: Some(PreparedImageSpec {

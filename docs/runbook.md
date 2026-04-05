@@ -23,7 +23,7 @@ For a first working run:
 1. Run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`, or copy the closest shipped example.
 2. Set `x-slurm.cache_dir` if you need an explicit shared cache path, and adjust any cluster-specific resource settings.
 3. Run `hpc-compose submit --watch -f compose.yaml`.
-4. If that fails, or if you are still adapting the spec, use `validate`, `inspect`, `preflight`, `prepare`, `render`, `status`, or `logs` separately.
+4. If that fails, or if you are still adapting the spec, use `validate`, `inspect`, `preflight`, `prepare`, `render`, `status`, `stats`, or `logs` separately.
 
 ## Pick a starting example
 
@@ -34,6 +34,13 @@ For a first working run:
 | LLM curl workflow | one GPU-backed LLM plus a one-shot `curl` request from a second service | [`examples/llm-curl-workflow.yaml`](../examples/llm-curl-workflow.yaml) |
 | LLM curl workflow (home) | the same request flow, but anchored under `$HOME/models` for direct use on a login node | [`examples/llm-curl-workflow-workdir.yaml`](../examples/llm-curl-workflow-workdir.yaml) |
 | GPU-backed app | one GPU service plus a dependent application | [`examples/llama-app.yaml`](../examples/llama-app.yaml) |
+| Minimal batch | simplest single-service batch job | [`examples/minimal-batch.yaml`](../examples/minimal-batch.yaml) |
+| Training checkpoints | GPU training with checkpoints to shared storage | [`examples/training-checkpoints.yaml`](../examples/training-checkpoints.yaml) |
+| Postgres ETL | PostgreSQL plus a Python data processing job | [`examples/postgres-etl.yaml`](../examples/postgres-etl.yaml) |
+| vLLM serving | vLLM with an in-job Python client | [`examples/vllm-openai.yaml`](../examples/vllm-openai.yaml) |
+| MPI hello | MPI hello world with Open MPI | [`examples/mpi-hello.yaml`](../examples/mpi-hello.yaml) |
+| Multi-stage pipeline | two-stage pipeline with file-based handoff | [`examples/multi-stage-pipeline.yaml`](../examples/multi-stage-pipeline.yaml) |
+| Data preprocessing | CPU-heavy NLP preprocessing pipeline | [`examples/fairseq-preprocess.yaml`](../examples/fairseq-preprocess.yaml) |
 
 The fastest path is usually to copy the closest example and adapt it instead of starting from scratch.
 
@@ -212,11 +219,20 @@ Use the tracked helpers for later inspection:
 
 ```bash
 hpc-compose status -f compose.yaml
+hpc-compose stats -f compose.yaml
+hpc-compose cancel -f compose.yaml
 hpc-compose logs -f compose.yaml
 hpc-compose logs -f compose.yaml --service app --follow
 ```
 
 `status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created.
+
+`stats` now prefers sampler data from `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` when `x-slurm.metrics` is enabled. In v1 that sampler can collect:
+
+- GPU snapshots and compute-process rows through `nvidia-smi`
+- job-step CPU and memory snapshots through `sstat`
+
+If the sampler is absent, disabled, or only partially available, `stats` falls back to live `sstat`. It works best for running jobs, requires the cluster's `jobacct_gather` plugin to be enabled for Slurm-side step metrics, and only shows GPU accounting fields from Slurm when the cluster exposes GPU TRES accounting.
 
 Runtime logs live under:
 
@@ -225,6 +241,18 @@ ${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/logs/<service>.log
 ```
 
 That same per-job directory is also mounted inside every container at `/hpc-compose/job`. Use it for small cross-service coordination files when a workflow needs shared ephemeral state.
+
+When metrics sampling is enabled, the job also writes:
+
+```text
+${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics/
+  meta.json
+  gpu.jsonl
+  gpu_processes.jsonl
+  slurm.jsonl
+```
+
+Collector failures are best-effort: missing `nvidia-smi`, missing `sstat`, or unsupported queries do not fail the batch job itself.
 
 Slurm may also write a top-level batch log such as `slurm-<jobid>.out`, or to the path configured with `x-slurm.output`. Check that file first when the job fails before any service log appears.
 
@@ -336,11 +364,49 @@ Add the required credentials before relying on private registries or heavily rat
 
 ### Services start in the wrong order
 
-Use `depends_on` for launch order and `readiness` for actual startup gating. `depends_on` alone does not wait for ports or logs.
+Use `depends_on` with `condition: service_healthy` when a dependent must wait for a dependency's readiness probe. Plain list form still means `service_started`.
 
-When a TCP port opens before the service is fully usable, prefer log-based readiness over TCP readiness.
+When a TCP port opens before the service is fully usable, prefer HTTP or log-based readiness over TCP readiness.
+
+### Preview a submission without running sbatch
+
+Use `submit --dry-run` to run the full pipeline (preflight, prepare, render) without actually calling `sbatch`. The rendered script is written to disk so you can inspect it:
+
+```bash
+hpc-compose submit --dry-run -f compose.yaml
+```
+
+Combine with `--skip-prepare` for a pure validation-and-render dry run.
+
+### Clean up old job directories
+
+Tracked job metadata and logs accumulate in `.hpc-compose/`. Use `clean` to remove old entries:
+
+```bash
+# Remove jobs older than 7 days
+hpc-compose clean -f compose.yaml --age 7
+
+# Remove all except the latest tracked job
+hpc-compose clean -f compose.yaml --all
+```
+
+### Shell completions
+
+Generate completions for your shell and source them:
+
+```bash
+# bash
+hpc-compose completions bash > ~/.local/share/bash-completion/completions/hpc-compose
+
+# zsh
+hpc-compose completions zsh > ~/.zfunc/_hpc-compose
+
+# fish
+hpc-compose completions fish > ~/.config/fish/completions/hpc-compose.fish
+```
 
 ## Related docs
 
 - [`docs/spec-reference.md`](spec-reference.md)
+- [`docs/docker-compose-migration.md`](docker-compose-migration.md)
 - [`examples/README.md`](../examples/README.md)

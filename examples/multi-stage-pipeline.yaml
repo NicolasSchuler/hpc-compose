@@ -1,0 +1,65 @@
+name: multi-stage-pipeline
+
+x-slurm:
+  job_name: multi-stage-pipeline
+  time: "00:30:00"
+  mem: 8G
+  cpus_per_task: 4
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  producer:
+    image: python:3.11-slim
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python -c "
+        import csv, random, os
+
+        output = '/hpc-compose/job/output.csv'
+        with open(output, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['id', 'value', 'category'])
+            for i in range(1000):
+                writer.writerow([i, round(random.gauss(50, 15), 2), random.choice(['A', 'B', 'C'])])
+
+        print(f'Wrote 1000 rows to {output}')
+        print('producer complete')
+        "
+    readiness:
+      type: log
+      pattern: "producer complete"
+      timeout_seconds: 60
+    x-slurm:
+      cpus_per_task: 1
+
+  consumer:
+    image: python:3.11-slim
+    depends_on:
+      producer:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python -c "
+        import csv, collections
+
+        with open('/hpc-compose/job/output.csv') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        by_cat = collections.defaultdict(list)
+        for row in rows:
+            by_cat[row['category']].append(float(row['value']))
+
+        print(f'Read {len(rows)} rows')
+        for cat in sorted(by_cat):
+            vals = by_cat[cat]
+            print(f'  {cat}: count={len(vals)}, mean={sum(vals)/len(vals):.2f}')
+
+        print('consumer complete')
+        "
+    x-slurm:
+      cpus_per_task: 1

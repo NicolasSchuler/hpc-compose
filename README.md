@@ -1,8 +1,33 @@
 # hpc-compose
 
+[![CI](https://github.com/NicolasSchuler/hpc-compose/actions/workflows/ci.yml/badge.svg)](https://github.com/NicolasSchuler/hpc-compose/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/NicolasSchuler/hpc-compose)](https://github.com/NicolasSchuler/hpc-compose/releases/latest)
+
 `hpc-compose` is a single-binary launcher that turns a Compose-like spec into a single Slurm job running one or more services through Enroot and Pyxis.
 
 It is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to `sbatch` + `srun` + Enroot on a single node.
+
+## At a glance
+
+```yaml
+# compose.yaml
+name: hello
+
+x-slurm:
+  time: "00:10:00"
+  mem: 4G
+
+services:
+  app:
+    image: python:3.11-slim
+    command: python -c "print('Hello from Slurm!')"
+```
+
+```bash
+hpc-compose submit --watch -f compose.yaml
+```
+
+That is all it takes: a familiar Compose file with Slurm resource settings, and one command to validate, prepare, and submit.
 
 ## What it is for
 
@@ -30,6 +55,7 @@ If you need to customize an image, use `image:` plus `x-enroot.prepare`, not `bu
 
 - **Runbook:** [`docs/runbook.md`](docs/runbook.md) for the end-to-end workflow from choosing a cache directory to reading logs and pruning cache artifacts.
 - **Settings reference:** [`docs/spec-reference.md`](docs/spec-reference.md) for the supported Compose subset, `x-slurm`, and `x-enroot` settings.
+- **Migrating from Docker Compose:** [`docs/docker-compose-migration.md`](docs/docker-compose-migration.md) for a side-by-side comparison and step-by-step migration checklist.
 - **Examples:** [`examples/README.md`](examples/README.md) for choosing and adapting the shipped example specs.
 
 ## Quickstart
@@ -49,7 +75,7 @@ target/release/hpc-compose inspect --verbose -f /tmp/compose.yaml
 target/release/hpc-compose submit --watch -f /tmp/compose.yaml
 ```
 
-In normal cluster use, `submit --watch` is the fastest end-to-end path. It runs preflight, prepares missing images, renders the batch script, submits it through `sbatch`, then follows scheduler state and service logs for the tracked job. Use `status` and `logs` later to revisit a tracked submission, or use `validate`, `inspect`, `preflight`, `prepare`, or `render` separately when adapting a spec or debugging a failure.
+In normal cluster use, `submit --watch` is the fastest end-to-end path. It runs preflight, prepares missing images, renders the batch script, submits it through `sbatch`, then follows scheduler state and service logs for the tracked job. Use `status`, `stats`, and `logs` later to revisit a tracked submission, or use `validate`, `inspect`, `preflight`, `prepare`, or `render` separately when adapting a spec or debugging a failure.
 
 For the full workflow, including example selection, cache setup, and log handling, use the [runbook](docs/runbook.md).
 
@@ -77,10 +103,14 @@ Linux release notes:
 - `preflight` checks the login node environment before submission, with grouped diagnostics by default plus `--verbose` and `--json`.
 - `prepare` imports or rebuilds missing runtime artifacts on the login node.
 - `render` writes the generated `sbatch` script without submitting it.
-- `submit` runs preflight, optional prepare, render, and `sbatch`; `submit --watch` also follows scheduler state and service logs.
+- `submit` runs preflight, optional prepare, render, and `sbatch`; `submit --watch` also follows scheduler state and service logs. Use `--dry-run` to preview the rendered script without actually calling `sbatch`.
 - `status` shows the tracked scheduler/log state for the latest or selected job id for a compose file, including the top-level batch log path.
+- `stats` prefers job-local sampler data when `x-slurm.metrics` is enabled, and otherwise falls back to live Slurm `sstat` job-step CPU/memory metrics plus GPU accounting fields when the cluster exposes them.
 - `logs` tails tracked service logs, optionally filtered to one service and followed live.
+- `cancel` cancels a tracked job via `scancel`.
 - `cache list|inspect|prune` inspects and manages cached artifacts.
+- `clean` removes old tracked job directories. Use `--age DAYS` or `--all` to select which jobs to prune.
+- `completions` generates shell completions for bash, zsh, fish, or PowerShell.
 
 ## Examples
 
@@ -89,6 +119,13 @@ Linux release notes:
 - [`examples/llm-curl-workflow.yaml`](examples/llm-curl-workflow.yaml): end-to-end LLM request with a `curl` client.
 - [`examples/llm-curl-workflow-workdir.yaml`](examples/llm-curl-workflow-workdir.yaml): the same LLM flow simplified for direct use from `$HOME/models` on a login node.
 - [`examples/llama-app.yaml`](examples/llama-app.yaml): GPU-backed service with a dependent application.
+- [`examples/minimal-batch.yaml`](examples/minimal-batch.yaml): simplest single-service batch job.
+- [`examples/training-checkpoints.yaml`](examples/training-checkpoints.yaml): GPU training with checkpoints written to shared storage.
+- [`examples/postgres-etl.yaml`](examples/postgres-etl.yaml): PostgreSQL plus a Python data processing job.
+- [`examples/vllm-openai.yaml`](examples/vllm-openai.yaml): vLLM serving with an in-job Python client.
+- [`examples/mpi-hello.yaml`](examples/mpi-hello.yaml): MPI hello world with Open MPI.
+- [`examples/multi-stage-pipeline.yaml`](examples/multi-stage-pipeline.yaml): two-stage pipeline coordinating through the shared job mount.
+- [`examples/fairseq-preprocess.yaml`](examples/fairseq-preprocess.yaml): CPU-heavy NLP data preprocessing pipeline.
 
 ## Build and test
 

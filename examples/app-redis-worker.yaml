@@ -22,7 +22,8 @@ services:
   worker:
     image: redis:7
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     command:
       - /bin/sh
       - -lc

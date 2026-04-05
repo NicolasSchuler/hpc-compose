@@ -20,16 +20,16 @@ services:
         set -eu
         rm -f /hpc-compose/job/request.done
         /app/llama-server -m /models/model.gguf --host 0.0.0.0 --port 8080 &
-        server_pid=$!
+        server_pid=$$!
         while [ ! -f /hpc-compose/job/request.done ]; do
-          if ! kill -0 "$server_pid" 2>/dev/null; then
-            wait "$server_pid"
-            exit $?
+          if ! kill -0 "$$server_pid" 2>/dev/null; then
+            wait "$$server_pid"
+            exit $$?
           fi
           sleep 1
         done
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" || true
+        kill "$$server_pid" 2>/dev/null || true
+        wait "$$server_pid" || true
     readiness:
       type: log
       pattern: "main: model loaded"
@@ -41,7 +41,8 @@ services:
   curl_client:
     image: debian:bookworm-slim
     depends_on:
-      - llm
+      llm:
+        condition: service_healthy
     environment:
       LLM_BASE_URL: http://127.0.0.1:8080
     command:
@@ -66,11 +67,11 @@ services:
           "max_tokens": 64
         }
         JSON
-        echo "Sending test request to $LLM_BASE_URL/v1/chat/completions"
+        echo "Sending test request to $$LLM_BASE_URL/v1/chat/completions"
         curl --fail --show-error --silent \
           -H 'Content-Type: application/json' \
           --data @/tmp/request.json \
-          "$LLM_BASE_URL/v1/chat/completions"
+          "$$LLM_BASE_URL/v1/chat/completions"
         touch /hpc-compose/job/request.done
     x-enroot:
       prepare:
