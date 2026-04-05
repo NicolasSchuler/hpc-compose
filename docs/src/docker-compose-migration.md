@@ -18,7 +18,7 @@ This guide helps you convert an existing `docker-compose.yaml` into an `hpc-comp
 | `networks` / `network_mode` | **Not supported.** All services share the host network on one node. |
 | `restart` | **Not supported.** Slurm handles job lifecycle. |
 | `deploy` | **Not supported.** Use `x-slurm` for resource allocation. |
-| `healthcheck` | Use `readiness` (TCP, log, or sleep) instead. |
+| `healthcheck` | Supported for a constrained TCP/HTTP subset and normalized into `readiness`; use explicit `readiness` for anything more complex. |
 | Resource limits (`cpus`, `mem_limit`) | Use `x-slurm.cpus_per_task`, `x-slurm.mem`, `x-slurm.gpus` |
 
 ## Side-by-side: web app + Redis
@@ -133,7 +133,7 @@ Prefer `volumes` for fast-changing source code and `x-enroot.prepare.commands` f
 
 ### Health checks vs readiness
 
-Docker Compose uses `healthcheck` with a test command, interval, timeout, and retries. `hpc-compose` uses `readiness` with three types:
+Docker Compose uses `healthcheck` with a test command, interval, timeout, and retries. `hpc-compose` now accepts a constrained `healthcheck` subset and normalizes it into `readiness`:
 
 ```yaml
 # TCP: wait for a port to accept connections
@@ -154,6 +154,20 @@ readiness:
   type: sleep
   seconds: 5
 ```
+
+Supported `healthcheck` migration patterns:
+
+- `["CMD", "nc", "-z", HOST, PORT]`
+- `["CMD-SHELL", "nc -z HOST PORT"]`
+- recognized `curl` probes against `http://` or `https://` URLs
+- recognized `wget --spider` probes against `http://` or `https://` URLs
+
+Still unsupported in v1:
+
+- arbitrary custom command probes
+- `interval`
+- `retries`
+- `start_period`
 
 ### Resource allocation
 

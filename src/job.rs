@@ -11,7 +11,11 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tar::Builder;
 
 use crate::prepare::RuntimePlan;
 use crate::render::log_file_name_for_service;
@@ -20,6 +24,8 @@ const SUBMISSION_SCHEMA_VERSION: u32 = 1;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS: u64 = 15;
 const ACCOUNTING_GAP_GRACE_SECONDS: u64 = 15;
+const ARTIFACT_MANIFEST_SCHEMA_VERSION: u32 = 2;
+const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 1;
 
 /// Metadata persisted for a submitted job tracked under `.hpc-compose/`.
 #[allow(missing_docs)]
@@ -113,13 +119,35 @@ pub struct StatsSnapshot {
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactManifest {
+    #[serde(default = "default_artifact_manifest_schema_version")]
+    pub schema_version: u32,
     pub job_id: String,
     pub collect_policy: String,
     pub collected_at: String,
     pub job_outcome: String,
+    #[serde(default)]
     pub declared_source_patterns: Vec<String>,
+    #[serde(default)]
     pub matched_source_paths: Vec<String>,
+    #[serde(default)]
     pub copied_relative_paths: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub bundles: BTreeMap<String, ArtifactBundleManifest>,
+}
+
+/// Bundle-specific entries tracked in an artifact manifest.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactBundleManifest {
+    #[serde(default)]
+    pub declared_source_patterns: Vec<String>,
+    #[serde(default)]
+    pub matched_source_paths: Vec<String>,
+    #[serde(default)]
+    pub copied_relative_paths: Vec<String>,
+    #[serde(default)]
     pub warnings: Vec<String>,
 }
 
@@ -132,8 +160,66 @@ pub struct ArtifactExportReport {
     pub payload_dir: PathBuf,
     pub export_dir: PathBuf,
     pub manifest: ArtifactManifest,
+    pub selected_bundles: Vec<String>,
+    pub bundles: Vec<BundleExportReport>,
     pub exported_paths: Vec<PathBuf>,
+    pub tarball_paths: Vec<PathBuf>,
     pub warnings: Vec<String>,
+}
+
+/// Export result for one artifact bundle.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleExportReport {
+    pub name: String,
+    pub export_dir: PathBuf,
+    pub provenance_path: PathBuf,
+    pub tarball_path: Option<PathBuf>,
+    pub exported_paths: Vec<PathBuf>,
+    pub files: Vec<ArtifactEntryMetadata>,
+    pub warnings: Vec<String>,
+}
+
+/// One exported artifact entry captured in provenance output.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactEntryMetadata {
+    pub relative_path: String,
+    pub entry_type: String,
+    pub size_bytes: Option<u64>,
+    pub sha256: Option<String>,
+    pub link_target: Option<String>,
+}
+
+/// Per-bundle provenance file written during artifact export.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactBundleProvenance {
+    pub schema_version: u32,
+    pub job_id: String,
+    pub bundle: String,
+    pub compose_file: PathBuf,
+    pub script_path: PathBuf,
+    pub collect_policy: String,
+    pub job_outcome: String,
+    pub collected_at: String,
+    pub exported_at_unix: u64,
+    pub export_dir: PathBuf,
+    pub tarball_path: Option<PathBuf>,
+    pub selected_bundles: Vec<String>,
+    pub declared_source_patterns: Vec<String>,
+    pub matched_source_paths: Vec<String>,
+    pub copied_relative_paths: Vec<String>,
+    pub warnings: Vec<String>,
+    pub files: Vec<ArtifactEntryMetadata>,
+}
+
+/// Options controlling tracked artifact export.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactExportOptions {
+    pub selected_bundles: Vec<String>,
+    pub tarball: bool,
 }
 
 /// One Slurm step metrics row as presented by `hpc-compose stats`.
@@ -713,8 +799,70 @@ pub fn artifact_payload_dir_for_record(record: &SubmissionRecord) -> PathBuf {
     artifacts_dir_for_record(record).join("payload")
 }
 
+fn default_artifact_manifest_schema_version() -> u32 {
+    1
+}
+
+impl ArtifactManifest {
+    fn normalized_bundles(&self) -> BTreeMap<String, ArtifactBundleManifest> {
+        if !self.bundles.is_empty() {
+            return self.bundles.clone();
+        }
+
+        if self.declared_source_patterns.is_empty()
+            && self.matched_source_paths.is_empty()
+            && self.copied_relative_paths.is_empty()
+            && self.warnings.is_empty()
+        {
+            return BTreeMap::new();
+        }
+
+        BTreeMap::from([(
+            "default".to_string(),
+            ArtifactBundleManifest {
+                declared_source_patterns: self.declared_source_patterns.clone(),
+                matched_source_paths: self.matched_source_paths.clone(),
+                copied_relative_paths: self.copied_relative_paths.clone(),
+                warnings: self.warnings.clone(),
+            },
+        )])
+    }
+}
+
+fn resolve_selected_bundles(
+    bundles: &BTreeMap<String, ArtifactBundleManifest>,
+    requested: &[String],
+) -> Result<Vec<String>> {
+    if requested.is_empty() {
+        return Ok(bundles.keys().cloned().collect());
+    }
+
+    let mut selected = Vec::new();
+    for bundle in requested {
+        if !bundles.contains_key(bundle) {
+            bail!("artifact bundle '{bundle}' is not available");
+        }
+        if !selected.contains(bundle) {
+            selected.push(bundle.clone());
+        }
+    }
+    Ok(selected)
+}
+
+fn bundle_export_dir(export_dir: &Path, bundle_name: &str) -> PathBuf {
+    if bundle_name == "default" {
+        export_dir.to_path_buf()
+    } else {
+        export_dir.join("bundles").join(bundle_name)
+    }
+}
+
 /// Copies tracked artifacts for a completed job into its configured export directory.
-pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<ArtifactExportReport> {
+pub fn export_artifacts(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &ArtifactExportOptions,
+) -> Result<ArtifactExportReport> {
     let record = load_submission_record(spec_path, job_id)?;
     let export_dir_template = record.artifact_export_dir.as_deref().context(format!(
         "tracked submission metadata for job {} does not include x-slurm.artifacts.export_dir; resubmit with artifact tracking enabled",
@@ -730,6 +878,12 @@ pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<Artifa
         );
     }
     let manifest: ArtifactManifest = read_json(&manifest_path)?;
+    if manifest.schema_version > ARTIFACT_MANIFEST_SCHEMA_VERSION {
+        bail!(
+            "artifact manifest schema version {} is newer than this hpc-compose build supports",
+            manifest.schema_version
+        );
+    }
     if manifest.job_id != record.job_id {
         bail!(
             "artifact manifest job id {} does not match tracked job {}",
@@ -745,23 +899,92 @@ pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<Artifa
 
     let mut warnings = manifest.warnings.clone();
     let mut exported_paths = Vec::new();
-    for relative_path in &manifest.copied_relative_paths {
-        let source = payload_dir.join(relative_path);
-        if !source.exists() {
-            warnings.push(format!(
-                "collected payload path '{}' is missing under {}",
-                relative_path,
-                payload_dir.display()
-            ));
-            continue;
+    let bundles = manifest.normalized_bundles();
+    let selected_bundles = resolve_selected_bundles(&bundles, &options.selected_bundles)?;
+    let exported_at_unix = unix_timestamp_now();
+    let mut bundle_reports = Vec::new();
+    let mut tarball_paths = Vec::new();
+
+    for bundle_name in &selected_bundles {
+        let bundle_manifest = bundles
+            .get(bundle_name)
+            .cloned()
+            .context(format!("artifact bundle '{bundle_name}' is not available"))?;
+        let bundle_export_dir = bundle_export_dir(&export_dir, bundle_name);
+        fs::create_dir_all(&bundle_export_dir)
+            .context(format!("failed to create {}", bundle_export_dir.display()))?;
+
+        let mut bundle_warnings = bundle_manifest.warnings.clone();
+        let mut bundle_exported_paths = Vec::new();
+        for relative_path in &bundle_manifest.copied_relative_paths {
+            let source = payload_dir.join(relative_path);
+            if !source.exists() {
+                let warning = format!(
+                    "collected payload path '{}' is missing under {}",
+                    relative_path,
+                    payload_dir.display()
+                );
+                warnings.push(warning.clone());
+                bundle_warnings.push(warning);
+                continue;
+            }
+            let destination = bundle_export_dir.join(relative_path);
+            copy_path_recursive(&source, &destination).context(format!(
+                "failed to export artifact '{}' to {}",
+                source.display(),
+                destination.display()
+            ))?;
+            exported_paths.push(destination.clone());
+            bundle_exported_paths.push(destination);
         }
-        let destination = export_dir.join(relative_path);
-        copy_path_recursive(&source, &destination).context(format!(
-            "failed to export artifact '{}' to {}",
-            source.display(),
-            destination.display()
-        ))?;
-        exported_paths.push(destination);
+
+        let files =
+            collect_bundle_metadata(&bundle_export_dir, &bundle_manifest.copied_relative_paths)?;
+        let provenance_path = export_dir
+            .join("_hpc-compose")
+            .join("bundles")
+            .join(format!("{bundle_name}.json"));
+        let tarball_path = if options.tarball {
+            let tarball = export_dir.join(format!("{bundle_name}.tar.gz"));
+            write_bundle_tarball(
+                &tarball,
+                &bundle_export_dir,
+                &bundle_manifest.copied_relative_paths,
+            )?;
+            tarball_paths.push(tarball.clone());
+            Some(tarball)
+        } else {
+            None
+        };
+        let provenance = ArtifactBundleProvenance {
+            schema_version: ARTIFACT_PROVENANCE_SCHEMA_VERSION,
+            job_id: record.job_id.clone(),
+            bundle: bundle_name.clone(),
+            compose_file: record.compose_file.clone(),
+            script_path: record.script_path.clone(),
+            collect_policy: manifest.collect_policy.clone(),
+            job_outcome: manifest.job_outcome.clone(),
+            collected_at: manifest.collected_at.clone(),
+            exported_at_unix,
+            export_dir: bundle_export_dir.clone(),
+            tarball_path: tarball_path.clone(),
+            selected_bundles: selected_bundles.clone(),
+            declared_source_patterns: bundle_manifest.declared_source_patterns.clone(),
+            matched_source_paths: bundle_manifest.matched_source_paths.clone(),
+            copied_relative_paths: bundle_manifest.copied_relative_paths.clone(),
+            warnings: bundle_warnings.clone(),
+            files: files.clone(),
+        };
+        write_json(&provenance_path, &provenance)?;
+        bundle_reports.push(BundleExportReport {
+            name: bundle_name.clone(),
+            export_dir: bundle_export_dir,
+            provenance_path,
+            tarball_path,
+            exported_paths: bundle_exported_paths,
+            files,
+            warnings: bundle_warnings,
+        });
     }
 
     Ok(ArtifactExportReport {
@@ -770,7 +993,10 @@ pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<Artifa
         payload_dir,
         export_dir,
         manifest,
+        selected_bundles,
+        bundles: bundle_reports,
         exported_paths,
+        tarball_paths,
         warnings,
     })
 }
@@ -1184,6 +1410,156 @@ fn resolve_export_dir(compose_file: &Path, template: &str, job_id: &str) -> Path
         };
         parent.join(candidate)
     }
+}
+
+fn collect_bundle_metadata(
+    bundle_root: &Path,
+    copied_relative_paths: &[String],
+) -> Result<Vec<ArtifactEntryMetadata>> {
+    let mut files = Vec::new();
+    for relative_path in copied_relative_paths {
+        let relative = PathBuf::from(relative_path);
+        let path = bundle_root.join(&relative);
+        if !path.exists() && fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        collect_path_metadata(bundle_root, &path, &mut files)?;
+    }
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(files)
+}
+
+fn collect_path_metadata(
+    bundle_root: &Path,
+    path: &Path,
+    files: &mut Vec<ArtifactEntryMetadata>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .context(format!("failed to read metadata for {}", path.display()))?;
+    let relative_path = path
+        .strip_prefix(bundle_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string();
+
+    if metadata.file_type().is_symlink() {
+        let target =
+            fs::read_link(path).context(format!("failed to read link {}", path.display()))?;
+        files.push(ArtifactEntryMetadata {
+            relative_path,
+            entry_type: "symlink".to_string(),
+            size_bytes: None,
+            sha256: None,
+            link_target: Some(target.to_string_lossy().to_string()),
+        });
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        files.push(ArtifactEntryMetadata {
+            relative_path,
+            entry_type: "directory".to_string(),
+            size_bytes: None,
+            sha256: None,
+            link_target: None,
+        });
+        let mut entries = fs::read_dir(path)
+            .context(format!("failed to read {}", path.display()))?
+            .collect::<io::Result<Vec<_>>>()
+            .context(format!("failed to read {}", path.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            collect_path_metadata(bundle_root, &entry.path(), files)?;
+        }
+        return Ok(());
+    }
+
+    files.push(ArtifactEntryMetadata {
+        relative_path,
+        entry_type: "file".to_string(),
+        size_bytes: Some(metadata.len()),
+        sha256: Some(hash_file(path)?),
+        link_target: None,
+    });
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path).context(format!("failed to open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .context(format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn write_bundle_tarball(
+    tarball_path: &Path,
+    bundle_root: &Path,
+    copied_relative_paths: &[String],
+) -> Result<()> {
+    if let Some(parent) = tarball_path.parent() {
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
+    }
+    let file = File::create(tarball_path)
+        .context(format!("failed to create {}", tarball_path.display()))?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut builder = Builder::new(encoder);
+    for relative_path in copied_relative_paths {
+        let relative = PathBuf::from(relative_path);
+        let source = bundle_root.join(&relative);
+        if !source.exists() && fs::symlink_metadata(&source).is_err() {
+            continue;
+        }
+        append_path_to_tar(&mut builder, &source, &relative)?;
+    }
+    builder
+        .finish()
+        .context(format!("failed to finalize {}", tarball_path.display()))?;
+    let encoder = builder
+        .into_inner()
+        .context(format!("failed to finalize {}", tarball_path.display()))?;
+    encoder
+        .finish()
+        .context(format!("failed to finalize {}", tarball_path.display()))?;
+    Ok(())
+}
+
+fn append_path_to_tar<W: Write>(
+    builder: &mut Builder<W>,
+    source: &Path,
+    relative: &Path,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .context(format!("failed to read metadata for {}", source.display()))?;
+    if metadata.is_dir() {
+        if !relative.as_os_str().is_empty() {
+            builder
+                .append_dir(relative, source)
+                .context(format!("failed to append {} to tarball", source.display()))?;
+        }
+        let mut entries = fs::read_dir(source)
+            .context(format!("failed to read {}", source.display()))?
+            .collect::<io::Result<Vec<_>>>()
+            .context(format!("failed to read {}", source.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            append_path_to_tar(builder, &entry.path(), &relative.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+
+    builder
+        .append_path_with_name(source, relative)
+        .context(format!("failed to append {} to tarball", source.display()))?;
+    Ok(())
 }
 
 fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
@@ -2507,6 +2883,7 @@ services:
             collect: crate::spec::ArtifactCollectPolicy::Always,
             export_dir: Some("./results/${SLURM_JOB_ID}".into()),
             paths: vec!["/hpc-compose/job/metrics/**".into()],
+            bundles: BTreeMap::new(),
         });
         let record = persist_submission_record(
             &compose,
@@ -2522,6 +2899,7 @@ services:
         fs::write(
             artifact_manifest_path_for_record(&record),
             serde_json::to_vec_pretty(&ArtifactManifest {
+                schema_version: 2,
                 job_id: "12345".into(),
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
@@ -2532,12 +2910,24 @@ services:
                 warnings: vec![
                     "pattern '/hpc-compose/job/unused/*' did not match any paths".into(),
                 ],
+                bundles: BTreeMap::from([(
+                    "default".into(),
+                    ArtifactBundleManifest {
+                        declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                        matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
+                        copied_relative_paths: vec!["metrics/meta.json".into()],
+                        warnings: vec![
+                            "pattern '/hpc-compose/job/unused/*' did not match any paths".into(),
+                        ],
+                    },
+                )]),
             })
             .expect("manifest"),
         )
         .expect("write manifest");
 
-        let report = export_artifacts(&compose, None).expect("export");
+        let report =
+            export_artifacts(&compose, None, &ArtifactExportOptions::default()).expect("export");
         assert_eq!(report.record.job_id, "12345");
         assert_eq!(report.export_dir, tmpdir.path().join("results/12345"));
         assert_eq!(report.exported_paths.len(), 1);
@@ -2576,6 +2966,7 @@ services:
             collect: crate::spec::ArtifactCollectPolicy::Always,
             export_dir: Some("./results/${SLURM_JOB_ID}".into()),
             paths: vec!["/hpc-compose/job/metrics/**".into()],
+            bundles: BTreeMap::new(),
         });
         let record = persist_submission_record(
             &compose,
@@ -2591,6 +2982,7 @@ services:
         fs::write(
             artifact_manifest_path_for_record(&record),
             serde_json::to_vec_pretty(&ArtifactManifest {
+                schema_version: 2,
                 job_id: "12345".into(),
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
@@ -2599,6 +2991,15 @@ services:
                 matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
                 copied_relative_paths: vec!["metrics/meta.json".into()],
                 warnings: Vec::new(),
+                bundles: BTreeMap::from([(
+                    "default".into(),
+                    ArtifactBundleManifest {
+                        declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                        matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
+                        copied_relative_paths: vec!["metrics/meta.json".into()],
+                        warnings: Vec::new(),
+                    },
+                )]),
             })
             .expect("manifest"),
         )
@@ -2606,7 +3007,8 @@ services:
 
         fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("mutate compose");
 
-        let report = export_artifacts(&compose, None).expect("export");
+        let report =
+            export_artifacts(&compose, None, &ArtifactExportOptions::default()).expect("export");
         assert_eq!(report.export_dir, tmpdir.path().join("results/12345"));
         assert_eq!(
             fs::read_to_string(report.export_dir.join("metrics/meta.json")).expect("exported"),
@@ -2638,6 +3040,7 @@ services:
             collect: crate::spec::ArtifactCollectPolicy::Always,
             export_dir: Some("./results/${SLURM_JOB_ID}".into()),
             paths: vec!["/hpc-compose/job/checkpoints/**".into()],
+            bundles: BTreeMap::new(),
         });
         let record = persist_submission_record(
             &compose,
@@ -2655,6 +3058,7 @@ services:
         fs::write(
             artifact_manifest_path_for_record(&record),
             serde_json::to_vec_pretty(&ArtifactManifest {
+                schema_version: 2,
                 job_id: "12345".into(),
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
@@ -2666,12 +3070,25 @@ services:
                 ],
                 copied_relative_paths: vec!["checkpoints".into()],
                 warnings: Vec::new(),
+                bundles: BTreeMap::from([(
+                    "default".into(),
+                    ArtifactBundleManifest {
+                        declared_source_patterns: vec!["/hpc-compose/job/checkpoints/**".into()],
+                        matched_source_paths: vec![
+                            "/hpc-compose/job/checkpoints/step-1.bin".into(),
+                            "/hpc-compose/job/checkpoints/latest".into(),
+                        ],
+                        copied_relative_paths: vec!["checkpoints".into()],
+                        warnings: Vec::new(),
+                    },
+                )]),
             })
             .expect("manifest"),
         )
         .expect("write manifest");
 
-        let report = export_artifacts(&compose, None).expect("export");
+        let report =
+            export_artifacts(&compose, None, &ArtifactExportOptions::default()).expect("export");
         let latest = report.export_dir.join("checkpoints/latest");
         let metadata = fs::symlink_metadata(&latest).expect("latest metadata");
         assert!(metadata.file_type().is_symlink());
@@ -2696,7 +3113,8 @@ services:
         )
         .expect("record");
 
-        let err = export_artifacts(&compose, None).expect_err("missing config");
+        let err = export_artifacts(&compose, None, &ArtifactExportOptions::default())
+            .expect_err("missing config");
         assert!(err.to_string().contains("tracked submission metadata"));
 
         let mut plan_with_artifacts = runtime_plan(tmpdir.path());
@@ -2704,6 +3122,7 @@ services:
             collect: crate::spec::ArtifactCollectPolicy::Always,
             export_dir: Some("./results".into()),
             paths: vec!["/hpc-compose/job/metrics/**".into()],
+            bundles: BTreeMap::new(),
         });
         fs::write(
             &compose,
@@ -2728,7 +3147,8 @@ services:
         )
         .expect("record with artifacts");
 
-        let err = export_artifacts(&compose, Some("67890")).expect_err("missing manifest");
+        let err = export_artifacts(&compose, Some("67890"), &ArtifactExportOptions::default())
+            .expect_err("missing manifest");
         assert!(
             err.to_string()
                 .contains("tracked artifact manifest does not exist")
@@ -2758,6 +3178,7 @@ services:
             collect: crate::spec::ArtifactCollectPolicy::Always,
             export_dir: Some("./results/${SLURM_JOB_ID}".into()),
             paths: vec!["/hpc-compose/job/metrics/**".into()],
+            bundles: BTreeMap::new(),
         });
         let record = persist_submission_record(
             &compose,
@@ -2772,6 +3193,7 @@ services:
         fs::write(
             artifact_manifest_path_for_record(&record),
             serde_json::to_vec_pretty(&ArtifactManifest {
+                schema_version: 2,
                 job_id: "99999".into(),
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
@@ -2780,11 +3202,21 @@ services:
                 matched_source_paths: vec!["/hpc-compose/job/metrics/missing.json".into()],
                 copied_relative_paths: vec!["metrics/missing.json".into()],
                 warnings: Vec::new(),
+                bundles: BTreeMap::from([(
+                    "default".into(),
+                    ArtifactBundleManifest {
+                        declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                        matched_source_paths: vec!["/hpc-compose/job/metrics/missing.json".into()],
+                        copied_relative_paths: vec!["metrics/missing.json".into()],
+                        warnings: Vec::new(),
+                    },
+                )]),
             })
             .expect("manifest"),
         )
         .expect("write manifest");
-        let err = export_artifacts(&compose, None).expect_err("mismatch");
+        let err = export_artifacts(&compose, None, &ArtifactExportOptions::default())
+            .expect_err("mismatch");
         assert!(
             err.to_string()
                 .contains("artifact manifest job id 99999 does not match")
@@ -2793,6 +3225,7 @@ services:
         fs::write(
             artifact_manifest_path_for_record(&record),
             serde_json::to_vec_pretty(&ArtifactManifest {
+                schema_version: 2,
                 job_id: "12345".into(),
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
@@ -2801,17 +3234,141 @@ services:
                 matched_source_paths: vec!["/hpc-compose/job/metrics/missing.json".into()],
                 copied_relative_paths: vec!["metrics/missing.json".into()],
                 warnings: Vec::new(),
+                bundles: BTreeMap::from([(
+                    "default".into(),
+                    ArtifactBundleManifest {
+                        declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                        matched_source_paths: vec!["/hpc-compose/job/metrics/missing.json".into()],
+                        copied_relative_paths: vec!["metrics/missing.json".into()],
+                        warnings: Vec::new(),
+                    },
+                )]),
             })
             .expect("manifest"),
         )
         .expect("write manifest");
-        let report = export_artifacts(&compose, None).expect("export");
+        let report =
+            export_artifacts(&compose, None, &ArtifactExportOptions::default()).expect("export");
         assert!(report.exported_paths.is_empty());
         assert!(
             report
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("collected payload path"))
+        );
+    }
+
+    #[test]
+    fn export_artifacts_supports_named_bundles_and_tarballs() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &compose,
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/metrics/**
+    bundles:
+      logs:
+        paths:
+          - /hpc-compose/job/logs/**
+services:
+  app:
+    image: redis:7
+"#,
+        )
+        .expect("compose");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.artifacts = Some(crate::spec::ArtifactsConfig {
+            collect: crate::spec::ArtifactCollectPolicy::Always,
+            export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+            paths: vec!["/hpc-compose/job/metrics/**".into()],
+            bundles: BTreeMap::from([(
+                "logs".into(),
+                crate::spec::ArtifactBundleSpec {
+                    paths: vec!["/hpc-compose/job/logs/**".into()],
+                },
+            )]),
+        });
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(payload_dir.join("metrics")).expect("metrics dir");
+        fs::create_dir_all(payload_dir.join("logs")).expect("logs dir");
+        fs::write(payload_dir.join("metrics/meta.json"), "{\"ok\":true}\n").expect("meta");
+        fs::write(payload_dir.join("logs/app.log"), "ready\n").expect("log");
+        fs::write(
+            artifact_manifest_path_for_record(&record),
+            serde_json::to_vec_pretty(&ArtifactManifest {
+                schema_version: 2,
+                job_id: "12345".into(),
+                collect_policy: "always".into(),
+                collected_at: "2026-04-05T10:00:00Z".into(),
+                job_outcome: "success".into(),
+                declared_source_patterns: vec![
+                    "/hpc-compose/job/logs/**".into(),
+                    "/hpc-compose/job/metrics/**".into(),
+                ],
+                matched_source_paths: vec![
+                    "/hpc-compose/job/logs/app.log".into(),
+                    "/hpc-compose/job/metrics/meta.json".into(),
+                ],
+                copied_relative_paths: vec!["logs/app.log".into(), "metrics/meta.json".into()],
+                warnings: Vec::new(),
+                bundles: BTreeMap::from([
+                    (
+                        "default".into(),
+                        ArtifactBundleManifest {
+                            declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                            matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
+                            copied_relative_paths: vec!["metrics/meta.json".into()],
+                            warnings: Vec::new(),
+                        },
+                    ),
+                    (
+                        "logs".into(),
+                        ArtifactBundleManifest {
+                            declared_source_patterns: vec!["/hpc-compose/job/logs/**".into()],
+                            matched_source_paths: vec!["/hpc-compose/job/logs/app.log".into()],
+                            copied_relative_paths: vec!["logs/app.log".into()],
+                            warnings: Vec::new(),
+                        },
+                    ),
+                ]),
+            })
+            .expect("manifest"),
+        )
+        .expect("write manifest");
+
+        let report = export_artifacts(
+            &compose,
+            None,
+            &ArtifactExportOptions {
+                selected_bundles: vec!["logs".into()],
+                tarball: true,
+            },
+        )
+        .expect("export");
+        assert_eq!(report.selected_bundles, vec!["logs".to_string()]);
+        assert!(report.export_dir.join("bundles/logs/logs/app.log").exists());
+        assert!(!report.export_dir.join("metrics/meta.json").exists());
+        assert_eq!(report.bundles.len(), 1);
+        assert_eq!(report.bundles[0].name, "logs");
+        assert!(report.bundles[0].provenance_path.exists());
+        assert!(report.tarball_paths[0].exists());
+        assert!(
+            report.bundles[0]
+                .files
+                .iter()
+                .any(|entry| entry.relative_path == "logs/app.log" && entry.sha256.is_some())
         );
     }
 

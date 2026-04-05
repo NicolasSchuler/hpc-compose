@@ -329,14 +329,24 @@ fn check_cache_path_policy(report: &mut Report, plan: &RuntimePlan) {
         });
     }
 
-    if plan.slurm.cache_dir.is_none()
-        && let Some(home) = env::var_os("HOME").map(PathBuf::from)
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from)
         && plan.cache_dir.starts_with(&home)
     {
+        let message = if plan.slurm.cache_dir.is_none() {
+            format!(
+                "cache directory defaults under HOME: {}",
+                plan.cache_dir.display()
+            )
+        } else {
+            format!(
+                "cache directory resolves under HOME: {}",
+                plan.cache_dir.display()
+            )
+        };
         report.items.push(Item {
             level: Level::Warn,
-            message: format!("cache directory defaults under HOME: {}", plan.cache_dir.display()),
-            remediation: Some("On HAICORE, prefer x-slurm.cache_dir on workspace/shared storage to reduce quota and visibility issues.".to_string()),
+            message,
+            remediation: Some("Prepare runs on the login node, but compute nodes must reuse the same cache at runtime. Choose a shared filesystem path such as workspace, project, or other shared storage; a local HOME path can prepare successfully and still fail at runtime.".to_string()),
         });
     }
 }
@@ -936,6 +946,20 @@ mod tests {
         let text = report.render_verbose();
         assert!(text.contains("passes shared-path policy"));
         assert!(text.contains("defaults under HOME"));
+        assert!(text.contains("Prepare runs on the login node"));
+
+        let explicit_home = RuntimePlan {
+            slurm: SlurmConfig {
+                cache_dir: Some("~/shared-cache".into()),
+                ..SlurmConfig::default()
+            },
+            ..plan.clone()
+        };
+        let mut report = Report { items: Vec::new() };
+        check_cache_path_policy(&mut report, &explicit_home);
+        let text = report.render_verbose();
+        assert!(text.contains("resolves under HOME"));
+        assert!(text.contains("compute nodes must reuse the same cache"));
 
         let tmp_issue = RuntimePlan {
             cache_dir: PathBuf::from("/tmp/hpc-compose"),

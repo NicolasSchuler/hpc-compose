@@ -479,6 +479,7 @@ mod tests {
             working_dir: None,
             depends_on: DependsOnSpec::None,
             readiness: None,
+            healthcheck: None,
             slurm: ServiceSlurmConfig::default(),
             enroot: ServiceEnrootConfig::default(),
         }

@@ -45,6 +45,7 @@ For a new spec on a real cluster:
 | LLM curl workflow | one GPU-backed LLM plus a one-shot `curl` request from a second service | [`examples/llm-curl-workflow.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow.yaml) |
 | LLM curl workflow (home) | the same request flow, but anchored under `$HOME/models` for direct use on a login node | [`examples/llm-curl-workflow-workdir.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow-workdir.yaml) |
 | GPU-backed app | one GPU service plus a dependent application | [`examples/llama-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-app.yaml) |
+| llama.cpp + uv worker | llama.cpp serving plus a source-mounted Python worker run through `uv` | [`examples/llama-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker.yaml) |
 | Minimal batch | simplest single-service batch job | [`examples/minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) |
 | Training checkpoints | GPU training with checkpoints to shared storage | [`examples/training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) |
 | Postgres ETL | PostgreSQL plus a Python data processing job | [`examples/postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) |
@@ -76,6 +77,7 @@ Rules:
 - Do **not** use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm`.
 - If you leave `cache_dir` unset, the default is `$HOME/.cache/hpc-compose`.
 - The default is convenient for small or home-directory workflows, but a shared project or workspace path is usually safer on real clusters.
+- The important constraint is visibility: `prepare` runs on the login node, but the batch job later reuses those cached artifacts from compute nodes.
 
 ## 2. Adapt the example to your workload
 
@@ -121,11 +123,14 @@ Check:
 
 - service order,
 - how images were normalized,
+- final host-to-container mount mappings,
+- resolved environment values,
 - where runtime artifacts will live,
 - whether the planner expects a cache hit or miss,
 - whether a prepared image will rebuild on every submit because `prepare.mounts` are present.
 
 `inspect` is the quickest way to confirm that the planner understood your spec the way you intended.
+`inspect --verbose` is a debugging-oriented view and can print secrets from resolved environment values.
 
 ## 5. Usual run: submit the job and watch it
 
@@ -232,7 +237,10 @@ Use the tracked helpers for later inspection:
 ```bash
 hpc-compose status -f compose.yaml
 hpc-compose stats -f compose.yaml
+hpc-compose stats -f compose.yaml --format csv
+hpc-compose stats -f compose.yaml --format jsonl
 hpc-compose artifacts -f compose.yaml
+hpc-compose artifacts -f compose.yaml --bundle checkpoints --tarball
 hpc-compose cancel -f compose.yaml
 hpc-compose logs -f compose.yaml
 hpc-compose logs -f compose.yaml --service app --follow
@@ -246,6 +254,8 @@ hpc-compose logs -f compose.yaml --service app --follow
 - job-step CPU and memory snapshots through `sstat`
 
 If the sampler is absent, disabled, or only partially available, `stats` falls back to live `sstat`. It works best for running jobs, requires the cluster's `jobacct_gather` plugin to be enabled for Slurm-side step metrics, and only shows GPU accounting fields from Slurm when the cluster exposes GPU TRES accounting.
+
+Use `--format json`, `--format csv`, or `--format jsonl` when you want machine-friendly output for dashboards, plotting, or experiment tracking. `--json` remains supported as a compatibility alias for `--format json`.
 
 Runtime logs live under:
 
@@ -276,6 +286,8 @@ ${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/artifacts/
 ```
 
 Use `hpc-compose artifacts -f compose.yaml` after the job finishes to copy the collected payload into the configured `x-slurm.artifacts.export_dir`. The export path is resolved relative to the compose file and expands `${SLURM_JOB_ID}` from tracked metadata.
+
+If the compose file defines named bundles under `x-slurm.artifacts.bundles`, `hpc-compose artifacts --bundle <name>` exports only the selected bundle(s). Named bundles are written under `<export_dir>/bundles/<bundle>/`, and every export writes provenance JSON under `<export_dir>/_hpc-compose/bundles/<bundle>.json`. Add `--tarball` to also create `<bundle>.tar.gz` archives during export. The bundle name `default` is reserved for top-level `x-slurm.artifacts.paths`.
 
 Slurm may also write a top-level batch log such as `slurm-<jobid>.out`, or to the path configured with `x-slurm.output`. Check that file first when the job fails before any service log appears.
 
@@ -331,6 +343,16 @@ Cache keys include the tool version, so upgrading `hpc-compose` invalidates all 
 hpc-compose cache prune --age 0
 ```
 
+## What changed and what should I run?
+
+| If you changed... | Typical next step |
+| --- | --- |
+| YAML planning/runtime settings only | `hpc-compose validate -f compose.yaml`, `hpc-compose inspect --verbose -f compose.yaml`, then `hpc-compose submit --watch -f compose.yaml` |
+| The base image, `x-enroot.prepare.commands`, or prepare env | `hpc-compose submit --watch --force-rebuild -f compose.yaml` for the normal path, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
+| Only mounted runtime source such as app code under `volumes` | Usually just `hpc-compose submit --watch -f compose.yaml` |
+| Cache entries you no longer want and this plan does not reference | `hpc-compose cache prune --all-unused -f compose.yaml` |
+| `hpc-compose` itself | Expect cache misses on the next `prepare` or `submit`, then optionally prune old entries |
+
 ## Decision guide
 
 ### When should I use `volumes`?
@@ -354,6 +376,12 @@ Use them after changing:
 - prepare environment,
 - tooling or dependencies that should invalidate the cached runtime image.
 
+### When should I manually run `enroot remove`?
+
+Treat manual `enroot remove` as a rare last resort.
+
+Use it only when Enroot state is clearly broken or inconsistent and `hpc-compose prepare --force` plus cache pruning did not fix the problem. In the normal rebuild or refresh path, prefer `submit --force-rebuild`, `prepare --force`, and `cache prune` so `hpc-compose` stays in charge of artifact state.
+
 ### Why does my service rebuild every time?
 
 If `x-enroot.prepare.mounts` is non-empty, that service intentionally rebuilds on every `prepare` / `submit`.
@@ -371,7 +399,7 @@ Pyxis support appears unavailable on that node. Move to a supported login node o
 ### Cache directory errors or warnings
 
 - Errors usually mean the path is not shared or not writable.
-- A warning under `$HOME` means the path may work, but a shared workspace path is preferred.
+- A warning under `$HOME` means the path may work on some clusters, but a shared workspace or project path is safer because prepare happens on the login node and runtime happens on compute nodes.
 
 ### Missing local mount or image paths
 

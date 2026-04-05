@@ -25,6 +25,7 @@ hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$US
 | [`llm-curl-workflow.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow.yaml) | End-to-end LLM request flow with a login-node prepare step and a `curl` client | You want the smallest concrete inference workflow |
 | [`llm-curl-workflow-workdir.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow-workdir.yaml) | Same LLM workflow, but anchored under `$HOME/models` for direct use on a login node | You want the lowest-overhead path from a login-node home directory |
 | [`llama-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-app.yaml) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
+| [`llama-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker.yaml) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server + mounted worker pattern |
 | [`minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) | Single service, no dependencies, no GPU, no prepare | You want the simplest possible starting point |
 | [`training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) | GPU training with checkpoints written to shared storage | You need a batch training workflow with artifact collection |
 | [`postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
@@ -49,6 +50,7 @@ Do you need GPUs?
 │  └─ Multi-stage file pipeline?      → multi-stage-pipeline.yaml
 └─ Yes
    ├─ LLM inference (llama.cpp)?      → llm-curl-workflow.yaml
+   ├─ LLM inference (llama.cpp + uv)? → llama-uv-worker.yaml
    ├─ LLM inference (vLLM only)?      → vllm-openai.yaml
    ├─ LLM inference (vLLM + uv app)?  → vllm-uv-worker.yaml
    ├─ GPU training with artifacts?    → training-checkpoints.yaml
@@ -65,6 +67,18 @@ Iterative development with mounted source? → dev-python-app.yaml
 | early validation while adapting | `hpc-compose validate -f ...` and `hpc-compose inspect --verbose -f ...` |
 | normal run | `hpc-compose submit --watch -f ...` |
 | troubleshooting | `hpc-compose preflight -f ...`, `hpc-compose prepare -f ...`, `hpc-compose render -f ... --output ...` |
+
+`inspect --verbose` is a debugging view: it prints resolved environment values and final mount mappings, so treat its output as sensitive when your spec contains secrets.
+
+## What changed?
+
+| Change | Typical next command |
+| --- | --- |
+| YAML planning/runtime settings only | `hpc-compose validate -f compose.yaml`, `hpc-compose inspect --verbose -f compose.yaml`, then `hpc-compose submit --watch -f compose.yaml` |
+| Base image, prepare commands, or prepare env | `hpc-compose submit --watch --force-rebuild -f compose.yaml` for the normal path, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
+| Mounted runtime source only | Usually just `hpc-compose submit --watch -f compose.yaml` |
+| Old cache artifacts no longer referenced by this spec | `hpc-compose cache prune --all-unused -f compose.yaml` |
+| Upgraded `hpc-compose` | Expect cache misses on the next run, then optionally prune old entries |
 
 ## How to adapt an example
 
@@ -109,6 +123,13 @@ Iterative development with mounted source? → dev-python-app.yaml
 
 - Best reference for GPU-backed services and dependent apps.
 - Expects a model file at `models/model.gguf`; see [`examples/models/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/models/README.md).
+
+### `llama-uv-worker.yaml`
+
+- Best reference for llama.cpp serving plus a source-mounted Python worker run through `uv`.
+- Expects a model file at `models/model.gguf`; see [`examples/models/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/models/README.md).
+- Uses log-based readiness so the worker waits until the GGUF model is actually loaded.
+- Uses `/hpc-compose/job/request.done` for shared in-job handoff and clean shutdown.
 
 ### `minimal-batch.yaml`
 

@@ -19,6 +19,7 @@ const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "working_dir",
     "depends_on",
     "readiness",
+    "healthcheck",
     "x-slurm",
     "x-enroot",
 ];
@@ -103,6 +104,17 @@ pub struct ArtifactsConfig {
     pub export_dir: Option<String>,
     #[serde(default)]
     pub paths: Vec<String>,
+    #[serde(default)]
+    pub bundles: BTreeMap<String, ArtifactBundleSpec>,
+}
+
+/// Named artifact bundle under `x-slurm.artifacts.bundles`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactBundleSpec {
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 /// Runtime metrics collector supported by the job sampler.
@@ -147,6 +159,8 @@ pub struct ServiceSpec {
     pub depends_on: DependsOnSpec,
     #[serde(default)]
     pub readiness: Option<ReadinessSpec>,
+    #[serde(default)]
+    pub healthcheck: Option<HealthcheckSpec>,
     #[serde(rename = "x-slurm", default)]
     pub slurm: ServiceSlurmConfig,
     #[serde(rename = "x-enroot", default)]
@@ -296,6 +310,45 @@ pub enum ReadinessSpec {
     },
 }
 
+/// Compose-compatible healthcheck block accepted as sugar for `readiness`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthcheckSpec {
+    #[serde(default)]
+    pub test: Option<HealthcheckTest>,
+    #[serde(default)]
+    pub timeout: Option<HealthcheckDuration>,
+    #[serde(default)]
+    pub disable: Option<bool>,
+    #[serde(default)]
+    pub interval: Option<HealthcheckDuration>,
+    #[serde(default)]
+    pub retries: Option<u32>,
+    #[serde(default)]
+    pub start_period: Option<HealthcheckDuration>,
+}
+
+/// Supported healthcheck `test` syntaxes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HealthcheckTest {
+    /// Compose exec-array form.
+    Vec(Vec<String>),
+    /// String form, treated like a shell probe.
+    String(String),
+}
+
+/// Supported healthcheck duration syntaxes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HealthcheckDuration {
+    /// Numeric seconds.
+    Seconds(u64),
+    /// Compose duration string such as `30s` or `1m30s`.
+    String(String),
+}
+
 fn default_http_status_code() -> u16 {
     200
 }
@@ -325,8 +378,12 @@ impl ComposeSpec {
         Ok(())
     }
 
-    fn validate(&self) -> Result<()> {
-        self.slurm.validate()
+    fn validate(&mut self) -> Result<()> {
+        self.slurm.validate()?;
+        for service in self.services.values_mut() {
+            service.normalize_healthcheck()?;
+        }
+        Ok(())
     }
 }
 
@@ -512,11 +569,24 @@ impl SlurmConfig {
             if export_dir.trim().is_empty() {
                 bail!("x-slurm.artifacts.export_dir must not be empty");
             }
-            if artifacts.paths.is_empty() {
-                bail!("x-slurm.artifacts.paths must contain at least one source path");
+            if artifacts.paths.is_empty() && artifacts.bundles.is_empty() {
+                bail!(
+                    "x-slurm.artifacts must contain at least one source path in paths or bundles"
+                );
             }
             for path in &artifacts.paths {
                 validate_artifact_path(path)?;
+            }
+            for (name, bundle) in &artifacts.bundles {
+                validate_artifact_bundle_name(name)?;
+                if bundle.paths.is_empty() {
+                    bail!(
+                        "x-slurm.artifacts.bundles.{name}.paths must contain at least one source path"
+                    );
+                }
+                for path in &bundle.paths {
+                    validate_artifact_path(path)?;
+                }
             }
         }
         Ok(())
@@ -544,6 +614,19 @@ impl SlurmConfig {
 }
 
 impl ArtifactsConfig {
+    /// Returns artifact bundles with the legacy top-level `paths` exposed as `default`.
+    pub fn normalized_bundles(&self) -> BTreeMap<String, Vec<String>> {
+        let mut bundles = self
+            .bundles
+            .iter()
+            .map(|(name, bundle)| (name.clone(), bundle.paths.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if !self.paths.is_empty() {
+            bundles.insert("default".to_string(), self.paths.clone());
+        }
+        bundles
+    }
+
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         if let Some(export_dir) = &mut self.export_dir {
             let mut vars_with_job_id = vars.clone();
@@ -553,6 +636,9 @@ impl ArtifactsConfig {
                 .replace(JOB_ID_SENTINEL, "${SLURM_JOB_ID}");
         }
         interpolate_vec_strings(&mut self.paths, vars)?;
+        for bundle in self.bundles.values_mut() {
+            interpolate_vec_strings(&mut bundle.paths, vars)?;
+        }
         Ok(())
     }
 }
@@ -569,8 +655,50 @@ impl ServiceSpec {
         self.environment.interpolate_values(vars)?;
         interpolate_vec_strings(&mut self.volumes, vars)?;
         interpolate_optional_string(&mut self.working_dir, vars)?;
+        if let Some(healthcheck) = &mut self.healthcheck {
+            healthcheck.interpolate(vars)?;
+        }
         self.slurm.interpolate(vars)?;
         self.enroot.interpolate(vars)?;
+        Ok(())
+    }
+
+    fn normalize_healthcheck(&mut self) -> Result<()> {
+        if self.readiness.is_some() && self.healthcheck.is_some() {
+            bail!("readiness and healthcheck are mutually exclusive; use only one");
+        }
+
+        let Some(healthcheck) = self.healthcheck.take() else {
+            return Ok(());
+        };
+        if healthcheck.disable.unwrap_or(false) {
+            self.readiness = None;
+            return Ok(());
+        }
+        if healthcheck.interval.is_some() {
+            bail!(
+                "healthcheck.interval is not supported; use healthcheck.timeout or explicit readiness instead"
+            );
+        }
+        if healthcheck.retries.is_some() {
+            bail!(
+                "healthcheck.retries is not supported; use healthcheck.timeout or explicit readiness instead"
+            );
+        }
+        if healthcheck.start_period.is_some() {
+            bail!(
+                "healthcheck.start_period is not supported; use healthcheck.timeout or explicit readiness instead"
+            );
+        }
+        let timeout_seconds = healthcheck
+            .timeout
+            .as_ref()
+            .map(HealthcheckDuration::to_seconds)
+            .transpose()?;
+        let test = healthcheck
+            .test
+            .context("healthcheck.test is required unless healthcheck.disable is true")?;
+        self.readiness = Some(test.to_readiness(timeout_seconds)?);
         Ok(())
     }
 }
@@ -597,6 +725,63 @@ impl PrepareSpec {
         interpolate_vec_strings(&mut self.mounts, vars)?;
         self.env.interpolate_values(vars)?;
         Ok(())
+    }
+}
+
+impl HealthcheckSpec {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        if let Some(test) = &mut self.test {
+            test.interpolate(vars)?;
+        }
+        Ok(())
+    }
+}
+
+impl HealthcheckTest {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        match self {
+            HealthcheckTest::Vec(items) => interpolate_vec_strings(items, vars),
+            HealthcheckTest::String(command) => {
+                *command = interpolate_string(command, vars)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn to_readiness(&self, timeout_seconds: Option<u64>) -> Result<ReadinessSpec> {
+        let argv = match self {
+            HealthcheckTest::Vec(items) => parse_healthcheck_argv(items)?,
+            HealthcheckTest::String(command) => command
+                .split_whitespace()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        };
+        if let Some((host, port)) = parse_nc_probe(&argv)? {
+            return Ok(ReadinessSpec::Tcp {
+                host: Some(host),
+                port,
+                timeout_seconds,
+            });
+        }
+        if let Some(url) = parse_http_probe(&argv) {
+            return Ok(ReadinessSpec::Http {
+                url,
+                status_code: 200,
+                timeout_seconds,
+            });
+        }
+        bail!(
+            "healthcheck.test must use a recognized nc, curl, or wget --spider probe; use explicit readiness for other checks"
+        )
+    }
+}
+
+impl HealthcheckDuration {
+    fn to_seconds(&self) -> Result<u64> {
+        match self {
+            HealthcheckDuration::Seconds(seconds) => Ok(*seconds),
+            HealthcheckDuration::String(raw) => parse_duration_seconds(raw),
+        }
     }
 }
 
@@ -766,6 +951,130 @@ fn resolve_required_variable(name: &str, vars: &InterpolationVars) -> Result<Str
     vars.get(name)
         .cloned()
         .context(format!("missing variable '{name}'"))
+}
+
+fn parse_healthcheck_argv(items: &[String]) -> Result<Vec<String>> {
+    if items.is_empty() {
+        bail!("healthcheck.test must not be empty");
+    }
+    match items[0].as_str() {
+        "CMD" => {
+            if items.len() < 2 {
+                bail!("healthcheck.test CMD form must include a command");
+            }
+            Ok(items[1..].to_vec())
+        }
+        "CMD-SHELL" => {
+            let Some(shell) = items.get(1) else {
+                bail!("healthcheck.test CMD-SHELL form must include a shell command");
+            };
+            Ok(shell.split_whitespace().map(ToString::to_string).collect())
+        }
+        _ => bail!("healthcheck.test must start with CMD or CMD-SHELL for Compose compatibility"),
+    }
+}
+
+fn parse_nc_probe(argv: &[String]) -> Result<Option<(String, u16)>> {
+    if argv.first().map(String::as_str) != Some("nc") {
+        return Ok(None);
+    }
+    let mut non_flags = Vec::new();
+    let mut has_zero_scan = false;
+    let mut index = 1;
+    while index < argv.len() {
+        match argv[index].as_str() {
+            "-z" => {
+                has_zero_scan = true;
+                index += 1;
+            }
+            flag if flag.starts_with('-') => {
+                index += 1;
+            }
+            value => {
+                non_flags.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    if !has_zero_scan {
+        bail!("healthcheck nc probes must include '-z'; use explicit readiness otherwise");
+    }
+    if non_flags.len() != 2 {
+        bail!("healthcheck nc probes must use 'nc -z HOST PORT'");
+    }
+    let port = non_flags[1]
+        .parse::<u16>()
+        .context("healthcheck nc probe port must be a valid TCP port")?;
+    Ok(Some((non_flags[0].clone(), port)))
+}
+
+fn parse_http_probe(argv: &[String]) -> Option<String> {
+    match argv.first().map(String::as_str) {
+        Some("curl") => argv.iter().rev().find(|item| looks_like_url(item)).cloned(),
+        Some("wget") if argv.iter().any(|item| item == "--spider") => {
+            argv.iter().rev().find(|item| looks_like_url(item)).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn looks_like_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn parse_duration_seconds(raw: &str) -> Result<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("healthcheck duration must not be empty");
+    }
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return trimmed
+            .parse::<u64>()
+            .context("healthcheck duration must be a valid integer number of seconds");
+    }
+
+    let mut total = 0_u64;
+    let mut number = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            number.push(ch);
+            continue;
+        }
+        if number.is_empty() {
+            bail!("unsupported healthcheck duration '{trimmed}'; use values like 30s or 2m");
+        }
+        let value = number
+            .parse::<u64>()
+            .context("healthcheck duration segment must be numeric")?;
+        let factor = match ch {
+            'h' => 3600,
+            'm' => 60,
+            's' => 1,
+            _ => {
+                bail!("unsupported healthcheck duration unit '{ch}' in '{trimmed}'; use h, m, or s")
+            }
+        };
+        total = total.saturating_add(value.saturating_mul(factor));
+        number.clear();
+    }
+    if !number.is_empty() {
+        bail!("unsupported healthcheck duration '{trimmed}'; include a unit suffix");
+    }
+    Ok(total)
+}
+
+fn validate_artifact_bundle_name(name: &str) -> Result<()> {
+    if name == "default" {
+        bail!("x-slurm.artifacts bundle name 'default' is reserved for top-level artifact paths");
+    }
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        bail!("x-slurm.artifacts bundle names must match [A-Za-z0-9_-]+, got '{name}'");
+    }
+    Ok(())
 }
 
 fn is_var_start(ch: char) -> bool {
@@ -1173,6 +1482,31 @@ services:
     }
 
     #[test]
+    fn artifacts_block_rejects_reserved_default_bundle_name() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results
+    bundles:
+      default:
+        paths:
+          - /hpc-compose/job/metrics/**
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("bundle name 'default' is reserved")
+        );
+    }
+
+    #[test]
     fn artifacts_block_rejects_non_absolute_paths() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let path = write_spec(
@@ -1277,6 +1611,297 @@ services:
                 timeout_seconds: Some(10),
             })
         );
+    }
+
+    #[test]
+    fn healthcheck_cmd_normalizes_to_tcp_readiness() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "6379"]
+      timeout: 30s
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        let service = spec.services.get("redis").expect("service");
+        assert!(service.healthcheck.is_none());
+        assert_eq!(
+            service.readiness,
+            Some(ReadinessSpec::Tcp {
+                host: Some("127.0.0.1".into()),
+                port: 6379,
+                timeout_seconds: Some(30),
+            })
+        );
+    }
+
+    #[test]
+    fn healthcheck_shell_normalizes_to_http_readiness() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  api:
+    image: python:3.11
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --silent --fail http://127.0.0.1:8080/health
+      timeout: 2m
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        let service = spec.services.get("api").expect("service");
+        assert_eq!(
+            service.readiness,
+            Some(ReadinessSpec::Http {
+                url: "http://127.0.0.1:8080/health".into(),
+                status_code: 200,
+                timeout_seconds: Some(120),
+            })
+        );
+    }
+
+    #[test]
+    fn healthcheck_disable_and_validation_errors_are_enforced() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let disabled = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    healthcheck:
+      disable: true
+"#,
+        );
+        let spec = ComposeSpec::load(&disabled).expect("load");
+        assert!(
+            spec.services
+                .get("app")
+                .and_then(|service| service.readiness.as_ref())
+                .is_none()
+        );
+
+        let conflict = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    readiness:
+      type: sleep
+      seconds: 1
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "6379"]
+"#,
+        );
+        let err = ComposeSpec::load(&conflict).expect_err("conflict");
+        assert!(err.to_string().contains("mutually exclusive"));
+
+        let unsupported = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "echo", "ok"]
+      interval: 5s
+"#,
+        );
+        let err = ComposeSpec::load(&unsupported).expect_err("unsupported");
+        assert!(err.to_string().contains("healthcheck.interval"));
+    }
+
+    #[test]
+    fn healthcheck_helper_parsers_cover_remaining_error_paths() {
+        assert!(parse_healthcheck_argv(&[]).is_err());
+        assert!(parse_healthcheck_argv(&["CMD".into()]).is_err());
+        assert!(parse_healthcheck_argv(&["CMD-SHELL".into()]).is_err());
+        assert!(parse_healthcheck_argv(&["NONE".into(), "echo".into()]).is_err());
+
+        assert_eq!(
+            parse_nc_probe(&["curl".into(), "http://127.0.0.1".into()]).expect("non nc"),
+            None
+        );
+        assert!(parse_nc_probe(&["nc".into(), "127.0.0.1".into(), "80".into()]).is_err());
+        assert!(parse_nc_probe(&["nc".into(), "-z".into(), "127.0.0.1".into()]).is_err());
+        assert!(
+            parse_nc_probe(&["nc".into(), "-z".into(), "127.0.0.1".into(), "nope".into()]).is_err()
+        );
+        assert_eq!(
+            parse_nc_probe(&[
+                "nc".into(),
+                "-v".into(),
+                "-z".into(),
+                "127.0.0.1".into(),
+                "8080".into(),
+            ])
+            .expect("nc")
+            .expect("some"),
+            ("127.0.0.1".into(), 8080)
+        );
+
+        assert_eq!(
+            parse_http_probe(&[
+                "wget".into(),
+                "--spider".into(),
+                "http://127.0.0.1:8080/health".into(),
+            ]),
+            Some("http://127.0.0.1:8080/health".into())
+        );
+        assert_eq!(
+            parse_http_probe(&["wget".into(), "http://127.0.0.1:8080/health".into()]),
+            None
+        );
+    }
+
+    #[test]
+    fn healthcheck_duration_and_conversion_helpers_cover_remaining_branches() {
+        assert_eq!(
+            HealthcheckDuration::Seconds(7)
+                .to_seconds()
+                .expect("seconds"),
+            7
+        );
+        assert_eq!(
+            parse_duration_seconds("15").expect("plain integer seconds"),
+            15
+        );
+        assert_eq!(
+            parse_duration_seconds("1h2m3s").expect("compound duration"),
+            3723
+        );
+        assert!(parse_duration_seconds("").is_err());
+        assert!(parse_duration_seconds("ms").is_err());
+        assert!(parse_duration_seconds("7q").is_err());
+        assert!(parse_duration_seconds("7m30").is_err());
+
+        let mut vars = BTreeMap::new();
+        vars.insert("PORT".into(), "9090".into());
+        let mut test = HealthcheckTest::String("curl http://127.0.0.1:${PORT}/ready".into());
+        test.interpolate(&vars).expect("interpolate");
+        assert_eq!(
+            test.to_readiness(Some(12)).expect("http readiness"),
+            ReadinessSpec::Http {
+                url: "http://127.0.0.1:9090/ready".into(),
+                status_code: 200,
+                timeout_seconds: Some(12),
+            }
+        );
+
+        let unsupported = HealthcheckTest::String("echo ok".into());
+        assert!(unsupported.to_readiness(None).is_err());
+    }
+
+    #[test]
+    fn artifact_and_interpolation_validation_cover_remaining_error_paths() {
+        assert!(validate_artifact_bundle_name("bad.name").is_err());
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let empty_export_dir = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: "   "
+    paths:
+      - /hpc-compose/job/metrics/**
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        assert!(
+            ComposeSpec::load(&empty_export_dir)
+                .expect_err("empty export")
+                .to_string()
+                .contains("must not be empty")
+        );
+
+        let empty_bundle_paths = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./results
+    bundles:
+      logs:
+        paths: []
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        assert!(
+            ComposeSpec::load(&empty_bundle_paths)
+                .expect_err("empty bundle")
+                .to_string()
+                .contains("bundles.logs.paths must contain at least one source path")
+        );
+
+        let bad_healthcheck = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "6379"]
+      retries: 2
+"#,
+        );
+        assert!(
+            ComposeSpec::load(&bad_healthcheck)
+                .expect_err("retries")
+                .to_string()
+                .contains("healthcheck.retries")
+        );
+
+        let start_period = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "6379"]
+      start_period: 5s
+"#,
+        );
+        assert!(
+            ComposeSpec::load(&start_period)
+                .expect_err("start period")
+                .to_string()
+                .contains("healthcheck.start_period")
+        );
+
+        let list_env = EnvironmentSpec::List(vec!["BROKEN".into()]);
+        assert!(list_env.to_pairs().is_err());
+
+        let mut list_env = EnvironmentSpec::List(vec!["URL=http://${HOST}".into()]);
+        let mut vars = BTreeMap::new();
+        vars.insert("HOST".into(), "localhost".into());
+        list_env.interpolate_values(&vars).expect("interpolate env");
+        assert_eq!(
+            list_env.to_pairs().expect("pairs"),
+            vec![("URL".into(), "http://localhost".into())]
+        );
+
+        let deps = DependsOnSpec::Map(BTreeMap::from([(
+            "db".into(),
+            DependsOnConditionSpec {
+                condition: Some("service_healthy".into()),
+            },
+        )]));
+        assert_eq!(deps.names().expect("names"), vec!["db".to_string()]);
     }
 
     #[test]

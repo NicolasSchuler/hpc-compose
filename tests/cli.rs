@@ -581,6 +581,7 @@ services:
 }
 
 fn write_env_compose(tmpdir: &Path, cache_dir: &Path) -> PathBuf {
+    fs::create_dir_all(tmpdir.join("app")).expect("app dir");
     fs::write(
         tmpdir.join(".env"),
         "SECRET_TOKEN=super-secret\nMESSAGE=hi-from-dotenv\n",
@@ -599,6 +600,8 @@ x-slurm:
 services:
   app:
     image: python:3.11-slim
+    volumes:
+      - ./app:/workspace
     environment:
       SECRET_TOKEN: $SECRET_TOKEN
     command:
@@ -1777,8 +1780,14 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
     );
     assert_success(&inspect_verbose);
     let inspect_verbose_stdout = stdout_text(&inspect_verbose);
-    assert!(inspect_verbose_stdout.contains("environment keys: SECRET_TOKEN"));
-    assert!(!inspect_verbose_stdout.contains("super-secret"));
+    assert!(inspect_verbose_stdout.contains("environment:"));
+    assert!(inspect_verbose_stdout.contains("  - SECRET_TOKEN"));
+    assert!(!inspect_verbose_stdout.contains("SECRET_TOKEN=super-secret"));
+    assert!(inspect_verbose_stdout.contains(&format!(
+        "{}:/workspace",
+        tmpdir.path().join("app").display()
+    )));
+    assert!(inspect_verbose_stdout.contains("/hpc-compose/job"));
     assert!(inspect_verbose_stdout.contains("effective srun args:"));
 
     let inspect_json = run_cli(
@@ -1822,6 +1831,7 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         "llm-curl-workflow",
         "llm-curl-workflow-workdir",
         "llama-app",
+        "llama-uv-worker",
         "vllm-uv-worker",
     ] {
         let output = tmpdir.path().join(format!("{template}.yaml"));

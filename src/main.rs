@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use hpc_compose::cache::{
     CacheEntryKind, load_manifest_if_exists, prune_all_unused, prune_by_age, scan_cache,
@@ -15,17 +15,18 @@ use hpc_compose::init::{
     resolve_template, write_initialized_template,
 };
 use hpc_compose::job::{
-    ArtifactExportReport, SchedulerOptions, StatsOptions, StatsSnapshot, StatusSnapshot,
-    WatchOutcome, build_stats_snapshot, build_status_snapshot, build_submission_record,
-    clean_all_except_latest, clean_by_age, export_artifacts, load_submission_record, print_logs,
-    scheduler_source_label, watch_submission, write_submission_record,
+    ArtifactExportOptions, ArtifactExportReport, SchedulerOptions, StatsOptions, StatsSnapshot,
+    StatusSnapshot, WatchOutcome, build_stats_snapshot, build_status_snapshot,
+    build_submission_record, clean_all_except_latest, clean_by_age, export_artifacts,
+    load_submission_record, print_logs, scheduler_source_label, watch_submission,
+    write_submission_record,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, build_plan, registry_host_for_remote,
 };
 use hpc_compose::preflight::{Options as PreflightOptions, Report, run as run_preflight};
 use hpc_compose::prepare::{
-    ArtifactAction, PrepareOptions, PrepareSummary, RuntimePlan, base_image_path,
+    ArtifactAction, PrepareOptions, PrepareSummary, RuntimePlan, RuntimeService, base_image_path,
     build_runtime_plan, prepare_runtime_plan,
 };
 use hpc_compose::render::{
@@ -42,6 +43,14 @@ use hpc_compose::spec::{ComposeSpec, DependencyCondition, ServiceDependency};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+enum StatsOutputFormat {
+    Text,
+    Json,
+    Csv,
+    Jsonl,
 }
 
 #[derive(Debug, Subcommand)]
@@ -135,8 +144,10 @@ enum Commands {
         file: PathBuf,
         #[arg(long)]
         job_id: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "format")]
         json: bool,
+        #[arg(long, value_enum)]
+        format: Option<StatsOutputFormat>,
         #[arg(long, default_value = "sstat")]
         sstat_bin: String,
         #[arg(long, default_value = "squeue")]
@@ -151,6 +162,10 @@ enum Commands {
         job_id: Option<String>,
         #[arg(long)]
         json: bool,
+        #[arg(long = "bundle")]
+        bundles: Vec<String>,
+        #[arg(long)]
+        tarball: bool,
     },
     Logs {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
@@ -482,6 +497,7 @@ fn run_command(command: Commands) -> Result<()> {
             file,
             job_id,
             json,
+            format,
             sstat_bin,
             squeue_bin,
             sacct_bin,
@@ -497,18 +513,45 @@ fn run_command(command: Commands) -> Result<()> {
                     sstat_bin,
                 },
             )?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&snapshot)
-                        .context("failed to serialize stats output")?
-                );
+            let format = if json {
+                StatsOutputFormat::Json
             } else {
-                print_stats_snapshot(&snapshot);
+                format.unwrap_or(StatsOutputFormat::Text)
+            };
+            match format {
+                StatsOutputFormat::Text => print_stats_snapshot(&snapshot),
+                StatsOutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&snapshot)
+                            .context("failed to serialize stats output")?
+                    );
+                }
+                StatsOutputFormat::Csv => {
+                    write_stats_snapshot_csv(&mut io::stdout(), &snapshot)
+                        .context("failed to write csv stats output")?;
+                }
+                StatsOutputFormat::Jsonl => {
+                    write_stats_snapshot_jsonl(&mut io::stdout(), &snapshot)
+                        .context("failed to write jsonl stats output")?;
+                }
             }
         }
-        Commands::Artifacts { file, job_id, json } => {
-            let report = export_artifacts(&file, job_id.as_deref())?;
+        Commands::Artifacts {
+            file,
+            job_id,
+            json,
+            bundles,
+            tarball,
+        } => {
+            let report = export_artifacts(
+                &file,
+                job_id.as_deref(),
+                &ArtifactExportOptions {
+                    selected_bundles: bundles,
+                    tarball,
+                },
+            )?;
             if json {
                 println!(
                     "{}",
@@ -900,6 +943,134 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
     Ok(())
 }
 
+fn write_stats_snapshot_csv(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io::Result<()> {
+    writeln!(
+        writer,
+        "job_id,scheduler_state,scheduler_source,stats_source,step_id,ntasks,ave_cpu,ave_rss,max_rss,alloc_tres,tres_usage_in_ave,gpu_count,gpu_util,gpu_mem,alloc_tres_map,usage_tres_in_ave_map"
+    )?;
+    for step in &snapshot.steps {
+        writeln!(
+            writer,
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            csv_field(&snapshot.job_id),
+            csv_field(&snapshot.scheduler.state),
+            csv_field(scheduler_source_label(snapshot.scheduler.source)),
+            csv_field(&snapshot.source),
+            csv_field(&step.step_id),
+            csv_field(&step.ntasks),
+            csv_field(&step.ave_cpu),
+            csv_field(&step.ave_rss),
+            csv_field(&step.max_rss),
+            csv_field(&step.alloc_tres),
+            csv_field(&step.tres_usage_in_ave),
+            csv_field(step.gpu_count.as_deref().unwrap_or("")),
+            csv_field(step.gpu_util.as_deref().unwrap_or("")),
+            csv_field(step.gpu_mem.as_deref().unwrap_or("")),
+            csv_field(&format_tres_map(&step.alloc_tres_map)),
+            csv_field(&format_tres_map(&step.usage_tres_in_ave_map)),
+        )?;
+    }
+    Ok(())
+}
+
+fn write_stats_snapshot_jsonl(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io::Result<()> {
+    write_jsonl_record(
+        writer,
+        &serde_json::json!({
+            "record_type": "summary",
+            "job_id": snapshot.job_id,
+            "scheduler_state": snapshot.scheduler.state,
+            "scheduler_source": scheduler_source_label(snapshot.scheduler.source),
+            "stats_source": snapshot.source,
+            "available": snapshot.available,
+            "reason": snapshot.reason,
+            "metrics_dir": snapshot.metrics_dir,
+        }),
+    )?;
+    for note in &snapshot.notes {
+        write_jsonl_record(
+            writer,
+            &serde_json::json!({
+                "record_type": "note",
+                "job_id": snapshot.job_id,
+                "message": note,
+            }),
+        )?;
+    }
+    if let Some(sampler) = &snapshot.sampler {
+        for collector in &sampler.collectors {
+            write_jsonl_record(
+                writer,
+                &serde_json::json!({
+                    "record_type": "collector",
+                    "job_id": snapshot.job_id,
+                    "name": collector.name,
+                    "enabled": collector.enabled,
+                    "available": collector.available,
+                    "note": collector.note,
+                    "last_sampled_at": collector.last_sampled_at,
+                }),
+            )?;
+        }
+        if let Some(gpu) = &sampler.gpu {
+            for device in &gpu.gpus {
+                write_jsonl_record(
+                    writer,
+                    &serde_json::json!({
+                        "record_type": "gpu_device",
+                        "job_id": snapshot.job_id,
+                        "sampled_at": gpu.sampled_at,
+                        "device": device,
+                    }),
+                )?;
+            }
+            for process in &gpu.processes {
+                write_jsonl_record(
+                    writer,
+                    &serde_json::json!({
+                        "record_type": "gpu_process",
+                        "job_id": snapshot.job_id,
+                        "sampled_at": gpu.sampled_at,
+                        "process": process,
+                    }),
+                )?;
+            }
+        }
+    }
+    for step in &snapshot.steps {
+        write_jsonl_record(
+            writer,
+            &serde_json::json!({
+                "record_type": "step",
+                "job_id": snapshot.job_id,
+                "scheduler_state": snapshot.scheduler.state,
+                "scheduler_source": scheduler_source_label(snapshot.scheduler.source),
+                "stats_source": snapshot.source,
+                "step": step,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+fn write_jsonl_record(writer: &mut impl Write, value: &serde_json::Value) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, value).map_err(io::Error::other)?;
+    writeln!(writer)
+}
+
+fn csv_field(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+fn format_tres_map(values: &std::collections::BTreeMap<String, String>) -> String {
+    values
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 fn write_artifact_export_report(
     writer: &mut impl Write,
     report: &ArtifactExportReport,
@@ -920,9 +1091,31 @@ fn write_artifact_export_report(
         "matched source paths: {}",
         report.manifest.matched_source_paths.len()
     )?;
+    writeln!(
+        writer,
+        "selected bundles: {}",
+        report.selected_bundles.join(",")
+    )?;
+    writeln!(writer, "bundle reports: {}", report.bundles.len())?;
     writeln!(writer, "exported paths: {}", report.exported_paths.len())?;
     for warning in &report.warnings {
         writeln!(writer, "warning: {warning}")?;
+    }
+    for bundle in &report.bundles {
+        writeln!(
+            writer,
+            "bundle '{}': exported={} provenance={}{}",
+            bundle.name,
+            bundle.exported_paths.len(),
+            bundle.provenance_path.display(),
+            match &bundle.tarball_path {
+                Some(path) => format!(" tarball={}", path.display()),
+                None => String::new(),
+            }
+        )?;
+        for warning in &bundle.warnings {
+            writeln!(writer, "bundle warning '{}': {warning}", bundle.name)?;
+        }
     }
     for path in &report.exported_paths {
         writeln!(writer, "exported: {}", path.display())?;
@@ -962,29 +1155,8 @@ fn write_plan_inspect_verbose(
             "working dir: {}",
             runtime.working_dir.as_deref().unwrap_or("<image default>")
         )?;
-        writeln!(
-            writer,
-            "volumes: {}",
-            if runtime.volumes.is_empty() {
-                "0".to_string()
-            } else {
-                runtime.volumes.join(" | ")
-            }
-        )?;
-        writeln!(
-            writer,
-            "environment keys: {}",
-            if runtime.environment.is_empty() {
-                "0".to_string()
-            } else {
-                runtime
-                    .environment
-                    .iter()
-                    .map(|(name, _)| name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            }
-        )?;
+        writeln!(writer, "{}", format_mount_block(runtime))?;
+        writeln!(writer, "{}", format_environment_block(runtime))?;
         writeln!(
             writer,
             "depends_on: {}",
@@ -1009,6 +1181,34 @@ fn write_plan_inspect_verbose(
         }
     }
     Ok(())
+}
+
+fn format_mount_block(runtime: &RuntimeService) -> String {
+    let mut mounts = Vec::with_capacity(runtime.volumes.len() + 1);
+    mounts.push("${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}:/hpc-compose/job".into());
+    mounts.extend(runtime.volumes.iter().cloned());
+    format_debug_block("mounts", &mounts)
+}
+
+fn format_environment_block(runtime: &RuntimeService) -> String {
+    let values = runtime
+        .environment
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    format_debug_block("environment", &values)
+}
+
+fn format_debug_block(label: &str, values: &[String]) -> String {
+    if values.is_empty() {
+        return format!("{label}: <none>");
+    }
+
+    let mut lines = vec![format!("{label}:")];
+    for value in values {
+        lines.push(format!("  - {value}"));
+    }
+    lines.join("\n")
 }
 
 fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result<()> {
@@ -2059,6 +2259,22 @@ services:
         assert!(stats_text.contains("gpu process: pid=4242"));
         assert!(stats_text.contains("gpu count: 1"));
 
+        let mut csv_out = Vec::new();
+        write_stats_snapshot_csv(&mut csv_out, &stats).expect("csv");
+        let csv_text = String::from_utf8(csv_out).expect("utf8");
+        assert!(csv_text.contains("job_id,scheduler_state,scheduler_source,stats_source"));
+        assert!(csv_text.contains("\"12345\",\"RUNNING\",\"squeue\",\"sampler+sstat\""));
+        assert!(csv_text.contains("\"12345.0\""));
+
+        let mut jsonl_out = Vec::new();
+        write_stats_snapshot_jsonl(&mut jsonl_out, &stats).expect("jsonl");
+        let jsonl_text = String::from_utf8(jsonl_out).expect("utf8");
+        assert!(jsonl_text.contains("\"record_type\":\"summary\""));
+        assert!(jsonl_text.contains("\"record_type\":\"collector\""));
+        assert!(jsonl_text.contains("\"record_type\":\"gpu_device\""));
+        assert!(jsonl_text.contains("\"record_type\":\"gpu_process\""));
+        assert!(jsonl_text.contains("\"record_type\":\"step\""));
+
         let unavailable_stats = StatsSnapshot {
             available: false,
             sampler: None,
@@ -2083,12 +2299,20 @@ services:
         assert!(unavailable_text.contains("stats reason: job is pending"));
         assert!(!unavailable_text.contains("step: "));
 
+        let mut unavailable_csv = Vec::new();
+        write_stats_snapshot_csv(&mut unavailable_csv, &unavailable_stats).expect("csv");
+        assert_eq!(
+            String::from_utf8(unavailable_csv).expect("utf8"),
+            "job_id,scheduler_state,scheduler_source,stats_source,step_id,ntasks,ave_cpu,ave_rss,max_rss,alloc_tres,tres_usage_in_ave,gpu_count,gpu_util,gpu_mem,alloc_tres_map,usage_tres_in_ave_map\n"
+        );
+
         let report = ArtifactExportReport {
             record: record.clone(),
             manifest_path: tmpdir.path().join("manifest.json"),
             payload_dir: tmpdir.path().join("payload"),
             export_dir: tmpdir.path().join("results"),
             manifest: ArtifactManifest {
+                schema_version: 2,
                 job_id: "12345".into(),
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
@@ -2097,8 +2321,20 @@ services:
                 matched_source_paths: vec!["/x/a".into()],
                 copied_relative_paths: vec!["a".into()],
                 warnings: Vec::new(),
+                bundles: BTreeMap::from([(
+                    "default".into(),
+                    hpc_compose::job::ArtifactBundleManifest {
+                        declared_source_patterns: vec!["/x/**".into()],
+                        matched_source_paths: vec!["/x/a".into()],
+                        copied_relative_paths: vec!["a".into()],
+                        warnings: Vec::new(),
+                    },
+                )]),
             },
+            selected_bundles: vec!["default".into()],
+            bundles: Vec::new(),
             exported_paths: vec![tmpdir.path().join("results/a")],
+            tarball_paths: Vec::new(),
             warnings: vec!["missing optional path".into()],
         };
         let mut report_out = Vec::new();

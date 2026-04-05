@@ -10,6 +10,21 @@ use crate::spec::{ArtifactCollectPolicy, DependencyCondition, MetricsCollector, 
 pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     let metrics_enabled = plan.slurm.metrics_enabled();
     let artifacts_enabled = plan.slurm.artifacts_enabled();
+    let artifact_bundles = plan
+        .slurm
+        .artifacts
+        .as_ref()
+        .map(|artifacts| artifacts.normalized_bundles())
+        .unwrap_or_default();
+    let artifact_bundle_names = artifact_bundles.keys().cloned().collect::<Vec<_>>();
+    let mut artifact_pattern_bundles = Vec::new();
+    let mut artifact_source_patterns = Vec::new();
+    for (bundle, patterns) in &artifact_bundles {
+        for pattern in patterns {
+            artifact_pattern_bundles.push(bundle.clone());
+            artifact_source_patterns.push(pattern.clone());
+        }
+    }
     let mut out = String::new();
     out.push_str("#!/bin/bash\n");
     out.push_str(&format!(
@@ -105,17 +120,21 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
             })
         ));
         out.push_str(&format!(
+            "ARTIFACT_BUNDLE_NAMES={}\n",
+            bash_array_literal(&artifact_bundle_names)
+        ));
+        out.push_str(&format!(
+            "ARTIFACT_PATTERN_BUNDLES={}\n",
+            bash_array_literal(&artifact_pattern_bundles)
+        ));
+        out.push_str(&format!(
             "ARTIFACT_SOURCE_PATTERNS={}\n\n",
-            bash_array_literal(
-                &plan
-                    .slurm
-                    .artifacts
-                    .as_ref()
-                    .map(|artifacts| artifacts.paths.clone())
-                    .unwrap_or_default()
-            )
+            bash_array_literal(&artifact_source_patterns)
         ));
         out.push_str("ARTIFACT_COPIED_RELATIVE_PATHS=()\n");
+        out.push_str("ARTIFACT_BUNDLE_MATCH_RECORDS=()\n");
+        out.push_str("ARTIFACT_BUNDLE_COPIED_RECORDS=()\n");
+        out.push_str("ARTIFACT_BUNDLE_WARNING_RECORDS=()\n");
         out.push_str("ARTIFACT_WARNINGS=()\n\n");
     }
     if metrics_enabled {
@@ -759,6 +778,84 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("  printf '  ]'\n");
     out.push_str("}\n\n");
 
+    out.push_str("write_bundle_pattern_array() {\n");
+    out.push_str("  local bundle=$1\n");
+    out.push_str("  local label=$2\n");
+    out.push_str("  printf '      \"%s\": [' \"$label\"\n");
+    out.push_str("  local first=1\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!ARTIFACT_SOURCE_PATTERNS[@]}\"; do\n");
+    out.push_str("    [[ \"${ARTIFACT_PATTERN_BUNDLES[$i]}\" == \"$bundle\" ]] || continue\n");
+    out.push_str("    if (( first == 0 )); then\n");
+    out.push_str("      printf ','\n");
+    out.push_str("    fi\n");
+    out.push_str(
+        "    printf '\\n        \"%s\"' \"$(json_escape \"${ARTIFACT_SOURCE_PATTERNS[$i]}\")\"\n",
+    );
+    out.push_str("    first=0\n");
+    out.push_str("  done\n");
+    out.push_str("  if (( first == 0 )); then\n");
+    out.push_str("    printf '\\n'\n");
+    out.push_str("  fi\n");
+    out.push_str("  printf '      ]'\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_bundle_record_array() {\n");
+    out.push_str("  local bundle=$1\n");
+    out.push_str("  local label=$2\n");
+    out.push_str("  shift 2\n");
+    out.push_str("  printf '      \"%s\": [' \"$label\"\n");
+    out.push_str("  local first=1\n");
+    out.push_str("  local record\n");
+    out.push_str("  local record_bundle\n");
+    out.push_str("  local record_value\n");
+    out.push_str("  for record in \"$@\"; do\n");
+    out.push_str("    record_bundle=${record%%$'\\t'*}\n");
+    out.push_str("    record_value=${record#*$'\\t'}\n");
+    out.push_str("    [[ \"$record_bundle\" == \"$bundle\" ]] || continue\n");
+    out.push_str("    if (( first == 0 )); then\n");
+    out.push_str("      printf ','\n");
+    out.push_str("    fi\n");
+    out.push_str("    printf '\\n        \"%s\"' \"$(json_escape \"$record_value\")\"\n");
+    out.push_str("    first=0\n");
+    out.push_str("  done\n");
+    out.push_str("  if (( first == 0 )); then\n");
+    out.push_str("    printf '\\n'\n");
+    out.push_str("  fi\n");
+    out.push_str("  printf '      ]'\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_artifact_bundles_json() {\n");
+    out.push_str("  local first=1\n");
+    out.push_str("  local bundle\n");
+    out.push_str("  printf '  \"bundles\": {'\n");
+    out.push_str("  for bundle in \"${ARTIFACT_BUNDLE_NAMES[@]}\"; do\n");
+    out.push_str("    if (( first == 0 )); then\n");
+    out.push_str("      printf ','\n");
+    out.push_str("    fi\n");
+    out.push_str("    printf '\\n    \"%s\": {\\n' \"$(json_escape \"$bundle\")\"\n");
+    out.push_str("    write_bundle_pattern_array \"$bundle\" \"declared_source_patterns\"\n");
+    out.push_str("    printf ',\\n'\n");
+    out.push_str(
+        "    write_bundle_record_array \"$bundle\" \"matched_source_paths\" \"${ARTIFACT_BUNDLE_MATCH_RECORDS[@]}\"\n",
+    );
+    out.push_str("    printf ',\\n'\n");
+    out.push_str(
+        "    write_bundle_record_array \"$bundle\" \"copied_relative_paths\" \"${ARTIFACT_BUNDLE_COPIED_RECORDS[@]}\"\n",
+    );
+    out.push_str("    printf ',\\n'\n");
+    out.push_str(
+        "    write_bundle_record_array \"$bundle\" \"warnings\" \"${ARTIFACT_BUNDLE_WARNING_RECORDS[@]}\"\n",
+    );
+    out.push_str("    printf '\\n    }'\n");
+    out.push_str("    first=0\n");
+    out.push_str("  done\n");
+    out.push_str("  if (( first == 0 )); then\n");
+    out.push_str("    printf '\\n'\n");
+    out.push_str("  fi\n");
+    out.push_str("  printf '  }'\n");
+    out.push_str("}\n\n");
+
     out.push_str("write_artifact_manifest() {\n");
     out.push_str("  local job_outcome=$1\n");
     out.push_str("  shift\n");
@@ -768,6 +865,7 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("  local tmp_manifest=\"$ARTIFACTS_MANIFEST_FILE.tmp\"\n");
     out.push_str("  {\n");
     out.push_str("    printf '{\\n'\n");
+    out.push_str("    printf '  \"schema_version\": 2,\\n'\n");
     out.push_str("    printf '  \"job_id\": \"%s\",\\n' \"$(json_escape \"$SLURM_JOB_ID\")\"\n");
     out.push_str("    printf '  \"collect_policy\": \"%s\",\\n' \"$(json_escape \"$ARTIFACTS_COLLECT_POLICY\")\"\n");
     out.push_str("    printf '  \"collected_at\": \"%s\",\\n' \"$(json_escape \"$(artifact_timestamp)\")\"\n");
@@ -785,6 +883,8 @@ fn render_artifact_helpers(out: &mut String) {
     );
     out.push_str("    printf ',\\n'\n");
     out.push_str("    write_json_string_array \"warnings\" \"${warnings[@]}\"\n");
+    out.push_str("    printf ',\\n'\n");
+    out.push_str("    write_artifact_bundles_json\n");
     out.push_str("    printf '\\n}\\n'\n");
     out.push_str("  } > \"$tmp_manifest\"\n");
     out.push_str("  mv \"$tmp_manifest\" \"$ARTIFACTS_MANIFEST_FILE\"\n");
@@ -803,11 +903,21 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("  local copy_output\n");
     out.push_str("  local shopt_state\n");
     out.push_str("  local pattern_matched\n");
+    out.push_str("  local bundle_name\n");
+    out.push_str("  local bundle_match_key\n");
+    out.push_str("  local bundle_copy_key\n");
+    out.push_str("  local bundle_warning_key\n");
     out.push_str("  local -a matched_source_paths=()\n");
     out.push_str("  ARTIFACT_COPIED_RELATIVE_PATHS=()\n");
+    out.push_str("  ARTIFACT_BUNDLE_MATCH_RECORDS=()\n");
+    out.push_str("  ARTIFACT_BUNDLE_COPIED_RECORDS=()\n");
+    out.push_str("  ARTIFACT_BUNDLE_WARNING_RECORDS=()\n");
     out.push_str("  ARTIFACT_WARNINGS=()\n");
     out.push_str("  local -A seen_matches=()\n");
     out.push_str("  local -A seen_copied=()\n");
+    out.push_str("  local -A seen_bundle_matches=()\n");
+    out.push_str("  local -A seen_bundle_copied=()\n");
+    out.push_str("  local -A seen_bundle_warnings=()\n");
     out.push_str("  if (( exit_code != 0 )); then\n");
     out.push_str("    job_outcome=failure\n");
     out.push_str("  fi\n");
@@ -832,7 +942,10 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("  fi\n");
     out.push_str("  shopt_state=$(shopt -p nullglob globstar dotglob)\n");
     out.push_str("  shopt -s nullglob globstar dotglob\n");
-    out.push_str("  for declared_pattern in \"${ARTIFACT_SOURCE_PATTERNS[@]}\"; do\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!ARTIFACT_SOURCE_PATTERNS[@]}\"; do\n");
+    out.push_str("    declared_pattern=\"${ARTIFACT_SOURCE_PATTERNS[$i]}\"\n");
+    out.push_str("    bundle_name=\"${ARTIFACT_PATTERN_BUNDLES[$i]}\"\n");
     out.push_str("    pattern_matched=0\n");
     out.push_str("    host_pattern=\"$JOB_TMP${declared_pattern#/hpc-compose/job}\"\n");
     out.push_str("    while IFS= read -r matched; do\n");
@@ -844,8 +957,20 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("      seen_matches[\"$matched\"]=1\n");
     out.push_str("      container_match=\"/hpc-compose/job${matched#\"$JOB_TMP\"}\"\n");
     out.push_str("      matched_source_paths+=(\"$container_match\")\n");
+    out.push_str("      bundle_match_key=\"$bundle_name\"$'\\t'\"$container_match\"\n");
+    out.push_str("      if [[ -z \"${seen_bundle_matches[\"$bundle_match_key\"]+x}\" ]]; then\n");
+    out.push_str("        seen_bundle_matches[\"$bundle_match_key\"]=1\n");
+    out.push_str("        ARTIFACT_BUNDLE_MATCH_RECORDS+=(\"$bundle_match_key\")\n");
+    out.push_str("      fi\n");
     out.push_str("      if [[ \"$matched\" == \"$JOB_TMP\" ]]; then\n");
     out.push_str("        ARTIFACT_WARNINGS+=(\"skipped reserved root path '/hpc-compose/job'; collect a child path instead\")\n");
+    out.push_str("        bundle_warning_key=\"$bundle_name\"$'\\t'\"skipped reserved root path '/hpc-compose/job'; collect a child path instead\"\n");
+    out.push_str(
+        "        if [[ -z \"${seen_bundle_warnings[\"$bundle_warning_key\"]+x}\" ]]; then\n",
+    );
+    out.push_str("          seen_bundle_warnings[\"$bundle_warning_key\"]=1\n");
+    out.push_str("          ARTIFACT_BUNDLE_WARNING_RECORDS+=(\"$bundle_warning_key\")\n");
+    out.push_str("        fi\n");
     out.push_str("        continue\n");
     out.push_str("      fi\n");
     out.push_str("      relative_path=${matched#\"$JOB_TMP\"/}\n");
@@ -855,9 +980,21 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str(
         "        ARTIFACT_WARNINGS+=(\"skipped unsupported artifact path '$container_match'\")\n",
     );
+    out.push_str("        bundle_warning_key=\"$bundle_name\"$'\\t'\"skipped unsupported artifact path '$container_match'\"\n");
+    out.push_str(
+        "        if [[ -z \"${seen_bundle_warnings[\"$bundle_warning_key\"]+x}\" ]]; then\n",
+    );
+    out.push_str("          seen_bundle_warnings[\"$bundle_warning_key\"]=1\n");
+    out.push_str("          ARTIFACT_BUNDLE_WARNING_RECORDS+=(\"$bundle_warning_key\")\n");
+    out.push_str("        fi\n");
     out.push_str("        continue\n");
     out.push_str("      fi\n");
+    out.push_str("      bundle_copy_key=\"$bundle_name\"$'\\t'\"$relative_path\"\n");
     out.push_str("      if [[ -n \"${seen_copied[\"$relative_path\"]+x}\" ]]; then\n");
+    out.push_str("        if [[ -z \"${seen_bundle_copied[\"$bundle_copy_key\"]+x}\" ]]; then\n");
+    out.push_str("          seen_bundle_copied[\"$bundle_copy_key\"]=1\n");
+    out.push_str("          ARTIFACT_BUNDLE_COPIED_RECORDS+=(\"$bundle_copy_key\")\n");
+    out.push_str("        fi\n");
     out.push_str("        continue\n");
     out.push_str("      fi\n");
     out.push_str("      destination=\"$ARTIFACTS_PAYLOAD_DIR/$relative_path\"\n");
@@ -866,8 +1003,19 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("        if copy_output=$(cp -R \"$matched\"/. \"$destination\" 2>&1); then\n");
     out.push_str("          seen_copied[\"$relative_path\"]=1\n");
     out.push_str("          ARTIFACT_COPIED_RELATIVE_PATHS+=(\"$relative_path\")\n");
+    out.push_str("          if [[ -z \"${seen_bundle_copied[\"$bundle_copy_key\"]+x}\" ]]; then\n");
+    out.push_str("            seen_bundle_copied[\"$bundle_copy_key\"]=1\n");
+    out.push_str("            ARTIFACT_BUNDLE_COPIED_RECORDS+=(\"$bundle_copy_key\")\n");
+    out.push_str("          fi\n");
     out.push_str("        else\n");
     out.push_str("          ARTIFACT_WARNINGS+=(\"failed to copy '$container_match': $(trim_whitespace \"${copy_output//$'\\n'/; }\")\")\n");
+    out.push_str("          bundle_warning_key=\"$bundle_name\"$'\\t'\"failed to copy '$container_match': $(trim_whitespace \"${copy_output//$'\\n'/; }\")\"\n");
+    out.push_str(
+        "          if [[ -z \"${seen_bundle_warnings[\"$bundle_warning_key\"]+x}\" ]]; then\n",
+    );
+    out.push_str("            seen_bundle_warnings[\"$bundle_warning_key\"]=1\n");
+    out.push_str("            ARTIFACT_BUNDLE_WARNING_RECORDS+=(\"$bundle_warning_key\")\n");
+    out.push_str("          fi\n");
     out.push_str("        fi\n");
     out.push_str("        continue\n");
     out.push_str("      fi\n");
@@ -875,14 +1023,32 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("      if copy_output=$(cp -R \"$matched\" \"$destination\" 2>&1); then\n");
     out.push_str("        seen_copied[\"$relative_path\"]=1\n");
     out.push_str("        ARTIFACT_COPIED_RELATIVE_PATHS+=(\"$relative_path\")\n");
+    out.push_str("        if [[ -z \"${seen_bundle_copied[\"$bundle_copy_key\"]+x}\" ]]; then\n");
+    out.push_str("          seen_bundle_copied[\"$bundle_copy_key\"]=1\n");
+    out.push_str("          ARTIFACT_BUNDLE_COPIED_RECORDS+=(\"$bundle_copy_key\")\n");
+    out.push_str("        fi\n");
     out.push_str("      else\n");
     out.push_str("        ARTIFACT_WARNINGS+=(\"failed to copy '$container_match': $(trim_whitespace \"${copy_output//$'\\n'/; }\")\")\n");
+    out.push_str("        bundle_warning_key=\"$bundle_name\"$'\\t'\"failed to copy '$container_match': $(trim_whitespace \"${copy_output//$'\\n'/; }\")\"\n");
+    out.push_str(
+        "        if [[ -z \"${seen_bundle_warnings[\"$bundle_warning_key\"]+x}\" ]]; then\n",
+    );
+    out.push_str("          seen_bundle_warnings[\"$bundle_warning_key\"]=1\n");
+    out.push_str("          ARTIFACT_BUNDLE_WARNING_RECORDS+=(\"$bundle_warning_key\")\n");
+    out.push_str("        fi\n");
     out.push_str("      fi\n");
     out.push_str("    done < <(compgen -G \"$host_pattern\" || true)\n");
     out.push_str("    if (( pattern_matched == 0 )); then\n");
     out.push_str(
         "      ARTIFACT_WARNINGS+=(\"pattern '$declared_pattern' did not match any paths\")\n",
     );
+    out.push_str("      bundle_warning_key=\"$bundle_name\"$'\\t'\"pattern '$declared_pattern' did not match any paths\"\n");
+    out.push_str(
+        "      if [[ -z \"${seen_bundle_warnings[\"$bundle_warning_key\"]+x}\" ]]; then\n",
+    );
+    out.push_str("        seen_bundle_warnings[\"$bundle_warning_key\"]=1\n");
+    out.push_str("        ARTIFACT_BUNDLE_WARNING_RECORDS+=(\"$bundle_warning_key\")\n");
+    out.push_str("      fi\n");
     out.push_str("    fi\n");
     out.push_str("  done\n");
     out.push_str("  eval \"$shopt_state\"\n");
@@ -1131,6 +1297,7 @@ fn flag(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use super::*;
@@ -1620,6 +1787,7 @@ mod tests {
                         "/hpc-compose/job/metrics/**".into(),
                         "/hpc-compose/job/checkpoints/*.pt".into(),
                     ],
+                    bundles: BTreeMap::new(),
                 }),
                 ..SlurmConfig::default()
             },
@@ -1630,11 +1798,13 @@ mod tests {
         assert!(script.contains("ARTIFACTS_DIR=\"$JOB_TMP/artifacts\""));
         assert!(script.contains("ARTIFACTS_MANIFEST_FILE=\"$ARTIFACTS_DIR/manifest.json\""));
         assert!(script.contains("ARTIFACTS_COLLECT_POLICY='on_failure'"));
+        assert!(script.contains("ARTIFACT_BUNDLE_NAMES=('default')"));
+        assert!(script.contains("ARTIFACT_PATTERN_BUNDLES=('default' 'default')"));
         assert!(script.contains("ARTIFACT_SOURCE_PATTERNS=('/hpc-compose/job/metrics/**' '/hpc-compose/job/checkpoints/*.pt')"));
         assert!(script.contains("collect_artifacts \"$code\" || true"));
         assert!(script.contains("host_pattern=\"$JOB_TMP${declared_pattern#/hpc-compose/job}\""));
         assert!(script.contains("container_match=\"/hpc-compose/job${matched#\"$JOB_TMP\"}\""));
-        assert!(script.contains("write_artifact_manifest"));
+        assert!(script.contains("write_artifact_bundles_json"));
     }
 
     #[test]

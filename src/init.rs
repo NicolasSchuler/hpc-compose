@@ -45,6 +45,11 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/llama-app.yaml"),
     },
     Template {
+        name: "llama-uv-worker",
+        description: "llama.cpp serving plus a source-mounted Python worker run through uv.",
+        body: include_str!("../examples/llama-uv-worker.yaml"),
+    },
+    Template {
         name: "minimal-batch",
         description: "Simplest single-service batch job.",
         body: include_str!("../examples/minimal-batch.yaml"),

@@ -123,7 +123,10 @@ x-slurm:
     export_dir: ./results/${SLURM_JOB_ID}
     paths:
       - /hpc-compose/job/metrics/**
-      - /hpc-compose/job/checkpoints/*.pt
+    bundles:
+      checkpoints:
+        paths:
+          - /hpc-compose/job/checkpoints/*.pt
 ```
 
 Rules:
@@ -132,11 +135,16 @@ Rules:
 - `collect` defaults to `always`. Supported values are `always`, `on_success`, and `on_failure`.
 - `export_dir` is required. It is resolved relative to the compose file directory for `hpc-compose artifacts`.
 - `${SLURM_JOB_ID}` is preserved in `export_dir` until `hpc-compose artifacts` runs, then expanded from the tracked job id.
-- `paths` must be a non-empty list.
+- `paths` remains supported as the implicit `default` bundle.
+- `bundles` is an optional mapping of named artifact bundles. Bundle names must match `[A-Za-z0-9_-]+`, and `default` is reserved for top-level `paths`.
+- At least one source path must be present in `paths` or `bundles`.
 - Every path must be an absolute container-visible path rooted at `/hpc-compose/job`.
 - Paths under `/hpc-compose/job/artifacts` are rejected to avoid recursive collection.
 - Collection happens during batch teardown and is best-effort: unmatched globs and copy failures are recorded in the artifact manifest, but they do not fail the job.
 - Collected payloads and `manifest.json` are written under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/artifacts/`.
+- `hpc-compose artifacts --bundle <name>` exports only the selected bundle(s).
+- `hpc-compose artifacts --tarball` also writes one `<bundle>.tar.gz` archive per exported bundle.
+- Export writes per-bundle provenance metadata under `<export_dir>/_hpc-compose/bundles/<bundle>.json`.
 
 ### `gres` vs `gpus`
 
@@ -154,6 +162,7 @@ When both `gres` and `gpus` are set at the same level (top-level or per-service)
 | `working_dir` | string | Optional. Only valid when the service also has an explicit `command` or `entrypoint`. |
 | `depends_on` | list or mapping | Optional dependency list with `service_started` and `service_healthy` conditions. |
 | `readiness` | mapping | Optional readiness gate run after the service launches. |
+| `healthcheck` | mapping | Optional Compose-compatible sugar for a subset of `readiness`. Mutually exclusive with `readiness`. |
 | `x-slurm` | mapping | Optional per-service Slurm overrides. |
 | `x-enroot` | mapping | Optional per-service Enroot preparation rules. |
 
@@ -313,6 +322,32 @@ readiness:
 - `status_code` defaults to `200`.
 - `timeout_seconds` defaults to `60`.
 - Uses `curl` to poll the URL. The readiness check succeeds when the HTTP response code matches `status_code`.
+
+## `healthcheck`
+
+`healthcheck` is accepted as migration sugar and is normalized into the existing readiness model.
+
+```yaml
+services:
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "6379"]
+      timeout: 30s
+```
+
+Rules:
+
+- `healthcheck` and `readiness` are mutually exclusive.
+- Supported probe forms are a constrained subset:
+  - `["CMD", "nc", "-z", HOST, PORT]`
+  - `["CMD-SHELL", "nc -z HOST PORT"]`
+  - recognized `curl` probes against `http://` or `https://` URLs
+  - recognized `wget --spider` probes against `http://` or `https://` URLs
+- `timeout` maps to `timeout_seconds`.
+- `disable: true` disables readiness for that service.
+- `interval`, `retries`, and `start_period` are parsed but rejected in v1.
+- HTTP-style healthchecks normalize to `readiness.type: http` with `status_code: 200`. Use explicit `readiness` if you need non-200 status checks or log-based readiness.
 
 ## Service-level `x-slurm`
 
