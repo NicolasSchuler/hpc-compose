@@ -478,7 +478,8 @@ fn remove_job_artifacts(compose_file: &Path, job_id: &str) -> Result<()> {
     let jobs_dir = jobs_dir_for(compose_file);
     let record_path = jobs_dir.join(format!("{job_id}.json"));
     if record_path.exists() {
-        fs::remove_file(&record_path).context(format!("failed to remove {}", record_path.display()))?;
+        fs::remove_file(&record_path)
+            .context(format!("failed to remove {}", record_path.display()))?;
     }
     let job_dir = metadata_root_for(compose_file).join(job_id);
     if job_dir.is_dir() {
@@ -739,7 +740,8 @@ pub fn export_artifacts(spec_path: &Path, job_id: Option<&str>) -> Result<Artifa
 
     let payload_dir = artifact_payload_dir_for_record(&record);
     let export_dir = resolve_export_dir(&record.compose_file, export_dir_template, &record.job_id);
-    fs::create_dir_all(&export_dir).context(format!("failed to create {}", export_dir.display()))?;
+    fs::create_dir_all(&export_dir)
+        .context(format!("failed to create {}", export_dir.display()))?;
 
     let mut warnings = manifest.warnings.clone();
     let mut exported_paths = Vec::new();
@@ -879,8 +881,11 @@ fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceS
         if line.is_empty() {
             continue;
         }
-        let row: GpuDeviceSampleRow = serde_json::from_str(line)
-            .context(format!("failed to parse {} line {}", path.display(), index + 1))?;
+        let row: GpuDeviceSampleRow = serde_json::from_str(line).context(format!(
+            "failed to parse {} line {}",
+            path.display(),
+            index + 1
+        ))?;
         match latest_sampled_at.as_deref() {
             None => {
                 latest_sampled_at = Some(row.sampled_at.clone());
@@ -952,8 +957,11 @@ fn load_gpu_processes_for_timestamp(
         if line.is_empty() {
             continue;
         }
-        let row: GpuProcessSampleRow = serde_json::from_str(line)
-            .context(format!("failed to parse {} line {}", path.display(), index + 1))?;
+        let row: GpuProcessSampleRow = serde_json::from_str(line).context(format!(
+            "failed to parse {} line {}",
+            path.display(),
+            index + 1
+        ))?;
         if row.sampled_at != sampled_at {
             continue;
         }
@@ -982,11 +990,17 @@ fn load_slurm_sampler_snapshot(metrics_dir: &Path) -> Result<Option<SlurmSampler
         if line.is_empty() {
             continue;
         }
-        let row: SlurmSampleRow = serde_json::from_str(line)
-            .context(format!("failed to parse {} line {}", path.display(), index + 1))?;
+        let row: SlurmSampleRow = serde_json::from_str(line).context(format!(
+            "failed to parse {} line {}",
+            path.display(),
+            index + 1
+        ))?;
         let sampled_at = row.sampled_at.clone();
-        let step = step_from_slurm_sample_row(row)
-            .context(format!("failed to parse {} line {}", path.display(), index + 1))?;
+        let step = step_from_slurm_sample_row(row).context(format!(
+            "failed to parse {} line {}",
+            path.display(),
+            index + 1
+        ))?;
         match latest_sampled_at.as_deref() {
             None => {
                 latest_sampled_at = Some(sampled_at);
@@ -1014,10 +1028,11 @@ fn step_from_slurm_sample_row(row: SlurmSampleRow) -> Result<StepStats> {
     let step_id = required_json_string("step_id", row.step_id)?;
     let alloc_tres = row.alloc_tres.unwrap_or_default();
     let tres_usage_in_ave = row.tres_usage_in_ave.unwrap_or_default();
-    let alloc_tres_map =
-        parse_tres_map(&alloc_tres).context(format!("failed to parse AllocTRES for step '{step_id}'"))?;
-    let usage_tres_in_ave_map = parse_tres_map(&tres_usage_in_ave)
-        .context(format!("failed to parse TRESUsageInAve for step '{step_id}'"))?;
+    let alloc_tres_map = parse_tres_map(&alloc_tres)
+        .context(format!("failed to parse AllocTRES for step '{step_id}'"))?;
+    let usage_tres_in_ave_map = parse_tres_map(&tres_usage_in_ave).context(format!(
+        "failed to parse TRESUsageInAve for step '{step_id}'"
+    ))?;
 
     Ok(StepStats {
         step_id,
@@ -1179,10 +1194,9 @@ fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
     }
 
     if metadata.is_dir() {
-        fs::create_dir_all(destination).context(format!("failed to create {}", destination.display()))?;
-        for entry in
-            fs::read_dir(source).context(format!("failed to read {}", source.display()))?
-        {
+        fs::create_dir_all(destination)
+            .context(format!("failed to create {}", destination.display()))?;
+        for entry in fs::read_dir(source).context(format!("failed to read {}", source.display()))? {
             let entry = entry?;
             copy_path_recursive(&entry.path(), &destination.join(entry.file_name()))?;
         }
@@ -1214,7 +1228,8 @@ fn remove_existing_destination(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn copy_symlink(source: &Path, destination: &Path) -> Result<()> {
-    let target = fs::read_link(source).context(format!("failed to read link {}", source.display()))?;
+    let target =
+        fs::read_link(source).context(format!("failed to read link {}", source.display()))?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
@@ -1463,10 +1478,11 @@ fn parse_sstat_output(job_id: &str, stdout: &str) -> Result<Vec<StepStats>> {
             continue;
         }
 
-        let alloc_tres_map =
-            parse_tres_map(fields[5]).context(format!("failed to parse AllocTRES for step '{step_id}'"))?;
-        let usage_tres_in_ave_map = parse_tres_map(fields[6])
-            .context(format!("failed to parse TRESUsageInAve for step '{step_id}'"))?;
+        let alloc_tres_map = parse_tres_map(fields[5])
+            .context(format!("failed to parse AllocTRES for step '{step_id}'"))?;
+        let usage_tres_in_ave_map = parse_tres_map(fields[6]).context(format!(
+            "failed to parse TRESUsageInAve for step '{step_id}'"
+        ))?;
         steps.push(StepStats {
             step_id: step_id.to_string(),
             ntasks: fields[1].to_string(),
@@ -1705,7 +1721,10 @@ fn read_new_lines(cursor: &mut LogCursor) -> Result<Vec<String>> {
     };
     let len = file
         .metadata()
-        .context(format!("failed to read metadata for {}", cursor.path.display()))?
+        .context(format!(
+            "failed to read metadata for {}",
+            cursor.path.display()
+        ))?
         .len();
     if cursor.offset > len {
         cursor.offset = 0;
@@ -1869,7 +1888,10 @@ mod tests {
         assert!(latest_record_path_for(spec_path).ends_with(".hpc-compose/latest.json"));
         assert_eq!(scheduler_source_label(SchedulerSource::Squeue), "squeue");
         assert_eq!(scheduler_source_label(SchedulerSource::Sacct), "sacct");
-        assert_eq!(scheduler_source_label(SchedulerSource::LocalOnly), "local-only");
+        assert_eq!(
+            scheduler_source_label(SchedulerSource::LocalOnly),
+            "local-only"
+        );
 
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let mut plan = runtime_plan(tmpdir.path());
@@ -1892,7 +1914,9 @@ mod tests {
         );
         assert_eq!(
             artifact_manifest_path_for_record(&record),
-            tmpdir.path().join(".hpc-compose/12345/artifacts/manifest.json")
+            tmpdir
+                .path()
+                .join(".hpc-compose/12345/artifacts/manifest.json")
         );
         assert_eq!(
             artifact_payload_dir_for_record(&record),
@@ -1903,11 +1927,16 @@ mod tests {
             tmpdir.path().join("results/12345")
         );
         assert_eq!(
-            resolve_export_dir(&record.compose_file, "/tmp/results/${SLURM_JOB_ID}", "12345"),
+            resolve_export_dir(
+                &record.compose_file,
+                "/tmp/results/${SLURM_JOB_ID}",
+                "12345"
+            ),
             PathBuf::from("/tmp/results/12345")
         );
 
-        let missing = build_batch_log_status(&tmpdir.path().join("missing.log"), unix_timestamp_now());
+        let missing =
+            build_batch_log_status(&tmpdir.path().join("missing.log"), unix_timestamp_now());
         assert!(!missing.present);
         let batch_log = tmpdir.path().join("slurm-12345.out");
         fs::write(&batch_log, "hello\n").expect("batch log");
@@ -2298,7 +2327,10 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
         assert!(err.to_string().contains("failed to parse AllocTRES"));
 
         let sstat = tmpdir.path().join("sstat-fail");
-        write_script(&sstat, "#!/bin/bash\nset -euo pipefail\necho nope >&2\nexit 1\n");
+        write_script(
+            &sstat,
+            "#!/bin/bash\nset -euo pipefail\necho nope >&2\nexit 1\n",
+        );
         let err = probe_step_stats("12345", sstat.to_str().expect("path")).expect_err("sstat");
         assert!(err.to_string().contains("sstat failed for job 12345: nope"));
     }
@@ -2753,7 +2785,10 @@ services:
         )
         .expect("write manifest");
         let err = export_artifacts(&compose, None).expect_err("mismatch");
-        assert!(err.to_string().contains("artifact manifest job id 99999 does not match"));
+        assert!(
+            err.to_string()
+                .contains("artifact manifest job id 99999 does not match")
+        );
 
         fs::write(
             artifact_manifest_path_for_record(&record),
@@ -2822,7 +2857,12 @@ services:
             let dest_link = tmpdir.path().join("dest-link");
             fs::write(&dest_link, "occupied").expect("occupied");
             copy_path_recursive(&source_link, &dest_link).expect("copy symlink");
-            assert!(fs::symlink_metadata(&dest_link).expect("meta").file_type().is_symlink());
+            assert!(
+                fs::symlink_metadata(&dest_link)
+                    .expect("meta")
+                    .file_type()
+                    .is_symlink()
+            );
         }
     }
 

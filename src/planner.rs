@@ -431,10 +431,10 @@ fn expand_home(value: &str) -> String {
             Err(_) => "~".to_string(),
         };
     }
-    if let Some(rest) = value.strip_prefix("~/") {
-        if let Ok(home) = env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
+    if let Some(rest) = value.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME")
+    {
+        return format!("{home}/{rest}");
     }
     value.to_string()
 }

@@ -12,7 +12,7 @@ Install the latest hpc-compose release for the current platform.
 
 Environment overrides:
   HPC_COMPOSE_INSTALL_DIR  Install destination (default: ~/.local/bin)
-  HPC_COMPOSE_VERSION      Release tag to install, for example v0.1.11
+  HPC_COMPOSE_VERSION      Release tag to install, for example v0.1.12
   HPC_COMPOSE_REPO         Alternate GitHub repo in owner/name form
 EOF
 }

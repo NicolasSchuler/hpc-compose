@@ -129,7 +129,10 @@ pub fn prompt_for_init() -> Result<InitAnswers> {
     prompt_for_init_with_io(&mut stdin, &mut stdout)
 }
 
-fn prompt_for_init_with_io(input: &mut impl BufRead, output: &mut impl Write) -> Result<InitAnswers> {
+fn prompt_for_init_with_io(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<InitAnswers> {
     writeln!(output, "Choose a template:").ok();
     for (index, template) in TEMPLATES.iter().enumerate() {
         writeln!(
@@ -295,7 +298,10 @@ mod tests {
     #[test]
     fn resolve_template_reports_unknown_name() {
         let err = resolve_template("missing-template").expect_err("missing");
-        assert!(err.to_string().contains("unknown template 'missing-template'"));
+        assert!(
+            err.to_string()
+                .contains("unknown template 'missing-template'")
+        );
         assert!(err.to_string().contains("dev-python-app"));
     }
 
@@ -379,7 +385,10 @@ mod tests {
             "/cache/path",
         )
         .expect_err("invalid x-slurm");
-        assert!(err.to_string().contains("template x-slurm must be a mapping"));
+        assert!(
+            err.to_string()
+                .contains("template x-slurm must be a mapping")
+        );
     }
 
     #[test]
@@ -408,9 +417,11 @@ mod tests {
         assert_eq!(answers.template_name, "dev-python-app");
         assert_eq!(answers.app_name, "dev-python-app");
         assert_eq!(answers.cache_dir, DEFAULT_CACHE_DIR);
-        assert!(String::from_utf8(defaults_output)
-            .expect("utf8")
-            .contains("Choose a template:"));
+        assert!(
+            String::from_utf8(defaults_output)
+                .expect("utf8")
+                .contains("Choose a template:")
+        );
 
         let mut custom_input = Cursor::new(b"2\ncustom-app\n/custom-cache\n");
         let mut custom_output = Vec::new();
@@ -458,6 +469,9 @@ mod tests {
         assert!(err.to_string().contains("refusing to overwrite"));
 
         write_initialized_template(&relative, "name: forced\n", true).expect("force overwrite");
-        assert_eq!(fs::read_to_string(&written).expect("read"), "name: forced\n");
+        assert_eq!(
+            fs::read_to_string(&written).expect("read"),
+            "name: forced\n"
+        );
     }
 }

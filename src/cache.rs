@@ -110,11 +110,7 @@ pub fn upsert_prepared_manifest(
             source_image: image_source_string(source),
             registry: parse_remote_registry(source),
             prepare_commands: prepare.commands.clone(),
-            prepare_env: prepare
-                .env
-                .iter()
-                .map(format_env_entry)
-                .collect(),
+            prepare_env: prepare.env.iter().map(format_env_entry).collect(),
             prepare_root: Some(prepare.root),
             prepare_mounts: prepare.mounts.clone(),
             force_rebuild_due_to_mounts: prepare.force_rebuild,
@@ -197,9 +193,10 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
             if !looks_like_manifest_path(&path) {
                 continue;
             }
-            let raw = fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
-            let manifest: CacheEntryManifest =
-                serde_json::from_str(&raw).context(format!("failed to parse {}", path.display()))?;
+            let raw =
+                fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
+            let manifest: CacheEntryManifest = serde_json::from_str(&raw)
+                .context(format!("failed to parse {}", path.display()))?;
             manifests.push(manifest);
         }
     }
@@ -319,7 +316,8 @@ fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     }
     let raw =
         serde_json::to_string_pretty(manifest).context("failed to serialize cache manifest")?;
-    fs::write(&manifest_path, raw).context(format!("failed to write {}", manifest_path.display()))?;
+    fs::write(&manifest_path, raw)
+        .context(format!("failed to write {}", manifest_path.display()))?;
     Ok(())
 }
 

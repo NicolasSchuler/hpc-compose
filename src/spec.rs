@@ -303,10 +303,10 @@ fn default_http_status_code() -> u16 {
 impl ComposeSpec {
     /// Loads, interpolates, and validates a compose file from disk.
     pub fn load(path: &Path) -> Result<Self> {
-        let raw =
-            fs::read_to_string(path).context(format!("failed to read spec at {}", path.display()))?;
-        let value: Value =
-            serde_yaml::from_str(&raw).context(format!("failed to parse YAML at {}", path.display()))?;
+        let raw = fs::read_to_string(path)
+            .context(format!("failed to read spec at {}", path.display()))?;
+        let value: Value = serde_yaml::from_str(&raw)
+            .context(format!("failed to parse YAML at {}", path.display()))?;
         validate_root(&value)?;
         let mut spec: ComposeSpec = serde_yaml::from_value(value)
             .context(format!("failed to deserialize spec at {}", path.display()))?;
@@ -616,8 +616,8 @@ fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
         return Ok(BTreeMap::new());
     }
 
-    let raw =
-        fs::read_to_string(&dotenv_path).context(format!("failed to read {}", dotenv_path.display()))?;
+    let raw = fs::read_to_string(&dotenv_path)
+        .context(format!("failed to read {}", dotenv_path.display()))?;
     let mut vars = BTreeMap::new();
     for (line_no, line) in raw.lines().enumerate() {
         let trimmed = line.trim();
@@ -790,9 +790,9 @@ fn validate_artifact_path(path: &str) -> Result<()> {
             std::path::Component::RootDir => {}
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                normalized
-                    .pop()
-                    .context(format!("x-slurm.artifacts.paths entry '{path}' escapes the root path"))?;
+                normalized.pop().context(format!(
+                    "x-slurm.artifacts.paths entry '{path}' escapes the root path"
+                ))?;
             }
             std::path::Component::Normal(part) => {
                 normalized.push(part.to_string_lossy().into_owned())

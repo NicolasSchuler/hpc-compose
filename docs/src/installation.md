@@ -14,7 +14,7 @@ Useful overrides:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | env HPC_COMPOSE_INSTALL_DIR=/usr/local/bin sh
-curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | env HPC_COMPOSE_VERSION=v0.1.11 sh
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | env HPC_COMPOSE_VERSION=v0.1.12 sh
 ```
 
 Supported targets match the release workflow:
@@ -31,7 +31,7 @@ Prebuilt archives are published on the project's [GitHub Releases](https://githu
 Typical flow on Linux or macOS:
 
 ```bash
-curl -L https://github.com/NicolasSchuler/hpc-compose/releases/latest/download/hpc-compose-v0.1.11-x86_64-unknown-linux-musl.tar.gz -o hpc-compose.tar.gz
+curl -L https://github.com/NicolasSchuler/hpc-compose/releases/latest/download/hpc-compose-v0.1.12-x86_64-unknown-linux-musl.tar.gz -o hpc-compose.tar.gz
 tar -xzf hpc-compose.tar.gz
 ./hpc-compose --help
 ```

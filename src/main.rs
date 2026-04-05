@@ -760,8 +760,16 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
     if let Some(detail) = &snapshot.scheduler.detail {
         writeln!(writer, "scheduler note: {detail}")?;
     }
-    writeln!(writer, "compose file: {}", snapshot.record.compose_file.display())?;
-    writeln!(writer, "script path: {}", snapshot.record.script_path.display())?;
+    writeln!(
+        writer,
+        "compose file: {}",
+        snapshot.record.compose_file.display()
+    )?;
+    writeln!(
+        writer,
+        "script path: {}",
+        snapshot.record.script_path.display()
+    )?;
     writeln!(writer, "cache dir: {}", snapshot.record.cache_dir.display())?;
     writeln!(writer, "log dir: {}", snapshot.log_dir.display())?;
     writeln!(
@@ -869,7 +877,11 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
         writeln!(writer, "ave cpu: {}", display_stats_value(&step.ave_cpu))?;
         writeln!(writer, "ave rss: {}", display_stats_value(&step.ave_rss))?;
         writeln!(writer, "max rss: {}", display_stats_value(&step.max_rss))?;
-        writeln!(writer, "alloc tres: {}", display_stats_value(&step.alloc_tres))?;
+        writeln!(
+            writer,
+            "alloc tres: {}",
+            display_stats_value(&step.alloc_tres)
+        )?;
         writeln!(
             writer,
             "tres usage in ave: {}",
@@ -1003,19 +1015,35 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
     writeln!(writer, "name: {}", plan.name)?;
     writeln!(writer, "runtime mode: pyxis")?;
     writeln!(writer, "cache dir: {}", plan.cache_dir.display())?;
-    writeln!(writer, "service order: {}", service_names(plan).join(" -> "))?;
+    writeln!(
+        writer,
+        "service order: {}",
+        service_names(plan).join(" -> ")
+    )?;
 
     for service in &plan.ordered_services {
         writeln!(writer)?;
         writeln!(writer, "service: {}", service.name)?;
-        writeln!(writer, "source image: {}", source_image_display(&service.source))?;
+        writeln!(
+            writer,
+            "source image: {}",
+            source_image_display(&service.source)
+        )?;
         if let ImageSource::Remote(_) = &service.source {
             let base_path = base_image_path(&plan.cache_dir, service);
             writeln!(writer, "base cache artifact: {}", base_path.display())?;
-            writeln!(writer, "base cache state: {}", hit_or_miss(base_path.exists()))?;
+            writeln!(
+                writer,
+                "base cache state: {}",
+                hit_or_miss(base_path.exists())
+            )?;
         }
         writeln!(writer, "runtime image: {}", service.runtime_image.display())?;
-        writeln!(writer, "runtime image state: {}", runtime_cache_state(service))?;
+        writeln!(
+            writer,
+            "runtime image state: {}",
+            runtime_cache_state(service)
+        )?;
         if let Some(prepare) = &service.prepare {
             writeln!(
                 writer,
@@ -1062,16 +1090,28 @@ fn write_cache_inspect(
         }
 
         writeln!(writer, "service: {}", service.name)?;
-        writeln!(writer, "source image: {}", source_image_display(&service.source))?;
+        writeln!(
+            writer,
+            "source image: {}",
+            source_image_display(&service.source)
+        )?;
 
         if let ImageSource::Remote(remote) = &service.source {
             let base_path = base_image_path(&plan.cache_dir, service);
             writeln!(writer, "base artifact: {}", base_path.display())?;
-            writeln!(writer, "base registry: {}", registry_host_for_remote(remote))?;
+            writeln!(
+                writer,
+                "base registry: {}",
+                registry_host_for_remote(remote)
+            )?;
             write_manifest_block(writer, &base_path)?;
         }
 
-        writeln!(writer, "runtime artifact: {}", service.runtime_image.display())?;
+        writeln!(
+            writer,
+            "runtime artifact: {}",
+            service.runtime_image.display()
+        )?;
         write_manifest_block(writer, &service.runtime_image)?;
         writeln!(
             writer,
@@ -1108,11 +1148,19 @@ fn write_manifest_block(writer: &mut impl Write, path: &Path) -> Result<()> {
         writeln!(writer, "manifest kind: {kind}")?;
         writeln!(writer, "manifest cache key: {}", manifest.cache_key)?;
         writeln!(writer, "manifest source: {}", manifest.source_image)?;
-        writeln!(writer, "manifest services: {}", manifest.service_names.join(","))?;
+        writeln!(
+            writer,
+            "manifest services: {}",
+            manifest.service_names.join(",")
+        )?;
         writeln!(writer, "manifest created_at: {}", manifest.created_at)?;
         writeln!(writer, "manifest last_used_at: {}", manifest.last_used_at)?;
         if manifest.kind == CacheEntryKind::Prepared {
-            writeln!(writer, "prepare root: {}", manifest.prepare_root.unwrap_or(true))?;
+            writeln!(
+                writer,
+                "prepare root: {}",
+                manifest.prepare_root.unwrap_or(true)
+            )?;
             writeln!(
                 writer,
                 "prepare commands: {}",
@@ -1416,7 +1464,7 @@ mod tests {
     use hpc_compose::job::{
         ArtifactExportReport, ArtifactManifest, BatchLogStatus, CollectorStatus, GpuDeviceSample,
         GpuProcessSample, GpuSnapshot, SamplerSnapshot, SchedulerSource, SchedulerStatus,
-        ServiceLogStatus, StatsSnapshot, StepStats, StatusSnapshot, SubmissionRecord,
+        ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats, SubmissionRecord,
     };
     use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
     use hpc_compose::spec::{
@@ -2084,7 +2132,10 @@ services:
         let inspect_text = String::from_utf8(inspect_out).expect("utf8");
         assert!(inspect_text.contains("execution form: shell"));
         assert!(inspect_text.contains("depends_on: db(service_healthy)"));
-        assert!(inspect_text.contains("readiness: http http://127.0.0.1:8000/health (status 200 timeout 30s)"));
+        assert!(
+            inspect_text
+                .contains("readiness: http http://127.0.0.1:8000/health (status 200 timeout 30s)")
+        );
         assert!(inspect_text.contains("rebuild reason: x-enroot.prepare.mounts are present"));
     }
 
@@ -2095,9 +2146,18 @@ services:
         assert_eq!(display_optional_stats_value(None), "unknown");
         assert_eq!(display_optional_stats_value(Some("")), "unknown");
         assert_eq!(display_optional_stats_value(Some("x")), "x");
-        assert_eq!(execution_form_label(&ExecutionSpec::ImageDefault), "image-default");
-        assert_eq!(execution_form_label(&ExecutionSpec::Shell("echo".into())), "shell");
-        assert_eq!(execution_form_label(&ExecutionSpec::Exec(vec!["echo".into()])), "exec");
+        assert_eq!(
+            execution_form_label(&ExecutionSpec::ImageDefault),
+            "image-default"
+        );
+        assert_eq!(
+            execution_form_label(&ExecutionSpec::Shell("echo".into())),
+            "shell"
+        );
+        assert_eq!(
+            execution_form_label(&ExecutionSpec::Exec(vec!["echo".into()])),
+            "exec"
+        );
         assert_eq!(readiness_description(None), "none");
         assert_eq!(
             readiness_description(Some(&ReadinessSpec::Sleep { seconds: 5 })),
@@ -2159,24 +2219,22 @@ services:
 
     #[test]
     fn resolve_init_answers_and_cancel_job_cover_remaining_paths() {
-        let answers = resolve_init_answers(
-            Some("dev-python-app".into()),
-            None,
-            None,
-            || unreachable!("template path should not prompt"),
-        )
+        let answers = resolve_init_answers(Some("dev-python-app".into()), None, None, || {
+            unreachable!("template path should not prompt")
+        })
         .expect("template answers");
         assert_eq!(answers.app_name, "dev-python-app");
         assert_eq!(answers.cache_dir, default_init_cache_dir());
 
-        let prompted = resolve_init_answers(None, Some("override".into()), Some("/cache".into()), || {
-            Ok(hpc_compose::init::InitAnswers {
-                template_name: "app-redis-worker".into(),
-                app_name: "prompted".into(),
-                cache_dir: "/default".into(),
+        let prompted =
+            resolve_init_answers(None, Some("override".into()), Some("/cache".into()), || {
+                Ok(hpc_compose::init::InitAnswers {
+                    template_name: "app-redis-worker".into(),
+                    app_name: "prompted".into(),
+                    cache_dir: "/default".into(),
+                })
             })
-        })
-        .expect("prompted");
+            .expect("prompted");
         assert_eq!(prompted.app_name, "override");
         assert_eq!(prompted.cache_dir, "/cache");
 
@@ -2194,8 +2252,11 @@ services:
         let err = cancel_job("42", stderr_fail.to_str().expect("path")).expect_err("stderr fail");
         assert!(err.to_string().contains("scancel failed for job 42: boom"));
 
-        let err = cancel_job("42", tmpdir.path().join("missing-bin").to_str().expect("path"))
-            .expect_err("missing binary");
+        let err = cancel_job(
+            "42",
+            tmpdir.path().join("missing-bin").to_str().expect("path"),
+        )
+        .expect_err("missing binary");
         assert!(err.to_string().contains("failed to execute"));
     }
 
@@ -2212,9 +2273,15 @@ services:
         let empty_cache = tmpdir.path().join("empty-cache");
         fs::create_dir_all(&empty_cache).expect("empty cache");
         let no_id_sbatch = tmpdir.path().join("sbatch-no-id");
-        write_script(&no_id_sbatch, "#!/bin/bash\nset -euo pipefail\necho 'submitted without id'\n");
+        write_script(
+            &no_id_sbatch,
+            "#!/bin/bash\nset -euo pipefail\necho 'submitted without id'\n",
+        );
         let scancel_ok = tmpdir.path().join("scancel-ok");
-        write_script(&scancel_ok, "#!/bin/bash\nset -euo pipefail\necho 'cancel ok'\n");
+        write_script(
+            &scancel_ok,
+            "#!/bin/bash\nset -euo pipefail\necho 'cancel ok'\n",
+        );
         let scancel_fail = tmpdir.path().join("scancel-fail");
         write_script(
             &scancel_fail,
@@ -2242,7 +2309,11 @@ services:
             output: Some(tmpdir.path().join("missing-parent/rendered.sbatch")),
         })
         .expect_err("render write failure");
-        assert!(render_err.to_string().contains("failed to write rendered script"));
+        assert!(
+            render_err
+                .to_string()
+                .contains("failed to write rendered script")
+        );
 
         run_command(Commands::Prepare {
             file: compose.clone(),
@@ -2405,7 +2476,11 @@ services:
             scancel_bin: scancel_fail.display().to_string(),
         })
         .expect_err("cancel fail");
-        assert!(cancel_err.to_string().contains("scancel failed for job 12345"));
+        assert!(
+            cancel_err
+                .to_string()
+                .contains("scancel failed for job 12345")
+        );
 
         let init_output = tmpdir.path().join("init-compose.yaml");
         run_command(Commands::Init {

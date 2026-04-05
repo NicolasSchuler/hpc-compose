@@ -516,16 +516,19 @@ fn create_cache_dirs(plan: &RuntimePlan) -> Result<()> {
         plan.cache_dir.join("enroot/data"),
         plan.cache_dir.join("enroot/tmp"),
     ] {
-        fs::create_dir_all(&path)
-            .context(format!("failed to create cache directory {}", path.display()))?;
+        fs::create_dir_all(&path).context(format!(
+            "failed to create cache directory {}",
+            path.display()
+        ))?;
     }
     Ok(())
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .context(format!("path '{}' does not have a parent directory", path.display()))?;
+    let parent = path.parent().context(format!(
+        "path '{}' does not have a parent directory",
+        path.display()
+    ))?;
     fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     Ok(())
 }
