@@ -25,7 +25,7 @@ It is intentionally **not** a full Docker Compose implementation. It focuses on 
 - Compose `build:`
 - `ports`
 - `networks` / `network_mode`
-- `restart`
+- Compose `restart` (use `services.<name>.x-slurm.failure_policy` instead)
 - `deploy`
 - multi-node service placement in v1
 

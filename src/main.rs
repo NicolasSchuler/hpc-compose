@@ -815,6 +815,15 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
     )?;
     writeln!(writer, "cache dir: {}", snapshot.record.cache_dir.display())?;
     writeln!(writer, "log dir: {}", snapshot.log_dir.display())?;
+    if let Some(attempt) = snapshot.attempt {
+        writeln!(writer, "attempt: {attempt}")?;
+    }
+    if let Some(is_resume) = snapshot.is_resume {
+        writeln!(writer, "is resume: {}", yes_no(is_resume))?;
+    }
+    if let Some(resume_dir) = &snapshot.resume_dir {
+        writeln!(writer, "resume dir: {}", resume_dir.display())?;
+    }
     writeln!(
         writer,
         "batch log: {} (present: {}, updated: {})",
@@ -838,6 +847,30 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
             yes_no(service.present),
             age
         )?;
+        if service.failure_policy_mode.is_some()
+            || service.restart_count.is_some()
+            || service.max_restarts.is_some()
+            || service.last_exit_code.is_some()
+        {
+            let mode = service.failure_policy_mode.as_deref().unwrap_or("unknown");
+            let restart_count = service
+                .restart_count
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let max_restarts = service
+                .max_restarts
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let last_exit = service
+                .last_exit_code
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            writeln!(
+                writer,
+                "state service '{}': failure_policy={} restarts={}/{} last_exit={}",
+                service.service_name, mode, restart_count, max_restarts, last_exit
+            )?;
+        }
     }
     Ok(())
 }
@@ -856,6 +889,15 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
     writeln!(writer, "stats source: {}", snapshot.source)?;
     if let Some(metrics_dir) = &snapshot.metrics_dir {
         writeln!(writer, "metrics dir: {}", metrics_dir.display())?;
+    }
+    if let Some(attempt) = snapshot.attempt {
+        writeln!(writer, "attempt: {attempt}")?;
+    }
+    if let Some(is_resume) = snapshot.is_resume {
+        writeln!(writer, "is resume: {}", yes_no(is_resume))?;
+    }
+    if let Some(resume_dir) = &snapshot.resume_dir {
+        writeln!(writer, "resume dir: {}", resume_dir.display())?;
     }
     if let Some(reason) = &snapshot.reason {
         writeln!(writer, "stats reason: {reason}")?;
@@ -985,6 +1027,9 @@ fn write_stats_snapshot_jsonl(writer: &mut impl Write, snapshot: &StatsSnapshot)
             "available": snapshot.available,
             "reason": snapshot.reason,
             "metrics_dir": snapshot.metrics_dir,
+            "attempt": snapshot.attempt,
+            "is_resume": snapshot.is_resume,
+            "resume_dir": snapshot.resume_dir,
         }),
     )?;
     for note in &snapshot.notes {
@@ -1081,6 +1126,15 @@ fn write_artifact_export_report(
     writeln!(writer, "export dir: {}", report.export_dir.display())?;
     writeln!(writer, "collect policy: {}", report.manifest.collect_policy)?;
     writeln!(writer, "job outcome: {}", report.manifest.job_outcome)?;
+    if let Some(attempt) = report.manifest.attempt {
+        writeln!(writer, "attempt: {attempt}")?;
+    }
+    if let Some(is_resume) = report.manifest.is_resume {
+        writeln!(writer, "is resume: {}", yes_no(is_resume))?;
+    }
+    if let Some(resume_dir) = &report.manifest.resume_dir {
+        writeln!(writer, "resume dir: {}", resume_dir.display())?;
+    }
     writeln!(
         writer,
         "declared patterns: {}",
@@ -1668,7 +1722,8 @@ mod tests {
     };
     use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
     use hpc_compose::spec::{
-        DependencyCondition, ReadinessSpec, ServiceDependency, ServiceSlurmConfig, SlurmConfig,
+        DependencyCondition, ReadinessSpec, ServiceDependency, ServiceFailurePolicy,
+        ServiceSlurmConfig, SlurmConfig,
     };
 
     fn runtime_service(
@@ -1685,6 +1740,7 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare,
             source,
@@ -2182,15 +2238,28 @@ services:
                 present: false,
                 updated_at: None,
                 updated_age_seconds: None,
+                failure_policy_mode: Some("restart_on_failure".into()),
+                restart_count: Some(1),
+                max_restarts: Some(3),
+                last_exit_code: Some(0),
             }],
+            attempt: Some(1),
+            is_resume: Some(true),
+            resume_dir: Some(PathBuf::from("/shared/runs/demo")),
         };
         let mut status_out = Vec::new();
         write_status_snapshot(&mut status_out, &status).expect("status");
         let status_text = String::from_utf8(status_out).expect("utf8");
         assert!(status_text.contains("scheduler state: COMPLETED (sacct)"));
         assert!(status_text.contains("scheduler note: finished"));
+        assert!(status_text.contains("attempt: 1"));
+        assert!(status_text.contains("is resume: yes"));
+        assert!(status_text.contains("resume dir: /shared/runs/demo"));
         assert!(status_text.contains("updated: 1m ago"));
         assert!(status_text.contains("updated: unknown"));
+        assert!(status_text.contains(
+            "state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 last_exit=0"
+        ));
 
         let stats = StatsSnapshot {
             job_id: "12345".into(),
@@ -2249,11 +2318,17 @@ services:
                 slurm: None,
             }),
             steps: vec![sample_step()],
+            attempt: Some(1),
+            is_resume: Some(true),
+            resume_dir: Some(PathBuf::from("/shared/runs/demo")),
         };
         let mut stats_out = Vec::new();
         write_stats_snapshot(&mut stats_out, &stats).expect("stats");
         let stats_text = String::from_utf8(stats_out).expect("utf8");
         assert!(stats_text.contains("collector 'gpu': available"));
+        assert!(stats_text.contains("attempt: 1"));
+        assert!(stats_text.contains("is resume: yes"));
+        assert!(stats_text.contains("resume dir: /shared/runs/demo"));
         assert!(!stats_text.contains("collector 'slurm'"));
         assert!(stats_text.contains("gpu snapshot: 2026-04-05T10:00:10Z"));
         assert!(stats_text.contains("gpu process: pid=4242"));
@@ -2274,6 +2349,8 @@ services:
         assert!(jsonl_text.contains("\"record_type\":\"gpu_device\""));
         assert!(jsonl_text.contains("\"record_type\":\"gpu_process\""));
         assert!(jsonl_text.contains("\"record_type\":\"step\""));
+        assert!(jsonl_text.contains("\"attempt\":1"));
+        assert!(jsonl_text.contains("\"is_resume\":true"));
 
         let unavailable_stats = StatsSnapshot {
             available: false,
@@ -2292,6 +2369,9 @@ services:
                 failed: false,
                 detail: None,
             },
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
         };
         let mut unavailable_out = Vec::new();
         write_stats_snapshot(&mut unavailable_out, &unavailable_stats).expect("stats");
@@ -2317,6 +2397,9 @@ services:
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
                 job_outcome: "success".into(),
+                attempt: Some(1),
+                is_resume: Some(true),
+                resume_dir: Some(PathBuf::from("/shared/runs/demo")),
                 declared_source_patterns: vec!["/x/**".into()],
                 matched_source_paths: vec!["/x/a".into()],
                 copied_relative_paths: vec!["a".into()],
@@ -2341,6 +2424,9 @@ services:
         write_artifact_export_report(&mut report_out, &report).expect("artifacts");
         let report_text = String::from_utf8(report_out).expect("utf8");
         assert!(report_text.contains("collect policy: always"));
+        assert!(report_text.contains("attempt: 1"));
+        assert!(report_text.contains("is resume: yes"));
+        assert!(report_text.contains("resume dir: /shared/runs/demo"));
         assert!(report_text.contains("warning: missing optional path"));
         assert!(report_text.contains("exported: "));
 
@@ -2359,6 +2445,7 @@ services:
                 working_dir: service.working_dir.clone(),
                 depends_on: service.depends_on.clone(),
                 readiness: service.readiness.clone(),
+                failure_policy: service.failure_policy.clone(),
                 slurm: service.slurm.clone(),
                 prepare: service.prepare.clone(),
             }],

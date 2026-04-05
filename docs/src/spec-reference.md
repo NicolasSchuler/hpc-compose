@@ -50,6 +50,7 @@ These fields live under the top-level `x-slurm` block.
 | `cache_dir` | string | `$HOME/.cache/hpc-compose` | Must resolve to shared storage visible from the login node and the compute nodes. |
 | `metrics` | mapping | omitted | Enables runtime metrics sampling. |
 | `artifacts` | mapping | omitted | Enables tracked artifact collection and export metadata. |
+| `resume` | mapping | omitted | Enables checkpoint-aware resume semantics with a shared host path mounted into every service. |
 | `setup` | list of strings | omitted | Raw shell lines inserted into the generated batch script before service launches. |
 | `submit_args` | list of strings | omitted | Extra raw Slurm arguments appended as `#SBATCH ...` lines. |
 
@@ -148,6 +149,26 @@ x-slurm:
   - `hpc-compose artifacts --bundle <name>` exports only the selected bundle or bundles.
   - `hpc-compose artifacts --tarball` also writes one `<bundle>.tar.gz` archive per exported bundle.
   - Export writes per-bundle provenance metadata under `<export_dir>/_hpc-compose/bundles/<bundle>.json`.
+
+### `x-slurm.resume`
+
+```yaml
+x-slurm:
+  resume:
+    path: /shared/$USER/runs/my-run
+```
+
+- Shape: mapping
+- Default: omitted
+- Notes:
+  - Omitting the block disables resume semantics.
+  - `path` is required and must be an absolute host path.
+  - `/hpc-compose/...` paths are rejected because `path` must point at shared host storage, not a container-visible path.
+  - `/tmp` and `/var/tmp` technically validate, but `preflight` warns because those paths are not reliable resume storage.
+  - When enabled, `hpc-compose` mounts `path` into every service at `/hpc-compose/resume`.
+  - Services also receive `HPC_COMPOSE_RESUME_DIR`, `HPC_COMPOSE_ATTEMPT`, and `HPC_COMPOSE_IS_RESUME`.
+  - The canonical resume source is the shared `path`, not exported artifact bundles.
+  - Attempt-specific runtime state moves under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/attempts/<attempt>/`, and the top-level `logs`, `metrics`, `artifacts`, and `state.json` paths continue to point at the latest attempt for compatibility.
 
 ### `gres` and `gpus`
 
@@ -364,6 +385,33 @@ These fields live under `services.<name>.x-slurm`.
 | `gpus` | integer | omitted | Adds `--gpus` when `gres` is not set. |
 | `gres` | string | omitted | Adds `--gres` to that service's `srun`. Takes priority over `gpus`. |
 | `extra_srun_args` | list of strings | omitted | Appended directly to the service's `srun` command. |
+| `failure_policy` | mapping | omitted | Per-service failure handling (`fail_job`, `ignore`, `restart_on_failure`). |
+
+### `services.<name>.x-slurm.failure_policy`
+
+```yaml
+services:
+  worker:
+    image: python:3.11-slim
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 3
+        backoff_seconds: 5
+```
+
+| Field | Shape | Default | Notes |
+| --- | --- | --- | --- |
+| `mode` | `fail_job` \| `ignore` \| `restart_on_failure` | `fail_job` | `fail_job` keeps fail-fast behavior. `ignore` keeps the job running after non-zero exits. `restart_on_failure` restarts on non-zero exits only. |
+| `max_restarts` | integer | `3` when `mode=restart_on_failure` | Required to be at least `1` after defaults are applied. Valid only for `restart_on_failure`. |
+| `backoff_seconds` | integer | `5` when `mode=restart_on_failure` | Fixed delay between restart attempts. Required to be at least `1` after defaults are applied. Valid only for `restart_on_failure`. |
+
+Rules:
+
+- `max_restarts` and `backoff_seconds` are rejected unless `mode: restart_on_failure`.
+- Restart attempts count relaunches after the initial launch.
+- Restarts trigger only for non-zero exits.
+- Services configured with `mode: ignore` cannot be used as dependencies in `depends_on`.
 
 Unknown keys under top-level `x-slurm` or per-service `x-slurm` cause hard errors.
 
@@ -409,7 +457,7 @@ These keys are rejected with explicit messages:
 - `ports`
 - `networks`
 - `network_mode`
-- `restart`
+- Compose `restart` (use `services.<name>.x-slurm.failure_policy`)
 - `deploy`
 
 Any other unknown key at the service level is also rejected.

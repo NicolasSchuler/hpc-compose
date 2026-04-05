@@ -1,15 +1,21 @@
 //! Batch-script rendering for prepared runtime plans.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 
 use crate::planner::ExecutionSpec;
 use crate::prepare::{RuntimePlan, RuntimeService};
-use crate::spec::{ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec};
+use crate::spec::{
+    ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec, ServiceFailureMode,
+};
 
 /// Renders the complete `sbatch` script for a runtime plan.
 pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     let metrics_enabled = plan.slurm.metrics_enabled();
     let artifacts_enabled = plan.slurm.artifacts_enabled();
+    let resume_enabled = plan.slurm.resume_dir().is_some();
+    let resume_host_path = plan.slurm.resume_dir().unwrap_or("");
     let artifact_bundles = plan
         .slurm
         .artifacts
@@ -23,6 +29,15 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         for pattern in patterns {
             artifact_pattern_bundles.push(bundle.clone());
             artifact_source_patterns.push(pattern.clone());
+        }
+    }
+    let mut dependents_by_service = BTreeMap::<String, Vec<String>>::new();
+    for service in &plan.ordered_services {
+        for dependency in &service.depends_on {
+            dependents_by_service
+                .entry(dependency.name.clone())
+                .or_default()
+                .push(service.name.clone());
         }
     }
     let mut out = String::new();
@@ -72,7 +87,32 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         out.push_str(&format!("#SBATCH {arg}\n"));
     }
     out.push_str("\nset -euo pipefail\n\n");
-    out.push_str("JOB_TMP=\"${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}\"\n");
+    out.push_str("JOB_ROOT=\"${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}\"\n");
+    out.push_str(&format!("RESUME_ENABLED={}\n", flag(resume_enabled)));
+    out.push_str(&format!(
+        "RESUME_HOST_PATH={}\n",
+        shell_quote(resume_host_path)
+    ));
+    out.push_str("RESUME_CONTAINER_PATH='/hpc-compose/resume'\n");
+    out.push_str(&format!(
+        "RESUME_COMPOSE_NAME={}\n",
+        shell_quote(&plan.name)
+    ));
+    out.push_str("ATTEMPT=\"${SLURM_RESTART_COUNT:-0}\"\n");
+    out.push_str("IS_RESUME=0\n");
+    out.push_str("if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
+    out.push_str("  JOB_TMP=\"$JOB_ROOT/attempts/$ATTEMPT\"\n");
+    out.push_str("  RESUME_META_DIR=\"$RESUME_HOST_PATH/_hpc-compose\"\n");
+    out.push_str("  RESUME_META_FILE=\"$RESUME_META_DIR/latest.json\"\n");
+    out.push_str("  mkdir -p \"$RESUME_HOST_PATH\" \"$RESUME_META_DIR\"\n");
+    out.push_str("  if (( ATTEMPT > 0 )) || [[ -f \"$RESUME_META_FILE\" ]]; then\n");
+    out.push_str("    IS_RESUME=1\n");
+    out.push_str("  fi\n");
+    out.push_str("else\n");
+    out.push_str("  JOB_TMP=\"$JOB_ROOT\"\n");
+    out.push_str("  RESUME_META_DIR=\"\"\n");
+    out.push_str("  RESUME_META_FILE=\"\"\n");
+    out.push_str("fi\n");
     out.push_str("LOG_DIR=\"$JOB_TMP/logs\"\n");
     out.push_str("STATE_FILE=\"$JOB_TMP/state.json\"\n");
     if artifacts_enabled {
@@ -108,7 +148,15 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("SERVICE_STEP_NAMES=()\n");
     out.push_str("SERVICE_LOG_PATHS=()\n");
     out.push_str("SERVICE_HEALTHY=()\n");
-    out.push_str("printf '{\\n  \"services\": []\\n}\\n' > \"$STATE_FILE\"\n");
+    out.push_str("SERVICE_FAILURE_POLICY_MODE=()\n");
+    out.push_str("SERVICE_MAX_RESTARTS=()\n");
+    out.push_str("SERVICE_BACKOFF_SECONDS=()\n");
+    out.push_str("SERVICE_RESTART_COUNT=()\n");
+    out.push_str("SERVICE_LAST_EXIT_CODE=()\n");
+    out.push_str("SERVICE_LAUNCH_FNS=()\n");
+    out.push_str("SERVICE_DEPENDENTS=()\n");
+    out.push_str("WAIT_HELPER_EXITED=0\n");
+    out.push_str("WAIT_HELPER_EXIT_STATUS=\"\"\n");
     out.push_str("declare -A SERVICE_INDEX_BY_NAME=()\n\n");
     if artifacts_enabled {
         out.push_str(&format!(
@@ -182,6 +230,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local extra\n");
     out.push_str("  PYXIS_MOUNTS=()\n");
     out.push_str("  append_unique_mount \"$JOB_TMP:/hpc-compose/job\"\n");
+    out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
+    out.push_str("    append_unique_mount \"$RESUME_HOST_PATH:$RESUME_CONTAINER_PATH\"\n");
+    out.push_str("  fi\n");
     out.push_str("  if [[ -e /etc/slurm/task_prolog.hk ]]; then\n");
     out.push_str(
         "    append_unique_mount \"/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk\"\n",
@@ -225,6 +276,59 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  printf '%s' \"$value\"\n");
     out.push_str("}\n\n");
 
+    out.push_str("reset_wait_helper_exit_state() {\n");
+    out.push_str("  WAIT_HELPER_EXITED=0\n");
+    out.push_str("  WAIT_HELPER_EXIT_STATUS=\"\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("record_wait_helper_exit() {\n");
+    out.push_str("  local pid=$1\n");
+    out.push_str("  local status=0\n");
+    out.push_str("  wait \"$pid\" || status=$?\n");
+    out.push_str("  WAIT_HELPER_EXITED=1\n");
+    out.push_str("  WAIT_HELPER_EXIT_STATUS=\"$status\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("replace_with_symlink() {\n");
+    out.push_str("  local link_path=$1\n");
+    out.push_str("  local target=$2\n");
+    out.push_str("  if [[ -L \"$link_path\" || -f \"$link_path\" ]]; then\n");
+    out.push_str("    rm -f \"$link_path\"\n");
+    out.push_str("  elif [[ -d \"$link_path\" ]]; then\n");
+    out.push_str("    rm -rf \"$link_path\"\n");
+    out.push_str("  fi\n");
+    out.push_str("  ln -s \"$target\" \"$link_path\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("update_latest_runtime_links() {\n");
+    out.push_str("  [[ \"$RESUME_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  replace_with_symlink \"$JOB_ROOT/logs\" \"$LOG_DIR\"\n");
+    out.push_str("  replace_with_symlink \"$JOB_ROOT/state.json\" \"$STATE_FILE\"\n");
+    if metrics_enabled {
+        out.push_str("  replace_with_symlink \"$JOB_ROOT/metrics\" \"$METRICS_DIR\"\n");
+    }
+    if artifacts_enabled {
+        out.push_str("  replace_with_symlink \"$JOB_ROOT/artifacts\" \"$ARTIFACTS_DIR\"\n");
+    }
+    out.push_str("}\n\n");
+
+    out.push_str("write_resume_metadata() {\n");
+    out.push_str("  [[ \"$RESUME_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  local tmp_resume=\"$RESUME_META_FILE.tmp\"\n");
+    out.push_str("  {\n");
+    out.push_str("    printf '{\\n'\n");
+    out.push_str("    printf '  \"schema_version\": 1,\\n'\n");
+    out.push_str(
+        "    printf '  \"compose_name\": \"%s\",\\n' \"$(json_escape \"$RESUME_COMPOSE_NAME\")\"\n",
+    );
+    out.push_str("    printf '  \"job_id\": \"%s\",\\n' \"$(json_escape \"$SLURM_JOB_ID\")\"\n");
+    out.push_str("    printf '  \"attempt\": %s,\\n' \"$ATTEMPT\"\n");
+    out.push_str("    printf '  \"updated_at\": \"%s\"\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n");
+    out.push_str("    printf '}\\n'\n");
+    out.push_str("  } > \"$tmp_resume\"\n");
+    out.push_str("  mv \"$tmp_resume\" \"$RESUME_META_FILE\"\n");
+    out.push_str("}\n\n");
+
     if artifacts_enabled {
         render_artifact_helpers(&mut out);
     }
@@ -236,26 +340,48 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("write_state_file() {\n");
     out.push_str("  local tmp_state=\"$STATE_FILE.tmp\"\n");
     out.push_str("  {\n");
-    out.push_str("    printf '{\\n  \"services\": ['\n");
+    out.push_str("    printf '{\\n'\n");
+    out.push_str("    if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
+    out.push_str("      printf '  \"attempt\": %s,\\n' \"$ATTEMPT\"\n");
+    out.push_str("      printf '  \"is_resume\": %s,\\n' \"$(if [[ \"$IS_RESUME\" == \"1\" ]]; then printf true; else printf false; fi)\"\n");
+    out.push_str(
+        "      printf '  \"resume_dir\": \"%s\",\\n' \"$(json_escape \"$RESUME_HOST_PATH\")\"\n",
+    );
+    out.push_str("    else\n");
+    out.push_str("      printf '  \"attempt\": null,\\n'\n");
+    out.push_str("      printf '  \"is_resume\": null,\\n'\n");
+    out.push_str("      printf '  \"resume_dir\": null,\\n'\n");
+    out.push_str("    fi\n");
+    out.push_str("    printf '  \"services\": ['\n");
     out.push_str("    local first=1\n");
     out.push_str("    local i\n");
     out.push_str("    for i in \"${!SERVICE_NAMES[@]}\"; do\n");
     out.push_str("      if (( first == 0 )); then\n");
     out.push_str("        printf ','\n");
     out.push_str("      fi\n");
-    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s}' \\\n");
+    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"last_exit_code\":%s}' \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_NAMES[$i]}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_STEP_NAMES[$i]:-}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_LOG_PATHS[$i]:-}\")\" \\\n");
     out.push_str("        \"$i\" \\\n");
     out.push_str("        \"${SERVICE_PIDS[$i]:-0}\" \\\n");
-    out.push_str("        \"$(if [[ \"${SERVICE_HEALTHY[$i]:-0}\" == \"1\" ]]; then printf true; else printf false; fi)\"\n");
+    out.push_str("        \"$(if [[ \"${SERVICE_HEALTHY[$i]:-0}\" == \"1\" ]]; then printf true; else printf false; fi)\" \\\n");
+    out.push_str(
+        "        \"$(json_escape \"${SERVICE_FAILURE_POLICY_MODE[$i]:-fail_job}\")\" \\\n",
+    );
+    out.push_str("        \"${SERVICE_RESTART_COUNT[$i]:-0}\" \\\n");
+    out.push_str("        \"${SERVICE_MAX_RESTARTS[$i]:-0}\" \\\n");
+    out.push_str("        \"$(if [[ -n \"${SERVICE_LAST_EXIT_CODE[$i]:-}\" ]]; then printf '%s' \"${SERVICE_LAST_EXIT_CODE[$i]}\"; else printf null; fi)\"\n");
     out.push_str("      first=0\n");
     out.push_str("    done\n");
     out.push_str("    printf '\\n  ]\\n}\\n'\n");
     out.push_str("  } > \"$tmp_state\"\n");
     out.push_str("  mv \"$tmp_state\" \"$STATE_FILE\"\n");
     out.push_str("}\n\n");
+
+    out.push_str("update_latest_runtime_links\n");
+    out.push_str("write_resume_metadata\n");
+    out.push_str("write_state_file\n\n");
 
     out.push_str("kill_services() {\n");
     out.push_str("  for pid in \"${SERVICE_PIDS[@]:-}\"; do\n");
@@ -286,13 +412,37 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local pid=$2\n");
     out.push_str("  local step_name=$3\n");
     out.push_str("  local log_path=$4\n");
-    out.push_str("  local index=${#SERVICE_PIDS[@]}\n");
-    out.push_str("  SERVICE_PIDS+=(\"$pid\")\n");
-    out.push_str("  SERVICE_NAMES+=(\"$name\")\n");
-    out.push_str("  SERVICE_STEP_NAMES+=(\"$step_name\")\n");
-    out.push_str("  SERVICE_LOG_PATHS+=(\"$log_path\")\n");
-    out.push_str("  SERVICE_HEALTHY+=(\"0\")\n");
-    out.push_str("  SERVICE_INDEX_BY_NAME[\"$name\"]=$index\n");
+    out.push_str("  local failure_mode=$5\n");
+    out.push_str("  local max_restarts=$6\n");
+    out.push_str("  local backoff_seconds=$7\n");
+    out.push_str("  local launch_fn=$8\n");
+    out.push_str("  local dependents_csv=$9\n");
+    out.push_str("  local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}\n");
+    out.push_str("  if [[ -n \"$index\" ]]; then\n");
+    out.push_str("    SERVICE_PIDS[$index]=\"$pid\"\n");
+    out.push_str("    SERVICE_STEP_NAMES[$index]=\"$step_name\"\n");
+    out.push_str("    SERVICE_LOG_PATHS[$index]=\"$log_path\"\n");
+    out.push_str("    SERVICE_HEALTHY[$index]=\"0\"\n");
+    out.push_str("    SERVICE_LAUNCH_FNS[$index]=\"$launch_fn\"\n");
+    out.push_str("    if [[ -n \"$dependents_csv\" ]]; then\n");
+    out.push_str("      SERVICE_DEPENDENTS[$index]=\"$dependents_csv\"\n");
+    out.push_str("    fi\n");
+    out.push_str("  else\n");
+    out.push_str("    index=${#SERVICE_PIDS[@]}\n");
+    out.push_str("    SERVICE_PIDS+=(\"$pid\")\n");
+    out.push_str("    SERVICE_NAMES+=(\"$name\")\n");
+    out.push_str("    SERVICE_STEP_NAMES+=(\"$step_name\")\n");
+    out.push_str("    SERVICE_LOG_PATHS+=(\"$log_path\")\n");
+    out.push_str("    SERVICE_HEALTHY+=(\"0\")\n");
+    out.push_str("    SERVICE_FAILURE_POLICY_MODE+=(\"$failure_mode\")\n");
+    out.push_str("    SERVICE_MAX_RESTARTS+=(\"$max_restarts\")\n");
+    out.push_str("    SERVICE_BACKOFF_SECONDS+=(\"$backoff_seconds\")\n");
+    out.push_str("    SERVICE_RESTART_COUNT+=(\"0\")\n");
+    out.push_str("    SERVICE_LAST_EXIT_CODE+=(\"\")\n");
+    out.push_str("    SERVICE_LAUNCH_FNS+=(\"$launch_fn\")\n");
+    out.push_str("    SERVICE_DEPENDENTS+=(\"$dependents_csv\")\n");
+    out.push_str("    SERVICE_INDEX_BY_NAME[\"$name\"]=$index\n");
+    out.push_str("  fi\n");
     out.push_str("  write_state_file\n");
     out.push_str("}\n\n");
 
@@ -312,19 +462,16 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local seconds=$3\n");
     out.push_str("  local start\n");
     out.push_str("  start=$(date +%s)\n");
+    out.push_str("  reset_wait_helper_exit_state\n");
     out.push_str("  while (( $(date +%s) - start < seconds )); do\n");
     out.push_str("    if ! kill -0 \"$pid\" 2>/dev/null; then\n");
-    out.push_str("      local status=0\n");
-    out.push_str("      wait \"$pid\" || status=$?\n");
-    out.push_str("      echo \"Service '$name' exited with status $status before its readiness sleep completed\" >&2\n");
+    out.push_str("      record_wait_helper_exit \"$pid\"\n");
     out.push_str("      return 1\n");
     out.push_str("    fi\n");
     out.push_str("    sleep 1\n");
     out.push_str("  done\n");
     out.push_str("  if ! kill -0 \"$pid\" 2>/dev/null; then\n");
-    out.push_str("    local status=0\n");
-    out.push_str("    wait \"$pid\" || status=$?\n");
-    out.push_str("    echo \"Service '$name' exited with status $status before its readiness sleep completed\" >&2\n");
+    out.push_str("    record_wait_helper_exit \"$pid\"\n");
     out.push_str("    return 1\n");
     out.push_str("  fi\n");
     out.push_str("}\n\n");
@@ -337,12 +484,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local timeout=${5:-60}\n");
     out.push_str("  local start\n");
     out.push_str("  start=$(date +%s)\n");
+    out.push_str("  reset_wait_helper_exit_state\n");
     out.push_str("  until bash -lc \"</dev/tcp/${host}/${port}\" >/dev/null 2>&1; do\n");
     out.push_str("    if ! kill -0 \"$pid\" 2>/dev/null; then\n");
-    out.push_str("      wait \"$pid\"\n");
-    out.push_str(
-        "      echo \"Service '$name' exited before ${host}:${port} became reachable\" >&2\n",
-    );
+    out.push_str("      record_wait_helper_exit \"$pid\"\n");
     out.push_str("      return 1\n");
     out.push_str("    fi\n");
     out.push_str("    if (( $(date +%s) - start >= timeout )); then\n");
@@ -361,12 +506,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local timeout=${5:-60}\n");
     out.push_str("  local start\n");
     out.push_str("  start=$(date +%s)\n");
+    out.push_str("  reset_wait_helper_exit_state\n");
     out.push_str("  until grep -E -q \"$pattern\" \"$logfile\" 2>/dev/null; do\n");
     out.push_str("    if ! kill -0 \"$pid\" 2>/dev/null; then\n");
-    out.push_str("      wait \"$pid\"\n");
-    out.push_str(
-        "      echo \"Service '$name' exited before readiness log pattern appeared\" >&2\n",
-    );
+    out.push_str("      record_wait_helper_exit \"$pid\"\n");
     out.push_str("      return 1\n");
     out.push_str("    fi\n");
     out.push_str("    if (( $(date +%s) - start >= timeout )); then\n");
@@ -387,12 +530,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local timeout=${5:-60}\n");
     out.push_str("  local start\n");
     out.push_str("  start=$(date +%s)\n");
+    out.push_str("  reset_wait_helper_exit_state\n");
     out.push_str("  while true; do\n");
     out.push_str("    if ! kill -0 \"$pid\" 2>/dev/null; then\n");
-    out.push_str("      wait \"$pid\"\n");
-    out.push_str(
-        "      echo \"Service '$name' exited before HTTP readiness check succeeded\" >&2\n",
-    );
+    out.push_str("      record_wait_helper_exit \"$pid\"\n");
     out.push_str("      return 1\n");
     out.push_str("    fi\n");
     out.push_str("    local code\n");
@@ -414,18 +555,30 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local dependency=$1\n");
     out.push_str("  local target=$2\n");
     out.push_str("  local index\n");
-    out.push_str("  index=$(service_index_for \"$dependency\") || return 1\n");
-    out.push_str("  local pid=${SERVICE_PIDS[$index]:-}\n");
-    out.push_str("  if [[ -z \"$pid\" ]]; then\n");
-    out.push_str("    echo \"Dependency '$dependency' for service '$target' does not have a tracked pid\" >&2\n");
-    out.push_str("    return 1\n");
-    out.push_str("  fi\n");
-    out.push_str("  if ! kill -0 \"$pid\" 2>/dev/null; then\n");
+    out.push_str("  while true; do\n");
+    out.push_str("    index=$(service_index_for \"$dependency\") || return 1\n");
+    out.push_str("    local pid=${SERVICE_PIDS[$index]:-}\n");
+    out.push_str("    if [[ -z \"$pid\" ]]; then\n");
+    out.push_str("      echo \"Dependency '$dependency' for service '$target' does not have a tracked pid\" >&2\n");
+    out.push_str("      return 1\n");
+    out.push_str("    fi\n");
+    out.push_str("    if kill -0 \"$pid\" 2>/dev/null; then\n");
+    out.push_str("      return 0\n");
+    out.push_str("    fi\n");
     out.push_str("    local status=0\n");
     out.push_str("    wait \"$pid\" || status=$?\n");
-    out.push_str("    echo \"Dependency '$dependency' exited with status $status before service '$target' could start\" >&2\n");
+    out.push_str("    handle_service_exit \"$index\" \"$status\"\n");
+    out.push_str("    local handled_status=$?\n");
+    out.push_str(
+        "    if (( handled_status == 0 )) && [[ -n \"${SERVICE_PIDS[$index]:-}\" ]]; then\n",
+    );
+    out.push_str("      continue\n");
+    out.push_str("    fi\n");
+    out.push_str("    if (( handled_status == 0 )); then\n");
+    out.push_str("      echo \"Dependency '$dependency' exited with status $status before service '$target' could start\" >&2\n");
+    out.push_str("    fi\n");
     out.push_str("    return 1\n");
-    out.push_str("  fi\n");
+    out.push_str("  done\n");
     out.push_str("}\n\n");
 
     out.push_str("wait_for_service_healthy() {\n");
@@ -433,38 +586,124 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local target=$2\n");
     out.push_str("  local wait_fn=$3\n");
     out.push_str("  local index\n");
-    out.push_str("  index=$(service_index_for \"$dependency\") || return 1\n");
-    out.push_str("  wait_for_service_started \"$dependency\" \"$target\" || return 1\n");
-    out.push_str("  if [[ \"${SERVICE_HEALTHY[$index]:-0}\" == \"1\" ]]; then\n");
+    out.push_str("  while true; do\n");
+    out.push_str("    index=$(service_index_for \"$dependency\") || return 1\n");
+    out.push_str("    wait_for_service_started \"$dependency\" \"$target\" || return 1\n");
+    out.push_str("    index=$(service_index_for \"$dependency\") || return 1\n");
+    out.push_str("    if [[ \"${SERVICE_HEALTHY[$index]:-0}\" == \"1\" ]]; then\n");
+    out.push_str("      return 0\n");
+    out.push_str("    fi\n");
+    out.push_str("    local pid=${SERVICE_PIDS[$index]}\n");
+    out.push_str("    if \"$wait_fn\" \"$pid\" \"$dependency\"; then\n");
+    out.push_str("      SERVICE_HEALTHY[$index]=\"1\"\n");
+    out.push_str("      write_state_file\n");
+    out.push_str("      return 0\n");
+    out.push_str("    fi\n");
+    out.push_str("    if [[ \"$WAIT_HELPER_EXITED\" == \"1\" ]]; then\n");
+    out.push_str("      local status=$WAIT_HELPER_EXIT_STATUS\n");
+    out.push_str("      handle_service_exit \"$index\" \"$status\"\n");
+    out.push_str("      local handled_status=$?\n");
+    out.push_str(
+        "      if (( handled_status == 0 )) && [[ -n \"${SERVICE_PIDS[$index]:-}\" ]]; then\n",
+    );
+    out.push_str("        continue\n");
+    out.push_str("      fi\n");
+    out.push_str("      if (( handled_status == 0 )); then\n");
+    out.push_str("        echo \"Dependency '$dependency' exited with status $status before it became healthy for service '$target'\" >&2\n");
+    out.push_str("      fi\n");
+    out.push_str("    fi\n");
+    out.push_str("    return 1\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+
+    out.push_str("emit_dependency_failure_diagnostic() {\n");
+    out.push_str("  local failed_service=$1\n");
+    out.push_str("  local index\n");
+    out.push_str("  index=$(service_index_for \"$failed_service\") || return 0\n");
+    out.push_str("  local dependents_csv=${SERVICE_DEPENDENTS[$index]:-}\n");
+    out.push_str("  [[ -z \"$dependents_csv\" ]] && return 0\n");
+    out.push_str("  local formatted=${dependents_csv//,/ , }\n");
+    out.push_str("  echo \"Service '$failed_service' is required by: $formatted\" >&2\n");
+    out.push_str("}\n\n");
+
+    out.push_str("handle_service_exit() {\n");
+    out.push_str("  local index=$1\n");
+    out.push_str("  local status=$2\n");
+    out.push_str("  local name=${SERVICE_NAMES[$index]:-}\n");
+    out.push_str("  local mode=${SERVICE_FAILURE_POLICY_MODE[$index]:-fail_job}\n");
+    out.push_str("  local max_restarts=${SERVICE_MAX_RESTARTS[$index]:-0}\n");
+    out.push_str("  local restart_count=${SERVICE_RESTART_COUNT[$index]:-0}\n");
+    out.push_str("  local backoff_seconds=${SERVICE_BACKOFF_SECONDS[$index]:-0}\n");
+    out.push_str("  local launch_fn=${SERVICE_LAUNCH_FNS[$index]:-}\n");
+    out.push_str("  SERVICE_PIDS[$index]=''\n");
+    out.push_str("  SERVICE_LAST_EXIT_CODE[$index]=\"$status\"\n");
+    out.push_str("  write_state_file\n");
+    out.push_str("  if (( status == 0 )); then\n");
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
-    out.push_str("  local pid=${SERVICE_PIDS[$index]}\n");
-    out.push_str("  \"$wait_fn\" \"$pid\" \"$dependency\" || return 1\n");
-    out.push_str("  SERVICE_HEALTHY[$index]=\"1\"\n");
-    out.push_str("  write_state_file\n");
+    out.push_str("  if [[ \"$mode\" == \"ignore\" ]]; then\n");
+    out.push_str(
+        "    echo \"Service '$name' exited with status $status; continuing because failure_policy is ignore\" >&2\n",
+    );
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]] && (( restart_count < max_restarts )); then\n");
+    out.push_str("    local next_restart=$((restart_count + 1))\n");
+    out.push_str("    SERVICE_RESTART_COUNT[$index]=\"$next_restart\"\n");
+    out.push_str("    write_state_file\n");
+    out.push_str("    if (( backoff_seconds > 0 )); then\n");
+    out.push_str("      sleep \"$backoff_seconds\"\n");
+    out.push_str("    fi\n");
+    out.push_str("    if [[ -z \"$launch_fn\" ]]; then\n");
+    out.push_str(
+        "      echo \"Service '$name' requested restart but no launch function is registered\" >&2\n",
+    );
+    out.push_str("      emit_dependency_failure_diagnostic \"$name\"\n");
+    out.push_str("      return \"$status\"\n");
+    out.push_str("    fi\n");
+    out.push_str(
+        "    echo \"Service '$name' exited with status $status; restarting ($next_restart/$max_restarts)\" >&2\n",
+    );
+    out.push_str("    \"$launch_fn\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]]; then\n");
+    out.push_str(
+        "    echo \"Service '$name' exited with status $status after $restart_count/$max_restarts restarts\" >&2\n",
+    );
+    out.push_str("  else\n");
+    out.push_str("    echo \"Service '$name' exited with status $status\" >&2\n");
+    out.push_str("  fi\n");
+    out.push_str("  emit_dependency_failure_diagnostic \"$name\"\n");
+    out.push_str("  return \"$status\"\n");
     out.push_str("}\n\n");
 
     out.push_str("monitor_services() {\n");
     out.push_str("  while true; do\n");
-    out.push_str("    local active=0\n");
+    out.push_str("    local tracked=0\n");
     out.push_str("    for i in \"${!SERVICE_PIDS[@]}\"; do\n");
     out.push_str("      local pid=${SERVICE_PIDS[$i]}\n");
     out.push_str("      [[ -z \"$pid\" ]] && continue\n");
+    out.push_str("      tracked=$((tracked + 1))\n");
     out.push_str("      if kill -0 \"$pid\" 2>/dev/null; then\n");
-    out.push_str("        active=$((active + 1))\n");
     out.push_str("        continue\n");
     out.push_str("      fi\n");
     out.push_str("      if wait \"$pid\"; then\n");
-    out.push_str("        SERVICE_PIDS[i]=''\n");
+    out.push_str("        handle_service_exit \"$i\" 0\n");
+    out.push_str("        local handled_status=$?\n");
+    out.push_str("        if (( handled_status != 0 )); then\n");
+    out.push_str("          return \"$handled_status\"\n");
+    out.push_str("        fi\n");
     out.push_str("      else\n");
     out.push_str("        local status=$?\n");
-    out.push_str(
-        "        echo \"Service '${SERVICE_NAMES[$i]}' exited with status $status\" >&2\n",
-    );
-    out.push_str("        return \"$status\"\n");
+    out.push_str("        handle_service_exit \"$i\" \"$status\"\n");
+    out.push_str("        local handled_status=$?\n");
+    out.push_str("        if (( handled_status != 0 )); then\n");
+    out.push_str("          return \"$handled_status\"\n");
+    out.push_str("        fi\n");
     out.push_str("      fi\n");
     out.push_str("    done\n");
-    out.push_str("    if (( active == 0 )); then\n");
+    out.push_str("    if (( tracked == 0 )); then\n");
     out.push_str("      return 0\n");
     out.push_str("    fi\n");
     out.push_str("    sleep 1\n");
@@ -488,7 +727,11 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     }
 
     for service in &plan.ordered_services {
-        render_service(&mut out, service);
+        let dependents = dependents_by_service
+            .get(&service.name)
+            .cloned()
+            .unwrap_or_default();
+        render_service(&mut out, service, &dependents);
         out.push('\n');
     }
 
@@ -865,13 +1108,24 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("  local tmp_manifest=\"$ARTIFACTS_MANIFEST_FILE.tmp\"\n");
     out.push_str("  {\n");
     out.push_str("    printf '{\\n'\n");
-    out.push_str("    printf '  \"schema_version\": 2,\\n'\n");
+    out.push_str("    printf '  \"schema_version\": 3,\\n'\n");
     out.push_str("    printf '  \"job_id\": \"%s\",\\n' \"$(json_escape \"$SLURM_JOB_ID\")\"\n");
     out.push_str("    printf '  \"collect_policy\": \"%s\",\\n' \"$(json_escape \"$ARTIFACTS_COLLECT_POLICY\")\"\n");
     out.push_str("    printf '  \"collected_at\": \"%s\",\\n' \"$(json_escape \"$(artifact_timestamp)\")\"\n");
     out.push_str(
         "    printf '  \"job_outcome\": \"%s\",\\n' \"$(json_escape \"$job_outcome\")\"\n",
     );
+    out.push_str("    if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
+    out.push_str("      printf '  \"attempt\": %s,\\n' \"$ATTEMPT\"\n");
+    out.push_str("      printf '  \"is_resume\": %s,\\n' \"$(if [[ \"$IS_RESUME\" == \"1\" ]]; then printf true; else printf false; fi)\"\n");
+    out.push_str(
+        "      printf '  \"resume_dir\": \"%s\",\\n' \"$(json_escape \"$RESUME_HOST_PATH\")\"\n",
+    );
+    out.push_str("    else\n");
+    out.push_str("      printf '  \"attempt\": null,\\n'\n");
+    out.push_str("      printf '  \"is_resume\": null,\\n'\n");
+    out.push_str("      printf '  \"resume_dir\": null,\\n'\n");
+    out.push_str("    fi\n");
     out.push_str("    write_json_string_array \"declared_source_patterns\" \"${ARTIFACT_SOURCE_PATTERNS[@]}\"\n");
     out.push_str("    printf ',\\n'\n");
     out.push_str(
@@ -1056,12 +1310,13 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("}\n\n");
 }
 
-fn render_service(out: &mut String, service: &RuntimeService) {
+fn render_service(out: &mut String, service: &RuntimeService, dependents: &[String]) {
     let service_id = service_token(&service.name);
     let fn_name = format!("launch_{service_id}");
     let step_name = service_step_name(&service.name);
     let command_args = execution_argv(&service.execution, service.working_dir.as_deref());
     let srun_args = build_srun_command(service);
+    let dependents_csv = dependents.join(",");
     let service_env = service
         .environment
         .iter()
@@ -1096,20 +1351,34 @@ fn render_service(out: &mut String, service: &RuntimeService) {
     out.push_str("  echo \"Starting service ");
     out.push_str(&service.name);
     out.push_str("\"\n");
-    if service.environment.is_empty() {
-        out.push_str("  \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >\"$logfile\" 2>&1 &\n");
-    } else {
+    out.push_str("  local -a launch_env=()\n");
+    out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
+    out.push_str("    launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")\n");
+    out.push_str("    launch_env+=(\"HPC_COMPOSE_ATTEMPT=$ATTEMPT\")\n");
+    out.push_str("    launch_env+=(\"HPC_COMPOSE_IS_RESUME=$IS_RESUME\")\n");
+    out.push_str("  fi\n");
+    if !service.environment.is_empty() {
         out.push_str(&format!(
             "  local -a service_env={}\n",
             bash_array_literal(&service_env)
         ));
-        out.push_str("  env \"${service_env[@]}\" \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >\"$logfile\" 2>&1 &\n");
+        out.push_str("  launch_env+=(\"${service_env[@]}\")\n");
     }
+    out.push_str("  if (( ${#launch_env[@]} == 0 )); then\n");
+    out.push_str("    \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >\"$logfile\" 2>&1 &\n");
+    out.push_str("  else\n");
+    out.push_str("    env \"${launch_env[@]}\" \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >\"$logfile\" 2>&1 &\n");
+    out.push_str("  fi\n");
     out.push_str("  local pid=$!\n");
     out.push_str(&format!(
-        "  register_service {} \"$pid\" {} \"$logfile\"\n",
+        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {}\n",
         shell_quote(&service.name),
-        shell_quote(&step_name)
+        shell_quote(&step_name),
+        shell_quote(failure_policy_mode_label(service.failure_policy.mode)),
+        service.failure_policy.max_restarts,
+        service.failure_policy.backoff_seconds,
+        shell_quote(&fn_name),
+        shell_quote(&dependents_csv)
     ));
     out.push_str("}\n");
 }
@@ -1295,14 +1564,26 @@ fn flag(value: bool) -> &'static str {
     if value { "1" } else { "0" }
 }
 
+fn failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
+    match mode {
+        ServiceFailureMode::FailJob => "fail_job",
+        ServiceFailureMode::Ignore => "ignore",
+        ServiceFailureMode::RestartOnFailure => "restart_on_failure",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::process::Command;
 
     use super::*;
     use crate::spec::{
-        DependencyCondition, ReadinessSpec, ServiceDependency, ServiceSlurmConfig, SlurmConfig,
+        DependencyCondition, ReadinessSpec, ResumeConfig, ServiceDependency, ServiceFailurePolicy,
+        ServiceSlurmConfig, SlurmConfig,
     };
 
     fn runtime_service() -> RuntimeService {
@@ -1319,12 +1600,126 @@ mod tests {
                 port: 8080,
                 timeout_seconds: Some(20),
             }),
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::LocalSqsh(PathBuf::from(
                 "/shared/cache/worker.sqsh",
             )),
         }
+    }
+
+    fn write_executable(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("write script");
+        let mut perms = fs::metadata(path).expect("meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    fn write_fake_runtime_srun(tmpdir: &std::path::Path) {
+        let srun = tmpdir.join("srun");
+        write_executable(
+            &srun,
+            r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+container_mounts=""
+for arg in "$@"; do
+  case "$arg" in
+    --container-mounts=*)
+      container_mounts="${arg#--container-mounts=}"
+      ;;
+  esac
+done
+job_mount=""
+IFS=',' read -r -a mount_items <<< "$container_mounts"
+for mount in "${mount_items[@]}"; do
+  host="${mount%%:*}"
+  dest="${mount#*:}"
+  if [[ "$dest" == "/hpc-compose/job" ]]; then
+    job_mount="$host"
+  fi
+done
+printf 'resume_dir=%s attempt=%s is_resume=%s\n' "${HPC_COMPOSE_RESUME_DIR:-}" "${HPC_COMPOSE_ATTEMPT:-}" "${HPC_COMPOSE_IS_RESUME:-}"
+if [[ -n "$job_mount" ]]; then
+  mkdir -p "$job_mount/checkpoints"
+  printf 'checkpoint %s\n' "${HPC_COMPOSE_ATTEMPT:-missing}" > "$job_mount/checkpoints/checkpoint-${HPC_COMPOSE_ATTEMPT:-missing}.txt"
+fi
+"#,
+        );
+    }
+
+    fn write_fake_runtime_srun_with_dependency_restart(tmpdir: &std::path::Path) {
+        let srun = tmpdir.join("srun");
+        write_executable(
+            &srun,
+            r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+job_name=""
+for arg in "$@"; do
+  case "$arg" in
+    --job-name=*)
+      job_name="${arg#--job-name=}"
+      break
+      ;;
+  esac
+done
+state_root="${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/fake-runtime-srun"
+mkdir -p "$state_root"
+key="$(printf '%s' "$job_name" | tr -c 'A-Za-z0-9._-' '_')"
+count_file="$state_root/${key}.count"
+count=0
+if [[ -f "$count_file" ]]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+echo "$count" > "$count_file"
+case "$job_name" in
+  hpc-compose:api)
+    if (( count == 1 )); then
+      exit 41
+    fi
+    sleep 2
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+        );
+    }
+
+    fn run_rendered_script(
+        tmpdir: &std::path::Path,
+        script_path: &std::path::Path,
+        restart_count: u32,
+    ) {
+        let mut path = std::ffi::OsString::from(tmpdir.as_os_str());
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let output = Command::new("bash")
+            .arg(script_path)
+            .current_dir(tmpdir)
+            .env("PATH", path)
+            .env("SLURM_JOB_ID", "12345")
+            .env("SLURM_SUBMIT_DIR", tmpdir)
+            .env("SLURM_RESTART_COUNT", restart_count.to_string())
+            .output()
+            .expect("run rendered script");
+        assert!(
+            output.status.success(),
+            "script failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1403,6 +1798,7 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::LocalSqsh(PathBuf::from(
@@ -1434,11 +1830,13 @@ mod tests {
                 pattern: "ready".into(),
                 timeout_seconds: None,
             }),
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig {
                 cpus_per_task: Some(3),
                 gpus: Some(2),
                 gres: None,
                 extra_srun_args: vec!["--mpi=none".into()],
+                failure_policy: None,
             },
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1505,6 +1903,7 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: Some(ReadinessSpec::Sleep { seconds: 3 }),
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1575,11 +1974,13 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig {
                 cpus_per_task: Some(2),
                 gpus: None,
                 gres: Some("gpu:1".into()),
                 extra_srun_args: vec!["--exclusive".into()],
+                failure_policy: None,
             },
             prepare: None,
             source: crate::planner::ImageSource::LocalSqsh(PathBuf::from(
@@ -1621,6 +2022,7 @@ mod tests {
                 pattern: "ready".into(),
                 timeout_seconds: Some(5),
             }),
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1659,6 +2061,7 @@ mod tests {
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                failure_policy: ServiceFailurePolicy::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
                 source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1687,6 +2090,7 @@ mod tests {
                 pattern: "ready".into(),
                 timeout_seconds: Some(30),
             }),
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1700,6 +2104,7 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1716,6 +2121,7 @@ mod tests {
                 condition: DependencyCondition::ServiceHealthy,
             }],
             readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1745,6 +2151,91 @@ mod tests {
             .expect("healthy cache");
         assert!(started_check < healthy_cache);
         assert!(script.contains("\"healthy\":"));
+    }
+
+    #[test]
+    fn render_includes_failure_policy_arrays_and_restart_handlers() {
+        let restart_service = RuntimeService {
+            name: "api".into(),
+            runtime_image: PathBuf::from("/shared/cache/api.sqsh"),
+            execution: ExecutionSpec::Shell("echo api".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            failure_policy: crate::spec::ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 3,
+                backoff_seconds: 5,
+            },
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+        let ignore_service = RuntimeService {
+            name: "worker".into(),
+            runtime_image: PathBuf::from("/shared/cache/worker.sqsh"),
+            execution: ExecutionSpec::Shell("echo worker".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            failure_policy: crate::spec::ServiceFailurePolicy {
+                mode: ServiceFailureMode::Ignore,
+                max_restarts: 0,
+                backoff_seconds: 0,
+            },
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://python:3.11-slim".into()),
+        };
+        let dependent = RuntimeService {
+            name: "client".into(),
+            runtime_image: PathBuf::from("/shared/cache/client.sqsh"),
+            execution: ExecutionSpec::Shell("echo client".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: vec![ServiceDependency {
+                name: "api".into(),
+                condition: DependencyCondition::ServiceStarted,
+            }],
+            readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://alpine:3".into()),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![restart_service, ignore_service, dependent],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("SERVICE_FAILURE_POLICY_MODE=()"));
+        assert!(script.contains("SERVICE_MAX_RESTARTS=()"));
+        assert!(script.contains("SERVICE_BACKOFF_SECONDS=()"));
+        assert!(script.contains("SERVICE_RESTART_COUNT=()"));
+        assert!(script.contains("SERVICE_LAST_EXIT_CODE=()"));
+        assert!(script.contains("\"failure_policy_mode\""));
+        assert!(script.contains("\"restart_count\""));
+        assert!(script.contains("\"max_restarts\""));
+        assert!(script.contains("\"last_exit_code\""));
+        assert!(script.contains("handle_service_exit()"));
+        assert!(script.contains("mode=${SERVICE_FAILURE_POLICY_MODE[$index]:-fail_job}"));
+        assert!(script.contains("if [[ \"$mode\" == \"ignore\" ]]"));
+        assert!(script.contains("if [[ \"$mode\" == \"restart_on_failure\" ]]"));
+        assert!(script.contains("SERVICE_RESTART_COUNT[$index]=\"$next_restart\""));
+        assert!(script.contains("local launch_fn=${SERVICE_LAUNCH_FNS[$index]:-}"));
+        assert!(script.contains("local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}"));
+        assert!(script.contains("emit_dependency_failure_diagnostic()"));
+        assert!(script.contains("Service '$failed_service' is required by:"));
+        assert!(script.contains("'restart_on_failure' 3 5"));
+        assert!(script.contains("'ignore' 0 0"));
     }
 
     #[test]
@@ -1805,6 +2296,251 @@ mod tests {
         assert!(script.contains("host_pattern=\"$JOB_TMP${declared_pattern#/hpc-compose/job}\""));
         assert!(script.contains("container_match=\"/hpc-compose/job${matched#\"$JOB_TMP\"}\""));
         assert!(script.contains("write_artifact_bundles_json"));
+    }
+
+    #[test]
+    fn render_resume_helpers_when_enabled() {
+        let mut plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![runtime_service()],
+        };
+        plan.slurm.resume = Some(ResumeConfig {
+            path: "/shared/runs/demo".into(),
+        });
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("RESUME_ENABLED=1"));
+        assert!(script.contains("JOB_TMP=\"$JOB_ROOT/attempts/$ATTEMPT\""));
+        assert!(
+            script.contains("append_unique_mount \"$RESUME_HOST_PATH:$RESUME_CONTAINER_PATH\"")
+        );
+        assert!(script.contains("launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")"));
+        assert!(script.contains("launch_env+=(\"HPC_COMPOSE_ATTEMPT=$ATTEMPT\")"));
+        assert!(script.contains("launch_env+=(\"HPC_COMPOSE_IS_RESUME=$IS_RESUME\")"));
+        assert!(script.contains("update_latest_runtime_links"));
+        assert!(script.contains("write_resume_metadata"));
+    }
+
+    #[test]
+    fn rendered_resume_script_preserves_prior_attempts_and_updates_latest_links() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        write_fake_runtime_srun(tmpdir.path());
+        let resume_dir = tmpdir.path().join("resume");
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig {
+                artifacts: Some(crate::spec::ArtifactsConfig {
+                    collect: ArtifactCollectPolicy::Always,
+                    export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                    paths: vec!["/hpc-compose/job/checkpoints/**".into()],
+                    bundles: BTreeMap::new(),
+                }),
+                resume: Some(ResumeConfig {
+                    path: resume_dir.display().to_string(),
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![RuntimeService {
+                execution: ExecutionSpec::Shell("echo resume".into()),
+                environment: Vec::new(),
+                working_dir: None,
+                readiness: None,
+                ..runtime_service()
+            }],
+        };
+        let script = render_script(&plan).expect("script");
+        let script_path = tmpdir.path().join("resume.sbatch");
+        write_executable(&script_path, &script);
+
+        run_rendered_script(tmpdir.path(), &script_path, 0);
+        run_rendered_script(tmpdir.path(), &script_path, 1);
+
+        let job_root = tmpdir.path().join(".hpc-compose/12345");
+        let attempt0_log = job_root.join("attempts/0/logs/worker.log");
+        let attempt1_log = job_root.join("attempts/1/logs/worker.log");
+        assert!(attempt0_log.exists());
+        assert!(attempt1_log.exists());
+        assert!(
+            fs::read_to_string(&attempt0_log)
+                .expect("attempt0 log")
+                .contains("resume_dir=/hpc-compose/resume attempt=0 is_resume=0")
+        );
+        assert!(
+            fs::read_to_string(&attempt1_log)
+                .expect("attempt1 log")
+                .contains("resume_dir=/hpc-compose/resume attempt=1 is_resume=1")
+        );
+
+        assert_eq!(
+            fs::read_link(job_root.join("logs")).expect("logs symlink"),
+            job_root.join("attempts/1/logs")
+        );
+        assert_eq!(
+            fs::read_link(job_root.join("artifacts")).expect("artifacts symlink"),
+            job_root.join("attempts/1/artifacts")
+        );
+        assert_eq!(
+            fs::read_link(job_root.join("state.json")).expect("state symlink"),
+            job_root.join("attempts/1/state.json")
+        );
+
+        assert!(
+            job_root
+                .join("attempts/0/artifacts/payload/checkpoints/checkpoint-0.txt")
+                .exists()
+        );
+        assert!(
+            job_root
+                .join("attempts/1/artifacts/payload/checkpoints/checkpoint-1.txt")
+                .exists()
+        );
+
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(job_root.join("state.json")).expect("state"))
+                .expect("state json");
+        assert_eq!(state["attempt"], 1);
+        assert_eq!(state["is_resume"], true);
+        assert_eq!(state["resume_dir"], resume_dir.display().to_string());
+
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(job_root.join("artifacts/manifest.json")).expect("manifest"),
+        )
+        .expect("manifest json");
+        assert_eq!(manifest["schema_version"], 3);
+        assert_eq!(manifest["attempt"], 1);
+        assert_eq!(manifest["is_resume"], true);
+        assert_eq!(manifest["resume_dir"], resume_dir.display().to_string());
+    }
+
+    #[test]
+    fn rendered_resume_script_detects_existing_resume_metadata() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        write_fake_runtime_srun(tmpdir.path());
+        let resume_dir = tmpdir.path().join("resume");
+        fs::create_dir_all(resume_dir.join("_hpc-compose")).expect("resume meta dir");
+        fs::write(
+            resume_dir.join("_hpc-compose/latest.json"),
+            r#"{"schema_version":1,"compose_name":"demo","job_id":"old","attempt":7,"updated_at":"2026-04-05T10:00:00Z"}"#,
+        )
+        .expect("seed metadata");
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig {
+                resume: Some(ResumeConfig {
+                    path: resume_dir.display().to_string(),
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![RuntimeService {
+                execution: ExecutionSpec::Shell("echo resume".into()),
+                environment: Vec::new(),
+                working_dir: None,
+                readiness: None,
+                ..runtime_service()
+            }],
+        };
+        let script = render_script(&plan).expect("script");
+        let script_path = tmpdir.path().join("resume-detect.sbatch");
+        write_executable(&script_path, &script);
+
+        run_rendered_script(tmpdir.path(), &script_path, 0);
+        let log = fs::read_to_string(
+            tmpdir
+                .path()
+                .join(".hpc-compose/12345/attempts/0/logs/worker.log"),
+        )
+        .expect("log");
+        assert!(log.contains("is_resume=1"));
+    }
+
+    #[test]
+    fn rendered_script_restarts_failed_dependency_before_healthy_dependents_launch() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        write_fake_runtime_srun_with_dependency_restart(tmpdir.path());
+        let provider = RuntimeService {
+            name: "api".into(),
+            runtime_image: PathBuf::from("/shared/cache/api.sqsh"),
+            execution: ExecutionSpec::Shell("echo api".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: Some(ReadinessSpec::Sleep { seconds: 1 }),
+            failure_policy: ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 1,
+                backoff_seconds: 1,
+            },
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+        let client = RuntimeService {
+            name: "client".into(),
+            runtime_image: PathBuf::from("/shared/cache/client.sqsh"),
+            execution: ExecutionSpec::Shell("echo client".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: vec![ServiceDependency {
+                name: "api".into(),
+                condition: DependencyCondition::ServiceHealthy,
+            }],
+            readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://alpine:3".into()),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![provider, client],
+        };
+        let script = render_script(&plan).expect("script");
+        let script_path = tmpdir.path().join("restart-dependency.sbatch");
+        write_executable(&script_path, &script);
+
+        run_rendered_script(tmpdir.path(), &script_path, 0);
+
+        assert_eq!(
+            fs::read_to_string(
+                tmpdir
+                    .path()
+                    .join(".hpc-compose/fake-runtime-srun/hpc-compose_api.count"),
+            )
+            .expect("api count")
+            .trim(),
+            "2"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                tmpdir
+                    .path()
+                    .join(".hpc-compose/fake-runtime-srun/hpc-compose_client.count"),
+            )
+            .expect("client count")
+            .trim(),
+            "1"
+        );
+
+        let state: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/state.json"))
+                .expect("state"),
+        )
+        .expect("state json");
+        let api = state["services"]
+            .as_array()
+            .expect("services")
+            .iter()
+            .find(|service| service["service_name"] == "api")
+            .expect("api");
+        assert_eq!(api["restart_count"], 1);
     }
 
     #[test]

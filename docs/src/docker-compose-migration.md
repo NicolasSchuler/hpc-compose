@@ -16,7 +16,7 @@ This guide helps you convert an existing `docker-compose.yaml` into an `hpc-comp
 | `build` | **Not supported.** Use `image` + `x-enroot.prepare.commands` instead. |
 | `ports` | **Not supported.** Services communicate via `127.0.0.1` on a single node. |
 | `networks` / `network_mode` | **Not supported.** All services share the host network on one node. |
-| `restart` | **Not supported.** Slurm handles job lifecycle. |
+| `restart` | **Not supported as a Compose key.** Use `services.<name>.x-slurm.failure_policy`. |
 | `deploy` | **Not supported.** Use `x-slurm` for resource allocation. |
 | `healthcheck` | Supported for a constrained TCP/HTTP subset and normalized into `readiness`; use explicit `readiness` for anything more complex. |
 | Resource limits (`cpus`, `mem_limit`) | Use `x-slurm.cpus_per_task`, `x-slurm.mem`, `x-slurm.gpus` |
@@ -189,7 +189,20 @@ services:
 
 ### Restart policies
 
-Docker Compose supports `restart: always`, `on-failure`, etc. `hpc-compose` does not have restart policies. Slurm manages the job lifecycle: if a service fails, the job fails. Design your workflows to be robust or use Slurm's own retry mechanisms at the job level.
+Docker Compose supports `restart: always`, `on-failure`, etc. `hpc-compose` does not accept the Compose `restart:` key, but it does support per-service restart behavior through `services.<name>.x-slurm.failure_policy`.
+
+```yaml
+services:
+  app:
+    image: python:3.11-slim
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 3
+        backoff_seconds: 5
+```
+
+`restart_on_failure` retries only on non-zero exits. Use `mode: fail_job` (default) for fail-fast behavior, or `mode: ignore` for non-critical sidecars.
 
 ## What to do about unsupported features
 
@@ -198,7 +211,7 @@ Docker Compose supports `restart: always`, `on-failure`, etc. `hpc-compose` does
 | `build` | Use `image` + `x-enroot.prepare.commands`. Mount build context files with `x-enroot.prepare.mounts` if needed. |
 | `ports` | Not needed. Services share `127.0.0.1` on one node. |
 | `networks` / `network_mode` | Not needed. All services are on the same host network. |
-| `restart` | Slurm handles job lifecycle. No restart policies. |
+| `restart` | Use `services.<name>.x-slurm.failure_policy` (`fail_job`, `ignore`, `restart_on_failure`). |
 | `deploy` | Use `x-slurm` for resources. |
 | Service DNS names | Use `127.0.0.1` instead of service names. |
 | Named volumes | Use host-path bind mounts in `volumes`. |
@@ -209,7 +222,7 @@ Docker Compose supports `restart: always`, `on-failure`, etc. `hpc-compose` does
 1. **Remove `build:`** — Replace with `image:` pointing to a base image. Move dependency installation to `x-enroot.prepare.commands`.
 2. **Remove `ports:`** — Services communicate via localhost on the same node.
 3. **Remove `networks:` / `network_mode:`** — Not applicable on a single Slurm node.
-4. **Remove `restart:`** — Slurm manages job lifecycle.
+4. **Remove Compose `restart:`** — use `services.<name>.x-slurm.failure_policy` when you need per-service restart behavior.
 5. **Remove `deploy:`** — Use `x-slurm` for resource allocation.
 6. **Replace service hostnames** — Change any service-name references (e.g. `redis`, `postgres`) to `127.0.0.1`.
 7. **Replace `healthcheck:`** — Convert to `readiness:` with `type: tcp`, `type: log`, or `type: sleep`.

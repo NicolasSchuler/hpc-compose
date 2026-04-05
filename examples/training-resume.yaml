@@ -1,0 +1,61 @@
+name: training-resume
+
+x-slurm:
+  job_name: training-resume
+  time: "04:00:00"
+  mem: 64G
+  cpus_per_task: 8
+  gpus: 1
+  cache_dir: /shared/$USER/hpc-compose-cache
+  resume:
+    path: /shared/$USER/runs/training-resume
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/checkpoints/**
+
+services:
+  trainer:
+    image: pytorch/pytorch:2.3.1-cuda12.1-cudnn9-runtime
+    environment:
+      NUM_EPOCHS: "10"
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python - <<'PY'
+        import json
+        import os
+        import pathlib
+        import time
+
+        resume_dir = pathlib.Path(os.environ["HPC_COMPOSE_RESUME_DIR"])
+        attempt = os.environ["HPC_COMPOSE_ATTEMPT"]
+        is_resume = os.environ["HPC_COMPOSE_IS_RESUME"] == "1"
+        checkpoint_dir = pathlib.Path("/hpc-compose/job/checkpoints")
+        latest_state_path = resume_dir / "latest.json"
+
+        resume_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        start_epoch = 0
+        if latest_state_path.exists():
+            state = json.loads(latest_state_path.read_text())
+            start_epoch = state["next_epoch"]
+            print(f"Resuming run at epoch {start_epoch} (attempt {attempt})")
+        else:
+            print(f"Starting fresh run (attempt {attempt})")
+
+        for epoch in range(start_epoch, int(os.environ["NUM_EPOCHS"])):
+            state = {
+                "completed_epoch": epoch,
+                "next_epoch": epoch + 1,
+                "attempt": int(attempt),
+                "is_resume": is_resume,
+            }
+            latest_state_path.write_text(json.dumps(state, indent=2) + "\n")
+            artifact_path = checkpoint_dir / f"checkpoint_epoch_{epoch}.json"
+            artifact_path.write_text(json.dumps(state, indent=2) + "\n")
+            print(f"Epoch {epoch}: wrote {artifact_path}")
+            time.sleep(1)
+        PY

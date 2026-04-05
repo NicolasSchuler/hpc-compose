@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::spec::{
     CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, ServiceDependency,
-    ServiceEnrootConfig, ServiceSlurmConfig, SlurmConfig,
+    ServiceEnrootConfig, ServiceFailureMode, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
 };
 
 const RESERVED_RUNTIME_MOUNT_DESTINATIONS: &[&str] = &["/hpc-compose/job"];
@@ -38,6 +38,7 @@ pub struct PlannedService {
     pub working_dir: Option<String>,
     pub depends_on: Vec<ServiceDependency>,
     pub readiness: Option<ReadinessSpec>,
+    pub failure_policy: ServiceFailurePolicy,
     pub slurm: ServiceSlurmConfig,
     pub prepare: Option<PreparedImageSpec>,
 }
@@ -123,6 +124,7 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
         )?;
         let image = normalize_image(&service.image, &project_dir)?;
         let prepare = normalize_prepare(service.enroot.clone(), &project_dir, name)?;
+        let failure_policy = service.slurm.normalized_failure_policy(name)?;
 
         temp.insert(
             name.clone(),
@@ -135,6 +137,7 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
                 working_dir,
                 depends_on,
                 readiness: service.readiness.clone(),
+                failure_policy,
                 slurm: service.slurm.clone(),
                 prepare,
             },
@@ -290,6 +293,13 @@ fn validate_dependency_conditions(services: &BTreeMap<String, PlannedService>) -
             {
                 bail!(
                     "service '{service_name}' depends on '{}' with condition 'service_healthy', but '{}' does not define readiness",
+                    dep.name,
+                    dep.name
+                );
+            }
+            if dependency.failure_policy.mode == ServiceFailureMode::Ignore {
+                bail!(
+                    "service '{service_name}' depends on '{}', but '{}' uses x-slurm.failure_policy.mode=ignore and cannot be depended on",
                     dep.name,
                     dep.name
                 );
@@ -466,7 +476,8 @@ mod tests {
     use super::*;
     use crate::spec::{
         ComposeSpec, DependsOnConditionSpec, DependsOnSpec, EnvironmentSpec, ReadinessSpec,
-        ServiceDependency, ServiceEnrootConfig, ServiceSlurmConfig, ServiceSpec,
+        ServiceDependency, ServiceEnrootConfig, ServiceFailureMode, ServiceFailurePolicy,
+        ServiceFailurePolicySpec, ServiceSlurmConfig, ServiceSpec,
     };
 
     fn service(image: &str) -> ServiceSpec {
@@ -775,6 +786,7 @@ mod tests {
                     condition: DependencyCondition::ServiceStarted,
                 }],
                 readiness: None,
+                failure_policy: ServiceFailurePolicy::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
             },
@@ -797,6 +809,7 @@ mod tests {
                         condition: DependencyCondition::ServiceStarted,
                     }],
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                 },
@@ -815,6 +828,7 @@ mod tests {
                         condition: DependencyCondition::ServiceStarted,
                     }],
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                 },
@@ -975,5 +989,183 @@ mod tests {
                 (&"redis".to_string(), DependencyCondition::ServiceHealthy),
             ]
         );
+    }
+
+    #[test]
+    fn build_plan_normalizes_failure_policy_defaults_and_overrides() {
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([
+                ("default".into(), service("redis:7")),
+                (
+                    "restart-defaults".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            failure_policy: Some(ServiceFailurePolicySpec {
+                                mode: ServiceFailureMode::RestartOnFailure,
+                                max_restarts: None,
+                                backoff_seconds: None,
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "restart-custom".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            failure_policy: Some(ServiceFailurePolicySpec {
+                                mode: ServiceFailureMode::RestartOnFailure,
+                                max_restarts: Some(7),
+                                backoff_seconds: Some(9),
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "ignore".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            failure_policy: Some(ServiceFailurePolicySpec {
+                                mode: ServiceFailureMode::Ignore,
+                                max_restarts: None,
+                                backoff_seconds: None,
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+            ]),
+        };
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+        let plan = build_plan(&compose, spec).expect("plan");
+        let by_name = plan
+            .ordered_services
+            .iter()
+            .map(|service| (service.name.as_str(), service.failure_policy.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            by_name.get("default"),
+            Some(&ServiceFailurePolicy::default())
+        );
+        assert_eq!(
+            by_name.get("restart-defaults"),
+            Some(&ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 3,
+                backoff_seconds: 5,
+            })
+        );
+        assert_eq!(
+            by_name.get("restart-custom"),
+            Some(&ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 7,
+                backoff_seconds: 9,
+            })
+        );
+        assert_eq!(
+            by_name.get("ignore"),
+            Some(&ServiceFailurePolicy {
+                mode: ServiceFailureMode::Ignore,
+                max_restarts: 0,
+                backoff_seconds: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn build_plan_rejects_invalid_failure_policy_combinations() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let invalid_non_restart = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        failure_policy: Some(ServiceFailurePolicySpec {
+                            mode: ServiceFailureMode::FailJob,
+                            max_restarts: Some(2),
+                            backoff_seconds: None,
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("redis:7")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, invalid_non_restart).expect_err("invalid fail_job policy");
+        assert!(
+            err.to_string()
+                .contains("only valid when mode is restart_on_failure")
+        );
+
+        let invalid_restart = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        failure_policy: Some(ServiceFailurePolicySpec {
+                            mode: ServiceFailureMode::RestartOnFailure,
+                            max_restarts: Some(0),
+                            backoff_seconds: Some(5),
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("redis:7")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, invalid_restart).expect_err("invalid restart policy");
+        assert!(err.to_string().contains("max_restarts"));
+    }
+
+    #[test]
+    fn build_plan_rejects_dependencies_on_ignore_services() {
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([
+                (
+                    "app".into(),
+                    ServiceSpec {
+                        depends_on: DependsOnSpec::List(vec!["sidecar".into()]),
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "sidecar".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            failure_policy: Some(ServiceFailurePolicySpec {
+                                mode: ServiceFailureMode::Ignore,
+                                max_restarts: None,
+                                backoff_seconds: None,
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+            ]),
+        };
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+        let err = build_plan(&compose, spec).expect_err("ignore dependency");
+        assert!(err.to_string().contains("cannot be depended on"));
     }
 }

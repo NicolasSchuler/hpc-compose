@@ -24,8 +24,8 @@ const SUBMISSION_SCHEMA_VERSION: u32 = 1;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS: u64 = 15;
 const ACCOUNTING_GAP_GRACE_SECONDS: u64 = 15;
-const ARTIFACT_MANIFEST_SCHEMA_VERSION: u32 = 2;
-const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 1;
+const ARTIFACT_MANIFEST_SCHEMA_VERSION: u32 = 3;
+const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 2;
 
 /// Metadata persisted for a submitted job tracked under `.hpc-compose/`.
 #[allow(missing_docs)]
@@ -42,6 +42,8 @@ pub struct SubmissionRecord {
     pub service_logs: BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub artifact_export_dir: Option<String>,
+    #[serde(default)]
+    pub resume_dir: Option<PathBuf>,
 }
 
 /// Source used to determine scheduler state.
@@ -76,6 +78,14 @@ pub struct ServiceLogStatus {
     pub present: bool,
     pub updated_at: Option<u64>,
     pub updated_age_seconds: Option<u64>,
+    #[serde(default)]
+    pub failure_policy_mode: Option<String>,
+    #[serde(default)]
+    pub restart_count: Option<u32>,
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    #[serde(default)]
+    pub last_exit_code: Option<i32>,
 }
 
 /// Presence and freshness information for the top-level batch log.
@@ -97,6 +107,9 @@ pub struct StatusSnapshot {
     pub log_dir: PathBuf,
     pub batch_log: BatchLogStatus,
     pub services: Vec<ServiceLogStatus>,
+    pub attempt: Option<u32>,
+    pub is_resume: Option<bool>,
+    pub resume_dir: Option<PathBuf>,
 }
 
 /// Combined metrics and scheduler view returned by the `stats` command.
@@ -113,6 +126,9 @@ pub struct StatsSnapshot {
     pub notes: Vec<String>,
     pub sampler: Option<SamplerSnapshot>,
     pub steps: Vec<StepStats>,
+    pub attempt: Option<u32>,
+    pub is_resume: Option<bool>,
+    pub resume_dir: Option<PathBuf>,
 }
 
 /// Manifest produced when teardown exports tracked artifacts.
@@ -125,6 +141,12 @@ pub struct ArtifactManifest {
     pub collect_policy: String,
     pub collected_at: String,
     pub job_outcome: String,
+    #[serde(default)]
+    pub attempt: Option<u32>,
+    #[serde(default)]
+    pub is_resume: Option<bool>,
+    #[serde(default)]
+    pub resume_dir: Option<PathBuf>,
     #[serde(default)]
     pub declared_source_patterns: Vec<String>,
     #[serde(default)]
@@ -197,6 +219,9 @@ pub struct ArtifactEntryMetadata {
 pub struct ArtifactBundleProvenance {
     pub schema_version: u32,
     pub job_id: String,
+    pub attempt: Option<u32>,
+    pub is_resume: Option<bool>,
+    pub resume_dir: Option<PathBuf>,
     pub bundle: String,
     pub compose_file: PathBuf,
     pub script_path: PathBuf,
@@ -405,6 +430,31 @@ struct LogCursor {
     pending: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ServiceRuntimeStateFile {
+    #[serde(default)]
+    attempt: Option<u32>,
+    #[serde(default)]
+    is_resume: Option<bool>,
+    #[serde(default)]
+    resume_dir: Option<PathBuf>,
+    #[serde(default)]
+    services: Vec<ServiceRuntimeStateEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ServiceRuntimeStateEntry {
+    service_name: String,
+    #[serde(default)]
+    failure_policy_mode: Option<String>,
+    #[serde(default)]
+    restart_count: Option<u32>,
+    #[serde(default)]
+    max_restarts: Option<u32>,
+    #[serde(default)]
+    last_exit_code: Option<i32>,
+}
+
 /// Returns the `.hpc-compose` metadata directory for a compose file.
 pub fn metadata_root_for(spec_path: &Path) -> PathBuf {
     let parent = match spec_path.parent() {
@@ -475,6 +525,7 @@ pub fn build_submission_record(
             .artifacts
             .as_ref()
             .and_then(|artifacts| artifacts.export_dir.clone()),
+        resume_dir: plan.slurm.resume_dir().map(PathBuf::from),
     })
 }
 
@@ -614,15 +665,24 @@ pub fn build_status_snapshot(
     );
     let now = unix_timestamp_now();
     let batch_log = build_batch_log_status(&record.batch_log, now);
+    let runtime_state = load_runtime_state(&record);
+    let runtime_state_by_service = runtime_state.as_ref().map(runtime_state_by_service);
     let mut services = Vec::with_capacity(record.service_logs.len());
     for (service_name, path) in &record.service_logs {
         let log_status = build_log_status(path, now);
+        let runtime_state = runtime_state_by_service
+            .as_ref()
+            .and_then(|state| state.get(service_name));
         services.push(ServiceLogStatus {
             service_name: service_name.clone(),
             path: path.clone(),
             present: log_status.present,
             updated_age_seconds: log_status.updated_age_seconds,
             updated_at: log_status.updated_at,
+            failure_policy_mode: runtime_state.and_then(|state| state.failure_policy_mode.clone()),
+            restart_count: runtime_state.and_then(|state| state.restart_count),
+            max_restarts: runtime_state.and_then(|state| state.max_restarts),
+            last_exit_code: runtime_state.and_then(|state| state.last_exit_code),
         });
     }
     Ok(StatusSnapshot {
@@ -631,7 +691,31 @@ pub fn build_status_snapshot(
         record,
         scheduler,
         services,
+        attempt: runtime_state.as_ref().and_then(|state| state.attempt),
+        is_resume: runtime_state.as_ref().and_then(|state| state.is_resume),
+        resume_dir: runtime_state
+            .as_ref()
+            .and_then(|state| state.resume_dir.clone()),
     })
+}
+
+fn load_runtime_state(record: &SubmissionRecord) -> Option<ServiceRuntimeStateFile> {
+    let state_path = record
+        .submit_dir
+        .join(".hpc-compose")
+        .join(&record.job_id)
+        .join("state.json");
+    read_json::<ServiceRuntimeStateFile>(&state_path).ok()
+}
+
+fn runtime_state_by_service(
+    state: &ServiceRuntimeStateFile,
+) -> BTreeMap<String, ServiceRuntimeStateEntry> {
+    let mut by_service = BTreeMap::new();
+    for service in &state.services {
+        by_service.insert(service.service_name.clone(), service.clone());
+    }
+    by_service
 }
 
 /// Builds the tracked metrics snapshot used by `hpc-compose stats`.
@@ -662,6 +746,7 @@ pub fn build_stats_snapshot(
         raw_scheduler
     };
     let metrics_dir = record.as_ref().map(metrics_dir_for_record);
+    let runtime_state = record.as_ref().and_then(load_runtime_state);
     let SamplerLoadOutcome { sampler, mut notes } = if let Some(metrics_dir) = metrics_dir.as_ref()
     {
         load_sampler_snapshot(metrics_dir)
@@ -736,6 +821,11 @@ pub fn build_stats_snapshot(
         notes,
         sampler,
         steps,
+        attempt: runtime_state.as_ref().and_then(|state| state.attempt),
+        is_resume: runtime_state.as_ref().and_then(|state| state.is_resume),
+        resume_dir: runtime_state
+            .as_ref()
+            .and_then(|state| state.resume_dir.clone()),
     })
 }
 
@@ -959,6 +1049,9 @@ pub fn export_artifacts(
         let provenance = ArtifactBundleProvenance {
             schema_version: ARTIFACT_PROVENANCE_SCHEMA_VERSION,
             job_id: record.job_id.clone(),
+            attempt: manifest.attempt,
+            is_resume: manifest.is_resume,
+            resume_dir: manifest.resume_dir.clone(),
             bundle: bundle_name.clone(),
             compose_file: record.compose_file.clone(),
             script_path: record.script_path.clone(),
@@ -2178,7 +2271,7 @@ mod tests {
     use super::*;
     use crate::planner::{ExecutionSpec, ImageSource};
     use crate::prepare::RuntimeService;
-    use crate::spec::{ServiceSlurmConfig, SlurmConfig};
+    use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig};
 
     fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
         RuntimePlan {
@@ -2195,6 +2288,7 @@ mod tests {
                     working_dir: None,
                     depends_on: Vec::new(),
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://redis:7".into()),
@@ -2208,6 +2302,7 @@ mod tests {
                     working_dir: None,
                     depends_on: Vec::new(),
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://python:3.11-slim".into()),
@@ -2330,6 +2425,7 @@ mod tests {
             batch_log,
             service_logs: BTreeMap::new(),
             artifact_export_dir: None,
+            resume_dir: None,
         };
         assert_eq!(
             log_dir_for_record(&fallback_record),
@@ -2388,6 +2484,24 @@ mod tests {
         for path in record.service_logs.values() {
             fs::write(path, "line one\nline two\n").expect("service log");
         }
+        fs::write(
+            tmpdir.path().join(".hpc-compose/12345/state.json"),
+            r#"{
+  "attempt": 1,
+  "is_resume": true,
+  "resume_dir": "/shared/runs/demo",
+  "services": [
+    {
+      "service_name": "api",
+      "failure_policy_mode": "restart_on_failure",
+      "restart_count": 1,
+      "max_restarts": 3,
+      "last_exit_code": 0
+    }
+  ]
+}"#,
+        )
+        .expect("state");
 
         let squeue = tmpdir.path().join("squeue");
         let sacct = tmpdir.path().join("sacct");
@@ -2404,8 +2518,35 @@ mod tests {
         )
         .expect("status snapshot");
         assert_eq!(snapshot.scheduler.state, "RUNNING");
+        assert_eq!(snapshot.attempt, Some(1));
+        assert_eq!(snapshot.is_resume, Some(true));
+        assert_eq!(
+            snapshot.resume_dir,
+            Some(PathBuf::from("/shared/runs/demo"))
+        );
         assert!(snapshot.batch_log.present);
         assert_eq!(snapshot.services.len(), 2);
+        let api = snapshot
+            .services
+            .iter()
+            .find(|service| service.service_name == "api")
+            .expect("api");
+        assert_eq!(
+            api.failure_policy_mode.as_deref(),
+            Some("restart_on_failure")
+        );
+        assert_eq!(api.restart_count, Some(1));
+        assert_eq!(api.max_restarts, Some(3));
+        assert_eq!(api.last_exit_code, Some(0));
+        let worker = snapshot
+            .services
+            .iter()
+            .find(|service| service.service_name == "worker")
+            .expect("worker");
+        assert!(worker.failure_policy_mode.is_none());
+        assert!(worker.restart_count.is_none());
+        assert!(worker.max_restarts.is_none());
+        assert!(worker.last_exit_code.is_none());
 
         let selected = selected_service_logs(&record, Some("api")).expect("selected");
         assert_eq!(selected.len(), 1);
@@ -2413,6 +2554,74 @@ mod tests {
         assert!(err.to_string().contains("service 'missing'"));
 
         print_logs(&record, Some("api"), 1, false).expect("print logs");
+    }
+
+    #[test]
+    fn status_snapshot_tolerates_missing_or_legacy_state_files() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let plan = runtime_plan(tmpdir.path());
+        let record = persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+        fs::create_dir_all(log_dir_for_record(&record)).expect("log dir");
+        fs::write(&record.batch_log, "batch\n").expect("batch log");
+        for path in record.service_logs.values() {
+            fs::write(path, "line one\n").expect("service log");
+        }
+        let squeue = tmpdir.path().join("squeue");
+        let sacct = tmpdir.path().join("sacct");
+        write_script(&squeue, "#!/bin/bash\necho RUNNING\n");
+        write_script(&sacct, "#!/bin/bash\nexit 0\n");
+
+        let missing_state = build_status_snapshot(
+            &compose,
+            None,
+            &SchedulerOptions {
+                squeue_bin: squeue.display().to_string(),
+                sacct_bin: sacct.display().to_string(),
+            },
+        )
+        .expect("status missing state");
+        assert!(
+            missing_state
+                .services
+                .iter()
+                .all(|service| service.failure_policy_mode.is_none()
+                    && service.restart_count.is_none()
+                    && service.max_restarts.is_none()
+                    && service.last_exit_code.is_none())
+        );
+
+        fs::write(
+            tmpdir.path().join(".hpc-compose/12345/state.json"),
+            r#"{"services":[{"service_name":"api"}]}"#,
+        )
+        .expect("legacy state");
+        let legacy_state = build_status_snapshot(
+            &compose,
+            None,
+            &SchedulerOptions {
+                squeue_bin: squeue.display().to_string(),
+                sacct_bin: sacct.display().to_string(),
+            },
+        )
+        .expect("status legacy state");
+        let api = legacy_state
+            .services
+            .iter()
+            .find(|service| service.service_name == "api")
+            .expect("api");
+        assert!(api.failure_policy_mode.is_none());
+        assert!(api.restart_count.is_none());
+        assert!(api.max_restarts.is_none());
+        assert!(api.last_exit_code.is_none());
     }
 
     #[test]
@@ -2904,6 +3113,9 @@ services:
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
                 job_outcome: "success".into(),
+                attempt: None,
+                is_resume: None,
+                resume_dir: None,
                 declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
                 matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
                 copied_relative_paths: vec!["metrics/meta.json".into()],
@@ -2987,6 +3199,9 @@ services:
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
                 job_outcome: "success".into(),
+                attempt: None,
+                is_resume: None,
+                resume_dir: None,
                 declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
                 matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
                 copied_relative_paths: vec!["metrics/meta.json".into()],
@@ -3063,6 +3278,9 @@ services:
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
                 job_outcome: "success".into(),
+                attempt: None,
+                is_resume: None,
+                resume_dir: None,
                 declared_source_patterns: vec!["/hpc-compose/job/checkpoints/**".into()],
                 matched_source_paths: vec![
                     "/hpc-compose/job/checkpoints/step-1.bin".into(),
@@ -3198,6 +3416,9 @@ services:
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
                 job_outcome: "success".into(),
+                attempt: None,
+                is_resume: None,
+                resume_dir: None,
                 declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
                 matched_source_paths: vec!["/hpc-compose/job/metrics/missing.json".into()],
                 copied_relative_paths: vec!["metrics/missing.json".into()],
@@ -3230,6 +3451,9 @@ services:
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
                 job_outcome: "success".into(),
+                attempt: None,
+                is_resume: None,
+                resume_dir: None,
                 declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
                 matched_source_paths: vec!["/hpc-compose/job/metrics/missing.json".into()],
                 copied_relative_paths: vec!["metrics/missing.json".into()],
@@ -3313,6 +3537,9 @@ services:
                 collect_policy: "always".into(),
                 collected_at: "2026-04-05T10:00:00Z".into(),
                 job_outcome: "success".into(),
+                attempt: None,
+                is_resume: None,
+                resume_dir: None,
                 declared_source_patterns: vec![
                     "/hpc-compose/job/logs/**".into(),
                     "/hpc-compose/job/metrics/**".into(),

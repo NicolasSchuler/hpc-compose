@@ -350,7 +350,7 @@ mod tests {
     use super::*;
     use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
     use crate::prepare::RuntimeService;
-    use crate::spec::ServiceSlurmConfig;
+    use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig};
 
     fn runtime_service() -> RuntimeService {
         RuntimeService {
@@ -362,6 +362,7 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: Some(PreparedImageSpec {
                 commands: vec!["apt-get update".into()],
@@ -551,6 +552,7 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: ImageSource::LocalSqsh(PathBuf::from("/tmp/local.sqsh")),

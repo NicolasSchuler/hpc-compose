@@ -28,6 +28,7 @@ hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$US
 | [`llama-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker.yaml) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server + mounted worker pattern |
 | [`minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) | Single service, no dependencies, no GPU, no prepare | You want the simplest possible starting point |
 | [`training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) | GPU training with checkpoints written to shared storage | You need a batch training workflow with artifact collection |
+| [`training-resume.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-resume.yaml) | GPU training with a shared resume directory and attempt-aware checkpoints | You need restart-safe checkpoint semantics across requeues or repeated submissions |
 | [`postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
 | [`vllm-openai.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-openai.yaml) | vLLM serving with an in-job Python client | You want vLLM-based inference instead of llama.cpp |
 | [`vllm-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-uv-worker.yaml) | vLLM serving plus a source-mounted Python worker executed through `uv` | You want a common LLM stack with mounted app code |
@@ -41,6 +42,7 @@ hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$US
 - Start with [`dev-python-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/dev-python-app.yaml) if you want a source-mounted development loop.
 - Start with [`llm-curl-workflow-workdir.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow-workdir.yaml) if you want the fastest real-cluster GPU inference example.
 - Start with [`training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) if you need a GPU training job with checkpoint output.
+- Start with [`training-resume.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-resume.yaml) if you need resume-aware checkpoints on shared storage.
 - Start with [`app-redis-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/app-redis-worker.yaml) or [`postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) if your workload depends on multi-service startup ordering.
 
 Companion notes for the more involved examples live alongside the example assets:

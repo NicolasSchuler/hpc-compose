@@ -60,6 +60,11 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/training-checkpoints.yaml"),
     },
     Template {
+        name: "training-resume",
+        description: "GPU training with a shared resume directory and attempt-aware checkpoints.",
+        body: include_str!("../examples/training-resume.yaml"),
+    },
+    Template {
         name: "postgres-etl",
         description: "PostgreSQL plus a Python data processing job.",
         body: include_str!("../examples/postgres-etl.yaml"),

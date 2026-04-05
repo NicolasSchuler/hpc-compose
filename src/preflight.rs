@@ -229,6 +229,7 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
     check_cache_path_policy(&mut report, plan);
     check_cache_dir_access(&mut report, &plan.cache_dir);
     check_local_and_mount_paths(&mut report, plan);
+    check_resume_path(&mut report, plan);
     check_registry_credentials(&mut report, plan);
     check_readiness_host_tools(&mut report, plan);
     check_metrics_collectors(&mut report, plan);
@@ -422,6 +423,37 @@ fn check_local_and_mount_paths(report: &mut Report, plan: &RuntimePlan) {
             }
         }
     }
+}
+
+fn check_resume_path(report: &mut Report, plan: &RuntimePlan) {
+    let Some(resume_dir) = plan.slurm.resume_dir() else {
+        return;
+    };
+
+    let resume_path = Path::new(resume_dir);
+    if resume_path.starts_with("/tmp") || resume_path.starts_with("/var/tmp") {
+        report.items.push(Item {
+            level: Level::Warn,
+            message: format!(
+                "resume directory uses a node-local temporary root and may not survive requeue/resume safely: {}",
+                resume_path.display()
+            ),
+            remediation: Some(
+                "Use a shared filesystem path such as /shared/$USER/... for x-slurm.resume.path."
+                    .to_string(),
+            ),
+        });
+        return;
+    }
+
+    report.items.push(Item {
+        level: Level::Ok,
+        message: format!(
+            "resume directory is configured on host storage: {}",
+            resume_path.display()
+        ),
+        remediation: None,
+    });
 }
 
 fn check_mount_path(report: &mut Report, service_name: &str, mount: &str, kind: &str) {
@@ -751,7 +783,8 @@ mod tests {
     use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
     use crate::prepare::RuntimeService;
     use crate::spec::{
-        MetricsCollector, MetricsConfig, ReadinessSpec, ServiceSlurmConfig, SlurmConfig,
+        MetricsCollector, MetricsConfig, ReadinessSpec, ServiceFailurePolicy, ServiceSlurmConfig,
+        SlurmConfig,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -773,6 +806,7 @@ mod tests {
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                failure_policy: ServiceFailurePolicy::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: Some(PreparedImageSpec {
                     commands: vec!["echo prep".into()],
@@ -1002,6 +1036,7 @@ mod tests {
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                failure_policy: ServiceFailurePolicy::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: Some(PreparedImageSpec {
                     commands: vec!["echo prep".into()],
@@ -1022,6 +1057,32 @@ mod tests {
     }
 
     #[test]
+    fn resume_path_reports_ok_and_temp_root_warning() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.resume = Some(crate::spec::ResumeConfig {
+            path: "/shared/runs/demo".into(),
+        });
+
+        let mut report = Report { items: Vec::new() };
+        check_resume_path(&mut report, &plan);
+        assert!(
+            report
+                .render_verbose()
+                .contains("resume directory is configured on host storage")
+        );
+
+        plan.slurm.resume = Some(crate::spec::ResumeConfig {
+            path: "/tmp/demo".into(),
+        });
+        let mut report = Report { items: Vec::new() };
+        check_resume_path(&mut report, &plan);
+        let text = report.render();
+        assert!(text.contains("node-local temporary root"));
+        assert!(text.contains("x-slurm.resume.path"));
+    }
+
+    #[test]
     fn skip_prepare_skips_local_services_without_prepare() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let local = tmpdir.path().join("local.sqsh");
@@ -1039,6 +1100,7 @@ mod tests {
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                failure_policy: ServiceFailurePolicy::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
                 source: ImageSource::LocalSqsh(local),
@@ -1199,6 +1261,7 @@ mod tests {
                     working_dir: None,
                     depends_on: Vec::new(),
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://redis:7".into()),
@@ -1212,6 +1275,7 @@ mod tests {
                     working_dir: None,
                     depends_on: Vec::new(),
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://nvcr.io/nvidia/pytorch:24.01-py3".into()),
@@ -1225,6 +1289,7 @@ mod tests {
                     working_dir: None,
                     depends_on: Vec::new(),
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote(
@@ -1240,6 +1305,7 @@ mod tests {
                     working_dir: None,
                     depends_on: Vec::new(),
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://ghcr.io/example/private:latest".into()),
@@ -1253,6 +1319,7 @@ mod tests {
                     working_dir: None,
                     depends_on: Vec::new(),
                     readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::LocalSqsh(tmpdir.path().join("local.sqsh")),

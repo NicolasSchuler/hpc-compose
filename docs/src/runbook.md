@@ -50,6 +50,7 @@ For a new spec on a real cluster:
 | llama.cpp + uv worker | llama.cpp serving plus a source-mounted Python worker run through `uv` | [`examples/llama-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker.yaml) |
 | Minimal batch | simplest single-service batch job | [`examples/minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) |
 | Training checkpoints | GPU training with checkpoints to shared storage | [`examples/training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) |
+| Training resume | GPU training with a shared resume directory and attempt-aware checkpoints | [`examples/training-resume.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-resume.yaml) |
 | Postgres ETL | PostgreSQL plus a Python data processing job | [`examples/postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) |
 | vLLM serving | vLLM with an in-job Python client | [`examples/vllm-openai.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-openai.yaml) |
 | vLLM + uv worker | vLLM serving with a source-mounted Python worker run through `uv` | [`examples/vllm-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-uv-worker.yaml) |
@@ -251,7 +252,7 @@ hpc-compose logs -f compose.yaml
 hpc-compose logs -f compose.yaml --service app --follow
 ```
 
-`status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created.
+`status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created. When `services.<name>.x-slurm.failure_policy` is used, `status` includes per-service policy state (`failure_policy`, restart counters, and last exit code) from tracked runtime state.
 
 `stats` now prefers sampler data from `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` when `x-slurm.metrics` is enabled. In v1 that sampler can collect:
 
@@ -299,6 +300,15 @@ Slurm may also write a top-level batch log such as `slurm-<jobid>.out`, or to th
 Service names containing non-alphanumeric characters are encoded in the log filename. For example, a service named `my.app` produces `my_x2e_app.log`. Prefer `[a-zA-Z0-9_-]` in service names for readability.
 
 If you used `--script-out`, keep that script with the job logs when debugging cluster behavior.
+
+When `x-slurm.resume` is enabled, `hpc-compose` also:
+
+- mounts the shared resume path into every service at `/hpc-compose/resume`,
+- injects `HPC_COMPOSE_RESUME_DIR`, `HPC_COMPOSE_ATTEMPT`, and `HPC_COMPOSE_IS_RESUME`,
+- writes attempt-specific runtime outputs under `.hpc-compose/<jobid>/attempts/<attempt>/`,
+- keeps `.hpc-compose/<jobid>/{logs,metrics,artifacts,state.json}` pointed at the latest attempt for compatibility.
+
+Use the shared resume directory for the canonical checkpoint a restarted run should load next. Treat exported artifacts as retrieval and provenance output after the attempt finishes, not as the primary live resume source.
 
 ## 10. Inspect and prune cache artifacts
 

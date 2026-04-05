@@ -169,8 +169,59 @@ exit 0
     path
 }
 
+fn write_fake_srun_failure_policy(tmpdir: &Path) -> PathBuf {
+    let path = tmpdir.join("srun");
+    write_script(
+        &path,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+job_name=""
+for arg in "$@"; do
+  case "$arg" in
+    --job-name=*)
+      job_name="${arg#--job-name=}"
+      break
+      ;;
+  esac
+done
+state_root="${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/fake-srun"
+mkdir -p "$state_root"
+key="$(printf '%s' "$job_name" | tr -c 'A-Za-z0-9._-' '_')"
+count_file="$state_root/${key}.count"
+count=0
+if [[ -f "$count_file" ]]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+echo "$count" > "$count_file"
+case "$job_name" in
+  hpc-compose:app)
+    if (( count == 1 )); then
+      exit 41
+    fi
+    exit 0
+    ;;
+  hpc-compose:sidecar)
+    exit 42
+    ;;
+  hpc-compose:flaky)
+    exit 43
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+    );
+    path
+}
+
 fn write_fake_srun_failure(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("srun-fail");
+    let path = tmpdir.join("srun");
     write_script(
         &path,
         r#"#!/bin/bash
@@ -209,6 +260,26 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_SUBMIT_DIR="$PWD"
 bash "$script_path" >/dev/null 2>&1
+echo "Submitted batch job 12345"
+"#,
+            tmpdir.display()
+        ),
+    );
+    path
+}
+
+fn write_fake_sbatch_runs_script_with_job_output(tmpdir: &Path) -> PathBuf {
+    let path = tmpdir.join("sbatch-run-script-with-output");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+script_path="${{1:?missing script path}}"
+PATH="{}:$PATH"
+export SLURM_JOB_ID=12345
+export SLURM_SUBMIT_DIR="$PWD"
+bash "$script_path"
 echo "Submitted batch job 12345"
 "#,
             tmpdir.display()
@@ -469,7 +540,7 @@ x-slurm:
   time: "00:10:00"
   cache_dir: {}
   metrics:
-    interval_seconds: 1
+    interval_seconds: 60
 services:
   app:
     image: python:3.11-slim
@@ -938,6 +1009,227 @@ fn submit_skip_prepare_reuses_existing_artifact() {
     assert_success(&submit);
     assert!(!stdout_text(&submit).contains("BUILD service 'app' runtime image"));
     assert!(stdout_text(&submit).contains("Submitted batch job 12345"));
+}
+
+#[test]
+fn submit_restart_on_failure_restarts_once_and_status_reports_state() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 3
+        backoff_seconds: 1
+"#,
+            local_image.display()
+        ),
+    );
+    let srun = write_fake_srun_failure_policy(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    assert!(stdout_text(&submit).contains("Submitted batch job 12345"));
+
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status);
+    let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    let app = payload["services"]
+        .as_array()
+        .expect("services")
+        .iter()
+        .find(|service| service["service_name"] == "app")
+        .expect("app service");
+    assert_eq!(app["failure_policy_mode"], "restart_on_failure");
+    assert_eq!(app["restart_count"], 1);
+    assert_eq!(app["max_restarts"], 3);
+    assert_eq!(app["last_exit_code"], 0);
+}
+
+#[test]
+fn submit_ignore_policy_allows_job_success_with_failed_sidecar() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  main:
+    image: {}
+    command: /bin/true
+  sidecar:
+    image: {}
+    command: /bin/false
+    x-slurm:
+      failure_policy:
+        mode: ignore
+"#,
+            local_image.display(),
+            local_image.display()
+        ),
+    );
+    let srun = write_fake_srun_failure_policy(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    assert!(stdout_text(&submit).contains("Submitted batch job 12345"));
+
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status);
+    let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    let sidecar = payload["services"]
+        .as_array()
+        .expect("services")
+        .iter()
+        .find(|service| service["service_name"] == "sidecar")
+        .expect("sidecar service");
+    assert_eq!(sidecar["failure_policy_mode"], "ignore");
+    assert_eq!(sidecar["last_exit_code"], 42);
+}
+
+#[test]
+fn submit_restart_on_failure_exhausted_retries_fails_job() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  flaky:
+    image: {}
+    command: /bin/false
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 1
+        backoff_seconds: 1
+"#,
+            local_image.display()
+        ),
+    );
+    let srun = write_fake_srun_failure_policy(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script_with_job_output(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&submit);
+    let combined = format!("{}\n{}", stdout_text(&submit), stderr_text(&submit));
+    assert!(combined.contains("after 1/1 restarts"));
+}
+
+#[test]
+fn validate_rejects_dependency_on_ignore_service() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+services:
+  app:
+    image: redis:7
+    depends_on:
+      - sidecar
+  sidecar:
+    image: redis:7
+    x-slurm:
+      failure_policy:
+        mode: ignore
+"#,
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    assert!(stderr_text(&validate).contains("cannot be depended on"));
 }
 
 #[test]

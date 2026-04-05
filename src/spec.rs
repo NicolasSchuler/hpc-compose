@@ -75,6 +75,8 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub artifacts: Option<ArtifactsConfig>,
     #[serde(default)]
+    pub resume: Option<ResumeConfig>,
+    #[serde(default)]
     pub setup: Vec<String>,
     #[serde(default)]
     pub submit_args: Vec<String>,
@@ -106,6 +108,14 @@ pub struct ArtifactsConfig {
     pub paths: Vec<String>,
     #[serde(default)]
     pub bundles: BTreeMap<String, ArtifactBundleSpec>,
+}
+
+/// Top-level `x-slurm.resume` configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeConfig {
+    pub path: String,
 }
 
 /// Named artifact bundle under `x-slurm.artifacts.bundles`.
@@ -180,6 +190,63 @@ pub struct ServiceSlurmConfig {
     pub gres: Option<String>,
     #[serde(default)]
     pub extra_srun_args: Vec<String>,
+    #[serde(default)]
+    pub failure_policy: Option<ServiceFailurePolicySpec>,
+}
+
+/// Per-service failure mode inside a single batch job.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceFailureMode {
+    /// Any non-zero service exit fails the whole job.
+    #[default]
+    FailJob,
+    /// Non-zero exits are recorded but do not fail the whole job.
+    Ignore,
+    /// Non-zero exits trigger bounded restarts before failing the job.
+    RestartOnFailure,
+}
+
+/// Raw per-service failure policy declaration under `x-slurm.failure_policy`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceFailurePolicySpec {
+    #[serde(default)]
+    pub mode: ServiceFailureMode,
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    #[serde(default)]
+    pub backoff_seconds: Option<u64>,
+}
+
+impl Default for ServiceFailurePolicySpec {
+    fn default() -> Self {
+        Self {
+            mode: ServiceFailureMode::FailJob,
+            max_restarts: None,
+            backoff_seconds: None,
+        }
+    }
+}
+
+/// Normalized per-service failure policy with defaults resolved.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceFailurePolicy {
+    pub mode: ServiceFailureMode,
+    pub max_restarts: u32,
+    pub backoff_seconds: u64,
+}
+
+impl Default for ServiceFailurePolicy {
+    fn default() -> Self {
+        Self {
+            mode: ServiceFailureMode::FailJob,
+            max_restarts: 0,
+            backoff_seconds: 0,
+        }
+    }
 }
 
 /// Per-service `x-enroot` configuration.
@@ -555,6 +622,11 @@ impl SlurmConfig {
             .unwrap_or_default()
     }
 
+    /// Returns the configured shared resume directory when resume semantics are enabled.
+    pub fn resume_dir(&self) -> Option<&str> {
+        self.resume.as_ref().map(|resume| resume.path.as_str())
+    }
+
     /// Validates semantic rules that serde alone cannot express.
     pub fn validate(&self) -> Result<()> {
         if let Some(metrics) = &self.metrics
@@ -589,6 +661,9 @@ impl SlurmConfig {
                 }
             }
         }
+        if let Some(resume) = &self.resume {
+            validate_resume_path(&resume.path)?;
+        }
         Ok(())
     }
 
@@ -607,6 +682,9 @@ impl SlurmConfig {
         interpolate_optional_string(&mut self.cache_dir, vars)?;
         if let Some(artifacts) = &mut self.artifacts {
             artifacts.interpolate(vars)?;
+        }
+        if let Some(resume) = &mut self.resume {
+            resume.interpolate(vars)?;
         }
         interpolate_vec_strings(&mut self.submit_args, vars)?;
         Ok(())
@@ -639,6 +717,13 @@ impl ArtifactsConfig {
         for bundle in self.bundles.values_mut() {
             interpolate_vec_strings(&mut bundle.paths, vars)?;
         }
+        Ok(())
+    }
+}
+
+impl ResumeConfig {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        self.path = interpolate_string(&self.path, vars)?;
         Ok(())
     }
 }
@@ -704,6 +789,50 @@ impl ServiceSpec {
 }
 
 impl ServiceSlurmConfig {
+    /// Returns the validated per-service failure policy with defaults resolved.
+    pub fn normalized_failure_policy(&self, service_name: &str) -> Result<ServiceFailurePolicy> {
+        const DEFAULT_MAX_RESTARTS: u32 = 3;
+        const DEFAULT_BACKOFF_SECONDS: u64 = 5;
+
+        let Some(policy) = &self.failure_policy else {
+            return Ok(ServiceFailurePolicy::default());
+        };
+
+        match policy.mode {
+            ServiceFailureMode::FailJob | ServiceFailureMode::Ignore => {
+                if policy.max_restarts.is_some() || policy.backoff_seconds.is_some() {
+                    bail!(
+                        "service '{service_name}' sets x-slurm.failure_policy.max_restarts/backoff_seconds, but those fields are only valid when mode is restart_on_failure"
+                    );
+                }
+                Ok(ServiceFailurePolicy {
+                    mode: policy.mode,
+                    max_restarts: 0,
+                    backoff_seconds: 0,
+                })
+            }
+            ServiceFailureMode::RestartOnFailure => {
+                let max_restarts = policy.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS);
+                let backoff_seconds = policy.backoff_seconds.unwrap_or(DEFAULT_BACKOFF_SECONDS);
+                if max_restarts == 0 {
+                    bail!(
+                        "service '{service_name}' sets x-slurm.failure_policy.max_restarts to 0; use a value of at least 1"
+                    );
+                }
+                if backoff_seconds == 0 {
+                    bail!(
+                        "service '{service_name}' sets x-slurm.failure_policy.backoff_seconds to 0; use a value of at least 1"
+                    );
+                }
+                Ok(ServiceFailurePolicy {
+                    mode: policy.mode,
+                    max_restarts,
+                    backoff_seconds,
+                })
+            }
+        }
+    }
+
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         interpolate_optional_string(&mut self.gres, vars)?;
         interpolate_vec_strings(&mut self.extra_srun_args, vars)?;
@@ -1123,6 +1252,42 @@ fn validate_artifact_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_resume_path(path: &str) -> Result<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        bail!("x-slurm.resume.path must not be empty");
+    }
+
+    let candidate = Path::new(trimmed);
+    if !candidate.is_absolute() {
+        bail!("x-slurm.resume.path must be an absolute host path, got '{path}'");
+    }
+
+    let mut normalized = Vec::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop().context(format!(
+                    "x-slurm.resume.path entry '{path}' escapes the root path"
+                ))?;
+            }
+            std::path::Component::Normal(part) => {
+                normalized.push(part.to_string_lossy().into_owned())
+            }
+            std::path::Component::Prefix(_) => {
+                bail!("x-slurm.resume.path '{path}' must use Unix-style absolute paths");
+            }
+        }
+    }
+
+    if normalized.first().map(String::as_str) == Some("hpc-compose") {
+        bail!("x-slurm.resume.path must be a host path, not a container-visible /hpc-compose path");
+    }
+    Ok(())
+}
+
 fn validate_root(value: &Value) -> Result<()> {
     let Some(root) = value.as_mapping() else {
         bail!("top-level YAML document must be a mapping");
@@ -1168,7 +1333,9 @@ fn validate_mapping_keys(scope: &str, mapping: &Mapping, allowed: &[&str]) -> Re
             "networks" | "network_mode" => {
                 "custom container networking is not supported under this Slurm/Enroot execution model"
             }
-            "restart" => "restart policies are not supported inside a batch job",
+            "restart" => {
+                "Compose restart policies are not supported; use services.<name>.x-slurm.failure_policy instead"
+            }
             "deploy" => {
                 "deploy is not supported; this tool targets one Slurm allocation, not a long-running orchestrator"
             }
@@ -1479,6 +1646,103 @@ services:
             err.to_string()
                 .contains("must contain at least one source path")
         );
+    }
+
+    #[test]
+    fn resume_block_accepts_absolute_shared_path() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  resume:
+    path: /shared/runs/demo
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        assert_eq!(spec.slurm.resume_dir(), Some("/shared/runs/demo"));
+    }
+
+    #[test]
+    fn resume_block_interpolates_env_values() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let env_file = tmpdir.path().join(".env");
+        fs::write(&env_file, "RUN_ID=exp-42\n").expect("env");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  resume:
+    path: /shared/$RUN_ID
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        assert_eq!(spec.slurm.resume_dir(), Some("/shared/exp-42"));
+    }
+
+    #[test]
+    fn resume_block_rejects_missing_relative_empty_and_container_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+        let missing = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  resume: {}
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        assert!(ComposeSpec::load(&missing).is_err());
+
+        let empty = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  resume:
+    path: ""
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&empty).expect_err("empty");
+        assert!(err.to_string().contains("resume.path"));
+
+        let relative = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  resume:
+    path: ./runs/demo
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&relative).expect_err("relative");
+        assert!(err.to_string().contains("absolute host path"));
+
+        let container = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  resume:
+    path: /hpc-compose/resume/demo
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&container).expect_err("container");
+        assert!(err.to_string().contains("host path"));
     }
 
     #[test]
@@ -1970,10 +2234,7 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&restart).expect_err("restart");
-        assert!(
-            err.to_string()
-                .contains("restart policies are not supported")
-        );
+        assert!(err.to_string().contains("x-slurm.failure_policy"));
 
         let deploy = write_spec(
             tmpdir.path(),
