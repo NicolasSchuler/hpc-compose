@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use hpc-compose in your work, please cite it using the metadata from this file."
+title: "hpc-compose"
+type: software
+authors:
+  - family-names: "Schuler"
+    given-names: "Nicolas"
+    affiliation: "Karlsruhe Institute of Technology (KIT)"
+version: "0.1.15"
+date-released: 2026-04-05
+url: "https://github.com/NicolasSchuler/hpc-compose"
+repository-code: "https://github.com/NicolasSchuler/hpc-compose"

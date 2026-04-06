@@ -69,3 +69,18 @@ hpc-compose submit --watch -f compose.yaml
 - Spec reference: [docs/src/spec-reference.md](docs/src/spec-reference.md)
 - Docker Compose migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
 - Contributor architecture notes: [docs/src/architecture.md](docs/src/architecture.md)
+
+## Citation
+
+If you use `hpc-compose` in research, please cite the software. GitHub also exposes the same metadata through the repository citation UI via [`CITATION.cff`](CITATION.cff).
+
+```bibtex
+@software{schuler_hpc_compose_2026,
+  author = {Schuler, Nicolas},
+  title = {hpc-compose},
+  version = {0.1.15},
+  year = {2026},
+  publisher = {Karlsruhe Institute of Technology (KIT)},
+  url = {https://github.com/NicolasSchuler/hpc-compose}
+}
+```
