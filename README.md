@@ -29,6 +29,8 @@ It is intentionally **not** a full Docker Compose implementation. It focuses on 
 - `deploy`
 - arbitrary multi-node orchestration or partial-node service placement
 
+For the exact first-class vs raw pass-through vs out-of-scope Slurm boundary, see [Supported Slurm model](docs/src/supported-slurm-model.md).
+
 ## Install
 
 ```bash
@@ -67,6 +69,7 @@ hpc-compose submit --watch -f compose.yaml
 - Runbook: [docs/src/runbook.md](docs/src/runbook.md)
 - Examples: [docs/src/examples.md](docs/src/examples.md)
 - Spec reference: [docs/src/spec-reference.md](docs/src/spec-reference.md)
+- Supported Slurm model: [docs/src/supported-slurm-model.md](docs/src/supported-slurm-model.md)
 - Docker Compose migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
 - Contributor architecture notes: [docs/src/architecture.md](docs/src/architecture.md)
 

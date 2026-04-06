@@ -796,39 +796,56 @@ fn print_cache_inspect(plan: &RuntimePlan, filter: Option<&str>) -> Result<()> {
 
 fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> io::Result<()> {
     writeln!(writer, "job id: {}", snapshot.record.job_id)?;
+    writeln!(writer, "Scheduler:")?;
     writeln!(
         writer,
-        "scheduler state: {} ({})",
+        "  state: {} ({})",
         snapshot.scheduler.state,
         scheduler_source_label(snapshot.scheduler.source)
     )?;
     if let Some(detail) = &snapshot.scheduler.detail {
-        writeln!(writer, "scheduler note: {detail}")?;
+        writeln!(writer, "  note: {detail}")?;
     }
+    if let Some(queue) = &snapshot.queue_diagnostics {
+        if let Some(reason) = &queue.pending_reason {
+            writeln!(writer, "  pending reason: {reason}")?;
+        }
+        if let Some(eligible_time) = &queue.eligible_time {
+            writeln!(writer, "  eligible time: {eligible_time}")?;
+        }
+        if let Some(start_time) = &queue.start_time {
+            writeln!(writer, "  start time: {start_time}")?;
+        }
+    }
+    writeln!(writer, "Runtime:")?;
     writeln!(
         writer,
-        "compose file: {}",
+        "  compose file: {}",
         snapshot.record.compose_file.display()
     )?;
     writeln!(
         writer,
-        "script path: {}",
+        "  script path: {}",
         snapshot.record.script_path.display()
     )?;
-    writeln!(writer, "cache dir: {}", snapshot.record.cache_dir.display())?;
-    writeln!(writer, "log dir: {}", snapshot.log_dir.display())?;
+    writeln!(
+        writer,
+        "  cache dir: {}",
+        snapshot.record.cache_dir.display()
+    )?;
+    writeln!(writer, "  log dir: {}", snapshot.log_dir.display())?;
     if let Some(attempt) = snapshot.attempt {
-        writeln!(writer, "attempt: {attempt}")?;
+        writeln!(writer, "  attempt: {attempt}")?;
     }
     if let Some(is_resume) = snapshot.is_resume {
-        writeln!(writer, "is resume: {}", yes_no(is_resume))?;
+        writeln!(writer, "  is resume: {}", yes_no(is_resume))?;
     }
     if let Some(resume_dir) = &snapshot.resume_dir {
-        writeln!(writer, "resume dir: {}", resume_dir.display())?;
+        writeln!(writer, "  resume dir: {}", resume_dir.display())?;
     }
     writeln!(
         writer,
-        "batch log: {} (present: {}, updated: {})",
+        "  batch log: {} (present: {}, updated: {})",
         snapshot.batch_log.path.display(),
         yes_no(snapshot.batch_log.present),
         match snapshot.batch_log.updated_age_seconds {
@@ -843,7 +860,7 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
         };
         writeln!(
             writer,
-            "log  service '{}': {} (present: {}, updated: {})",
+            "  log  service '{}': {} (present: {}, updated: {})",
             service.service_name,
             service.path.display(),
             yes_no(service.present),
@@ -869,7 +886,7 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
                 .unwrap_or_else(|| "unknown".to_string());
             writeln!(
                 writer,
-                "state service '{}': failure_policy={} restarts={}/{} last_exit={}",
+                "  state service '{}': failure_policy={} restarts={}/{} last_exit={}",
                 service.service_name, mode, restart_count, max_restarts, last_exit
             )?;
         }
@@ -881,7 +898,7 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
         {
             writeln!(
                 writer,
-                "placement service '{}': mode={} nodes={} ntasks={} ntasks_per_node={} nodelist={}",
+                "  placement service '{}': mode={} nodes={} ntasks={} ntasks_per_node={} nodelist={}",
                 service.service_name,
                 service.placement_mode.as_deref().unwrap_or("unknown"),
                 service
@@ -1798,8 +1815,9 @@ mod tests {
     use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
     use hpc_compose::job::{
         ArtifactExportReport, ArtifactManifest, BatchLogStatus, CollectorStatus, GpuDeviceSample,
-        GpuProcessSample, GpuSnapshot, SamplerSnapshot, SchedulerSource, SchedulerStatus,
-        ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats, SubmissionRecord,
+        GpuProcessSample, GpuSnapshot, QueueDiagnostics, SamplerSnapshot, SchedulerSource,
+        SchedulerStatus, ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats,
+        SubmissionRecord,
     };
     use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use hpc_compose::spec::{
@@ -2307,6 +2325,11 @@ services:
                 failed: false,
                 detail: Some("finished".into()),
             },
+            queue_diagnostics: Some(QueueDiagnostics {
+                pending_reason: None,
+                eligible_time: Some("2026-04-06T10:00:00".into()),
+                start_time: Some("2026-04-06T10:05:00".into()),
+            }),
             log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
             batch_log: BatchLogStatus {
                 path: tmpdir.path().join("slurm-12345.out"),
@@ -2337,19 +2360,58 @@ services:
         let mut status_out = Vec::new();
         write_status_snapshot(&mut status_out, &status).expect("status");
         let status_text = String::from_utf8(status_out).expect("utf8");
-        assert!(status_text.contains("scheduler state: COMPLETED (sacct)"));
-        assert!(status_text.contains("scheduler note: finished"));
-        assert!(status_text.contains("attempt: 1"));
-        assert!(status_text.contains("is resume: yes"));
-        assert!(status_text.contains("resume dir: /shared/runs/demo"));
+        assert!(status_text.contains("Scheduler:"));
+        assert!(status_text.contains("  state: COMPLETED (sacct)"));
+        assert!(status_text.contains("  note: finished"));
+        assert!(status_text.contains("  eligible time: 2026-04-06T10:00:00"));
+        assert!(status_text.contains("  start time: 2026-04-06T10:05:00"));
+        assert!(status_text.contains("Runtime:"));
+        assert!(status_text.contains("  attempt: 1"));
+        assert!(status_text.contains("  is resume: yes"));
+        assert!(status_text.contains("  resume dir: /shared/runs/demo"));
         assert!(status_text.contains("updated: 1m ago"));
         assert!(status_text.contains("updated: unknown"));
         assert!(status_text.contains(
-            "state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 last_exit=0"
+            "  state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 last_exit=0"
         ));
         assert!(status_text.contains(
-            "placement service 'svc/name': mode=distributed nodes=2 ntasks=4 ntasks_per_node=2 nodelist=node01 node02"
+            "  placement service 'svc/name': mode=distributed nodes=2 ntasks=4 ntasks_per_node=2 nodelist=node01 node02"
         ));
+
+        let waiting = StatusSnapshot {
+            record: record.clone(),
+            scheduler: SchedulerStatus {
+                state: "WAITING_FOR_ACCOUNTING".into(),
+                source: SchedulerSource::LocalOnly,
+                terminal: false,
+                failed: false,
+                detail: Some(
+                    "job just disappeared from squeue and has not appeared in sacct yet".into(),
+                ),
+            },
+            queue_diagnostics: None,
+            log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
+            batch_log: BatchLogStatus {
+                path: tmpdir.path().join("slurm-12345.out"),
+                present: false,
+                updated_at: None,
+                updated_age_seconds: None,
+            },
+            services: Vec::new(),
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+        };
+        let mut waiting_out = Vec::new();
+        write_status_snapshot(&mut waiting_out, &waiting).expect("waiting");
+        let waiting_text = String::from_utf8(waiting_out).expect("utf8");
+        assert!(waiting_text.contains("  state: WAITING_FOR_ACCOUNTING (local-only)"));
+        assert!(waiting_text.contains(
+            "  note: job just disappeared from squeue and has not appeared in sacct yet"
+        ));
+        assert!(!waiting_text.contains("pending reason:"));
+        assert!(!waiting_text.contains("eligible time:"));
+        assert!(!waiting_text.contains("start time:"));
 
         let stats = StatsSnapshot {
             job_id: "12345".into(),

@@ -426,13 +426,60 @@ fn write_fake_squeue(tmpdir: &Path, state_file: &Path) -> PathBuf {
         &format!(
             r#"#!/bin/bash
 set -euo pipefail
-state="$(cat '{}' 2>/dev/null || true)"
-case "$state" in
+content="$(cat '{}' 2>/dev/null || true)"
+format_string=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" || "$prev" == "--format" ]]; then
+    format_string="$arg"
+  fi
+  case "$arg" in
+    --format=*)
+      format_string="${{arg#--format=}}"
+      ;;
+  esac
+  prev="$arg"
+done
+case "$content" in
   ""|NONE)
     exit 0
     ;;
+  *"STATE="*)
+    state=""
+    reason=""
+    start=""
+    while IFS= read -r line; do
+      case "$line" in
+        STATE=*)
+          state="${{line#STATE=}}"
+          ;;
+        REASON=*)
+          reason="${{line#REASON=}}"
+          ;;
+        START=*)
+          start="${{line#START=}}"
+          ;;
+      esac
+    done <<< "$content"
+    if [[ -z "$state" || "$state" == "NONE" ]]; then
+      exit 0
+    fi
+    case "$format_string" in
+      *"%T|%r|%S"*)
+        printf '%s|%s|%s\n' "$state" "${{reason:-N/A}}" "${{start:-N/A}}"
+        ;;
+      *)
+        printf '%s\n' "$state"
+        ;;
+    esac
+    ;;
   *)
-    echo "$state"
+    while IFS= read -r line; do
+      if [[ -n "$line" && "$line" != "NONE" ]]; then
+        printf '%s\n' "$line"
+        break
+      fi
+    done <<< "$content"
     ;;
 esac
 "#,
@@ -449,10 +496,70 @@ fn write_fake_sacct(tmpdir: &Path, state_file: &Path) -> PathBuf {
         &format!(
             r#"#!/bin/bash
 set -euo pipefail
-state="$(cat '{}' 2>/dev/null || true)"
-if [[ -n "$state" && "$state" != "NONE" ]]; then
-  echo "$state"
-fi
+content="$(cat '{}' 2>/dev/null || true)"
+format_string=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--format" ]]; then
+    format_string="$arg"
+  fi
+  case "$arg" in
+    --format=*)
+      format_string="${{arg#--format=}}"
+      ;;
+  esac
+  prev="$arg"
+done
+case "$content" in
+  ""|NONE)
+    exit 0
+    ;;
+  *"STATE="*)
+    state=""
+    reason=""
+    eligible=""
+    start=""
+    while IFS= read -r line; do
+      case "$line" in
+        STATE=*)
+          state="${{line#STATE=}}"
+          ;;
+        REASON=*)
+          reason="${{line#REASON=}}"
+          ;;
+        ELIGIBLE=*)
+          eligible="${{line#ELIGIBLE=}}"
+          ;;
+        START=*)
+          start="${{line#START=}}"
+          ;;
+      esac
+    done <<< "$content"
+    if [[ -z "$state" || "$state" == "NONE" ]]; then
+      exit 0
+    fi
+    case "$format_string" in
+      *"State,Eligible,Start,Reason"*)
+        printf '%s|%s|%s|%s\n' \
+          "$state" \
+          "${{eligible:-Unknown}}" \
+          "${{start:-Unknown}}" \
+          "${{reason:-None}}"
+        ;;
+      *)
+        printf '%s\n' "$state"
+        ;;
+    esac
+    ;;
+  *)
+    while IFS= read -r line; do
+      if [[ -n "$line" && "$line" != "NONE" ]]; then
+        printf '%s\n' "$line"
+        break
+      fi
+    done <<< "$content"
+    ;;
+esac
 "#,
             state_file.display()
         ),
@@ -1440,10 +1547,15 @@ fn status_and_logs_commands_use_submission_metadata() {
     assert_success(&status);
     let status_stdout = stdout_text(&status);
     assert!(status_stdout.contains("job id: 12345"));
-    assert!(status_stdout.contains("scheduler state: COMPLETED (sacct)"));
-    assert!(status_stdout.contains("compose file:"));
-    assert!(status_stdout.contains("batch log:"));
-    assert!(status_stdout.contains("log  service 'app':"));
+    assert!(status_stdout.contains("Scheduler:"));
+    assert!(status_stdout.contains("  state: COMPLETED (sacct)"));
+    assert!(status_stdout.contains("Runtime:"));
+    assert!(status_stdout.contains("  compose file:"));
+    assert!(status_stdout.contains("  batch log:"));
+    assert!(status_stdout.contains("  log  service 'app':"));
+    assert!(!status_stdout.contains("pending reason:"));
+    assert!(!status_stdout.contains("eligible time:"));
+    assert!(!status_stdout.contains("start time:"));
 
     let status_json = run_cli(
         tmpdir.path(),
@@ -1464,6 +1576,7 @@ fn status_and_logs_commands_use_submission_metadata() {
     let value: Value = serde_json::from_str(&stdout_text(&status_json)).expect("status json");
     assert_eq!(value["record"]["job_id"], Value::from("12345"));
     assert_eq!(value["scheduler"]["state"], Value::from("COMPLETED"));
+    assert!(value.get("queue_diagnostics").is_none());
     assert!(
         value["record"]["batch_log"]
             .as_str()
@@ -1483,6 +1596,97 @@ fn status_and_logs_commands_use_submission_metadata() {
     );
     assert_success(&logs);
     assert!(stdout_text(&logs).contains("[app] beta"));
+}
+
+#[test]
+fn status_reports_pending_queue_diagnostics_in_text_and_json() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let squeue_state = tmpdir.path().join("pending-squeue.state");
+    let sacct_state = tmpdir.path().join("pending-sacct.state");
+    fs::write(
+        &squeue_state,
+        "STATE=PENDING\nREASON=Priority\nSTART=2026-04-07T12:34:56\n",
+    )
+    .expect("squeue state");
+    fs::write(
+        &sacct_state,
+        "STATE=PENDING\nELIGIBLE=2026-04-07T10:00:00\nSTART=Unknown\nREASON=Priority\n",
+    )
+    .expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status);
+    let status_stdout = stdout_text(&status);
+    assert!(status_stdout.contains("  state: PENDING (squeue)"));
+    assert!(status_stdout.contains("  pending reason: Priority"));
+    assert!(status_stdout.contains("  eligible time: 2026-04-07T10:00:00"));
+    assert!(status_stdout.contains("  start time: 2026-04-07T12:34:56"));
+    assert!(status_stdout.contains("Runtime:"));
+
+    let status_json = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status_json);
+    let value: Value = serde_json::from_str(&stdout_text(&status_json)).expect("status json");
+    assert_eq!(value["scheduler"]["state"], Value::from("PENDING"));
+    assert_eq!(
+        value["queue_diagnostics"]["pending_reason"],
+        Value::from("Priority")
+    );
+    assert_eq!(
+        value["queue_diagnostics"]["eligible_time"],
+        Value::from("2026-04-07T10:00:00")
+    );
+    assert_eq!(
+        value["queue_diagnostics"]["start_time"],
+        Value::from("2026-04-07T12:34:56")
+    );
+    assert!(value["record"]["job_id"] == Value::from("12345"));
 }
 
 #[test]
