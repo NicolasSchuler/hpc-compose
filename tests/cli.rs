@@ -1686,7 +1686,7 @@ fn status_reports_pending_queue_diagnostics_in_text_and_json() {
         value["queue_diagnostics"]["start_time"],
         Value::from("2026-04-07T12:34:56")
     );
-    assert!(value["record"]["job_id"] == Value::from("12345"));
+    assert_eq!(value["record"]["job_id"], "12345");
 }
 
 #[test]
