@@ -268,7 +268,7 @@ if [[ -n "$output_path" ]]; then
   mkdir -p "$(dirname "$output_path")"
   printf 'ready\n' >> "$output_path"
 fi
-sleep 1
+sleep 3
 exit 0
 "#,
             log_path.display(),
