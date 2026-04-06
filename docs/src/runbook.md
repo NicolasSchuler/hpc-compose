@@ -13,6 +13,7 @@ Read the [Execution model](execution-model.md) page first if you are still orien
 Make sure you have:
 
 - a login node with `enroot`, `srun`, and `sbatch` available,
+- `scontrol` available when you request `x-slurm.nodes > 1`,
 - Pyxis support in `srun` (`srun --help` should mention `--container-image`),
 - a shared filesystem path for `x-slurm.cache_dir`,
 - any required local source trees or local `.sqsh` images in place,
@@ -49,6 +50,8 @@ For a new spec on a real cluster:
 | GPU-backed app | one GPU service plus a dependent application | [`examples/llama-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-app.yaml) |
 | llama.cpp + uv worker | llama.cpp serving plus a source-mounted Python worker run through `uv` | [`examples/llama-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker.yaml) |
 | Minimal batch | simplest single-service batch job | [`examples/minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) |
+| Multi-node MPI | one helper on the primary node plus one allocation-wide distributed step | [`examples/multi-node-mpi.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-node-mpi.yaml) |
+| Multi-node torchrun | allocation-wide GPU training with the primary node as rendezvous | [`examples/multi-node-torchrun.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-node-torchrun.yaml) |
 | Training checkpoints | GPU training with checkpoints to shared storage | [`examples/training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) |
 | Training resume | GPU training with a shared resume directory and attempt-aware checkpoints | [`examples/training-resume.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-resume.yaml) |
 | Postgres ETL | PostgreSQL plus a Python data processing job | [`examples/postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) |
@@ -125,6 +128,7 @@ hpc-compose inspect --verbose -f compose.yaml
 Check:
 
 - service order,
+- allocation geometry and each service's step geometry,
 - how images were normalized,
 - final host-to-container mount mappings,
 - resolved environment values,
@@ -179,6 +183,7 @@ hpc-compose preflight --verbose -f compose.yaml
 `preflight` checks:
 
 - required binaries (`enroot`, `srun`, `sbatch`),
+- `scontrol` when `x-slurm.nodes > 1`,
 - Pyxis container support in `srun`,
 - cache directory policy and writability,
 - local mount and image paths,
@@ -254,12 +259,16 @@ hpc-compose logs -f compose.yaml --service app --follow
 
 `status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created. When `services.<name>.x-slurm.failure_policy` is used, `status` includes per-service policy state (`failure_policy`, restart counters, and last exit code) from tracked runtime state.
 
+For multi-node jobs, `status` also reports tracked placement geometry (`placement_mode`, nodes, task counts, and expanded nodelist) for each service.
+
 `stats` now prefers sampler data from `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` when `x-slurm.metrics` is enabled. In v1 that sampler can collect:
 
 - GPU snapshots and compute-process rows through `nvidia-smi`
 - job-step CPU and memory snapshots through `sstat`
 
 If the sampler is absent, disabled, or only partially available, `stats` falls back to live `sstat`. It works best for running jobs, requires the cluster's `jobacct_gather` plugin to be enabled for Slurm-side step metrics, and only shows GPU accounting fields from Slurm when the cluster exposes GPU TRES accounting.
+
+In multi-node v1, GPU sampler collection remains primary-node-only. Slurm step metrics still cover the whole step through `sstat`, but `nvidia-smi` fan-in across nodes is intentionally out of scope.
 
 Use `--format json`, `--format csv`, or `--format jsonl` when you want machine-friendly output for dashboards, plotting, or experiment tracking. `--json` remains supported as a compatibility alias for `--format json`.
 

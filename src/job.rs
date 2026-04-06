@@ -86,6 +86,16 @@ pub struct ServiceLogStatus {
     pub max_restarts: Option<u32>,
     #[serde(default)]
     pub last_exit_code: Option<i32>,
+    #[serde(default)]
+    pub placement_mode: Option<String>,
+    #[serde(default)]
+    pub nodes: Option<u32>,
+    #[serde(default)]
+    pub ntasks: Option<u32>,
+    #[serde(default)]
+    pub ntasks_per_node: Option<u32>,
+    #[serde(default)]
+    pub nodelist: Option<String>,
 }
 
 /// Presence and freshness information for the top-level batch log.
@@ -453,6 +463,16 @@ struct ServiceRuntimeStateEntry {
     max_restarts: Option<u32>,
     #[serde(default)]
     last_exit_code: Option<i32>,
+    #[serde(default)]
+    placement_mode: Option<String>,
+    #[serde(default)]
+    nodes: Option<u32>,
+    #[serde(default)]
+    ntasks: Option<u32>,
+    #[serde(default)]
+    ntasks_per_node: Option<u32>,
+    #[serde(default)]
+    nodelist: Option<String>,
 }
 
 /// Returns the `.hpc-compose` metadata directory for a compose file.
@@ -683,6 +703,11 @@ pub fn build_status_snapshot(
             restart_count: runtime_state.and_then(|state| state.restart_count),
             max_restarts: runtime_state.and_then(|state| state.max_restarts),
             last_exit_code: runtime_state.and_then(|state| state.last_exit_code),
+            placement_mode: runtime_state.and_then(|state| state.placement_mode.clone()),
+            nodes: runtime_state.and_then(|state| state.nodes),
+            ntasks: runtime_state.and_then(|state| state.ntasks),
+            ntasks_per_node: runtime_state.and_then(|state| state.ntasks_per_node),
+            nodelist: runtime_state.and_then(|state| state.nodelist.clone()),
         });
     }
     Ok(StatusSnapshot {
@@ -2269,7 +2294,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::planner::{ExecutionSpec, ImageSource};
+    use crate::planner::{ExecutionSpec, ImageSource, ServicePlacement};
     use crate::prepare::RuntimeService;
     use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig};
 
@@ -2289,6 +2314,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://redis:7".into()),
@@ -2303,6 +2329,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://python:3.11-slim".into()),

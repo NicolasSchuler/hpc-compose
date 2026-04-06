@@ -22,7 +22,7 @@ use hpc_compose::job::{
     write_submission_record,
 };
 use hpc_compose::planner::{
-    ExecutionSpec, ImageSource, Plan, build_plan, registry_host_for_remote,
+    ExecutionSpec, ImageSource, Plan, ServicePlacementMode, build_plan, registry_host_for_remote,
 };
 use hpc_compose::preflight::{Options as PreflightOptions, Report, run as run_preflight};
 use hpc_compose::prepare::{
@@ -30,7 +30,7 @@ use hpc_compose::prepare::{
     build_runtime_plan, prepare_runtime_plan,
 };
 use hpc_compose::render::{
-    build_srun_command, execution_argv, log_file_name_for_service, render_script,
+    display_srun_command, execution_argv, log_file_name_for_service, render_script,
 };
 use hpc_compose::spec::{ComposeSpec, DependencyCondition, ServiceDependency};
 
@@ -297,6 +297,7 @@ fn run_command(command: Commands) -> Result<()> {
                     enroot_bin,
                     sbatch_bin,
                     srun_bin,
+                    scontrol_bin: "scontrol".to_string(),
                     require_submit_tools: true,
                     skip_prepare: false,
                 },
@@ -361,6 +362,7 @@ fn run_command(command: Commands) -> Result<()> {
                         enroot_bin: enroot_bin.clone(),
                         sbatch_bin: sbatch_bin.clone(),
                         srun_bin,
+                        scontrol_bin: "scontrol".to_string(),
                         require_submit_tools: true,
                         skip_prepare,
                     },
@@ -871,6 +873,32 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
                 service.service_name, mode, restart_count, max_restarts, last_exit
             )?;
         }
+        if service.placement_mode.is_some()
+            || service.nodes.is_some()
+            || service.ntasks.is_some()
+            || service.ntasks_per_node.is_some()
+            || service.nodelist.is_some()
+        {
+            writeln!(
+                writer,
+                "placement service '{}': mode={} nodes={} ntasks={} ntasks_per_node={} nodelist={}",
+                service.service_name,
+                service.placement_mode.as_deref().unwrap_or("unknown"),
+                service
+                    .nodes
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                service
+                    .ntasks
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                service
+                    .ntasks_per_node
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                service.nodelist.as_deref().unwrap_or("unknown"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -1228,7 +1256,12 @@ fn write_plan_inspect_verbose(
         writeln!(
             writer,
             "effective srun args: {}",
-            build_srun_command(runtime).join(" ")
+            display_srun_command(runtime).join(" ")
+        )?;
+        writeln!(
+            writer,
+            "step geometry: {}",
+            format_service_step_geometry(runtime)
         )?;
         if let Some(reason) = rebuild_reason(runtime) {
             writeln!(writer, "rebuild reason: {reason}")?;
@@ -1265,10 +1298,53 @@ fn format_debug_block(label: &str, values: &[String]) -> String {
     lines.join("\n")
 }
 
+fn format_allocation_geometry(plan: &RuntimePlan) -> String {
+    format!(
+        "nodes={} ntasks={} ntasks_per_node={}",
+        plan.slurm.allocation_nodes(),
+        format_optional_u32(plan.slurm.ntasks),
+        format_optional_u32(plan.slurm.ntasks_per_node)
+    )
+}
+
+fn format_service_step_geometry(service: &RuntimeService) -> String {
+    let mut parts = vec![
+        format!("mode={}", placement_mode_label(service.placement.mode)),
+        format!("nodes={}", service.placement.nodes),
+        format!("ntasks={}", format_optional_u32(service.placement.ntasks)),
+        format!(
+            "ntasks_per_node={}",
+            format_optional_u32(service.placement.ntasks_per_node)
+        ),
+    ];
+    if service.placement.pin_to_primary_node {
+        parts.push("nodelist=$HPC_COMPOSE_PRIMARY_NODE".to_string());
+    }
+    parts.join(" ")
+}
+
+fn format_optional_u32(value: Option<u32>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "auto".to_string())
+}
+
+fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
+    match mode {
+        ServicePlacementMode::PrimaryNode => "primary_node",
+        ServicePlacementMode::Distributed => "distributed",
+    }
+}
+
 fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result<()> {
     writeln!(writer, "name: {}", plan.name)?;
     writeln!(writer, "runtime mode: pyxis")?;
     writeln!(writer, "cache dir: {}", plan.cache_dir.display())?;
+    writeln!(
+        writer,
+        "allocation geometry: {}",
+        format_allocation_geometry(plan)
+    )?;
     writeln!(
         writer,
         "service order: {}",
@@ -1297,6 +1373,11 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
             writer,
             "runtime image state: {}",
             runtime_cache_state(service)
+        )?;
+        writeln!(
+            writer,
+            "step geometry: {}",
+            format_service_step_geometry(service)
         )?;
         if let Some(prepare) = &service.prepare {
             writeln!(
@@ -1720,7 +1801,7 @@ mod tests {
         GpuProcessSample, GpuSnapshot, SamplerSnapshot, SchedulerSource, SchedulerStatus,
         ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats, SubmissionRecord,
     };
-    use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
+    use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use hpc_compose::spec::{
         DependencyCondition, ReadinessSpec, ServiceDependency, ServiceFailurePolicy,
         ServiceSlurmConfig, SlurmConfig,
@@ -1741,6 +1822,7 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare,
             source,
@@ -2242,6 +2324,11 @@ services:
                 restart_count: Some(1),
                 max_restarts: Some(3),
                 last_exit_code: Some(0),
+                placement_mode: Some("distributed".into()),
+                nodes: Some(2),
+                ntasks: Some(4),
+                ntasks_per_node: Some(2),
+                nodelist: Some("node01 node02".into()),
             }],
             attempt: Some(1),
             is_resume: Some(true),
@@ -2259,6 +2346,9 @@ services:
         assert!(status_text.contains("updated: unknown"));
         assert!(status_text.contains(
             "state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 last_exit=0"
+        ));
+        assert!(status_text.contains(
+            "placement service 'svc/name': mode=distributed nodes=2 ntasks=4 ntasks_per_node=2 nodelist=node01 node02"
         ));
 
         let stats = StatsSnapshot {
@@ -2446,6 +2536,7 @@ services:
                 depends_on: service.depends_on.clone(),
                 readiness: service.readiness.clone(),
                 failure_policy: service.failure_policy.clone(),
+                placement: service.placement.clone(),
                 slurm: service.slurm.clone(),
                 prepare: service.prepare.clone(),
             }],

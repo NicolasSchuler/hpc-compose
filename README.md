@@ -7,15 +7,15 @@
 [![CI](https://github.com/NicolasSchuler/hpc-compose/actions/workflows/ci.yml/badge.svg)](https://github.com/NicolasSchuler/hpc-compose/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/NicolasSchuler/hpc-compose)](https://github.com/NicolasSchuler/hpc-compose/releases/latest)
 
-`hpc-compose` is a single-binary launcher that turns a Compose-like spec into a single Slurm job running one or more services through Enroot and Pyxis.
+`hpc-compose` is a single-binary launcher that turns a Compose-like spec into one Slurm job running one or more services through Enroot and Pyxis.
 
-It is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to one Slurm allocation, one node in v1, and multiple containerized services inside that allocation.
+It is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to one Slurm allocation, plus either single-node services or one allocation-wide distributed service without adding a separate orchestration layer.
 
 ## What It Is For
 
 - one Slurm allocation per application
-- one node per allocation in v1
-- multiple services started inside that allocation
+- single-node jobs and constrained multi-node distributed runs
+- optional helper services pinned to the allocation's primary node
 - remote images such as `redis:7` or existing local `.sqsh` images
 - login-node image preparation through `x-enroot.prepare`
 - readiness-gated startup across dependent services
@@ -27,7 +27,7 @@ It is intentionally **not** a full Docker Compose implementation. It focuses on 
 - `networks` / `network_mode`
 - Compose `restart` (use `services.<name>.x-slurm.failure_policy` instead)
 - `deploy`
-- multi-node service placement in v1
+- arbitrary multi-node orchestration or partial-node service placement
 
 ## Install
 

@@ -25,6 +25,10 @@ fn run_cli(cwd: &Path, args: &[&str]) -> Output {
         .expect("run cli")
 }
 
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
 fn run_cli_with_stdin(cwd: &Path, args: &[&str], stdin: &str) -> Output {
     let mut child = Command::new(bin_path())
         .current_dir(cwd)
@@ -166,6 +170,7 @@ fi
 exit 0
 "#,
     );
+    write_fake_scontrol(tmpdir);
     path
 }
 
@@ -217,6 +222,7 @@ case "$job_name" in
 esac
 "#,
     );
+    write_fake_scontrol(tmpdir);
     path
 }
 
@@ -231,6 +237,65 @@ if [[ "${1:-}" == "--help" ]]; then
   exit 0
 fi
 exit 17
+"#,
+    );
+    write_fake_scontrol(tmpdir);
+    path
+}
+
+fn write_fake_srun_capture(tmpdir: &Path, log_path: &Path) -> PathBuf {
+    let path = tmpdir.join("srun");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+if [[ "${{1:-}}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+output_path=""
+for arg in "$@"; do
+  case "$arg" in
+    --output=*)
+      output_path="${{arg#--output=}}"
+      ;;
+  esac
+done
+printf 'args:%s\n' "$*" >> '{}'
+printf 'env:%s|%s|%s|%s\n' "${{HPC_COMPOSE_PRIMARY_NODE:-}}" "${{HPC_COMPOSE_NODE_COUNT:-}}" "${{HPC_COMPOSE_NODELIST:-}}" "${{HPC_COMPOSE_NODELIST_FILE:-}}" >> '{}'
+if [[ -n "$output_path" ]]; then
+  mkdir -p "$(dirname "$output_path")"
+  printf 'ready\n' >> "$output_path"
+fi
+sleep 1
+exit 0
+"#,
+            log_path.display(),
+            log_path.display()
+        ),
+    );
+    write_fake_scontrol(tmpdir);
+    path
+}
+
+fn write_fake_scontrol(tmpdir: &Path) -> PathBuf {
+    let path = tmpdir.join("scontrol");
+    write_script(
+        &path,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "show" && "${2:-}" == "hostnames" ]]; then
+  if [[ $# -ge 3 ]]; then
+    raw="${3//,/ }"
+    for host in $raw; do
+      printf '%s\n' "$host"
+    done
+  fi
+  exit 0
+fi
+echo "unsupported scontrol invocation" >&2
+exit 1
 "#,
     );
     path
@@ -258,6 +323,7 @@ set -euo pipefail
 script_path="${{1:?missing script path}}"
 PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
+export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
 bash "$script_path" >/dev/null 2>&1
 echo "Submitted batch job 12345"
@@ -278,6 +344,7 @@ set -euo pipefail
 script_path="${{1:?missing script path}}"
 PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
+export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
 bash "$script_path"
 echo "Submitted batch job 12345"
@@ -298,11 +365,38 @@ set -euo pipefail
 script_path="${{1:?missing script path}}"
 PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
+export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
 bash "$script_path" >/dev/null 2>&1 || true
 echo "Submitted batch job 12345"
 "#,
             tmpdir.display()
+        ),
+    );
+    path
+}
+
+fn write_fake_sbatch_runs_script_with_nodelist(
+    tmpdir: &Path,
+    file_name: &str,
+    job_nodelist: &str,
+) -> PathBuf {
+    let path = tmpdir.join(file_name);
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+script_path="${{1:?missing script path}}"
+PATH="{}:$PATH"
+export SLURM_JOB_ID=12345
+export SLURM_JOB_NODELIST='{}'
+export SLURM_SUBMIT_DIR="$PWD"
+bash "$script_path"
+echo "Submitted batch job 12345"
+"#,
+            tmpdir.display(),
+            job_nodelist
         ),
     );
     path
@@ -524,6 +618,16 @@ services:
             cache_dir.display()
         ),
     )
+}
+
+fn write_example_compose(tmpdir: &Path, example_name: &str, cache_dir: &Path) -> PathBuf {
+    let source = repo_root().join("examples").join(example_name);
+    let body = fs::read_to_string(&source).expect("read example");
+    let rewritten = body.replace(
+        "/shared/$USER/hpc-compose-cache",
+        &cache_dir.display().to_string(),
+    );
+    write_compose(tmpdir, example_name, &rewritten)
 }
 
 fn write_metrics_compose(tmpdir: &Path, cache_dir: &Path) -> PathBuf {
@@ -2448,6 +2552,127 @@ fn artifact_collection_policy_skips_when_job_outcome_does_not_match() {
     assert_success(&artifacts);
     let out = stdout_text(&artifacts);
     assert!(out.contains("exported paths: 0"));
+}
+
+#[test]
+fn submit_multi_node_mpi_example_pins_helper_and_tracks_allocation_metadata() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_example_compose(tmpdir.path(), "multi-node-mpi.yaml", &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun_log = tmpdir.path().join("srun.log");
+    let srun = write_fake_srun_capture(tmpdir.path(), &srun_log);
+    let sbatch = write_fake_sbatch_runs_script_with_nodelist(
+        tmpdir.path(),
+        "sbatch-multi-node-mpi",
+        "node01,node02",
+    );
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--no-preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let srun_text = fs::read_to_string(&srun_log).expect("srun log");
+    assert!(srun_text.contains("--job-name=hpc-compose:bootstrap"));
+    assert!(srun_text.contains("--nodes=1"));
+    assert!(srun_text.contains("--ntasks=1"));
+    assert!(srun_text.contains("--nodelist=node01"));
+    assert!(srun_text.contains("--job-name=hpc-compose:mpi"));
+    assert!(srun_text.contains("--nodes=2"));
+    assert!(srun_text.contains("--ntasks-per-node=2"));
+    assert!(srun_text.contains("env:node01|2|node01 node02|/hpc-compose/job/allocation/nodes.txt"));
+
+    let state: Value = serde_json::from_str(
+        &fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/state.json")).expect("state"),
+    )
+    .expect("state json");
+    let services = state["services"].as_array().expect("services");
+    let bootstrap = services
+        .iter()
+        .find(|service| service["service_name"] == "bootstrap")
+        .expect("bootstrap state");
+    let mpi = services
+        .iter()
+        .find(|service| service["service_name"] == "mpi")
+        .expect("mpi state");
+    assert_eq!(bootstrap["placement_mode"], "primary_node");
+    assert_eq!(bootstrap["nodes"], 1);
+    assert_eq!(bootstrap["nodelist"], "node01");
+    assert_eq!(mpi["placement_mode"], "distributed");
+    assert_eq!(mpi["nodes"], 2);
+    assert_eq!(mpi["ntasks_per_node"], 2);
+    assert_eq!(mpi["nodelist"], "node01 node02");
+}
+
+#[test]
+fn inspect_and_submit_multi_node_torchrun_example_show_distributed_geometry() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_example_compose(tmpdir.path(), "multi-node-torchrun.yaml", &cache_dir);
+
+    let inspect = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--verbose",
+        ],
+    );
+    assert_success(&inspect);
+    let inspect_text = stdout_text(&inspect);
+    assert!(inspect_text.contains("allocation geometry: nodes=2"));
+    assert!(inspect_text.contains("step geometry: mode=distributed nodes=2"));
+    assert!(inspect_text.contains("--nodes=2"));
+    assert!(inspect_text.contains("--ntasks-per-node=4"));
+
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun_log = tmpdir.path().join("torchrun-srun.log");
+    let srun = write_fake_srun_capture(tmpdir.path(), &srun_log);
+    let sbatch = write_fake_sbatch_runs_script_with_nodelist(
+        tmpdir.path(),
+        "sbatch-multi-node-torchrun",
+        "node01,node02",
+    );
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--no-preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let srun_text = fs::read_to_string(&srun_log).expect("srun log");
+    assert!(srun_text.contains("--job-name=hpc-compose:trainer"));
+    assert!(srun_text.contains("--nodes=2"));
+    assert!(srun_text.contains("--ntasks-per-node=4"));
+    assert!(!srun_text.contains("--nodelist=node01"));
+    assert!(srun_text.contains("env:node01|2|node01 node02|/hpc-compose/job/allocation/nodes.txt"));
 }
 
 #[test]

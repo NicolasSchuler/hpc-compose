@@ -38,7 +38,9 @@ These fields live under the top-level `x-slurm` block.
 | `account` | string | omitted | Passed through to `#SBATCH --account`. |
 | `qos` | string | omitted | Passed through to `#SBATCH --qos`. |
 | `time` | string | omitted | Passed through to `#SBATCH --time`. |
-| `nodes` | integer | omitted | Must be `1` or omitted in v1. |
+| `nodes` | integer | omitted | Slurm allocation node count. Defaults to `1` when omitted. |
+| `ntasks` | integer | omitted | Passed through to `#SBATCH --ntasks`. |
+| `ntasks_per_node` | integer | omitted | Passed through to `#SBATCH --ntasks-per-node`. |
 | `cpus_per_task` | integer | omitted | Top-level Slurm CPU request. |
 | `mem` | string | omitted | Passed through to `#SBATCH --mem`. |
 | `gres` | string | omitted | Passed through to `#SBATCH --gres`. |
@@ -95,6 +97,14 @@ x-slurm:
   - Paths under `/tmp`, `/var/tmp`, `/private/tmp`, and `/dev/shm` are rejected.
   - The path must be visible from both the login node and the compute nodes.
 
+### Multi-node placement rules
+
+- `x-slurm.nodes > 1` reserves a multi-node allocation.
+- Multi-node v1 supports at most one distributed service spanning the full allocation.
+- Helper services remain single-node steps and are pinned to the allocation's primary node.
+- When a multi-node job has exactly one service, that service defaults to the distributed full-allocation step.
+- Distributed services may use `readiness.type: sleep` or `readiness.type: log`, or TCP/HTTP readiness only with an explicit non-local host or URL.
+
 ### `x-slurm.metrics`
 
 ```yaml
@@ -114,6 +124,7 @@ x-slurm:
   - Supported collectors:
     - `gpu` samples device and process telemetry through `nvidia-smi`
     - `slurm` samples job-step CPU and memory data through `sstat`
+  - In multi-node v1, `gpu` sampling remains primary-node-only; `slurm` sampling still observes the full distributed step through `sstat`.
   - Sampler files are written under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` on the host and are also visible inside containers at `/hpc-compose/job/metrics`.
   - Collector failures are best-effort and do not fail the batch job.
 
@@ -169,6 +180,17 @@ x-slurm:
   - Services also receive `HPC_COMPOSE_RESUME_DIR`, `HPC_COMPOSE_ATTEMPT`, and `HPC_COMPOSE_IS_RESUME`.
   - The canonical resume source is the shared `path`, not exported artifact bundles.
   - Attempt-specific runtime state moves under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/attempts/<attempt>/`, and the top-level `logs`, `metrics`, `artifacts`, and `state.json` paths continue to point at the latest attempt for compatibility.
+
+### Allocation metadata inside services
+
+Every service receives:
+
+- `HPC_COMPOSE_PRIMARY_NODE`
+- `HPC_COMPOSE_NODE_COUNT`
+- `HPC_COMPOSE_NODELIST`
+- `HPC_COMPOSE_NODELIST_FILE`
+
+The same data is also written under `/hpc-compose/job/allocation/primary_node` and `/hpc-compose/job/allocation/nodes.txt`.
 
 ### `gres` and `gpus`
 
@@ -381,6 +403,9 @@ These fields live under `services.<name>.x-slurm`.
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
+| `nodes` | integer | omitted | `1` for a helper step, or the full top-level allocation node count for the one distributed service. |
+| `ntasks` | integer | omitted | Adds `--ntasks` to that service's `srun`. |
+| `ntasks_per_node` | integer | omitted | Adds `--ntasks-per-node` to that service's `srun`. |
 | `cpus_per_task` | integer | omitted | Adds `--cpus-per-task` to that service's `srun`. |
 | `gpus` | integer | omitted | Adds `--gpus` when `gres` is not set. |
 | `gres` | string | omitted | Adds `--gres` to that service's `srun`. Takes priority over `gpus`. |
@@ -408,6 +433,9 @@ services:
 
 Rules:
 
+- In a multi-node allocation, at most one service may resolve to distributed placement.
+- Distributed placement requires `services.<name>.x-slurm.nodes` to equal the top-level allocation node count when it is set explicitly.
+- Helper services in multi-node jobs are pinned to `HPC_COMPOSE_PRIMARY_NODE`.
 - `max_restarts` and `backoff_seconds` are rejected unless `mode: restart_on_failure`.
 - Restart attempts count relaunches after the initial launch.
 - Restarts trigger only for non-zero exits.

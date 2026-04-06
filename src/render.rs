@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 
-use crate::planner::ExecutionSpec;
+use crate::planner::{ExecutionSpec, ServicePlacementMode};
 use crate::prepare::{RuntimePlan, RuntimeService};
 use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec, ServiceFailureMode,
@@ -47,7 +47,16 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         plan.name
     ));
     out.push_str(&format!("#SBATCH --job-name={}\n", plan.name));
-    out.push_str("#SBATCH --nodes=1\n");
+    out.push_str(&format!(
+        "#SBATCH --nodes={}\n",
+        plan.slurm.allocation_nodes()
+    ));
+    if let Some(ntasks) = plan.slurm.ntasks {
+        out.push_str(&format!("#SBATCH --ntasks={ntasks}\n"));
+    }
+    if let Some(ntasks_per_node) = plan.slurm.ntasks_per_node {
+        out.push_str(&format!("#SBATCH --ntasks-per-node={ntasks_per_node}\n"));
+    }
     if let Some(partition) = &plan.slurm.partition {
         out.push_str(&format!("#SBATCH --partition={partition}\n"));
     }
@@ -113,6 +122,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  RESUME_META_DIR=\"\"\n");
     out.push_str("  RESUME_META_FILE=\"\"\n");
     out.push_str("fi\n");
+    out.push_str("ALLOCATION_DIR=\"$JOB_TMP/allocation\"\n");
+    out.push_str("PRIMARY_NODE_FILE=\"$ALLOCATION_DIR/primary_node\"\n");
+    out.push_str("NODELIST_FILE=\"$ALLOCATION_DIR/nodes.txt\"\n");
     out.push_str("LOG_DIR=\"$JOB_TMP/logs\"\n");
     out.push_str("STATE_FILE=\"$JOB_TMP/state.json\"\n");
     if artifacts_enabled {
@@ -134,7 +146,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("export ENROOT_CACHE_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/cache\"\n");
     out.push_str("export ENROOT_DATA_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/data\"\n");
     out.push_str("export ENROOT_TEMP_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/tmp\"\n");
-    out.push_str("mkdir -p \"$LOG_DIR\"");
+    out.push_str("mkdir -p \"$LOG_DIR\" \"$ALLOCATION_DIR\"");
     if artifacts_enabled {
         out.push_str(" \"$ARTIFACTS_DIR\"");
     }
@@ -153,6 +165,11 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("SERVICE_BACKOFF_SECONDS=()\n");
     out.push_str("SERVICE_RESTART_COUNT=()\n");
     out.push_str("SERVICE_LAST_EXIT_CODE=()\n");
+    out.push_str("SERVICE_PLACEMENT_MODE=()\n");
+    out.push_str("SERVICE_STEP_NODES=()\n");
+    out.push_str("SERVICE_STEP_NTASKS=()\n");
+    out.push_str("SERVICE_STEP_NTASKS_PER_NODE=()\n");
+    out.push_str("SERVICE_STEP_NODELIST=()\n");
     out.push_str("SERVICE_LAUNCH_FNS=()\n");
     out.push_str("SERVICE_DEPENDENTS=()\n");
     out.push_str("WAIT_HELPER_EXITED=0\n");
@@ -276,6 +293,24 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  printf '%s' \"$value\"\n");
     out.push_str("}\n\n");
 
+    out.push_str("json_string_or_null() {\n");
+    out.push_str("  local value=${1-}\n");
+    out.push_str("  if [[ -z \"$value\" ]]; then\n");
+    out.push_str("    printf 'null'\n");
+    out.push_str("  else\n");
+    out.push_str("    printf '\"%s\"' \"$(json_escape \"$value\")\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("json_number_or_null() {\n");
+    out.push_str("  local value=${1-}\n");
+    out.push_str("  if [[ -z \"$value\" ]]; then\n");
+    out.push_str("    printf 'null'\n");
+    out.push_str("  else\n");
+    out.push_str("    printf '%s' \"$value\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
     out.push_str("reset_wait_helper_exit_state() {\n");
     out.push_str("  WAIT_HELPER_EXITED=0\n");
     out.push_str("  WAIT_HELPER_EXIT_STATUS=\"\"\n");
@@ -302,6 +337,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
 
     out.push_str("update_latest_runtime_links() {\n");
     out.push_str("  [[ \"$RESUME_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  replace_with_symlink \"$JOB_ROOT/allocation\" \"$ALLOCATION_DIR\"\n");
     out.push_str("  replace_with_symlink \"$JOB_ROOT/logs\" \"$LOG_DIR\"\n");
     out.push_str("  replace_with_symlink \"$JOB_ROOT/state.json\" \"$STATE_FILE\"\n");
     if metrics_enabled {
@@ -310,6 +346,51 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     if artifacts_enabled {
         out.push_str("  replace_with_symlink \"$JOB_ROOT/artifacts\" \"$ARTIFACTS_DIR\"\n");
     }
+    out.push_str("}\n\n");
+
+    out.push_str("resolve_allocation_metadata() {\n");
+    out.push_str("  local -a allocation_nodes=()\n");
+    if plan.slurm.is_multi_node() {
+        out.push_str("  if [[ -z \"${SLURM_JOB_NODELIST:-}\" ]]; then\n");
+        out.push_str(
+            "    echo \"SLURM_JOB_NODELIST is required to derive allocation metadata\" >&2\n",
+        );
+        out.push_str("    exit 1\n");
+        out.push_str("  fi\n");
+        out.push_str("  if ! command -v scontrol >/dev/null 2>&1; then\n");
+        out.push_str("    echo \"scontrol is required to derive allocation metadata\" >&2\n");
+        out.push_str("    exit 1\n");
+        out.push_str("  fi\n");
+        out.push_str(
+            "  mapfile -t allocation_nodes < <(scontrol show hostnames \"$SLURM_JOB_NODELIST\")\n",
+        );
+        out.push_str("  if (( ${#allocation_nodes[@]} == 0 )); then\n");
+        out.push_str("    echo \"failed to expand SLURM_JOB_NODELIST via scontrol\" >&2\n");
+        out.push_str("    exit 1\n");
+        out.push_str("  fi\n");
+        out.push_str("  HPC_COMPOSE_PRIMARY_NODE=\"${allocation_nodes[0]}\"\n");
+        out.push_str("  HPC_COMPOSE_NODE_COUNT=${#allocation_nodes[@]}\n");
+        out.push_str("  HPC_COMPOSE_NODELIST=\"${allocation_nodes[*]}\"\n");
+    } else {
+        out.push_str("  local primary_node=\"${SLURMD_NODENAME:-${HOSTNAME:-}}\"\n");
+        out.push_str("  if [[ -z \"$primary_node\" ]]; then\n");
+        out.push_str("    primary_node=$(hostname)\n");
+        out.push_str("  fi\n");
+        out.push_str("  if [[ -z \"$primary_node\" ]]; then\n");
+        out.push_str(
+            "    echo \"failed to derive primary node metadata for single-node allocation\" >&2\n",
+        );
+        out.push_str("    exit 1\n");
+        out.push_str("  fi\n");
+        out.push_str("  allocation_nodes=(\"$primary_node\")\n");
+        out.push_str("  HPC_COMPOSE_PRIMARY_NODE=\"$primary_node\"\n");
+        out.push_str("  HPC_COMPOSE_NODE_COUNT=1\n");
+        out.push_str("  HPC_COMPOSE_NODELIST=\"$primary_node\"\n");
+    }
+    out.push_str("  HPC_COMPOSE_NODELIST_FILE=\"/hpc-compose/job/allocation/nodes.txt\"\n");
+    out.push_str("  printf '%s\\n' \"${allocation_nodes[@]}\" > \"$NODELIST_FILE\"\n");
+    out.push_str("  printf '%s\\n' \"$HPC_COMPOSE_PRIMARY_NODE\" > \"$PRIMARY_NODE_FILE\"\n");
+    out.push_str("  export HPC_COMPOSE_PRIMARY_NODE HPC_COMPOSE_NODE_COUNT HPC_COMPOSE_NODELIST HPC_COMPOSE_NODELIST_FILE\n");
     out.push_str("}\n\n");
 
     out.push_str("write_resume_metadata() {\n");
@@ -359,7 +440,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("      if (( first == 0 )); then\n");
     out.push_str("        printf ','\n");
     out.push_str("      fi\n");
-    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"last_exit_code\":%s}' \\\n");
+    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"last_exit_code\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s}' \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_NAMES[$i]}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_STEP_NAMES[$i]:-}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_LOG_PATHS[$i]:-}\")\" \\\n");
@@ -371,7 +452,14 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     );
     out.push_str("        \"${SERVICE_RESTART_COUNT[$i]:-0}\" \\\n");
     out.push_str("        \"${SERVICE_MAX_RESTARTS[$i]:-0}\" \\\n");
-    out.push_str("        \"$(if [[ -n \"${SERVICE_LAST_EXIT_CODE[$i]:-}\" ]]; then printf '%s' \"${SERVICE_LAST_EXIT_CODE[$i]}\"; else printf null; fi)\"\n");
+    out.push_str("        \"$(if [[ -n \"${SERVICE_LAST_EXIT_CODE[$i]:-}\" ]]; then printf '%s' \"${SERVICE_LAST_EXIT_CODE[$i]}\"; else printf null; fi)\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"${SERVICE_PLACEMENT_MODE[$i]:-}\")\" \\\n");
+    out.push_str("        \"$(json_number_or_null \"${SERVICE_STEP_NODES[$i]:-}\")\" \\\n");
+    out.push_str("        \"$(json_number_or_null \"${SERVICE_STEP_NTASKS[$i]:-}\")\" \\\n");
+    out.push_str(
+        "        \"$(json_number_or_null \"${SERVICE_STEP_NTASKS_PER_NODE[$i]:-}\")\" \\\n",
+    );
+    out.push_str("        \"$(json_string_or_null \"${SERVICE_STEP_NODELIST[$i]:-}\")\"\n");
     out.push_str("      first=0\n");
     out.push_str("    done\n");
     out.push_str("    printf '\\n  ]\\n}\\n'\n");
@@ -379,6 +467,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  mv \"$tmp_state\" \"$STATE_FILE\"\n");
     out.push_str("}\n\n");
 
+    out.push_str("resolve_allocation_metadata\n");
     out.push_str("update_latest_runtime_links\n");
     out.push_str("write_resume_metadata\n");
     out.push_str("write_state_file\n\n");
@@ -417,12 +506,22 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local backoff_seconds=$7\n");
     out.push_str("  local launch_fn=$8\n");
     out.push_str("  local dependents_csv=$9\n");
+    out.push_str("  local placement_mode=${10}\n");
+    out.push_str("  local step_nodes=${11}\n");
+    out.push_str("  local step_ntasks=${12}\n");
+    out.push_str("  local step_ntasks_per_node=${13}\n");
+    out.push_str("  local step_nodelist=${14}\n");
     out.push_str("  local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}\n");
     out.push_str("  if [[ -n \"$index\" ]]; then\n");
     out.push_str("    SERVICE_PIDS[$index]=\"$pid\"\n");
     out.push_str("    SERVICE_STEP_NAMES[$index]=\"$step_name\"\n");
     out.push_str("    SERVICE_LOG_PATHS[$index]=\"$log_path\"\n");
     out.push_str("    SERVICE_HEALTHY[$index]=\"0\"\n");
+    out.push_str("    SERVICE_PLACEMENT_MODE[$index]=\"$placement_mode\"\n");
+    out.push_str("    SERVICE_STEP_NODES[$index]=\"$step_nodes\"\n");
+    out.push_str("    SERVICE_STEP_NTASKS[$index]=\"$step_ntasks\"\n");
+    out.push_str("    SERVICE_STEP_NTASKS_PER_NODE[$index]=\"$step_ntasks_per_node\"\n");
+    out.push_str("    SERVICE_STEP_NODELIST[$index]=\"$step_nodelist\"\n");
     out.push_str("    SERVICE_LAUNCH_FNS[$index]=\"$launch_fn\"\n");
     out.push_str("    if [[ -n \"$dependents_csv\" ]]; then\n");
     out.push_str("      SERVICE_DEPENDENTS[$index]=\"$dependents_csv\"\n");
@@ -439,6 +538,11 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    SERVICE_BACKOFF_SECONDS+=(\"$backoff_seconds\")\n");
     out.push_str("    SERVICE_RESTART_COUNT+=(\"0\")\n");
     out.push_str("    SERVICE_LAST_EXIT_CODE+=(\"\")\n");
+    out.push_str("    SERVICE_PLACEMENT_MODE+=(\"$placement_mode\")\n");
+    out.push_str("    SERVICE_STEP_NODES+=(\"$step_nodes\")\n");
+    out.push_str("    SERVICE_STEP_NTASKS+=(\"$step_ntasks\")\n");
+    out.push_str("    SERVICE_STEP_NTASKS_PER_NODE+=(\"$step_ntasks_per_node\")\n");
+    out.push_str("    SERVICE_STEP_NODELIST+=(\"$step_nodelist\")\n");
     out.push_str("    SERVICE_LAUNCH_FNS+=(\"$launch_fn\")\n");
     out.push_str("    SERVICE_DEPENDENTS+=(\"$dependents_csv\")\n");
     out.push_str("    SERVICE_INDEX_BY_NAME[\"$name\"]=$index\n");
@@ -747,24 +851,6 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
 }
 
 fn render_metrics_helpers(out: &mut String) {
-    out.push_str("json_string_or_null() {\n");
-    out.push_str("  local value=${1-}\n");
-    out.push_str("  if [[ -z \"$value\" ]]; then\n");
-    out.push_str("    printf 'null'\n");
-    out.push_str("  else\n");
-    out.push_str("    printf '\"%s\"' \"$(json_escape \"$value\")\"\n");
-    out.push_str("  fi\n");
-    out.push_str("}\n\n");
-
-    out.push_str("json_number_or_null() {\n");
-    out.push_str("  local value=${1-}\n");
-    out.push_str("  if [[ -z \"$value\" ]]; then\n");
-    out.push_str("    printf 'null'\n");
-    out.push_str("  else\n");
-    out.push_str("    printf '%s' \"$value\"\n");
-    out.push_str("  fi\n");
-    out.push_str("}\n\n");
-
     out.push_str("json_bool_from_flag() {\n");
     out.push_str("  if [[ \"${1:-0}\" == \"1\" ]]; then\n");
     out.push_str("    printf true\n");
@@ -1348,10 +1434,20 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     out.push_str("  if [[ -n \"$pyxis_mounts\" ]]; then\n");
     out.push_str("    srun_cmd+=(\"--container-mounts=$pyxis_mounts\")\n");
     out.push_str("  fi\n");
+    if service.placement.pin_to_primary_node {
+        out.push_str("  local service_nodelist=\"$HPC_COMPOSE_PRIMARY_NODE\"\n");
+        out.push_str("  srun_cmd+=(\"--nodelist=$service_nodelist\")\n");
+    } else {
+        out.push_str("  local service_nodelist=\"$HPC_COMPOSE_NODELIST\"\n");
+    }
     out.push_str("  echo \"Starting service ");
     out.push_str(&service.name);
     out.push_str("\"\n");
     out.push_str("  local -a launch_env=()\n");
+    out.push_str("  launch_env+=(\"HPC_COMPOSE_PRIMARY_NODE=$HPC_COMPOSE_PRIMARY_NODE\")\n");
+    out.push_str("  launch_env+=(\"HPC_COMPOSE_NODE_COUNT=$HPC_COMPOSE_NODE_COUNT\")\n");
+    out.push_str("  launch_env+=(\"HPC_COMPOSE_NODELIST=$HPC_COMPOSE_NODELIST\")\n");
+    out.push_str("  launch_env+=(\"HPC_COMPOSE_NODELIST_FILE=$HPC_COMPOSE_NODELIST_FILE\")\n");
     out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
     out.push_str("    launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")\n");
     out.push_str("    launch_env+=(\"HPC_COMPOSE_ATTEMPT=$ATTEMPT\")\n");
@@ -1371,14 +1467,31 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     out.push_str("  fi\n");
     out.push_str("  local pid=$!\n");
     out.push_str(&format!(
-        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {}\n",
+        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {} {} {} {} {} {}\n",
         shell_quote(&service.name),
         shell_quote(&step_name),
         shell_quote(failure_policy_mode_label(service.failure_policy.mode)),
         service.failure_policy.max_restarts,
         service.failure_policy.backoff_seconds,
         shell_quote(&fn_name),
-        shell_quote(&dependents_csv)
+        shell_quote(&dependents_csv),
+        shell_quote(placement_mode_label(service.placement.mode)),
+        service.placement.nodes,
+        shell_quote(
+            &service
+                .placement
+                .ntasks
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        shell_quote(
+            &service
+                .placement
+                .ntasks_per_node
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        "\"$service_nodelist\""
     ));
     out.push_str("}\n");
 }
@@ -1492,24 +1605,33 @@ pub fn execution_argv(execution: &ExecutionSpec, working_dir: Option<&str>) -> V
 pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
     let mut args = vec![
         "srun".to_string(),
-        "--nodes=1".to_string(),
-        "--ntasks=1".to_string(),
+        format!("--nodes={}", service.placement.nodes),
         "--exact".to_string(),
         "--overlap".to_string(),
         format!("--job-name={}", service_step_name(&service.name)),
     ];
+    if let Some(ntasks) = service.placement.ntasks {
+        args.push(format!("--ntasks={ntasks}"));
+    }
+    if let Some(ntasks_per_node) = service.placement.ntasks_per_node {
+        args.push(format!("--ntasks-per-node={ntasks_per_node}"));
+    }
     if matches!(service.execution, ExecutionSpec::ImageDefault) {
         args.push("--container-entrypoint".to_string());
     }
-    if !service.environment.is_empty() {
-        let env_names = service
-            .environment
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        args.push(format!("--container-env={env_names}"));
-    }
+    let mut env_names = vec![
+        "HPC_COMPOSE_PRIMARY_NODE",
+        "HPC_COMPOSE_NODE_COUNT",
+        "HPC_COMPOSE_NODELIST",
+        "HPC_COMPOSE_NODELIST_FILE",
+        "HPC_COMPOSE_RESUME_DIR",
+        "HPC_COMPOSE_ATTEMPT",
+        "HPC_COMPOSE_IS_RESUME",
+    ];
+    env_names.extend(service.environment.iter().map(|(name, _)| name.as_str()));
+    env_names.sort_unstable();
+    env_names.dedup();
+    args.push(format!("--container-env={}", env_names.join(",")));
     if let Some(cpus) = service.slurm.cpus_per_task {
         args.push(format!("--cpus-per-task={cpus}"));
     }
@@ -1519,6 +1641,15 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
         args.push(format!("--gpus={gpus}"));
     }
     args.extend(service.slurm.extra_srun_args.clone());
+    args
+}
+
+/// Builds the user-visible `srun` command line for one runtime service.
+pub fn display_srun_command(service: &RuntimeService) -> Vec<String> {
+    let mut args = build_srun_command(service);
+    if service.placement.pin_to_primary_node {
+        args.push("--nodelist=$HPC_COMPOSE_PRIMARY_NODE".to_string());
+    }
     args
 }
 
@@ -1572,6 +1703,13 @@ fn failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
     }
 }
 
+fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
+    match mode {
+        ServicePlacementMode::PrimaryNode => "primary_node",
+        ServicePlacementMode::Distributed => "distributed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1581,6 +1719,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::planner::ServicePlacement;
     use crate::spec::{
         DependencyCondition, ReadinessSpec, ResumeConfig, ServiceDependency, ServiceFailurePolicy,
         ServiceSlurmConfig, SlurmConfig,
@@ -1601,6 +1740,7 @@ mod tests {
                 timeout_seconds: Some(20),
             }),
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::LocalSqsh(PathBuf::from(
@@ -1644,12 +1784,14 @@ for mount in "${mount_items[@]}"; do
   fi
 done
 printf 'resume_dir=%s attempt=%s is_resume=%s\n' "${HPC_COMPOSE_RESUME_DIR:-}" "${HPC_COMPOSE_ATTEMPT:-}" "${HPC_COMPOSE_IS_RESUME:-}"
+printf 'node_meta=%s|%s|%s|%s\n' "${HPC_COMPOSE_PRIMARY_NODE:-}" "${HPC_COMPOSE_NODE_COUNT:-}" "${HPC_COMPOSE_NODELIST:-}" "${HPC_COMPOSE_NODELIST_FILE:-}"
 if [[ -n "$job_mount" ]]; then
   mkdir -p "$job_mount/checkpoints"
   printf 'checkpoint %s\n' "${HPC_COMPOSE_ATTEMPT:-missing}" > "$job_mount/checkpoints/checkpoint-${HPC_COMPOSE_ATTEMPT:-missing}.txt"
 fi
 "#,
         );
+        write_fake_scontrol(tmpdir);
     }
 
     fn write_fake_runtime_srun_with_dependency_restart(tmpdir: &std::path::Path) {
@@ -1695,6 +1837,28 @@ case "$job_name" in
 esac
 "#,
         );
+        write_fake_scontrol(tmpdir);
+    }
+
+    fn write_fake_scontrol(tmpdir: &std::path::Path) {
+        let scontrol = tmpdir.join("scontrol");
+        write_executable(
+            &scontrol,
+            r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "show" && "${2:-}" == "hostnames" ]]; then
+  if [[ $# -ge 3 ]]; then
+    raw="${3//,/ }"
+    for host in $raw; do
+      printf '%s\n' "$host"
+    done
+  fi
+  exit 0
+fi
+echo "unsupported scontrol invocation" >&2
+exit 1
+"#,
+        );
     }
 
     fn run_rendered_script(
@@ -1710,6 +1874,8 @@ esac
             .current_dir(tmpdir)
             .env("PATH", path)
             .env("SLURM_JOB_ID", "12345")
+            .env("SLURM_JOB_NODELIST", "node01")
+            .env("SLURMD_NODENAME", "node01")
             .env("SLURM_SUBMIT_DIR", tmpdir)
             .env("SLURM_RESTART_COUNT", restart_count.to_string())
             .output()
@@ -1799,6 +1965,7 @@ esac
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::LocalSqsh(PathBuf::from(
@@ -1831,12 +1998,14 @@ esac
                 timeout_seconds: None,
             }),
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig {
                 cpus_per_task: Some(3),
                 gpus: Some(2),
                 gres: None,
                 extra_srun_args: vec!["--mpi=none".into()],
                 failure_policy: None,
+                ..ServiceSlurmConfig::default()
             },
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1904,6 +2073,7 @@ esac
             depends_on: Vec::new(),
             readiness: Some(ReadinessSpec::Sleep { seconds: 3 }),
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -1975,12 +2145,14 @@ esac
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig {
                 cpus_per_task: Some(2),
                 gpus: None,
                 gres: Some("gpu:1".into()),
                 extra_srun_args: vec!["--exclusive".into()],
                 failure_policy: None,
+                ..ServiceSlurmConfig::default()
             },
             prepare: None,
             source: crate::planner::ImageSource::LocalSqsh(PathBuf::from(
@@ -2009,6 +2181,94 @@ esac
     }
 
     #[test]
+    fn render_multi_node_script_emits_allocation_metadata_and_geometry() {
+        let mut helper = runtime_service();
+        helper.name = "bootstrap".into();
+        helper.readiness = Some(ReadinessSpec::Log {
+            pattern: "ready".into(),
+            timeout_seconds: Some(5),
+        });
+        helper.placement = ServicePlacement {
+            mode: ServicePlacementMode::PrimaryNode,
+            nodes: 1,
+            ntasks: Some(1),
+            ntasks_per_node: None,
+            pin_to_primary_node: true,
+        };
+
+        let mut distributed = runtime_service();
+        distributed.name = "trainer".into();
+        distributed.readiness = Some(ReadinessSpec::Sleep { seconds: 1 });
+        distributed.placement = ServicePlacement {
+            mode: ServicePlacementMode::Distributed,
+            nodes: 2,
+            ntasks: None,
+            ntasks_per_node: Some(4),
+            pin_to_primary_node: false,
+        };
+
+        let plan = RuntimePlan {
+            name: "multi-node".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ntasks_per_node: Some(4),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![helper.clone(), distributed.clone()],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("#SBATCH --nodes=2"));
+        assert!(script.contains("#SBATCH --ntasks-per-node=4"));
+        assert!(script.contains("PRIMARY_NODE_FILE=\"$ALLOCATION_DIR/primary_node\""));
+        assert!(script.contains("NODELIST_FILE=\"$ALLOCATION_DIR/nodes.txt\""));
+        assert!(
+            script.contains("HPC_COMPOSE_NODELIST_FILE=\"/hpc-compose/job/allocation/nodes.txt\"")
+        );
+        assert!(script.contains("scontrol show hostnames \"$SLURM_JOB_NODELIST\""));
+        assert!(
+            display_srun_command(&helper)
+                .iter()
+                .any(|arg| arg == "--nodelist=$HPC_COMPOSE_PRIMARY_NODE")
+        );
+        assert!(
+            !display_srun_command(&distributed)
+                .iter()
+                .any(|arg| arg.starts_with("--nodelist="))
+        );
+    }
+
+    #[test]
+    fn rendered_single_node_script_derives_allocation_metadata_without_scontrol() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        write_fake_runtime_srun(tmpdir.path());
+        fs::remove_file(tmpdir.path().join("scontrol")).expect("remove scontrol");
+
+        let plan = RuntimePlan {
+            name: "single-node".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![RuntimeService {
+                execution: ExecutionSpec::Shell("echo single-node".into()),
+                environment: Vec::new(),
+                working_dir: None,
+                readiness: None,
+                ..runtime_service()
+            }],
+        };
+        let script = render_script(&plan).expect("script");
+        let script_path = tmpdir.path().join("single-node.sbatch");
+        write_executable(&script_path, &script);
+
+        run_rendered_script(tmpdir.path(), &script_path, 0);
+
+        let log = fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/logs/worker.log"))
+            .expect("log");
+        assert!(log.contains("node_meta=node01|1|node01|/hpc-compose/job/allocation/nodes.txt"));
+    }
+
+    #[test]
     fn render_uses_distinct_internal_ids_for_punctuation_variants() {
         let mk_service = |name: &str| RuntimeService {
             name: name.into(),
@@ -2023,6 +2283,7 @@ esac
                 timeout_seconds: Some(5),
             }),
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -2062,6 +2323,7 @@ esac
                 depends_on: Vec::new(),
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
                 source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -2091,6 +2353,7 @@ esac
                 timeout_seconds: Some(30),
             }),
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -2105,6 +2368,7 @@ esac
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -2122,6 +2386,7 @@ esac
             }],
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -2169,6 +2434,7 @@ esac
                 max_restarts: 3,
                 backoff_seconds: 5,
             },
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -2187,6 +2453,7 @@ esac
                 max_restarts: 0,
                 backoff_seconds: 0,
             },
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://python:3.11-slim".into()),
@@ -2204,6 +2471,7 @@ esac
             }],
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://alpine:3".into()),
@@ -2475,6 +2743,7 @@ esac
                 max_restarts: 1,
                 backoff_seconds: 1,
             },
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
@@ -2492,6 +2761,7 @@ esac
             }],
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: crate::planner::ImageSource::Remote("docker://alpine:3".into()),
