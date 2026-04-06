@@ -27,6 +27,8 @@ hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$US
 | [`llama-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-app.yaml) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
 | [`llama-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker.yaml) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server + mounted worker pattern |
 | [`minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) | Single service, no dependencies, no GPU, no prepare | You want the simplest possible starting point |
+| [`multi-node-mpi.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-node-mpi.yaml) | One primary-node helper plus one allocation-wide distributed CPU step | You want a minimal multi-node pattern without adding orchestration |
+| [`multi-node-torchrun.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-node-torchrun.yaml) | Allocation-wide torchrun launch using the primary node as rendezvous | You want a multi-node GPU training starting point |
 | [`training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) | GPU training with checkpoints written to shared storage | You need a batch training workflow with artifact collection |
 | [`training-resume.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-resume.yaml) | GPU training with a shared resume directory and attempt-aware checkpoints | You need restart-safe checkpoint semantics across requeues or repeated submissions |
 | [`postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
@@ -39,6 +41,8 @@ hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$US
 ## Which example should I start from?
 
 - Start with [`minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) if you are new to `hpc-compose` and want the smallest possible file.
+- Start with [`multi-node-mpi.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-node-mpi.yaml) if you need one distributed step plus small helper services on the primary node.
+- Start with [`multi-node-torchrun.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-node-torchrun.yaml) if you need a torchrun-style rendezvous pattern across multiple nodes.
 - Start with [`dev-python-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/dev-python-app.yaml) if you want a source-mounted development loop.
 - Start with [`llm-curl-workflow-workdir.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow-workdir.yaml) if you want the fastest real-cluster GPU inference example.
 - Start with [`training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) if you need a GPU training job with checkpoint output.

@@ -11,7 +11,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::cache::{touch_manifest, upsert_base_manifest, upsert_prepared_manifest};
-use crate::planner::{ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec};
+use crate::planner::{
+    ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement,
+};
 use crate::spec::{
     ReadinessSpec, ServiceDependency, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
 };
@@ -39,6 +41,7 @@ pub struct RuntimeService {
     pub depends_on: Vec<ServiceDependency>,
     pub readiness: Option<ReadinessSpec>,
     pub failure_policy: ServiceFailurePolicy,
+    pub placement: ServicePlacement,
     pub slurm: ServiceSlurmConfig,
     pub prepare: Option<PreparedImageSpec>,
     pub source: ImageSource,
@@ -118,6 +121,7 @@ pub fn build_runtime_plan(plan: &Plan) -> RuntimePlan {
                 depends_on: service.depends_on.clone(),
                 readiness: service.readiness.clone(),
                 failure_policy: service.failure_policy.clone(),
+                placement: service.placement.clone(),
                 slurm: service.slurm.clone(),
                 prepare: service.prepare.clone(),
                 source: service.image.clone(),
@@ -407,6 +411,7 @@ fn runtime_image_path(plan: &Plan, service: &PlannedService) -> PathBuf {
                 depends_on: service.depends_on.clone(),
                 readiness: service.readiness.clone(),
                 failure_policy: service.failure_policy.clone(),
+                placement: service.placement.clone(),
                 slurm: service.slurm.clone(),
                 prepare: service.prepare.clone(),
                 source: service.image.clone(),
@@ -579,7 +584,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
-    use crate::planner::{ImageSource, PreparedImageSpec};
+    use crate::planner::{ImageSource, PreparedImageSpec, ServicePlacement};
     use crate::spec::{ServiceFailurePolicy, SlurmConfig};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -598,6 +603,7 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: Some(PreparedImageSpec {
                 commands: vec!["echo setup".into()],
@@ -813,6 +819,7 @@ esac
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: ImageSource::Remote("docker://redis:7".into()),
@@ -919,6 +926,7 @@ esac
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: ImageSource::LocalSqsh(PathBuf::from("/tmp/local-image.sqsh")),
@@ -956,6 +964,7 @@ esac
                 depends_on: Vec::new(),
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
                 source: ImageSource::LocalSqsh(local_present_path.clone()),
@@ -993,6 +1002,7 @@ esac
                 depends_on: Vec::new(),
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
                 source: ImageSource::LocalSqsh(tmpdir.path().join("missing.sqsh")),
@@ -1023,6 +1033,7 @@ esac
                 depends_on: Vec::new(),
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
                 source: ImageSource::Remote("docker://redis:7".into()),
@@ -1069,6 +1080,7 @@ esac
                 depends_on: Vec::new(),
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: Some(PreparedImageSpec {
                     commands: vec!["echo local".into()],
@@ -1231,6 +1243,7 @@ esac
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                 },
@@ -1244,6 +1257,7 @@ esac
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: Some(PreparedImageSpec {
                         commands: vec!["echo hi".into()],

@@ -8,11 +8,12 @@
     <a href="execution-model.html">Execution model</a>
     <a href="runbook.html">Runbook</a>
     <a href="spec-reference.html">Spec reference</a>
+    <a href="supported-slurm-model.html">Supported Slurm model</a>
     <a href="examples.html">Examples</a>
   </div>
 </div>
 
-`hpc-compose` is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to a single-node Slurm allocation with containerized services inside that allocation.
+`hpc-compose` is intentionally **not** a full Docker Compose implementation. It focuses on the subset that maps cleanly to one Slurm allocation, plus either single-node services or one allocation-wide distributed service without a separate orchestration layer.
 
 ## Start Here
 
@@ -21,12 +22,13 @@
 3. Use [Runbook](runbook.md) when adapting a real workload to a real cluster.
 4. Use [Examples](examples.md) when you want the closest known-good starting point.
 5. Use [Spec reference](spec-reference.md) when you need exact field behavior or validation rules.
+6. Use [Supported Slurm model](supported-slurm-model.md) when you need the product boundary spelled out clearly.
 
 ## What it is for
 
 - One Slurm allocation per application
-- One node per allocation in v1
-- Multiple services started inside that allocation
+- Single-node jobs and constrained multi-node distributed runs
+- Optional helper services pinned to the allocation's primary node
 - Remote images such as `redis:7` or existing local `.sqsh` images
 - Optional image customization on the login node through `x-enroot.prepare`
 - Shared cache management for imported and prepared images
@@ -39,7 +41,7 @@
 - custom Docker networks / `network_mode`
 - `restart` policies
 - `deploy`
-- multi-node service placement
+- arbitrary multi-node orchestration or partial-node service placement
 - mixed string/array `entrypoint` + `command` combinations in ambiguous cases
 
 If you need image customization, use `image:` plus `x-enroot.prepare`, not `build:`.
@@ -73,4 +75,5 @@ hpc-compose submit --watch -f compose.yaml
 - [Runbook](runbook.md) for real-cluster setup and debugging
 - [Examples](examples.md) for example selection and adaptation
 - [Spec Reference](spec-reference.md) for the supported Compose subset
+- [Supported Slurm model](supported-slurm-model.md) for the first-class / pass-through / out-of-scope boundary
 - [Docker Compose Migration](docker-compose-migration.md) for feature mapping and conversion guidance

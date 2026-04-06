@@ -22,7 +22,7 @@ use hpc_compose::job::{
     write_submission_record,
 };
 use hpc_compose::planner::{
-    ExecutionSpec, ImageSource, Plan, build_plan, registry_host_for_remote,
+    ExecutionSpec, ImageSource, Plan, ServicePlacementMode, build_plan, registry_host_for_remote,
 };
 use hpc_compose::preflight::{Options as PreflightOptions, Report, run as run_preflight};
 use hpc_compose::prepare::{
@@ -30,7 +30,7 @@ use hpc_compose::prepare::{
     build_runtime_plan, prepare_runtime_plan,
 };
 use hpc_compose::render::{
-    build_srun_command, execution_argv, log_file_name_for_service, render_script,
+    display_srun_command, execution_argv, log_file_name_for_service, render_script,
 };
 use hpc_compose::spec::{ComposeSpec, DependencyCondition, ServiceDependency};
 
@@ -297,6 +297,7 @@ fn run_command(command: Commands) -> Result<()> {
                     enroot_bin,
                     sbatch_bin,
                     srun_bin,
+                    scontrol_bin: "scontrol".to_string(),
                     require_submit_tools: true,
                     skip_prepare: false,
                 },
@@ -361,6 +362,7 @@ fn run_command(command: Commands) -> Result<()> {
                         enroot_bin: enroot_bin.clone(),
                         sbatch_bin: sbatch_bin.clone(),
                         srun_bin,
+                        scontrol_bin: "scontrol".to_string(),
                         require_submit_tools: true,
                         skip_prepare,
                     },
@@ -794,39 +796,56 @@ fn print_cache_inspect(plan: &RuntimePlan, filter: Option<&str>) -> Result<()> {
 
 fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> io::Result<()> {
     writeln!(writer, "job id: {}", snapshot.record.job_id)?;
+    writeln!(writer, "Scheduler:")?;
     writeln!(
         writer,
-        "scheduler state: {} ({})",
+        "  state: {} ({})",
         snapshot.scheduler.state,
         scheduler_source_label(snapshot.scheduler.source)
     )?;
     if let Some(detail) = &snapshot.scheduler.detail {
-        writeln!(writer, "scheduler note: {detail}")?;
+        writeln!(writer, "  note: {detail}")?;
     }
+    if let Some(queue) = &snapshot.queue_diagnostics {
+        if let Some(reason) = &queue.pending_reason {
+            writeln!(writer, "  pending reason: {reason}")?;
+        }
+        if let Some(eligible_time) = &queue.eligible_time {
+            writeln!(writer, "  eligible time: {eligible_time}")?;
+        }
+        if let Some(start_time) = &queue.start_time {
+            writeln!(writer, "  start time: {start_time}")?;
+        }
+    }
+    writeln!(writer, "Runtime:")?;
     writeln!(
         writer,
-        "compose file: {}",
+        "  compose file: {}",
         snapshot.record.compose_file.display()
     )?;
     writeln!(
         writer,
-        "script path: {}",
+        "  script path: {}",
         snapshot.record.script_path.display()
     )?;
-    writeln!(writer, "cache dir: {}", snapshot.record.cache_dir.display())?;
-    writeln!(writer, "log dir: {}", snapshot.log_dir.display())?;
+    writeln!(
+        writer,
+        "  cache dir: {}",
+        snapshot.record.cache_dir.display()
+    )?;
+    writeln!(writer, "  log dir: {}", snapshot.log_dir.display())?;
     if let Some(attempt) = snapshot.attempt {
-        writeln!(writer, "attempt: {attempt}")?;
+        writeln!(writer, "  attempt: {attempt}")?;
     }
     if let Some(is_resume) = snapshot.is_resume {
-        writeln!(writer, "is resume: {}", yes_no(is_resume))?;
+        writeln!(writer, "  is resume: {}", yes_no(is_resume))?;
     }
     if let Some(resume_dir) = &snapshot.resume_dir {
-        writeln!(writer, "resume dir: {}", resume_dir.display())?;
+        writeln!(writer, "  resume dir: {}", resume_dir.display())?;
     }
     writeln!(
         writer,
-        "batch log: {} (present: {}, updated: {})",
+        "  batch log: {} (present: {}, updated: {})",
         snapshot.batch_log.path.display(),
         yes_no(snapshot.batch_log.present),
         match snapshot.batch_log.updated_age_seconds {
@@ -841,7 +860,7 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
         };
         writeln!(
             writer,
-            "log  service '{}': {} (present: {}, updated: {})",
+            "  log  service '{}': {} (present: {}, updated: {})",
             service.service_name,
             service.path.display(),
             yes_no(service.present),
@@ -867,8 +886,34 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
                 .unwrap_or_else(|| "unknown".to_string());
             writeln!(
                 writer,
-                "state service '{}': failure_policy={} restarts={}/{} last_exit={}",
+                "  state service '{}': failure_policy={} restarts={}/{} last_exit={}",
                 service.service_name, mode, restart_count, max_restarts, last_exit
+            )?;
+        }
+        if service.placement_mode.is_some()
+            || service.nodes.is_some()
+            || service.ntasks.is_some()
+            || service.ntasks_per_node.is_some()
+            || service.nodelist.is_some()
+        {
+            writeln!(
+                writer,
+                "  placement service '{}': mode={} nodes={} ntasks={} ntasks_per_node={} nodelist={}",
+                service.service_name,
+                service.placement_mode.as_deref().unwrap_or("unknown"),
+                service
+                    .nodes
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                service
+                    .ntasks
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                service
+                    .ntasks_per_node
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                service.nodelist.as_deref().unwrap_or("unknown"),
             )?;
         }
     }
@@ -1228,7 +1273,12 @@ fn write_plan_inspect_verbose(
         writeln!(
             writer,
             "effective srun args: {}",
-            build_srun_command(runtime).join(" ")
+            display_srun_command(runtime).join(" ")
+        )?;
+        writeln!(
+            writer,
+            "step geometry: {}",
+            format_service_step_geometry(runtime)
         )?;
         if let Some(reason) = rebuild_reason(runtime) {
             writeln!(writer, "rebuild reason: {reason}")?;
@@ -1265,10 +1315,53 @@ fn format_debug_block(label: &str, values: &[String]) -> String {
     lines.join("\n")
 }
 
+fn format_allocation_geometry(plan: &RuntimePlan) -> String {
+    format!(
+        "nodes={} ntasks={} ntasks_per_node={}",
+        plan.slurm.allocation_nodes(),
+        format_optional_u32(plan.slurm.ntasks),
+        format_optional_u32(plan.slurm.ntasks_per_node)
+    )
+}
+
+fn format_service_step_geometry(service: &RuntimeService) -> String {
+    let mut parts = vec![
+        format!("mode={}", placement_mode_label(service.placement.mode)),
+        format!("nodes={}", service.placement.nodes),
+        format!("ntasks={}", format_optional_u32(service.placement.ntasks)),
+        format!(
+            "ntasks_per_node={}",
+            format_optional_u32(service.placement.ntasks_per_node)
+        ),
+    ];
+    if service.placement.pin_to_primary_node {
+        parts.push("nodelist=$HPC_COMPOSE_PRIMARY_NODE".to_string());
+    }
+    parts.join(" ")
+}
+
+fn format_optional_u32(value: Option<u32>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "auto".to_string())
+}
+
+fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
+    match mode {
+        ServicePlacementMode::PrimaryNode => "primary_node",
+        ServicePlacementMode::Distributed => "distributed",
+    }
+}
+
 fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result<()> {
     writeln!(writer, "name: {}", plan.name)?;
     writeln!(writer, "runtime mode: pyxis")?;
     writeln!(writer, "cache dir: {}", plan.cache_dir.display())?;
+    writeln!(
+        writer,
+        "allocation geometry: {}",
+        format_allocation_geometry(plan)
+    )?;
     writeln!(
         writer,
         "service order: {}",
@@ -1297,6 +1390,11 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
             writer,
             "runtime image state: {}",
             runtime_cache_state(service)
+        )?;
+        writeln!(
+            writer,
+            "step geometry: {}",
+            format_service_step_geometry(service)
         )?;
         if let Some(prepare) = &service.prepare {
             writeln!(
@@ -1717,10 +1815,11 @@ mod tests {
     use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
     use hpc_compose::job::{
         ArtifactExportReport, ArtifactManifest, BatchLogStatus, CollectorStatus, GpuDeviceSample,
-        GpuProcessSample, GpuSnapshot, SamplerSnapshot, SchedulerSource, SchedulerStatus,
-        ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats, SubmissionRecord,
+        GpuProcessSample, GpuSnapshot, QueueDiagnostics, SamplerSnapshot, SchedulerSource,
+        SchedulerStatus, ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats,
+        SubmissionRecord,
     };
-    use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
+    use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use hpc_compose::spec::{
         DependencyCondition, ReadinessSpec, ServiceDependency, ServiceFailurePolicy,
         ServiceSlurmConfig, SlurmConfig,
@@ -1741,6 +1840,7 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare,
             source,
@@ -2225,6 +2325,11 @@ services:
                 failed: false,
                 detail: Some("finished".into()),
             },
+            queue_diagnostics: Some(QueueDiagnostics {
+                pending_reason: None,
+                eligible_time: Some("2026-04-06T10:00:00".into()),
+                start_time: Some("2026-04-06T10:05:00".into()),
+            }),
             log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
             batch_log: BatchLogStatus {
                 path: tmpdir.path().join("slurm-12345.out"),
@@ -2242,6 +2347,11 @@ services:
                 restart_count: Some(1),
                 max_restarts: Some(3),
                 last_exit_code: Some(0),
+                placement_mode: Some("distributed".into()),
+                nodes: Some(2),
+                ntasks: Some(4),
+                ntasks_per_node: Some(2),
+                nodelist: Some("node01 node02".into()),
             }],
             attempt: Some(1),
             is_resume: Some(true),
@@ -2250,16 +2360,58 @@ services:
         let mut status_out = Vec::new();
         write_status_snapshot(&mut status_out, &status).expect("status");
         let status_text = String::from_utf8(status_out).expect("utf8");
-        assert!(status_text.contains("scheduler state: COMPLETED (sacct)"));
-        assert!(status_text.contains("scheduler note: finished"));
-        assert!(status_text.contains("attempt: 1"));
-        assert!(status_text.contains("is resume: yes"));
-        assert!(status_text.contains("resume dir: /shared/runs/demo"));
+        assert!(status_text.contains("Scheduler:"));
+        assert!(status_text.contains("  state: COMPLETED (sacct)"));
+        assert!(status_text.contains("  note: finished"));
+        assert!(status_text.contains("  eligible time: 2026-04-06T10:00:00"));
+        assert!(status_text.contains("  start time: 2026-04-06T10:05:00"));
+        assert!(status_text.contains("Runtime:"));
+        assert!(status_text.contains("  attempt: 1"));
+        assert!(status_text.contains("  is resume: yes"));
+        assert!(status_text.contains("  resume dir: /shared/runs/demo"));
         assert!(status_text.contains("updated: 1m ago"));
         assert!(status_text.contains("updated: unknown"));
         assert!(status_text.contains(
-            "state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 last_exit=0"
+            "  state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 last_exit=0"
         ));
+        assert!(status_text.contains(
+            "  placement service 'svc/name': mode=distributed nodes=2 ntasks=4 ntasks_per_node=2 nodelist=node01 node02"
+        ));
+
+        let waiting = StatusSnapshot {
+            record: record.clone(),
+            scheduler: SchedulerStatus {
+                state: "WAITING_FOR_ACCOUNTING".into(),
+                source: SchedulerSource::LocalOnly,
+                terminal: false,
+                failed: false,
+                detail: Some(
+                    "job just disappeared from squeue and has not appeared in sacct yet".into(),
+                ),
+            },
+            queue_diagnostics: None,
+            log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
+            batch_log: BatchLogStatus {
+                path: tmpdir.path().join("slurm-12345.out"),
+                present: false,
+                updated_at: None,
+                updated_age_seconds: None,
+            },
+            services: Vec::new(),
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+        };
+        let mut waiting_out = Vec::new();
+        write_status_snapshot(&mut waiting_out, &waiting).expect("waiting");
+        let waiting_text = String::from_utf8(waiting_out).expect("utf8");
+        assert!(waiting_text.contains("  state: WAITING_FOR_ACCOUNTING (local-only)"));
+        assert!(waiting_text.contains(
+            "  note: job just disappeared from squeue and has not appeared in sacct yet"
+        ));
+        assert!(!waiting_text.contains("pending reason:"));
+        assert!(!waiting_text.contains("eligible time:"));
+        assert!(!waiting_text.contains("start time:"));
 
         let stats = StatsSnapshot {
             job_id: "12345".into(),
@@ -2446,6 +2598,7 @@ services:
                 depends_on: service.depends_on.clone(),
                 readiness: service.readiness.clone(),
                 failure_policy: service.failure_policy.clone(),
+                placement: service.placement.clone(),
                 slurm: service.slurm.clone(),
                 prepare: service.prepare.clone(),
             }],

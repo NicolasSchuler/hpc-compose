@@ -14,8 +14,8 @@ This guide helps you convert an existing `docker-compose.yaml` into an `hpc-comp
 | `depends_on` | `depends_on` (list or map with `condition: service_started` / `service_healthy`) |
 | `working_dir` | `working_dir` (requires explicit `command` or `entrypoint`) |
 | `build` | **Not supported.** Use `image` + `x-enroot.prepare.commands` instead. |
-| `ports` | **Not supported.** Services communicate via `127.0.0.1` on a single node. |
-| `networks` / `network_mode` | **Not supported.** All services share the host network on one node. |
+| `ports` | **Not supported.** Use host networking semantics instead. `127.0.0.1` works only when both sides run on the same node. |
+| `networks` / `network_mode` | **Not supported.** There is no Docker-style overlay network or service-name DNS layer. |
 | `restart` | **Not supported as a Compose key.** Use `services.<name>.x-slurm.failure_policy`. |
 | `deploy` | **Not supported.** Use `x-slurm` for resource allocation. |
 | `healthcheck` | Supported for a constrained TCP/HTTP subset and normalized into `readiness`; use explicit `readiness` for anything more complex. |
@@ -105,7 +105,7 @@ services:
 
 ### Networking
 
-Docker Compose creates isolated networks where services find each other by name. In `hpc-compose`, all services run on the same node and share the host network. Replace service hostnames with `127.0.0.1`.
+Docker Compose creates isolated networks where services find each other by name. In `hpc-compose`, helper services on the same node share the host network directly, and multi-node distributed steps must use explicit rendezvous addresses. Replace service hostnames with `127.0.0.1` only when both sides intentionally stay on one node. For multi-node runs, derive the rendezvous host from `/hpc-compose/job/allocation/primary_node` or `HPC_COMPOSE_PRIMARY_NODE`.
 
 ### Building images
 
@@ -213,18 +213,18 @@ services:
 | `networks` / `network_mode` | Not needed. All services are on the same host network. |
 | `restart` | Use `services.<name>.x-slurm.failure_policy` (`fail_job`, `ignore`, `restart_on_failure`). |
 | `deploy` | Use `x-slurm` for resources. |
-| Service DNS names | Use `127.0.0.1` instead of service names. |
+| Service DNS names | Use `127.0.0.1` for same-node helpers, or explicit host metadata such as `HPC_COMPOSE_PRIMARY_NODE` for distributed runs. |
 | Named volumes | Use host-path bind mounts in `volumes`. |
 | `.env` file | Supported. `.env` in the compose file directory is loaded automatically. |
 
 ## Migration checklist
 
 1. **Remove `build:`** — Replace with `image:` pointing to a base image. Move dependency installation to `x-enroot.prepare.commands`.
-2. **Remove `ports:`** — Services communicate via localhost on the same node.
-3. **Remove `networks:` / `network_mode:`** — Not applicable on a single Slurm node.
+2. **Remove `ports:`** — Use host-network semantics instead of container port publishing.
+3. **Remove `networks:` / `network_mode:`** — There is no Docker-style overlay network or service-name DNS layer.
 4. **Remove Compose `restart:`** — use `services.<name>.x-slurm.failure_policy` when you need per-service restart behavior.
 5. **Remove `deploy:`** — Use `x-slurm` for resource allocation.
-6. **Replace service hostnames** — Change any service-name references (e.g. `redis`, `postgres`) to `127.0.0.1`.
+6. **Replace service hostnames** — Change any service-name references (e.g. `redis`, `postgres`) to `127.0.0.1` for same-node helpers, or to explicit allocation metadata for distributed runs.
 7. **Replace `healthcheck:`** — Convert to `readiness:` with `type: tcp`, `type: log`, or `type: sleep`.
 8. **Add `x-slurm:`** — Set `time`, `mem`, `cpus_per_task`, and optionally `gpus`, `partition`, `account`.
 9. **Set `cache_dir`** — Point `x-slurm.cache_dir` to shared storage visible from login and compute nodes.

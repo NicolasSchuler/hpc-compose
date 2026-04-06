@@ -1,0 +1,46 @@
+name: multi-node-mpi
+
+x-slurm:
+  job_name: multi-node-mpi
+  time: "00:20:00"
+  nodes: 2
+  ntasks_per_node: 2
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  bootstrap:
+    image: alpine:3.20
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "primary=$(cat /hpc-compose/job/allocation/primary_node)"
+        sleep 30
+    readiness:
+      type: sleep
+      seconds: 1
+    x-slurm:
+      nodes: 1
+
+  mpi:
+    image: python:3.11-slim
+    depends_on:
+      bootstrap:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "primary=$(cat /hpc-compose/job/allocation/primary_node)"
+        echo "nodes=$(tr '\n' ' ' < /hpc-compose/job/allocation/nodes.txt)"
+        python - <<'PY'
+        import os
+        print("mpi placeholder")
+        print("node_count", os.environ["HPC_COMPOSE_NODE_COUNT"])
+        PY
+    readiness:
+      type: sleep
+      seconds: 2
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 2

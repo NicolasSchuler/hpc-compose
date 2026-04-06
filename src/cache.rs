@@ -348,7 +348,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
+    use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use crate::prepare::RuntimeService;
     use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig};
 
@@ -363,6 +363,7 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: Some(PreparedImageSpec {
                 commands: vec!["apt-get update".into()],
@@ -553,6 +554,7 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
             prepare: None,
             source: ImageSource::LocalSqsh(PathBuf::from("/tmp/local.sqsh")),

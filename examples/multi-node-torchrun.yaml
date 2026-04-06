@@ -1,0 +1,33 @@
+name: multi-node-torchrun
+
+x-slurm:
+  job_name: multi-node-torchrun
+  time: "04:00:00"
+  nodes: 2
+  ntasks_per_node: 4
+  gres: gpu:4
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  trainer:
+    image: pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        MASTER_ADDR="$(cat /hpc-compose/job/allocation/primary_node)"
+        echo "master=$$MASTER_ADDR"
+        echo "nodes=$$HPC_COMPOSE_NODELIST"
+        torchrun \
+          --nnodes="$$HPC_COMPOSE_NODE_COUNT" \
+          --nproc-per-node=4 \
+          --rdzv-backend=c10d \
+          --rdzv-endpoint="$$MASTER_ADDR:29400" \
+          train.py
+    readiness:
+      type: sleep
+      seconds: 5
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 4
+      gres: gpu:4

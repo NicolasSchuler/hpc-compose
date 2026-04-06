@@ -86,6 +86,16 @@ pub struct ServiceLogStatus {
     pub max_restarts: Option<u32>,
     #[serde(default)]
     pub last_exit_code: Option<i32>,
+    #[serde(default)]
+    pub placement_mode: Option<String>,
+    #[serde(default)]
+    pub nodes: Option<u32>,
+    #[serde(default)]
+    pub ntasks: Option<u32>,
+    #[serde(default)]
+    pub ntasks_per_node: Option<u32>,
+    #[serde(default)]
+    pub nodelist: Option<String>,
 }
 
 /// Presence and freshness information for the top-level batch log.
@@ -104,12 +114,26 @@ pub struct BatchLogStatus {
 pub struct StatusSnapshot {
     pub record: SubmissionRecord,
     pub scheduler: SchedulerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_diagnostics: Option<QueueDiagnostics>,
     pub log_dir: PathBuf,
     pub batch_log: BatchLogStatus,
     pub services: Vec<ServiceLogStatus>,
     pub attempt: Option<u32>,
     pub is_resume: Option<bool>,
     pub resume_dir: Option<PathBuf>,
+}
+
+/// Optional queue-facing scheduler diagnostics returned only by `status`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
 }
 
 /// Combined metrics and scheduler view returned by the `stats` command.
@@ -369,6 +393,14 @@ struct SamplerMetaFile {
     collectors: Vec<CollectorStatus>,
 }
 
+#[derive(Debug, Default)]
+struct QueueDiagnosticsProbe {
+    state: Option<String>,
+    pending_reason: Option<String>,
+    eligible_time: Option<String>,
+    start_time: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct GpuDeviceSampleRow {
     sampled_at: String,
@@ -453,6 +485,16 @@ struct ServiceRuntimeStateEntry {
     max_restarts: Option<u32>,
     #[serde(default)]
     last_exit_code: Option<i32>,
+    #[serde(default)]
+    placement_mode: Option<String>,
+    #[serde(default)]
+    nodes: Option<u32>,
+    #[serde(default)]
+    ntasks: Option<u32>,
+    #[serde(default)]
+    ntasks_per_node: Option<u32>,
+    #[serde(default)]
+    nodelist: Option<String>,
 }
 
 /// Returns the `.hpc-compose` metadata directory for a compose file.
@@ -657,8 +699,9 @@ pub fn build_status_snapshot(
     options: &SchedulerOptions,
 ) -> Result<StatusSnapshot> {
     let record = load_submission_record(spec_path, job_id)?;
+    let (raw_scheduler, queue_diagnostics) = probe_status_components(&record.job_id, options);
     let scheduler = reconcile_scheduler_status(
-        probe_scheduler_status(&record.job_id, options),
+        raw_scheduler,
         record.submitted_at,
         None,
         unix_timestamp_now(),
@@ -683,6 +726,11 @@ pub fn build_status_snapshot(
             restart_count: runtime_state.and_then(|state| state.restart_count),
             max_restarts: runtime_state.and_then(|state| state.max_restarts),
             last_exit_code: runtime_state.and_then(|state| state.last_exit_code),
+            placement_mode: runtime_state.and_then(|state| state.placement_mode.clone()),
+            nodes: runtime_state.and_then(|state| state.nodes),
+            ntasks: runtime_state.and_then(|state| state.ntasks),
+            ntasks_per_node: runtime_state.and_then(|state| state.ntasks_per_node),
+            nodelist: runtime_state.and_then(|state| state.nodelist.clone()),
         });
     }
     Ok(StatusSnapshot {
@@ -690,6 +738,7 @@ pub fn build_status_snapshot(
         batch_log,
         record,
         scheduler,
+        queue_diagnostics,
         services,
         attempt: runtime_state.as_ref().and_then(|state| state.attempt),
         is_resume: runtime_state.as_ref().and_then(|state| state.is_resume),
@@ -831,8 +880,17 @@ pub fn build_stats_snapshot(
 
 /// Probes scheduler state using `squeue` first and `sacct` as fallback.
 pub fn probe_scheduler_status(job_id: &str, options: &SchedulerOptions) -> SchedulerStatus {
-    probe_squeue(job_id, &options.squeue_bin)
-        .or_else(|| probe_sacct(job_id, &options.sacct_bin))
+    probe_status_components(job_id, options).0
+}
+
+fn probe_status_components(
+    job_id: &str,
+    options: &SchedulerOptions,
+) -> (SchedulerStatus, Option<QueueDiagnostics>) {
+    let squeue = probe_squeue_queue_diagnostics(job_id, &options.squeue_bin);
+    let sacct = probe_sacct_queue_diagnostics(job_id, &options.sacct_bin);
+    let scheduler = scheduler_status_from_probe(squeue.as_ref(), SchedulerSource::Squeue)
+        .or_else(|| scheduler_status_from_probe(sacct.as_ref(), SchedulerSource::Sacct))
         .unwrap_or_else(|| SchedulerStatus {
             state: "unknown".to_string(),
             source: SchedulerSource::LocalOnly,
@@ -842,7 +900,46 @@ pub fn probe_scheduler_status(job_id: &str, options: &SchedulerOptions) -> Sched
                 "scheduler state is unavailable because squeue/sacct could not determine this job"
                     .to_string(),
             ),
-        })
+        });
+    let queue_diagnostics =
+        build_status_queue_diagnostics(&scheduler, squeue.as_ref(), sacct.as_ref());
+    (scheduler, queue_diagnostics)
+}
+
+fn build_status_queue_diagnostics(
+    scheduler: &SchedulerStatus,
+    squeue: Option<&QueueDiagnosticsProbe>,
+    sacct: Option<&QueueDiagnosticsProbe>,
+) -> Option<QueueDiagnostics> {
+    let pending_reason = if scheduler.state == "PENDING" {
+        squeue
+            .and_then(|probe| probe.pending_reason.clone())
+            .or_else(|| match sacct.and_then(|probe| probe.state.as_deref()) {
+                Some("PENDING") => sacct.and_then(|probe| probe.pending_reason.clone()),
+                _ => None,
+            })
+    } else {
+        None
+    };
+    let diagnostics = QueueDiagnostics {
+        pending_reason,
+        eligible_time: sacct.and_then(|probe| probe.eligible_time.clone()),
+        start_time: squeue
+            .and_then(|probe| probe.start_time.clone())
+            .or_else(|| sacct.and_then(|probe| probe.start_time.clone())),
+    };
+    (diagnostics.pending_reason.is_some()
+        || diagnostics.eligible_time.is_some()
+        || diagnostics.start_time.is_some())
+    .then_some(diagnostics)
+}
+
+fn scheduler_status_from_probe(
+    probe: Option<&QueueDiagnosticsProbe>,
+    source: SchedulerSource,
+) -> Option<SchedulerStatus> {
+    let state = probe.and_then(|probe| probe.state.clone())?;
+    Some(build_scheduler_status(state, source))
 }
 
 /// Returns the tracked log directory for a submission record.
@@ -1846,51 +1943,62 @@ fn build_log_status(path: &Path, now: u64) -> BatchLogStatus {
     }
 }
 
-fn probe_squeue(job_id: &str, binary: &str) -> Option<SchedulerStatus> {
+fn probe_squeue_queue_diagnostics(job_id: &str, binary: &str) -> Option<QueueDiagnosticsProbe> {
     let output = Command::new(binary)
-        .args(["-h", "-j", job_id, "-o", "%T"])
+        .args(["-h", "-j", job_id, "-o", "%T|%r|%S"])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let state = stdout
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())?
-        .to_string();
-    Some(build_scheduler_status(
-        normalize_scheduler_state(&state),
-        SchedulerSource::Squeue,
-    ))
+        .find(|line| !line.is_empty())?;
+    let mut fields = row.split('|').map(str::trim);
+    let state = fields.next().and_then(normalize_scheduler_state_field);
+    let pending_reason = fields.next().and_then(normalize_scheduler_metadata);
+    let start_time = fields.next().and_then(normalize_scheduler_metadata);
+    Some(QueueDiagnosticsProbe {
+        state,
+        pending_reason,
+        start_time,
+        ..QueueDiagnosticsProbe::default()
+    })
 }
 
-fn probe_sacct(job_id: &str, binary: &str) -> Option<SchedulerStatus> {
+fn probe_sacct_queue_diagnostics(job_id: &str, binary: &str) -> Option<QueueDiagnosticsProbe> {
     let output = Command::new(binary)
-        .args(["-n", "-j", job_id, "--format=State", "--parsable2"])
+        .args([
+            "-n",
+            "-X",
+            "-j",
+            job_id,
+            "--format=State,Eligible,Start,Reason",
+            "--parsable2",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let state = stdout
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())?
-        .split('|')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if state.is_empty() {
-        return None;
-    }
-    Some(build_scheduler_status(
-        normalize_scheduler_state(&state),
-        SchedulerSource::Sacct,
-    ))
+        .find(|line| !line.is_empty())?;
+    let mut fields = row.split('|').map(str::trim);
+    let state = fields.next().and_then(normalize_scheduler_state_field);
+    let eligible_time = fields.next().and_then(normalize_scheduler_metadata);
+    let start_time = fields.next().and_then(normalize_scheduler_metadata);
+    let pending_reason = fields.next().and_then(normalize_scheduler_metadata);
+    Some(QueueDiagnosticsProbe {
+        state,
+        pending_reason,
+        eligible_time,
+        start_time,
+    })
 }
 
 fn probe_step_stats(job_id: &str, binary: &str) -> Result<Vec<StepStats>> {
@@ -2059,6 +2167,29 @@ fn reconcile_scheduler_status(
     }
 
     status
+}
+
+fn normalize_scheduler_state_field(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    Some(normalize_scheduler_state(trimmed))
+}
+
+fn normalize_scheduler_metadata(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "n/a" | "na" | "none" | "null" | "unknown" | "invalid" | "not_set" | "not set"
+    ) {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn normalize_scheduler_state(raw: &str) -> String {
@@ -2269,7 +2400,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::planner::{ExecutionSpec, ImageSource};
+    use crate::planner::{ExecutionSpec, ImageSource, ServicePlacement};
     use crate::prepare::RuntimeService;
     use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig};
 
@@ -2289,6 +2420,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://redis:7".into()),
@@ -2303,6 +2435,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://python:3.11-slim".into()),
@@ -2518,6 +2651,7 @@ mod tests {
         )
         .expect("status snapshot");
         assert_eq!(snapshot.scheduler.state, "RUNNING");
+        assert!(snapshot.queue_diagnostics.is_none());
         assert_eq!(snapshot.attempt, Some(1));
         assert_eq!(snapshot.is_resume, Some(true));
         assert_eq!(
@@ -2622,6 +2756,170 @@ mod tests {
         assert!(api.restart_count.is_none());
         assert!(api.max_restarts.is_none());
         assert!(api.last_exit_code.is_none());
+    }
+
+    #[test]
+    fn build_status_snapshot_merges_queue_diagnostics_from_squeue_and_sacct() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let plan = runtime_plan(tmpdir.path());
+        persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+
+        let squeue = tmpdir.path().join("squeue");
+        let sacct = tmpdir.path().join("sacct");
+        write_script(
+            &squeue,
+            r#"#!/bin/bash
+set -euo pipefail
+if [[ "${*: -1}" == "%T|%r|%S" ]]; then
+  echo "PENDING|Priority|2026-04-07T12:34:56"
+else
+  echo "PENDING"
+fi
+"#,
+        );
+        write_script(
+            &sacct,
+            r#"#!/bin/bash
+set -euo pipefail
+case "$*" in
+  *"State,Eligible,Start,Reason"*)
+    echo "PENDING|2026-04-07T10:00:00|Unknown|Priority"
+    ;;
+  *)
+    echo "PENDING"
+    ;;
+esac
+"#,
+        );
+
+        let snapshot = build_status_snapshot(
+            &compose,
+            None,
+            &SchedulerOptions {
+                squeue_bin: squeue.display().to_string(),
+                sacct_bin: sacct.display().to_string(),
+            },
+        )
+        .expect("status snapshot");
+        assert_eq!(snapshot.scheduler.state, "PENDING");
+        assert_eq!(
+            snapshot.queue_diagnostics,
+            Some(QueueDiagnostics {
+                pending_reason: Some("Priority".into()),
+                eligible_time: Some("2026-04-07T10:00:00".into()),
+                start_time: Some("2026-04-07T12:34:56".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn build_status_snapshot_reuses_one_squeue_snapshot_for_state_and_queue_details() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let plan = runtime_plan(tmpdir.path());
+        persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+
+        let squeue = tmpdir.path().join("squeue");
+        let squeue_calls = tmpdir.path().join("squeue.calls");
+        let sacct = tmpdir.path().join("sacct");
+        write_script(
+            &squeue,
+            &format!(
+                r#"#!/bin/bash
+set -euo pipefail
+count=0
+if [[ -f "{calls}" ]]; then
+  count="$(cat "{calls}")"
+fi
+count=$((count + 1))
+printf '%s' "$count" > "{calls}"
+if [[ "${{*: -1}}" == "%T|%r|%S" ]]; then
+  if [[ "$count" -eq 1 ]]; then
+    echo "PENDING|Priority|N/A"
+  else
+    echo "RUNNING|None|2026-04-07T12:34:56"
+  fi
+else
+  echo "PENDING"
+fi
+"#,
+                calls = squeue_calls.display()
+            ),
+        );
+        write_script(&sacct, "#!/bin/bash\nexit 0\n");
+
+        let snapshot = build_status_snapshot(
+            &compose,
+            None,
+            &SchedulerOptions {
+                squeue_bin: squeue.display().to_string(),
+                sacct_bin: sacct.display().to_string(),
+            },
+        )
+        .expect("status snapshot");
+        assert_eq!(snapshot.scheduler.state, "PENDING");
+        assert_eq!(
+            snapshot.queue_diagnostics,
+            Some(QueueDiagnostics {
+                pending_reason: Some("Priority".into()),
+                eligible_time: None,
+                start_time: None,
+            })
+        );
+        assert_eq!(
+            fs::read_to_string(&squeue_calls).expect("squeue calls"),
+            "1"
+        );
+    }
+
+    #[test]
+    fn build_status_snapshot_waiting_for_scheduler_omits_queue_diagnostics() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let plan = runtime_plan(tmpdir.path());
+        persist_submission_record(
+            &compose,
+            tmpdir.path(),
+            &tmpdir.path().join("job.sbatch"),
+            &plan,
+            "12345",
+        )
+        .expect("record");
+
+        let squeue = tmpdir.path().join("squeue");
+        let sacct = tmpdir.path().join("sacct");
+        write_script(&squeue, "#!/bin/bash\nexit 0\n");
+        write_script(&sacct, "#!/bin/bash\nexit 0\n");
+
+        let snapshot = build_status_snapshot(
+            &compose,
+            None,
+            &SchedulerOptions {
+                squeue_bin: squeue.display().to_string(),
+                sacct_bin: sacct.display().to_string(),
+            },
+        )
+        .expect("status snapshot");
+        assert_eq!(snapshot.scheduler.state, "WAITING_FOR_SCHEDULER");
+        assert!(snapshot.queue_diagnostics.is_none());
     }
 
     #[test]

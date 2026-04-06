@@ -8,7 +8,9 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::planner::{ImageSource, cache_path_policy_issue, registry_host_for_remote};
+use crate::planner::{
+    ImageSource, ServicePlacementMode, cache_path_policy_issue, registry_host_for_remote,
+};
 use crate::prepare::RuntimePlan;
 use crate::spec::{MetricsCollector, ReadinessSpec};
 
@@ -68,6 +70,7 @@ pub struct Options {
     pub enroot_bin: String,
     pub sbatch_bin: String,
     pub srun_bin: String,
+    pub scontrol_bin: String,
     pub require_submit_tools: bool,
     pub skip_prepare: bool,
 }
@@ -78,6 +81,7 @@ impl Default for Options {
             enroot_bin: "enroot".to_string(),
             sbatch_bin: "sbatch".to_string(),
             srun_bin: "srun".to_string(),
+            scontrol_bin: "scontrol".to_string(),
             require_submit_tools: true,
             skip_prepare: false,
         }
@@ -220,6 +224,14 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
             "sbatch is available",
             "Use a node with Slurm client tools installed or pass --sbatch-bin.",
         );
+        if plan.slurm.is_multi_node() {
+            check_binary(
+                &mut report,
+                &options.scontrol_bin,
+                "scontrol is available",
+                "Multi-node runs need scontrol on the submission host so hpc-compose can expand SLURM_JOB_NODELIST at runtime.",
+            );
+        }
         if srun_available {
             check_pyxis_support(&mut report, &options.srun_bin);
         }
@@ -545,21 +557,67 @@ fn check_metrics_collectors(report: &mut Report, plan: &RuntimePlan) {
 }
 
 fn check_readiness_host_tools(report: &mut Report, plan: &RuntimePlan) {
-    if !plan
+    let has_http_readiness = plan
         .ordered_services
         .iter()
-        .any(|service| matches!(service.readiness, Some(ReadinessSpec::Http { .. })))
-    {
-        return;
+        .any(|service| matches!(service.readiness, Some(ReadinessSpec::Http { .. })));
+    if has_http_readiness {
+        check_optional_binary(
+            report,
+            "curl",
+            "HTTP readiness checks can query curl",
+            "HTTP readiness checks require 'curl' on the host, but it was not found on this node",
+            "Install curl on the host or switch readiness.type to a probe that uses tools already available on the batch node.",
+        );
     }
 
-    check_optional_binary(
-        report,
-        "curl",
-        "HTTP readiness checks can query curl",
-        "HTTP readiness checks require 'curl' on the host, but it was not found on this node",
-        "Install curl on the host or switch readiness.type to a probe that uses tools already available on the batch node.",
-    );
+    for service in &plan.ordered_services {
+        if service.placement.mode != ServicePlacementMode::Distributed {
+            continue;
+        }
+        if !distributed_readiness_uses_localhost(service.readiness.as_ref()) {
+            continue;
+        }
+        report.items.push(Item {
+            level: Level::Error,
+            message: format!(
+                "distributed service '{}' uses readiness that still relies on localhost semantics",
+                service.name
+            ),
+            remediation: Some(
+                "Use readiness.type=sleep or readiness.type=log, or switch TCP/HTTP readiness to an explicit non-local host or URL."
+                    .to_string(),
+            ),
+        });
+    }
+}
+
+fn distributed_readiness_uses_localhost(readiness: Option<&ReadinessSpec>) -> bool {
+    match readiness {
+        None | Some(ReadinessSpec::Sleep { .. } | ReadinessSpec::Log { .. }) => false,
+        Some(ReadinessSpec::Tcp { host, .. }) => host.as_deref().is_none_or(is_localhost_host),
+        Some(ReadinessSpec::Http { url, .. }) => {
+            distributed_http_host(url).is_none_or(is_localhost_host)
+        }
+    }
+}
+
+fn distributed_http_host(url: &str) -> Option<&str> {
+    let (_, after_scheme) = url.split_once("://")?;
+    let authority = after_scheme.split('/').next()?;
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    if authority.is_empty() {
+        return None;
+    }
+    if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        return Some(&authority[1..end]);
+    }
+    Some(authority.split(':').next().unwrap_or(authority))
+}
+
+fn is_localhost_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn check_haicore_mount_helpers(report: &mut Report) {
@@ -780,7 +838,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
-    use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec};
+    use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use crate::prepare::RuntimeService;
     use crate::spec::{
         MetricsCollector, MetricsConfig, ReadinessSpec, ServiceFailurePolicy, ServiceSlurmConfig,
@@ -807,6 +865,7 @@ mod tests {
                 depends_on: Vec::new(),
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: Some(PreparedImageSpec {
                     commands: vec!["echo prep".into()],
@@ -860,6 +919,7 @@ mod tests {
                 enroot_bin: enroot.display().to_string(),
                 sbatch_bin: sbatch.display().to_string(),
                 srun_bin: srun.display().to_string(),
+                scontrol_bin: "scontrol".into(),
                 require_submit_tools: true,
                 skip_prepare: false,
             },
@@ -1037,6 +1097,7 @@ mod tests {
                 depends_on: Vec::new(),
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: Some(PreparedImageSpec {
                     commands: vec!["echo prep".into()],
@@ -1101,6 +1162,7 @@ mod tests {
                 depends_on: Vec::new(),
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
                 source: ImageSource::LocalSqsh(local),
@@ -1197,6 +1259,52 @@ mod tests {
     }
 
     #[test]
+    fn multi_node_preflight_requires_scontrol_and_rejects_localhost_distributed_readiness() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::create_dir_all(tmpdir.path().join("src")).expect("src");
+        fs::create_dir_all(tmpdir.path().join("deps")).expect("deps");
+        let srun = tmpdir.path().join("srun");
+        let sbatch = tmpdir.path().join("sbatch");
+        let enroot = tmpdir.path().join("enroot");
+        write_fake_binary(
+            &srun,
+            "#!/bin/bash\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'usage: srun --container-image=IMAGE'; fi\n",
+        );
+        write_fake_binary(&sbatch, "#!/bin/bash\nexit 0\n");
+        write_fake_binary(&enroot, "#!/bin/bash\nexit 0\n");
+
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.nodes = Some(2);
+        plan.ordered_services[0].placement = ServicePlacement {
+            mode: ServicePlacementMode::Distributed,
+            nodes: 2,
+            ntasks: None,
+            ntasks_per_node: Some(1),
+            pin_to_primary_node: false,
+        };
+        plan.ordered_services[0].readiness = Some(ReadinessSpec::Tcp {
+            host: None,
+            port: 29500,
+            timeout_seconds: None,
+        });
+
+        let report = run(
+            &plan,
+            &Options {
+                enroot_bin: enroot.display().to_string(),
+                sbatch_bin: sbatch.display().to_string(),
+                srun_bin: srun.display().to_string(),
+                scontrol_bin: tmpdir.path().join("missing-scontrol").display().to_string(),
+                require_submit_tools: true,
+                skip_prepare: false,
+            },
+        );
+        let text = report.render();
+        assert!(text.contains("required binary"));
+        assert!(text.contains("distributed service 'app' uses readiness"));
+    }
+
+    #[test]
     fn registry_helpers_cover_multiple_paths_and_parsing() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let creds = tmpdir.path().join(".credentials");
@@ -1262,6 +1370,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://redis:7".into()),
@@ -1276,6 +1385,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://nvcr.io/nvidia/pytorch:24.01-py3".into()),
@@ -1290,6 +1400,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote(
@@ -1306,6 +1417,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::Remote("docker://ghcr.io/example/private:latest".into()),
@@ -1320,6 +1432,7 @@ mod tests {
                     depends_on: Vec::new(),
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                     source: ImageSource::LocalSqsh(tmpdir.path().join("local.sqsh")),

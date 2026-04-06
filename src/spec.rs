@@ -53,6 +53,10 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub nodes: Option<u32>,
     #[serde(default)]
+    pub ntasks: Option<u32>,
+    #[serde(default)]
+    pub ntasks_per_node: Option<u32>,
+    #[serde(default)]
     pub cpus_per_task: Option<u32>,
     #[serde(default)]
     pub mem: Option<String>,
@@ -182,6 +186,12 @@ pub struct ServiceSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSlurmConfig {
+    #[serde(default)]
+    pub nodes: Option<u32>,
+    #[serde(default)]
+    pub ntasks: Option<u32>,
+    #[serde(default)]
+    pub ntasks_per_node: Option<u32>,
     #[serde(default)]
     pub cpus_per_task: Option<u32>,
     #[serde(default)]
@@ -447,8 +457,9 @@ impl ComposeSpec {
 
     fn validate(&mut self) -> Result<()> {
         self.slurm.validate()?;
-        for service in self.services.values_mut() {
+        for (name, service) in &mut self.services {
             service.normalize_healthcheck()?;
+            service.slurm.validate(name)?;
         }
         Ok(())
     }
@@ -582,6 +593,16 @@ fn default_true() -> bool {
 }
 
 impl SlurmConfig {
+    /// Returns the effective Slurm allocation node count.
+    pub fn allocation_nodes(&self) -> u32 {
+        self.nodes.unwrap_or(1)
+    }
+
+    /// Returns whether the allocation spans multiple nodes.
+    pub fn is_multi_node(&self) -> bool {
+        self.allocation_nodes() > 1
+    }
+
     /// Returns whether runtime metrics sampling is enabled.
     pub fn metrics_enabled(&self) -> bool {
         self.metrics
@@ -629,6 +650,9 @@ impl SlurmConfig {
 
     /// Validates semantic rules that serde alone cannot express.
     pub fn validate(&self) -> Result<()> {
+        validate_positive_u32(self.nodes, "x-slurm.nodes")?;
+        validate_positive_u32(self.ntasks, "x-slurm.ntasks")?;
+        validate_positive_u32(self.ntasks_per_node, "x-slurm.ntasks_per_node")?;
         if let Some(metrics) = &self.metrics
             && matches!(metrics.interval_seconds, Some(0))
         {
@@ -789,6 +813,23 @@ impl ServiceSpec {
 }
 
 impl ServiceSlurmConfig {
+    /// Validates semantic rules on service-level Slurm options.
+    pub fn validate(&self, service_name: &str) -> Result<()> {
+        validate_positive_u32(
+            self.nodes,
+            &format!("service '{service_name}' x-slurm.nodes"),
+        )?;
+        validate_positive_u32(
+            self.ntasks,
+            &format!("service '{service_name}' x-slurm.ntasks"),
+        )?;
+        validate_positive_u32(
+            self.ntasks_per_node,
+            &format!("service '{service_name}' x-slurm.ntasks_per_node"),
+        )?;
+        Ok(())
+    }
+
     /// Returns the validated per-service failure policy with defaults resolved.
     pub fn normalized_failure_policy(&self, service_name: &str) -> Result<ServiceFailurePolicy> {
         const DEFAULT_MAX_RESTARTS: u32 = 3;
@@ -838,6 +879,13 @@ impl ServiceSlurmConfig {
         interpolate_vec_strings(&mut self.extra_srun_args, vars)?;
         Ok(())
     }
+}
+
+fn validate_positive_u32(value: Option<u32>, field: &str) -> Result<()> {
+    if matches!(value, Some(0)) {
+        bail!("{field} must be at least 1");
+    }
+    Ok(())
 }
 
 impl ServiceEnrootConfig {

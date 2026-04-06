@@ -5,7 +5,7 @@ use std::env;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::spec::{
     CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, ServiceDependency,
@@ -39,8 +39,46 @@ pub struct PlannedService {
     pub depends_on: Vec<ServiceDependency>,
     pub readiness: Option<ReadinessSpec>,
     pub failure_policy: ServiceFailurePolicy,
+    pub placement: ServicePlacement,
     pub slurm: ServiceSlurmConfig,
     pub prepare: Option<PreparedImageSpec>,
+}
+
+/// Service placement mode inside one Slurm allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServicePlacementMode {
+    /// The service is pinned to the allocation's primary node.
+    PrimaryNode,
+    /// The service spans the full allocation.
+    Distributed,
+}
+
+/// The effective `srun` placement geometry for one service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServicePlacement {
+    /// Placement mode used for this service.
+    pub mode: ServicePlacementMode,
+    /// Number of nodes requested for the step.
+    pub nodes: u32,
+    /// Explicit task count for the step when one is requested.
+    pub ntasks: Option<u32>,
+    /// Explicit tasks-per-node count for the step when one is requested.
+    pub ntasks_per_node: Option<u32>,
+    /// Whether this step should be pinned to the primary node.
+    pub pin_to_primary_node: bool,
+}
+
+impl Default for ServicePlacement {
+    fn default() -> Self {
+        Self {
+            mode: ServicePlacementMode::PrimaryNode,
+            nodes: 1,
+            ntasks: Some(1),
+            ntasks_per_node: None,
+            pin_to_primary_node: false,
+        }
+    }
 }
 
 /// Where a service image comes from after normalization.
@@ -97,12 +135,6 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
         bail!("spec must define at least one service");
     }
 
-    if let Some(nodes) = spec.slurm.nodes
-        && nodes != 1
-    {
-        bail!("this v1 only supports a single-node allocation; set x-slurm.nodes to 1 or omit it");
-    }
-
     let cache_dir = resolve_cache_dir(&spec.slurm, &project_dir)?;
 
     let mut temp = BTreeMap::new();
@@ -138,11 +170,20 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
                 depends_on,
                 readiness: service.readiness.clone(),
                 failure_policy,
+                placement: ServicePlacement {
+                    mode: ServicePlacementMode::PrimaryNode,
+                    nodes: 1,
+                    ntasks: Some(1),
+                    ntasks_per_node: None,
+                    pin_to_primary_node: false,
+                },
                 slurm: service.slurm.clone(),
                 prepare,
             },
         );
     }
+
+    assign_service_placements(&spec.slurm, &mut temp)?;
 
     validate_dependency_conditions(&temp)?;
     let ordered_names = topo_sort(&temp)?;
@@ -159,6 +200,155 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
         slurm: spec.slurm,
         ordered_services,
     })
+}
+
+fn assign_service_placements(
+    slurm: &SlurmConfig,
+    services: &mut BTreeMap<String, PlannedService>,
+) -> Result<()> {
+    let allocation_nodes = slurm.allocation_nodes();
+    let default_distributed_service = allocation_nodes > 1 && services.len() == 1;
+    let mut distributed_services = Vec::new();
+
+    for service in services.values_mut() {
+        let placement = resolve_service_placement(
+            service,
+            slurm,
+            allocation_nodes,
+            default_distributed_service,
+        )?;
+        if placement.mode == ServicePlacementMode::Distributed {
+            distributed_services.push(service.name.clone());
+        }
+        service.placement = placement;
+    }
+
+    if distributed_services.len() > 1 {
+        bail!(
+            "multi-node allocations support at most one distributed service, but {} request full-allocation placement: {}",
+            distributed_services.len(),
+            distributed_services.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+fn resolve_service_placement(
+    service: &PlannedService,
+    slurm: &SlurmConfig,
+    allocation_nodes: u32,
+    default_distributed_service: bool,
+) -> Result<ServicePlacement> {
+    if let Some(nodes) = service.slurm.nodes
+        && nodes > allocation_nodes
+    {
+        bail!(
+            "service '{}' requests x-slurm.nodes={}, but the allocation only reserves {} node(s)",
+            service.name,
+            nodes,
+            allocation_nodes
+        );
+    }
+
+    let distributed = if allocation_nodes == 1 {
+        if let Some(nodes) = service.slurm.nodes
+            && nodes != 1
+        {
+            bail!(
+                "service '{}' requests x-slurm.nodes={}, but single-node allocations only support x-slurm.nodes=1",
+                service.name,
+                nodes
+            );
+        }
+        false
+    } else {
+        match service.slurm.nodes {
+            Some(1) => false,
+            Some(nodes) if nodes == allocation_nodes => true,
+            Some(nodes) => {
+                bail!(
+                    "service '{}' requests x-slurm.nodes={}, but multi-node v1 only supports helpers on 1 node or one distributed service spanning all {} nodes",
+                    service.name,
+                    nodes,
+                    allocation_nodes
+                );
+            }
+            None => default_distributed_service,
+        }
+    };
+
+    if distributed && readiness_uses_implicit_localhost(service.readiness.as_ref()) {
+        bail!(
+            "service '{}' uses readiness that relies on localhost semantics, but distributed services must use sleep/log readiness or explicit non-local hosts",
+            service.name
+        );
+    }
+
+    let (nodes, ntasks, ntasks_per_node, pin_to_primary_node, mode) = if distributed {
+        (
+            allocation_nodes,
+            service.slurm.ntasks.or(slurm.ntasks),
+            service.slurm.ntasks_per_node.or_else(|| {
+                if service.slurm.ntasks.is_some() {
+                    None
+                } else {
+                    slurm
+                        .ntasks_per_node
+                        .or_else(|| slurm.ntasks.is_none().then_some(1))
+                }
+            }),
+            false,
+            ServicePlacementMode::Distributed,
+        )
+    } else {
+        (
+            1,
+            service
+                .slurm
+                .ntasks
+                .or_else(|| service.slurm.ntasks_per_node.is_none().then_some(1)),
+            service.slurm.ntasks_per_node,
+            allocation_nodes > 1,
+            ServicePlacementMode::PrimaryNode,
+        )
+    };
+
+    Ok(ServicePlacement {
+        mode,
+        nodes,
+        ntasks,
+        ntasks_per_node,
+        pin_to_primary_node,
+    })
+}
+
+fn readiness_uses_implicit_localhost(readiness: Option<&ReadinessSpec>) -> bool {
+    match readiness {
+        None | Some(ReadinessSpec::Sleep { .. } | ReadinessSpec::Log { .. }) => false,
+        Some(ReadinessSpec::Tcp { host, .. }) => host.as_deref().is_none_or(is_localhost_host),
+        Some(ReadinessSpec::Http { url, .. }) => {
+            http_readiness_host(url).is_none_or(is_localhost_host)
+        }
+    }
+}
+
+fn http_readiness_host(url: &str) -> Option<&str> {
+    let (_, after_scheme) = url.split_once("://")?;
+    let authority = after_scheme.split('/').next()?;
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    if authority.is_empty() {
+        return None;
+    }
+    if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        return Some(&authority[1..end]);
+    }
+    Some(authority.split(':').next().unwrap_or(authority))
+}
+
+fn is_localhost_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn normalize_prepare(
@@ -677,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_rejects_empty_services_and_multi_node() {
+    fn build_plan_rejects_empty_services_and_accepts_multi_node_single_service() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let compose = tmpdir.path().join("compose.yaml");
         std::fs::write(&compose, "services: {}\n").expect("write");
@@ -693,19 +883,96 @@ mod tests {
         .expect_err("empty services");
         assert!(err.to_string().contains("at least one service"));
 
-        let err = build_plan(
+        let plan = build_plan(
             &compose,
             ComposeSpec {
                 name: None,
                 slurm: SlurmConfig {
                     nodes: Some(2),
+                    ntasks_per_node: Some(4),
                     ..SlurmConfig::default()
                 },
                 services: BTreeMap::from([("app".into(), service("redis:7"))]),
             },
         )
-        .expect_err("multi node");
-        assert!(err.to_string().contains("single-node allocation"));
+        .expect("multi node");
+        assert_eq!(plan.slurm.allocation_nodes(), 2);
+        assert_eq!(plan.ordered_services.len(), 1);
+        assert_eq!(
+            plan.ordered_services[0].placement.mode,
+            ServicePlacementMode::Distributed
+        );
+        assert_eq!(plan.ordered_services[0].placement.nodes, 2);
+        assert_eq!(plan.ordered_services[0].placement.ntasks_per_node, Some(4));
+    }
+
+    #[test]
+    fn build_plan_rejects_multiple_distributed_services_in_multi_node_allocations() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([
+                (
+                    "a".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            nodes: Some(2),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "b".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            nodes: Some(2),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                ),
+            ]),
+        };
+
+        let err = build_plan(&compose, spec).expect_err("multiple distributed services");
+        assert!(err.to_string().contains("at most one distributed service"));
+    }
+
+    #[test]
+    fn build_plan_rejects_distributed_readiness_with_localhost_semantics() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([(
+                "trainer".into(),
+                ServiceSpec {
+                    readiness: Some(ReadinessSpec::Tcp {
+                        host: None,
+                        port: 29500,
+                        timeout_seconds: None,
+                    }),
+                    ..service("python:3.11-slim")
+                },
+            )]),
+        };
+
+        let err = build_plan(&compose, spec).expect_err("distributed localhost readiness");
+        assert!(err.to_string().contains("localhost semantics"));
     }
 
     #[test]
@@ -787,6 +1054,7 @@ mod tests {
                 }],
                 readiness: None,
                 failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
                 prepare: None,
             },
@@ -810,6 +1078,7 @@ mod tests {
                     }],
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                 },
@@ -829,6 +1098,7 @@ mod tests {
                     }],
                     readiness: None,
                     failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
                     prepare: None,
                 },
