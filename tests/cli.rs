@@ -910,6 +910,23 @@ fn validate_and_render_commands_work() {
     assert_success(&validate);
     assert!(stdout_text(&validate).contains("spec is valid"));
 
+    let validate_json = run_cli(
+        tmpdir.path(),
+        &[
+            "validate",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&validate_json);
+    let validate_value: Value =
+        serde_json::from_str(&stdout_text(&validate_json)).expect("validate json");
+    assert_eq!(validate_value["valid"], Value::from(true));
+    assert_eq!(validate_value["service_count"], Value::from(1));
+    assert_eq!(validate_value["services"][0], Value::from("app"));
+
     let script_path = tmpdir.path().join("job.sbatch");
     let render = run_cli(
         tmpdir.path(),
@@ -925,6 +942,27 @@ fn validate_and_render_commands_work() {
     let script = fs::read_to_string(&script_path).expect("script");
     assert!(script.contains("#SBATCH --job-name=demo"));
     assert!(script.contains("--container-image="));
+
+    let render_json = run_cli(
+        tmpdir.path(),
+        &[
+            "render",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&render_json);
+    let render_value: Value =
+        serde_json::from_str(&stdout_text(&render_json)).expect("render json");
+    assert_eq!(render_value["output_path"], Value::Null);
+    assert!(
+        render_value["script"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("#SBATCH --job-name=demo")
+    );
 }
 
 #[test]
@@ -968,6 +1006,50 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
     assert!(preflight_stderr.contains("Passed checks:"));
     assert!(preflight_stderr.contains("srun reports Pyxis container support"));
     assert!(preflight_stderr.contains("cache directory is writable"));
+
+    let inspect_json = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&inspect_json);
+    let inspect_value: Value =
+        serde_json::from_str(&stdout_text(&inspect_json)).expect("inspect json");
+    assert_eq!(
+        inspect_value["ordered_services"][0]["name"],
+        Value::from("app")
+    );
+
+    let preflight_json = run_cli(
+        tmpdir.path(),
+        &[
+            "preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&preflight_json);
+    let preflight_value: Value =
+        serde_json::from_str(&stdout_text(&preflight_json)).expect("preflight json");
+    assert!(
+        preflight_value["summary"]["passed_checks"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
 
     let strict = run_cli(
         tmpdir.path(),
@@ -1014,6 +1096,26 @@ fn prepare_and_cache_commands_manage_artifacts() {
         hpc_compose::cache::manifest_path_for(&plan.ordered_services[0].runtime_image).exists()
     );
 
+    let prepare_json = run_cli(
+        tmpdir.path(),
+        &[
+            "prepare",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&prepare_json);
+    let prepare_value: Value =
+        serde_json::from_str(&stdout_text(&prepare_json)).expect("prepare json");
+    assert_eq!(
+        prepare_value["services"][0]["service_name"],
+        Value::from("app")
+    );
+
     let list = run_cli(
         tmpdir.path(),
         &[
@@ -1027,6 +1129,27 @@ fn prepare_and_cache_commands_manage_artifacts() {
     let list_stdout = stdout_text(&list);
     assert!(list_stdout.contains("prepared"));
     assert!(list_stdout.contains("base"));
+
+    let list_json = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "list",
+            "--cache-dir",
+            cache_dir.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&list_json);
+    let list_value: Value = serde_json::from_str(&stdout_text(&list_json)).expect("list json");
+    assert!(
+        list_value
+            .as_array()
+            .map(|entries| entries.len())
+            .unwrap_or(0)
+            >= 2
+    );
 
     let inspect = run_cli(
         tmpdir.path(),
@@ -1043,6 +1166,31 @@ fn prepare_and_cache_commands_manage_artifacts() {
     let inspect_stdout = stdout_text(&inspect);
     assert!(inspect_stdout.contains("manifest kind: prepared"));
     assert!(inspect_stdout.contains("current reuse expectation: cache hit"));
+
+    let inspect_json = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--service",
+            "app",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&inspect_json);
+    let inspect_value: Value =
+        serde_json::from_str(&stdout_text(&inspect_json)).expect("inspect json");
+    assert_eq!(
+        inspect_value["services"][0]["service_name"],
+        Value::from("app")
+    );
+    assert_eq!(
+        inspect_value["services"][0]["runtime_artifact"]["manifest"]["kind"],
+        Value::from("prepared")
+    );
 
     for artifact in [
         hpc_compose::cache::manifest_path_for(&plan.ordered_services[0].runtime_image),
@@ -1076,6 +1224,24 @@ fn prepare_and_cache_commands_manage_artifacts() {
     assert_success(&prune);
     assert!(stdout_text(&prune).contains("removed: 2"));
     assert!(!plan.ordered_services[0].runtime_image.exists());
+
+    let prune_json = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "prune",
+            "--age",
+            "1",
+            "--cache-dir",
+            cache_dir.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&prune_json);
+    let prune_value: Value = serde_json::from_str(&stdout_text(&prune_json)).expect("prune json");
+    assert_eq!(prune_value["mode"], Value::from("age"));
+    assert_eq!(prune_value["removed_count"], Value::from(0));
 }
 
 #[test]
@@ -1565,7 +1731,8 @@ fn status_and_logs_commands_use_submission_metadata() {
             compose.to_str().expect("path"),
             "--job-id",
             "12345",
-            "--json",
+            "--format",
+            "json",
             "--squeue-bin",
             squeue.to_str().expect("path"),
             "--sacct-bin",
@@ -2432,6 +2599,8 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         "llm-curl-workflow-workdir",
         "llama-app",
         "llama-uv-worker",
+        "multi-node-mpi",
+        "multi-node-torchrun",
         "vllm-uv-worker",
     ] {
         let output = tmpdir.path().join(format!("{template}.yaml"));
@@ -2463,6 +2632,45 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         assert!(rendered.contains("cache_dir: /tmp/custom-cache"));
         assert!(stdout_text(&init).contains("hpc-compose submit --watch -f"));
     }
+}
+
+#[test]
+fn help_and_template_discovery_surface_guided_workflows() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    let top_help = run_cli(tmpdir.path(), &["--help"]);
+    assert_success(&top_help);
+    let top_help_stdout = stdout_text(&top_help);
+    assert!(top_help_stdout.contains("Normal run:"));
+    assert!(top_help_stdout.contains("submit --watch -f compose.yaml"));
+    assert!(top_help_stdout.contains("Debugging flow:"));
+
+    let init_help = run_cli(tmpdir.path(), &["init", "--help"]);
+    assert_success(&init_help);
+    let init_help_stdout = stdout_text(&init_help);
+    assert!(init_help_stdout.contains("--list-templates"));
+    assert!(init_help_stdout.contains("--describe-template <TEMPLATE>"));
+
+    let cache_help = run_cli(tmpdir.path(), &["cache", "--help"]);
+    assert_success(&cache_help);
+    assert!(stdout_text(&cache_help).contains("cache inspect -f compose.yaml"));
+
+    let list_templates = run_cli(tmpdir.path(), &["init", "--list-templates"]);
+    assert_success(&list_templates);
+    let list_stdout = stdout_text(&list_templates);
+    assert!(list_stdout.contains("minimal-batch"));
+    assert!(list_stdout.contains("multi-node-mpi"));
+    assert!(list_stdout.contains("multi-node-torchrun"));
+
+    let describe_template = run_cli(
+        tmpdir.path(),
+        &["init", "--describe-template", "multi-node-mpi"],
+    );
+    assert_success(&describe_template);
+    let describe_stdout = stdout_text(&describe_template);
+    assert!(describe_stdout.contains("template: multi-node-mpi"));
+    assert!(describe_stdout.contains("allocation-wide"));
+    assert!(describe_stdout.contains("hpc-compose init --template multi-node-mpi"));
 }
 
 #[test]
@@ -2585,7 +2793,8 @@ fn artifacts_command_exports_collected_metrics_and_json() {
             "artifacts",
             "-f",
             compose.to_str().expect("path"),
-            "--json",
+            "--format",
+            "json",
             "--job-id",
             "12345",
         ],

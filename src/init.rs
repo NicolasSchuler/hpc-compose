@@ -85,6 +85,16 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/mpi-hello.yaml"),
     },
     Template {
+        name: "multi-node-mpi",
+        description: "Primary-node helper plus one allocation-wide distributed MPI step.",
+        body: include_str!("../examples/multi-node-mpi.yaml"),
+    },
+    Template {
+        name: "multi-node-torchrun",
+        description: "Allocation-wide GPU training with the primary node as rendezvous.",
+        body: include_str!("../examples/multi-node-torchrun.yaml"),
+    },
+    Template {
         name: "multi-stage-pipeline",
         description: "Two-stage data pipeline coordinating through shared job mount.",
         body: include_str!("../examples/multi-stage-pipeline.yaml"),

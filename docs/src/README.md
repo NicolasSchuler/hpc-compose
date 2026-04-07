@@ -5,6 +5,8 @@
   <p><code>hpc-compose</code> turns a Compose-like spec into a single Slurm job that runs one or more services through Enroot and Pyxis.</p>
   <div class="hpc-compose-links">
     <a href="quickstart.html">Quickstart</a>
+    <a href="support-matrix.html">Support matrix</a>
+    <a href="task-guide.html">Task guide</a>
     <a href="execution-model.html">Execution model</a>
     <a href="runbook.html">Runbook</a>
     <a href="spec-reference.html">Spec reference</a>
@@ -18,11 +20,13 @@
 ## Start Here
 
 1. Read [Quickstart](quickstart.md) for the shortest install-and-run path.
-2. Read [Execution model](execution-model.md) to understand what runs on the login node, what runs on the compute node, and which paths must be shared.
-3. Use [Runbook](runbook.md) when adapting a real workload to a real cluster.
-4. Use [Examples](examples.md) when you want the closest known-good starting point.
-5. Use [Spec reference](spec-reference.md) when you need exact field behavior or validation rules.
-6. Use [Supported Slurm model](supported-slurm-model.md) when you need the product boundary spelled out clearly.
+2. Read [Support Matrix](support-matrix.md) to confirm what is officially supported, CI-tested, or only release-built.
+3. Use [Task Guide](task-guide.md) when you want the shortest path for a specific workflow.
+4. Read [Execution model](execution-model.md) to understand what runs on the login node, what runs on the compute node, and which paths must be shared.
+5. Use [Runbook](runbook.md) when adapting a real workload to a real cluster.
+6. Use [Examples](examples.md) when you want the closest known-good starting point.
+7. Use [Spec reference](spec-reference.md) when you need exact field behavior or validation rules.
+8. Use [Supported Slurm model](supported-slurm-model.md) when you need the product boundary spelled out clearly.
 
 ## What it is for
 
@@ -71,6 +75,8 @@ hpc-compose submit --watch -f compose.yaml
 
 - [Installation](installation.md) for release and source install paths
 - [Quickstart](quickstart.md) for the shortest working flow
+- [Support Matrix](support-matrix.md) for platform and runtime support expectations
+- [Task Guide](task-guide.md) for goal-oriented workflow entry points
 - [Execution model](execution-model.md) for the login-node / compute-node split
 - [Runbook](runbook.md) for real-cluster setup and debugging
 - [Examples](examples.md) for example selection and adaptation

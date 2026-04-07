@@ -10,6 +10,8 @@ curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/ins
 
 By default this installs `hpc-compose` into `~/.local/bin` and verifies the published SHA-256 checksum before placing the binary.
 
+Installer availability does not imply full runtime support. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run submission, prepare, or watch workflows end to end.
+
 Useful overrides:
 
 ```bash
@@ -23,6 +25,8 @@ Supported targets match the release workflow:
 - Linux arm64
 - macOS x86_64
 - macOS arm64
+
+Windows release archives are also published, but Windows is not part of the installer path and is not an officially supported runtime target.
 
 ## Download a release build manually
 

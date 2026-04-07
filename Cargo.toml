@@ -1,7 +1,15 @@
 [package]
 name = "hpc-compose"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/NicolasSchuler/hpc-compose"
+homepage = "https://github.com/NicolasSchuler/hpc-compose"
+documentation = "https://nicolasschuler.github.io/hpc-compose/"
+readme = "README.md"
+description = "Compose-like specs for single-allocation Slurm jobs with Enroot and Pyxis"
+keywords = ["slurm", "hpc", "compose", "containers", "enroot"]
+categories = ["command-line-utilities", "config"]
 
 [dependencies]
 anyhow = "1.0.100"

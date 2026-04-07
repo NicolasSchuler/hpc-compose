@@ -34,6 +34,33 @@
   margin-top: 1rem;
 }
 
+.hpc-compose-links a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.5rem;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--quote-border);
+  border-radius: 0.5rem;
+  text-decoration: none;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--bg) 92%, var(--quote-bg));
+}
+
+.hpc-compose-links a:hover {
+  background: color-mix(in srgb, var(--bg) 84%, var(--quote-bg));
+}
+
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #005fcc;
+  outline-offset: 2px;
+}
+
 .callout {
   margin: 1rem 0;
   padding: 0.9rem 1rem;

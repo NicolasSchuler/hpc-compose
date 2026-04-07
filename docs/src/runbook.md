@@ -270,7 +270,7 @@ If the sampler is absent, disabled, or only partially available, `stats` falls b
 
 In multi-node v1, GPU sampler collection remains primary-node-only. Slurm step metrics still cover the whole step through `sstat`, but `nvidia-smi` fan-in across nodes is intentionally out of scope.
 
-Use `--format json`, `--format csv`, or `--format jsonl` when you want machine-friendly output for dashboards, plotting, or experiment tracking. `--json` remains supported as a compatibility alias for `--format json`.
+Use `--format json`, `--format csv`, or `--format jsonl` when you want machine-friendly output for dashboards, plotting, or experiment tracking. `--format json` is the preferred interface for `validate`, `render`, `prepare`, `preflight`, `inspect`, `status`, `stats`, `artifacts`, and `cache` subcommands. `--json` remains supported as a compatibility alias on older machine-readable commands.
 
 Runtime logs live under:
 

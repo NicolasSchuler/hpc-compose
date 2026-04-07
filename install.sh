@@ -5,6 +5,7 @@ set -eu
 REPO="${HPC_COMPOSE_REPO:-NicolasSchuler/hpc-compose}"
 INSTALL_DIR="${HPC_COMPOSE_INSTALL_DIR:-${HOME}/.local/bin}"
 BINARY_NAME="hpc-compose"
+BASE_URL="${HPC_COMPOSE_BASE_URL:-}"
 
 usage() {
   cat <<'EOF'
@@ -14,6 +15,7 @@ Environment overrides:
   HPC_COMPOSE_INSTALL_DIR  Install destination (default: ~/.local/bin)
   HPC_COMPOSE_VERSION      Release tag to install, for example v0.1.12
   HPC_COMPOSE_REPO         Alternate GitHub repo in owner/name form
+  HPC_COMPOSE_BASE_URL     Alternate base URL serving release assets directly
 EOF
 }
 
@@ -70,6 +72,10 @@ resolve_target() {
 }
 
 resolve_version() {
+  if [ -n "${BASE_URL}" ] && [ -z "${HPC_COMPOSE_VERSION:-}" ]; then
+    fail "HPC_COMPOSE_VERSION is required when HPC_COMPOSE_BASE_URL is set"
+  fi
+
   if [ -n "${HPC_COMPOSE_VERSION:-}" ]; then
     printf '%s' "${HPC_COMPOSE_VERSION}"
     return 0
@@ -134,7 +140,11 @@ main() {
   target="$(resolve_target)"
   version="$(resolve_version)"
   asset="${BINARY_NAME}-${version}-${target}.tar.gz"
-  asset_url="https://github.com/${REPO}/releases/download/${version}/${asset}"
+  if [ -n "${BASE_URL}" ]; then
+    asset_url="${BASE_URL%/}/${asset}"
+  else
+    asset_url="https://github.com/${REPO}/releases/download/${version}/${asset}"
+  fi
   checksum_url="${asset_url}.sha256"
 
   tmp_base="${TMPDIR:-/tmp}"

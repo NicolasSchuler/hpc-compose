@@ -22,20 +22,30 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
           toolchain: stable
           components: llvm-tools-preview
           rustflags: ""
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
 
       - name: Install mdBook
         run: |
           curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/mdbook.tar.gz
           tar -xzf /tmp/mdbook.tar.gz -C /tmp
           echo "/tmp" >> "$GITHUB_PATH"
+
+      - name: Install docs QA tools
+        run: |
+          cargo install lychee --locked
+          npm install --global pa11y-ci
 
       - name: Build mdBook docs
         run: mdbook build docs
@@ -45,15 +55,37 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+      - name: Check docs links
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          lychee --no-progress README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md docs/src/**/*.md target/mdbook/**/*.html
+
+      - name: Check docs accessibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m http.server 3000 --directory target/mdbook >/tmp/hpc-compose-docs-http.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/ >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          pa11y-ci --config .pa11yci.json
+
   fmt:
     name: Format
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
           toolchain: stable
           components: rustfmt
@@ -67,10 +99,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
           toolchain: stable
           components: clippy
@@ -84,10 +116,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
           toolchain: stable
           rustflags: ""
@@ -103,21 +135,153 @@ jobs:
             cargo run -- validate -f "$f"
           done
 
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck
+        run: shellcheck install.sh
+
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
+        with:
+          toolchain: stable
+          rustflags: ""
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Run cargo-deny
+        run: cargo deny check
+
+  installer-smoke:
+    name: Installer Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
+        with:
+          toolchain: stable
+          rustflags: ""
+
+      - name: Install Linux musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Run installer smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="v0.0.0-test"
+          binary_name="hpc-compose"
+          install_dir="$PWD/.tmp/install-root"
+          bad_install_dir="$PWD/.tmp/install-root-bad"
+          stage_dir="$PWD/.tmp/install-stage"
+          dist_dir="$PWD/.tmp/install-dist"
+
+          rm -rf "$install_dir" "$bad_install_dir" "$stage_dir" "$dist_dir"
+          mkdir -p "$install_dir" "$bad_install_dir" "$stage_dir" "$dist_dir"
+
+          case "$(uname -s):$(uname -m)" in
+            Linux:x86_64|Linux:amd64)
+              target="x86_64-unknown-linux-musl"
+              ;;
+            Darwin:arm64|Darwin:aarch64)
+              target="aarch64-apple-darwin"
+              ;;
+            Darwin:x86_64)
+              target="x86_64-apple-darwin"
+              ;;
+            *)
+              echo "unsupported smoke-test platform" >&2
+              exit 1
+              ;;
+          esac
+
+          cargo build --locked --release --target "$target"
+
+          asset="${binary_name}-${version}-${target}.tar.gz"
+          cp "target/${target}/release/${binary_name}" "$stage_dir/"
+          cp README.md "$stage_dir/"
+          tar -C "$stage_dir" -czf "$dist_dir/$asset" "$binary_name" README.md
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$dist_dir/$asset" > "$dist_dir/$asset.sha256"
+          else
+            sha256sum "$dist_dir/$asset" > "$dist_dir/$asset.sha256"
+          fi
+
+          python3 -m http.server 8123 --directory "$dist_dir" >/tmp/hpc-compose-install-http.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8123/ >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          if HPC_COMPOSE_BASE_URL=http://127.0.0.1:8123 sh install.sh >/tmp/install-missing.out 2>/tmp/install-missing.err; then
+            echo "expected missing-version install to fail" >&2
+            exit 1
+          fi
+          grep -q "HPC_COMPOSE_VERSION is required when HPC_COMPOSE_BASE_URL is set" /tmp/install-missing.err
+
+          HPC_COMPOSE_BASE_URL=http://127.0.0.1:8123 \
+          HPC_COMPOSE_VERSION="$version" \
+          HPC_COMPOSE_INSTALL_DIR="$install_dir" \
+          sh install.sh
+          "$install_dir/$binary_name" --help >/dev/null
+
+          printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "$asset" > "$dist_dir/$asset.sha256"
+          if HPC_COMPOSE_BASE_URL=http://127.0.0.1:8123 \
+            HPC_COMPOSE_VERSION="$version" \
+            HPC_COMPOSE_INSTALL_DIR="$bad_install_dir" \
+            sh install.sh >/tmp/install-bad.out 2>/tmp/install-bad.err; then
+            echo "expected checksum verification failure" >&2
+            exit 1
+          fi
+
   coverage:
     name: Coverage
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
           toolchain: stable
           rustflags: ""
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@ddc7029b5ba1e37640598eb3580cdbefa9662f46
 
       - name: Enforce coverage gate
         run: cargo llvm-cov --workspace --summary-only --fail-under-lines 95 --fail-under-regions 95 --fail-under-functions 95 --locked

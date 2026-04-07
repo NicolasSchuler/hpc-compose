@@ -3,6 +3,8 @@
 - [Overview](README.md)
 - [Installation](installation.md)
 - [Quickstart](quickstart.md)
+- [Support Matrix](support-matrix.md)
+- [Task Guide](task-guide.md)
 - [Execution model](execution-model.md)
 - [Runbook](runbook.md)
 - [Examples](examples.md)

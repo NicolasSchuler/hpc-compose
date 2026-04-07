@@ -67,7 +67,8 @@ impl Default for PrepareOptions {
 }
 
 /// How a runtime artifact was obtained during preparation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactAction {
     /// The artifact already existed and was used as-is.
     Present,
@@ -79,7 +80,7 @@ pub enum ArtifactAction {
 
 /// Status for one concrete artifact path produced or reused during prepare.
 #[allow(missing_docs)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ArtifactStatus {
     pub path: PathBuf,
     pub action: ArtifactAction,
@@ -88,7 +89,7 @@ pub struct ArtifactStatus {
 
 /// Preparation results for one service.
 #[allow(missing_docs)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ServicePrepareResult {
     pub service_name: String,
     pub base_image: Option<ArtifactStatus>,
@@ -97,7 +98,7 @@ pub struct ServicePrepareResult {
 
 /// Summary of all service preparations in a runtime plan.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PrepareSummary {
     pub services: Vec<ServicePrepareResult>,
 }

@@ -1,0 +1,18 @@
+{
+  "defaults": {
+    "standard": "WCAG2AA",
+    "timeout": 30000,
+    "wait": 500,
+    "chromeLaunchConfig": {
+      "args": ["--no-sandbox"]
+    }
+  },
+  "urls": [
+    "http://127.0.0.1:3000/",
+    "http://127.0.0.1:3000/quickstart.html",
+    "http://127.0.0.1:3000/runbook.html",
+    "http://127.0.0.1:3000/examples.html",
+    "http://127.0.0.1:3000/support-matrix.html",
+    "http://127.0.0.1:3000/task-guide.html"
+  ]
+}

@@ -12,7 +12,7 @@ use hpc_compose::cache::{
 };
 use hpc_compose::init::{
     default_cache_dir as default_init_cache_dir, next_commands, prompt_for_init, render_template,
-    resolve_template, write_initialized_template,
+    resolve_template, templates, write_initialized_template,
 };
 use hpc_compose::job::{
     ArtifactExportOptions, ArtifactExportReport, SchedulerOptions, StatsOptions, StatsSnapshot,
@@ -33,16 +33,98 @@ use hpc_compose::render::{
     display_srun_command, execution_argv, log_file_name_for_service, render_script,
 };
 use hpc_compose::spec::{ComposeSpec, DependencyCondition, ServiceDependency};
+use serde::Serialize;
+
+const TOP_LEVEL_HELP: &str = "\
+Normal run:
+  hpc-compose submit --watch -f compose.yaml
+
+Debugging flow:
+  hpc-compose validate -f compose.yaml
+  hpc-compose inspect --verbose -f compose.yaml
+  hpc-compose preflight -f compose.yaml
+  hpc-compose prepare -f compose.yaml";
+
+const VALIDATE_HELP: &str = "\
+Examples:
+  hpc-compose validate -f compose.yaml
+  hpc-compose validate -f compose.yaml --format json";
+
+const RENDER_HELP: &str = "\
+Examples:
+  hpc-compose render -f compose.yaml
+  hpc-compose render -f compose.yaml --output job.sbatch
+  hpc-compose render -f compose.yaml --format json";
+
+const PREPARE_HELP: &str = "\
+Examples:
+  hpc-compose prepare -f compose.yaml
+  hpc-compose prepare -f compose.yaml --force
+  hpc-compose prepare -f compose.yaml --format json";
+
+const PREFLIGHT_HELP: &str = "\
+Examples:
+  hpc-compose preflight -f compose.yaml
+  hpc-compose preflight -f compose.yaml --strict
+  hpc-compose preflight -f compose.yaml --format json";
+
+const INSPECT_HELP: &str = "\
+Examples:
+  hpc-compose inspect -f compose.yaml
+  hpc-compose inspect --verbose -f compose.yaml
+  hpc-compose inspect -f compose.yaml --format json";
+
+const SUBMIT_HELP: &str = "\
+Examples:
+  hpc-compose submit --watch -f compose.yaml
+  hpc-compose submit --dry-run -f compose.yaml
+  hpc-compose submit --skip-prepare -f compose.yaml";
+
+const STATUS_HELP: &str = "\
+Examples:
+  hpc-compose status -f compose.yaml
+  hpc-compose status -f compose.yaml --format json";
+
+const STATS_HELP: &str = "\
+Examples:
+  hpc-compose stats -f compose.yaml
+  hpc-compose stats -f compose.yaml --format json
+  hpc-compose stats -f compose.yaml --format csv";
+
+const ARTIFACTS_HELP: &str = "\
+Examples:
+  hpc-compose artifacts -f compose.yaml
+  hpc-compose artifacts -f compose.yaml --bundle checkpoints --tarball
+  hpc-compose artifacts -f compose.yaml --format json";
+
+const INIT_HELP: &str = "\
+Examples:
+  hpc-compose init --list-templates
+  hpc-compose init --describe-template minimal-batch
+  hpc-compose init --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml";
+
+const CACHE_HELP: &str = "\
+Examples:
+  hpc-compose cache list
+  hpc-compose cache inspect -f compose.yaml
+  hpc-compose cache prune --age 7";
 
 #[derive(Debug, Parser)]
 #[command(
     author,
     version,
-    about = "Compile a compose-like spec into a single Slurm job using Enroot"
+    about = "Compile a compose-like spec into a single Slurm job using Enroot",
+    after_help = TOP_LEVEL_HELP
 )]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -55,16 +137,29 @@ enum StatsOutputFormat {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(
+        about = "Validate a compose spec without submitting a job",
+        after_help = VALIDATE_HELP
+    )]
     Validate {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
     },
+    #[command(about = "Render the generated sbatch script", after_help = RENDER_HELP)]
     Render {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
         #[arg(short, long)]
         output: Option<PathBuf>,
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
     },
+    #[command(
+        about = "Prepare imported and customized runtime images",
+        after_help = PREPARE_HELP
+    )]
     Prepare {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
@@ -74,7 +169,13 @@ enum Commands {
         keep_failed_prep: bool,
         #[arg(long)]
         force: bool,
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
     },
+    #[command(
+        about = "Check cluster prerequisites on the submission host",
+        after_help = PREFLIGHT_HELP
+    )]
     Preflight {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
@@ -82,7 +183,9 @@ enum Commands {
         strict: bool,
         #[arg(long)]
         verbose: bool,
-        #[arg(long)]
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
+        #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
         #[arg(long, default_value = "enroot")]
         enroot_bin: String,
@@ -91,14 +194,21 @@ enum Commands {
         #[arg(long, default_value = "srun")]
         srun_bin: String,
     },
+    #[command(
+        about = "Inspect the normalized runtime plan",
+        after_help = INSPECT_HELP
+    )]
     Inspect {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
         #[arg(long)]
         verbose: bool,
-        #[arg(long)]
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
+        #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
     },
+    #[command(about = "Submit a job and optionally watch it", after_help = SUBMIT_HELP)]
     Submit {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
@@ -127,24 +237,31 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    #[command(
+        about = "Show tracked scheduler state and log locations",
+        after_help = STATUS_HELP
+    )]
     Status {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
         #[arg(long)]
         job_id: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
+        #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
         #[arg(long, default_value = "squeue")]
         squeue_bin: String,
         #[arg(long, default_value = "sacct")]
         sacct_bin: String,
     },
+    #[command(about = "Show tracked runtime metrics and step stats", after_help = STATS_HELP)]
     Stats {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
         #[arg(long)]
         job_id: Option<String>,
-        #[arg(long, conflicts_with = "format")]
+        #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
         #[arg(long, value_enum)]
         format: Option<StatsOutputFormat>,
@@ -155,12 +272,18 @@ enum Commands {
         #[arg(long, default_value = "sacct")]
         sacct_bin: String,
     },
+    #[command(
+        about = "Export tracked artifact bundles after a run",
+        after_help = ARTIFACTS_HELP
+    )]
     Artifacts {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
         #[arg(long)]
         job_id: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
+        #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
         #[arg(long = "bundle")]
         bundles: Vec<String>,
@@ -187,9 +310,24 @@ enum Commands {
         #[arg(long, default_value = "scancel")]
         scancel_bin: String,
     },
+    #[command(
+        about = "Write a starter compose file from a built-in template",
+        after_help = INIT_HELP
+    )]
     Init {
         #[arg(long)]
         template: Option<String>,
+        #[arg(
+            long,
+            conflicts_with_all = ["describe_template", "template", "name", "cache_dir", "output", "force"]
+        )]
+        list_templates: bool,
+        #[arg(
+            long = "describe-template",
+            value_name = "TEMPLATE",
+            conflicts_with_all = ["list_templates", "template", "name", "cache_dir", "output", "force"]
+        )]
+        describe_template: Option<String>,
         #[arg(long)]
         name: Option<String>,
         #[arg(long)]
@@ -199,6 +337,10 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    #[command(
+        about = "Inspect and prune cached image artifacts",
+        after_help = CACHE_HELP
+    )]
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
@@ -222,12 +364,16 @@ enum CacheCommands {
     List {
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
     },
     Inspect {
         #[arg(short = 'f', long, default_value = "compose.yaml")]
         file: PathBuf,
         #[arg(long)]
         service: Option<String>,
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
     },
     Prune {
         #[arg(short = 'f', long)]
@@ -238,6 +384,8 @@ enum CacheCommands {
         age: Option<u64>,
         #[arg(long)]
         all_unused: bool,
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
     },
 }
 
@@ -248,20 +396,52 @@ fn main() -> Result<()> {
 
 fn run_command(command: Commands) -> Result<()> {
     match command {
-        Commands::Validate { file } => {
-            load_runtime_plan(&file)?;
-            println!("spec is valid");
+        Commands::Validate { file, format } => {
+            let plan = load_plan(&file)?;
+            match resolve_output_format(format, false) {
+                OutputFormat::Text => println!("spec is valid"),
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&build_validate_output(&plan))
+                            .context("failed to serialize validate output")?
+                    );
+                }
+            }
         }
-        Commands::Render { file, output } => {
-            let script = render_from_path(&file)?;
-            if let Some(output_path) = output {
-                fs::write(&output_path, script).context(format!(
+        Commands::Render {
+            file,
+            output,
+            format,
+        } => {
+            let plan = load_plan(&file)?;
+            let runtime_plan = build_runtime_plan(&plan);
+            let script = render_script(&runtime_plan)?;
+            if let Some(output_path) = output.as_ref() {
+                fs::write(output_path, &script).context(format!(
                     "failed to write rendered script to {}",
                     output_path.display()
                 ))?;
-                println!("{}", output_path.display());
-            } else {
-                print!("{script}");
+            }
+            match resolve_output_format(format, false) {
+                OutputFormat::Text => {
+                    if let Some(output_path) = output {
+                        println!("{}", output_path.display());
+                    } else {
+                        print!("{script}");
+                    }
+                }
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&RenderOutput {
+                            compose_file: plan.spec_path,
+                            output_path: output,
+                            script,
+                        })
+                        .context("failed to serialize render output")?
+                    );
+                }
             }
         }
         Commands::Prepare {
@@ -269,6 +449,7 @@ fn run_command(command: Commands) -> Result<()> {
             enroot_bin,
             keep_failed_prep,
             force,
+            format,
         } => {
             let runtime_plan = load_runtime_plan(&file)?;
             let summary = prepare_runtime_plan(
@@ -279,12 +460,22 @@ fn run_command(command: Commands) -> Result<()> {
                     force_rebuild: force,
                 },
             )?;
-            print_prepare_summary(&summary);
+            match resolve_output_format(format, false) {
+                OutputFormat::Text => print_prepare_summary(&summary),
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&summary)
+                            .context("failed to serialize prepare output")?
+                    );
+                }
+            }
         }
         Commands::Preflight {
             file,
             strict,
             verbose,
+            format,
             json,
             enroot_bin,
             sbatch_bin,
@@ -302,14 +493,15 @@ fn run_command(command: Commands) -> Result<()> {
                     skip_prepare: false,
                 },
             );
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report.grouped())
-                        .context("failed to serialize preflight report")?
-                );
-            } else {
-                print_report(&report, verbose);
+            match resolve_output_format(format, json) {
+                OutputFormat::Text => print_report(&report, verbose),
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report.grouped())
+                            .context("failed to serialize preflight report")?
+                    );
+                }
             }
             if report.has_errors() {
                 bail!("preflight failed");
@@ -321,19 +513,25 @@ fn run_command(command: Commands) -> Result<()> {
         Commands::Inspect {
             file,
             verbose,
+            format,
             json,
         } => {
             let (plan, runtime_plan) = load_plan_and_runtime(&file)?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&runtime_plan)
-                        .context("failed to serialize inspect output")?
-                );
-            } else if verbose {
-                print_plan_inspect_verbose(&plan, &runtime_plan);
-            } else {
-                print_plan_inspect(&runtime_plan);
+            match resolve_output_format(format, json) {
+                OutputFormat::Text => {
+                    if verbose {
+                        print_plan_inspect_verbose(&plan, &runtime_plan);
+                    } else {
+                        print_plan_inspect(&runtime_plan);
+                    }
+                }
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&runtime_plan)
+                            .context("failed to serialize inspect output")?
+                    );
+                }
             }
         }
         Commands::Submit {
@@ -473,6 +671,7 @@ fn run_command(command: Commands) -> Result<()> {
         Commands::Status {
             file,
             job_id,
+            format,
             json,
             squeue_bin,
             sacct_bin,
@@ -485,14 +684,15 @@ fn run_command(command: Commands) -> Result<()> {
                     sacct_bin,
                 },
             )?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&snapshot)
-                        .context("failed to serialize status output")?
-                );
-            } else {
-                print_status_snapshot(&snapshot);
+            match resolve_output_format(format, json) {
+                OutputFormat::Text => print_status_snapshot(&snapshot),
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&snapshot)
+                            .context("failed to serialize status output")?
+                    );
+                }
             }
         }
         Commands::Stats {
@@ -515,12 +715,7 @@ fn run_command(command: Commands) -> Result<()> {
                     sstat_bin,
                 },
             )?;
-            let format = if json {
-                StatsOutputFormat::Json
-            } else {
-                format.unwrap_or(StatsOutputFormat::Text)
-            };
-            match format {
+            match resolve_stats_output_format(format, json) {
                 StatsOutputFormat::Text => print_stats_snapshot(&snapshot),
                 StatsOutputFormat::Json => {
                     println!(
@@ -542,6 +737,7 @@ fn run_command(command: Commands) -> Result<()> {
         Commands::Artifacts {
             file,
             job_id,
+            format,
             json,
             bundles,
             tarball,
@@ -554,14 +750,15 @@ fn run_command(command: Commands) -> Result<()> {
                     tarball,
                 },
             )?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report)
-                        .context("failed to serialize artifacts output")?
-                );
-            } else {
-                print_artifact_export_report(&report);
+            match resolve_output_format(format, json) {
+                OutputFormat::Text => print_artifact_export_report(&report),
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report)
+                            .context("failed to serialize artifacts output")?
+                    );
+                }
             }
         }
         Commands::Logs {
@@ -587,11 +784,21 @@ fn run_command(command: Commands) -> Result<()> {
         }
         Commands::Init {
             template,
+            list_templates,
+            describe_template,
             name,
             cache_dir,
             output,
             force,
         } => {
+            if list_templates {
+                print_template_list();
+                return Ok(());
+            }
+            if let Some(template_name) = describe_template {
+                print_template_description(&template_name)?;
+                return Ok(());
+            }
             let answers = resolve_init_answers(template, name, cache_dir, prompt_for_init)?;
             let rendered = render_template(
                 &answers.template_name,
@@ -605,36 +812,62 @@ fn run_command(command: Commands) -> Result<()> {
             }
         }
         Commands::Cache { command } => match command {
-            CacheCommands::List { cache_dir } => {
+            CacheCommands::List { cache_dir, format } => {
                 let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
                 let manifests = scan_cache(&cache_dir)?;
-                if manifests.is_empty() {
-                    println!("no cache entries found in {}", cache_dir.display());
-                } else {
-                    println!("cache dir: {}", cache_dir.display());
-                    for manifest in manifests {
-                        let kind = match manifest.kind {
-                            CacheEntryKind::Base => "base",
-                            CacheEntryKind::Prepared => "prepared",
-                        };
+                match resolve_output_format(format, false) {
+                    OutputFormat::Text => {
+                        if manifests.is_empty() {
+                            println!("no cache entries found in {}", cache_dir.display());
+                        } else {
+                            println!("cache dir: {}", cache_dir.display());
+                            for manifest in manifests {
+                                let kind = match manifest.kind {
+                                    CacheEntryKind::Base => "base",
+                                    CacheEntryKind::Prepared => "prepared",
+                                };
+                                println!(
+                                    "{kind}\t{}\tservices={}\tsource={}",
+                                    manifest.artifact_path,
+                                    manifest.service_names.join(","),
+                                    manifest.source_image
+                                );
+                            }
+                        }
+                    }
+                    OutputFormat::Json => {
                         println!(
-                            "{kind}\t{}\tservices={}\tsource={}",
-                            manifest.artifact_path,
-                            manifest.service_names.join(","),
-                            manifest.source_image
+                            "{}",
+                            serde_json::to_string_pretty(&manifests)
+                                .context("failed to serialize cache list output")?
                         );
                     }
                 }
             }
-            CacheCommands::Inspect { file, service } => {
+            CacheCommands::Inspect {
+                file,
+                service,
+                format,
+            } => {
                 let runtime_plan = load_runtime_plan(&file)?;
-                print_cache_inspect(&runtime_plan, service.as_deref())?;
+                let report = build_cache_inspect_report(&runtime_plan, service.as_deref())?;
+                match resolve_output_format(format, false) {
+                    OutputFormat::Text => print_cache_inspect(&report)?,
+                    OutputFormat::Json => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&report)
+                                .context("failed to serialize cache inspect output")?
+                        );
+                    }
+                }
             }
             CacheCommands::Prune {
                 file,
                 cache_dir,
                 age,
                 all_unused,
+                format,
             } => {
                 if age.is_none() && !all_unused {
                     bail!("cache prune requires either --age DAYS or --all-unused");
@@ -643,16 +876,38 @@ fn run_command(command: Commands) -> Result<()> {
                     bail!("cache prune accepts only one strategy at a time");
                 }
 
-                if let Some(days) = age {
+                let report = if let Some(days) = age {
                     let target = cache_dir.unwrap_or_else(default_cache_dir);
                     let result = prune_by_age(&target, days)?;
-                    print_prune_result(&target, &result.removed);
+                    CachePruneReport {
+                        cache_dir: target,
+                        mode: "age".to_string(),
+                        removed_count: result.removed.len(),
+                        removed_paths: result.removed,
+                    }
                 } else {
                     let file = file.context("--all-unused requires -f/--file so the current plan can define which artifacts are still referenced")?;
                     let runtime_plan = load_runtime_plan(&file)?;
                     let target = cache_dir.unwrap_or_else(|| runtime_plan.cache_dir.clone());
                     let result = prune_all_unused(&target, &runtime_plan)?;
-                    print_prune_result(&target, &result.removed);
+                    CachePruneReport {
+                        cache_dir: target,
+                        mode: "all_unused".to_string(),
+                        removed_count: result.removed.len(),
+                        removed_paths: result.removed,
+                    }
+                };
+                match resolve_output_format(format, false) {
+                    OutputFormat::Text => {
+                        print_prune_result(&report.cache_dir, &report.removed_paths)
+                    }
+                    OutputFormat::Json => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&report)
+                                .context("failed to serialize cache prune output")?
+                        );
+                    }
                 }
             }
         },
@@ -683,9 +938,89 @@ fn run_command(command: Commands) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct ValidateOutput {
+    valid: bool,
+    compose_file: PathBuf,
+    name: String,
+    service_count: usize,
+    services: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RenderOutput {
+    compose_file: PathBuf,
+    output_path: Option<PathBuf>,
+    script: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CacheArtifactInspect {
+    path: PathBuf,
+    artifact_present: bool,
+    manifest_path: PathBuf,
+    manifest: Option<hpc_compose::cache::CacheEntryManifest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CacheInspectService {
+    service_name: String,
+    source_image: String,
+    base_registry: Option<String>,
+    base_artifact: Option<CacheArtifactInspect>,
+    runtime_artifact: CacheArtifactInspect,
+    current_reuse_expectation: String,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CacheInspectReport {
+    cache_dir: PathBuf,
+    services: Vec<CacheInspectService>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CachePruneReport {
+    cache_dir: PathBuf,
+    mode: String,
+    removed_count: usize,
+    removed_paths: Vec<PathBuf>,
+}
+
+#[cfg(test)]
 fn render_from_path(path: &Path) -> Result<String> {
     let runtime = load_runtime_plan(path)?;
     render_script(&runtime)
+}
+
+fn resolve_output_format(format: Option<OutputFormat>, json: bool) -> OutputFormat {
+    if json {
+        OutputFormat::Json
+    } else {
+        format.unwrap_or(OutputFormat::Text)
+    }
+}
+
+fn resolve_stats_output_format(format: Option<StatsOutputFormat>, json: bool) -> StatsOutputFormat {
+    if json {
+        StatsOutputFormat::Json
+    } else {
+        format.unwrap_or(StatsOutputFormat::Text)
+    }
+}
+
+fn build_validate_output(plan: &Plan) -> ValidateOutput {
+    ValidateOutput {
+        valid: true,
+        compose_file: plan.spec_path.clone(),
+        name: plan.name.clone(),
+        service_count: plan.ordered_services.len(),
+        services: plan
+            .ordered_services
+            .iter()
+            .map(|service| service.name.clone())
+            .collect(),
+    }
 }
 
 fn load_plan(path: &Path) -> Result<Plan> {
@@ -790,8 +1125,8 @@ fn print_plan_inspect(plan: &RuntimePlan) {
     let _ = write_plan_inspect(&mut io::stdout(), plan);
 }
 
-fn print_cache_inspect(plan: &RuntimePlan, filter: Option<&str>) -> Result<()> {
-    write_cache_inspect(&mut io::stdout(), plan, filter)
+fn print_cache_inspect(report: &CacheInspectReport) -> Result<()> {
+    write_cache_inspect(&mut io::stdout(), report)
 }
 
 fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> io::Result<()> {
@@ -1429,11 +1764,11 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
     Ok(())
 }
 
-fn write_cache_inspect(
-    writer: &mut impl Write,
+fn build_cache_inspect_report(
     plan: &RuntimePlan,
     filter: Option<&str>,
-) -> Result<()> {
+) -> Result<CacheInspectReport> {
+    let mut services = Vec::new();
     for service in &plan.ordered_services {
         if let Some(filter_name) = filter
             && service.name != filter_name
@@ -1441,42 +1776,81 @@ fn write_cache_inspect(
             continue;
         }
 
-        writeln!(writer, "service: {}", service.name)?;
-        writeln!(
-            writer,
-            "source image: {}",
-            source_image_display(&service.source)
-        )?;
-
-        if let ImageSource::Remote(remote) = &service.source {
+        let base_artifact = if let ImageSource::Remote(_) = &service.source {
             let base_path = base_image_path(&plan.cache_dir, service);
-            writeln!(writer, "base artifact: {}", base_path.display())?;
-            writeln!(
-                writer,
-                "base registry: {}",
-                registry_host_for_remote(remote)
-            )?;
-            write_manifest_block(writer, &base_path)?;
+            Some(CacheArtifactInspect {
+                path: base_path.clone(),
+                artifact_present: base_path.exists(),
+                manifest_path: hpc_compose::cache::manifest_path_for(&base_path),
+                manifest: load_manifest_if_exists(&base_path)?,
+            })
+        } else {
+            None
+        };
+
+        services.push(CacheInspectService {
+            service_name: service.name.clone(),
+            source_image: source_image_display(&service.source),
+            base_registry: match &service.source {
+                ImageSource::Remote(remote) => Some(registry_host_for_remote(remote)),
+                ImageSource::LocalSqsh(_) => None,
+            },
+            base_artifact,
+            runtime_artifact: build_cache_artifact_inspect(&service.runtime_image)?,
+            current_reuse_expectation: runtime_cache_state(service).to_string(),
+            note: service.prepare.as_ref().and_then(|prepare| {
+                if prepare.force_rebuild {
+                    Some(
+                        "this service rebuilds on submit because prepare.mounts are present".into(),
+                    )
+                } else {
+                    None
+                }
+            }),
+        });
+    }
+
+    Ok(CacheInspectReport {
+        cache_dir: plan.cache_dir.clone(),
+        services,
+    })
+}
+
+fn build_cache_artifact_inspect(path: &Path) -> Result<CacheArtifactInspect> {
+    Ok(CacheArtifactInspect {
+        path: path.to_path_buf(),
+        artifact_present: path.exists(),
+        manifest_path: hpc_compose::cache::manifest_path_for(path),
+        manifest: load_manifest_if_exists(path)?,
+    })
+}
+
+fn write_cache_inspect(writer: &mut impl Write, report: &CacheInspectReport) -> Result<()> {
+    for service in &report.services {
+        writeln!(writer, "service: {}", service.service_name)?;
+        writeln!(writer, "source image: {}", service.source_image)?;
+
+        if let Some(base_artifact) = &service.base_artifact {
+            writeln!(writer, "base artifact: {}", base_artifact.path.display())?;
+            if let Some(base_registry) = &service.base_registry {
+                writeln!(writer, "base registry: {base_registry}")?;
+            }
+            write_cache_artifact_block(writer, base_artifact)?;
         }
 
         writeln!(
             writer,
             "runtime artifact: {}",
-            service.runtime_image.display()
+            service.runtime_artifact.path.display()
         )?;
-        write_manifest_block(writer, &service.runtime_image)?;
+        write_cache_artifact_block(writer, &service.runtime_artifact)?;
         writeln!(
             writer,
             "current reuse expectation: {}",
-            runtime_cache_state(service)
+            service.current_reuse_expectation
         )?;
-        if let Some(prepare) = &service.prepare
-            && prepare.force_rebuild
-        {
-            writeln!(
-                writer,
-                "note: this service rebuilds on submit because prepare.mounts are present"
-            )?;
+        if let Some(note) = &service.note {
+            writeln!(writer, "note: {note}")?;
         }
         writeln!(writer)?;
     }
@@ -1485,14 +1859,25 @@ fn write_cache_inspect(
 
 #[cfg(test)]
 fn print_manifest_block(path: &Path) -> Result<()> {
-    write_manifest_block(&mut io::stdout(), path)
+    let artifact = build_cache_artifact_inspect(path)?;
+    write_cache_artifact_block(&mut io::stdout(), &artifact)
 }
 
-fn write_manifest_block(writer: &mut impl Write, path: &Path) -> Result<()> {
-    writeln!(writer, "artifact present: {}", yes_no(path.exists()))?;
-    let manifest_path = hpc_compose::cache::manifest_path_for(path);
-    writeln!(writer, "manifest path: {}", manifest_path.display())?;
-    if let Some(manifest) = load_manifest_if_exists(path)? {
+fn write_cache_artifact_block(
+    writer: &mut impl Write,
+    artifact: &CacheArtifactInspect,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "artifact present: {}",
+        yes_no(artifact.artifact_present)
+    )?;
+    writeln!(
+        writer,
+        "manifest path: {}",
+        artifact.manifest_path.display()
+    )?;
+    if let Some(manifest) = &artifact.manifest {
         let kind = match manifest.kind {
             CacheEntryKind::Base => "base",
             CacheEntryKind::Prepared => "prepared",
@@ -1594,6 +1979,25 @@ fn service_names(plan: &RuntimePlan) -> Vec<&str> {
         .iter()
         .map(|service| service.name.as_str())
         .collect()
+}
+
+fn print_template_list() {
+    for template in templates() {
+        println!("{}\t{}", template.name, template.description);
+    }
+}
+
+fn print_template_description(template_name: &str) -> Result<()> {
+    let template = resolve_template(template_name)?;
+    println!("template: {}", template.name);
+    println!("description: {}", template.description);
+    println!("command:");
+    println!(
+        "hpc-compose init --template {} --name my-app --cache-dir {} --output compose.yaml",
+        template.name,
+        default_init_cache_dir()
+    );
+    Ok(())
 }
 
 fn resolve_init_answers(
@@ -2259,8 +2663,12 @@ services:
         });
         print_plan_inspect(&plan);
         print_plan_inspect(&local_plan);
-        print_cache_inspect(&plan, None).expect("inspect");
-        print_cache_inspect(&plan, Some("other")).expect("inspect filtered");
+        print_cache_inspect(&build_cache_inspect_report(&plan, None).expect("inspect report"))
+            .expect("inspect");
+        print_cache_inspect(
+            &build_cache_inspect_report(&plan, Some("other")).expect("inspect filtered report"),
+        )
+        .expect("inspect filtered");
         print_manifest_block(&runtime_image).expect("manifest block");
         print_manifest_block(&tmpdir.path().join("missing.sqsh")).expect("missing manifest block");
         print_prune_result(tmpdir.path(), &[]);
@@ -2766,23 +3174,27 @@ services:
 
         run_command(Commands::Validate {
             file: compose.clone(),
+            format: None,
         })
         .expect("validate");
         run_command(Commands::Render {
             file: compose.clone(),
             output: None,
+            format: None,
         })
         .expect("render stdout");
         let rendered = tmpdir.path().join("rendered.sbatch");
         run_command(Commands::Render {
             file: compose.clone(),
             output: Some(rendered.clone()),
+            format: None,
         })
         .expect("render file");
         assert!(rendered.exists());
         let render_err = run_command(Commands::Render {
             file: compose.clone(),
             output: Some(tmpdir.path().join("missing-parent/rendered.sbatch")),
+            format: None,
         })
         .expect_err("render write failure");
         assert!(
@@ -2796,6 +3208,7 @@ services:
             enroot_bin: enroot.display().to_string(),
             keep_failed_prep: false,
             force: true,
+            format: None,
         })
         .expect("prepare");
 
@@ -2803,6 +3216,7 @@ services:
             file: compose.clone(),
             strict: true,
             verbose: false,
+            format: None,
             json: false,
             enroot_bin: enroot.display().to_string(),
             sbatch_bin: sbatch_ok.display().to_string(),
@@ -2814,6 +3228,7 @@ services:
             file: compose.clone(),
             strict: false,
             verbose: false,
+            format: None,
             json: false,
             enroot_bin: enroot.display().to_string(),
             sbatch_bin: sbatch_ok.display().to_string(),
@@ -2824,6 +3239,7 @@ services:
         run_command(Commands::Inspect {
             file: compose.clone(),
             verbose: false,
+            format: None,
             json: false,
         })
         .expect("inspect");
@@ -2882,12 +3298,14 @@ services:
         run_command(Commands::Cache {
             command: CacheCommands::List {
                 cache_dir: Some(cache_dir.clone()),
+                format: None,
             },
         })
         .expect("cache list");
         run_command(Commands::Cache {
             command: CacheCommands::List {
                 cache_dir: Some(empty_cache),
+                format: None,
             },
         })
         .expect("cache list empty");
@@ -2895,6 +3313,7 @@ services:
             command: CacheCommands::Inspect {
                 file: compose.clone(),
                 service: Some("app".into()),
+                format: None,
             },
         })
         .expect("cache inspect");
@@ -2904,6 +3323,7 @@ services:
                 cache_dir: Some(cache_dir.clone()),
                 age: None,
                 all_unused: true,
+                format: None,
             },
         })
         .expect_err("missing file");
@@ -2914,6 +3334,7 @@ services:
                 cache_dir: Some(cache_dir.clone()),
                 age: Some(7),
                 all_unused: true,
+                format: None,
             },
         })
         .expect_err("conflicting strategies");
@@ -2927,6 +3348,7 @@ services:
                 cache_dir: Some(cache_dir),
                 age: Some(999),
                 all_unused: false,
+                format: None,
             },
         })
         .expect("prune age");
@@ -2936,6 +3358,7 @@ services:
                 cache_dir: None,
                 age: None,
                 all_unused: true,
+                format: None,
             },
         })
         .expect("prune all unused");
@@ -2961,6 +3384,8 @@ services:
         let init_output = tmpdir.path().join("init-compose.yaml");
         run_command(Commands::Init {
             template: Some("dev-python-app".into()),
+            list_templates: false,
+            describe_template: None,
             name: Some("custom-init".into()),
             cache_dir: Some("/tmp/custom-cache".into()),
             output: init_output.clone(),

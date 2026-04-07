@@ -8,7 +8,7 @@ This is the shortest install-and-run path from an empty shell to a submitted job
 curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
 ```
 
-The installer selects the newest published release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default.
+The installer selects the newest published release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run full cluster workflows.
 
 ## 2. Initialize a starter spec
 
@@ -72,6 +72,8 @@ target/release/hpc-compose submit --watch -f compose.yaml
 ## Read next
 
 - Use the [Execution model](execution-model.md) page to understand what runs where and which paths must be shared.
+- Use the [Support Matrix](support-matrix.md) page to confirm what is officially supported versus only release-built.
+- Use the [Task Guide](task-guide.md) page when you want a goal-oriented starting point.
 - Use the [Runbook](runbook.md) when adapting a real workload to a real cluster.
 - Use the [Examples](examples.md) page when you want the closest known-good template.
 - Use the [Spec Reference](spec-reference.md) when changing fields or validation-sensitive values.

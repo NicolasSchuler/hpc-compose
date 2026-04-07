@@ -37,7 +37,7 @@ For the exact first-class vs raw pass-through vs out-of-scope Slurm boundary, se
 curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
 ```
 
-The installer selects the newest GitHub release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Manual release downloads remain documented in [docs/src/installation.md](docs/src/installation.md).
+The installer selects the newest GitHub release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Installer availability is not the same thing as full runtime support; see the [Support Matrix](docs/src/support-matrix.md) before assuming a platform/cluster combination is supported end to end. Manual release downloads remain documented in [docs/src/installation.md](docs/src/installation.md).
 
 ## Minimal example
 
@@ -65,6 +65,8 @@ hpc-compose submit --watch -f compose.yaml
 - Published docs: [nicolasschuler.github.io/hpc-compose](https://nicolasschuler.github.io/hpc-compose/)
 - Installation: [docs/src/installation.md](docs/src/installation.md)
 - Quickstart: [docs/src/quickstart.md](docs/src/quickstart.md)
+- Support matrix: [docs/src/support-matrix.md](docs/src/support-matrix.md)
+- Task guide: [docs/src/task-guide.md](docs/src/task-guide.md)
 - Execution model: [docs/src/execution-model.md](docs/src/execution-model.md)
 - Runbook: [docs/src/runbook.md](docs/src/runbook.md)
 - Examples: [docs/src/examples.md](docs/src/examples.md)
@@ -72,6 +74,13 @@ hpc-compose submit --watch -f compose.yaml
 - Supported Slurm model: [docs/src/supported-slurm-model.md](docs/src/supported-slurm-model.md)
 - Docker Compose migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
 - Contributor architecture notes: [docs/src/architecture.md](docs/src/architecture.md)
+
+## Project policies
+
+- License: [LICENSE](LICENSE)
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Security: [SECURITY.md](SECURITY.md)
+- Code of Conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
 ## Citation
 
@@ -81,7 +90,7 @@ If you use `hpc-compose` in research, please cite the software. GitHub also expo
 @software{schuler_hpc_compose_2026,
   author = {Schuler, Nicolas},
   title = {hpc-compose},
-  version = {0.1.15},
+  version = {0.1.16},
   year = {2026},
   publisher = {Karlsruhe Institute of Technology (KIT)},
   url = {https://github.com/NicolasSchuler/hpc-compose}

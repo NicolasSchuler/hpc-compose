@@ -27,12 +27,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
           toolchain: stable
           rustflags: ""
@@ -44,6 +44,10 @@ jobs:
     name: Build ${{ matrix.label }}
     needs: verify
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -71,12 +75,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
           toolchain: stable
           rustflags: ""
@@ -108,6 +112,19 @@ jobs:
           tar -C "${stage_dir}" -czf "dist/${asset}" "${{ matrix.binary_name }}" README.md
           shasum -a 256 "dist/${asset}" > "dist/${checksum}"
 
+      - name: Smoke test Unix release assets
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG}"
+          asset="hpc-compose-${version}-${{ matrix.target }}.tar.gz"
+          smoke_dir="$(mktemp -d)"
+
+          tar -C "${smoke_dir}" -xzf "dist/${asset}"
+          "${smoke_dir}/${{ matrix.binary_name }}" --version >/dev/null
+
       - name: Package Windows release assets
         if: runner.os == 'Windows'
         shell: pwsh
@@ -125,8 +142,25 @@ jobs:
           $hash = (Get-FileHash "dist/$asset" -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path "dist/$asset.sha256" -Value "$hash  $asset"
 
+      - name: Smoke test Windows release assets
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG
+          $asset = "hpc-compose-$version-${{ matrix.target }}.zip"
+          $smokeDir = Join-Path $env:RUNNER_TEMP "release-smoke"
+
+          New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+          Expand-Archive -Path "dist/$asset" -DestinationPath $smokeDir -Force
+          & (Join-Path $smokeDir "${{ matrix.binary_name }}") --version | Out-Null
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: dist/*
+
       - name: Upload packaged assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-${{ matrix.target }}
           path: dist/*
@@ -140,7 +174,7 @@ jobs:
       contents: write
     steps:
       - name: Download packaged assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: release-*
           merge-multiple: true
