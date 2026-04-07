@@ -13,6 +13,7 @@ Install the latest hpc-compose release for the current platform.
 
 Environment overrides:
   HPC_COMPOSE_INSTALL_DIR  Install destination (default: ~/.local/bin)
+  HPC_COMPOSE_MAN_DIR      Manpage root (default: <prefix>/share/man when install dir ends in /bin, otherwise ~/.local/share/man)
   HPC_COMPOSE_VERSION      Release tag to install, for example v0.1.12
   HPC_COMPOSE_REPO         Alternate GitHub repo in owner/name form
   HPC_COMPOSE_BASE_URL     Alternate base URL serving release assets directly
@@ -21,6 +22,10 @@ EOF
 
 log() {
   printf '%s\n' "$*" >&2
+}
+
+warn() {
+  log "warning: $*"
 }
 
 fail() {
@@ -120,6 +125,44 @@ verify_checksum() {
   fail "no checksum tool available; need shasum, sha256sum, or openssl"
 }
 
+resolve_man_dir() {
+  if [ -n "${HPC_COMPOSE_MAN_DIR:-}" ]; then
+    printf '%s' "${HPC_COMPOSE_MAN_DIR}"
+    return 0
+  fi
+
+  install_dir="${INSTALL_DIR%/}"
+  if [ "$(basename "${install_dir}")" = "bin" ]; then
+    printf '%s' "$(dirname "${install_dir}")/share/man"
+  else
+    printf '%s' "${HOME}/.local/share/man"
+  fi
+}
+
+install_manpages() {
+  src_dir="${TMP_WORKDIR}/share/man/man1"
+  [ -d "${src_dir}" ] || return 0
+
+  man_dir="$(resolve_man_dir)"
+  if ! mkdir -p "${man_dir}/man1"; then
+    warn "failed to create ${man_dir}/man1; skipping manpage installation"
+    return 0
+  fi
+  installed=0
+  for page in "${src_dir}"/*.1; do
+    [ -f "${page}" ] || continue
+    if ! install -m 0644 "${page}" "${man_dir}/man1/$(basename "${page}")"; then
+      warn "failed to install manpages into ${man_dir}/man1; leaving the binary installed"
+      return 0
+    fi
+    installed=1
+  done
+
+  if [ "${installed}" -eq 1 ]; then
+    log "Installed manpages to ${man_dir}/man1"
+  fi
+}
+
 main() {
   case "${1:-}" in
     "" ) ;;
@@ -162,6 +205,7 @@ main() {
   mkdir -p "${INSTALL_DIR}"
   tar -xzf "${archive_path}" -C "${TMP_WORKDIR}"
   install -m 0755 "${TMP_WORKDIR}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  install_manpages
 
   log "Installed ${BINARY_NAME} ${version} to ${INSTALL_DIR}/${BINARY_NAME}"
   case ":${PATH:-}:" in

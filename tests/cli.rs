@@ -2644,6 +2644,10 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(top_help_stdout.contains("Normal run:"));
     assert!(top_help_stdout.contains("submit --watch -f compose.yaml"));
     assert!(top_help_stdout.contains("Debugging flow:"));
+    assert!(top_help_stdout.contains("logs         Print tracked service logs"));
+    assert!(top_help_stdout.contains("cancel       Cancel a tracked Slurm job"));
+    assert!(top_help_stdout.contains("clean        Remove old tracked job directories"));
+    assert!(top_help_stdout.contains("completions  Generate shell completions"));
 
     let init_help = run_cli(tmpdir.path(), &["init", "--help"]);
     assert_success(&init_help);
@@ -2653,7 +2657,26 @@ fn help_and_template_discovery_surface_guided_workflows() {
 
     let cache_help = run_cli(tmpdir.path(), &["cache", "--help"]);
     assert_success(&cache_help);
-    assert!(stdout_text(&cache_help).contains("cache inspect -f compose.yaml"));
+    let cache_help_stdout = stdout_text(&cache_help);
+    assert!(cache_help_stdout.contains("cache inspect -f compose.yaml"));
+    assert!(cache_help_stdout.contains("list     List cached image artifacts"));
+    assert!(cache_help_stdout.contains("inspect  Inspect cache reuse for the current plan"));
+    assert!(cache_help_stdout.contains("prune    Prune cached image artifacts"));
+
+    let submit_help = run_cli(tmpdir.path(), &["submit", "--help"]);
+    assert_success(&submit_help);
+    let submit_help_stdout = stdout_text(&submit_help);
+    assert!(
+        submit_help_stdout
+            .contains("Poll scheduler state and stream tracked logs after submission")
+    );
+    assert!(
+        submit_help_stdout.contains("Run preflight, prepare, and render without calling sbatch")
+    );
+
+    let preflight_help = run_cli(tmpdir.path(), &["preflight", "--help"]);
+    assert_success(&preflight_help);
+    assert!(stdout_text(&preflight_help).contains("Treat warnings as failures"));
 
     let list_templates = run_cli(tmpdir.path(), &["init", "--list-templates"]);
     assert_success(&list_templates);

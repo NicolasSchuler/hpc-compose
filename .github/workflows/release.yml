@@ -109,7 +109,9 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "${stage_dir}/"
           cp README.md "${stage_dir}/"
-          tar -C "${stage_dir}" -czf "dist/${asset}" "${{ matrix.binary_name }}" README.md
+          mkdir -p "${stage_dir}/share/man"
+          cp -R man/man1 "${stage_dir}/share/man/"
+          tar -C "${stage_dir}" -czf "dist/${asset}" "${{ matrix.binary_name }}" README.md share/man/man1
           shasum -a 256 "dist/${asset}" > "dist/${checksum}"
 
       - name: Smoke test Unix release assets
@@ -124,6 +126,8 @@ jobs:
 
           tar -C "${smoke_dir}" -xzf "dist/${asset}"
           "${smoke_dir}/${{ matrix.binary_name }}" --version >/dev/null
+          test -f "${smoke_dir}/share/man/man1/hpc-compose.1"
+          test -f "${smoke_dir}/share/man/man1/hpc-compose-submit.1"
 
       - name: Package Windows release assets
         if: runner.os == 'Windows'

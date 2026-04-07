@@ -2,6 +2,8 @@
 name = "hpc-compose"
 version = "0.1.16"
 edition = "2024"
+autobins = false
+default-run = "hpc-compose"
 license = "MIT"
 repository = "https://github.com/NicolasSchuler/hpc-compose"
 homepage = "https://github.com/NicolasSchuler/hpc-compose"
@@ -10,6 +12,18 @@ readme = "README.md"
 description = "Compose-like specs for single-allocation Slurm jobs with Enroot and Pyxis"
 keywords = ["slurm", "hpc", "compose", "containers", "enroot"]
 categories = ["command-line-utilities", "config"]
+
+[features]
+manpage-bin = []
+
+[[bin]]
+name = "hpc-compose"
+path = "src/main.rs"
+
+[[bin]]
+name = "gen-manpages"
+path = "src/bin/gen-manpages.rs"
+required-features = ["manpage-bin"]
 
 [dependencies]
 anyhow = "1.0.100"

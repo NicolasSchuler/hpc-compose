@@ -10,6 +10,13 @@ curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/ins
 
 By default this installs `hpc-compose` into `~/.local/bin` and verifies the published SHA-256 checksum before placing the binary.
 
+On Unix installs, the release archive also ships section-1 manpages. After installation you can use:
+
+```bash
+man hpc-compose
+man hpc-compose-submit
+```
+
 Installer availability does not imply full runtime support. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run submission, prepare, or watch workflows end to end.
 
 Useful overrides:
@@ -42,6 +49,8 @@ tar -xzf hpc-compose.tar.gz
 
 Pick the archive that matches your platform from the release page. Linux x86_64 releases use a musl target to avoid common cluster glibc mismatches.
 
+Unix release archives also contain `share/man/man1/` so the shipped manpages can be installed alongside the binary.
+
 ## Build from source
 
 Requirements:
@@ -55,6 +64,13 @@ git clone https://github.com/NicolasSchuler/hpc-compose.git
 cd hpc-compose
 cargo build --release
 ./target/release/hpc-compose --help
+```
+
+The repository keeps generated manpages under `man/man1`. Regenerate them from a checkout with:
+
+```bash
+cargo run --features manpage-bin --bin gen-manpages
+man -l man/man1/hpc-compose.1
 ```
 
 ## Local docs commands

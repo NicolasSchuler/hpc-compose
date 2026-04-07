@@ -19,8 +19,10 @@
 #![warn(missing_docs)]
 
 pub mod cache;
+pub mod cli;
 pub mod init;
 pub mod job;
+pub mod manpages;
 pub mod planner;
 pub mod preflight;
 pub mod prepare;

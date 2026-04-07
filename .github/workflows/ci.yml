@@ -55,6 +55,9 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+      - name: Check generated manpages
+        run: cargo run --locked --features manpage-bin --bin gen-manpages -- --check
+
       - name: Check docs links
         shell: bash
         run: |
@@ -126,6 +129,16 @@ jobs:
 
       - name: Run test suite
         run: cargo test --locked
+
+      - name: Smoke test cargo install surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="$PWD/.tmp/cargo-install"
+          rm -rf "$install_root"
+          cargo install --path . --locked --offline --root "$install_root"
+          test -x "$install_root/bin/hpc-compose"
+          test ! -e "$install_root/bin/gen-manpages"
 
       - name: Validate all shipped examples
         run: |
@@ -200,13 +213,15 @@ jobs:
 
           version="v0.0.0-test"
           binary_name="hpc-compose"
-          install_dir="$PWD/.tmp/install-root"
-          bad_install_dir="$PWD/.tmp/install-root-bad"
+          install_root="$PWD/.tmp/install-root"
+          install_dir="$install_root/bin"
+          bad_install_root="$PWD/.tmp/install-root-bad"
+          bad_install_dir="$bad_install_root/bin"
           stage_dir="$PWD/.tmp/install-stage"
           dist_dir="$PWD/.tmp/install-dist"
 
-          rm -rf "$install_dir" "$bad_install_dir" "$stage_dir" "$dist_dir"
-          mkdir -p "$install_dir" "$bad_install_dir" "$stage_dir" "$dist_dir"
+          rm -rf "$install_root" "$bad_install_root" "$stage_dir" "$dist_dir"
+          mkdir -p "$install_dir" "$bad_install_dir" "$stage_dir/share/man" "$dist_dir"
 
           case "$(uname -s):$(uname -m)" in
             Linux:x86_64|Linux:amd64)
@@ -229,7 +244,8 @@ jobs:
           asset="${binary_name}-${version}-${target}.tar.gz"
           cp "target/${target}/release/${binary_name}" "$stage_dir/"
           cp README.md "$stage_dir/"
-          tar -C "$stage_dir" -czf "$dist_dir/$asset" "$binary_name" README.md
+          cp -R man/man1 "$stage_dir/share/man/"
+          tar -C "$stage_dir" -czf "$dist_dir/$asset" "$binary_name" README.md share/man/man1
           if command -v shasum >/dev/null 2>&1; then
             shasum -a 256 "$dist_dir/$asset" > "$dist_dir/$asset.sha256"
           else
@@ -257,6 +273,22 @@ jobs:
           HPC_COMPOSE_INSTALL_DIR="$install_dir" \
           sh install.sh
           "$install_dir/$binary_name" --help >/dev/null
+          test -f "$install_root/share/man/man1/hpc-compose.1"
+          test -f "$install_root/share/man/man1/hpc-compose-submit.1"
+
+          readonly_root="$PWD/.tmp/install-root-readonly"
+          readonly_dir="$readonly_root/bin"
+          rm -rf "$readonly_root"
+          mkdir -p "$readonly_dir"
+          chmod 0555 "$readonly_root"
+          chmod 0755 "$readonly_dir"
+          HPC_COMPOSE_BASE_URL=http://127.0.0.1:8123 \
+          HPC_COMPOSE_VERSION="$version" \
+          HPC_COMPOSE_INSTALL_DIR="$readonly_dir" \
+          sh install.sh >/tmp/install-readonly.out 2>/tmp/install-readonly.err
+          "$readonly_dir/$binary_name" --help >/dev/null
+          grep -q "skipping manpage installation" /tmp/install-readonly.err
+          test ! -e "$readonly_root/share/man/man1/hpc-compose.1"
 
           printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "$asset" > "$dist_dir/$asset.sha256"
           if HPC_COMPOSE_BASE_URL=http://127.0.0.1:8123 \

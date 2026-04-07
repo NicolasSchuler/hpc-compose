@@ -10,6 +10,8 @@ curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/ins
 
 The installer selects the newest published release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run full cluster workflows.
 
+The installed CLI also ships Unix manpages. Use `man hpc-compose` or `man hpc-compose-submit` as the concise command reference, and keep the longer mdBook docs for workflow guidance.
+
 ## 2. Initialize a starter spec
 
 ```bash
