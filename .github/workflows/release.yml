@@ -37,6 +37,31 @@ jobs:
           toolchain: stable
           rustflags: ""
 
+      - name: Verify release tag matches Cargo package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate_version="$(awk '
+            BEGIN { in_pkg = 0 }
+            $0 == "[package]" { in_pkg = 1; next }
+            /^\[/ && in_pkg { in_pkg = 0 }
+            in_pkg && $1 == "version" {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)"
+          if [ -z "${crate_version}" ]; then
+            echo "failed to read [package].version from Cargo.toml" >&2
+            exit 1
+          fi
+          expected_tag="v${crate_version}"
+          if [ "${RELEASE_TAG}" != "${expected_tag}" ]; then
+            echo "release tag/version mismatch: RELEASE_TAG=${RELEASE_TAG}, Cargo.toml version=${crate_version}" >&2
+            echo "expected release tag ${expected_tag}" >&2
+            exit 1
+          fi
+
       - name: Run test suite
         run: cargo test --locked
 
