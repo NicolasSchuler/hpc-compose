@@ -197,12 +197,27 @@ state_root="${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/fake-srun"
 mkdir -p "$state_root"
 key="$(printf '%s' "$job_name" | tr -c 'A-Za-z0-9._-' '_')"
 count_file="$state_root/${key}.count"
+plan_file="$state_root/${key}.plan"
 count=0
 if [[ -f "$count_file" ]]; then
   count="$(cat "$count_file")"
 fi
 count=$((count + 1))
 echo "$count" > "$count_file"
+if [[ -f "$plan_file" ]]; then
+  line="$(sed -n "${count}p" "$plan_file")"
+  if [[ -z "$line" ]]; then
+    line="$(tail -n 1 "$plan_file")"
+  fi
+  if [[ -n "$line" ]]; then
+    read -r exit_code sleep_seconds <<< "$line"
+    sleep_seconds="${sleep_seconds:-0}"
+    if (( sleep_seconds > 0 )); then
+      sleep "$sleep_seconds"
+    fi
+    exit "$exit_code"
+  fi
+fi
 case "$job_name" in
   hpc-compose:app)
     if (( count == 1 )); then
@@ -223,6 +238,37 @@ esac
 "#,
     );
     write_fake_scontrol(tmpdir);
+    path
+}
+
+fn fake_srun_key(job_name: &str) -> String {
+    job_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_fake_srun_failure_policy_plan(
+    tmpdir: &Path,
+    job_name: &str,
+    attempts: &[(i32, u64)],
+) -> PathBuf {
+    let path = write_fake_srun_failure_policy(tmpdir);
+    let state_root = tmpdir.join(".hpc-compose/fake-srun");
+    fs::create_dir_all(&state_root).expect("create fake srun state");
+    let key = fake_srun_key(job_name);
+    let plan = attempts
+        .iter()
+        .map(|(exit_code, sleep_seconds)| format!("{exit_code} {sleep_seconds}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(state_root.join(format!("{key}.plan")), format!("{plan}\n")).expect("write plan");
     path
 }
 
@@ -1460,6 +1506,9 @@ services:
     assert_eq!(app["failure_policy_mode"], "restart_on_failure");
     assert_eq!(app["restart_count"], 1);
     assert_eq!(app["max_restarts"], 3);
+    assert_eq!(app["window_seconds"], 60);
+    assert_eq!(app["max_restarts_in_window"], 3);
+    assert_eq!(app["restart_failures_in_window"], 1);
     assert_eq!(app["last_exit_code"], 0);
 }
 
@@ -1580,6 +1629,139 @@ services:
     assert_failure(&submit);
     let combined = format!("{}\n{}", stdout_text(&submit), stderr_text(&submit));
     assert!(combined.contains("after 1/1 restarts"));
+}
+
+#[test]
+fn submit_restart_on_failure_window_limit_blocks_crash_loop() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  loopy:
+    image: {}
+    command: /bin/false
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 5
+        backoff_seconds: 1
+        window_seconds: 60
+        max_restarts_in_window: 2
+"#,
+            local_image.display()
+        ),
+    );
+    let srun = write_fake_srun_failure_policy_plan(
+        tmpdir.path(),
+        "hpc-compose:loopy",
+        &[(41, 0), (41, 0), (41, 0)],
+    );
+    let sbatch = write_fake_sbatch_runs_script_with_job_output(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&submit);
+    let combined = format!("{}\n{}", stdout_text(&submit), stderr_text(&submit));
+    assert!(combined.contains("after 2/2 restart-triggering exits in 60s"));
+}
+
+#[test]
+fn submit_restart_on_failure_window_ages_out_failures() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  spaced:
+    image: {}
+    command: /bin/false
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 5
+        backoff_seconds: 1
+        window_seconds: 2
+        max_restarts_in_window: 1
+"#,
+            local_image.display()
+        ),
+    );
+    let srun = write_fake_srun_failure_policy_plan(
+        tmpdir.path(),
+        "hpc-compose:spaced",
+        &[(51, 0), (52, 2), (0, 2)],
+    );
+    let sbatch = write_fake_sbatch_runs_script_with_job_output(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    assert!(stdout_text(&submit).contains("Submitted batch job 12345"));
+
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status);
+    let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    let spaced = payload["services"]
+        .as_array()
+        .expect("services")
+        .iter()
+        .find(|service| service["service_name"] == "spaced")
+        .expect("spaced service");
+    assert_eq!(spaced["restart_count"], 2);
+    assert_eq!(spaced["max_restarts"], 5);
+    assert_eq!(spaced["window_seconds"], 2);
+    assert_eq!(spaced["max_restarts_in_window"], 1);
+    assert_eq!(spaced["restart_failures_in_window"], 0);
+    assert_eq!(spaced["last_exit_code"], 0);
 }
 
 #[test]

@@ -163,7 +163,11 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("SERVICE_FAILURE_POLICY_MODE=()\n");
     out.push_str("SERVICE_MAX_RESTARTS=()\n");
     out.push_str("SERVICE_BACKOFF_SECONDS=()\n");
+    out.push_str("SERVICE_WINDOW_SECONDS=()\n");
+    out.push_str("SERVICE_MAX_RESTARTS_IN_WINDOW=()\n");
     out.push_str("SERVICE_RESTART_COUNT=()\n");
+    out.push_str("SERVICE_RESTART_FAILURES_IN_WINDOW=()\n");
+    out.push_str("SERVICE_RESTART_FAILURE_TIMESTAMPS=()\n");
     out.push_str("SERVICE_LAST_EXIT_CODE=()\n");
     out.push_str("SERVICE_PLACEMENT_MODE=()\n");
     out.push_str("SERVICE_STEP_NODES=()\n");
@@ -311,6 +315,26 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  fi\n");
     out.push_str("}\n\n");
 
+    out.push_str("json_number_array() {\n");
+    out.push_str("  local raw_values=${1-}\n");
+    out.push_str("  local -a values=()\n");
+    out.push_str("  local value\n");
+    out.push_str("  printf '['\n");
+    out.push_str("  if [[ -n \"$raw_values\" ]]; then\n");
+    out.push_str("    read -r -a values <<< \"$raw_values\"\n");
+    out.push_str("    local first=1\n");
+    out.push_str("    for value in \"${values[@]}\"; do\n");
+    out.push_str("      [[ -z \"$value\" ]] && continue\n");
+    out.push_str("      if (( first == 0 )); then\n");
+    out.push_str("        printf ','\n");
+    out.push_str("      fi\n");
+    out.push_str("      printf '%s' \"$value\"\n");
+    out.push_str("      first=0\n");
+    out.push_str("    done\n");
+    out.push_str("  fi\n");
+    out.push_str("  printf ']'\n");
+    out.push_str("}\n\n");
+
     out.push_str("reset_wait_helper_exit_state() {\n");
     out.push_str("  WAIT_HELPER_EXITED=0\n");
     out.push_str("  WAIT_HELPER_EXIT_STATUS=\"\"\n");
@@ -440,7 +464,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("      if (( first == 0 )); then\n");
     out.push_str("        printf ','\n");
     out.push_str("      fi\n");
-    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"last_exit_code\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s}' \\\n");
+    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"window_seconds\":%s,\"max_restarts_in_window\":%s,\"restart_failures_in_window\":%s,\"restart_failure_timestamps\":%s,\"last_exit_code\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s}' \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_NAMES[$i]}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_STEP_NAMES[$i]:-}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_LOG_PATHS[$i]:-}\")\" \\\n");
@@ -452,6 +476,12 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     );
     out.push_str("        \"${SERVICE_RESTART_COUNT[$i]:-0}\" \\\n");
     out.push_str("        \"${SERVICE_MAX_RESTARTS[$i]:-0}\" \\\n");
+    out.push_str("        \"${SERVICE_WINDOW_SECONDS[$i]:-0}\" \\\n");
+    out.push_str("        \"${SERVICE_MAX_RESTARTS_IN_WINDOW[$i]:-0}\" \\\n");
+    out.push_str("        \"${SERVICE_RESTART_FAILURES_IN_WINDOW[$i]:-0}\" \\\n");
+    out.push_str(
+        "        \"$(json_number_array \"${SERVICE_RESTART_FAILURE_TIMESTAMPS[$i]:-}\")\" \\\n",
+    );
     out.push_str("        \"$(if [[ -n \"${SERVICE_LAST_EXIT_CODE[$i]:-}\" ]]; then printf '%s' \"${SERVICE_LAST_EXIT_CODE[$i]}\"; else printf null; fi)\" \\\n");
     out.push_str("        \"$(json_string_or_null \"${SERVICE_PLACEMENT_MODE[$i]:-}\")\" \\\n");
     out.push_str("        \"$(json_number_or_null \"${SERVICE_STEP_NODES[$i]:-}\")\" \\\n");
@@ -504,13 +534,15 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local failure_mode=$5\n");
     out.push_str("  local max_restarts=$6\n");
     out.push_str("  local backoff_seconds=$7\n");
-    out.push_str("  local launch_fn=$8\n");
-    out.push_str("  local dependents_csv=$9\n");
-    out.push_str("  local placement_mode=${10}\n");
-    out.push_str("  local step_nodes=${11}\n");
-    out.push_str("  local step_ntasks=${12}\n");
-    out.push_str("  local step_ntasks_per_node=${13}\n");
-    out.push_str("  local step_nodelist=${14}\n");
+    out.push_str("  local window_seconds=$8\n");
+    out.push_str("  local max_restarts_in_window=$9\n");
+    out.push_str("  local launch_fn=${10}\n");
+    out.push_str("  local dependents_csv=${11}\n");
+    out.push_str("  local placement_mode=${12}\n");
+    out.push_str("  local step_nodes=${13}\n");
+    out.push_str("  local step_ntasks=${14}\n");
+    out.push_str("  local step_ntasks_per_node=${15}\n");
+    out.push_str("  local step_nodelist=${16}\n");
     out.push_str("  local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}\n");
     out.push_str("  if [[ -n \"$index\" ]]; then\n");
     out.push_str("    SERVICE_PIDS[$index]=\"$pid\"\n");
@@ -536,7 +568,11 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    SERVICE_FAILURE_POLICY_MODE+=(\"$failure_mode\")\n");
     out.push_str("    SERVICE_MAX_RESTARTS+=(\"$max_restarts\")\n");
     out.push_str("    SERVICE_BACKOFF_SECONDS+=(\"$backoff_seconds\")\n");
+    out.push_str("    SERVICE_WINDOW_SECONDS+=(\"$window_seconds\")\n");
+    out.push_str("    SERVICE_MAX_RESTARTS_IN_WINDOW+=(\"$max_restarts_in_window\")\n");
     out.push_str("    SERVICE_RESTART_COUNT+=(\"0\")\n");
+    out.push_str("    SERVICE_RESTART_FAILURES_IN_WINDOW+=(\"0\")\n");
+    out.push_str("    SERVICE_RESTART_FAILURE_TIMESTAMPS+=(\"\")\n");
     out.push_str("    SERVICE_LAST_EXIT_CODE+=(\"\")\n");
     out.push_str("    SERVICE_PLACEMENT_MODE+=(\"$placement_mode\")\n");
     out.push_str("    SERVICE_STEP_NODES+=(\"$step_nodes\")\n");
@@ -548,6 +584,27 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    SERVICE_INDEX_BY_NAME[\"$name\"]=$index\n");
     out.push_str("  fi\n");
     out.push_str("  write_state_file\n");
+    out.push_str("}\n\n");
+
+    out.push_str("prune_restart_window() {\n");
+    out.push_str("  local index=$1\n");
+    out.push_str("  local now=${2:-$(date +%s)}\n");
+    out.push_str("  local window_seconds=${SERVICE_WINDOW_SECONDS[$index]:-0}\n");
+    out.push_str("  local raw_timestamps=${SERVICE_RESTART_FAILURE_TIMESTAMPS[$index]:-}\n");
+    out.push_str("  local -a kept=()\n");
+    out.push_str("  local -a timestamps=()\n");
+    out.push_str("  local ts\n");
+    out.push_str("  if [[ -n \"$raw_timestamps\" ]]; then\n");
+    out.push_str("    read -r -a timestamps <<< \"$raw_timestamps\"\n");
+    out.push_str("    for ts in \"${timestamps[@]}\"; do\n");
+    out.push_str("      [[ -z \"$ts\" ]] && continue\n");
+    out.push_str("      if (( now - ts < window_seconds )); then\n");
+    out.push_str("        kept+=(\"$ts\")\n");
+    out.push_str("      fi\n");
+    out.push_str("    done\n");
+    out.push_str("  fi\n");
+    out.push_str("  SERVICE_RESTART_FAILURE_TIMESTAMPS[$index]=\"${kept[*]:-}\"\n");
+    out.push_str("  SERVICE_RESTART_FAILURES_IN_WINDOW[$index]=\"${#kept[@]}\"\n");
     out.push_str("}\n\n");
 
     out.push_str("service_index_for() {\n");
@@ -738,9 +795,14 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local max_restarts=${SERVICE_MAX_RESTARTS[$index]:-0}\n");
     out.push_str("  local restart_count=${SERVICE_RESTART_COUNT[$index]:-0}\n");
     out.push_str("  local backoff_seconds=${SERVICE_BACKOFF_SECONDS[$index]:-0}\n");
+    out.push_str("  local window_seconds=${SERVICE_WINDOW_SECONDS[$index]:-0}\n");
+    out.push_str("  local max_restarts_in_window=${SERVICE_MAX_RESTARTS_IN_WINDOW[$index]:-0}\n");
     out.push_str("  local launch_fn=${SERVICE_LAUNCH_FNS[$index]:-}\n");
     out.push_str("  SERVICE_PIDS[$index]=''\n");
     out.push_str("  SERVICE_LAST_EXIT_CODE[$index]=\"$status\"\n");
+    out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]]; then\n");
+    out.push_str("    prune_restart_window \"$index\"\n");
+    out.push_str("  fi\n");
     out.push_str("  write_state_file\n");
     out.push_str("  if (( status == 0 )); then\n");
     out.push_str("    return 0\n");
@@ -751,7 +813,33 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     );
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
-    out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]] && (( restart_count < max_restarts )); then\n");
+    out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]]; then\n");
+    out.push_str(
+        "    local restart_failures_in_window=${SERVICE_RESTART_FAILURES_IN_WINDOW[$index]:-0}\n",
+    );
+    out.push_str("    if (( restart_count >= max_restarts )); then\n");
+    out.push_str(
+        "      echo \"Service '$name' exited with status $status after $restart_count/$max_restarts restarts\" >&2\n",
+    );
+    out.push_str("      emit_dependency_failure_diagnostic \"$name\"\n");
+    out.push_str("      return \"$status\"\n");
+    out.push_str("    fi\n");
+    out.push_str("    if (( restart_failures_in_window >= max_restarts_in_window )); then\n");
+    out.push_str(
+        "      echo \"Service '$name' exited with status $status after $restart_failures_in_window/$max_restarts_in_window restart-triggering exits in ${window_seconds}s\" >&2\n",
+    );
+    out.push_str("      emit_dependency_failure_diagnostic \"$name\"\n");
+    out.push_str("      return \"$status\"\n");
+    out.push_str("    fi\n");
+    out.push_str("    local now\n");
+    out.push_str("    now=$(date +%s)\n");
+    out.push_str(
+        "    SERVICE_RESTART_FAILURE_TIMESTAMPS[$index]=\"${SERVICE_RESTART_FAILURE_TIMESTAMPS[$index]:-} $now\"\n",
+    );
+    out.push_str(
+        "    SERVICE_RESTART_FAILURE_TIMESTAMPS[$index]=\"${SERVICE_RESTART_FAILURE_TIMESTAMPS[$index]# }\"\n",
+    );
+    out.push_str("    prune_restart_window \"$index\" \"$now\"\n");
     out.push_str("    local next_restart=$((restart_count + 1))\n");
     out.push_str("    SERVICE_RESTART_COUNT[$index]=\"$next_restart\"\n");
     out.push_str("    write_state_file\n");
@@ -771,13 +859,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    \"$launch_fn\"\n");
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
-    out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]]; then\n");
-    out.push_str(
-        "    echo \"Service '$name' exited with status $status after $restart_count/$max_restarts restarts\" >&2\n",
-    );
-    out.push_str("  else\n");
-    out.push_str("    echo \"Service '$name' exited with status $status\" >&2\n");
-    out.push_str("  fi\n");
+    out.push_str("  echo \"Service '$name' exited with status $status\" >&2\n");
     out.push_str("  emit_dependency_failure_diagnostic \"$name\"\n");
     out.push_str("  return \"$status\"\n");
     out.push_str("}\n\n");
@@ -1467,12 +1549,14 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     out.push_str("  fi\n");
     out.push_str("  local pid=$!\n");
     out.push_str(&format!(
-        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {} {} {} {} {} {}\n",
+        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {} {} {} {} {} {} {} {}\n",
         shell_quote(&service.name),
         shell_quote(&step_name),
         shell_quote(failure_policy_mode_label(service.failure_policy.mode)),
         service.failure_policy.max_restarts,
         service.failure_policy.backoff_seconds,
+        service.failure_policy.window_seconds,
+        service.failure_policy.max_restarts_in_window,
         shell_quote(&fn_name),
         shell_quote(&dependents_csv),
         shell_quote(placement_mode_label(service.placement.mode)),
@@ -2433,6 +2517,8 @@ exit 1
                 mode: ServiceFailureMode::RestartOnFailure,
                 max_restarts: 3,
                 backoff_seconds: 5,
+                window_seconds: 60,
+                max_restarts_in_window: 3,
             },
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -2452,6 +2538,8 @@ exit 1
                 mode: ServiceFailureMode::Ignore,
                 max_restarts: 0,
                 backoff_seconds: 0,
+                window_seconds: 0,
+                max_restarts_in_window: 0,
             },
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -2487,23 +2575,42 @@ exit 1
         assert!(script.contains("SERVICE_FAILURE_POLICY_MODE=()"));
         assert!(script.contains("SERVICE_MAX_RESTARTS=()"));
         assert!(script.contains("SERVICE_BACKOFF_SECONDS=()"));
+        assert!(script.contains("SERVICE_WINDOW_SECONDS=()"));
+        assert!(script.contains("SERVICE_MAX_RESTARTS_IN_WINDOW=()"));
         assert!(script.contains("SERVICE_RESTART_COUNT=()"));
+        assert!(script.contains("SERVICE_RESTART_FAILURES_IN_WINDOW=()"));
+        assert!(script.contains("SERVICE_RESTART_FAILURE_TIMESTAMPS=()"));
         assert!(script.contains("SERVICE_LAST_EXIT_CODE=()"));
+        assert!(script.contains("json_number_array()"));
         assert!(script.contains("\"failure_policy_mode\""));
         assert!(script.contains("\"restart_count\""));
         assert!(script.contains("\"max_restarts\""));
+        assert!(script.contains("\"window_seconds\""));
+        assert!(script.contains("\"max_restarts_in_window\""));
+        assert!(script.contains("\"restart_failures_in_window\""));
+        assert!(script.contains("\"restart_failure_timestamps\""));
         assert!(script.contains("\"last_exit_code\""));
+        assert!(script.contains("prune_restart_window()"));
         assert!(script.contains("handle_service_exit()"));
         assert!(script.contains("mode=${SERVICE_FAILURE_POLICY_MODE[$index]:-fail_job}"));
         assert!(script.contains("if [[ \"$mode\" == \"ignore\" ]]"));
         assert!(script.contains("if [[ \"$mode\" == \"restart_on_failure\" ]]"));
+        assert!(script.contains("local window_seconds=${SERVICE_WINDOW_SECONDS[$index]:-0}"));
+        assert!(
+            script.contains(
+                "local max_restarts_in_window=${SERVICE_MAX_RESTARTS_IN_WINDOW[$index]:-0}"
+            )
+        );
+        assert!(script.contains(
+            "local restart_failures_in_window=${SERVICE_RESTART_FAILURES_IN_WINDOW[$index]:-0}"
+        ));
         assert!(script.contains("SERVICE_RESTART_COUNT[$index]=\"$next_restart\""));
         assert!(script.contains("local launch_fn=${SERVICE_LAUNCH_FNS[$index]:-}"));
         assert!(script.contains("local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}"));
         assert!(script.contains("emit_dependency_failure_diagnostic()"));
         assert!(script.contains("Service '$failed_service' is required by:"));
-        assert!(script.contains("'restart_on_failure' 3 5"));
-        assert!(script.contains("'ignore' 0 0"));
+        assert!(script.contains("'restart_on_failure' 3 5 60 3"));
+        assert!(script.contains("'ignore' 0 0 0 0"));
     }
 
     #[test]
@@ -2742,6 +2849,8 @@ exit 1
                 mode: ServiceFailureMode::RestartOnFailure,
                 max_restarts: 1,
                 backoff_seconds: 1,
+                window_seconds: 60,
+                max_restarts_in_window: 1,
             },
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -2811,6 +2920,23 @@ exit 1
             .find(|service| service["service_name"] == "api")
             .expect("api");
         assert_eq!(api["restart_count"], 1);
+        assert_eq!(api["window_seconds"], 60);
+        assert_eq!(api["max_restarts_in_window"], 1);
+        assert_eq!(api["restart_failures_in_window"], 1);
+        assert_eq!(
+            api["restart_failure_timestamps"]
+                .as_array()
+                .expect("timestamps")
+                .len(),
+            1
+        );
+        assert!(
+            api["restart_failure_timestamps"]
+                .as_array()
+                .expect("timestamps")
+                .iter()
+                .all(|value| value.as_u64().is_some())
+        );
     }
 
     #[test]

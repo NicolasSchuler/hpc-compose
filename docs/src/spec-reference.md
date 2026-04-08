@@ -423,6 +423,8 @@ services:
         mode: restart_on_failure
         max_restarts: 3
         backoff_seconds: 5
+        window_seconds: 60
+        max_restarts_in_window: 3
 ```
 
 | Field | Shape | Default | Notes |
@@ -430,16 +432,69 @@ services:
 | `mode` | `fail_job` \| `ignore` \| `restart_on_failure` | `fail_job` | `fail_job` keeps fail-fast behavior. `ignore` keeps the job running after non-zero exits. `restart_on_failure` restarts on non-zero exits only. |
 | `max_restarts` | integer | `3` when `mode=restart_on_failure` | Required to be at least `1` after defaults are applied. Valid only for `restart_on_failure`. |
 | `backoff_seconds` | integer | `5` when `mode=restart_on_failure` | Fixed delay between restart attempts. Required to be at least `1` after defaults are applied. Valid only for `restart_on_failure`. |
+| `window_seconds` | integer | `60` when `mode=restart_on_failure` | Rolling window for counting restart-triggering exits. Required to be at least `1` after defaults are applied. Valid only for `restart_on_failure`. |
+| `max_restarts_in_window` | integer | resolved `max_restarts` when `mode=restart_on_failure` | Maximum restart-triggering exits allowed within `window_seconds`. Required to be at least `1` after defaults are applied. Valid only for `restart_on_failure`. |
 
 Rules:
 
 - In a multi-node allocation, at most one service may resolve to distributed placement.
 - Distributed placement requires `services.<name>.x-slurm.nodes` to equal the top-level allocation node count when it is set explicitly.
 - Helper services in multi-node jobs are pinned to `HPC_COMPOSE_PRIMARY_NODE`.
-- `max_restarts` and `backoff_seconds` are rejected unless `mode: restart_on_failure`.
+- `max_restarts`, `backoff_seconds`, `window_seconds`, and `max_restarts_in_window` are rejected unless `mode: restart_on_failure`.
 - Restart attempts count relaunches after the initial launch.
 - Restarts trigger only for non-zero exits.
+- `restart_on_failure` enforces both a lifetime cap (`max_restarts`) and a rolling-window cap (`max_restarts_in_window` within `window_seconds`) during one live batch-script execution.
+- If you omit the rolling-window fields, `restart_on_failure` still enables default crash-loop protection with `window_seconds: 60` and `max_restarts_in_window: <resolved max_restarts>`.
 - Services configured with `mode: ignore` cannot be used as dependencies in `depends_on`.
+
+Examples:
+
+Use the defaults when you only need bounded retries:
+
+```yaml
+services:
+  worker:
+    image: python:3.11-slim
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+```
+
+That resolves to:
+
+- `max_restarts: 3`
+- `backoff_seconds: 5`
+- `window_seconds: 60`
+- `max_restarts_in_window: 3`
+
+Use explicit fields when you need a larger lifetime budget but still want a tighter crash-loop guard:
+
+```yaml
+services:
+  worker:
+    image: python:3.11-slim
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 8
+        backoff_seconds: 10
+        window_seconds: 60
+        max_restarts_in_window: 3
+```
+
+Semantics:
+
+- The initial launch does not count as a restart.
+- `restart_count` counts granted relaunches after the initial launch.
+- `max_restarts_in_window` counts restart-triggering non-zero exits whose timestamps still satisfy `now - event < window_seconds`.
+- If a non-zero exit would exceed the rolling-window cap, the job fails immediately and that blocked exit is not recorded as a consumed restart.
+- Successful exits do not trigger restarts and do not add entries to the rolling window.
+- The rolling window is attempt-local to one live batch-script execution. It is not hydrated from prior `state.json`, resume metadata, or Slurm requeue history.
+
+Tracked state:
+
+- `status --json` includes `failure_policy_mode`, `restart_count`, `max_restarts`, `window_seconds`, `max_restarts_in_window`, `restart_failures_in_window`, and `last_exit_code` for each tracked service.
+- Text `status` renders the live rolling-window budget as `window=<current>/<max>@<seconds>s`.
 
 Unknown keys under top-level `x-slurm` or per-service `x-slurm` cause hard errors.
 

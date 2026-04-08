@@ -1276,6 +1276,8 @@ mod tests {
                                 mode: ServiceFailureMode::RestartOnFailure,
                                 max_restarts: None,
                                 backoff_seconds: None,
+                                window_seconds: None,
+                                max_restarts_in_window: None,
                             }),
                             ..ServiceSlurmConfig::default()
                         },
@@ -1290,6 +1292,8 @@ mod tests {
                                 mode: ServiceFailureMode::RestartOnFailure,
                                 max_restarts: Some(7),
                                 backoff_seconds: Some(9),
+                                window_seconds: Some(11),
+                                max_restarts_in_window: Some(4),
                             }),
                             ..ServiceSlurmConfig::default()
                         },
@@ -1304,6 +1308,8 @@ mod tests {
                                 mode: ServiceFailureMode::Ignore,
                                 max_restarts: None,
                                 backoff_seconds: None,
+                                window_seconds: None,
+                                max_restarts_in_window: None,
                             }),
                             ..ServiceSlurmConfig::default()
                         },
@@ -1331,6 +1337,8 @@ mod tests {
                 mode: ServiceFailureMode::RestartOnFailure,
                 max_restarts: 3,
                 backoff_seconds: 5,
+                window_seconds: 60,
+                max_restarts_in_window: 3,
             })
         );
         assert_eq!(
@@ -1339,6 +1347,8 @@ mod tests {
                 mode: ServiceFailureMode::RestartOnFailure,
                 max_restarts: 7,
                 backoff_seconds: 9,
+                window_seconds: 11,
+                max_restarts_in_window: 4,
             })
         );
         assert_eq!(
@@ -1347,6 +1357,79 @@ mod tests {
                 mode: ServiceFailureMode::Ignore,
                 max_restarts: 0,
                 backoff_seconds: 0,
+                window_seconds: 0,
+                max_restarts_in_window: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn build_plan_applies_partial_restart_window_overrides() {
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([
+                (
+                    "window-seconds-only".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            failure_policy: Some(ServiceFailurePolicySpec {
+                                mode: ServiceFailureMode::RestartOnFailure,
+                                max_restarts: Some(4),
+                                backoff_seconds: Some(9),
+                                window_seconds: Some(30),
+                                max_restarts_in_window: None,
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "window-count-only".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            failure_policy: Some(ServiceFailurePolicySpec {
+                                mode: ServiceFailureMode::RestartOnFailure,
+                                max_restarts: Some(6),
+                                backoff_seconds: Some(7),
+                                window_seconds: None,
+                                max_restarts_in_window: Some(2),
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+            ]),
+        };
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+        let plan = build_plan(&compose, spec).expect("plan");
+        let by_name = plan
+            .ordered_services
+            .iter()
+            .map(|service| (service.name.as_str(), service.failure_policy.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            by_name.get("window-seconds-only"),
+            Some(&ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 4,
+                backoff_seconds: 9,
+                window_seconds: 30,
+                max_restarts_in_window: 4,
+            })
+        );
+        assert_eq!(
+            by_name.get("window-count-only"),
+            Some(&ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 6,
+                backoff_seconds: 7,
+                window_seconds: 60,
+                max_restarts_in_window: 2,
             })
         );
     }
@@ -1368,6 +1451,8 @@ mod tests {
                             mode: ServiceFailureMode::FailJob,
                             max_restarts: Some(2),
                             backoff_seconds: None,
+                            window_seconds: None,
+                            max_restarts_in_window: Some(1),
                         }),
                         ..ServiceSlurmConfig::default()
                     },
@@ -1392,6 +1477,8 @@ mod tests {
                             mode: ServiceFailureMode::RestartOnFailure,
                             max_restarts: Some(0),
                             backoff_seconds: Some(5),
+                            window_seconds: Some(10),
+                            max_restarts_in_window: Some(2),
                         }),
                         ..ServiceSlurmConfig::default()
                     },
@@ -1401,6 +1488,53 @@ mod tests {
         };
         let err = build_plan(&compose, invalid_restart).expect_err("invalid restart policy");
         assert!(err.to_string().contains("max_restarts"));
+
+        let invalid_window = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        failure_policy: Some(ServiceFailurePolicySpec {
+                            mode: ServiceFailureMode::RestartOnFailure,
+                            max_restarts: Some(2),
+                            backoff_seconds: Some(5),
+                            window_seconds: Some(0),
+                            max_restarts_in_window: Some(1),
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("redis:7")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, invalid_window).expect_err("invalid restart window");
+        assert!(err.to_string().contains("window_seconds"));
+
+        let invalid_window_count = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        failure_policy: Some(ServiceFailurePolicySpec {
+                            mode: ServiceFailureMode::RestartOnFailure,
+                            max_restarts: Some(2),
+                            backoff_seconds: Some(5),
+                            window_seconds: Some(10),
+                            max_restarts_in_window: Some(0),
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("redis:7")
+                },
+            )]),
+        };
+        let err =
+            build_plan(&compose, invalid_window_count).expect_err("invalid restart window count");
+        assert!(err.to_string().contains("max_restarts_in_window"));
     }
 
     #[test]
@@ -1424,6 +1558,8 @@ mod tests {
                                 mode: ServiceFailureMode::Ignore,
                                 max_restarts: None,
                                 backoff_seconds: None,
+                                window_seconds: None,
+                                max_restarts_in_window: None,
                             }),
                             ..ServiceSlurmConfig::default()
                         },

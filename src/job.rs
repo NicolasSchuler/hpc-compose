@@ -85,6 +85,12 @@ pub struct ServiceLogStatus {
     #[serde(default)]
     pub max_restarts: Option<u32>,
     #[serde(default)]
+    pub window_seconds: Option<u64>,
+    #[serde(default)]
+    pub max_restarts_in_window: Option<u32>,
+    #[serde(default)]
+    pub restart_failures_in_window: Option<u32>,
+    #[serde(default)]
     pub last_exit_code: Option<i32>,
     #[serde(default)]
     pub placement_mode: Option<String>,
@@ -484,6 +490,14 @@ struct ServiceRuntimeStateEntry {
     #[serde(default)]
     max_restarts: Option<u32>,
     #[serde(default)]
+    window_seconds: Option<u64>,
+    #[serde(default)]
+    max_restarts_in_window: Option<u32>,
+    #[serde(default)]
+    restart_failures_in_window: Option<u32>,
+    #[serde(default)]
+    restart_failure_timestamps: Option<Vec<u64>>,
+    #[serde(default)]
     last_exit_code: Option<i32>,
     #[serde(default)]
     placement_mode: Option<String>,
@@ -725,6 +739,11 @@ pub fn build_status_snapshot(
             failure_policy_mode: runtime_state.and_then(|state| state.failure_policy_mode.clone()),
             restart_count: runtime_state.and_then(|state| state.restart_count),
             max_restarts: runtime_state.and_then(|state| state.max_restarts),
+            window_seconds: runtime_state.and_then(|state| state.window_seconds),
+            max_restarts_in_window: runtime_state.and_then(|state| state.max_restarts_in_window),
+            restart_failures_in_window: runtime_state
+                .and_then(|state| active_restart_failures_in_window(state, now))
+                .or_else(|| runtime_state.and_then(|state| state.restart_failures_in_window)),
             last_exit_code: runtime_state.and_then(|state| state.last_exit_code),
             placement_mode: runtime_state.and_then(|state| state.placement_mode.clone()),
             nodes: runtime_state.and_then(|state| state.nodes),
@@ -755,6 +774,17 @@ fn load_runtime_state(record: &SubmissionRecord) -> Option<ServiceRuntimeStateFi
         .join(&record.job_id)
         .join("state.json");
     read_json::<ServiceRuntimeStateFile>(&state_path).ok()
+}
+
+fn active_restart_failures_in_window(state: &ServiceRuntimeStateEntry, now: u64) -> Option<u32> {
+    let timestamps = state.restart_failure_timestamps.as_ref()?;
+    let window_seconds = state.window_seconds?;
+    Some(
+        timestamps
+            .iter()
+            .filter(|&&timestamp| now.saturating_sub(timestamp) < window_seconds)
+            .count() as u32,
+    )
 }
 
 fn runtime_state_by_service(
@@ -2617,22 +2647,31 @@ mod tests {
         for path in record.service_logs.values() {
             fs::write(path, "line one\nline two\n").expect("service log");
         }
+        let now = unix_timestamp_now();
         fs::write(
             tmpdir.path().join(".hpc-compose/12345/state.json"),
-            r#"{
+            format!(
+                r#"{{
   "attempt": 1,
   "is_resume": true,
   "resume_dir": "/shared/runs/demo",
   "services": [
-    {
+    {{
       "service_name": "api",
       "failure_policy_mode": "restart_on_failure",
       "restart_count": 1,
       "max_restarts": 3,
+      "window_seconds": 60,
+      "max_restarts_in_window": 3,
+      "restart_failures_in_window": 2,
+      "restart_failure_timestamps": [{}, {}],
       "last_exit_code": 0
-    }
+    }}
   ]
-}"#,
+}}"#,
+                now.saturating_sub(10),
+                now.saturating_sub(90)
+            ),
         )
         .expect("state");
 
@@ -2671,6 +2710,9 @@ mod tests {
         );
         assert_eq!(api.restart_count, Some(1));
         assert_eq!(api.max_restarts, Some(3));
+        assert_eq!(api.window_seconds, Some(60));
+        assert_eq!(api.max_restarts_in_window, Some(3));
+        assert_eq!(api.restart_failures_in_window, Some(1));
         assert_eq!(api.last_exit_code, Some(0));
         let worker = snapshot
             .services
@@ -2680,6 +2722,9 @@ mod tests {
         assert!(worker.failure_policy_mode.is_none());
         assert!(worker.restart_count.is_none());
         assert!(worker.max_restarts.is_none());
+        assert!(worker.window_seconds.is_none());
+        assert!(worker.max_restarts_in_window.is_none());
+        assert!(worker.restart_failures_in_window.is_none());
         assert!(worker.last_exit_code.is_none());
 
         let selected = selected_service_logs(&record, Some("api")).expect("selected");
@@ -2730,6 +2775,9 @@ mod tests {
                 .all(|service| service.failure_policy_mode.is_none()
                     && service.restart_count.is_none()
                     && service.max_restarts.is_none()
+                    && service.window_seconds.is_none()
+                    && service.max_restarts_in_window.is_none()
+                    && service.restart_failures_in_window.is_none()
                     && service.last_exit_code.is_none())
         );
 
@@ -2755,6 +2803,9 @@ mod tests {
         assert!(api.failure_policy_mode.is_none());
         assert!(api.restart_count.is_none());
         assert!(api.max_restarts.is_none());
+        assert!(api.window_seconds.is_none());
+        assert!(api.max_restarts_in_window.is_none());
+        assert!(api.restart_failures_in_window.is_none());
         assert!(api.last_exit_code.is_none());
     }
 

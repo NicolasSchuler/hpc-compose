@@ -228,6 +228,10 @@ pub struct ServiceFailurePolicySpec {
     pub max_restarts: Option<u32>,
     #[serde(default)]
     pub backoff_seconds: Option<u64>,
+    #[serde(default)]
+    pub window_seconds: Option<u64>,
+    #[serde(default)]
+    pub max_restarts_in_window: Option<u32>,
 }
 
 impl Default for ServiceFailurePolicySpec {
@@ -236,6 +240,8 @@ impl Default for ServiceFailurePolicySpec {
             mode: ServiceFailureMode::FailJob,
             max_restarts: None,
             backoff_seconds: None,
+            window_seconds: None,
+            max_restarts_in_window: None,
         }
     }
 }
@@ -247,6 +253,8 @@ pub struct ServiceFailurePolicy {
     pub mode: ServiceFailureMode,
     pub max_restarts: u32,
     pub backoff_seconds: u64,
+    pub window_seconds: u64,
+    pub max_restarts_in_window: u32,
 }
 
 impl Default for ServiceFailurePolicy {
@@ -255,6 +263,8 @@ impl Default for ServiceFailurePolicy {
             mode: ServiceFailureMode::FailJob,
             max_restarts: 0,
             backoff_seconds: 0,
+            window_seconds: 0,
+            max_restarts_in_window: 0,
         }
     }
 }
@@ -834,6 +844,7 @@ impl ServiceSlurmConfig {
     pub fn normalized_failure_policy(&self, service_name: &str) -> Result<ServiceFailurePolicy> {
         const DEFAULT_MAX_RESTARTS: u32 = 3;
         const DEFAULT_BACKOFF_SECONDS: u64 = 5;
+        const DEFAULT_WINDOW_SECONDS: u64 = 60;
 
         let Some(policy) = &self.failure_policy else {
             return Ok(ServiceFailurePolicy::default());
@@ -841,20 +852,28 @@ impl ServiceSlurmConfig {
 
         match policy.mode {
             ServiceFailureMode::FailJob | ServiceFailureMode::Ignore => {
-                if policy.max_restarts.is_some() || policy.backoff_seconds.is_some() {
+                if policy.max_restarts.is_some()
+                    || policy.backoff_seconds.is_some()
+                    || policy.window_seconds.is_some()
+                    || policy.max_restarts_in_window.is_some()
+                {
                     bail!(
-                        "service '{service_name}' sets x-slurm.failure_policy.max_restarts/backoff_seconds, but those fields are only valid when mode is restart_on_failure"
+                        "service '{service_name}' sets x-slurm.failure_policy.max_restarts/backoff_seconds/window_seconds/max_restarts_in_window, but those fields are only valid when mode is restart_on_failure"
                     );
                 }
                 Ok(ServiceFailurePolicy {
                     mode: policy.mode,
                     max_restarts: 0,
                     backoff_seconds: 0,
+                    window_seconds: 0,
+                    max_restarts_in_window: 0,
                 })
             }
             ServiceFailureMode::RestartOnFailure => {
                 let max_restarts = policy.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS);
                 let backoff_seconds = policy.backoff_seconds.unwrap_or(DEFAULT_BACKOFF_SECONDS);
+                let window_seconds = policy.window_seconds.unwrap_or(DEFAULT_WINDOW_SECONDS);
+                let max_restarts_in_window = policy.max_restarts_in_window.unwrap_or(max_restarts);
                 if max_restarts == 0 {
                     bail!(
                         "service '{service_name}' sets x-slurm.failure_policy.max_restarts to 0; use a value of at least 1"
@@ -865,10 +884,22 @@ impl ServiceSlurmConfig {
                         "service '{service_name}' sets x-slurm.failure_policy.backoff_seconds to 0; use a value of at least 1"
                     );
                 }
+                if window_seconds == 0 {
+                    bail!(
+                        "service '{service_name}' sets x-slurm.failure_policy.window_seconds to 0; use a value of at least 1"
+                    );
+                }
+                if max_restarts_in_window == 0 {
+                    bail!(
+                        "service '{service_name}' sets x-slurm.failure_policy.max_restarts_in_window to 0; use a value of at least 1"
+                    );
+                }
                 Ok(ServiceFailurePolicy {
                     mode: policy.mode,
                     max_restarts,
                     backoff_seconds,
+                    window_seconds,
+                    max_restarts_in_window,
                 })
             }
         }

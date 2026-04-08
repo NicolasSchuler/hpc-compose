@@ -61,6 +61,8 @@ hpc-compose stats -f compose.yaml
 hpc-compose logs -f compose.yaml --follow
 ```
 
+If a service uses `x-slurm.failure_policy.mode: restart_on_failure`, `status` also shows the current retry state and rolling-window budget for that service.
+
 ## From a source checkout
 
 If you are running from a local checkout instead of an installed binary:
