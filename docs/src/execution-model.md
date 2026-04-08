@@ -14,6 +14,29 @@ This page explains the few runtime rules that matter most when a Compose mental 
 
 The main consequence is simple: image preparation and validation happen before the job starts, but the containers themselves run later inside the Slurm allocation.
 
+## Service failure policies inside one job
+
+`hpc-compose` does not provide a separate long-running orchestrator. Service failure handling happens inside the rendered batch script for the current allocation.
+
+- `mode: fail_job` keeps fail-fast behavior and stops the job on the first non-zero service exit.
+- `mode: ignore` records the failure but allows the rest of the job to continue.
+- `mode: restart_on_failure` only reacts to non-zero process exits. It does not restart on successful exits, and it does not use cross-attempt or cross-requeue history.
+
+For `restart_on_failure`, the batch script enforces two limits during one live execution:
+
+- a lifetime cap through `max_restarts`
+- a rolling-window cap through `max_restarts_in_window` within `window_seconds`
+
+If a service omits the rolling-window fields, `hpc-compose` still enables crash-loop protection with `window_seconds: 60` and `max_restarts_in_window: <resolved max_restarts>`.
+
+Use `status` to inspect the tracked policy state after submission. The text view reports:
+
+```text
+state service 'worker': failure_policy=restart_on_failure restarts=1/5 window=1/3@60s last_exit=42
+```
+
+Use `logs` to inspect the corresponding restart messages from the batch script when you need to distinguish lifetime-cap exhaustion from rolling-window exhaustion.
+
 ## Which paths must be shared
 
 - `x-slurm.cache_dir` must be visible from both the login node and the compute nodes.

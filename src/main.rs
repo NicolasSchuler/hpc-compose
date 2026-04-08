@@ -851,6 +851,9 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
         if service.failure_policy_mode.is_some()
             || service.restart_count.is_some()
             || service.max_restarts.is_some()
+            || service.window_seconds.is_some()
+            || service.max_restarts_in_window.is_some()
+            || service.restart_failures_in_window.is_some()
             || service.last_exit_code.is_some()
         {
             let mode = service.failure_policy_mode.as_deref().unwrap_or("unknown");
@@ -862,14 +865,38 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
                 .max_restarts
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
+            let window_seconds = service
+                .window_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let max_restarts_in_window = service
+                .max_restarts_in_window
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let restart_failures_in_window = service
+                .restart_failures_in_window
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
             let last_exit = service
                 .last_exit_code
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
+            let window_state = if mode == "restart_on_failure"
+                && service.window_seconds.is_some()
+                && service.max_restarts_in_window.is_some()
+                && service.restart_failures_in_window.is_some()
+            {
+                format!(
+                    " window={}/{}@{}s",
+                    restart_failures_in_window, max_restarts_in_window, window_seconds
+                )
+            } else {
+                String::new()
+            };
             writeln!(
                 writer,
-                "  state service '{}': failure_policy={} restarts={}/{} last_exit={}",
-                service.service_name, mode, restart_count, max_restarts, last_exit
+                "  state service '{}': failure_policy={} restarts={}/{}{} last_exit={}",
+                service.service_name, mode, restart_count, max_restarts, window_state, last_exit
             )?;
         }
         if service.placement_mode.is_some()
@@ -2401,6 +2428,9 @@ services:
                 failure_policy_mode: Some("restart_on_failure".into()),
                 restart_count: Some(1),
                 max_restarts: Some(3),
+                window_seconds: Some(60),
+                max_restarts_in_window: Some(3),
+                restart_failures_in_window: Some(1),
                 last_exit_code: Some(0),
                 placement_mode: Some("distributed".into()),
                 nodes: Some(2),
@@ -2427,7 +2457,7 @@ services:
         assert!(status_text.contains("updated: 1m ago"));
         assert!(status_text.contains("updated: unknown"));
         assert!(status_text.contains(
-            "  state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 last_exit=0"
+            "  state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 window=1/3@60s last_exit=0"
         ));
         assert!(status_text.contains(
             "  placement service 'svc/name': mode=distributed nodes=2 ntasks=4 ntasks_per_node=2 nodelist=node01 node02"
@@ -3040,5 +3070,95 @@ services:
         })
         .expect("init");
         assert!(init_output.exists());
+    }
+
+    #[test]
+    fn write_status_snapshot_omits_window_for_non_restart_or_legacy_state() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![runtime_service(
+                ImageSource::Remote("docker://redis:7".into()),
+                tmpdir.path().join("prepared.sqsh"),
+                None,
+            )],
+        };
+        let record = submission_record(tmpdir.path(), &plan, "12345");
+        let status = StatusSnapshot {
+            record,
+            scheduler: SchedulerStatus {
+                state: "RUNNING".into(),
+                source: SchedulerSource::Squeue,
+                terminal: false,
+                failed: false,
+                detail: None,
+            },
+            queue_diagnostics: None,
+            log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
+            batch_log: BatchLogStatus {
+                path: tmpdir.path().join("slurm-12345.out"),
+                present: true,
+                updated_at: Some(1),
+                updated_age_seconds: Some(1),
+            },
+            services: vec![
+                ServiceLogStatus {
+                    service_name: "ignore".into(),
+                    path: tmpdir.path().join(".hpc-compose/12345/logs/ignore.log"),
+                    present: true,
+                    updated_at: Some(1),
+                    updated_age_seconds: Some(1),
+                    failure_policy_mode: Some("ignore".into()),
+                    restart_count: Some(0),
+                    max_restarts: Some(0),
+                    window_seconds: Some(0),
+                    max_restarts_in_window: Some(0),
+                    restart_failures_in_window: Some(0),
+                    last_exit_code: Some(42),
+                    placement_mode: None,
+                    nodes: None,
+                    ntasks: None,
+                    ntasks_per_node: None,
+                    nodelist: None,
+                },
+                ServiceLogStatus {
+                    service_name: "legacy".into(),
+                    path: tmpdir.path().join(".hpc-compose/12345/logs/legacy.log"),
+                    present: true,
+                    updated_at: Some(1),
+                    updated_age_seconds: Some(1),
+                    failure_policy_mode: Some("restart_on_failure".into()),
+                    restart_count: Some(1),
+                    max_restarts: Some(3),
+                    window_seconds: None,
+                    max_restarts_in_window: None,
+                    restart_failures_in_window: None,
+                    last_exit_code: Some(17),
+                    placement_mode: None,
+                    nodes: None,
+                    ntasks: None,
+                    ntasks_per_node: None,
+                    nodelist: None,
+                },
+            ],
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+        };
+        let mut status_out = Vec::new();
+        write_status_snapshot(&mut status_out, &status).expect("status");
+        let status_text = String::from_utf8(status_out).expect("utf8");
+        assert!(
+            status_text.contains(
+                "  state service 'ignore': failure_policy=ignore restarts=0/0 last_exit=42"
+            )
+        );
+        assert!(status_text.contains(
+            "  state service 'legacy': failure_policy=restart_on_failure restarts=1/3 last_exit=17"
+        ));
+        assert!(!status_text.contains("window=0/0@0s"));
+        assert!(!status_text.contains("window=unknown/unknown@unknowns"));
     }
 }

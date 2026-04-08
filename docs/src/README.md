@@ -37,13 +37,14 @@
 - Optional image customization on the login node through `x-enroot.prepare`
 - Shared cache management for imported and prepared images
 - Readiness-gated startup across dependent services
+- Per-service `restart_on_failure` with bounded retries and rolling-window crash-loop protection
 
 ## What it does not support
 
 - Compose `build:`
 - `ports`
 - custom Docker networks / `network_mode`
-- `restart` policies
+- Compose `restart:` as a Docker key (use `services.<name>.x-slurm.failure_policy` instead)
 - `deploy`
 - arbitrary multi-node orchestration or partial-node service placement
 - mixed string/array `entrypoint` + `command` combinations in ambiguous cases

@@ -1,0 +1,44 @@
+name: restart-policy
+
+x-slurm:
+  job_name: restart-policy
+  time: "00:10:00"
+  mem: 4G
+  cpus_per_task: 1
+  cache_dir: /shared/$USER/hpc-compose-cache
+
+services:
+  flaky-worker:
+    image: python:3.11-slim
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python - <<'PY'
+        import pathlib
+        import sys
+        import time
+
+        state_dir = pathlib.Path("/hpc-compose/job/restart-policy")
+        counter_path = state_dir / "attempts.txt"
+
+        state_dir.mkdir(parents=True, exist_ok=True)
+        attempts = int(counter_path.read_text()) if counter_path.exists() else 0
+        attempts += 1
+        counter_path.write_text(f"{attempts}\n")
+
+        print(f"attempt {attempts}")
+        if attempts <= 2:
+            print("simulating transient failure")
+            sys.exit(42)
+
+        print("work completed after transient failures")
+        time.sleep(1)
+        PY
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 5
+        backoff_seconds: 2
+        window_seconds: 60
+        max_restarts_in_window: 3

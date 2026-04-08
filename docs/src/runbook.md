@@ -257,7 +257,22 @@ hpc-compose logs -f compose.yaml
 hpc-compose logs -f compose.yaml --service app --follow
 ```
 
-`status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created. When `services.<name>.x-slurm.failure_policy` is used, `status` includes per-service policy state (`failure_policy`, restart counters, and last exit code) from tracked runtime state.
+`status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created. When `services.<name>.x-slurm.failure_policy` is used, `status` includes per-service policy state (`failure_policy`, restart counters, rolling-window budget as `window=<current>/<max>@<seconds>s`, and last exit code) from tracked runtime state.
+
+Example:
+
+```text
+state service 'worker': failure_policy=restart_on_failure restarts=2/5 window=2/3@60s last_exit=42
+```
+
+Read that line as:
+
+- the service has already been relaunched twice
+- it can still use three more lifetime restarts before hitting `max_restarts: 5`
+- two restart-triggering failures are still inside the current 60-second rolling window
+- one more restart-triggering failure inside that same window would exhaust `max_restarts_in_window: 3`
+
+If you need the machine-readable form, `status --json` exposes the same policy state per service through `failure_policy_mode`, `restart_count`, `max_restarts`, `window_seconds`, `max_restarts_in_window`, `restart_failures_in_window`, and `last_exit_code`.
 
 For multi-node jobs, `status` also reports tracked placement geometry (`placement_mode`, nodes, task counts, and expanded nodelist) for each service.
 

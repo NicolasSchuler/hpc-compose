@@ -19,6 +19,7 @@ It is intentionally **not** a full Docker Compose implementation. It focuses on 
 - remote images such as `redis:7` or existing local `.sqsh` images
 - login-node image preparation through `x-enroot.prepare`
 - readiness-gated startup across dependent services
+- per-service `restart_on_failure` with bounded retries and rolling-window crash-loop protection
 
 ## What It Does Not Support
 
@@ -59,6 +60,25 @@ hpc-compose submit --watch -f compose.yaml
 ```
 
 `submit --watch` is the normal run. Use `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are adapting a new spec or isolating a failure.
+
+## Restart policy example
+
+When you want per-service retries on transient non-zero exits, use `services.<name>.x-slurm.failure_policy` instead of Compose `restart:`.
+
+```yaml
+services:
+  worker:
+    image: python:3.11-slim
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 5
+        backoff_seconds: 5
+        window_seconds: 60
+        max_restarts_in_window: 3
+```
+
+`restart_on_failure` only reacts to non-zero process exits. It enforces both a lifetime cap (`max_restarts`) and a rolling-window cap (`max_restarts_in_window` within `window_seconds`) during one live batch-script execution. `hpc-compose status -f compose.yaml` reports the current restart budget as `window=<current>/<max>@<seconds>s`. See the runnable [`examples/restart-policy.yaml`](examples/restart-policy.yaml), the [Spec Reference](docs/src/spec-reference.md), and the [Runbook](docs/src/runbook.md) for details.
 
 ## Documentation
 

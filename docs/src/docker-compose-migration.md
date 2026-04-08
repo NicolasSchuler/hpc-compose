@@ -200,9 +200,19 @@ services:
         mode: restart_on_failure
         max_restarts: 3
         backoff_seconds: 5
+        window_seconds: 60
+        max_restarts_in_window: 3
 ```
 
-`restart_on_failure` retries only on non-zero exits. Use `mode: fail_job` (default) for fail-fast behavior, or `mode: ignore` for non-critical sidecars.
+`restart_on_failure` retries only on non-zero exits. It enforces both a lifetime restart cap and a rolling-window crash-loop cap during one live batch-script execution. If you omit the rolling-window fields, `hpc-compose` defaults to `window_seconds: 60` and `max_restarts_in_window: <resolved max_restarts>`. Use `mode: fail_job` (default) for fail-fast behavior, or `mode: ignore` for non-critical sidecars.
+
+Practical mapping:
+
+- Compose `restart: "no"` -> omit `failure_policy` or use `mode: fail_job`
+- Compose `restart: on-failure[:N]` -> use `mode: restart_on_failure` with `max_restarts: N` when you want a similar lifetime retry budget
+- Compose `restart: always` / `unless-stopped` -> no direct equivalent; `hpc-compose` intentionally keeps restart handling bounded within one batch job
+
+The rolling-window fields have no direct Docker Compose equivalent. They exist to stop fast crash loops inside one Slurm allocation without giving up a larger lifetime retry budget for transient failures.
 
 ## What to do about unsupported features
 
