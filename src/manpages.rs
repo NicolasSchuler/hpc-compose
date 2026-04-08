@@ -498,7 +498,17 @@ fn escape_roff(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{page_stem, render_manpages};
+    use std::fs;
+
+    use clap::{Arg, Command};
+
+    use super::{
+        argument_description, argument_term, check_manpages, command_description, command_summary,
+        ensure_sentence, escape_roff, find_command, normalize_value_name, page_reference,
+        page_stem, related_pages, render_manpages, render_page, split_paragraphs,
+        strip_usage_prefix, usage_lines, value_name, visible_arguments, visible_subcommands,
+        write_manpages,
+    };
 
     #[test]
     fn rendered_pages_include_expected_files() {
@@ -562,5 +572,142 @@ mod tests {
             .find(|page| page.file_name == format!("{}.1", page_stem(&["inspect".to_string()])))
             .expect("inspect page");
         assert!(!inspect.contents.contains("--json"));
+    }
+
+    #[test]
+    fn write_and_check_manpages_refresh_generated_directory() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let dir = tmpdir.path();
+        fs::write(dir.join("obsolete.1"), "stale").expect("obsolete manpage");
+        fs::write(dir.join("notes.txt"), "keep me").expect("non-manpage helper");
+
+        write_manpages(dir).expect("write manpages");
+        assert!(dir.join("hpc-compose.1").exists());
+        assert!(!dir.join("obsolete.1").exists());
+        assert_eq!(
+            fs::read_to_string(dir.join("notes.txt")).expect("notes"),
+            "keep me"
+        );
+        check_manpages(dir).expect("fresh manpages");
+
+        let top = dir.join("hpc-compose.1");
+        fs::write(&top, "outdated").expect("stale rewrite");
+        fs::remove_file(dir.join("hpc-compose-submit.1")).expect("remove page");
+        fs::write(dir.join("unexpected.1"), "extra").expect("unexpected page");
+
+        let err = check_manpages(dir).expect_err("drift should fail");
+        let message = err.to_string();
+        assert!(message.contains("manpages are out of date"));
+        assert!(message.contains("missing: hpc-compose-submit.1"));
+        assert!(message.contains("stale: hpc-compose.1"));
+        assert!(message.contains("unexpected: unexpected.1"));
+
+        write_manpages(dir).expect("rewrite manpages");
+        assert!(!dir.join("unexpected.1").exists());
+        check_manpages(dir).expect("rewritten manpages");
+    }
+
+    #[test]
+    fn helper_renderers_cover_fallbacks_and_hidden_entries() {
+        let command = Command::new("demo")
+            .about("Demo summary")
+            .long_about("First paragraph.\n\nSecond paragraph")
+            .arg(Arg::new("input-path").help("input spec"))
+            .arg(
+                Arg::new("config-path")
+                    .short('c')
+                    .long("config-path")
+                    .help("config file")
+                    .default_value("compose.yaml")
+                    .value_parser(["compose.yaml", "other.yaml"])
+                    .num_args(1),
+            )
+            .arg(Arg::new("hidden-flag").long("hidden-flag").hide(true))
+            .subcommand(Command::new("child").about("Child summary"))
+            .subcommand(Command::new("sibling").about("Sibling summary"))
+            .subcommand(
+                Command::new("hidden-child")
+                    .about("Hidden summary")
+                    .hide(true),
+            );
+        let mut built = command.clone();
+        built.build();
+
+        assert_eq!(strip_usage_prefix("Usage: demo child"), "demo child");
+        assert_eq!(strip_usage_prefix("demo child"), "demo child");
+        assert_eq!(ensure_sentence(""), "");
+        assert_eq!(ensure_sentence("Done"), "Done.");
+        assert_eq!(ensure_sentence("Done!"), "Done!");
+        assert_eq!(normalize_value_name("config-path"), "CONFIG_PATH");
+        assert_eq!(split_paragraphs(" one \n\n two "), vec!["one", "two"]);
+        assert_eq!(command_summary(&built), "Demo summary");
+        assert_eq!(
+            command_description(&built),
+            vec!["First paragraph.", "Second paragraph"]
+        );
+        assert_eq!(
+            usage_lines(&built),
+            vec!["demo [OPTIONS] [input-path] [COMMAND]"]
+        );
+
+        let visible_args = visible_arguments(&built);
+        let visible_arg_ids: Vec<_> = visible_args
+            .iter()
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        assert!(visible_arg_ids.contains(&"input-path"));
+        assert!(visible_arg_ids.contains(&"config-path"));
+        assert!(!visible_arg_ids.contains(&"hidden-flag"));
+        let positional = visible_args
+            .iter()
+            .find(|arg| arg.get_id().as_str() == "input-path")
+            .expect("positional arg");
+        let option = visible_args
+            .iter()
+            .find(|arg| arg.get_id().as_str() == "config-path")
+            .expect("option arg");
+        assert_eq!(argument_term(positional), r"\fIINPUT_PATH\fR");
+        assert_eq!(
+            argument_term(option),
+            r"\fB-c\fR, \fB--config\-path\fR \fICONFIG_PATH\fR"
+        );
+        let description = argument_description(option);
+        assert!(description.contains("config file."));
+        assert!(description.contains("Default: compose.yaml."));
+        assert!(description.contains("Possible values: compose.yaml, other.yaml."));
+        assert_eq!(value_name(option), "CONFIG_PATH");
+
+        let visible_subcommands = visible_subcommands(&built);
+        assert_eq!(
+            visible_subcommands
+                .iter()
+                .map(|subcommand| subcommand.get_name())
+                .collect::<Vec<_>>(),
+            vec!["child", "sibling"]
+        );
+        let child_path = vec!["child".to_string()];
+        let refs = related_pages(&child_path, visible_subcommands[0], &built);
+        assert!(refs.contains(&page_reference(&[])));
+        assert!(refs.contains(&page_reference(&["sibling".to_string()])));
+        assert!(find_command(&built, &child_path).is_some());
+        assert!(find_command(&built, &["missing".to_string()]).is_none());
+
+        let escaped = escape_roff(".dash-leading\n'quoted\nslash\\value");
+        assert!(escaped.contains(r"\&.dash\-leading"));
+        assert!(escaped.contains(r"\&'quoted"));
+        assert!(escaped.contains(r"slash\\value"));
+    }
+
+    #[test]
+    fn render_page_uses_fallback_summary_when_description_and_examples_are_absent() {
+        let command = Command::new("empty");
+        let path = vec!["mystery".to_string()];
+        let page = render_page(&command, &path, &command);
+
+        assert!(page.contains(".SH DESCRIPTION"));
+        assert!(page.contains(".PP\nCommand reference\n"));
+        assert!(page.contains("No examples are documented for this command."));
+        assert!(page.contains(".SH SEE ALSO"));
+        assert!(page.contains(r"hpc\-compose(1)"));
     }
 }
