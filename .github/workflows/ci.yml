@@ -250,10 +250,11 @@ jobs:
           cp -R man/man1 "$stage_dir/share/man/"
           tar -C "$stage_dir" -czf "$dist_dir/$asset" "$binary_name" README.md share/man/man1
           if command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "$dist_dir/$asset" > "$dist_dir/$asset.sha256"
+            hash="$(shasum -a 256 "$dist_dir/$asset" | cut -d ' ' -f 1)"
           else
-            sha256sum "$dist_dir/$asset" > "$dist_dir/$asset.sha256"
+            hash="$(sha256sum "$dist_dir/$asset" | cut -d ' ' -f 1)"
           fi
+          printf '%s  dist/%s\n' "$hash" "$asset" > "$dist_dir/$asset.sha256"
 
           python3 -m http.server 8123 --directory "$dist_dir" >/tmp/hpc-compose-install-http.log 2>&1 &
           server_pid=$!

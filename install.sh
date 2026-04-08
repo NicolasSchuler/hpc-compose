@@ -99,30 +99,22 @@ verify_checksum() {
   archive_path="$1"
   checksum_path="$2"
 
+  expected="$(cut -d ' ' -f 1 "${checksum_path}")"
+  [ -n "${expected}" ] || fail "checksum file is empty: ${checksum_path}"
+
   if command -v shasum >/dev/null 2>&1; then
-    (
-      cd "${TMP_WORKDIR}"
-      shasum -a 256 -c "$(basename "${checksum_path}")"
-    ) >/dev/null
-    return 0
-  fi
-
-  if command -v sha256sum >/dev/null 2>&1; then
-    (
-      cd "${TMP_WORKDIR}"
-      sha256sum -c "$(basename "${checksum_path}")"
-    ) >/dev/null
-    return 0
-  fi
-
-  if command -v openssl >/dev/null 2>&1; then
-    expected="$(cut -d ' ' -f 1 "${checksum_path}")"
+    actual="$(shasum -a 256 "${archive_path}" | cut -d ' ' -f 1)"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "${archive_path}" | cut -d ' ' -f 1)"
+  elif command -v openssl >/dev/null 2>&1; then
     actual="$(openssl dgst -sha256 "${archive_path}" | sed 's/^.*= //')"
-    [ "${expected}" = "${actual}" ] || fail "checksum verification failed"
-    return 0
+  else
+    fail "no checksum tool available; need shasum, sha256sum, or openssl"
   fi
 
-  fail "no checksum tool available; need shasum, sha256sum, or openssl"
+  expected_lc="$(printf '%s' "${expected}" | tr 'A-F' 'a-f')"
+  actual_lc="$(printf '%s' "${actual}" | tr 'A-F' 'a-f')"
+  [ "${expected_lc}" = "${actual_lc}" ] || fail "checksum verification failed"
 }
 
 resolve_man_dir() {

@@ -112,7 +112,8 @@ jobs:
           mkdir -p "${stage_dir}/share/man"
           cp -R man/man1 "${stage_dir}/share/man/"
           tar -C "${stage_dir}" -czf "dist/${asset}" "${{ matrix.binary_name }}" README.md share/man/man1
-          shasum -a 256 "dist/${asset}" > "dist/${checksum}"
+          hash="$(shasum -a 256 "dist/${asset}" | cut -d ' ' -f 1)"
+          printf '%s  %s\n' "${hash}" "${asset}" > "dist/${checksum}"
 
       - name: Smoke test Unix release assets
         if: runner.os != 'Windows'
