@@ -16,6 +16,23 @@
 //! are exposed so the binary and integration tests can share the same logic;
 //! they are documented for contributors, not as a semver-stable general
 //! purpose API.
+//!
+//! ```no_run
+//! use std::path::Path;
+//!
+//! use hpc_compose::planner::build_plan;
+//! use hpc_compose::prepare::build_runtime_plan;
+//! use hpc_compose::render::render_script;
+//! use hpc_compose::spec::ComposeSpec;
+//!
+//! let compose_path = Path::new("compose.yaml");
+//! let spec = ComposeSpec::load(compose_path)?;
+//! let plan = build_plan(compose_path, spec)?;
+//! let runtime_plan = build_runtime_plan(&plan);
+//! let script = render_script(&runtime_plan)?;
+//! assert!(script.contains("#SBATCH"));
+//! # Ok::<(), anyhow::Error>(())
+//! ```
 #![warn(missing_docs)]
 
 pub mod cache;
@@ -28,3 +45,4 @@ pub mod preflight;
 pub mod prepare;
 pub mod render;
 pub mod spec;
+pub(crate) mod tracked_paths;

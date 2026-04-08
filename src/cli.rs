@@ -836,14 +836,19 @@ pub enum CacheCommands {
     },
 }
 
+/// Parses process arguments into the top-level CLI struct.
 pub fn parse_cli() -> Cli {
     Cli::parse()
 }
 
+/// Builds the Clap command tree used by the binary and manpage generator.
+#[must_use]
 pub fn build_cli_command() -> clap::Command {
     Cli::command()
 }
 
+/// Returns curated example invocations for one CLI path.
+#[must_use]
 pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
     match path {
         [] => TOP_LEVEL_EXAMPLES,

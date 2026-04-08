@@ -1,1359 +1,15 @@
-use std::fs;
-use std::fs::OpenOptions;
+mod support;
+
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use hpc_compose::planner::build_plan;
-use hpc_compose::prepare::{RuntimePlan, build_runtime_plan};
 use hpc_compose::render::log_file_name_for_service;
-use hpc_compose::spec::ComposeSpec;
 use serde_json::Value;
-
-fn bin_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_hpc-compose"))
-}
-
-fn run_cli(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(bin_path())
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .expect("run cli")
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn run_cli_with_stdin(cwd: &Path, args: &[&str], stdin: &str) -> Output {
-    let mut child = Command::new(bin_path())
-        .current_dir(cwd)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cli");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(stdin.as_bytes())
-        .expect("write stdin");
-    child.wait_with_output().expect("wait output")
-}
-
-fn stdout_text(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).to_string()
-}
-
-fn stderr_text(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).to_string()
-}
-
-fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "command failed\nstdout:\n{}\nstderr:\n{}",
-        stdout_text(output),
-        stderr_text(output)
-    );
-}
-
-fn assert_failure(output: &Output) {
-    assert!(
-        !output.status.success(),
-        "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
-        stdout_text(output),
-        stderr_text(output)
-    );
-}
-
-fn write_script(path: &Path, body: &str) {
-    fs::write(path, body).expect("write script");
-    let mut perms = fs::metadata(path).expect("meta").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(path, perms).expect("chmod");
-}
-
-fn write_fake_enroot(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("fake-enroot.sh");
-    write_script(
-        &path,
-        r#"#!/bin/bash
-set -euo pipefail
-cmd="${1:-}"
-shift || true
-case "$cmd" in
-  import)
-    output=""
-    while (($#)); do
-      case "$1" in
-        -o|--output)
-          output="$2"
-          shift 2
-          ;;
-        *)
-          shift
-          ;;
-      esac
-    done
-    mkdir -p "$(dirname "$output")"
-    touch "$output"
-    ;;
-  create)
-    name=""
-    while (($#)); do
-      case "$1" in
-        -n|--name)
-          name="$2"
-          shift 2
-          ;;
-        -f|--force)
-          shift
-          ;;
-        *)
-          shift
-          ;;
-      esac
-    done
-    mkdir -p "$ENROOT_DATA_PATH/$name"
-    ;;
-  start)
-    exit 0
-    ;;
-  export)
-    output=""
-    while (($#)); do
-      case "$1" in
-        -o|--output)
-          output="$2"
-          shift 2
-          ;;
-        -f|--force)
-          shift
-          ;;
-        *)
-          shift
-          ;;
-      esac
-    done
-    mkdir -p "$(dirname "$output")"
-    touch "$output"
-    ;;
-  remove)
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-"#,
-    );
-    path
-}
-
-fn write_fake_srun(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("srun");
-    write_script(
-        &path,
-        r#"#!/bin/bash
-set -euo pipefail
-if [[ "${1:-}" == "--help" ]]; then
-  echo "usage: srun --container-image=IMAGE"
-  exit 0
-fi
-exit 0
-"#,
-    );
-    write_fake_scontrol(tmpdir);
-    path
-}
-
-fn write_fake_srun_failure_policy(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("srun");
-    write_script(
-        &path,
-        r#"#!/bin/bash
-set -euo pipefail
-if [[ "${1:-}" == "--help" ]]; then
-  echo "usage: srun --container-image=IMAGE"
-  exit 0
-fi
-job_name=""
-for arg in "$@"; do
-  case "$arg" in
-    --job-name=*)
-      job_name="${arg#--job-name=}"
-      break
-      ;;
-  esac
-done
-state_root="${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/fake-srun"
-mkdir -p "$state_root"
-key="$(printf '%s' "$job_name" | tr -c 'A-Za-z0-9._-' '_')"
-count_file="$state_root/${key}.count"
-plan_file="$state_root/${key}.plan"
-count=0
-if [[ -f "$count_file" ]]; then
-  count="$(cat "$count_file")"
-fi
-count=$((count + 1))
-echo "$count" > "$count_file"
-if [[ -f "$plan_file" ]]; then
-  line="$(sed -n "${count}p" "$plan_file")"
-  if [[ -z "$line" ]]; then
-    line="$(tail -n 1 "$plan_file")"
-  fi
-  if [[ -n "$line" ]]; then
-    read -r exit_code sleep_seconds <<< "$line"
-    sleep_seconds="${sleep_seconds:-0}"
-    if (( sleep_seconds > 0 )); then
-      sleep "$sleep_seconds"
-    fi
-    exit "$exit_code"
-  fi
-fi
-case "$job_name" in
-  hpc-compose:app)
-    if (( count == 1 )); then
-      exit 41
-    fi
-    exit 0
-    ;;
-  hpc-compose:sidecar)
-    exit 42
-    ;;
-  hpc-compose:flaky)
-    exit 43
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-"#,
-    );
-    write_fake_scontrol(tmpdir);
-    path
-}
-
-fn fake_srun_key(job_name: &str) -> String {
-    job_name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn write_fake_srun_failure_policy_plan(
-    tmpdir: &Path,
-    job_name: &str,
-    attempts: &[(i32, u64)],
-) -> PathBuf {
-    let path = write_fake_srun_failure_policy(tmpdir);
-    let state_root = tmpdir.join(".hpc-compose/fake-srun");
-    fs::create_dir_all(&state_root).expect("create fake srun state");
-    let key = fake_srun_key(job_name);
-    let plan = attempts
-        .iter()
-        .map(|(exit_code, sleep_seconds)| format!("{exit_code} {sleep_seconds}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(state_root.join(format!("{key}.plan")), format!("{plan}\n")).expect("write plan");
-    path
-}
-
-fn write_fake_srun_failure(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("srun");
-    write_script(
-        &path,
-        r#"#!/bin/bash
-set -euo pipefail
-if [[ "${1:-}" == "--help" ]]; then
-  echo "usage: srun --container-image=IMAGE"
-  exit 0
-fi
-exit 17
-"#,
-    );
-    write_fake_scontrol(tmpdir);
-    path
-}
-
-fn write_fake_srun_capture(tmpdir: &Path, log_path: &Path) -> PathBuf {
-    let path = tmpdir.join("srun");
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-if [[ "${{1:-}}" == "--help" ]]; then
-  echo "usage: srun --container-image=IMAGE"
-  exit 0
-fi
-output_path=""
-for arg in "$@"; do
-  case "$arg" in
-    --output=*)
-      output_path="${{arg#--output=}}"
-      ;;
-  esac
-done
-printf 'args:%s\n' "$*" >> '{}'
-printf 'env:%s|%s|%s|%s\n' "${{HPC_COMPOSE_PRIMARY_NODE:-}}" "${{HPC_COMPOSE_NODE_COUNT:-}}" "${{HPC_COMPOSE_NODELIST:-}}" "${{HPC_COMPOSE_NODELIST_FILE:-}}" >> '{}'
-if [[ -n "$output_path" ]]; then
-  mkdir -p "$(dirname "$output_path")"
-  printf 'ready\n' >> "$output_path"
-fi
-sleep 3
-exit 0
-"#,
-            log_path.display(),
-            log_path.display()
-        ),
-    );
-    write_fake_scontrol(tmpdir);
-    path
-}
-
-fn write_fake_scontrol(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("scontrol");
-    write_script(
-        &path,
-        r#"#!/bin/bash
-set -euo pipefail
-if [[ "${1:-}" == "show" && "${2:-}" == "hostnames" ]]; then
-  if [[ $# -ge 3 ]]; then
-    raw="${3//,/ }"
-    for host in $raw; do
-      printf '%s\n' "$host"
-    done
-  fi
-  exit 0
-fi
-echo "unsupported scontrol invocation" >&2
-exit 1
-"#,
-    );
-    path
-}
-
-fn write_fake_sbatch(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("sbatch");
-    write_script(
-        &path,
-        r#"#!/bin/bash
-set -euo pipefail
-echo "Submitted batch job 12345"
-"#,
-    );
-    path
-}
-
-fn write_fake_sbatch_runs_script(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("sbatch-run-script");
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-script_path="${{1:?missing script path}}"
-PATH="{}:$PATH"
-export SLURM_JOB_ID=12345
-export SLURM_JOB_NODELIST=node01
-export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path" >/dev/null 2>&1
-echo "Submitted batch job 12345"
-"#,
-            tmpdir.display()
-        ),
-    );
-    path
-}
-
-fn write_fake_sbatch_runs_script_with_job_output(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("sbatch-run-script-with-output");
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-script_path="${{1:?missing script path}}"
-PATH="{}:$PATH"
-export SLURM_JOB_ID=12345
-export SLURM_JOB_NODELIST=node01
-export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path"
-echo "Submitted batch job 12345"
-"#,
-            tmpdir.display()
-        ),
-    );
-    path
-}
-
-fn write_fake_sbatch_runs_script_ignoring_job_exit(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("sbatch-run-script-ignore-exit");
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-script_path="${{1:?missing script path}}"
-PATH="{}:$PATH"
-export SLURM_JOB_ID=12345
-export SLURM_JOB_NODELIST=node01
-export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path" >/dev/null 2>&1 || true
-echo "Submitted batch job 12345"
-"#,
-            tmpdir.display()
-        ),
-    );
-    path
-}
-
-fn write_fake_sbatch_runs_script_with_nodelist(
-    tmpdir: &Path,
-    file_name: &str,
-    job_nodelist: &str,
-) -> PathBuf {
-    let path = tmpdir.join(file_name);
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-script_path="${{1:?missing script path}}"
-PATH="{}:$PATH"
-export SLURM_JOB_ID=12345
-export SLURM_JOB_NODELIST='{}'
-export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path"
-echo "Submitted batch job 12345"
-"#,
-            tmpdir.display(),
-            job_nodelist
-        ),
-    );
-    path
-}
-
-fn write_fake_scancel(tmpdir: &Path, log_path: &Path, success: bool) -> PathBuf {
-    let path = tmpdir.join(if success { "scancel" } else { "scancel-fail" });
-    let body = if success {
-        format!(
-            "#!/bin/bash\nset -euo pipefail\necho \"$@\" >> '{}'\n",
-            log_path.display()
-        )
-    } else {
-        format!(
-            "#!/bin/bash\nset -euo pipefail\necho \"$@\" >> '{}'\necho 'permission denied' >&2\nexit 17\n",
-            log_path.display()
-        )
-    };
-    write_script(&path, &body);
-    path
-}
-
-fn write_fake_squeue(tmpdir: &Path, state_file: &Path) -> PathBuf {
-    let path = tmpdir.join("squeue");
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-content="$(cat '{}' 2>/dev/null || true)"
-format_string=""
-prev=""
-for arg in "$@"; do
-  if [[ "$prev" == "-o" || "$prev" == "--format" ]]; then
-    format_string="$arg"
-  fi
-  case "$arg" in
-    --format=*)
-      format_string="${{arg#--format=}}"
-      ;;
-  esac
-  prev="$arg"
-done
-case "$content" in
-  ""|NONE)
-    exit 0
-    ;;
-  *"STATE="*)
-    state=""
-    reason=""
-    start=""
-    while IFS= read -r line; do
-      case "$line" in
-        STATE=*)
-          state="${{line#STATE=}}"
-          ;;
-        REASON=*)
-          reason="${{line#REASON=}}"
-          ;;
-        START=*)
-          start="${{line#START=}}"
-          ;;
-      esac
-    done <<< "$content"
-    if [[ -z "$state" || "$state" == "NONE" ]]; then
-      exit 0
-    fi
-    case "$format_string" in
-      *"%T|%r|%S"*)
-        printf '%s|%s|%s\n' "$state" "${{reason:-N/A}}" "${{start:-N/A}}"
-        ;;
-      *)
-        printf '%s\n' "$state"
-        ;;
-    esac
-    ;;
-  *)
-    while IFS= read -r line; do
-      if [[ -n "$line" && "$line" != "NONE" ]]; then
-        printf '%s\n' "$line"
-        break
-      fi
-    done <<< "$content"
-    ;;
-esac
-"#,
-            state_file.display()
-        ),
-    );
-    path
-}
-
-fn write_fake_sacct(tmpdir: &Path, state_file: &Path) -> PathBuf {
-    let path = tmpdir.join("sacct");
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-content="$(cat '{}' 2>/dev/null || true)"
-format_string=""
-prev=""
-for arg in "$@"; do
-  if [[ "$prev" == "--format" ]]; then
-    format_string="$arg"
-  fi
-  case "$arg" in
-    --format=*)
-      format_string="${{arg#--format=}}"
-      ;;
-  esac
-  prev="$arg"
-done
-case "$content" in
-  ""|NONE)
-    exit 0
-    ;;
-  *"STATE="*)
-    state=""
-    reason=""
-    eligible=""
-    start=""
-    while IFS= read -r line; do
-      case "$line" in
-        STATE=*)
-          state="${{line#STATE=}}"
-          ;;
-        REASON=*)
-          reason="${{line#REASON=}}"
-          ;;
-        ELIGIBLE=*)
-          eligible="${{line#ELIGIBLE=}}"
-          ;;
-        START=*)
-          start="${{line#START=}}"
-          ;;
-      esac
-    done <<< "$content"
-    if [[ -z "$state" || "$state" == "NONE" ]]; then
-      exit 0
-    fi
-    case "$format_string" in
-      *"State,Eligible,Start,Reason"*)
-        printf '%s|%s|%s|%s\n' \
-          "$state" \
-          "${{eligible:-Unknown}}" \
-          "${{start:-Unknown}}" \
-          "${{reason:-None}}"
-        ;;
-      *)
-        printf '%s\n' "$state"
-        ;;
-    esac
-    ;;
-  *)
-    while IFS= read -r line; do
-      if [[ -n "$line" && "$line" != "NONE" ]]; then
-        printf '%s\n' "$line"
-        break
-      fi
-    done <<< "$content"
-    ;;
-esac
-"#,
-            state_file.display()
-        ),
-    );
-    path
-}
-
-fn write_fake_sstat(tmpdir: &Path, output_file: &Path) -> PathBuf {
-    let path = tmpdir.join("sstat");
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-cat '{}' 2>/dev/null || true
-"#,
-            output_file.display()
-        ),
-    );
-    path
-}
-
-fn write_fake_sstat_failure(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("sstat-fail");
-    write_script(
-        &path,
-        r#"#!/bin/bash
-set -euo pipefail
-echo "job accounting unavailable" >&2
-exit 23
-"#,
-    );
-    path
-}
-
-fn write_fake_nvidia_smi(
-    tmpdir: &Path,
-    gpu_output_file: &Path,
-    process_output_file: &Path,
-) -> PathBuf {
-    let path = tmpdir.join("nvidia-smi");
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-case "$*" in
-  *"--query-gpu="*)
-    cat '{}'
-    ;;
-  *"--query-compute-apps="*)
-    cat '{}'
-    ;;
-  *)
-    echo "unsupported query" >&2
-    exit 1
-    ;;
-esac
-"#,
-            gpu_output_file.display(),
-            process_output_file.display()
-        ),
-    );
-    path
-}
-
-fn write_fake_watch_sbatch(
-    tmpdir: &Path,
-    squeue_state: &Path,
-    sacct_state: &Path,
-    terminal_state: &str,
-    final_log_line: &str,
-    gap_seconds: u64,
-) -> PathBuf {
-    let path = tmpdir.join(format!("sbatch-{}", terminal_state.to_lowercase()));
-    let log_dir = tmpdir.join(".hpc-compose/12345/logs");
-    let service_log = log_dir.join(log_file_name_for_service("app"));
-    write_script(
-        &path,
-        &format!(
-            r#"#!/bin/bash
-set -euo pipefail
-mkdir -p '{}'
-printf 'PENDING\n' > '{}'
-rm -f '{}'
-(
-  sleep 1
-  printf 'RUNNING\n' > '{}'
-  printf 'booting\n' > '{}'
-  sleep 1
-  printf '{}\n' >> '{}'
-  printf 'NONE\n' > '{}'
-  sleep {}
-  printf '{}\n' > '{}'
-) >/dev/null 2>&1 &
-echo "Submitted batch job 12345"
-"#,
-            log_dir.display(),
-            squeue_state.display(),
-            sacct_state.display(),
-            squeue_state.display(),
-            service_log.display(),
-            final_log_line,
-            service_log.display(),
-            squeue_state.display(),
-            gap_seconds,
-            terminal_state,
-            sacct_state.display()
-        ),
-    );
-    path
-}
-
-fn write_compose(tmpdir: &Path, name: &str, body: &str) -> PathBuf {
-    let path = tmpdir.join(name);
-    fs::write(&path, body).expect("write compose");
-    path
-}
-
-fn runtime_plan(path: &Path) -> RuntimePlan {
-    let spec = ComposeSpec::load(path).expect("load spec");
-    let plan = build_plan(path, spec).expect("build plan");
-    build_runtime_plan(&plan)
-}
-
-fn safe_cache_dir() -> tempfile::TempDir {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".tmp/hpc-compose-tests");
-    fs::create_dir_all(&root).expect("cache root");
-    tempfile::Builder::new()
-        .prefix("case-")
-        .tempdir_in(root)
-        .expect("cache tempdir")
-}
-
-fn write_prepare_compose(tmpdir: &Path, cache_dir: &Path) -> PathBuf {
-    fs::create_dir_all(tmpdir.join("app")).expect("app dir");
-    fs::write(tmpdir.join("app/main.py"), "print('hello')\n").expect("main.py");
-    write_compose(
-        tmpdir,
-        "compose.yaml",
-        &format!(
-            r#"
-name: demo
-x-slurm:
-  job_name: demo
-  time: "00:10:00"
-  cache_dir: {}
-services:
-  app:
-    image: python:3.11-slim
-    working_dir: /workspace
-    volumes:
-      - ./app:/workspace
-    command:
-      - python
-      - -m
-      - main
-    x-enroot:
-      prepare:
-        commands:
-          - pip install --no-cache-dir click
-"#,
-            cache_dir.display()
-        ),
-    )
-}
-
-fn write_example_compose(tmpdir: &Path, example_name: &str, cache_dir: &Path) -> PathBuf {
-    let source = repo_root().join("examples").join(example_name);
-    let body = fs::read_to_string(&source).expect("read example");
-    let rewritten = body.replace(
-        "/shared/$USER/hpc-compose-cache",
-        &cache_dir.display().to_string(),
-    );
-    write_compose(tmpdir, example_name, &rewritten)
-}
-
-fn write_metrics_compose(tmpdir: &Path, cache_dir: &Path) -> PathBuf {
-    fs::create_dir_all(tmpdir.join("app")).expect("app dir");
-    fs::write(tmpdir.join("app/main.py"), "print('hello')\n").expect("main.py");
-    write_compose(
-        tmpdir,
-        "compose-metrics.yaml",
-        &format!(
-            r#"
-name: demo
-x-slurm:
-  job_name: demo
-  time: "00:10:00"
-  cache_dir: {}
-  metrics:
-    interval_seconds: 60
-services:
-  app:
-    image: python:3.11-slim
-    working_dir: /workspace
-    volumes:
-      - ./app:/workspace
-    command:
-      - python
-      - main.py
-"#,
-            cache_dir.display()
-        ),
-    )
-}
-
-fn write_artifacts_compose_with_paths(
-    tmpdir: &Path,
-    cache_dir: &Path,
-    collect_policy: &str,
-    paths: &[&str],
-) -> PathBuf {
-    fs::create_dir_all(tmpdir.join("app")).expect("app dir");
-    fs::write(tmpdir.join("app/main.py"), "print('hello')\n").expect("main.py");
-    let paths_yaml = paths
-        .iter()
-        .map(|path| format!("      - {path}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_compose(
-        tmpdir,
-        &format!("compose-artifacts-{collect_policy}.yaml"),
-        &format!(
-            r#"
-name: demo
-x-slurm:
-  job_name: demo
-  time: "00:10:00"
-  cache_dir: {}
-  metrics:
-    interval_seconds: 1
-  artifacts:
-    collect: {}
-    export_dir: ./results/${{SLURM_JOB_ID}}
-    paths:
-{}
-services:
-  app:
-    image: python:3.11-slim
-    working_dir: /workspace
-    volumes:
-      - ./app:/workspace
-    command:
-      - python
-      - main.py
-"#,
-            cache_dir.display(),
-            collect_policy,
-            paths_yaml
-        ),
-    )
-}
-
-fn write_artifacts_compose(tmpdir: &Path, cache_dir: &Path, collect_policy: &str) -> PathBuf {
-    write_artifacts_compose_with_paths(
-        tmpdir,
-        cache_dir,
-        collect_policy,
-        &[
-            "/hpc-compose/job/metrics/**",
-            "/hpc-compose/job/missing/*.txt",
-        ],
-    )
-}
-
-fn write_mount_prepare_compose(tmpdir: &Path, cache_dir: &Path) -> PathBuf {
-    fs::create_dir_all(tmpdir.join("app")).expect("app dir");
-    fs::create_dir_all(tmpdir.join("deps")).expect("deps dir");
-    fs::write(tmpdir.join("app/main.py"), "print('hello')\n").expect("main.py");
-    write_compose(
-        tmpdir,
-        "compose-mount.yaml",
-        &format!(
-            r#"
-name: demo
-x-slurm:
-  job_name: demo
-  time: "00:10:00"
-  cache_dir: {}
-services:
-  app:
-    image: python:3.11-slim
-    working_dir: /workspace
-    volumes:
-      - ./app:/workspace
-    command:
-      - python
-      - -m
-      - main
-    x-enroot:
-      prepare:
-        commands:
-          - pip install --no-cache-dir click
-        mounts:
-          - ./deps:/deps
-"#,
-            cache_dir.display()
-        ),
-    )
-}
-
-fn write_env_compose(tmpdir: &Path, cache_dir: &Path) -> PathBuf {
-    fs::create_dir_all(tmpdir.join("app")).expect("app dir");
-    fs::write(
-        tmpdir.join(".env"),
-        "SECRET_TOKEN=super-secret\nMESSAGE=hi-from-dotenv\n",
-    )
-    .expect("dotenv");
-    write_compose(
-        tmpdir,
-        "compose-env.yaml",
-        &format!(
-            r#"
-name: env-demo
-x-slurm:
-  job_name: env-demo
-  time: "00:10:00"
-  cache_dir: {}
-services:
-  app:
-    image: python:3.11-slim
-    volumes:
-      - ./app:/workspace
-    environment:
-      SECRET_TOKEN: $SECRET_TOKEN
-    command:
-      - python
-      - -c
-      - print("${{MESSAGE}}")
-"#,
-            cache_dir.display()
-        ),
-    )
-}
-
-#[test]
-fn validate_and_render_commands_work() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_root = safe_cache_dir();
-    let cache_dir = cache_root.path().to_path_buf();
-    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
-
-    let validate = run_cli(
-        tmpdir.path(),
-        &["validate", "-f", compose.to_str().expect("path")],
-    );
-    assert_success(&validate);
-    assert!(stdout_text(&validate).contains("spec is valid"));
-
-    let validate_json = run_cli(
-        tmpdir.path(),
-        &[
-            "validate",
-            "-f",
-            compose.to_str().expect("path"),
-            "--format",
-            "json",
-        ],
-    );
-    assert_success(&validate_json);
-    let validate_value: Value =
-        serde_json::from_str(&stdout_text(&validate_json)).expect("validate json");
-    assert_eq!(validate_value["valid"], Value::from(true));
-    assert_eq!(validate_value["service_count"], Value::from(1));
-    assert_eq!(validate_value["services"][0], Value::from("app"));
-
-    let script_path = tmpdir.path().join("job.sbatch");
-    let render = run_cli(
-        tmpdir.path(),
-        &[
-            "render",
-            "-f",
-            compose.to_str().expect("path"),
-            "--output",
-            script_path.to_str().expect("path"),
-        ],
-    );
-    assert_success(&render);
-    let script = fs::read_to_string(&script_path).expect("script");
-    assert!(script.contains("#SBATCH --job-name=demo"));
-    assert!(script.contains("--container-image="));
-
-    let render_json = run_cli(
-        tmpdir.path(),
-        &[
-            "render",
-            "-f",
-            compose.to_str().expect("path"),
-            "--format",
-            "json",
-        ],
-    );
-    assert_success(&render_json);
-    let render_value: Value =
-        serde_json::from_str(&stdout_text(&render_json)).expect("render json");
-    assert_eq!(render_value["output_path"], Value::Null);
-    assert!(
-        render_value["script"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("#SBATCH --job-name=demo")
-    );
-}
-
-#[test]
-fn inspect_and_preflight_commands_cover_dev_workflow() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_root = safe_cache_dir();
-    let cache_dir = cache_root.path().to_path_buf();
-    let compose = write_mount_prepare_compose(tmpdir.path(), &cache_dir);
-    let enroot = write_fake_enroot(tmpdir.path());
-    let srun = write_fake_srun(tmpdir.path());
-    let sbatch = write_fake_sbatch(tmpdir.path());
-
-    let inspect = run_cli(
-        tmpdir.path(),
-        &["inspect", "-f", compose.to_str().expect("path")],
-    );
-    assert_success(&inspect);
-    assert!(
-        stdout_text(&inspect)
-            .contains("rebuild on submit because x-enroot.prepare.mounts are present")
-    );
-
-    let preflight = run_cli(
-        tmpdir.path(),
-        &[
-            "preflight",
-            "-f",
-            compose.to_str().expect("path"),
-            "--verbose",
-            "--enroot-bin",
-            enroot.to_str().expect("path"),
-            "--srun-bin",
-            srun.to_str().expect("path"),
-            "--sbatch-bin",
-            sbatch.to_str().expect("path"),
-        ],
-    );
-    assert_success(&preflight);
-    let preflight_stderr = stderr_text(&preflight);
-    assert!(preflight_stderr.contains("Summary:"));
-    assert!(preflight_stderr.contains("Passed checks:"));
-    assert!(preflight_stderr.contains("srun reports Pyxis container support"));
-    assert!(preflight_stderr.contains("cache directory is writable"));
-
-    let inspect_json = run_cli(
-        tmpdir.path(),
-        &[
-            "inspect",
-            "-f",
-            compose.to_str().expect("path"),
-            "--format",
-            "json",
-        ],
-    );
-    assert_success(&inspect_json);
-    let inspect_value: Value =
-        serde_json::from_str(&stdout_text(&inspect_json)).expect("inspect json");
-    assert_eq!(
-        inspect_value["ordered_services"][0]["name"],
-        Value::from("app")
-    );
-
-    let preflight_json = run_cli(
-        tmpdir.path(),
-        &[
-            "preflight",
-            "-f",
-            compose.to_str().expect("path"),
-            "--format",
-            "json",
-            "--enroot-bin",
-            enroot.to_str().expect("path"),
-            "--srun-bin",
-            srun.to_str().expect("path"),
-            "--sbatch-bin",
-            sbatch.to_str().expect("path"),
-        ],
-    );
-    assert_success(&preflight_json);
-    let preflight_value: Value =
-        serde_json::from_str(&stdout_text(&preflight_json)).expect("preflight json");
-    assert!(
-        preflight_value["summary"]["passed_checks"]
-            .as_u64()
-            .unwrap_or(0)
-            > 0
-    );
-
-    let strict = run_cli(
-        tmpdir.path(),
-        &[
-            "preflight",
-            "-f",
-            compose.to_str().expect("path"),
-            "--strict",
-            "--enroot-bin",
-            enroot.to_str().expect("path"),
-            "--srun-bin",
-            srun.to_str().expect("path"),
-            "--sbatch-bin",
-            sbatch.to_str().expect("path"),
-        ],
-    );
-    assert_failure(&strict);
-    assert!(stderr_text(&strict).contains("preflight reported warnings"));
-}
-
-#[test]
-fn prepare_and_cache_commands_manage_artifacts() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_root = safe_cache_dir();
-    let cache_dir = cache_root.path().to_path_buf();
-    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
-    let plan = runtime_plan(&compose);
-    let enroot = write_fake_enroot(tmpdir.path());
-
-    let prepare = run_cli(
-        tmpdir.path(),
-        &[
-            "prepare",
-            "-f",
-            compose.to_str().expect("path"),
-            "--enroot-bin",
-            enroot.to_str().expect("path"),
-        ],
-    );
-    assert_success(&prepare);
-    assert!(stdout_text(&prepare).contains("BUILD service 'app' runtime image"));
-    assert!(plan.ordered_services[0].runtime_image.exists());
-    assert!(
-        hpc_compose::cache::manifest_path_for(&plan.ordered_services[0].runtime_image).exists()
-    );
-
-    let prepare_json = run_cli(
-        tmpdir.path(),
-        &[
-            "prepare",
-            "-f",
-            compose.to_str().expect("path"),
-            "--enroot-bin",
-            enroot.to_str().expect("path"),
-            "--format",
-            "json",
-        ],
-    );
-    assert_success(&prepare_json);
-    let prepare_value: Value =
-        serde_json::from_str(&stdout_text(&prepare_json)).expect("prepare json");
-    assert_eq!(
-        prepare_value["services"][0]["service_name"],
-        Value::from("app")
-    );
-
-    let list = run_cli(
-        tmpdir.path(),
-        &[
-            "cache",
-            "list",
-            "--cache-dir",
-            cache_dir.to_str().expect("path"),
-        ],
-    );
-    assert_success(&list);
-    let list_stdout = stdout_text(&list);
-    assert!(list_stdout.contains("prepared"));
-    assert!(list_stdout.contains("base"));
-
-    let list_json = run_cli(
-        tmpdir.path(),
-        &[
-            "cache",
-            "list",
-            "--cache-dir",
-            cache_dir.to_str().expect("path"),
-            "--format",
-            "json",
-        ],
-    );
-    assert_success(&list_json);
-    let list_value: Value = serde_json::from_str(&stdout_text(&list_json)).expect("list json");
-    assert!(
-        list_value
-            .as_array()
-            .map(|entries| entries.len())
-            .unwrap_or(0)
-            >= 2
-    );
-
-    let inspect = run_cli(
-        tmpdir.path(),
-        &[
-            "cache",
-            "inspect",
-            "-f",
-            compose.to_str().expect("path"),
-            "--service",
-            "app",
-        ],
-    );
-    assert_success(&inspect);
-    let inspect_stdout = stdout_text(&inspect);
-    assert!(inspect_stdout.contains("manifest kind: prepared"));
-    assert!(inspect_stdout.contains("current reuse expectation: cache hit"));
-
-    let inspect_json = run_cli(
-        tmpdir.path(),
-        &[
-            "cache",
-            "inspect",
-            "-f",
-            compose.to_str().expect("path"),
-            "--service",
-            "app",
-            "--format",
-            "json",
-        ],
-    );
-    assert_success(&inspect_json);
-    let inspect_value: Value =
-        serde_json::from_str(&stdout_text(&inspect_json)).expect("inspect json");
-    assert_eq!(
-        inspect_value["services"][0]["service_name"],
-        Value::from("app")
-    );
-    assert_eq!(
-        inspect_value["services"][0]["runtime_artifact"]["manifest"]["kind"],
-        Value::from("prepared")
-    );
-
-    for artifact in [
-        hpc_compose::cache::manifest_path_for(&plan.ordered_services[0].runtime_image),
-        hpc_compose::cache::manifest_path_for(&hpc_compose::prepare::base_image_path(
-            &plan.cache_dir,
-            &plan.ordered_services[0],
-        )),
-    ] {
-        let mut manifest: Value =
-            serde_json::from_str(&fs::read_to_string(&artifact).expect("manifest")).expect("json");
-        manifest["created_at"] = Value::from(1_u64);
-        manifest["last_used_at"] = Value::from(1_u64);
-        fs::write(
-            &artifact,
-            serde_json::to_vec_pretty(&manifest).expect("serialize"),
-        )
-        .expect("rewrite manifest");
-    }
-
-    let prune = run_cli(
-        tmpdir.path(),
-        &[
-            "cache",
-            "prune",
-            "--age",
-            "1",
-            "--cache-dir",
-            cache_dir.to_str().expect("path"),
-        ],
-    );
-    assert_success(&prune);
-    assert!(stdout_text(&prune).contains("removed: 2"));
-    assert!(!plan.ordered_services[0].runtime_image.exists());
-
-    let prune_json = run_cli(
-        tmpdir.path(),
-        &[
-            "cache",
-            "prune",
-            "--age",
-            "1",
-            "--cache-dir",
-            cache_dir.to_str().expect("path"),
-            "--format",
-            "json",
-        ],
-    );
-    assert_success(&prune_json);
-    let prune_value: Value = serde_json::from_str(&stdout_text(&prune_json)).expect("prune json");
-    assert_eq!(prune_value["mode"], Value::from("age"));
-    assert_eq!(prune_value["removed_count"], Value::from(0));
-}
-
-#[test]
-fn cache_prune_argument_validation_and_all_unused_path_work() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_root = safe_cache_dir();
-    let cache_dir = cache_root.path().to_path_buf();
-    let compose_a = write_prepare_compose(tmpdir.path(), &cache_dir);
-    let enroot = write_fake_enroot(tmpdir.path());
-    let plan_a = runtime_plan(&compose_a);
-
-    let prepare = run_cli(
-        tmpdir.path(),
-        &[
-            "prepare",
-            "-f",
-            compose_a.to_str().expect("path"),
-            "--enroot-bin",
-            enroot.to_str().expect("path"),
-        ],
-    );
-    assert_success(&prepare);
-
-    let no_strategy = run_cli(tmpdir.path(), &["cache", "prune"]);
-    assert_failure(&no_strategy);
-    assert!(stderr_text(&no_strategy).contains("requires either --age DAYS or --all-unused"));
-
-    let invalid_combo = run_cli(
-        tmpdir.path(),
-        &["cache", "prune", "--age", "1", "--all-unused"],
-    );
-    assert_failure(&invalid_combo);
-    assert!(stderr_text(&invalid_combo).contains("only one strategy"));
-
-    let compose_b = write_compose(
-        tmpdir.path(),
-        "compose-other.yaml",
-        &format!(
-            r#"
-name: other
-x-slurm:
-  cache_dir: {}
-services:
-  redis:
-    image: redis:7
-"#,
-            cache_dir.display()
-        ),
-    );
-
-    let prune_unused = run_cli(
-        tmpdir.path(),
-        &[
-            "cache",
-            "prune",
-            "--all-unused",
-            "-f",
-            compose_b.to_str().expect("path"),
-            "--cache-dir",
-            cache_dir.to_str().expect("path"),
-        ],
-    );
-    assert_success(&prune_unused);
-    assert!(stdout_text(&prune_unused).contains("removed: 2"));
-    assert!(!plan_a.ordered_services[0].runtime_image.exists());
-}
+use support::*;
 
 #[test]
 fn submit_command_runs_end_to_end_with_fake_tools() {
@@ -1765,33 +421,6 @@ services:
 }
 
 #[test]
-fn validate_rejects_dependency_on_ignore_service() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let compose = write_compose(
-        tmpdir.path(),
-        "compose.yaml",
-        r#"
-services:
-  app:
-    image: redis:7
-    depends_on:
-      - sidecar
-  sidecar:
-    image: redis:7
-    x-slurm:
-      failure_policy:
-        mode: ignore
-"#,
-    );
-    let validate = run_cli(
-        tmpdir.path(),
-        &["validate", "-f", compose.to_str().expect("path")],
-    );
-    assert_failure(&validate);
-    assert!(stderr_text(&validate).contains("cannot be depended on"));
-}
-
-#[test]
 fn submit_succeeds_when_tracking_metadata_cannot_be_written() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose_root = tmpdir.path().join("readonly-compose");
@@ -2133,6 +762,82 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
     assert_eq!(steps[0]["gpu_util"], Value::from("65"));
     assert_eq!(steps[0]["gpu_mem"], Value::from("1024M"));
     assert_eq!(steps[0]["gpu_count"], Value::from("1"));
+}
+
+#[test]
+fn stats_command_supports_jsonl_output() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let squeue_state = tmpdir.path().join("stats-jsonl-squeue.state");
+    let sacct_state = tmpdir.path().join("stats-jsonl-sacct.state");
+    fs::write(&squeue_state, "RUNNING\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let sstat_output = tmpdir.path().join("stats-jsonl.output");
+    fs::write(
+        &sstat_output,
+        "\
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
+12345.0|1|00:00:10|512M|1G|cpu=1,mem=4G,gres/gpu=1|cpu=00:00:10,gres/gpuutil=65,gres/gpumem=1024M
+12345.1|2|00:00:20|256M|512M|cpu=2,mem=8G|cpu=00:00:20
+",
+    )
+    .expect("sstat output");
+    let sstat = write_fake_sstat(tmpdir.path(), &sstat_output);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let stats_jsonl = run_cli(
+        tmpdir.path(),
+        &[
+            "stats",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "jsonl",
+            "--sstat-bin",
+            sstat.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&stats_jsonl);
+
+    let stdout = stdout_text(&stats_jsonl);
+    let records = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["record_type"], Value::from("summary"));
+    assert_eq!(records[0]["job_id"], Value::from("12345"));
+    assert_eq!(records[0]["stats_source"], Value::from("sstat"));
+    assert_eq!(records[1]["record_type"], Value::from("step"));
+    assert_eq!(records[1]["step"]["step_id"], Value::from("12345.0"));
+    assert_eq!(records[2]["record_type"], Value::from("step"));
+    assert_eq!(records[2]["step"]["step_id"], Value::from("12345.1"));
 }
 
 #[test]
@@ -2709,200 +1414,6 @@ fn logs_follow_streams_appended_lines() {
 }
 
 #[test]
-fn inspect_json_preflight_json_and_init_cover_new_modes() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let cache_root = safe_cache_dir();
-    let cache_dir = cache_root.path().to_path_buf();
-    let compose = write_env_compose(tmpdir.path(), &cache_dir);
-    let enroot = write_fake_enroot(tmpdir.path());
-    let srun = write_fake_srun(tmpdir.path());
-    let sbatch = write_fake_sbatch(tmpdir.path());
-
-    let inspect_verbose = run_cli(
-        tmpdir.path(),
-        &[
-            "inspect",
-            "-f",
-            compose.to_str().expect("path"),
-            "--verbose",
-        ],
-    );
-    assert_success(&inspect_verbose);
-    let inspect_verbose_stdout = stdout_text(&inspect_verbose);
-    assert!(inspect_verbose_stdout.contains("environment:"));
-    assert!(inspect_verbose_stdout.contains("  - SECRET_TOKEN"));
-    assert!(!inspect_verbose_stdout.contains("SECRET_TOKEN=super-secret"));
-    assert!(inspect_verbose_stdout.contains(&format!(
-        "{}:/workspace",
-        tmpdir.path().join("app").display()
-    )));
-    assert!(inspect_verbose_stdout.contains("/hpc-compose/job"));
-    assert!(inspect_verbose_stdout.contains("effective srun args:"));
-
-    let inspect_json = run_cli(
-        tmpdir.path(),
-        &["inspect", "-f", compose.to_str().expect("path"), "--json"],
-    );
-    assert_success(&inspect_json);
-    let inspect_json_stdout = stdout_text(&inspect_json);
-    assert!(inspect_json_stdout.contains("super-secret"));
-    assert!(inspect_json_stdout.contains("hi-from-dotenv"));
-
-    let preflight_json = run_cli(
-        tmpdir.path(),
-        &[
-            "preflight",
-            "-f",
-            compose.to_str().expect("path"),
-            "--json",
-            "--enroot-bin",
-            enroot.to_str().expect("path"),
-            "--srun-bin",
-            srun.to_str().expect("path"),
-            "--sbatch-bin",
-            sbatch.to_str().expect("path"),
-        ],
-    );
-    assert_success(&preflight_json);
-    let preflight_value: Value =
-        serde_json::from_str(&stdout_text(&preflight_json)).expect("preflight json");
-    assert!(
-        preflight_value["summary"]["passed_checks"]
-            .as_u64()
-            .unwrap_or(0)
-            > 0
-    );
-    assert!(preflight_value["passed_checks"].is_array());
-
-    for template in [
-        "dev-python-app",
-        "app-redis-worker",
-        "llm-curl-workflow",
-        "llm-curl-workflow-workdir",
-        "llama-app",
-        "llama-uv-worker",
-        "multi-node-mpi",
-        "multi-node-torchrun",
-        "vllm-uv-worker",
-    ] {
-        let output = tmpdir.path().join(format!("{template}.yaml"));
-        let init = run_cli(
-            tmpdir.path(),
-            &[
-                "init",
-                "--template",
-                template,
-                "--name",
-                "custom-init",
-                "--cache-dir",
-                "/tmp/custom-cache",
-                "--output",
-                output.to_str().expect("path"),
-                "--force",
-            ],
-        );
-        assert_success(&init);
-        assert!(output.exists());
-        let validate = run_cli(
-            tmpdir.path(),
-            &["validate", "-f", output.to_str().expect("path")],
-        );
-        assert_success(&validate);
-        let rendered = fs::read_to_string(&output).expect("rendered template");
-        assert!(rendered.contains("name: custom-init"));
-        assert!(rendered.contains("job_name: custom-init"));
-        assert!(rendered.contains("cache_dir: /tmp/custom-cache"));
-        assert!(stdout_text(&init).contains("hpc-compose submit --watch -f"));
-    }
-}
-
-#[test]
-fn help_and_template_discovery_surface_guided_workflows() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-
-    let top_help = run_cli(tmpdir.path(), &["--help"]);
-    assert_success(&top_help);
-    let top_help_stdout = stdout_text(&top_help);
-    assert!(top_help_stdout.contains("Normal run:"));
-    assert!(top_help_stdout.contains("submit --watch -f compose.yaml"));
-    assert!(top_help_stdout.contains("Debugging flow:"));
-    assert!(top_help_stdout.contains("logs         Print tracked service logs"));
-    assert!(top_help_stdout.contains("cancel       Cancel a tracked Slurm job"));
-    assert!(top_help_stdout.contains("clean        Remove old tracked job directories"));
-    assert!(top_help_stdout.contains("completions  Generate shell completions"));
-
-    let init_help = run_cli(tmpdir.path(), &["init", "--help"]);
-    assert_success(&init_help);
-    let init_help_stdout = stdout_text(&init_help);
-    assert!(init_help_stdout.contains("--list-templates"));
-    assert!(init_help_stdout.contains("--describe-template <TEMPLATE>"));
-
-    let cache_help = run_cli(tmpdir.path(), &["cache", "--help"]);
-    assert_success(&cache_help);
-    let cache_help_stdout = stdout_text(&cache_help);
-    assert!(cache_help_stdout.contains("cache inspect -f compose.yaml"));
-    assert!(cache_help_stdout.contains("list     List cached image artifacts"));
-    assert!(cache_help_stdout.contains("inspect  Inspect cache reuse for the current plan"));
-    assert!(cache_help_stdout.contains("prune    Prune cached image artifacts"));
-
-    let submit_help = run_cli(tmpdir.path(), &["submit", "--help"]);
-    assert_success(&submit_help);
-    let submit_help_stdout = stdout_text(&submit_help);
-    assert!(
-        submit_help_stdout
-            .contains("Poll scheduler state and stream tracked logs after submission")
-    );
-    assert!(
-        submit_help_stdout.contains("Run preflight, prepare, and render without calling sbatch")
-    );
-
-    let preflight_help = run_cli(tmpdir.path(), &["preflight", "--help"]);
-    assert_success(&preflight_help);
-    assert!(stdout_text(&preflight_help).contains("Treat warnings as failures"));
-
-    let list_templates = run_cli(tmpdir.path(), &["init", "--list-templates"]);
-    assert_success(&list_templates);
-    let list_stdout = stdout_text(&list_templates);
-    assert!(list_stdout.contains("minimal-batch"));
-    assert!(list_stdout.contains("multi-node-mpi"));
-    assert!(list_stdout.contains("multi-node-torchrun"));
-
-    let describe_template = run_cli(
-        tmpdir.path(),
-        &["init", "--describe-template", "multi-node-mpi"],
-    );
-    assert_success(&describe_template);
-    let describe_stdout = stdout_text(&describe_template);
-    assert!(describe_stdout.contains("template: multi-node-mpi"));
-    assert!(describe_stdout.contains("allocation-wide"));
-    assert!(describe_stdout.contains("hpc-compose init --template multi-node-mpi"));
-}
-
-#[test]
-fn init_interactive_uses_prompted_values() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let output = tmpdir.path().join("interactive-init.yaml");
-    let init = run_cli_with_stdin(
-        tmpdir.path(),
-        &[
-            "init",
-            "--output",
-            output.to_str().expect("path"),
-            "--force",
-        ],
-        "2\ninteractive-app\n/tmp/interactive-cache\n",
-    );
-    assert_success(&init);
-    let rendered = fs::read_to_string(&output).expect("rendered");
-    assert!(rendered.contains("name: interactive-app"));
-    assert!(rendered.contains("job_name: interactive-app"));
-    assert!(rendered.contains("cache_dir: /tmp/interactive-cache"));
-    let stdout = stdout_text(&init);
-    assert!(stdout.contains("Choose a template:"));
-    assert!(stdout.contains("hpc-compose submit --watch -f"));
-}
-
-#[test]
 fn submit_dry_run_skips_sbatch() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -3337,6 +1848,71 @@ fn clean_command_removes_old_job_directories() {
 }
 
 #[test]
+fn clean_all_preserves_latest_tracked_submission() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+
+    let sbatch_first = tmpdir.path().join("sbatch-first");
+    write_script(
+        &sbatch_first,
+        "#!/bin/bash\nset -euo pipefail\necho \"Submitted batch job 11111\"\n",
+    );
+    let first_submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch_first.to_str().expect("path"),
+        ],
+    );
+    assert_success(&first_submit);
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose/11111/logs")).expect("first job dir");
+
+    let sbatch_second = tmpdir.path().join("sbatch-second");
+    write_script(
+        &sbatch_second,
+        "#!/bin/bash\nset -euo pipefail\necho \"Submitted batch job 22222\"\n",
+    );
+    let second_submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch_second.to_str().expect("path"),
+        ],
+    );
+    assert_success(&second_submit);
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose/22222/logs")).expect("second job dir");
+
+    let clean = run_cli(
+        tmpdir.path(),
+        &["clean", "--all", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&clean);
+    assert!(stdout_text(&clean).contains("removed 1 tracked job(s): 11111"));
+    assert!(!tmpdir.path().join(".hpc-compose/jobs/11111.json").exists());
+    assert!(tmpdir.path().join(".hpc-compose/jobs/22222.json").exists());
+    assert!(!tmpdir.path().join(".hpc-compose/11111").exists());
+    assert!(tmpdir.path().join(".hpc-compose/22222").exists());
+
+    let latest: Value = serde_json::from_str(
+        &fs::read_to_string(tmpdir.path().join(".hpc-compose/latest.json")).expect("latest"),
+    )
+    .expect("latest json");
+    assert_eq!(latest["job_id"], Value::from("22222"));
+}
+
+#[test]
 fn clean_requires_strategy_flag() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = tmpdir.path().join("compose.yaml");
@@ -3352,19 +1928,4 @@ fn clean_requires_strategy_flag() {
         err.contains("--age") || err.contains("--all"),
         "error should mention required flags: {err}"
     );
-}
-
-#[test]
-fn completions_command_generates_output() {
-    let tmpdir = tempfile::tempdir().expect("tmpdir");
-    for shell in ["bash", "zsh", "fish"] {
-        let output = run_cli(tmpdir.path(), &["completions", shell]);
-        assert_success(&output);
-        let out = stdout_text(&output);
-        assert!(
-            out.contains("hpc-compose"),
-            "completions for {shell} should mention hpc-compose"
-        );
-        assert!(out.len() > 100, "completions should be non-trivial");
-    }
 }

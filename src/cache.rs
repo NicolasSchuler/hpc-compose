@@ -50,6 +50,7 @@ pub struct CachePruneResult {
 }
 
 /// Returns the JSON manifest path stored next to an artifact file.
+#[must_use]
 pub fn manifest_path_for(artifact_path: &Path) -> PathBuf {
     let filename = artifact_path
         .file_name()
@@ -59,6 +60,11 @@ pub fn manifest_path_for(artifact_path: &Path) -> PathBuf {
 }
 
 /// Creates or updates the manifest for an imported base image.
+///
+/// # Errors
+///
+/// Returns an error when an existing manifest cannot be read, the updated
+/// manifest cannot be serialized, or the manifest file cannot be written.
 pub fn upsert_base_manifest(
     artifact_path: &Path,
     service_name: &str,
@@ -94,6 +100,11 @@ pub fn upsert_base_manifest(
 }
 
 /// Creates or updates the manifest for a prepared runtime image.
+///
+/// # Errors
+///
+/// Returns an error when an existing manifest cannot be read, the updated
+/// manifest cannot be serialized, or the manifest file cannot be written.
 pub fn upsert_prepared_manifest(
     artifact_path: &Path,
     service_name: &str,
@@ -135,6 +146,11 @@ pub fn upsert_prepared_manifest(
 }
 
 /// Refreshes the `last_used_at` timestamp for an existing manifest.
+///
+/// # Errors
+///
+/// Returns an error when an existing manifest cannot be read or the refreshed
+/// manifest cannot be written back to disk.
 pub fn touch_manifest(artifact_path: &Path) -> Result<()> {
     let Some(mut manifest) = load_manifest_if_exists(artifact_path)? else {
         return Ok(());
@@ -144,6 +160,10 @@ pub fn touch_manifest(artifact_path: &Path) -> Result<()> {
 }
 
 /// Reads the manifest stored next to an artifact path.
+///
+/// # Errors
+///
+/// Returns an error when the manifest file cannot be read or parsed as JSON.
 pub fn read_manifest(artifact_path: &Path) -> Result<CacheEntryManifest> {
     let manifest_path = manifest_path_for(artifact_path);
     let raw = fs::read_to_string(&manifest_path)
@@ -152,6 +172,10 @@ pub fn read_manifest(artifact_path: &Path) -> Result<CacheEntryManifest> {
 }
 
 /// Reads a manifest when it exists and returns `None` when it does not.
+///
+/// # Errors
+///
+/// Returns an error when the manifest exists but cannot be read or parsed.
 pub fn load_manifest_if_exists(artifact_path: &Path) -> Result<Option<CacheEntryManifest>> {
     let manifest_path = manifest_path_for(artifact_path);
     if !manifest_path.exists() {
@@ -161,6 +185,11 @@ pub fn load_manifest_if_exists(artifact_path: &Path) -> Result<Option<CacheEntry
 }
 
 /// Scans a cache directory recursively for tracked artifact manifests.
+///
+/// # Errors
+///
+/// Returns an error when cache directories cannot be traversed or a discovered
+/// manifest cannot be read or parsed.
 pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
     let mut manifests = Vec::new();
     if !cache_dir.exists() {
@@ -205,6 +234,11 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
 }
 
 /// Removes cached artifacts whose last-use time is older than the cutoff.
+///
+/// # Errors
+///
+/// Returns an error when cache manifests cannot be scanned or when a stale
+/// manifest or artifact cannot be removed.
 pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult> {
     let cutoff = unix_timestamp_now().saturating_sub(age_days.saturating_mul(24 * 60 * 60));
     let manifests = scan_cache(cache_dir)?;
@@ -221,6 +255,11 @@ pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult>
 }
 
 /// Removes cached artifacts that are not referenced by the given runtime plan.
+///
+/// # Errors
+///
+/// Returns an error when cache manifests cannot be scanned or when an unused
+/// manifest or artifact cannot be removed.
 pub fn prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePruneResult> {
     let referenced = referenced_artifacts(plan);
     let manifests = scan_cache(cache_dir)?;
@@ -237,6 +276,7 @@ pub fn prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePru
 }
 
 /// Returns the artifact paths referenced by a runtime plan.
+#[must_use]
 pub fn referenced_artifacts(plan: &RuntimePlan) -> HashSet<PathBuf> {
     let mut referenced = HashSet::new();
     for service in &plan.ordered_services {
@@ -249,6 +289,7 @@ pub fn referenced_artifacts(plan: &RuntimePlan) -> HashSet<PathBuf> {
 }
 
 /// Computes the cache key used for one service artifact kind.
+#[must_use]
 pub fn cache_key_for_service(service: &RuntimeService, kind: CacheEntryKind) -> String {
     match kind {
         CacheEntryKind::Base => {
@@ -274,6 +315,7 @@ pub fn cache_key_for_service(service: &RuntimeService, kind: CacheEntryKind) -> 
 }
 
 /// Returns the remote registry hostname associated with an image source.
+#[must_use]
 pub fn parse_remote_registry(source: &ImageSource) -> Option<String> {
     let ImageSource::Remote(remote) = source else {
         return None;

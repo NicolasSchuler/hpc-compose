@@ -15,9 +15,11 @@ Useful local commands:
 ```bash
 cargo test --locked
 cargo test --locked --test cli
+cargo test --locked --test release_metadata
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 mdbook build docs
+cargo run --locked --features manpage-bin --bin gen-manpages -- --check
 ```
 
 ## Expectations for changes
@@ -26,6 +28,7 @@ mdbook build docs
 - Prefer small, coherent changes over broad refactors.
 - Add or update tests when parser, planner, prepare, render, cache, or tracked-job behavior changes.
 - If a user-facing workflow changes, update the relevant docs in `README.md`, `docs/src/`, and `examples/` together.
+- When release-facing docs or CLI help change, regenerate checked-in manpages with `cargo run --features manpage-bin --bin gen-manpages` and keep `tests/release_metadata.rs` passing.
 
 ## Examples
 

@@ -115,6 +115,12 @@ pub struct PreparedImageSpec {
 }
 
 /// Builds a normalized plan from a validated compose spec.
+///
+/// # Errors
+///
+/// Returns an error when the compose file path cannot be normalized, the spec
+/// violates semantic validation rules, or service dependencies and placement
+/// cannot be resolved into one supported Slurm allocation plan.
 pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
     spec.slurm.validate()?;
     let spec_path = normalize_existing_path(spec_path)?;
@@ -540,6 +546,7 @@ fn resolve_cache_dir(slurm: &SlurmConfig, project_dir: &Path) -> Result<PathBuf>
 }
 
 /// Returns a user-facing issue for cache paths that violate cluster policy.
+#[must_use]
 pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
     let banned_prefixes = [
         Path::new("/tmp"),
@@ -560,6 +567,7 @@ pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
 }
 
 /// Extracts the registry hostname used by a remote image reference.
+#[must_use]
 pub fn registry_host_for_remote(remote: &str) -> String {
     let without_scheme = remote.split("://").nth(1).unwrap_or(remote);
     if let Some((host, _)) = without_scheme.split_once('#') {

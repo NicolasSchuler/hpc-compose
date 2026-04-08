@@ -61,25 +61,6 @@ hpc-compose submit --watch -f compose.yaml
 
 `submit --watch` is the normal run. Use `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are adapting a new spec or isolating a failure.
 
-## Restart policy example
-
-When you want per-service retries on transient non-zero exits, use `services.<name>.x-slurm.failure_policy` instead of Compose `restart:`.
-
-```yaml
-services:
-  worker:
-    image: python:3.11-slim
-    x-slurm:
-      failure_policy:
-        mode: restart_on_failure
-        max_restarts: 5
-        backoff_seconds: 5
-        window_seconds: 60
-        max_restarts_in_window: 3
-```
-
-`restart_on_failure` only reacts to non-zero process exits. It enforces both a lifetime cap (`max_restarts`) and a rolling-window cap (`max_restarts_in_window` within `window_seconds`) during one live batch-script execution. `hpc-compose status -f compose.yaml` reports the current restart budget as `window=<current>/<max>@<seconds>s`. See the runnable [`examples/restart-policy.yaml`](examples/restart-policy.yaml), the [Spec Reference](docs/src/spec-reference.md), and the [Runbook](docs/src/runbook.md) for details.
-
 ## Documentation
 
 - Published docs: [nicolasschuler.github.io/hpc-compose](https://nicolasschuler.github.io/hpc-compose/)
@@ -94,6 +75,8 @@ services:
 - Supported Slurm model: [docs/src/supported-slurm-model.md](docs/src/supported-slurm-model.md)
 - Docker Compose migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
 - Contributor architecture notes: [docs/src/architecture.md](docs/src/architecture.md)
+
+Longer workflow guidance lives in the mdBook. Keep this README as the shortest project overview and use the docs site for task-specific guidance, examples, and spec details.
 
 ## Project policies
 
@@ -110,7 +93,7 @@ If you use `hpc-compose` in research, please cite the software. GitHub also expo
 @software{schuler_hpc_compose_2026,
   author = {Schuler, Nicolas},
   title = {hpc-compose},
-  version = {0.1.17},
+  version = {0.1.20},
   year = {2026},
   publisher = {Karlsruhe Institute of Technology (KIT)},
   url = {https://github.com/NicolasSchuler/hpc-compose}

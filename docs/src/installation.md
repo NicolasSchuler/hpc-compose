@@ -70,6 +70,7 @@ The repository keeps generated manpages under `man/man1`. Regenerate them from a
 
 ```bash
 cargo run --features manpage-bin --bin gen-manpages
+cargo test --locked --test release_metadata
 man -l man/man1/hpc-compose.1
 ```
 

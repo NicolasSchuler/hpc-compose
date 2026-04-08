@@ -389,6 +389,7 @@ where
 }
 
 /// Returns the cache location used for a service's imported base image.
+#[must_use]
 pub fn base_image_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf {
     let key = base_image_cache_key(service);
     cache_dir.join("base").join(format!(
@@ -558,6 +559,11 @@ fn enroot_env(cache_dir: &Path) -> Vec<(String, String)> {
 }
 
 /// Verifies that an external binary is available on the current machine.
+///
+/// # Errors
+///
+/// Returns an error when the provided binary path does not exist or the named
+/// binary cannot be found on the current `PATH`.
 pub fn ensure_binary_available(binary: &str, message: &str) -> Result<()> {
     if binary.contains(std::path::MAIN_SEPARATOR) {
         let path = Path::new(binary);

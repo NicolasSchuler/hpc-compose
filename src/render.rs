@@ -9,6 +9,7 @@ use crate::prepare::{RuntimePlan, RuntimeService};
 use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec, ServiceFailureMode,
 };
+use crate::tracked_paths;
 
 /// Renders the complete `sbatch` script for a runtime plan.
 pub fn render_script(plan: &RuntimePlan) -> Result<String> {
@@ -96,7 +97,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         out.push_str(&format!("#SBATCH {arg}\n"));
     }
     out.push_str("\nset -euo pipefail\n\n");
-    out.push_str("JOB_ROOT=\"${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}\"\n");
+    out.push_str(&format!(
+        "JOB_ROOT=\"${{SLURM_SUBMIT_DIR:-$PWD}}/{}/${{SLURM_JOB_ID}}\"\n",
+        tracked_paths::METADATA_DIR_NAME
+    ));
     out.push_str(&format!("RESUME_ENABLED={}\n", flag(resume_enabled)));
     out.push_str(&format!(
         "RESUME_HOST_PATH={}\n",
@@ -110,9 +114,18 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("ATTEMPT=\"${SLURM_RESTART_COUNT:-0}\"\n");
     out.push_str("IS_RESUME=0\n");
     out.push_str("if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
-    out.push_str("  JOB_TMP=\"$JOB_ROOT/attempts/$ATTEMPT\"\n");
-    out.push_str("  RESUME_META_DIR=\"$RESUME_HOST_PATH/_hpc-compose\"\n");
-    out.push_str("  RESUME_META_FILE=\"$RESUME_META_DIR/latest.json\"\n");
+    out.push_str(&format!(
+        "  JOB_TMP=\"$JOB_ROOT/{}/$ATTEMPT\"\n",
+        tracked_paths::ATTEMPTS_DIR_NAME
+    ));
+    out.push_str(&format!(
+        "  RESUME_META_DIR=\"$RESUME_HOST_PATH/{}\"\n",
+        tracked_paths::RESUME_METADATA_DIR_NAME
+    ));
+    out.push_str(&format!(
+        "  RESUME_META_FILE=\"$RESUME_META_DIR/{}\"\n",
+        tracked_paths::LATEST_RECORD_FILE_NAME
+    ));
     out.push_str("  mkdir -p \"$RESUME_HOST_PATH\" \"$RESUME_META_DIR\"\n");
     out.push_str("  if (( ATTEMPT > 0 )) || [[ -f \"$RESUME_META_FILE\" ]]; then\n");
     out.push_str("    IS_RESUME=1\n");
@@ -122,18 +135,45 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  RESUME_META_DIR=\"\"\n");
     out.push_str("  RESUME_META_FILE=\"\"\n");
     out.push_str("fi\n");
-    out.push_str("ALLOCATION_DIR=\"$JOB_TMP/allocation\"\n");
-    out.push_str("PRIMARY_NODE_FILE=\"$ALLOCATION_DIR/primary_node\"\n");
-    out.push_str("NODELIST_FILE=\"$ALLOCATION_DIR/nodes.txt\"\n");
-    out.push_str("LOG_DIR=\"$JOB_TMP/logs\"\n");
-    out.push_str("STATE_FILE=\"$JOB_TMP/state.json\"\n");
+    out.push_str(&format!(
+        "ALLOCATION_DIR=\"$JOB_TMP/{}\"\n",
+        tracked_paths::ALLOCATION_DIR_NAME
+    ));
+    out.push_str(&format!(
+        "PRIMARY_NODE_FILE=\"$ALLOCATION_DIR/{}\"\n",
+        tracked_paths::PRIMARY_NODE_FILE_NAME
+    ));
+    out.push_str(&format!(
+        "NODELIST_FILE=\"$ALLOCATION_DIR/{}\"\n",
+        tracked_paths::NODELIST_FILE_NAME
+    ));
+    out.push_str(&format!(
+        "LOG_DIR=\"$JOB_TMP/{}\"\n",
+        tracked_paths::LOGS_DIR_NAME
+    ));
+    out.push_str(&format!(
+        "STATE_FILE=\"$JOB_TMP/{}\"\n",
+        tracked_paths::STATE_FILE_NAME
+    ));
     if artifacts_enabled {
-        out.push_str("ARTIFACTS_DIR=\"$JOB_TMP/artifacts\"\n");
-        out.push_str("ARTIFACTS_PAYLOAD_DIR=\"$ARTIFACTS_DIR/payload\"\n");
-        out.push_str("ARTIFACTS_MANIFEST_FILE=\"$ARTIFACTS_DIR/manifest.json\"\n");
+        out.push_str(&format!(
+            "ARTIFACTS_DIR=\"$JOB_TMP/{}\"\n",
+            tracked_paths::ARTIFACTS_DIR_NAME
+        ));
+        out.push_str(&format!(
+            "ARTIFACTS_PAYLOAD_DIR=\"$ARTIFACTS_DIR/{}\"\n",
+            tracked_paths::ARTIFACT_PAYLOAD_DIR_NAME
+        ));
+        out.push_str(&format!(
+            "ARTIFACTS_MANIFEST_FILE=\"$ARTIFACTS_DIR/{}\"\n",
+            tracked_paths::ARTIFACT_MANIFEST_FILE_NAME
+        ));
     }
     if metrics_enabled {
-        out.push_str("METRICS_DIR=\"$JOB_TMP/metrics\"\n");
+        out.push_str(&format!(
+            "METRICS_DIR=\"$JOB_TMP/{}\"\n",
+            tracked_paths::METRICS_DIR_NAME
+        ));
         out.push_str("METRICS_META_FILE=\"$METRICS_DIR/meta.json\"\n");
         out.push_str("GPU_METRICS_FILE=\"$METRICS_DIR/gpu.jsonl\"\n");
         out.push_str("GPU_PROCESSES_FILE=\"$METRICS_DIR/gpu_processes.jsonl\"\n");

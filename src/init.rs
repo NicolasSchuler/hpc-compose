@@ -8,11 +8,13 @@ use anyhow::{Context, Result, bail};
 use serde_yaml::{Mapping, Value};
 
 /// A shipped compose template exposed by `hpc-compose init`.
-#[allow(missing_docs)]
 #[derive(Debug)]
 pub struct Template {
+    /// Stable template identifier used on the CLI.
     pub name: &'static str,
+    /// Short contributor-facing description shown in discovery output.
     pub description: &'static str,
+    /// Raw YAML template body bundled into the binary.
     pub body: &'static str,
 }
 
@@ -108,24 +110,32 @@ const TEMPLATES: &[Template] = &[
 
 #[derive(Debug, Clone)]
 /// Answers gathered by the interactive `init` flow.
-#[allow(missing_docs)]
 pub struct InitAnswers {
+    /// Selected template identifier.
     pub template_name: String,
+    /// Application name inserted into the rendered template.
     pub app_name: String,
+    /// Cache directory inserted into `x-slurm.cache_dir`.
     pub cache_dir: String,
 }
 
 /// Returns the built-in compose templates bundled with the binary.
+#[must_use]
 pub fn templates() -> &'static [Template] {
     TEMPLATES
 }
 
 /// Returns the default shared cache directory suggested by `init`.
+#[must_use]
 pub fn default_cache_dir() -> &'static str {
     DEFAULT_CACHE_DIR
 }
 
 /// Resolves a template by name, accepting names with or without `.yaml`.
+///
+/// # Errors
+///
+/// Returns an error when the requested template does not exist.
 pub fn resolve_template(name: &str) -> Result<&'static Template> {
     let normalized = name.trim().trim_end_matches(".yaml");
     TEMPLATES
@@ -143,6 +153,11 @@ pub fn resolve_template(name: &str) -> Result<&'static Template> {
 }
 
 /// Prompts on stdin/stdout for template, app name, and cache directory.
+///
+/// # Errors
+///
+/// Returns an error when stdin/stdout interaction fails or the selected
+/// template number is out of range.
 pub fn prompt_for_init() -> Result<InitAnswers> {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout();
@@ -186,6 +201,22 @@ fn prompt_for_init_with_io(
 }
 
 /// Renders a shipped template with the selected application name and cache directory.
+///
+/// ```rust
+/// let rendered = hpc_compose::init::render_template(
+///     "minimal-batch",
+///     "demo-app",
+///     "/shared/$USER/hpc-compose-cache",
+/// )?;
+/// assert!(rendered.contains("name: demo-app"));
+/// assert!(rendered.contains("cache_dir: /shared/$USER/hpc-compose-cache"));
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns an error when the template name is unknown or the bundled template
+/// cannot be parsed and rewritten as YAML.
 pub fn render_template(template_name: &str, app_name: &str, cache_dir: &str) -> Result<String> {
     let template = resolve_template(template_name)?;
     render_template_body(template.body, template.name, app_name, cache_dir)
@@ -228,6 +259,12 @@ fn render_template_body(
 }
 
 /// Writes a rendered template to disk and returns the absolute output path.
+///
+/// # Errors
+///
+/// Returns an error when the destination already exists without `force`, when
+/// the parent directory cannot be created, or when the rendered template
+/// cannot be written.
 pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) -> Result<PathBuf> {
     let output = absolute_path(output)?;
     if output.exists() && !force {
@@ -244,6 +281,7 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
 }
 
 /// Returns the next CLI commands shown after `init` writes a compose file.
+#[must_use]
 pub fn next_commands(output: &Path) -> Vec<String> {
     let path = output.display().to_string();
     vec![

@@ -442,6 +442,11 @@ fn default_http_status_code() -> u16 {
 
 impl ComposeSpec {
     /// Loads, interpolates, and validates a compose file from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, the YAML cannot be
+    /// parsed, interpolation fails, or semantic validation rejects the spec.
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .context(format!("failed to read spec at {}", path.display()))?;
@@ -477,6 +482,10 @@ impl ComposeSpec {
 
 impl DependsOnSpec {
     /// Normalizes the dependency declaration into explicit dependency edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a dependency condition uses an unsupported value.
     pub fn entries(&self) -> Result<Vec<ServiceDependency>> {
         match self {
             DependsOnSpec::None => Ok(Vec::new()),
@@ -513,6 +522,11 @@ impl DependsOnSpec {
     }
 
     /// Returns only the dependency names, discarding their conditions.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`DependsOnSpec::entries`] when the dependency
+    /// declaration uses unsupported conditions.
     pub fn names(&self) -> Result<Vec<String>> {
         let entries = self.entries()?;
         Ok(entries.into_iter().map(|entry| entry.name).collect())
@@ -521,6 +535,11 @@ impl DependsOnSpec {
 
 impl EnvironmentSpec {
     /// Normalizes the environment declaration into key/value pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when list-form environment entries do not use
+    /// `KEY=VALUE` syntax.
     pub fn to_pairs(&self) -> Result<Vec<(String, String)>> {
         match self {
             EnvironmentSpec::None => Ok(Vec::new()),
@@ -565,11 +584,13 @@ impl EnvironmentSpec {
 
 impl CommandSpec {
     /// Returns `true` when this command uses shell-string form.
+    #[must_use]
     pub fn is_string(&self) -> bool {
         matches!(self, CommandSpec::String(_))
     }
 
     /// Returns the shell-form string when this command uses string form.
+    #[must_use]
     pub fn as_string(&self) -> Option<&str> {
         match self {
             CommandSpec::String(value) => Some(value),
@@ -578,6 +599,7 @@ impl CommandSpec {
     }
 
     /// Returns the exec-form argv when this command uses vector form.
+    #[must_use]
     pub fn as_vec(&self) -> Option<&[String]> {
         match self {
             CommandSpec::String(_) => None,
@@ -604,16 +626,19 @@ fn default_true() -> bool {
 
 impl SlurmConfig {
     /// Returns the effective Slurm allocation node count.
+    #[must_use]
     pub fn allocation_nodes(&self) -> u32 {
         self.nodes.unwrap_or(1)
     }
 
     /// Returns whether the allocation spans multiple nodes.
+    #[must_use]
     pub fn is_multi_node(&self) -> bool {
         self.allocation_nodes() > 1
     }
 
     /// Returns whether runtime metrics sampling is enabled.
+    #[must_use]
     pub fn metrics_enabled(&self) -> bool {
         self.metrics
             .as_ref()
@@ -621,6 +646,7 @@ impl SlurmConfig {
     }
 
     /// Returns the runtime metrics sampling interval in seconds.
+    #[must_use]
     pub fn metrics_interval_seconds(&self) -> u64 {
         self.metrics
             .as_ref()
@@ -629,6 +655,7 @@ impl SlurmConfig {
     }
 
     /// Returns the configured runtime metrics collectors with defaults applied.
+    #[must_use]
     pub fn metrics_collectors(&self) -> Vec<MetricsCollector> {
         let Some(metrics) = &self.metrics else {
             return Vec::new();
@@ -641,11 +668,13 @@ impl SlurmConfig {
     }
 
     /// Returns whether teardown artifact collection is enabled.
+    #[must_use]
     pub fn artifacts_enabled(&self) -> bool {
         self.artifacts.is_some()
     }
 
     /// Returns the configured artifact collection policy or the default.
+    #[must_use]
     pub fn artifacts_collect_policy(&self) -> ArtifactCollectPolicy {
         self.artifacts
             .as_ref()
@@ -654,11 +683,17 @@ impl SlurmConfig {
     }
 
     /// Returns the configured shared resume directory when resume semantics are enabled.
+    #[must_use]
     pub fn resume_dir(&self) -> Option<&str> {
         self.resume.as_ref().map(|resume| resume.path.as_str())
     }
 
     /// Validates semantic rules that serde alone cannot express.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when allocation, metrics, artifact, or resume settings
+    /// violate `hpc-compose`'s supported Slurm model.
     pub fn validate(&self) -> Result<()> {
         validate_positive_u32(self.nodes, "x-slurm.nodes")?;
         validate_positive_u32(self.ntasks, "x-slurm.ntasks")?;
@@ -727,6 +762,7 @@ impl SlurmConfig {
 
 impl ArtifactsConfig {
     /// Returns artifact bundles with the legacy top-level `paths` exposed as `default`.
+    #[must_use]
     pub fn normalized_bundles(&self) -> BTreeMap<String, Vec<String>> {
         let mut bundles = self
             .bundles
@@ -824,6 +860,10 @@ impl ServiceSpec {
 
 impl ServiceSlurmConfig {
     /// Validates semantic rules on service-level Slurm options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when service-level node or task counts are invalid.
     pub fn validate(&self, service_name: &str) -> Result<()> {
         validate_positive_u32(
             self.nodes,
@@ -841,6 +881,11 @@ impl ServiceSlurmConfig {
     }
 
     /// Returns the validated per-service failure policy with defaults resolved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when failure-policy fields are used with an
+    /// incompatible mode or contain invalid values.
     pub fn normalized_failure_policy(&self, service_name: &str) -> Result<ServiceFailurePolicy> {
         const DEFAULT_MAX_RESTARTS: u32 = 3;
         const DEFAULT_BACKOFF_SECONDS: u64 = 5;

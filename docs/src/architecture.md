@@ -1,6 +1,6 @@
 # Architecture for Contributors
 
-The CLI is intentionally thin. Most behavior lives in the library crate so the binary, integration tests, and generated rustdoc all describe the same pipeline.
+The library crate still owns the core staged pipeline, but the runtime binary is no longer a single “thin CLI” file. The binary is split into command-family modules under `src/commands/` plus `src/output.rs`, while the library keeps the reusable plan, prepare, render, tracking, cache, and template logic.
 
 ## Module map
 
@@ -10,8 +10,14 @@ The CLI is intentionally thin. Most behavior lives in the library crate so the b
 - `prepare`: import base images and rebuild prepared runtime artifacts
 - `render`: generate the final `sbatch` script and service launch commands
 - `job`: track submissions, logs, metrics, status, and artifact export
+- `tracked_paths`: centralize the `.hpc-compose/` layout used by render and job tracking
 - `cache`: persist cache manifests for imported and prepared images
 - `init`: expose the shipped example templates for `hpc-compose init`
+- `commands/spec`: binary-only handlers for `validate`, `render`, `prepare`, `preflight`, and `inspect`
+- `commands/runtime`: binary-only handlers for `submit`, `status`, `stats`, `artifacts`, `logs`, `cancel`, and `clean`
+- `commands/cache`: binary-only handlers for cache inspection and pruning
+- `commands/init`: binary-only handlers for `init` and `completions`
+- `output`: binary-only text, JSON, CSV, and JSONL formatting helpers
 
 ## Execution flow
 
@@ -22,14 +28,27 @@ The CLI is intentionally thin. Most behavior lives in the library crate so the b
 5. `prepare::prepare_runtime_plan` imports or rebuilds artifacts when needed.
 6. `render::render_script` emits the batch script consumed by `sbatch`.
 7. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `stats`, `logs`, `cancel`, and artifact export.
+8. `commands/*` turns CLI variants into library calls, and `output` formats the final presentation.
+
+## Tracked Runtime Layout
+
+`tracked_paths` is the single source of truth for the tracked-job layout shared by `render` and `job`.
+
+- Compose-level metadata lives under `.hpc-compose/` next to the compose file.
+- Per-job runtime state lives under `${SLURM_SUBMIT_DIR}/.hpc-compose/<job-id>/`.
+- Root-level `logs/`, `metrics/`, `artifacts/`, and `state.json` are the latest-view paths used by status and export commands.
+- Resume-aware runs still write attempt-specific state under `attempts/<attempt>/...`.
+- The batch script updates root-level latest symlinks so contributor-facing tooling can read the most recent attempt without reconstructing shell logic independently.
 
 ## Contributor commands
 
 ```bash
 cargo test
-cargo test --test cli
+cargo test --test cli_runtime
+cargo test --test release_metadata
 cargo doc --no-deps
 mdbook build docs
+cargo run --features manpage-bin --bin gen-manpages -- --check
 ```
 
 ## Documentation split
