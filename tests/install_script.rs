@@ -95,7 +95,7 @@ fn sha256_hex(path: &Path) -> String {
         fs::read(path).unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn write_checksum_file(dist_dir: &Path, asset: &str, include_dist_prefix: bool) {
