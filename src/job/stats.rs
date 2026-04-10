@@ -535,3 +535,132 @@ fn is_numbered_step(job_id: &str, step_id: &str) -> bool {
     };
     !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sampler_helpers_cover_latest_rows_and_missing_files() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let missing = load_sampler_snapshot(&tmpdir.path().join("missing"));
+        assert!(missing.sampler.is_none());
+        assert!(missing.notes.is_empty());
+
+        let metrics_dir = tmpdir.path().join("metrics");
+        fs::create_dir_all(&metrics_dir).expect("metrics dir");
+        fs::write(
+            metrics_dir.join("meta.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "interval_seconds": 5,
+                "collectors": [
+                    {"name": "gpu", "enabled": true, "available": true, "note": "nvidia-smi", "last_sampled_at": "2026-04-10T10:00:00Z"},
+                    {"name": "slurm", "enabled": true, "available": true, "note": null, "last_sampled_at": "2026-04-10T10:00:00Z"}
+                ]
+            }))
+            .expect("meta json"),
+        )
+        .expect("write meta");
+        fs::write(
+            metrics_dir.join("gpu.jsonl"),
+            concat!(
+                "\n",
+                "{\"sampled_at\":\"2026-04-10T09:59:00Z\",\"index\":\"0\",\"uuid\":\"gpu-old\",\"name\":\"A100\",\"utilization_gpu\":\"10\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"index\":\"0\",\"uuid\":\"gpu-new-0\",\"name\":\"A100\",\"utilization_gpu\":\"80\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"index\":\"1\",\"uuid\":\"gpu-new-1\",\"name\":\"A100\",\"utilization_gpu\":\"75\"}\n"
+            ),
+        )
+        .expect("write gpu");
+        fs::write(
+            metrics_dir.join("gpu_processes.jsonl"),
+            concat!(
+                "{\"sampled_at\":\"2026-04-10T09:59:00Z\",\"gpu_uuid\":\"gpu-old\",\"pid\":\"1\",\"process_name\":\"old\",\"used_memory_mib\":\"64\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"gpu_uuid\":\"gpu-new-0\",\"pid\":\"42\",\"process_name\":\"python\",\"used_memory_mib\":\"512\"}\n"
+            ),
+        )
+        .expect("write gpu processes");
+        fs::write(
+            metrics_dir.join("slurm.jsonl"),
+            concat!(
+                "\n",
+                "{\"sampled_at\":\"2026-04-10T09:59:00Z\",\"step_id\":\"123.0\",\"ntasks\":\"1\",\"ave_cpu\":\"00:00:01\",\"alloc_tres\":\"cpu=1\",\"tres_usage_in_ave\":\"cpu=00:00:01\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"step_id\":\"123.0\",\"ntasks\":\"1\",\"ave_cpu\":\"00:00:02\",\"alloc_tres\":\"cpu=1,gres/gpu:tesla=2\",\"tres_usage_in_ave\":\"cpu=00:00:02,gres/gpuutil:tesla=80\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"step_id\":\"123.1\",\"ntasks\":\"2\",\"ave_cpu\":\"00:00:03\",\"alloc_tres\":\"cpu=2\",\"tres_usage_in_ave\":\"cpu=00:00:03\"}\n"
+            ),
+        )
+        .expect("write slurm");
+
+        let loaded = load_sampler_snapshot(&metrics_dir);
+        let sampler = loaded.sampler.expect("sampler");
+        assert_eq!(sampler.interval_seconds, 5);
+        assert!(loaded.notes.iter().any(|note| note.contains("nvidia-smi")));
+        let gpu = sampler.gpu.expect("gpu snapshot");
+        assert_eq!(gpu.sampled_at, "2026-04-10T10:00:00Z");
+        assert_eq!(gpu.gpus.len(), 2);
+        assert_eq!(gpu.processes.len(), 1);
+        let slurm = sampler.slurm.expect("slurm snapshot");
+        assert_eq!(slurm.sampled_at, "2026-04-10T10:00:00Z");
+        assert_eq!(slurm.steps.len(), 2);
+    }
+
+    #[test]
+    fn stats_parser_helpers_cover_error_and_prefix_paths() {
+        let mut tres = BTreeMap::new();
+        tres.insert("gres/gpu:tesla".to_string(), "2".to_string());
+        assert_eq!(find_tres_value(&tres, "gres/gpu").as_deref(), Some("2"));
+        assert!(!is_numbered_step("123", "123.batch"));
+        assert!(is_numbered_step("123", "123.0"));
+
+        let parsed = parse_tres_map(" , cpu=1 ,, gres/gpumem:tesla=8192M ").expect("tres");
+        assert_eq!(parsed.get("cpu").map(String::as_str), Some("1"));
+        assert!(
+            parse_tres_map("broken-entry")
+                .expect_err("invalid tres")
+                .to_string()
+                .contains("invalid TRES entry")
+        );
+
+        let row = SlurmSampleRow {
+            sampled_at: "2026-04-10T10:00:00Z".into(),
+            step_id: Some("123.0".into()),
+            ntasks: None,
+            ave_cpu: None,
+            ave_rss: None,
+            max_rss: None,
+            alloc_tres: Some("gres/gpu:tesla=2".into()),
+            tres_usage_in_ave: Some("gres/gpumem:tesla=8192M".into()),
+        };
+        let step = step_from_slurm_sample_row(row).expect("step");
+        assert_eq!(step.gpu_count.as_deref(), Some("2"));
+        assert_eq!(step.gpu_mem.as_deref(), Some("8192M"));
+        assert!(
+            step_from_slurm_sample_row(SlurmSampleRow {
+                sampled_at: "2026-04-10T10:00:00Z".into(),
+                step_id: None,
+                ntasks: None,
+                ave_cpu: None,
+                ave_rss: None,
+                max_rss: None,
+                alloc_tres: None,
+                tres_usage_in_ave: None,
+            })
+            .expect_err("missing step id")
+            .to_string()
+            .contains("missing required field 'step_id'")
+        );
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let sstat_fail = tmpdir.path().join("fake-sstat.sh");
+        fs::write(&sstat_fail, "#!/bin/sh\nexit 1\n").expect("script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&sstat_fail).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&sstat_fail, perms).expect("chmod");
+        }
+        let sstat_err = probe_step_stats("123", sstat_fail.to_string_lossy().as_ref())
+            .expect_err("sstat failure");
+        assert!(sstat_err.to_string().contains("sstat failed for job 123"));
+    }
+}

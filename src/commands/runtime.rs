@@ -55,9 +55,19 @@ fn generate_local_job_id() -> String {
 }
 
 fn ensure_local_submit_supported(plan: &RuntimePlan) -> Result<()> {
-    if env::consts::OS != "linux" {
+    ensure_local_host_supported()?;
+    ensure_local_plan_supported(plan)
+}
+
+fn ensure_local_host_supported() -> Result<()> {
+    if env::consts::OS == "linux" {
+        Ok(())
+    } else {
         bail!("--local is only supported on Linux hosts");
     }
+}
+
+fn ensure_local_plan_supported(plan: &RuntimePlan) -> Result<()> {
     for service in &plan.ordered_services {
         if service.placement.mode == ServicePlacementMode::Distributed {
             bail!(
@@ -216,14 +226,14 @@ fn kill_pid(pid: u32) -> Result<()> {
 }
 
 fn rollback_local_tracking(record: &SubmissionRecord, supervisor_pid: Option<u32>) {
-    if let Some(pid) = supervisor_pid {
-        if let Err(err) = kill_pid(pid) {
-            let _ = writeln!(
-                io::stderr(),
-                "warning: failed to stop local supervisor {} during rollback: {err}",
-                pid
-            );
-        }
+    if let Some(pid) = supervisor_pid
+        && let Err(err) = kill_pid(pid)
+    {
+        let _ = writeln!(
+            io::stderr(),
+            "warning: failed to stop local supervisor {} during rollback: {err}",
+            pid
+        );
     }
     if let Err(err) = remove_submission_record(record) {
         let _ = writeln!(
@@ -750,7 +760,7 @@ pub(crate) fn cancel(
         .is_some_and(|record| record.backend == SubmissionBackend::Local)
     {
         let record = record.as_ref().expect("checked above");
-        let cancelled = if let Some(pid) = read_local_supervisor_pid(&record)? {
+        let cancelled = if let Some(pid) = read_local_supervisor_pid(record)? {
             kill_pid(pid)
                 .with_context(|| format!("failed to cancel local job {resolved_job_id}"))?;
             true
@@ -867,6 +877,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::thread;
+    use std::time::Duration;
 
     use super::*;
     use hpc_compose::context::{ResolvedBinaries, ResolvedValue, ValueSource};
@@ -897,6 +909,23 @@ mod tests {
             ),
         )
         .expect("write local compose");
+        compose
+    }
+
+    fn write_local_compose_with_services(root: &Path) -> PathBuf {
+        let local_image = root.join("local-rich.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        let compose = root.join("compose-local-rich.yaml");
+        fs::write(
+            &compose,
+            format!(
+                "name: demo\nservices:\n  api:\n    image: {}\n    command: /bin/true\n    readiness:\n      type: log\n      pattern: ready\n      timeout_seconds: 5\n  worker:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n",
+                local_image.display(),
+                local_image.display(),
+                root.join("cache-rich").display()
+            ),
+        )
+        .expect("write rich local compose");
         compose
     }
 
@@ -951,6 +980,19 @@ mod tests {
             None,
         )
         .expect("submit dry run");
+        submit(
+            context_for(&local_compose, tmpdir.path()),
+            Some(tmpdir.path().join("job.json.sbatch")),
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            true,
+            Some(OutputFormat::Json),
+        )
+        .expect("submit dry run json");
 
         let status_err = status(
             context.clone(),
@@ -1001,6 +1043,448 @@ mod tests {
         clean(
             context,
             Some(7),
+            false,
+            true,
+            true,
+            Some(OutputFormat::Json),
+        )
+        .expect("clean");
+
+        let sbatch_path = tmpdir.path().join("fake-sbatch.sh");
+        fs::write(
+            &sbatch_path,
+            "#!/bin/sh\nprintf 'submit boom\\n' >&2\nexit 1\n",
+        )
+        .expect("fake sbatch");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&sbatch_path).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&sbatch_path, perms).expect("chmod");
+        }
+        let mut sbatch_context = context_for(&compose, tmpdir.path());
+        sbatch_context.binaries.sbatch.value = sbatch_path.to_string_lossy().to_string();
+        let submit_err = submit(
+            sbatch_context,
+            Some(tmpdir.path().join("submit-fail.sbatch")),
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            None,
+        )
+        .expect_err("sbatch failure");
+        assert!(
+            submit_err
+                .to_string()
+                .contains("sbatch failed: submit boom")
+        );
+    }
+
+    #[test]
+    fn local_helper_functions_cover_labels_ids_and_stub_state_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_local_compose_with_services(tmpdir.path());
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let script_path = tmpdir.path().join("job.local.sh");
+        let record = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-test-123",
+            SubmissionBackend::Local,
+        )
+        .expect("record");
+
+        assert!(generate_local_job_id().starts_with("local-"));
+        assert_eq!(
+            local_failure_policy_mode_label(ServiceFailureMode::FailJob),
+            "fail_job"
+        );
+        assert_eq!(
+            local_failure_policy_mode_label(ServiceFailureMode::Ignore),
+            "ignore"
+        );
+        assert_eq!(
+            local_failure_policy_mode_label(ServiceFailureMode::RestartOnFailure),
+            "restart_on_failure"
+        );
+        assert_eq!(
+            local_placement_mode_label(ServicePlacementMode::PrimaryNode),
+            "primary_node"
+        );
+        assert_eq!(
+            local_placement_mode_label(ServicePlacementMode::Distributed),
+            "distributed"
+        );
+        assert_eq!(local_service_step_name("api"), "hpc-compose:api");
+        assert_eq!(
+            local_service_step_name("api.worker-1"),
+            "hpc-compose:api_x2e_worker_x2d_1"
+        );
+
+        write_local_runtime_state_stub(&record, &runtime_plan, 777).expect("state stub");
+        let state_path = state_path_for_record(&record);
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
+                .expect("parse state");
+        assert_eq!(state["backend"], serde_json::Value::from("local"));
+        assert_eq!(state["supervisor_pid"], serde_json::Value::from(777));
+        assert_eq!(state["services"].as_array().map(Vec::len), Some(2));
+        assert_eq!(state["services"][0]["service_name"], "api");
+        assert_eq!(state["services"][0]["readiness_configured"], true);
+        assert_eq!(state["services"][1]["service_name"], "worker");
+
+        assert_eq!(
+            read_local_supervisor_pid(&record).expect("supervisor pid"),
+            Some(777)
+        );
+
+        fs::write(&state_path, "{\"supervisor_pid\":9}").expect("overwrite state");
+        write_local_runtime_state_stub(&record, &runtime_plan, 888).expect("existing state");
+        let preserved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).expect("read preserved"))
+                .expect("parse preserved");
+        assert_eq!(preserved["supervisor_pid"], serde_json::Value::from(9));
+    }
+
+    #[test]
+    fn process_helpers_cover_spawn_kill_and_pid_reader_edges() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_local_compose(tmpdir.path());
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let script_path = tmpdir.path().join("job.local.sh");
+        let record = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-test-456",
+            SubmissionBackend::Local,
+        )
+        .expect("record");
+
+        assert_eq!(
+            read_local_supervisor_pid(&record).expect("missing state pid"),
+            None
+        );
+
+        let state_path = state_path_for_record(&record);
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("state dir");
+        }
+        fs::write(&state_path, "{not-json").expect("bad state");
+        let parse_err = read_local_supervisor_pid(&record).expect_err("malformed state");
+        assert!(parse_err.to_string().contains("failed to parse"));
+
+        fs::write(&script_path, "#!/bin/bash\ntrap 'exit 0' TERM\nsleep 30\n").expect("script");
+        let batch_log = tmpdir.path().join("batch.log");
+        let pid =
+            spawn_local_supervisor(tmpdir.path(), &script_path, &batch_log).expect("spawn local");
+        assert!(batch_log.exists());
+
+        kill_pid(pid).expect("kill child");
+        thread::sleep(Duration::from_millis(200));
+
+        let kill_err = kill_pid(u32::MAX).expect_err("unknown pid");
+        assert!(kill_err.to_string().contains("failed to signal pid"));
+    }
+
+    #[test]
+    fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_local_compose(tmpdir.path());
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+
+        warn_local_ignored_scheduler_settings(&runtime_plan);
+
+        let distributed = tmpdir.path().join("distributed.yaml");
+        let local_image = tmpdir.path().join("distributed.sqsh");
+        fs::write(&local_image, "sqsh").expect("distributed image");
+        fs::write(
+            &distributed,
+            format!(
+                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\n    x-slurm:\n      nodes: 2\nx-slurm:\n  cache_dir: {}\n  nodes: 2\n",
+                local_image.display(),
+                tmpdir.path().join("cache-distributed").display()
+            ),
+        )
+        .expect("distributed compose");
+        let distributed_plan = output::load_runtime_plan(&distributed).expect("distributed plan");
+        let distributed_err =
+            ensure_local_plan_supported(&distributed_plan).expect_err("distributed unsupported");
+        assert!(
+            distributed_err
+                .to_string()
+                .contains("does not support distributed placement")
+        );
+
+        let extra_args = tmpdir.path().join("extra-args.yaml");
+        fs::write(
+            &extra_args,
+            format!(
+                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\n    x-slurm:\n      extra_srun_args:\n        - --exclusive\nx-slurm:\n  cache_dir: {}\n",
+                local_image.display(),
+                tmpdir.path().join("cache-extra").display()
+            ),
+        )
+        .expect("extra args compose");
+        let extra_args_plan = output::load_runtime_plan(&extra_args).expect("extra args plan");
+        let extra_args_err =
+            ensure_local_plan_supported(&extra_args_plan).expect_err("extra args unsupported");
+        assert!(extra_args_err.to_string().contains("extra_srun_args"));
+
+        let multi_node = tmpdir.path().join("multi-node.yaml");
+        fs::write(
+            &multi_node,
+            format!(
+                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\n    x-slurm:\n      nodes: 1\nx-slurm:\n  cache_dir: {}\n  nodes: 2\n",
+                local_image.display(),
+                tmpdir.path().join("cache-nodes").display()
+            ),
+        )
+        .expect("multi-node compose");
+        let multi_node_plan = output::load_runtime_plan(&multi_node).expect("multi-node plan");
+        let multi_node_err =
+            ensure_local_plan_supported(&multi_node_plan).expect_err("multi-node unsupported");
+        assert!(
+            multi_node_err
+                .to_string()
+                .contains("only single-host specs")
+        );
+
+        if env::consts::OS != "linux" {
+            let err = ensure_local_host_supported().expect_err("non-linux");
+            assert!(err.to_string().contains("only supported on Linux hosts"));
+        }
+    }
+
+    #[test]
+    fn local_watch_cancel_and_rollback_helpers_cover_terminal_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_local_compose(tmpdir.path());
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let script_path = tmpdir.path().join("watch.local.sh");
+        let record = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-watch-123",
+            SubmissionBackend::Local,
+        )
+        .expect("record");
+
+        write_submission_record(&record).expect("persist record");
+        let state_path = state_path_for_record(&record);
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("state dir");
+        }
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "backend": SubmissionBackend::Local,
+                "job_status": "COMPLETED",
+                "job_exit_code": 0,
+                "supervisor_pid": serde_json::Value::Null,
+                "services": [],
+            }))
+            .expect("state json"),
+        )
+        .expect("write state");
+
+        print_local_launch_details(&record, &runtime_plan, &script_path);
+
+        let watch = watch_with_fallback(
+            &record,
+            &SchedulerOptions {
+                squeue_bin: "/definitely/missing-squeue".into(),
+                sacct_bin: "/definitely/missing-sacct".into(),
+            },
+            None,
+            5,
+        )
+        .expect("watch");
+        assert!(matches!(
+            watch,
+            hpc_compose::job::WatchOutcome::Completed(_)
+        ));
+
+        cancel(
+            context_for(&compose, tmpdir.path()),
+            Some(record.job_id.clone()),
+            Some(OutputFormat::Json),
+        )
+        .expect("cancel local without pid");
+
+        let mut sleeper = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "backend": SubmissionBackend::Local,
+                "job_status": "RUNNING",
+                "job_exit_code": serde_json::Value::Null,
+                "supervisor_pid": sleeper.id(),
+                "services": [],
+            }))
+            .expect("running state json"),
+        )
+        .expect("write running state");
+        cancel(
+            context_for(&compose, tmpdir.path()),
+            Some(record.job_id.clone()),
+            None,
+        )
+        .expect("cancel running local");
+        sleeper.wait().expect("wait for cancelled sleep");
+
+        let reservation_compose = tmpdir.path().join("compose-reservation.yaml");
+        let local_image = tmpdir.path().join("local.sqsh");
+        fs::write(
+            &reservation_compose,
+            format!(
+                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n  error: local.err\n  submit_args:\n    - --reservation=debug\n",
+                local_image.display(),
+                tmpdir.path().join("cache-reservation").display()
+            ),
+        )
+        .expect("reservation compose");
+        let reservation_plan =
+            output::load_runtime_plan(&reservation_compose).expect("reservation runtime plan");
+        warn_local_ignored_scheduler_settings(&reservation_plan);
+
+        let mut sleeper = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        rollback_local_tracking(&record, Some(sleeper.id()));
+        sleeper.wait().expect("wait for sleep");
+        assert!(
+            load_submission_record(&compose, Some(&record.job_id)).is_err(),
+            "rollback should remove tracked record"
+        );
+    }
+
+    #[test]
+    fn runtime_wrappers_cover_success_paths_with_local_tracking() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_local_compose_with_services(tmpdir.path());
+        let context = context_for(&compose, tmpdir.path());
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let script_path = tmpdir.path().join("local-wrapper.sh");
+        let record = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-success-123",
+            SubmissionBackend::Local,
+        )
+        .expect("record");
+        write_submission_record(&record).expect("write record");
+
+        for (service_name, log_path) in &record.service_logs {
+            if let Some(parent) = log_path.parent() {
+                fs::create_dir_all(parent).expect("log dir");
+            }
+            fs::write(log_path, format!("{service_name} ready\n")).expect("service log");
+        }
+
+        let state_path = state_path_for_record(&record);
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("state dir");
+        }
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "backend": SubmissionBackend::Local,
+                "job_status": "COMPLETED",
+                "job_exit_code": 0,
+                "supervisor_pid": serde_json::Value::Null,
+                "services": [
+                    {
+                        "service_name": "api",
+                        "step_name": "hpc-compose:api",
+                        "log_path": record.service_logs["api"],
+                        "launch_index": 0,
+                        "launcher_pid": serde_json::Value::Null,
+                        "healthy": true,
+                        "readiness_configured": true,
+                        "failure_policy_mode": "fail_job",
+                        "restart_count": 0,
+                        "last_exit_code": 0
+                    },
+                    {
+                        "service_name": "worker",
+                        "step_name": "hpc-compose:worker",
+                        "log_path": record.service_logs["worker"],
+                        "launch_index": 1,
+                        "launcher_pid": serde_json::Value::Null,
+                        "healthy": false,
+                        "readiness_configured": false,
+                        "failure_policy_mode": "ignore",
+                        "restart_count": 0,
+                        "last_exit_code": 0
+                    }
+                ]
+            }))
+            .expect("state json"),
+        )
+        .expect("write state");
+
+        status(
+            context.clone(),
+            Some(record.job_id.clone()),
+            Some(OutputFormat::Json),
+            false,
+        )
+        .expect("status");
+        stats(
+            context.clone(),
+            Some(record.job_id.clone()),
+            false,
+            Some(StatsOutputFormat::Json),
+        )
+        .expect("stats");
+        ps(
+            context.clone(),
+            Some(record.job_id.clone()),
+            Some(OutputFormat::Json),
+        )
+        .expect("ps");
+        logs(
+            context.clone(),
+            Some(record.job_id.clone()),
+            Some("api".into()),
+            false,
+            10,
+        )
+        .expect("logs");
+        watch(
+            context.clone(),
+            Some(record.job_id.clone()),
+            Some("api".into()),
+            10,
+        )
+        .expect("watch");
+        cancel(
+            context.clone(),
+            Some(record.job_id.clone()),
+            Some(OutputFormat::Json),
+        )
+        .expect("cancel");
+        jobs_list(true, Some(OutputFormat::Json)).expect("jobs list");
+        clean(
+            context,
+            Some(0),
             false,
             true,
             true,

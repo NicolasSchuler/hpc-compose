@@ -34,9 +34,9 @@ pub fn render_local_script(plan: &RuntimePlan, job_id: &str, enroot_bin: &str) -
         shell_quote(enroot_bin)
     )
     .unwrap();
-    write!(
+    writeln!(
         out,
-        "HPC_COMPOSE_LOCAL_BIN_DIR=\"$SLURM_SUBMIT_DIR/{}/${{SLURM_JOB_ID}}/.local-bin\"\n",
+        "HPC_COMPOSE_LOCAL_BIN_DIR=\"$SLURM_SUBMIT_DIR/{}/${{SLURM_JOB_ID}}/.local-bin\"",
         tracked_paths::METADATA_DIR_NAME
     )
     .unwrap();

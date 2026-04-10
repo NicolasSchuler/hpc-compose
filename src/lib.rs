@@ -35,15 +35,21 @@
 //! ```
 #![warn(missing_docs)]
 
+extern crate self as hpc_compose;
+
 pub mod cache;
 pub mod cli;
+/// CLI command orchestration used by the binary entrypoint.
+pub mod commands;
 pub mod context;
 pub mod init;
 pub mod job;
 pub mod manpages;
+pub(crate) mod output;
 pub mod planner;
 pub mod preflight;
 pub mod prepare;
 pub mod render;
 pub mod spec;
 pub(crate) mod tracked_paths;
+pub(crate) mod watch_ui;

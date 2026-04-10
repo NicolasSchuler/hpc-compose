@@ -614,4 +614,62 @@ mod tests {
             "prod"
         );
     }
+
+    #[test]
+    fn init_commands_cover_json_and_setup_output_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let output_path = tmpdir.path().join("compose-json.yaml");
+        let settings_path = tmpdir.path().join(".hpc-compose/settings.toml");
+
+        new_command(
+            None,
+            true,
+            None,
+            None,
+            None,
+            tmpdir.path().join("ignored.yaml"),
+            false,
+            Some(OutputFormat::Json),
+        )
+        .expect("list templates json");
+        new_command(
+            None,
+            false,
+            Some("dev-python-app".to_string()),
+            None,
+            None,
+            tmpdir.path().join("ignored.yaml"),
+            false,
+            Some(OutputFormat::Json),
+        )
+        .expect("describe template json");
+        new_command(
+            Some("dev-python-app".to_string()),
+            false,
+            None,
+            Some("demo-json".to_string()),
+            Some("/shared/cache-json".to_string()),
+            output_path.clone(),
+            false,
+            Some(OutputFormat::Json),
+        )
+        .expect("write template json");
+        assert!(output_path.exists());
+
+        setup(
+            Some(settings_path.clone()),
+            Some("json".to_string()),
+            None,
+            Some("compose-json.yaml".to_string()),
+            vec![".env".to_string()],
+            vec!["CACHE_DIR=/shared/cache-json".to_string()],
+            vec!["squeue=/opt/slurm/bin/squeue".to_string()],
+            Some("json".to_string()),
+            true,
+            Some(OutputFormat::Json),
+        )
+        .expect("setup json");
+        let settings = load_settings(&settings_path).expect("load settings json");
+        assert_eq!(settings.default_profile.as_deref(), Some("json"));
+    }
 }

@@ -19,7 +19,8 @@ struct GlobalCommandOptions {
     assume_explicit_values: bool,
 }
 
-pub(crate) fn run_cli(cli: Cli, raw_args: &[OsString]) -> Result<()> {
+/// Dispatches a parsed CLI invocation using the provided raw argument vector.
+pub fn run_cli(cli: Cli, raw_args: &[OsString]) -> Result<()> {
     run_command_with_options(
         cli.command,
         &GlobalCommandOptions {

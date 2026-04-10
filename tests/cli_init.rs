@@ -300,3 +300,32 @@ fn new_and_setup_commands_support_json_output() {
     assert_eq!(setup["env"]["CACHE_DIR"], "/shared/cache");
     assert_eq!(setup["binaries"]["srun"], "/opt/slurm/bin/srun");
 }
+
+#[test]
+fn setup_interactive_accepts_prompted_env_files_vars_and_binaries() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let setup = run_cli_with_stdin(
+        tmpdir.path(),
+        &["setup"],
+        "research\nstack.yaml\n.env,.env.local\nA=1,B=two\nenroot=/usr/local/bin/enroot,sbatch=/usr/local/bin/sbatch\nresearch\n",
+    );
+    assert_success(&setup);
+    let stdout = stdout_text(&setup);
+    assert!(stdout.contains("Profile name [dev]:"));
+    assert!(stdout.contains("Compose file [compose.yaml]:"));
+    assert!(stdout.contains("Profile env files (comma-separated) []:"));
+    assert!(stdout.contains("Profile env vars KEY=VALUE (comma-separated) []:"));
+    assert!(stdout.contains("Profile binaries NAME=PATH (comma-separated) []:"));
+    assert!(stdout.contains("Default profile [research]:"));
+
+    let settings_path = tmpdir.path().join(".hpc-compose/settings.toml");
+    let settings = fs::read_to_string(&settings_path).expect("settings written");
+    assert!(settings.contains("default_profile = \"research\""));
+    assert!(settings.contains("compose_file = \"stack.yaml\""));
+    assert!(settings.contains(".env"));
+    assert!(settings.contains(".env.local"));
+    assert!(settings.contains("A = \"1\""));
+    assert!(settings.contains("B = \"two\""));
+    assert!(settings.contains("enroot = \"/usr/local/bin/enroot\""));
+    assert!(settings.contains("sbatch = \"/usr/local/bin/sbatch\""));
+}

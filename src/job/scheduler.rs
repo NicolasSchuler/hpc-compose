@@ -289,5 +289,245 @@ pub(crate) fn build_local_scheduler_status(
 }
 
 fn pid_is_running(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
+        // Signal 0 checks for process existence without sending a real signal.
+        let result = unsafe { libc::kill(pid as i32, 0) };
+        if result == 0 {
+            return true;
+        }
+        let error = std::io::Error::last_os_error();
+        matches!(error.raw_os_error(), Some(libc::EPERM))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime_entry() -> ServiceRuntimeStateEntry {
+        ServiceRuntimeStateEntry {
+            service_name: "api".into(),
+            step_name: Some("hpc-compose:api".into()),
+            log_path: Some(PathBuf::from("/tmp/api.log")),
+            launch_index: Some(0),
+            launcher_pid: Some(std::process::id()),
+            healthy: Some(false),
+            readiness_configured: Some(false),
+            failure_policy_mode: None,
+            restart_count: Some(0),
+            max_restarts: None,
+            window_seconds: None,
+            max_restarts_in_window: None,
+            restart_failures_in_window: None,
+            restart_failure_timestamps: None,
+            last_exit_code: None,
+            placement_mode: None,
+            nodes: None,
+            ntasks: None,
+            ntasks_per_node: None,
+            nodelist: None,
+        }
+    }
+
+    #[test]
+    fn scheduler_helpers_cover_probe_and_service_status_paths() {
+        let pending_scheduler = build_scheduler_status("PENDING".into(), SchedulerSource::Squeue);
+        let squeue = QueueDiagnosticsProbe {
+            state: Some("PENDING".into()),
+            pending_reason: Some("Resources".into()),
+            eligible_time: None,
+            start_time: Some("2026-04-10T12:00:00".into()),
+        };
+        let sacct = QueueDiagnosticsProbe {
+            state: Some("PENDING".into()),
+            pending_reason: Some("Priority".into()),
+            eligible_time: Some("2026-04-10T11:55:00".into()),
+            start_time: None,
+        };
+        let diagnostics =
+            build_status_queue_diagnostics(&pending_scheduler, Some(&squeue), Some(&sacct))
+                .expect("pending diagnostics");
+        assert_eq!(diagnostics.pending_reason.as_deref(), Some("Resources"));
+        assert_eq!(
+            diagnostics.eligible_time.as_deref(),
+            Some("2026-04-10T11:55:00")
+        );
+        assert_eq!(
+            diagnostics.start_time.as_deref(),
+            Some("2026-04-10T12:00:00")
+        );
+
+        let running_scheduler = build_scheduler_status("RUNNING".into(), SchedulerSource::Squeue);
+        let start_only = build_status_queue_diagnostics(
+            &running_scheduler,
+            Some(&QueueDiagnosticsProbe {
+                state: Some("RUNNING".into()),
+                pending_reason: Some("ignored".into()),
+                eligible_time: None,
+                start_time: Some("2026-04-10T12:01:00".into()),
+            }),
+            None,
+        )
+        .expect("start-only diagnostics");
+        assert!(start_only.pending_reason.is_none());
+        assert_eq!(
+            start_only.start_time.as_deref(),
+            Some("2026-04-10T12:01:00")
+        );
+        assert!(build_status_queue_diagnostics(&running_scheduler, None, None).is_none());
+
+        assert!(scheduler_status_from_probe(None, SchedulerSource::Squeue).is_none());
+        let sacct_status = scheduler_status_from_probe(
+            Some(&QueueDiagnosticsProbe {
+                state: Some("COMPLETED".into()),
+                pending_reason: None,
+                eligible_time: None,
+                start_time: None,
+            }),
+            SchedulerSource::Sacct,
+        )
+        .expect("scheduler status");
+        assert_eq!(sacct_status.state, "COMPLETED");
+        assert_eq!(scheduler_source_label(sacct_status.source), "sacct");
+
+        let mut ready = runtime_entry();
+        ready.healthy = Some(true);
+        assert_eq!(
+            active_launcher_pid(&ready, SubmissionBackend::Slurm),
+            Some(std::process::id())
+        );
+        assert_eq!(
+            derive_service_status(&running_scheduler, Some(&ready), SubmissionBackend::Slurm),
+            "ready"
+        );
+
+        let mut starting = runtime_entry();
+        starting.readiness_configured = Some(true);
+        assert_eq!(
+            derive_service_status(
+                &running_scheduler,
+                Some(&starting),
+                SubmissionBackend::Slurm
+            ),
+            "starting"
+        );
+
+        let running = runtime_entry();
+        assert_eq!(
+            derive_service_status(&running_scheduler, Some(&running), SubmissionBackend::Slurm),
+            "running"
+        );
+
+        let mut exited = runtime_entry();
+        exited.launcher_pid = None;
+        exited.last_exit_code = Some(0);
+        assert_eq!(
+            derive_service_status(&running_scheduler, Some(&exited), SubmissionBackend::Local),
+            "exited"
+        );
+
+        let mut failed = exited.clone();
+        failed.last_exit_code = Some(1);
+        assert_eq!(
+            derive_service_status(&running_scheduler, Some(&failed), SubmissionBackend::Local),
+            "failed"
+        );
+
+        let terminal_failed = build_scheduler_status("FAILED".into(), SchedulerSource::LocalOnly);
+        assert_eq!(
+            derive_service_status(&terminal_failed, None, SubmissionBackend::Slurm),
+            "failed"
+        );
+        assert_eq!(
+            derive_service_status(&running_scheduler, None, SubmissionBackend::Local),
+            "starting"
+        );
+        assert_eq!(
+            derive_service_status(&running_scheduler, None, SubmissionBackend::Slurm),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn local_scheduler_status_covers_waiting_running_exit_and_pid_helpers() {
+        let current_pid = std::process::id();
+        assert!(pid_is_running(current_pid));
+        assert!(!pid_is_running(u32::MAX));
+
+        let waiting = build_local_scheduler_status(None);
+        assert_eq!(waiting.state, "WAITING_FOR_LOCAL_RUNTIME");
+        assert!(!waiting.terminal);
+
+        let running_state = ServiceRuntimeStateFile {
+            backend: Some(SubmissionBackend::Local),
+            job_status: Some("running".into()),
+            job_exit_code: None,
+            supervisor_pid: Some(current_pid),
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+            services: Vec::new(),
+        };
+        let running = build_local_scheduler_status(Some(&running_state));
+        assert_eq!(running.state, "RUNNING");
+        assert!(!running.terminal);
+
+        let cancelled_state = ServiceRuntimeStateFile {
+            backend: Some(SubmissionBackend::Local),
+            job_status: Some("cancelled".into()),
+            job_exit_code: None,
+            supervisor_pid: None,
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+            services: Vec::new(),
+        };
+        let cancelled = build_local_scheduler_status(Some(&cancelled_state));
+        assert_eq!(cancelled.state, "CANCELLED");
+        assert!(cancelled.terminal);
+
+        let failed_by_exit = ServiceRuntimeStateFile {
+            backend: Some(SubmissionBackend::Local),
+            job_status: None,
+            job_exit_code: Some(7),
+            supervisor_pid: None,
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+            services: Vec::new(),
+        };
+        let failed = build_local_scheduler_status(Some(&failed_by_exit));
+        assert_eq!(failed.state, "FAILED");
+        assert!(failed.failed);
+
+        let pending_local = ServiceRuntimeStateFile {
+            backend: Some(SubmissionBackend::Local),
+            job_status: None,
+            job_exit_code: None,
+            supervisor_pid: None,
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+            services: Vec::new(),
+        };
+        let waiting_existing = build_local_scheduler_status(Some(&pending_local));
+        assert_eq!(waiting_existing.state, "WAITING_FOR_LOCAL_RUNTIME");
+        assert!(
+            waiting_existing
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("local runtime state exists")
+        );
+    }
 }

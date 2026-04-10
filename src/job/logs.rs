@@ -266,3 +266,93 @@ pub(crate) fn tail_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
     }
     Ok(collected)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_helpers_cover_selection_cursors_and_local_watch() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        let local_image = tmpdir.path().join("local.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        fs::write(
+            &compose,
+            format!(
+                "name: demo\nservices:\n  api:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n",
+                local_image.display(),
+                tmpdir.path().join("cache").display()
+            ),
+        )
+        .expect("compose");
+        let runtime_plan = crate::output::load_runtime_plan(&compose).expect("runtime plan");
+        let script_path = tmpdir.path().join("job.local.sh");
+        let record = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-logs-123",
+            SubmissionBackend::Local,
+        )
+        .expect("record");
+        write_submission_record(&record).expect("write record");
+
+        let api_log = record.service_logs.get("api").expect("api log");
+        if let Some(parent) = api_log.parent() {
+            fs::create_dir_all(parent).expect("log dir");
+        }
+        fs::write(api_log, "boot\nready\npartial").expect("api log");
+
+        let selected = selected_service_logs(&record, Some("api")).expect("selected");
+        assert_eq!(selected.len(), 1);
+        assert!(
+            selected_service_logs(&record, Some("missing"))
+                .expect_err("missing service")
+                .to_string()
+                .contains("does not exist")
+        );
+
+        let mut rendered = Vec::new();
+        emit_initial_tail(&selected, 2, &mut rendered).expect("emit initial");
+        let rendered = String::from_utf8(rendered).expect("utf8");
+        assert!(rendered.contains("[api] ready"));
+
+        let mut cursors = build_cursors(&selected);
+        fs::write(api_log, "boot\nready\npartial\nnext\n").expect("append api log");
+        let mut followed = Vec::new();
+        assert!(drain_log_cursors(&mut cursors, &mut followed).expect("drain"));
+        let followed = String::from_utf8(followed).expect("utf8");
+        assert!(followed.contains("[api] next"));
+
+        let state_path = state_path_for_record(&record);
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("state dir");
+        }
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "backend": SubmissionBackend::Local,
+                "job_status": "COMPLETED",
+                "job_exit_code": 0,
+                "supervisor_pid": serde_json::Value::Null,
+                "services": [],
+            }))
+            .expect("state json"),
+        )
+        .expect("write state");
+
+        let outcome = watch_submission(
+            &record,
+            Some("api"),
+            &SchedulerOptions {
+                squeue_bin: "/definitely/missing-squeue".into(),
+                sacct_bin: "/definitely/missing-sacct".into(),
+            },
+            1,
+        )
+        .expect("watch local");
+        assert!(matches!(outcome, WatchOutcome::Completed(_)));
+    }
+}

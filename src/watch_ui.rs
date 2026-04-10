@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -16,6 +17,10 @@ const DEFAULT_WIDTH: usize = 120;
 const DEFAULT_HEIGHT: usize = 30;
 const MIN_TABLE_WIDTH: usize = 54;
 const FORCE_WATCH_UI_ENV: &str = "HPC_COMPOSE_FORCE_WATCH_UI";
+
+#[cfg(test)]
+static TEST_STTY_BIN: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatchKey {
@@ -52,7 +57,7 @@ struct TerminalGuard {
 impl TerminalGuard {
     fn enter() -> Result<Self> {
         let saved_mode = String::from_utf8(
-            Command::new("stty")
+            new_stty_command()
                 .arg("-g")
                 .output()
                 .context("failed to execute 'stty -g'")?
@@ -64,7 +69,7 @@ impl TerminalGuard {
         if saved_mode.is_empty() {
             bail!("failed to read terminal mode from stty");
         }
-        let status = Command::new("stty")
+        let status = new_stty_command()
             .args(["-echo", "-icanon", "min", "0", "time", "0"])
             .status()
             .context("failed to execute 'stty' while entering watch UI")?;
@@ -81,7 +86,7 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = Command::new("stty").arg(&self.saved_mode).status();
+        let _ = new_stty_command().arg(&self.saved_mode).status();
         let _ = write!(io::stdout(), "\x1b[?25h\x1b[?1049l");
         let _ = io::stdout().flush();
     }
@@ -136,7 +141,11 @@ impl SelectedLogBuffer {
 }
 
 pub(crate) fn can_use_watch_ui() -> bool {
-    force_watch_ui() || (io::stdin().is_terminal() && io::stdout().is_terminal())
+    watch_ui_available(
+        force_watch_ui(),
+        io::stdin().is_terminal(),
+        io::stdout().is_terminal(),
+    )
 }
 
 pub(crate) fn run_watch_ui(
@@ -220,7 +229,15 @@ pub(crate) fn run_watch_ui(
 }
 
 fn force_watch_ui() -> bool {
-    std::env::var_os(FORCE_WATCH_UI_ENV).is_some_and(|value| value != "0")
+    force_watch_ui_from_value(std::env::var_os(FORCE_WATCH_UI_ENV).as_deref())
+}
+
+fn force_watch_ui_from_value(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| value != OsStr::new("0"))
+}
+
+fn watch_ui_available(force: bool, stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    force || (stdin_is_terminal && stdout_is_terminal)
 }
 
 pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: WatchKey) -> usize {
@@ -266,10 +283,10 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     ];
     if let Some(detail) = model.snapshot.scheduler.detail.as_deref() {
         lines.push(fit_line(&format!("note: {detail}"), width));
-    } else if let Some(queue) = &model.snapshot.queue_diagnostics {
-        if let Some(reason) = queue.pending_reason.as_deref() {
-            lines.push(fit_line(&format!("pending reason: {reason}"), width));
-        }
+    } else if let Some(queue) = &model.snapshot.queue_diagnostics
+        && let Some(reason) = queue.pending_reason.as_deref()
+    {
+        lines.push(fit_line(&format!("pending reason: {reason}"), width));
     }
     lines.push("-".repeat(width));
 
@@ -374,26 +391,50 @@ fn log_capacity(height: usize) -> usize {
 }
 
 fn terminal_size() -> (usize, usize) {
-    if let Ok(output) = Command::new("stty").arg("size").output()
+    if let Ok(output) = new_stty_command().arg("size").output()
         && output.status.success()
-        && let Ok(raw) = String::from_utf8(output.stdout)
+        && let Some(size) = parse_stty_size(&output.stdout)
     {
-        let mut parts = raw.split_whitespace();
-        if let (Some(rows), Some(cols)) = (parts.next(), parts.next())
-            && let (Ok(rows), Ok(cols)) = (rows.parse::<usize>(), cols.parse::<usize>())
-        {
-            return (cols, rows);
-        }
+        return size;
     }
-    let cols = std::env::var("COLUMNS")
-        .ok()
+    let columns = std::env::var("COLUMNS").ok();
+    let rows = std::env::var("LINES").ok();
+    fallback_terminal_size(columns.as_deref(), rows.as_deref())
+}
+
+fn parse_stty_size(output: &[u8]) -> Option<(usize, usize)> {
+    let raw = String::from_utf8_lossy(output);
+    let mut parts = raw.split_whitespace();
+    let rows = parts.next()?.parse::<usize>().ok()?;
+    let cols = parts.next()?.parse::<usize>().ok()?;
+    Some((cols, rows))
+}
+
+fn fallback_terminal_size(columns: Option<&str>, rows: Option<&str>) -> (usize, usize) {
+    (
+        parse_terminal_env_size(columns, DEFAULT_WIDTH),
+        parse_terminal_env_size(rows, DEFAULT_HEIGHT),
+    )
+}
+
+fn parse_terminal_env_size(value: Option<&str>, default: usize) -> usize {
+    value
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_WIDTH);
-    let rows = std::env::var("LINES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_HEIGHT);
-    (cols, rows)
+        .unwrap_or(default)
+}
+
+fn new_stty_command() -> Command {
+    #[cfg(test)]
+    if let Some(path) = TEST_STTY_BIN
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("stty override lock")
+        .clone()
+    {
+        return Command::new(path);
+    }
+
+    Command::new("stty")
 }
 
 fn parse_keys(buffer: &mut Vec<u8>) -> Vec<WatchKey> {
@@ -542,9 +583,40 @@ fn pad_line(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output;
     use hpc_compose::job::{
-        PsSnapshot, QueueDiagnostics, SchedulerSource, SchedulerStatus, SubmissionRecord,
+        PsSnapshot, QueueDiagnostics, SchedulerOptions, SchedulerSource, SchedulerStatus,
+        SubmissionBackend, SubmissionRecord, WatchOutcome, build_submission_record_with_backend,
+        state_path_for_record, write_submission_record,
     };
+
+    fn with_test_stty<T>(script_body: &str, action: impl FnOnce() -> T) -> T {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let script_path = tmpdir.path().join("fake-stty.sh");
+        fs::write(&script_path, script_body).expect("write fake stty");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("chmod");
+        }
+
+        {
+            let mut slot = TEST_STTY_BIN
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+                .expect("stty override lock");
+            *slot = Some(script_path.clone());
+        }
+        let result = action();
+        let mut slot = TEST_STTY_BIN
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("stty override lock");
+        *slot = None;
+        result
+    }
 
     fn sample_snapshot() -> PsSnapshot {
         PsSnapshot {
@@ -693,5 +765,276 @@ mod tests {
         assert!(frame.contains("> api"));
         assert!(frame.contains("ready"));
         assert!(frame.contains("worker"));
+    }
+
+    #[test]
+    fn env_and_terminal_helpers_cover_force_and_fallback_paths() {
+        assert!(force_watch_ui_from_value(Some(OsStr::new("1"))));
+        assert!(!force_watch_ui_from_value(Some(OsStr::new("0"))));
+        assert!(!force_watch_ui_from_value(None));
+
+        assert!(watch_ui_available(true, false, false));
+        assert!(watch_ui_available(false, true, true));
+        assert!(!watch_ui_available(false, true, false));
+
+        assert_eq!(parse_stty_size(b"33 101\n"), Some((101, 33)));
+        assert_eq!(parse_stty_size(b"bad"), None);
+        assert_eq!(parse_stty_size(b"33 no"), None);
+
+        assert_eq!(fallback_terminal_size(Some("101"), Some("33")), (101, 33));
+        assert_eq!(
+            fallback_terminal_size(Some("bad"), Some("also-bad")),
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        );
+        assert_eq!(parse_terminal_env_size(Some("72"), DEFAULT_WIDTH), 72);
+        assert_eq!(
+            parse_terminal_env_size(Some("not-a-number"), DEFAULT_WIDTH),
+            DEFAULT_WIDTH
+        );
+    }
+
+    #[test]
+    fn selection_and_formatting_helpers_cover_remaining_paths() {
+        let snapshot = sample_snapshot();
+        assert_eq!(initial_selected_index(&snapshot, None).expect("default"), 0);
+        assert_eq!(
+            initial_selected_index(&snapshot, Some("worker")).expect("selected worker"),
+            1
+        );
+        let err = initial_selected_index(&snapshot, Some("missing")).expect_err("missing service");
+        assert!(err.to_string().contains("does not exist"));
+
+        let mut empty = snapshot.clone();
+        empty.services.clear();
+        assert_eq!(clamp_selected_index(&empty, 5), 0);
+        assert_eq!(clamp_selected_index(&snapshot, 7), 1);
+
+        assert_eq!(log_capacity(2), 4);
+        assert_eq!(log_capacity(12), 6);
+        assert_eq!(yes_no_short(true), "yes");
+        assert_eq!(yes_no_short(false), "no");
+        assert_eq!(truncate_cell("abcdef", 3), "abc");
+        assert_eq!(fit_line("abcdef", 4), "abcd");
+        assert_eq!(pad_line("abc", 5), "abc  ");
+        assert_eq!(
+            capped_lines(vec!["a".into(), "b".into(), "c".into()], 2),
+            vec!["b", "c"]
+        );
+    }
+
+    #[test]
+    fn read_new_lines_and_selected_log_buffer_cover_growth_and_reset_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let log_path = tmpdir.path().join("service.log");
+        fs::write(&log_path, "one\ntwo\npart").expect("seed log");
+
+        let mut offset = 0;
+        let mut pending = String::new();
+        let lines = read_new_lines(&log_path, &mut offset, &mut pending).expect("initial read");
+        assert_eq!(lines, vec!["one", "two"]);
+        assert_eq!(pending, "part");
+
+        fs::write(&log_path, "reset\n").expect("truncate log");
+        let lines = read_new_lines(&log_path, &mut offset, &mut pending).expect("truncated read");
+        assert_eq!(lines, vec!["reset"]);
+        assert!(pending.is_empty());
+
+        let missing = tmpdir.path().join("missing.log");
+        let lines = read_new_lines(&missing, &mut offset, &mut pending).expect("missing log");
+        assert!(lines.is_empty());
+        assert_eq!(offset, 0);
+        assert!(pending.is_empty());
+
+        fs::write(&log_path, "alpha\nbeta\ngamma\n").expect("rewrite log");
+        let row = PsServiceRow {
+            service_name: "api".into(),
+            path: log_path.clone(),
+            present: true,
+            updated_at: None,
+            updated_age_seconds: None,
+            log_path: Some(log_path.clone()),
+            step_name: Some("hpc-compose:api".into()),
+            launch_index: Some(0),
+            launcher_pid: Some(4242),
+            healthy: Some(true),
+            readiness_configured: Some(true),
+            status: Some("ready".into()),
+            failure_policy_mode: None,
+            restart_count: Some(0),
+            max_restarts: None,
+            window_seconds: None,
+            max_restarts_in_window: None,
+            restart_failures_in_window: None,
+            last_exit_code: None,
+            placement_mode: None,
+            nodes: None,
+            ntasks: None,
+            ntasks_per_node: None,
+            nodelist: None,
+        };
+
+        let mut buffer = SelectedLogBuffer::seed(Some(&row), 2, 2);
+        assert_eq!(buffer.lines, vec!["beta", "gamma"]);
+
+        fs::write(&log_path, "alpha\nbeta\ngamma\ndelta\n").expect("append log");
+        buffer.refresh().expect("refresh");
+        assert_eq!(buffer.lines, vec!["gamma", "delta"]);
+
+        let other_path = tmpdir.path().join("worker.log");
+        fs::write(&other_path, "worker-started\n").expect("other log");
+        let other = PsServiceRow {
+            service_name: "worker".into(),
+            path: other_path.clone(),
+            present: true,
+            updated_at: None,
+            updated_age_seconds: None,
+            log_path: Some(other_path),
+            step_name: Some("hpc-compose:worker".into()),
+            launch_index: Some(1),
+            launcher_pid: Some(5252),
+            healthy: Some(false),
+            readiness_configured: Some(false),
+            status: Some("running".into()),
+            failure_policy_mode: None,
+            restart_count: None,
+            max_restarts: None,
+            window_seconds: None,
+            max_restarts_in_window: None,
+            restart_failures_in_window: None,
+            last_exit_code: None,
+            placement_mode: None,
+            nodes: None,
+            ntasks: None,
+            ntasks_per_node: None,
+            nodelist: None,
+        };
+        buffer.reseed_if_needed(Some(&other), 5, 4);
+        assert_eq!(buffer.service_name, "worker");
+        assert_eq!(buffer.lines, vec!["worker-started"]);
+
+        buffer.reseed_if_needed(None, 5, 4);
+        assert_eq!(buffer.service_name, "<none>");
+        assert!(buffer.lines.is_empty());
+    }
+
+    #[test]
+    fn render_watch_frame_prefers_detail_then_pending_reason() {
+        let mut detail_snapshot = sample_snapshot();
+        detail_snapshot.scheduler.detail = Some("visible in queue".into());
+        let detail_frame = render_watch_frame(
+            &WatchModel {
+                snapshot: detail_snapshot,
+                selected_index: 1,
+                log_lines: vec!["tail".into()],
+            },
+            90,
+            14,
+        );
+        assert!(detail_frame.contains("note: visible in queue"));
+
+        let mut pending_snapshot = sample_snapshot();
+        pending_snapshot.scheduler.state = "PENDING".into();
+        pending_snapshot.queue_diagnostics = Some(QueueDiagnostics {
+            pending_reason: Some("Resources".into()),
+            eligible_time: None,
+            start_time: None,
+        });
+        let pending_frame = render_watch_frame(
+            &WatchModel {
+                snapshot: pending_snapshot,
+                selected_index: 0,
+                log_lines: Vec::new(),
+            },
+            90,
+            14,
+        );
+        assert!(pending_frame.contains("pending reason: Resources"));
+    }
+
+    #[test]
+    fn terminal_guard_and_run_watch_ui_cover_interactive_paths() {
+        let script = r#"#!/bin/sh
+if [ "$1" = "-g" ]; then
+  printf 'saved-mode\n'
+  exit 0
+fi
+if [ "$1" = "size" ]; then
+  printf '33 101\n'
+  exit 0
+fi
+exit 0
+"#;
+
+        with_test_stty(script, || {
+            assert_eq!(terminal_size(), (101, 33));
+
+            let guard = TerminalGuard::enter().expect("enter terminal guard");
+            drop(guard);
+
+            render_model(
+                &WatchModel {
+                    snapshot: sample_snapshot(),
+                    selected_index: 0,
+                    log_lines: vec!["line".into()],
+                },
+                (90, 14),
+            )
+            .expect("render model");
+
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let local_image = tmpdir.path().join("local.sqsh");
+            fs::write(&local_image, "sqsh").expect("local image");
+            let compose = tmpdir.path().join("compose.yaml");
+            fs::write(
+                &compose,
+                format!(
+                    "name: demo\nservices:\n  api:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n",
+                    local_image.display(),
+                    tmpdir.path().join("cache").display()
+                ),
+            )
+            .expect("compose");
+            let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+            let script_path = tmpdir.path().join("job.local.sh");
+            let record = build_submission_record_with_backend(
+                &compose,
+                tmpdir.path(),
+                &script_path,
+                &runtime_plan,
+                "local-watch-ui-123",
+                SubmissionBackend::Local,
+            )
+            .expect("record");
+            write_submission_record(&record).expect("write record");
+
+            let state_path = state_path_for_record(&record);
+            if let Some(parent) = state_path.parent() {
+                fs::create_dir_all(parent).expect("state dir");
+            }
+            fs::write(
+                &state_path,
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "backend": SubmissionBackend::Local,
+                    "job_status": "COMPLETED",
+                    "job_exit_code": 0,
+                    "supervisor_pid": serde_json::Value::Null,
+                    "services": []
+                }))
+                .expect("state json"),
+            )
+            .expect("write state");
+
+            let outcome = run_watch_ui(
+                &record,
+                &SchedulerOptions {
+                    squeue_bin: "/definitely/missing-squeue".into(),
+                    sacct_bin: "/definitely/missing-sacct".into(),
+                },
+                None,
+                5,
+            )
+            .expect("run watch ui");
+            assert!(matches!(outcome, WatchOutcome::Completed(_)));
+        });
     }
 }
