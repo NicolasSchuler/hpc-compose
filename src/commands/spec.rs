@@ -410,6 +410,7 @@ mod tests {
     use super::*;
 
     use std::collections::BTreeMap;
+    use std::env;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -580,9 +581,16 @@ services:
         }
     }
 
+    fn tempdir_in_repo() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("hpc-compose-spec-command-tests-")
+            .tempdir_in(env::current_dir().expect("cwd"))
+            .expect("tmpdir")
+    }
+
     #[test]
     fn command_wrappers_cover_json_and_text_paths() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let tmpdir = tempdir_in_repo();
         let compose = write_compose(tmpdir.path());
         let resolved_context = context_for(&compose, tmpdir.path());
 
@@ -622,7 +630,7 @@ services:
 
     #[test]
     fn context_succeeds_when_compose_cannot_be_loaded() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let tmpdir = tempdir_in_repo();
         let missing = tmpdir.path().join("missing.yaml");
         let resolved_context = context_for(&missing, tmpdir.path());
         context(resolved_context.clone(), Some(OutputFormat::Json)).expect("context json");
@@ -631,7 +639,7 @@ services:
 
     #[test]
     fn render_preflight_and_context_cover_error_and_optional_text_paths() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let tmpdir = tempdir_in_repo();
         let compose = write_compose(tmpdir.path());
         let resolved_context = context_for(&compose, tmpdir.path());
 
@@ -676,7 +684,7 @@ services:
 
     #[test]
     fn validate_render_and_inspect_cover_additional_text_and_strict_env_paths() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let tmpdir = tempdir_in_repo();
         let compose = write_compose(tmpdir.path());
         let resolved_context = context_for(&compose, tmpdir.path());
 
