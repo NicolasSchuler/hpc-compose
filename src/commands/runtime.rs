@@ -208,21 +208,43 @@ fn write_local_runtime_state_stub(
 }
 
 fn kill_pid(pid: u32) -> Result<()> {
-    let output = Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .output()
-        .context("failed to execute 'kill'")?;
-    if output.status.success() {
-        return Ok(());
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            bail!("failed to signal pid {pid}");
+        }
+
+        // Use libc directly so invalid test PIDs cannot be reinterpreted by `/bin/kill`.
+        let status = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        if status == 0 {
+            return Ok(());
+        }
+
+        let detail = std::io::Error::last_os_error().to_string();
+        if detail.is_empty() {
+            bail!("failed to signal pid {pid}");
+        }
+        bail!("failed to signal pid {pid}: {detail}");
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() { stderr } else { stdout };
-    if detail.is_empty() {
-        bail!("failed to signal pid {pid}");
+
+    #[cfg(not(unix))]
+    {
+        let output = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .output()
+            .context("failed to execute 'kill'")?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        if detail.is_empty() {
+            bail!("failed to signal pid {pid}");
+        }
+        bail!("failed to signal pid {pid}: {detail}");
     }
-    bail!("failed to signal pid {pid}: {detail}")
 }
 
 fn rollback_local_tracking(record: &SubmissionRecord, supervisor_pid: Option<u32>) {
