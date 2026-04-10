@@ -1142,10 +1142,10 @@ fn collect_missing_from_braced_expr(
 ) -> Result<()> {
     let mut chars = expr.chars();
     let Some(first) = chars.next() else {
-        bail!("invalid variable expression in '{}'", &input[start - 2..]);
+        bail!("invalid variable expression in '{}'", &input[start..]);
     };
     if !is_var_start(first) {
-        bail!("invalid variable expression in '{}'", &input[start - 2..]);
+        bail!("invalid variable expression in '{}'", &input[start..]);
     }
     let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
     let name = &expr[..name_len];
@@ -2821,6 +2821,27 @@ services:
         )
         .expect("scan");
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn strict_env_scanner_reports_malformed_placeholders_without_panicking() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      KEEP: "${}"
+"#,
+        );
+
+        let outcome =
+            std::panic::catch_unwind(|| missing_defaulted_variables(&path, &BTreeMap::new()));
+        let result = outcome.expect("malformed strict-env scan should not panic");
+        let err = result.expect_err("malformed placeholder should fail");
+        assert!(err.to_string().contains("invalid variable expression"));
     }
 
     #[test]

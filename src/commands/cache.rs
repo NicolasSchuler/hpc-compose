@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use hpc_compose::cache::{CacheEntryKind, prune_all_unused, prune_by_age, scan_cache};
 use hpc_compose::cli::OutputFormat;
-use hpc_compose::context::ResolvedContext;
+use hpc_compose::context::{ResolvedContext, ValueSource};
 
 use crate::output;
 
@@ -72,7 +72,10 @@ pub(crate) fn prune(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let report = if let Some(days) = age {
-        let target = cache_dir.unwrap_or_else(output::default_cache_dir);
+        let target = match cache_dir {
+            Some(path) => path,
+            None => active_cache_dir(&context)?,
+        };
         let result = prune_by_age(&target, days)?;
         output::CachePruneReport {
             cache_dir: target,
@@ -106,6 +109,17 @@ pub(crate) fn prune(
         }
     }
     Ok(())
+}
+
+fn active_cache_dir(context: &ResolvedContext) -> Result<PathBuf> {
+    if context.compose_file.source == ValueSource::Builtin && !context.compose_file.value.exists() {
+        return Ok(output::default_cache_dir());
+    }
+    let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+    )?;
+    Ok(runtime_plan.cache_dir)
 }
 
 pub(crate) fn prune_no_context(

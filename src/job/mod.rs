@@ -2795,6 +2795,56 @@ services:
     }
 
     #[test]
+    fn scan_job_inventory_ignores_stale_latest_pointer() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+        let project_dir = tmpdir.path().join("project");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let compose_path = project_dir.join("compose.yaml");
+        fs::write(&compose_path, "").expect("write");
+        let plan = runtime_plan(&project_dir);
+
+        let mut older = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("older.sbatch"),
+            &plan,
+            "100",
+        )
+        .expect("older");
+        older.submitted_at = 10;
+        write_submission_record(&older).expect("write older");
+
+        let mut newer = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("newer.sbatch"),
+            &plan,
+            "200",
+        )
+        .expect("newer");
+        newer.submitted_at = 20;
+        write_submission_record(&newer).expect("write newer");
+
+        write_json(&latest_record_path_for(&compose_path), &older).expect("stale latest");
+
+        let scan = scan_job_inventory(tmpdir.path(), false).expect("scan inventory");
+        assert_eq!(scan.jobs.len(), 2);
+        let newer_entry = scan
+            .jobs
+            .iter()
+            .find(|entry| entry.job_id == "200")
+            .expect("newer entry");
+        let older_entry = scan
+            .jobs
+            .iter()
+            .find(|entry| entry.job_id == "100")
+            .expect("older entry");
+        assert!(newer_entry.is_latest);
+        assert!(!older_entry.is_latest);
+    }
+
+    #[test]
     fn cleanup_report_dedupes_paths_and_repairs_latest_pointer() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let compose_path = tmpdir.path().join("compose.yaml");
@@ -2834,7 +2884,7 @@ services:
         )
         .expect("cleanup report");
         assert_eq!(report.removed_job_ids, vec!["500"]);
-        assert_eq!(report.latest_job_id_before.as_deref(), Some("500"));
+        assert_eq!(report.latest_job_id_before.as_deref(), Some("600"));
         assert_eq!(report.latest_job_id_after.as_deref(), Some("600"));
         let selected = report
             .jobs

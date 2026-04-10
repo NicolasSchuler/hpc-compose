@@ -2328,7 +2328,7 @@ fn clean_repairs_latest_pointer_and_removes_it_when_no_jobs_remain() {
         first_payload["removed_job_ids"],
         serde_json::json!(["11111"])
     );
-    assert_eq!(first_payload["latest_job_id_before"], Value::from("11111"));
+    assert_eq!(first_payload["latest_job_id_before"], Value::from("22222"));
     assert_eq!(first_payload["latest_job_id_after"], Value::from("22222"));
     let latest_after_first: Value = serde_json::from_str(
         &fs::read_to_string(latest_record_path_for(&compose)).expect("latest after first"),

@@ -299,3 +299,110 @@ services:
             .exists()
     );
 }
+
+#[test]
+fn cache_prune_age_uses_profile_context_cache_dir() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    fs::create_dir_all(tmpdir.path().join("app")).expect("app dir");
+    fs::write(tmpdir.path().join("app/main.py"), "print('hello')\n").expect("main.py");
+    let compose = write_compose(
+        tmpdir.path(),
+        "profile-compose.yaml",
+        &format!(
+            r#"
+name: demo
+x-slurm:
+  job_name: demo
+  time: "00:10:00"
+  cache_dir: {}
+services:
+  app:
+    image: python:3.11-slim
+    working_dir: /workspace
+    volumes:
+      - ./app:/workspace
+    command:
+      - python
+      - -m
+      - main
+    x-enroot:
+      prepare:
+        commands:
+          - pip install --no-cache-dir click
+"#,
+            cache_dir.display()
+        ),
+    );
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        r#"
+version = 1
+default_profile = "dev"
+
+[profiles.dev]
+compose_file = "profile-compose.yaml"
+"#,
+    )
+    .expect("settings");
+
+    let enroot = write_fake_enroot(tmpdir.path());
+    let prepare = run_cli(
+        tmpdir.path(),
+        &[
+            "prepare",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+        ],
+    );
+    assert_success(&prepare);
+    let plan = runtime_plan(&compose);
+
+    for artifact in [
+        hpc_compose::cache::manifest_path_for(&plan.ordered_services[0].runtime_image),
+        hpc_compose::cache::manifest_path_for(&hpc_compose::prepare::base_image_path(
+            &plan.cache_dir,
+            &plan.ordered_services[0],
+        )),
+    ] {
+        let mut manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&artifact).expect("manifest")).expect("json");
+        manifest["created_at"] = Value::from(1_u64);
+        manifest["last_used_at"] = Value::from(1_u64);
+        fs::write(
+            &artifact,
+            serde_json::to_vec_pretty(&manifest).expect("serialize"),
+        )
+        .expect("rewrite manifest");
+    }
+
+    let prune = run_cli(
+        tmpdir.path(),
+        &[
+            "--profile",
+            "dev",
+            "cache",
+            "prune",
+            "--age",
+            "1",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&prune);
+    let payload: Value = serde_json::from_str(&stdout_text(&prune)).expect("prune json");
+    assert_eq!(
+        payload["cache_dir"],
+        Value::from(cache_dir.display().to_string())
+    );
+    assert_eq!(payload["mode"], Value::from("age"));
+    assert_eq!(payload["removed_count"], Value::from(2));
+    assert!(!plan.ordered_services[0].runtime_image.exists());
+    assert!(
+        !hpc_compose::prepare::base_image_path(&plan.cache_dir, &plan.ordered_services[0]).exists()
+    );
+}

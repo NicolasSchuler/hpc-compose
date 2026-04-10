@@ -269,6 +269,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     let context =
                         resolve_command_context(options, Some(file), BinaryOverrides::default())?;
                     cache::prune(context, cache_dir, age, all_unused, format)
+                } else if cache_dir.is_none() {
+                    let context =
+                        resolve_command_context(options, file, BinaryOverrides::default())?;
+                    cache::prune(context, cache_dir, age, all_unused, format)
                 } else {
                     cache::prune_no_context(cache_dir, age, format)
                 }

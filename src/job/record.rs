@@ -362,20 +362,21 @@ fn resolved_latest_job_id(
     metadata_root: &Path,
     records: &[(PathBuf, SubmissionRecord)],
 ) -> Option<String> {
+    let newest = records
+        .iter()
+        .max_by(|(_, left), (_, right)| compare_submission_records(left, right))?;
     let latest_path = metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME);
     if latest_path.exists()
         && let Ok(latest) = read_json::<SubmissionRecord>(&latest_path)
-        && records
+        && let Some((_, pointed_record)) = records
             .iter()
-            .any(|(_, record)| record.job_id == latest.job_id)
+            .find(|(_, record)| record.job_id == latest.job_id)
+        && compare_submission_records(pointed_record, &newest.1) != Ordering::Less
     {
         return Some(latest.job_id);
     }
 
-    records
-        .iter()
-        .max_by(|(_, left), (_, right)| compare_submission_records(left, right))
-        .map(|(_, record)| record.job_id.clone())
+    Some(newest.1.job_id.clone())
 }
 
 fn cleanup_mode_label(mode: CleanupMode) -> &'static str {
