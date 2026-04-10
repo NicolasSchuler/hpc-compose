@@ -2151,7 +2151,7 @@ services:
         );
         assert_success(&status);
         let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
-        if payload["scheduler"]["terminal"] == Value::from(true) {
+        if payload["scheduler"]["terminal"].as_bool() == Some(true) {
             terminal = Some(payload);
             break;
         }
