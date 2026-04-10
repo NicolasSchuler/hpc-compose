@@ -8,6 +8,13 @@ Use this page when you know what you want to do, but not yet which command or ex
 - Start from `minimal-batch` with `hpc-compose init --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
 - Run `hpc-compose submit --watch -f compose.yaml`.
 
+## Remember directory/data/env settings once
+
+- Run `hpc-compose setup` to create or update repo-adjacent `.hpc-compose/settings.toml`.
+- Use `hpc-compose --profile dev submit --watch` so compose path, env files, env vars, and binary paths come from the selected profile.
+- Run `hpc-compose context --format json` to inspect all resolved values plus value sources.
+- Use `--settings-file <PATH>` when you need an explicit settings file instead of upward discovery.
+
 ## Migrate from Docker Compose
 
 - Read [Docker Compose Migration](docker-compose-migration.md).
@@ -41,6 +48,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 ## Debug cluster readiness
 
 - Run `hpc-compose validate -f compose.yaml`.
+- Run `hpc-compose validate -f compose.yaml --strict-env` when default interpolation fallbacks should be treated as failures.
 - Run `hpc-compose inspect --verbose -f compose.yaml`.
 - Run `hpc-compose preflight -f compose.yaml`.
 - Read the troubleshooting sections in [Runbook](runbook.md).
@@ -51,9 +59,17 @@ Use this page when you know what you want to do, but not yet which command or ex
 - Use `hpc-compose cache inspect -f compose.yaml` to see per-service reuse expectations.
 - Use `hpc-compose artifacts -f compose.yaml` after a run to export tracked payloads.
 
+## Find and clean tracked runs
+
+- Use `hpc-compose jobs list` to scan the current repo tree for tracked runs.
+- Use `hpc-compose jobs list --disk-usage` when you need a quick size estimate before deleting old state.
+- Use `hpc-compose clean -f compose.yaml --dry-run --age 7` to preview what a cleanup would remove.
+- Use `hpc-compose clean -f compose.yaml --all --format json` when automation needs a stable cleanup report for one compose context.
+
 ## Automation and scripting with JSON output
 
 - Prefer `--format json` for machine-readable output on `validate`, `render`, `prepare`, `preflight`, `inspect`, `status`, `stats`, `artifacts`, and `cache` subcommands.
+- Include `context --format json` when automation needs resolved compose path, binaries, interpolation vars, and runtime path roots.
 - Use `hpc-compose stats --format jsonl` or `--format csv` when downstream tooling wants row-oriented metrics.
 - Treat `--json` as a compatibility alias on older machine-readable commands; new automation should prefer `--format json`.
 

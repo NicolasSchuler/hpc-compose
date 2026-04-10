@@ -8,11 +8,11 @@ hpc\-compose clean [OPTIONS]
 .fi
 .SH DESCRIPTION
 .PP
-Remove old tracked job directories under .hpc\-compose for the compose file while keeping recent tracking data available.
+Preview or remove tracked job metadata and runtime directories for the active compose context while keeping recent tracking data available.
 .SH OPTIONS
 .TP
 \fB-f\fR, \fB--file\fR \fIFILE\fR
-Compose specification file to read. Default: compose.yaml.
+Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP
 \fB--age\fR \fIDAYS\fR
 Remove tracked job directories older than this many days.
@@ -20,12 +20,28 @@ Remove tracked job directories older than this many days.
 \fB--all\fR
 Remove all tracked job directories except the latest one.
 .TP
+\fB--dry\-run\fR
+Preview the tracked job cleanup plan without deleting files.
+.TP
+\fB--disk\-usage\fR
+Include recursive disk\-usage totals for tracked job paths.
+.TP
+\fB--format\fR \fIFORMAT\fR
+Output format. Possible values: text, json.
+.TP
+\fB--profile\fR \fINAME\fR
+Profile name to load from .hpc\-compose/settings.toml.
+.TP
+\fB--settings\-file\fR \fIPATH\fR
+Explicit settings file path; defaults to upward search for .hpc\-compose/settings.toml.
+.TP
 \fB-h\fR, \fB--help\fR
 Print help (see a summary with '\-h').
 .SH EXAMPLES
 .nf
-hpc\-compose clean \-f compose.yaml \-\-age 7
-hpc\-compose clean \-f compose.yaml \-\-all
+hpc\-compose clean \-\-age 7
+hpc\-compose clean \-\-all \-\-dry\-run
+hpc\-compose clean \-\-all \-\-format json
 .fi
 .SH SEE ALSO
-hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-completions(1), hpc\-compose\-init(1), hpc\-compose\-inspect(1), hpc\-compose\-logs(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-render(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-validate(1)
+hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-completions(1), hpc\-compose\-context(1), hpc\-compose\-init(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-render(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-validate(1)

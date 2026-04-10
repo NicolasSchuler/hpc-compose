@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -8,7 +9,8 @@ use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
 use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
 use hpc_compose::init::{default_cache_dir as default_init_cache_dir, resolve_template, templates};
 use hpc_compose::job::{
-    ArtifactExportReport, StatsSnapshot, StatusSnapshot, WatchOutcome, scheduler_source_label,
+    ArtifactExportReport, CleanupReport, JobInventoryScan, StatsSnapshot, StatusSnapshot,
+    WatchOutcome, scheduler_source_label,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, build_plan, registry_host_for_remote,
@@ -110,18 +112,39 @@ pub(crate) fn build_validate_output(plan: &Plan) -> ValidateOutput {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn load_plan(path: &Path) -> Result<Plan> {
     let spec = ComposeSpec::load(path)?;
     build_plan(path, spec)
 }
 
+pub(crate) fn load_plan_with_interpolation_vars(
+    path: &Path,
+    vars: &BTreeMap<String, String>,
+) -> Result<Plan> {
+    let spec = ComposeSpec::load_with_interpolation_vars(path, vars)?;
+    build_plan(path, spec)
+}
+
+#[cfg(test)]
 pub(crate) fn load_runtime_plan(path: &Path) -> Result<RuntimePlan> {
     let plan = load_plan(path)?;
     Ok(build_runtime_plan(&plan))
 }
 
-pub(crate) fn load_plan_and_runtime(path: &Path) -> Result<(Plan, RuntimePlan)> {
-    let plan = load_plan(path)?;
+pub(crate) fn load_runtime_plan_with_interpolation_vars(
+    path: &Path,
+    vars: &BTreeMap<String, String>,
+) -> Result<RuntimePlan> {
+    let plan = load_plan_with_interpolation_vars(path, vars)?;
+    Ok(build_runtime_plan(&plan))
+}
+
+pub(crate) fn load_plan_and_runtime_with_interpolation_vars(
+    path: &Path,
+    vars: &BTreeMap<String, String>,
+) -> Result<(Plan, RuntimePlan)> {
+    let plan = load_plan_with_interpolation_vars(path, vars)?;
     let runtime_plan = build_runtime_plan(&plan);
     Ok((plan, runtime_plan))
 }
@@ -214,6 +237,118 @@ pub(crate) fn print_plan_inspect(plan: &RuntimePlan) {
 
 pub(crate) fn print_cache_inspect(report: &CacheInspectReport) -> Result<()> {
     write_cache_inspect(&mut io::stdout(), report)
+}
+
+pub(crate) fn print_job_inventory_scan(report: &JobInventoryScan, disk_usage: bool) {
+    let _ = write_job_inventory_scan(&mut io::stdout(), report, disk_usage);
+}
+
+pub(crate) fn print_cleanup_report(report: &CleanupReport, disk_usage: bool) {
+    let _ = write_cleanup_report(&mut io::stdout(), report, disk_usage);
+}
+
+fn write_job_inventory_scan(
+    writer: &mut impl Write,
+    report: &JobInventoryScan,
+    disk_usage: bool,
+) -> io::Result<()> {
+    writeln!(writer, "scan root: {}", report.scan_root.display())?;
+    if report.jobs.is_empty() {
+        writeln!(writer, "no tracked jobs found")?;
+        return Ok(());
+    }
+
+    for job in &report.jobs {
+        let latest_marker = if job.is_latest { "*" } else { "-" };
+        write!(
+            writer,
+            "{} {} compose={} age={} submit_dir={} runtime={}",
+            latest_marker,
+            job.job_id,
+            job.compose_file.display(),
+            format_age_seconds(job.age_seconds),
+            job.submit_dir.display(),
+            runtime_presence_label(
+                job.runtime_job_root_present,
+                job.legacy_runtime_job_root_present,
+            )
+        )?;
+        if disk_usage {
+            write!(
+                writer,
+                " size={}",
+                format_bytes(job.disk_usage_bytes.unwrap_or(0))
+            )?;
+        }
+        writeln!(writer)?;
+    }
+    Ok(())
+}
+
+fn write_cleanup_report(
+    writer: &mut impl Write,
+    report: &CleanupReport,
+    disk_usage: bool,
+) -> io::Result<()> {
+    writeln!(writer, "compose file: {}", report.compose_file.display())?;
+    writeln!(writer, "mode: {}", report.mode)?;
+    writeln!(writer, "dry run: {}", yes_no(report.dry_run))?;
+    writeln!(
+        writer,
+        "latest before: {}",
+        report.latest_job_id_before.as_deref().unwrap_or("<none>")
+    )?;
+    writeln!(
+        writer,
+        "latest after: {}",
+        report.latest_job_id_after.as_deref().unwrap_or("<none>")
+    )?;
+    writeln!(writer, "selected jobs: {}", report.removed_job_ids.len())?;
+    if !report.removed_job_ids.is_empty() {
+        writeln!(writer, "selected ids: {}", report.removed_job_ids.join(","))?;
+    }
+    if !report.kept_job_ids.is_empty() {
+        writeln!(writer, "kept ids: {}", report.kept_job_ids.join(","))?;
+    }
+    if disk_usage {
+        writeln!(
+            writer,
+            "total bytes reclaimed: {}",
+            format_bytes(report.total_bytes_reclaimed.unwrap_or(0))
+        )?;
+    }
+    if report.removed_job_ids.is_empty() {
+        writeln!(writer, "no tracked jobs matched cleanup criteria")?;
+        return Ok(());
+    }
+
+    let action = if report.dry_run {
+        "would remove"
+    } else {
+        "removed"
+    };
+    for job in report.jobs.iter().filter(|job| job.selected) {
+        write!(
+            writer,
+            "{} {} submit_dir={} runtime={}",
+            action,
+            job.inventory.job_id,
+            job.inventory.submit_dir.display(),
+            runtime_presence_label(
+                job.inventory.runtime_job_root_present,
+                job.inventory.legacy_runtime_job_root_present,
+            )
+        )?;
+        if disk_usage {
+            write!(
+                writer,
+                " size={}",
+                format_bytes(job.bytes_reclaimed.unwrap_or(0))
+            )?;
+        }
+        writeln!(writer)?;
+    }
+    Ok(())
 }
 
 fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> io::Result<()> {
@@ -1091,6 +1226,30 @@ fn display_optional_stats_value(value: Option<&str>) -> &str {
     match value {
         Some(value) if !value.is_empty() => value,
         _ => "unknown",
+    }
+}
+
+fn runtime_presence_label(runtime_present: bool, legacy_present: bool) -> &'static str {
+    match (runtime_present, legacy_present) {
+        (true, true) => "runtime+legacy",
+        (true, false) => "runtime",
+        (false, true) => "legacy",
+        (false, false) => "missing",
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit_index = 0;
+    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_index += 1;
+    }
+    if unit_index == 0 {
+        format!("{bytes} {}", UNITS[unit_index])
+    } else {
+        format!("{value:.1} {}", UNITS[unit_index])
     }
 }
 
@@ -2302,26 +2461,27 @@ services:
         );
 
         run_command(Commands::Validate {
-            file: compose.clone(),
+            file: Some(compose.clone()),
+            strict_env: false,
             format: None,
         })
         .expect("validate");
         run_command(Commands::Render {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             output: None,
             format: None,
         })
         .expect("render stdout");
         let rendered = tmpdir.path().join("rendered.sbatch");
         run_command(Commands::Render {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             output: Some(rendered.clone()),
             format: None,
         })
         .expect("render file");
         assert!(rendered.exists());
         let render_err = run_command(Commands::Render {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             output: Some(tmpdir.path().join("missing-parent/rendered.sbatch")),
             format: None,
         })
@@ -2333,7 +2493,7 @@ services:
         );
 
         run_command(Commands::Prepare {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             enroot_bin: enroot.display().to_string(),
             keep_failed_prep: false,
             force: true,
@@ -2342,7 +2502,7 @@ services:
         .expect("prepare");
 
         let err = run_command(Commands::Preflight {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             strict: true,
             verbose: false,
             format: None,
@@ -2354,7 +2514,7 @@ services:
         .expect_err("strict warnings");
         assert!(err.to_string().contains("preflight reported warnings"));
         run_command(Commands::Preflight {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             strict: false,
             verbose: false,
             format: None,
@@ -2366,7 +2526,7 @@ services:
         .expect("non-strict preflight");
 
         run_command(Commands::Inspect {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             verbose: false,
             format: None,
             json: false,
@@ -2374,7 +2534,7 @@ services:
         .expect("inspect");
 
         let err = run_command(Commands::Submit {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             script_out: None,
             sbatch_bin: sbatch_fail.display().to_string(),
             srun_bin: srun.display().to_string(),
@@ -2392,7 +2552,7 @@ services:
         assert!(err.to_string().contains("sbatch failed"));
 
         run_command(Commands::Submit {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             script_out: Some(tmpdir.path().join("submit.sbatch")),
             sbatch_bin: sbatch_ok.display().to_string(),
             srun_bin: srun.display().to_string(),
@@ -2408,7 +2568,7 @@ services:
         })
         .expect("submit");
         run_command(Commands::Submit {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             script_out: Some(tmpdir.path().join("submit-no-id.sbatch")),
             sbatch_bin: no_id_sbatch.display().to_string(),
             srun_bin: srun.display().to_string(),
@@ -2440,7 +2600,7 @@ services:
         .expect("cache list empty");
         run_command(Commands::Cache {
             command: CacheCommands::Inspect {
-                file: compose.clone(),
+                file: Some(compose.clone()),
                 service: Some("app".into()),
                 format: None,
             },
@@ -2493,13 +2653,13 @@ services:
         .expect("prune all unused");
 
         run_command(Commands::Cancel {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             job_id: Some("12345".into()),
             scancel_bin: scancel_ok.display().to_string(),
         })
         .expect("cancel ok");
         let cancel_err = run_command(Commands::Cancel {
-            file: compose.clone(),
+            file: Some(compose.clone()),
             job_id: Some("12345".into()),
             scancel_bin: scancel_fail.display().to_string(),
         })

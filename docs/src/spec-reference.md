@@ -27,6 +27,18 @@ services:
 | `services` | mapping | required | Must contain at least one service. |
 | `x-slurm` | mapping | omitted | Top-level Slurm settings and shared runtime defaults. |
 
+## Settings-aware command table
+
+Use these commands and global flags when you want repo-adjacent profile memory for compose path, env files, env vars, and binary overrides.
+
+| Command or flag | Purpose | Notes |
+| --- | --- | --- |
+| `--profile <NAME>` | Select the profile from settings | Global flag; applies to every subcommand. |
+| `--settings-file <PATH>` | Use an explicit settings file | Global flag; bypasses upward auto-discovery of `.hpc-compose/settings.toml`. |
+| `hpc-compose setup` | Create or update repo-adjacent settings | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, and `--default-profile`. |
+| `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, interpolation vars, runtime paths, and value sources; supports `--format json`. |
+| `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
+
 ## `x-slurm`
 
 These fields live under the top-level `x-slurm` block.

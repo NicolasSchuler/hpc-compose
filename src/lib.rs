@@ -37,6 +37,7 @@
 
 pub mod cache;
 pub mod cli;
+pub mod context;
 pub mod init;
 pub mod job;
 pub mod manpages;

@@ -4,7 +4,12 @@ This runbook is for adapting `hpc-compose` to a real workload on a Slurm cluster
 
 Commands below assume `hpc-compose` is on your `PATH`. If you are running from a local checkout, replace `hpc-compose` with `target/release/hpc-compose`.
 
-All commands accept `-f` / `--file` to specify the compose spec path. When omitted, it defaults to `compose.yaml` in the current directory. (The `cache prune --all-unused` subcommand requires `-f` explicitly.)
+All commands accept `-f` / `--file` to specify the compose spec path. When omitted, `hpc-compose` first uses the active context compose file from repo-adjacent settings, then falls back to `compose.yaml` in the current directory. (The `cache prune --all-unused` subcommand requires `-f` explicitly.)
+
+Global context flags are also available everywhere:
+
+- `--profile <NAME>` selects a profile from `.hpc-compose/settings.toml`.
+- `--settings-file <PATH>` uses an explicit settings file instead of upward auto-discovery.
 
 Read the [Execution model](execution-model.md) page first if you are still orienting on login-node prepare, compute-node runtime, shared cache paths, or localhost networking.
 
@@ -25,6 +30,7 @@ Make sure you have:
 | --- | --- |
 | install or build `hpc-compose` | once per checkout or upgrade |
 | `init` or copy a shipped example | once per new spec |
+| `setup` and `context` | once per repo or when directory/data/env defaults change |
 | `validate` and `inspect` | early while adapting a spec |
 | `submit --watch` | normal run |
 | `preflight`, `prepare`, `render` | first-time cluster setup checks or the debugging flow |
@@ -34,10 +40,61 @@ Make sure you have:
 For a new spec on a real cluster:
 
 1. Run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`, or copy the closest shipped example.
-2. Set `x-slurm.cache_dir` if you need an explicit shared cache path, and adjust any cluster-specific resource settings.
-3. Run `hpc-compose validate -f compose.yaml` and `hpc-compose inspect --verbose -f compose.yaml` while you are still adapting the file.
-4. Run `hpc-compose submit --watch -f compose.yaml` for the normal run.
-5. If that fails, or if you need more visibility, break out `preflight`, `prepare`, `render`, `status`, `stats`, or `logs` separately.
+2. Run `hpc-compose setup` once so compose path, env files, env vars, and binary overrides live in repo-adjacent settings.
+3. Run `hpc-compose context --format json` to verify resolved values and sources.
+4. Set `x-slurm.cache_dir` if you need an explicit shared cache path, and adjust any cluster-specific resource settings.
+5. Run `hpc-compose validate -f compose.yaml` and `hpc-compose inspect --verbose -f compose.yaml` while you are still adapting the file.
+6. Run `hpc-compose --profile <name> submit --watch` for the normal run.
+7. If that fails, or if you need more visibility, break out `preflight`, `prepare`, `render`, `status`, `stats`, or `logs` separately.
+
+## Profiled context (repo-adjacent settings)
+
+`hpc-compose` can discover `.hpc-compose/settings.toml` by walking upward from the current directory. You can also pin a file with `--settings-file`.
+
+Typical setup flow:
+
+```bash
+hpc-compose setup
+hpc-compose context
+hpc-compose --profile dev context --format json
+```
+
+Non-interactive setup is available for scripting:
+
+```bash
+hpc-compose setup --profile-name dev --compose-file compose.yaml --env-file .env --env-file .env.dev --env CACHE_DIR=/shared/$USER/hpc-compose-cache --default-profile dev --non-interactive
+```
+
+Settings file shape (`.hpc-compose/settings.toml`):
+
+```toml
+version = 1
+default_profile = "dev"
+
+[defaults]
+compose_file = "compose.yaml"
+env_files = [".env"]
+
+[defaults.env]
+CACHE_DIR = "/shared/$USER/hpc-compose-cache"
+
+[profiles.dev]
+compose_file = "compose.yaml"
+env_files = [".env", ".env.dev"]
+
+[profiles.dev.env]
+RESUME_DIR = "/shared/$USER/runs/my-run"
+MODEL_DIR = "$HOME/models"
+```
+
+Resolution precedence is fixed and explicit:
+
+1. CLI flags
+2. selected profile values
+3. shared settings defaults
+4. built-in CLI defaults
+
+Use `context` whenever you want to inspect effective compose path, binaries, interpolation variables, runtime paths, and per-field sources (`cli`, `profile`, `defaults`, `compose`, `builtin`, `process_env`).
 
 ## Pick a starting example
 
@@ -106,6 +163,7 @@ Recommended pattern:
 
 ```bash
 hpc-compose validate -f compose.yaml
+hpc-compose validate -f compose.yaml --strict-env
 ```
 
 Use `validate` first when you are changing:
@@ -117,6 +175,7 @@ Use `validate` first when you are changing:
 - `x-slurm` / `x-enroot` blocks.
 
 If `validate` fails, fix that before doing anything more expensive.
+Use `--strict-env` when you want missing interpolation variables to fail instead of silently consuming `${VAR:-default}` or `${VAR-default}` fallbacks.
 
 ## 4. Inspect the normalized plan
 
@@ -285,7 +344,7 @@ If the sampler is absent, disabled, or only partially available, `stats` falls b
 
 In multi-node v1, GPU sampler collection remains primary-node-only. Slurm step metrics still cover the whole step through `sstat`, but `nvidia-smi` fan-in across nodes is intentionally out of scope.
 
-Use `--format json`, `--format csv`, or `--format jsonl` when you want machine-friendly output for dashboards, plotting, or experiment tracking. `--format json` is the preferred interface for `validate`, `render`, `prepare`, `preflight`, `inspect`, `status`, `stats`, `artifacts`, and `cache` subcommands. `--json` remains supported as a compatibility alias on older machine-readable commands.
+Use `--format json`, `--format csv`, or `--format jsonl` when you want machine-friendly output for dashboards, plotting, or experiment tracking. `--format json` is the preferred interface for `validate`, `render`, `prepare`, `preflight`, `inspect`, `status`, `stats`, `artifacts`, `cache`, and `context`. `--json` remains supported as a compatibility alias on older machine-readable commands.
 
 Runtime logs live under:
 
@@ -473,6 +532,18 @@ hpc-compose submit --dry-run -f compose.yaml
 
 Combine with `--skip-prepare` for a pure validation-and-render dry run.
 
+### Inspect tracked jobs across the repo tree
+
+Use `jobs list` when you want to rediscover tracked runs before jumping into one compose context:
+
+```bash
+hpc-compose jobs list
+hpc-compose jobs list --disk-usage
+hpc-compose jobs list --format json
+```
+
+`jobs list` scans from the nearest git root, or the current directory when no git root exists. It reports tracked submissions even when a runtime directory has already been removed or `latest.json` is stale.
+
 ### Clean up old job directories
 
 Tracked job metadata and logs accumulate in `.hpc-compose/`. Use `clean` to remove old entries:
@@ -483,7 +554,15 @@ hpc-compose clean -f compose.yaml --age 7
 
 # Remove all except the latest tracked job
 hpc-compose clean -f compose.yaml --all
+
+# Preview cleanup without deleting files
+hpc-compose clean -f compose.yaml --age 7 --dry-run
+
+# Produce machine-readable cleanup output
+hpc-compose clean -f compose.yaml --all --format json
 ```
+
+`clean` stays compose-scoped even though `jobs list` scans the repo tree. Use `context` when you need to confirm the difference between the compose directory, which resolves spec-relative paths, and the current submit directory, which anchors new runtime job state under `.hpc-compose/<job-id>`.
 
 ### Shell completions
 

@@ -43,9 +43,10 @@ pub use artifacts::{
 };
 pub use logs::{print_logs, watch_submission};
 pub use record::{
-    build_submission_record, clean_all_except_latest, clean_by_age, jobs_dir_for,
-    latest_record_path_for, load_submission_record, log_dir_for_record, metadata_root_for,
-    persist_submission_record, scan_job_records, write_submission_record,
+    build_cleanup_report, build_submission_record, clean_all_except_latest, clean_by_age,
+    jobs_dir_for, latest_record_path_for, load_submission_record, log_dir_for_record,
+    metadata_root_for, persist_submission_record, run_cleanup_report, scan_job_inventory,
+    scan_job_records, write_submission_record,
 };
 pub use scheduler::{build_status_snapshot, probe_scheduler_status, scheduler_source_label};
 pub use stats::{build_stats_snapshot, metrics_dir_for_record};
@@ -541,11 +542,67 @@ struct ServiceRuntimeStateEntry {
     nodelist: Option<String>,
 }
 
-/// Result returned by tracked-job cleanup commands.
+/// One tracked job discovered from recorded submission metadata.
 #[allow(missing_docs)]
-#[derive(Debug, Clone)]
-pub struct CleanResult {
-    pub removed_jobs: Vec<String>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobInventoryEntry {
+    pub compose_file: PathBuf,
+    pub compose_metadata_root: PathBuf,
+    pub job_id: String,
+    pub is_latest: bool,
+    pub submitted_at: u64,
+    pub age_seconds: u64,
+    pub submit_dir: PathBuf,
+    pub record_path: PathBuf,
+    pub runtime_job_root: PathBuf,
+    pub runtime_job_root_present: bool,
+    pub legacy_runtime_job_root: PathBuf,
+    pub legacy_runtime_job_root_present: bool,
+    #[serde(default)]
+    pub disk_usage_bytes: Option<u64>,
+}
+
+/// Repo-tree scan result returned by `jobs list`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobInventoryScan {
+    pub scan_root: PathBuf,
+    pub jobs: Vec<JobInventoryEntry>,
+}
+
+/// Planned or executed tracked-job cleanup report.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct CleanupReport {
+    pub compose_file: PathBuf,
+    pub mode: String,
+    pub dry_run: bool,
+    pub removed_job_ids: Vec<String>,
+    pub kept_job_ids: Vec<String>,
+    pub latest_job_id_before: Option<String>,
+    pub latest_job_id_after: Option<String>,
+    pub total_bytes_reclaimed: Option<u64>,
+    pub jobs: Vec<CleanupJobReport>,
+}
+
+/// Cleanup planning details for one tracked job.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct CleanupJobReport {
+    #[serde(flatten)]
+    pub inventory: JobInventoryEntry,
+    pub selected: bool,
+    pub bytes_reclaimed: Option<u64>,
+    #[serde(skip)]
+    pub removable_paths: Vec<PathBuf>,
+}
+
+/// Cleanup selection strategy.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupMode {
+    Age { age_days: u64 },
+    AllExceptLatest,
 }
 
 fn default_artifact_manifest_schema_version() -> u32 {
@@ -2600,7 +2657,7 @@ services:
 
         // latest.json should point to record2 (the last written)
         let result = clean_all_except_latest(&compose_path).expect("clean");
-        assert_eq!(result.removed_jobs, vec!["100"]);
+        assert_eq!(result.removed_job_ids, vec!["100"]);
 
         let remaining = scan_job_records(&compose_path).expect("scan");
         assert_eq!(remaining.len(), 1);
@@ -2637,7 +2694,7 @@ services:
         write_submission_record(&recent).expect("write");
 
         let result = clean_by_age(&compose_path, 7).expect("clean");
-        assert_eq!(result.removed_jobs, vec!["300"]);
+        assert_eq!(result.removed_job_ids, vec!["300"]);
 
         let remaining = scan_job_records(&compose_path).expect("scan");
         assert_eq!(remaining.len(), 1);
@@ -2669,7 +2726,7 @@ services:
 
         let result = clean_all_except_latest(&compose_path).expect("clean");
         // 500 is latest, so it should NOT be removed
-        assert!(result.removed_jobs.is_empty());
+        assert!(result.removed_job_ids.is_empty());
 
         // Add another record to make 500 non-latest
         let record2 = build_submission_record(
@@ -2683,7 +2740,121 @@ services:
         write_submission_record(&record2).expect("write");
 
         let result = clean_all_except_latest(&compose_path).expect("clean");
-        assert_eq!(result.removed_jobs, vec!["500"]);
+        assert_eq!(result.removed_job_ids, vec!["500"]);
         assert!(!job_dir.exists());
+    }
+
+    #[test]
+    fn scan_job_inventory_recovers_latest_when_pointer_is_missing() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+        let project_dir = tmpdir.path().join("project");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let compose_path = project_dir.join("compose.yaml");
+        fs::write(&compose_path, "").expect("write");
+        let plan = runtime_plan(&project_dir);
+
+        let mut older = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("older.sbatch"),
+            &plan,
+            "100",
+        )
+        .expect("older");
+        older.submitted_at = 10;
+        write_submission_record(&older).expect("write older");
+
+        let mut newer = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("newer.sbatch"),
+            &plan,
+            "200",
+        )
+        .expect("newer");
+        newer.submitted_at = 20;
+        write_submission_record(&newer).expect("write newer");
+
+        fs::remove_file(latest_record_path_for(&compose_path)).expect("remove latest");
+
+        let scan = scan_job_inventory(tmpdir.path(), false).expect("scan inventory");
+        assert_eq!(scan.jobs.len(), 2);
+        let newer_entry = scan
+            .jobs
+            .iter()
+            .find(|entry| entry.job_id == "200")
+            .expect("newer entry");
+        let older_entry = scan
+            .jobs
+            .iter()
+            .find(|entry| entry.job_id == "100")
+            .expect("older entry");
+        assert!(newer_entry.is_latest);
+        assert!(!older_entry.is_latest);
+    }
+
+    #[test]
+    fn cleanup_report_dedupes_paths_and_repairs_latest_pointer() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose_path = tmpdir.path().join("compose.yaml");
+        fs::write(&compose_path, "").expect("write");
+        let plan = runtime_plan(tmpdir.path());
+        let now = unix_timestamp_now();
+
+        let mut old_record = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("old.sbatch"),
+            &plan,
+            "500",
+        )
+        .expect("old");
+        old_record.submitted_at = now.saturating_sub(10 * 86_400);
+        write_submission_record(&old_record).expect("write old");
+
+        let mut new_record = build_submission_record(
+            &compose_path,
+            tmpdir.path(),
+            &tmpdir.path().join("new.sbatch"),
+            &plan,
+            "600",
+        )
+        .expect("new");
+        new_record.submitted_at = now.saturating_sub(60);
+        write_submission_record(&new_record).expect("write new");
+
+        write_json(&latest_record_path_for(&compose_path), &old_record).expect("stale latest");
+
+        let report = build_cleanup_report(
+            &compose_path,
+            CleanupMode::Age { age_days: 7 },
+            false,
+            false,
+        )
+        .expect("cleanup report");
+        assert_eq!(report.removed_job_ids, vec!["500"]);
+        assert_eq!(report.latest_job_id_before.as_deref(), Some("500"));
+        assert_eq!(report.latest_job_id_after.as_deref(), Some("600"));
+        let selected = report
+            .jobs
+            .iter()
+            .find(|job| job.inventory.job_id == "500")
+            .expect("selected job");
+        assert_eq!(selected.removable_paths.len(), 2);
+
+        run_cleanup_report(&report).expect("run cleanup");
+        let latest = load_submission_record(&compose_path, None).expect("latest after cleanup");
+        assert_eq!(latest.job_id, "600");
+
+        let final_report = build_cleanup_report(
+            &compose_path,
+            CleanupMode::Age { age_days: 0 },
+            false,
+            false,
+        )
+        .expect("final cleanup report");
+        run_cleanup_report(&final_report).expect("final cleanup");
+        assert!(!latest_record_path_for(&compose_path).exists());
     }
 }

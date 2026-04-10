@@ -1,6 +1,6 @@
 //! Compose-like spec parsing, interpolation, and validation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -448,6 +448,21 @@ impl ComposeSpec {
     /// Returns an error when the file cannot be read, the YAML cannot be
     /// parsed, interpolation fails, or semantic validation rejects the spec.
     pub fn load(path: &Path) -> Result<Self> {
+        let vars = interpolation_vars(path)?;
+        Self::load_with_interpolation_vars(path, &vars)
+    }
+
+    /// Loads, interpolates, and validates a compose file using explicit
+    /// interpolation variables.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, the YAML cannot be
+    /// parsed, interpolation fails, or semantic validation rejects the spec.
+    pub fn load_with_interpolation_vars(
+        path: &Path,
+        vars: &BTreeMap<String, String>,
+    ) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .context(format!("failed to read spec at {}", path.display()))?;
         let value: Value = serde_yaml::from_str(&raw)
@@ -455,17 +470,16 @@ impl ComposeSpec {
         validate_root(&value)?;
         let mut spec: ComposeSpec = serde_yaml::from_value(value)
             .context(format!("failed to deserialize spec at {}", path.display()))?;
-        spec.interpolate(path)?;
+        spec.interpolate_with_vars(vars)?;
         spec.validate()?;
         Ok(spec)
     }
 
-    fn interpolate(&mut self, path: &Path) -> Result<()> {
-        let vars = interpolation_vars(path)?;
-        interpolate_optional_string(&mut self.name, &vars)?;
-        self.slurm.interpolate(&vars)?;
+    fn interpolate_with_vars(&mut self, vars: &BTreeMap<String, String>) -> Result<()> {
+        interpolate_optional_string(&mut self.name, vars)?;
+        self.slurm.interpolate(vars)?;
         for service in self.services.values_mut() {
-            service.interpolate(&vars)?;
+            service.interpolate(vars)?;
         }
         Ok(())
     }
@@ -1048,6 +1062,120 @@ fn interpolation_vars(path: &Path) -> Result<InterpolationVars> {
     Ok(vars)
 }
 
+/// Returns variables that consumed `${VAR:-default}` or `${VAR-default}`
+/// defaults because `VAR` was missing from `vars`.
+///
+/// # Errors
+///
+/// Returns an error when interpolation syntax is malformed.
+pub fn missing_defaulted_variables(
+    path: &Path,
+    vars: &BTreeMap<String, String>,
+) -> Result<BTreeSet<String>> {
+    let raw =
+        fs::read_to_string(path).context(format!("failed to read spec at {}", path.display()))?;
+    let value: Value = serde_yaml::from_str(&raw)
+        .context(format!("failed to parse YAML at {}", path.display()))?;
+    let mut missing = BTreeSet::new();
+    collect_missing_defaulted_variables_from_value(&value, vars, &mut missing)?;
+    Ok(missing)
+}
+
+fn collect_missing_defaulted_variables_from_value(
+    value: &Value,
+    vars: &BTreeMap<String, String>,
+    out: &mut BTreeSet<String>,
+) -> Result<()> {
+    match value {
+        Value::String(current) => collect_missing_defaulted_variables_in_string(current, vars, out),
+        Value::Sequence(items) => {
+            for item in items {
+                collect_missing_defaulted_variables_from_value(item, vars, out)?;
+            }
+            Ok(())
+        }
+        Value::Mapping(entries) => {
+            for value in entries.values() {
+                collect_missing_defaulted_variables_from_value(value, vars, out)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn collect_missing_defaulted_variables_in_string(
+    input: &str,
+    vars: &BTreeMap<String, String>,
+    out: &mut BTreeSet<String>,
+) -> Result<()> {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '$' {
+            index += 1;
+            continue;
+        }
+        if matches!(chars.get(index + 1), Some('$')) {
+            index += 2;
+            continue;
+        }
+        if matches!(chars.get(index + 1), Some('{')) {
+            let start = index;
+            index += 2;
+            let (expr, next_index) = read_braced_expression(&chars, index, input, start)?;
+            index = next_index;
+            collect_missing_from_braced_expr(&expr, vars, out, input, start)?;
+            continue;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn collect_missing_from_braced_expr(
+    expr: &str,
+    vars: &BTreeMap<String, String>,
+    out: &mut BTreeSet<String>,
+    input: &str,
+    start: usize,
+) -> Result<()> {
+    let mut chars = expr.chars();
+    let Some(first) = chars.next() else {
+        bail!("invalid variable expression in '{}'", &input[start - 2..]);
+    };
+    if !is_var_start(first) {
+        bail!("invalid variable expression in '{}'", &input[start - 2..]);
+    }
+    let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
+    let name = &expr[..name_len];
+    let suffix = &expr[name_len..];
+
+    match suffix {
+        "" => {}
+        _ if suffix.starts_with(":-") => {
+            let default_used = match vars.get(name) {
+                Some(value) => value.is_empty(),
+                None => true,
+            };
+            if !vars.contains_key(name) {
+                out.insert(name.to_string());
+            }
+            if default_used {
+                collect_missing_defaulted_variables_in_string(&suffix[2..], vars, out)?;
+            }
+        }
+        _ if suffix.starts_with('-') => {
+            if !vars.contains_key(name) {
+                out.insert(name.to_string());
+                collect_missing_defaulted_variables_in_string(&suffix[1..], vars, out)?;
+            }
+        }
+        _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
+    }
+    Ok(())
+}
+
 fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
     let dotenv_path = project_dir.join(".env");
     if !dotenv_path.exists() {
@@ -1128,15 +1256,8 @@ fn interpolate_string(input: &str, vars: &InterpolationVars) -> Result<String> {
         if matches!(chars.get(index + 1), Some('{')) {
             let start = index;
             index += 2;
-            let mut expr = String::new();
-            while index < chars.len() && chars[index] != '}' {
-                expr.push(chars[index]);
-                index += 1;
-            }
-            if index == chars.len() {
-                bail!("unterminated variable expression in '{input}'");
-            }
-            index += 1;
+            let (expr, next_index) = read_braced_expression(&chars, index, input, start)?;
+            index = next_index;
             out.push_str(&resolve_braced_variable(&expr, vars, input, start)?);
             continue;
         }
@@ -1164,6 +1285,46 @@ fn interpolate_string(input: &str, vars: &InterpolationVars) -> Result<String> {
     }
 
     Ok(out)
+}
+
+fn read_braced_expression(
+    chars: &[char],
+    mut index: usize,
+    input: &str,
+    start: usize,
+) -> Result<(String, usize)> {
+    let mut expr = String::new();
+    let mut nested_braces = 0usize;
+
+    while let Some(ch) = chars.get(index) {
+        if *ch == '$' {
+            if matches!(chars.get(index + 1), Some('$')) {
+                expr.push('$');
+                expr.push('$');
+                index += 2;
+                continue;
+            }
+            if matches!(chars.get(index + 1), Some('{')) {
+                nested_braces += 1;
+                expr.push('$');
+                expr.push('{');
+                index += 2;
+                continue;
+            }
+        }
+
+        if *ch == '}' {
+            if nested_braces == 0 {
+                return Ok((expr, index + 1));
+            }
+            nested_braces -= 1;
+        }
+
+        expr.push(*ch);
+        index += 1;
+    }
+
+    bail!("unterminated variable expression in '{}'", &input[start..]);
 }
 
 fn resolve_braced_variable(
@@ -2546,6 +2707,120 @@ services:
             Some(value) => unsafe { env::set_var("EMPTY", value) },
             None => unsafe { env::remove_var("EMPTY") },
         }
+    }
+
+    #[test]
+    fn nested_default_interpolation_resolves_correct_values() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      KEEP: "${A:-${B:-fallback}}"
+"#,
+        );
+
+        let spec = ComposeSpec::load_with_interpolation_vars(
+            &path,
+            &BTreeMap::from([("A".to_string(), "present".to_string())]),
+        )
+        .expect("outer value");
+        assert_eq!(
+            spec.services
+                .get("app")
+                .expect("app")
+                .environment
+                .to_pairs()
+                .expect("pairs"),
+            vec![("KEEP".into(), "present".into())]
+        );
+
+        let spec = ComposeSpec::load_with_interpolation_vars(
+            &path,
+            &BTreeMap::from([("B".to_string(), "inner".to_string())]),
+        )
+        .expect("inner value");
+        assert_eq!(
+            spec.services
+                .get("app")
+                .expect("app")
+                .environment
+                .to_pairs()
+                .expect("pairs"),
+            vec![("KEEP".into(), "inner".into())]
+        );
+
+        let spec =
+            ComposeSpec::load_with_interpolation_vars(&path, &BTreeMap::new()).expect("fallback");
+        assert_eq!(
+            spec.services
+                .get("app")
+                .expect("app")
+                .environment
+                .to_pairs()
+                .expect("pairs"),
+            vec![("KEEP".into(), "fallback".into())]
+        );
+    }
+
+    #[test]
+    fn strict_env_scanner_handles_nested_defaults_and_escaped_dollars() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      KEEP: "${A:-${B:-fallback}}"
+      ESCAPED: "$${C:-literal}"
+"#,
+        );
+
+        let missing = missing_defaulted_variables(
+            &path,
+            &BTreeMap::from([("A".to_string(), "present".to_string())]),
+        )
+        .expect("scan");
+        assert!(missing.is_empty());
+
+        let missing = missing_defaulted_variables(
+            &path,
+            &BTreeMap::from([("B".to_string(), "inner".to_string())]),
+        )
+        .expect("scan");
+        assert_eq!(missing, BTreeSet::from(["A".to_string()]));
+
+        let missing = missing_defaulted_variables(&path, &BTreeMap::new()).expect("scan");
+        assert_eq!(missing, BTreeSet::from(["A".to_string(), "B".to_string()]));
+    }
+
+    #[test]
+    fn strict_env_scanner_ignores_yaml_comments_and_mapping_keys() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      "${IGNORED_KEY:-key}": fixed
+      KEEP: "${A:-ok}"
+    # ${IGNORED_COMMENT:-comment}
+"#,
+        );
+
+        let missing = missing_defaulted_variables(
+            &path,
+            &BTreeMap::from([("A".to_string(), "present".to_string())]),
+        )
+        .expect("scan");
+        assert!(missing.is_empty());
     }
 
     #[test]

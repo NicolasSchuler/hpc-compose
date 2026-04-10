@@ -24,18 +24,31 @@ hpc-compose init \
 
 If you already know the closest shipped example, copy it directly instead. The [Examples](examples.md) page is the fastest way to choose one.
 
-## 3. Normal run
+## 3. Optional: create repo-adjacent settings once
+
+If you want to stop repeating compose paths, env files, and binary overrides, create `.hpc-compose/settings.toml` once in the current repo tree:
+
+```bash
+hpc-compose setup
+hpc-compose context
+```
+
+Use `context` whenever you want to verify the fully resolved values and their sources before running cluster commands.
+
+## 4. Normal run
 
 ```bash
 hpc-compose submit --watch -f compose.yaml
+hpc-compose --profile dev submit --watch
 ```
 
 `submit --watch` is the normal run. It runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs.
 
-## 4. Debugging flow
+## 5. Debugging flow
 
 ```bash
 hpc-compose validate -f compose.yaml
+hpc-compose validate -f compose.yaml --strict-env
 hpc-compose inspect --verbose -f compose.yaml
 hpc-compose preflight -f compose.yaml
 hpc-compose prepare -f compose.yaml
@@ -53,15 +66,16 @@ Use the debugging flow when you want to confirm:
   <p><code>inspect --verbose</code> prints resolved environment values and final mount mappings. Treat its output as sensitive when the spec contains secrets.</p>
 </div>
 
-## 5. Revisit a tracked run later
+## 6. Revisit a tracked run later
 
 ```bash
+hpc-compose jobs list
 hpc-compose status -f compose.yaml
 hpc-compose stats -f compose.yaml
 hpc-compose logs -f compose.yaml --follow
 ```
 
-If a service uses `x-slurm.failure_policy.mode: restart_on_failure`, `status` also shows the current retry state and rolling-window budget for that service.
+Use `jobs list` first when you need to rediscover tracked runs under the current repo tree. If a service uses `x-slurm.failure_policy.mode: restart_on_failure`, `status` also shows the current retry state and rolling-window budget for that service.
 
 ## From a source checkout
 

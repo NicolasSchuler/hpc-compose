@@ -12,7 +12,7 @@ Print tracked service logs from a previous submit. Follow mode tails appended lo
 .SH OPTIONS
 .TP
 \fB-f\fR, \fB--file\fR \fIFILE\fR
-Compose specification file to read. Default: compose.yaml.
+Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP
 \fB--job\-id\fR \fIJOB_ID\fR
 Tracked Slurm job id to read instead of the latest recorded submission.
@@ -26,6 +26,12 @@ Follow appended log output until interrupted.
 \fB--lines\fR \fILINES\fR
 Number of trailing log lines to show before follow mode begins. Default: 100.
 .TP
+\fB--profile\fR \fINAME\fR
+Profile name to load from .hpc\-compose/settings.toml.
+.TP
+\fB--settings\-file\fR \fIPATH\fR
+Explicit settings file path; defaults to upward search for .hpc\-compose/settings.toml.
+.TP
 \fB-h\fR, \fB--help\fR
 Print help (see a summary with '\-h').
 .SH EXAMPLES
@@ -35,4 +41,4 @@ hpc\-compose logs \-f compose.yaml \-\-service app \-\-follow
 hpc\-compose logs \-f compose.yaml \-\-job\-id 12345 \-\-lines 200
 .fi
 .SH SEE ALSO
-hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-init(1), hpc\-compose\-inspect(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-render(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-validate(1)
+hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-context(1), hpc\-compose\-init(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-render(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-validate(1)

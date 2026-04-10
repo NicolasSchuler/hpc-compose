@@ -18,7 +18,7 @@ const MANUAL_LABEL: &str = "User Commands";
 const FILES_SECTION: &[(&str, &str)] = &[
     (
         "compose.yaml",
-        "Default compose specification file when -f or --file is omitted.",
+        "Fallback compose specification file when -f or --file is omitted and the active context does not provide one.",
     ),
     (
         "<compose-file-dir>/hpc-compose.sbatch",
@@ -515,6 +515,8 @@ mod tests {
         let pages = render_manpages();
         let names: Vec<_> = pages.iter().map(|page| page.file_name.as_str()).collect();
         assert!(names.contains(&"hpc-compose.1"));
+        assert!(names.contains(&"hpc-compose-jobs.1"));
+        assert!(names.contains(&"hpc-compose-jobs-list.1"));
         assert!(names.contains(&"hpc-compose-submit.1"));
         assert!(names.contains(&"hpc-compose-cache-prune.1"));
     }

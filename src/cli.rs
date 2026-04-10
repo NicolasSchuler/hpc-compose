@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
+const FILE_ARG_HELP: &str = "Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml";
+
 const TOP_LEVEL_HELP: &str = "\
 Normal run:
   hpc-compose submit --watch -f compose.yaml
@@ -20,6 +22,7 @@ Debugging flow:
 const VALIDATE_HELP: &str = "\
 Examples:
   hpc-compose validate -f compose.yaml
+  hpc-compose validate -f compose.yaml --strict-env
   hpc-compose validate -f compose.yaml --format json";
 
 const RENDER_HELP: &str = "\
@@ -110,10 +113,29 @@ Examples:
   hpc-compose cache prune --all-unused -f compose.yaml
   hpc-compose cache prune --age 7 --format json";
 
+const JOBS_HELP: &str = "\
+Examples:
+  hpc-compose jobs list
+  hpc-compose jobs list --disk-usage
+  hpc-compose jobs list --format json";
+
 const CLEAN_HELP: &str = "\
 Examples:
-  hpc-compose clean -f compose.yaml --age 7
-  hpc-compose clean -f compose.yaml --all";
+  hpc-compose clean --age 7
+  hpc-compose clean --all --dry-run
+  hpc-compose clean --all --format json";
+
+const CONTEXT_HELP: &str = "\
+Examples:
+  hpc-compose context
+  hpc-compose context --format json
+  hpc-compose --profile dev context";
+
+const SETUP_HELP: &str = "\
+Examples:
+  hpc-compose setup
+  hpc-compose setup --profile-name dev --compose-file compose.yaml --default-profile dev --non-interactive
+  hpc-compose setup --env CACHE_DIR=/shared/$USER/hpc-compose-cache --binary srun=/opt/slurm/bin/srun --non-interactive";
 
 const COMPLETIONS_HELP: &str = "\
 Examples:
@@ -130,6 +152,7 @@ pub const TOP_LEVEL_EXAMPLES: &[&str] = &[
 
 pub const VALIDATE_EXAMPLES: &[&str] = &[
     "hpc-compose validate -f compose.yaml",
+    "hpc-compose validate -f compose.yaml --strict-env",
     "hpc-compose validate -f compose.yaml --format json",
 ];
 
@@ -221,9 +244,28 @@ pub const CACHE_PRUNE_EXAMPLES: &[&str] = &[
     "hpc-compose cache prune --age 7 --format json",
 ];
 
+pub const JOBS_EXAMPLES: &[&str] = &[
+    "hpc-compose jobs list",
+    "hpc-compose jobs list --disk-usage",
+    "hpc-compose jobs list --format json",
+];
+
 pub const CLEAN_EXAMPLES: &[&str] = &[
-    "hpc-compose clean -f compose.yaml --age 7",
-    "hpc-compose clean -f compose.yaml --all",
+    "hpc-compose clean --age 7",
+    "hpc-compose clean --all --dry-run",
+    "hpc-compose clean --all --format json",
+];
+
+pub const CONTEXT_EXAMPLES: &[&str] = &[
+    "hpc-compose context",
+    "hpc-compose context --format json",
+    "hpc-compose --profile dev context",
+];
+
+pub const SETUP_EXAMPLES: &[&str] = &[
+    "hpc-compose setup",
+    "hpc-compose setup --profile-name dev --compose-file compose.yaml --default-profile dev --non-interactive",
+    "hpc-compose setup --env CACHE_DIR=/shared/$USER/hpc-compose-cache --binary srun=/opt/slurm/bin/srun --non-interactive",
 ];
 
 pub const COMPLETIONS_EXAMPLES: &[&str] = &[
@@ -241,6 +283,20 @@ pub const COMPLETIONS_EXAMPLES: &[&str] = &[
     after_help = TOP_LEVEL_HELP
 )]
 pub struct Cli {
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        help = "Profile name to load from .hpc-compose/settings.toml"
+    )]
+    pub profile: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        help = "Explicit settings file path; defaults to upward search for .hpc-compose/settings.toml"
+    )]
+    pub settings_file: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -271,10 +327,14 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Fail when ${VAR:-default} or ${VAR-default} fallbacks are used because VAR is missing"
+        )]
+        strict_env: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -288,10 +348,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             short,
             long,
@@ -312,10 +371,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "PATH",
@@ -346,10 +404,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(long, help = "Treat warnings as failures")]
         strict: bool,
         #[arg(long, help = "Show detailed preflight findings")]
@@ -390,10 +447,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             help = "Include resolved environment values and final mount mappings"
@@ -414,10 +470,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "OUTPUT",
@@ -494,10 +549,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "JOB_ID",
@@ -533,10 +587,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "JOB_ID",
@@ -579,10 +632,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "JOB_ID",
@@ -612,10 +664,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "JOB_ID",
@@ -648,10 +699,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "JOB_ID",
@@ -723,8 +773,17 @@ pub enum Commands {
         command: CacheCommands,
     },
     #[command(
+        about = "List tracked jobs under the current repo tree",
+        long_about = "Scan the current repository tree for tracked hpc-compose submissions and list the recorded jobs without querying the scheduler.",
+        after_help = JOBS_HELP
+    )]
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommands,
+    },
+    #[command(
         about = "Remove old tracked job directories",
-        long_about = "Remove old tracked job directories under .hpc-compose for the compose file while keeping recent tracking data available.",
+        long_about = "Preview or remove tracked job metadata and runtime directories for the active compose context while keeping recent tracking data available.",
         after_help = CLEAN_HELP
     )]
     Clean {
@@ -732,10 +791,9 @@ pub enum Commands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "DAYS",
@@ -749,6 +807,71 @@ pub enum Commands {
             conflicts_with = "age"
         )]
         all: bool,
+        #[arg(
+            long,
+            help = "Preview the tracked job cleanup plan without deleting files"
+        )]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Include recursive disk-usage totals for tracked job paths"
+        )]
+        disk_usage: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Print resolved profile/settings context",
+        long_about = "Print the effective settings, profile, binaries, interpolation variables, and derived runtime paths for the active invocation context.",
+        after_help = CONTEXT_HELP
+    )]
+    Context {
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Create or update repo-adjacent settings",
+        long_about = "Create or update .hpc-compose/settings.toml with profile defaults, environment files, explicit environment variables, and binary overrides.",
+        after_help = SETUP_HELP
+    )]
+    Setup {
+        #[arg(long, value_name = "PROFILE", help = "Profile to create or update")]
+        profile_name: Option<String>,
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Compose file path recorded under the selected profile"
+        )]
+        compose_file: Option<String>,
+        #[arg(
+            long = "env-file",
+            value_name = "PATH",
+            help = "Environment file path to append under profile.env_files"
+        )]
+        env_files: Vec<String>,
+        #[arg(
+            long = "env",
+            value_name = "KEY=VALUE",
+            help = "Environment variable entry written into profile.env"
+        )]
+        env: Vec<String>,
+        #[arg(
+            long = "binary",
+            value_name = "NAME=PATH",
+            help = "Binary override such as srun=/opt/slurm/bin/srun"
+        )]
+        binaries: Vec<String>,
+        #[arg(
+            long,
+            value_name = "PROFILE",
+            help = "Set settings.default_profile to this profile name"
+        )]
+        default_profile: Option<String>,
+        #[arg(
+            long,
+            help = "Do not prompt; use provided flags and existing settings as defaults"
+        )]
+        non_interactive: bool,
     },
     #[command(
         about = "Generate shell completions",
@@ -792,10 +915,9 @@ pub enum CacheCommands {
             short = 'f',
             long,
             value_name = "FILE",
-            default_value = "compose.yaml",
-            help = "Compose specification file to read"
+            help = FILE_ARG_HELP
         )]
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(long, value_name = "SERVICE", help = "Limit the report to one service")]
         service: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
@@ -836,6 +958,24 @@ pub enum CacheCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum JobsCommands {
+    #[command(
+        about = "List tracked jobs discovered under the repo tree",
+        long_about = "Scan the nearest git repository root, or the current directory when no git root exists, for tracked hpc-compose submissions and list the recorded jobs.",
+        after_help = JOBS_HELP
+    )]
+    List {
+        #[arg(
+            long,
+            help = "Include recursive disk-usage totals for tracked job paths"
+        )]
+        disk_usage: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+}
+
 /// Parses process arguments into the top-level CLI struct.
 pub fn parse_cli() -> Cli {
     Cli::parse()
@@ -868,7 +1008,11 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["cache", "list"] => CACHE_LIST_EXAMPLES,
         ["cache", "inspect"] => CACHE_INSPECT_EXAMPLES,
         ["cache", "prune"] => CACHE_PRUNE_EXAMPLES,
+        ["jobs"] => JOBS_EXAMPLES,
+        ["jobs", "list"] => JOBS_EXAMPLES,
         ["clean"] => CLEAN_EXAMPLES,
+        ["context"] => CONTEXT_EXAMPLES,
+        ["setup"] => SETUP_EXAMPLES,
         ["completions"] => COMPLETIONS_EXAMPLES,
         _ => &[],
     }

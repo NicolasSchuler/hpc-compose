@@ -23,6 +23,15 @@ pub(crate) fn run_cli(cwd: &Path, args: &[&str]) -> Output {
         .expect("run cli")
 }
 
+pub(crate) fn run_cli_with_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(bin_path());
+    command.current_dir(cwd).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().expect("run cli with env")
+}
+
 pub(crate) fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }

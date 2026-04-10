@@ -125,6 +125,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(top_help_stdout.contains("Debugging flow:"));
     assert!(top_help_stdout.contains("logs         Print tracked service logs"));
     assert!(top_help_stdout.contains("cancel       Cancel a tracked Slurm job"));
+    assert!(top_help_stdout.contains("jobs         List tracked jobs under the current repo tree"));
     assert!(top_help_stdout.contains("clean        Remove old tracked job directories"));
     assert!(top_help_stdout.contains("completions  Generate shell completions"));
 
@@ -142,6 +143,12 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(cache_help_stdout.contains("inspect  Inspect cache reuse for the current plan"));
     assert!(cache_help_stdout.contains("prune    Prune cached image artifacts"));
 
+    let jobs_help = run_cli(tmpdir.path(), &["jobs", "--help"]);
+    assert_success(&jobs_help);
+    let jobs_help_stdout = stdout_text(&jobs_help);
+    assert!(jobs_help_stdout.contains("jobs list --format json"));
+    assert!(jobs_help_stdout.contains("list  List tracked jobs discovered under the repo tree"));
+
     let submit_help = run_cli(tmpdir.path(), &["submit", "--help"]);
     assert_success(&submit_help);
     let submit_help_stdout = stdout_text(&submit_help);
@@ -152,6 +159,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(
         submit_help_stdout.contains("Run preflight, prepare, and render without calling sbatch")
     );
+    assert!(submit_help_stdout.contains("active context compose file"));
 
     let preflight_help = run_cli(tmpdir.path(), &["preflight", "--help"]);
     assert_success(&preflight_help);
