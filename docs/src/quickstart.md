@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/ins
 
 The installer selects the newest published release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run full cluster workflows.
 
-The installed CLI also ships Unix manpages. Use `man hpc-compose` or `man hpc-compose-submit` as the concise command reference, and keep the longer mdBook docs for workflow guidance. If you want shell integration right away, generate completions with `hpc-compose completions bash|zsh|fish`.
+The installed CLI also ships Unix manpages. Use `man hpc-compose`, `man hpc-compose-up`, or `man hpc-compose-submit` as the concise command reference, and keep the longer mdBook docs for workflow guidance. If you want shell integration right away, generate completions with `hpc-compose completions bash|zsh|fish`.
 
 ## 2. Write a starter spec
 
@@ -24,9 +24,9 @@ hpc-compose new \
 
 If you already know the closest shipped example, copy it directly instead. The [Examples](examples.md) page is the fastest way to choose one.
 
-## 3. Optional: create repo-adjacent settings once
+## 3. Optional: create a project-local settings file once
 
-If you want to stop repeating compose paths, env files, and binary overrides, create `.hpc-compose/settings.toml` once in the current repo tree:
+If you want to stop repeating compose paths, env files, and binary overrides, create the project-local settings file (`.hpc-compose/settings.toml`) once in the current repo tree:
 
 ```bash
 hpc-compose setup
@@ -38,11 +38,11 @@ Use `context` whenever you want to verify the fully resolved values and their so
 ## 4. Normal run
 
 ```bash
-hpc-compose submit --watch -f compose.yaml
-hpc-compose --profile dev submit --watch
+hpc-compose up -f compose.yaml
+hpc-compose --profile dev up
 ```
 
-`submit --watch` is the normal run. It runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to the line-oriented follower used in scripts and tests.
+`up` is the preferred normal run. It runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to the line-oriented follower used in scripts and tests. `submit --watch` remains available when you want the older spelling.
 
 ## 5. Debugging flow
 
@@ -86,12 +86,13 @@ If you are running from a local checkout instead of an installed binary:
 ```bash
 cargo build --release
 target/release/hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
-target/release/hpc-compose submit --watch -f compose.yaml
+target/release/hpc-compose up -f compose.yaml
 ```
 
 ## Read next
 
-- Use the [Execution model](execution-model.md) page to understand what runs where and which paths must be shared.
+- Use the [Execution Model](execution-model.md) page to understand what runs where and which paths must be shared.
+- Use the [CLI Reference](cli-reference.md) page for the current command surface grouped by workflow.
 - Use the [Support Matrix](support-matrix.md) page to confirm what is officially supported versus only release-built.
 - Use the [Task Guide](task-guide.md) page when you want a goal-oriented starting point.
 - Use the [Runbook](runbook.md) when adapting a real workload to a real cluster.

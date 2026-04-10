@@ -8,7 +8,7 @@ hpc\-compose [OPTIONS] <COMMAND>
 .fi
 .SH DESCRIPTION
 .PP
-Compile a compose\-like specification into one Slurm batch job that launches one or more services through Enroot and Pyxis inside a single allocation. Use submit \-\-watch for the normal run, and use validate, inspect, preflight, and prepare when adapting or debugging a spec.
+Compile a compose\-like specification into one Slurm batch job that launches one or more services through Enroot and Pyxis inside a single allocation. Use up for the normal run, and use config, validate, inspect, preflight, and prepare when adapting or debugging a spec.
 .SH SUBCOMMANDS
 .TP
 \fBvalidate\fR
@@ -25,6 +25,12 @@ Check cluster prerequisites on the submission host. See hpc\-compose\-preflight(
 .TP
 \fBinspect\fR
 Inspect the normalized runtime plan. See hpc\-compose\-inspect(1).
+.TP
+\fBconfig\fR
+Render the fully interpolated effective config. See hpc\-compose\-config(1).
+.TP
+\fBup\fR
+Submit, watch, and stream logs in one command. See hpc\-compose\-up(1).
 .TP
 \fBsubmit\fR
 Submit a job and optionally watch it. See hpc\-compose\-submit(1).
@@ -50,6 +56,12 @@ Watch a tracked job in a live terminal UI. See hpc\-compose\-watch(1).
 \fBcancel\fR
 Cancel a tracked Slurm job. See hpc\-compose\-cancel(1).
 .TP
+\fBdown\fR
+Cancel a tracked job and clean tracked state. See hpc\-compose\-down(1).
+.TP
+\fBrun\fR
+Run a one\-off command in one service environment. See hpc\-compose\-run(1).
+.TP
 \fBnew\fR
 Write a starter compose file from a built\-in template. See hpc\-compose\-new(1).
 .TP
@@ -63,10 +75,10 @@ List tracked jobs under the current repo tree. See hpc\-compose\-jobs(1).
 Remove old tracked job directories. See hpc\-compose\-clean(1).
 .TP
 \fBcontext\fR
-Print resolved profile/settings context. See hpc\-compose\-context(1).
+Print resolved project\-local settings context. See hpc\-compose\-context(1).
 .TP
 \fBsetup\fR
-Create or update repo\-adjacent settings. See hpc\-compose\-setup(1).
+Create or update the project\-local settings file. See hpc\-compose\-setup(1).
 .TP
 \fBcompletions\fR
 Generate shell completions. See hpc\-compose\-completions(1).
@@ -127,10 +139,11 @@ The command completed successfully.
 The command failed because validation, local I/O, or an external tool reported an error.
 .SH EXAMPLES
 .nf
-hpc\-compose submit \-\-watch \-f compose.yaml
+hpc\-compose up \-f compose.yaml
 hpc\-compose validate \-f compose.yaml
 hpc\-compose inspect \-\-verbose \-f compose.yaml
+hpc\-compose config \-f compose.yaml
 hpc\-compose preflight \-f compose.yaml
 .fi
 .SH SEE ALSO
-hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-context(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)
+hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-down(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-run(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-up(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)

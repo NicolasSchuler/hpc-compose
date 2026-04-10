@@ -13,11 +13,11 @@ The library crate still owns the core staged pipeline, but the runtime binary is
 - `tracked_paths`: centralize the `.hpc-compose/` layout used by render and job tracking
 - `cache`: persist cache manifests for imported and prepared images
 - `init`: expose the shipped example templates for `hpc-compose new` plus the legacy `init` alias
-- `commands/spec`: binary-only handlers for `validate`, `render`, `prepare`, `preflight`, and `inspect`
-- `commands/runtime`: binary-only handlers for `submit`, `status`, `ps`, `watch`, `stats`, `artifacts`, `logs`, `cancel`, and `clean`
+- `commands/spec`: binary-only handlers for `validate`, `render`, `prepare`, `preflight`, `config`, and `inspect`
+- `commands/runtime`: binary-only handlers for `up`, `submit`, `run`, `status`, `ps`, `watch`, `stats`, `artifacts`, `logs`, `down`, `cancel`, and `clean`
 - `commands/cache`: binary-only handlers for cache inspection and pruning
 - `commands/init`: binary-only handlers for `new` / `init`, `setup`, and `completions`
-- `watch_ui`: terminal UI controller and renderer for `submit --watch` and `watch`
+- `watch_ui`: terminal UI controller and renderer for `up`, `submit --watch`, and `watch`
 - `output`: binary-only text, JSON, CSV, and JSONL formatting helpers
 
 ## Execution flow

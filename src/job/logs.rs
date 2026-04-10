@@ -43,10 +43,12 @@ pub fn watch_submission(
     let mut cursors = build_cursors(&selected);
     let mut last_state: Option<(String, SchedulerSource)> = None;
     let mut last_visible_at: Option<u64> = None;
+    let mut last_progress_minute: Option<u64> = None;
 
     loop {
         let _ = drain_log_cursors(&mut cursors, &mut stdout)?;
-        let raw_status = probe_scheduler_status(&record.job_id, options);
+        let (raw_status, queue_diagnostics) =
+            probe_scheduler_status_with_queue_diagnostics(&record.job_id, options);
         let now = unix_timestamp_now();
         if raw_status.source != SchedulerSource::LocalOnly {
             last_visible_at = Some(now);
@@ -54,7 +56,8 @@ pub fn watch_submission(
         let status =
             reconcile_scheduler_status(raw_status, record.submitted_at, last_visible_at, now);
         let state_key = (status.state.clone(), status.source);
-        if last_state.as_ref() != Some(&state_key) {
+        let state_changed = last_state.as_ref() != Some(&state_key);
+        if state_changed {
             writeln!(
                 stdout,
                 "scheduler state: {} ({})",
@@ -67,6 +70,23 @@ pub fn watch_submission(
             }
             stdout.flush().ok();
             last_state = Some(state_key);
+        }
+        if let Some(progress) = walltime_progress(record, &status, queue_diagnostics.as_ref(), now)
+        {
+            let minute = progress.elapsed_seconds / 60;
+            if state_changed || last_progress_minute != Some(minute) {
+                writeln!(
+                    stdout,
+                    "walltime: {}% {}",
+                    walltime_progress_percent(&progress),
+                    format_walltime_summary(&progress)
+                )
+                .ok();
+                stdout.flush().ok();
+                last_progress_minute = Some(minute);
+            }
+        } else if state_changed {
+            last_progress_minute = None;
         }
 
         match status.source {
@@ -101,11 +121,13 @@ fn watch_local_submission(
     emit_initial_tail(&selected, lines, &mut stdout)?;
     let mut cursors = build_cursors(&selected);
     let mut last_state: Option<String> = None;
+    let mut last_progress_minute: Option<u64> = None;
 
     loop {
         let _ = drain_log_cursors(&mut cursors, &mut stdout)?;
         let snapshot = build_status_snapshot(&record.compose_file, Some(&record.job_id), options)?;
-        if last_state.as_ref() != Some(&snapshot.scheduler.state) {
+        let state_changed = last_state.as_ref() != Some(&snapshot.scheduler.state);
+        if state_changed {
             writeln!(
                 stdout,
                 "scheduler state: {} ({})",
@@ -118,6 +140,27 @@ fn watch_local_submission(
             }
             stdout.flush().ok();
             last_state = Some(snapshot.scheduler.state.clone());
+        }
+        if let Some(progress) = walltime_progress(
+            &snapshot.record,
+            &snapshot.scheduler,
+            snapshot.queue_diagnostics.as_ref(),
+            unix_timestamp_now(),
+        ) {
+            let minute = progress.elapsed_seconds / 60;
+            if state_changed || last_progress_minute != Some(minute) {
+                writeln!(
+                    stdout,
+                    "walltime: {}% {}",
+                    walltime_progress_percent(&progress),
+                    format_walltime_summary(&progress)
+                )
+                .ok();
+                stdout.flush().ok();
+                last_progress_minute = Some(minute);
+            }
+        } else if state_changed {
+            last_progress_minute = None;
         }
 
         if snapshot.scheduler.terminal {

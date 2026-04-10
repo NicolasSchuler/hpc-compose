@@ -21,7 +21,10 @@ use hpc_compose::prepare::{
     build_runtime_plan,
 };
 use hpc_compose::render::{display_srun_command, execution_argv, log_file_name_for_service};
-use hpc_compose::spec::{ComposeSpec, DependencyCondition, ServiceDependency};
+use hpc_compose::spec::{
+    ComposeSpec, DependencyCondition, EffectiveComposeConfig, ServiceDependency,
+    parse_slurm_time_limit,
+};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -93,6 +96,10 @@ pub(crate) struct CancelOutput {
     pub(crate) job_id: String,
     pub(crate) cancelled: bool,
     pub(crate) command_stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tracking_removed: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) purged_cache_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,6 +200,24 @@ pub(crate) fn load_runtime_plan_with_interpolation_vars(
 ) -> Result<RuntimePlan> {
     let plan = load_plan_with_interpolation_vars(path, vars)?;
     Ok(build_runtime_plan(&plan))
+}
+
+pub(crate) fn load_effective_config_with_interpolation_vars(
+    path: &Path,
+    vars: &BTreeMap<String, String>,
+) -> Result<EffectiveComposeConfig> {
+    let spec = ComposeSpec::load_with_interpolation_vars(path, vars)?;
+    let plan = build_plan(path, spec.clone())?;
+    let normalized_policies = plan
+        .ordered_services
+        .iter()
+        .map(|service| (service.name.clone(), service.failure_policy.clone()))
+        .collect::<BTreeMap<_, _>>();
+    spec.effective_config(&plan.cache_dir, &normalized_policies)
+}
+
+pub(crate) fn effective_config_yaml(config: &EffectiveComposeConfig) -> Result<String> {
+    serde_yaml::to_string(config).context("failed to serialize effective config as yaml")
 }
 
 pub(crate) fn load_plan_and_runtime_with_interpolation_vars(
@@ -326,9 +351,13 @@ fn write_job_inventory_scan(
         let latest_marker = if job.is_latest { "*" } else { "-" };
         write!(
             writer,
-            "{} {} compose={} age={} submit_dir={} runtime={}",
+            "{} {} kind={} compose={} age={} submit_dir={} runtime={}",
             latest_marker,
             job.job_id,
+            match job.kind {
+                hpc_compose::job::SubmissionKind::Main => "main",
+                hpc_compose::job::SubmissionKind::Run => "run",
+            },
             job.compose_file.display(),
             format_age_seconds(job.age_seconds),
             job.submit_dir.display(),
@@ -1048,6 +1077,99 @@ fn format_allocation_geometry(plan: &RuntimePlan) -> String {
     )
 }
 
+fn inspect_time_limit_warnings(plan: &RuntimePlan) -> Vec<String> {
+    let allocation_limit = plan
+        .slurm
+        .time
+        .as_deref()
+        .and_then(|value| parse_slurm_time_limit(value).ok());
+    let service_limits = plan
+        .ordered_services
+        .iter()
+        .filter_map(|service| {
+            service
+                .slurm
+                .time_limit
+                .as_deref()
+                .and_then(|value| parse_slurm_time_limit(value).ok())
+                .map(|seconds| (service.name.as_str(), seconds))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut warnings = std::collections::BTreeSet::new();
+
+    for service in &plan.ordered_services {
+        let Some(raw_limit) = service.slurm.time_limit.as_deref() else {
+            continue;
+        };
+        let Some(service_limit) = parse_slurm_time_limit(raw_limit).ok() else {
+            continue;
+        };
+        if let Some(allocation_limit) = allocation_limit
+            && service_limit > allocation_limit
+        {
+            warnings.insert(format!(
+                "service '{}' advisory time_limit {} exceeds allocation time {}",
+                service.name,
+                raw_limit,
+                plan.slurm.time.as_deref().unwrap_or("unknown"),
+            ));
+        }
+        for dependency in &service.depends_on {
+            let Some(dependency_limit) = service_limits.get(dependency.name.as_str()) else {
+                continue;
+            };
+            let Some(dependency_raw) = plan
+                .ordered_services
+                .iter()
+                .find(|candidate| candidate.name == dependency.name)
+                .and_then(|candidate| candidate.slurm.time_limit.as_deref())
+            else {
+                continue;
+            };
+            if *dependency_limit < service_limit {
+                warnings.insert(format!(
+                    "dependency '{}' advisory time_limit {} is shorter than dependent service '{}' ({})",
+                    dependency.name, dependency_raw, service.name, raw_limit
+                ));
+            }
+        }
+    }
+
+    if let Some(distributed) = plan
+        .ordered_services
+        .iter()
+        .find(|service| service.placement.mode == ServicePlacementMode::Distributed)
+        && let Some(distributed_raw) = distributed.slurm.time_limit.as_deref()
+        && let Ok(distributed_limit) = parse_slurm_time_limit(distributed_raw)
+    {
+        for helper in plan
+            .ordered_services
+            .iter()
+            .filter(|service| service.name != distributed.name)
+        {
+            let Some(helper_raw) = helper.slurm.time_limit.as_deref() else {
+                continue;
+            };
+            let Ok(helper_limit) = parse_slurm_time_limit(helper_raw) else {
+                continue;
+            };
+            if helper_limit > distributed_limit {
+                warnings.insert(format!(
+                    "helper service '{}' advisory time_limit {} outlives distributed service '{}' ({})",
+                    helper.name, helper_raw, distributed.name, distributed_raw
+                ));
+            } else if helper_limit < distributed_limit {
+                warnings.insert(format!(
+                    "helper service '{}' advisory time_limit {} may exit before distributed service '{}' ({})",
+                    helper.name, helper_raw, distributed.name, distributed_raw
+                ));
+            }
+        }
+    }
+
+    warnings.into_iter().collect()
+}
+
 fn format_service_step_geometry(service: &RuntimeService) -> String {
     let mut parts = vec![
         format!("mode={}", placement_mode_label(service.placement.mode)),
@@ -1091,6 +1213,13 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
         "service order: {}",
         service_names(plan).join(" -> ")
     )?;
+    let warnings = inspect_time_limit_warnings(plan);
+    if !warnings.is_empty() {
+        writeln!(writer, "warnings:")?;
+        for warning in warnings {
+            writeln!(writer, "  - {warning}")?;
+        }
+    }
 
     for service in &plan.ordered_services {
         writeln!(writer)?;
@@ -1663,7 +1792,8 @@ mod tests {
         ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
         CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, JobInventoryEntry,
         JobInventoryScan, QueueDiagnostics, SamplerSnapshot, SchedulerSource, SchedulerStatus,
-        ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats, SubmissionRecord,
+        ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats, SubmissionKind,
+        SubmissionRecord,
     };
     use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use hpc_compose::spec::{
@@ -2709,6 +2839,7 @@ services:
             compose_file: compose.clone(),
             compose_metadata_root: tmpdir.path().join(".hpc-compose"),
             job_id: "12345".into(),
+            kind: SubmissionKind::Main,
             is_latest: true,
             submitted_at: 1_775_807_600,
             age_seconds: 42,
@@ -2880,6 +3011,8 @@ services:
             no_preflight: true,
             watch: false,
             local: false,
+            allow_resume_changes: false,
+            resume_diff_only: false,
             dry_run: false,
             format: None,
         })
@@ -2900,6 +3033,8 @@ services:
             no_preflight: false,
             watch: false,
             local: false,
+            allow_resume_changes: false,
+            resume_diff_only: false,
             dry_run: false,
             format: None,
         })
@@ -2918,6 +3053,8 @@ services:
             no_preflight: true,
             watch: false,
             local: false,
+            allow_resume_changes: false,
+            resume_diff_only: false,
             dry_run: false,
             format: None,
         })
@@ -2995,6 +3132,7 @@ services:
             file: Some(compose.clone()),
             job_id: Some("12345".into()),
             scancel_bin: scancel_ok.display().to_string(),
+            purge_cache: false,
             format: None,
         })
         .expect("cancel ok");
@@ -3002,6 +3140,7 @@ services:
             file: Some(compose.clone()),
             job_id: Some("12345".into()),
             scancel_bin: scancel_fail.display().to_string(),
+            purge_cache: false,
             format: None,
         })
         .expect_err("cancel fail");

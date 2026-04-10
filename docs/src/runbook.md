@@ -4,7 +4,7 @@ This runbook is for adapting `hpc-compose` to a real workload on a Slurm cluster
 
 Commands below assume `hpc-compose` is on your `PATH`. If you are running from a local checkout, replace `hpc-compose` with `target/release/hpc-compose`.
 
-All commands accept `-f` / `--file` to specify the compose spec path. When omitted, `hpc-compose` first uses the active context compose file from repo-adjacent settings, then falls back to `compose.yaml` in the current directory. (`cache prune --all-unused` requires `-f` explicitly. `cache prune --age` can use the active context/profile unless you pass `--cache-dir`.)
+All commands accept `-f` / `--file` to specify the compose spec path. When omitted, `hpc-compose` first uses the active context compose file from the project-local settings file, then falls back to `compose.yaml` in the current directory. (`cache prune --all-unused` requires `-f` explicitly. `cache prune --age` can use the active context/profile unless you pass `--cache-dir`.)
 
 Global context flags are also available everywhere:
 
@@ -32,7 +32,7 @@ Make sure you have:
 | `new` or copy a shipped example | once per new spec |
 | `setup` and `context` | once per repo or when directory/data/env defaults change |
 | `validate` and `inspect` | early while adapting a spec |
-| `submit --watch` | normal run |
+| `up` | normal run |
 | `watch`, `ps`, `status`, `logs`, `stats` | revisit or inspect a tracked run later |
 | `preflight`, `prepare`, `render` | first-time cluster setup checks or the debugging flow |
 
@@ -41,14 +41,14 @@ Make sure you have:
 For a new spec on a real cluster:
 
 1. Run `hpc-compose new --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`, or copy the closest shipped example.
-2. Run `hpc-compose setup` once so compose path, env files, env vars, and binary overrides live in repo-adjacent settings.
+2. Run `hpc-compose setup` once so compose path, env files, env vars, and binary overrides live in the project-local settings file.
 3. Run `hpc-compose context --format json` to verify resolved values and sources.
 4. Set `x-slurm.cache_dir` if you need an explicit shared cache path, and adjust any cluster-specific resource settings.
 5. Run `hpc-compose validate -f compose.yaml` and `hpc-compose inspect --verbose -f compose.yaml` while you are still adapting the file.
-6. Run `hpc-compose --profile <name> submit --watch` for the normal run.
+6. Run `hpc-compose --profile <name> up` for the normal run.
 7. If that fails, or if you need more visibility later, break out `preflight`, `prepare`, `render`, `status`, `ps`, `watch`, `stats`, or `logs` separately.
 
-## Profiled context (repo-adjacent settings)
+## Profiled Context (Project-Local Settings File)
 
 `hpc-compose` can discover `.hpc-compose/settings.toml` by walking upward from the current directory. You can also pin a file with `--settings-file`.
 
@@ -199,41 +199,38 @@ Check:
 `inspect` is the quickest way to confirm that the planner understood your spec the way you intended.
 `inspect --verbose` is a debugging-oriented view and can print secrets from resolved environment values.
 
-## 5. Normal run: submit the job and watch it
+## 5. Normal run: use up
 
 ```bash
-hpc-compose submit --watch -f compose.yaml
+hpc-compose up -f compose.yaml
 ```
 
-`submit` does the normal end-to-end flow:
+`up` is the preferred end-to-end flow. It:
 
 1. run preflight unless `--no-preflight` is set,
 2. prepare images unless `--skip-prepare` is set,
 3. render the script,
-4. call `sbatch`.
-
-With `--watch`, `submit` also:
-
+4. call `sbatch`,
 5. records the tracked job metadata under `.hpc-compose/`,
 6. polls scheduler state with `squeue` / `sacct` when available,
 7. streams tracked service logs as they appear.
 
-On an interactive TTY, `submit --watch` launches the full-screen watch UI with a per-service table on the left and the selected service log on the right. In non-interactive contexts it keeps the line-oriented follower so scripts and tests still get stable plain text.
+On an interactive TTY, `up` launches the full-screen watch UI with a per-service table on the left and the selected service log on the right. In non-interactive contexts it keeps the line-oriented follower so scripts and tests still get stable plain text. `submit --watch` remains available as a compatibility path to the same watch behavior.
 
 <div class="callout note">
   <p><strong>Note</strong></p>
-  <p><code>submit</code> treats preflight warnings as non-fatal. If you want warnings to block submission, run <code>preflight --strict</code> separately before <code>submit</code>.</p>
+  <p><code>up</code> and <code>submit</code> treat preflight warnings as non-fatal. If you want warnings to block submission, run <code>preflight --strict</code> separately first.</p>
 </div>
 
 Useful options:
 
 - `--script-out path/to/job.sbatch` keeps a copy of the rendered script.
 - When `--script-out` is omitted, the script is written to `<compose-file-dir>/hpc-compose.sbatch`.
-- `--force-rebuild` refreshes imported and prepared artifacts during submit.
+- `--force-rebuild` refreshes imported and prepared artifacts during submission.
 - `--skip-prepare` reuses existing prepared artifacts.
 - `--keep-failed-prep` keeps the Enroot rootfs around when a prepare step fails.
 
-For the shipped examples, `submit --watch` is usually the only command you need in the normal run. Use the other commands when you need more visibility into planning, environment checks, image preparation, tracked job state, or the generated script.
+For the shipped examples, `up` is usually the only command you need in the normal run. Use the other commands when you need more visibility into planning, environment checks, image preparation, tracked job state, or the generated script.
 
 ## 6. Run preflight checks when you need to debug cluster readiness
 
@@ -258,7 +255,7 @@ If your cluster installs these tools in non-standard locations, pass explicit pa
 hpc-compose preflight -f compose.yaml --enroot-bin /opt/enroot/bin/enroot --srun-bin /usr/local/bin/srun --sbatch-bin /usr/local/bin/sbatch
 ```
 
-The same override flags (`--enroot-bin`, `--srun-bin`, `--sbatch-bin`) are available on `prepare` and `submit`.
+The same override flags (`--enroot-bin`, `--srun-bin`, `--sbatch-bin`) are available on `prepare`, `up`, and `submit`.
 
 Use strict mode if you want warnings to fail the command:
 
@@ -302,8 +299,10 @@ After a successful submit, `hpc-compose` prints:
 
 - the rendered script path,
 - the cache directory,
-- one log path per service.
+- one log path per service,
 - the tracked metadata location when a numeric Slurm job id was returned.
+
+### Tracked state and logs
 
 Use the tracked helpers for later inspection:
 
@@ -341,9 +340,11 @@ Read that line as:
 - two restart-triggering failures are still inside the current 60-second rolling window
 - one more restart-triggering failure inside that same window would exhaust `max_restarts_in_window: 3`
 
-If you need the machine-readable form, `status --json` exposes the same policy state per service through `failure_policy_mode`, `restart_count`, `max_restarts`, `window_seconds`, `max_restarts_in_window`, `restart_failures_in_window`, and `last_exit_code`.
+If you need the machine-readable form, `status --format json` exposes the same policy state per service through `failure_policy_mode`, `restart_count`, `max_restarts`, `window_seconds`, `max_restarts_in_window`, `restart_failures_in_window`, and `last_exit_code`.
 
 For multi-node jobs, `status` also reports tracked placement geometry (`placement_mode`, nodes, task counts, and expanded nodelist) for each service.
+
+### Metrics output
 
 `stats` now prefers sampler data from `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` when `x-slurm.metrics` is enabled. In v1 that sampler can collect:
 
@@ -354,7 +355,7 @@ If the sampler is absent, disabled, or only partially available, `stats` falls b
 
 In multi-node v1, GPU sampler collection remains primary-node-only. Slurm step metrics still cover the whole step through `sstat`, but `nvidia-smi` fan-in across nodes is intentionally out of scope.
 
-Use `--format json`, `--format csv`, or `--format jsonl` when you want machine-friendly output for dashboards, plotting, or experiment tracking. `--format json` is the preferred interface for `validate`, `render`, `prepare`, `preflight`, `inspect`, `status`, `stats`, `artifacts`, `cache`, and `context`. `--json` remains supported as a compatibility alias on older machine-readable commands.
+Use `--format json`, `--format csv`, or `--format jsonl` when you want machine-friendly output for dashboards, plotting, or experiment tracking. `--format json` is the preferred interface for `validate`, `render`, `prepare`, `preflight`, `inspect`, `status`, `stats`, `artifacts`, `cache`, and `context`. `--json` remains supported only as a compatibility alias on older machine-readable commands.
 
 Runtime logs live under:
 
@@ -376,6 +377,8 @@ ${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics/
 
 Collector failures are best-effort: missing `nvidia-smi`, missing `sstat`, or unsupported queries do not fail the batch job itself.
 
+### Artifact export
+
 When `x-slurm.artifacts` is enabled, teardown collection writes:
 
 ```text
@@ -393,6 +396,8 @@ Slurm may also write a top-level batch log such as `slurm-<jobid>.out`, or to th
 Service names containing non-alphanumeric characters are encoded in the log filename. For example, a service named `my.app` produces `my_x2e_app.log`. Prefer `[a-zA-Z0-9_-]` in service names for readability.
 
 If you used `--script-out`, keep that script with the job logs when debugging cluster behavior.
+
+### Resume-aware runs
 
 When `x-slurm.resume` is enabled, `hpc-compose` also:
 
@@ -453,7 +458,7 @@ Use `cache inspect` when you need to answer questions such as:
 
 ### After upgrading hpc-compose
 
-Cache keys include the tool version, so upgrading `hpc-compose` invalidates all existing cached artifacts. You will see a full rebuild on the next `prepare` or `submit`. To clean up orphaned artifacts after an upgrade:
+Cache keys include the tool version, so upgrading `hpc-compose` invalidates all existing cached artifacts. You will see a full rebuild on the next `prepare`, `up`, or `submit`. To clean up orphaned artifacts after an upgrade:
 
 ```bash
 hpc-compose cache prune --age 0
@@ -463,11 +468,11 @@ hpc-compose cache prune --age 0
 
 | If you changed... | Typical next step |
 | --- | --- |
-| YAML planning/runtime settings only | `hpc-compose validate -f compose.yaml`, `hpc-compose inspect --verbose -f compose.yaml`, then `hpc-compose submit --watch -f compose.yaml` |
-| The base image, `x-enroot.prepare.commands`, or prepare env | `hpc-compose submit --watch --force-rebuild -f compose.yaml` for the normal run, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
-| Only mounted runtime source such as app code under `volumes` | Usually just `hpc-compose submit --watch -f compose.yaml` |
+| YAML planning/runtime settings only | `hpc-compose validate -f compose.yaml`, `hpc-compose inspect --verbose -f compose.yaml`, then `hpc-compose up -f compose.yaml` |
+| The base image, `x-enroot.prepare.commands`, or prepare env | `hpc-compose up --force-rebuild -f compose.yaml` for the normal run, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
+| Only mounted runtime source such as app code under `volumes` | Usually just `hpc-compose up -f compose.yaml` |
 | Cache entries you no longer want and this plan does not reference | `hpc-compose cache prune --all-unused -f compose.yaml` |
-| `hpc-compose` itself | Expect cache misses on the next `prepare` or `submit`, then optionally prune old entries |
+| `hpc-compose` itself | Expect cache misses on the next `prepare`, `up`, or `submit`, then optionally prune old entries |
 
 ## Decision guide
 
@@ -496,7 +501,7 @@ Use them after changing:
 
 Treat manual `enroot remove` as a rare last resort.
 
-Use it only when Enroot state is clearly broken or inconsistent and `hpc-compose prepare --force` plus cache pruning did not fix the problem. In the normal rebuild or refresh path, prefer `submit --force-rebuild`, `prepare --force`, and `cache prune` so `hpc-compose` stays in charge of artifact state.
+Use it only when Enroot state is clearly broken or inconsistent and `hpc-compose prepare --force` plus cache pruning did not fix the problem. In the normal rebuild or refresh path, prefer `up --force-rebuild`, `prepare --force`, and `cache prune` so `hpc-compose` stays in charge of artifact state.
 
 ### Why does my service rebuild every time?
 
@@ -597,8 +602,9 @@ hpc-compose completions zsh > ~/.zfunc/_hpc-compose
 hpc-compose completions fish > ~/.config/fish/completions/hpc-compose.fish
 ```
 
-## Related docs
+## Related Docs
 
-- [Spec reference](spec-reference.md)
-- [Docker Compose migration](docker-compose-migration.md)
+- [CLI Reference](cli-reference.md)
+- [Spec Reference](spec-reference.md)
+- [Docker Compose Migration](docker-compose-migration.md)
 - [Examples](examples.md)

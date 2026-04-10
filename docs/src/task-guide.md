@@ -5,13 +5,14 @@ Use this page when you know what you want to do, but not yet which command or ex
 ## First run
 
 - Read [Quickstart](quickstart.md).
+- Run `hpc-compose new --list-templates` if you want to inspect the built-in starter templates before choosing one.
 - Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
-- Run `hpc-compose submit --watch -f compose.yaml`.
+- Run `hpc-compose up -f compose.yaml`.
 
 ## Remember directory/data/env settings once
 
-- Run `hpc-compose setup` to create or update repo-adjacent `.hpc-compose/settings.toml`.
-- Use `hpc-compose --profile dev submit --watch` so compose path, env files, env vars, and binary paths come from the selected profile.
+- Run `hpc-compose setup` to create or update the project-local settings file (`.hpc-compose/settings.toml`).
+- Use `hpc-compose --profile dev up` so compose path, env files, env vars, and binary paths come from the selected profile.
 - Run `hpc-compose context --format json` to inspect all resolved values plus value sources.
 - Use `--settings-file <PATH>` when you need an explicit settings file instead of upward discovery.
 
@@ -25,7 +26,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 - Start from [app-redis-worker.yaml](examples.md).
 - Add `depends_on` and `readiness` only where ordering really matters.
-- Use [Execution model](execution-model.md) to confirm which services can rely on localhost.
+- Use [Execution Model](execution-model.md) to confirm which services can rely on localhost.
 
 ## Multi-node distributed training
 
@@ -72,15 +73,16 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 ## Automation and scripting with JSON output
 
-- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `validate`, `render`, `prepare`, `preflight`, `inspect`, `submit`, `status`, `ps`, `stats`, `artifacts`, `cancel`, `setup`, `cache`, `clean`, and `context`.
+- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `validate`, `render`, `prepare`, `preflight`, `config`, `inspect`, `submit`, `status`, `ps`, `stats`, `artifacts`, `down`, `cancel`, `setup`, `cache`, `clean`, and `context`.
 - Include `context --format json` when automation needs resolved compose path, binaries, interpolation vars, and runtime path roots.
 - Use `hpc-compose stats --format jsonl` or `--format csv` when downstream tooling wants row-oriented metrics.
 - Treat `--json` as a compatibility alias on older machine-readable commands; new automation should prefer `--format json`. Streaming commands such as `logs --follow`, `watch`, and `completions` keep their native text or script output.
 
-## Related docs
+## Related Docs
 
 - [Support Matrix](support-matrix.md)
-- [Execution model](execution-model.md)
+- [CLI Reference](cli-reference.md)
+- [Execution Model](execution-model.md)
 - [Runbook](runbook.md)
 - [Examples](examples.md)
-- [Spec reference](spec-reference.md)
+- [Spec Reference](spec-reference.md)

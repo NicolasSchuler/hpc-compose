@@ -29,13 +29,13 @@ services:
 
 ## Settings-aware command table
 
-Use these commands and global flags when you want repo-adjacent profile memory for compose path, env files, env vars, and binary overrides.
+Use these commands and global flags when you want the project-local settings file (`.hpc-compose/settings.toml`) to remember compose path, env files, env vars, and binary overrides.
 
 | Command or flag | Purpose | Notes |
 | --- | --- | --- |
 | `--profile <NAME>` | Select the profile from settings | Global flag; applies to every subcommand. |
 | `--settings-file <PATH>` | Use an explicit settings file | Global flag; bypasses upward auto-discovery of `.hpc-compose/settings.toml`. |
-| `hpc-compose setup` | Create or update repo-adjacent settings | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, and `--default-profile`. |
+| `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, and `--default-profile`. |
 | `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, interpolation vars, runtime paths, and value sources; supports `--format json`. |
 | `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
 
@@ -505,7 +505,7 @@ Semantics:
 
 Tracked state:
 
-- `status --json` includes `failure_policy_mode`, `restart_count`, `max_restarts`, `window_seconds`, `max_restarts_in_window`, `restart_failures_in_window`, and `last_exit_code` for each tracked service.
+- `status --format json` includes `failure_policy_mode`, `restart_count`, `max_restarts`, `window_seconds`, `max_restarts_in_window`, `restart_failures_in_window`, and `last_exit_code` for each tracked service.
 - Text `status` renders the live rolling-window budget as `window=<current>/<max>@<seconds>s`.
 
 Unknown keys under top-level `x-slurm` or per-service `x-slurm` cause hard errors.

@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::job::{
-    PsServiceRow, PsSnapshot, SchedulerOptions, SubmissionRecord, WatchOutcome, build_ps_snapshot,
+    PsServiceRow, PsSnapshot, SchedulerOptions, SubmissionRecord, WalltimeProgress, WatchOutcome,
+    build_ps_snapshot, format_walltime_summary, walltime_progress, walltime_progress_percent,
 };
 
 const DATA_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -36,6 +37,7 @@ pub(crate) enum WatchKey {
 pub(crate) struct WatchModel {
     pub(crate) snapshot: PsSnapshot,
     pub(crate) selected_index: usize,
+    pub(crate) walltime_progress: Option<WalltimeProgress>,
     pub(crate) log_lines: Vec<String>,
 }
 
@@ -181,11 +183,18 @@ pub(crate) fn run_watch_ui(
             log_buffer.refresh()?;
             last_refresh = Instant::now();
         }
+        let walltime_progress = walltime_progress(
+            &snapshot.record,
+            &snapshot.scheduler,
+            snapshot.queue_diagnostics.as_ref(),
+            current_unix_timestamp(),
+        );
 
         render_model(
             &WatchModel {
                 snapshot: snapshot.clone(),
                 selected_index,
+                walltime_progress,
                 log_lines: log_buffer.lines.clone(),
             },
             terminal_size(),
@@ -281,6 +290,9 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
             width,
         ),
     ];
+    if let Some(progress) = &model.walltime_progress {
+        lines.push(fit_line(&render_walltime_bar(progress, width), width));
+    }
     if let Some(detail) = model.snapshot.scheduler.detail.as_deref() {
         lines.push(fit_line(&format!("note: {detail}"), width));
     } else if let Some(queue) = &model.snapshot.queue_diagnostics
@@ -388,6 +400,34 @@ fn clamp_selected_index(snapshot: &PsSnapshot, selected_index: usize) -> usize {
 
 fn log_capacity(height: usize) -> usize {
     height.saturating_sub(6).max(4)
+}
+
+fn current_unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn render_walltime_bar(progress: &WalltimeProgress, width: usize) -> String {
+    let summary = format!(
+        "walltime: [{}] {}% {}",
+        "{}",
+        walltime_progress_percent(progress),
+        format_walltime_summary(progress)
+    );
+    let reserved = summary.len().saturating_sub(2);
+    let bar_width = width.saturating_sub(reserved).clamp(10, 24);
+    let filled = if progress.total_seconds == 0 {
+        bar_width
+    } else {
+        ((u128::from(progress.elapsed_seconds) * bar_width as u128)
+            / u128::from(progress.total_seconds)) as usize
+    }
+    .min(bar_width);
+    let bar = format!("{}{}", "=".repeat(filled), "-".repeat(bar_width - filled));
+    summary.replacen("{}", &bar, 1)
 }
 
 fn terminal_size() -> (usize, usize) {
@@ -585,9 +625,10 @@ mod tests {
     use super::*;
     use crate::output;
     use hpc_compose::job::{
-        PsSnapshot, QueueDiagnostics, SchedulerOptions, SchedulerSource, SchedulerStatus,
-        SubmissionBackend, SubmissionRecord, WatchOutcome, build_submission_record_with_backend,
-        state_path_for_record, write_submission_record,
+        PsSnapshot, QueueDiagnostics, RequestedWalltime, SchedulerOptions, SchedulerSource,
+        SchedulerStatus, SubmissionBackend, SubmissionKind, SubmissionRecord, WalltimeProgress,
+        WatchOutcome, build_submission_record_with_backend, state_path_for_record,
+        write_submission_record,
     };
 
     fn with_test_stty<T>(script_body: &str, action: impl FnOnce() -> T) -> T {
@@ -623,6 +664,7 @@ mod tests {
             record: SubmissionRecord {
                 schema_version: 1,
                 backend: hpc_compose::job::SubmissionBackend::Slurm,
+                kind: SubmissionKind::Main,
                 job_id: "12345".into(),
                 submitted_at: 0,
                 compose_file: PathBuf::from("/tmp/compose.yaml"),
@@ -633,6 +675,14 @@ mod tests {
                 service_logs: Default::default(),
                 artifact_export_dir: None,
                 resume_dir: None,
+                service_name: None,
+                command_override: None,
+                requested_walltime: Some(RequestedWalltime {
+                    original: "00:10:00".into(),
+                    seconds: 600,
+                }),
+                config_snapshot_yaml: None,
+                cached_artifacts: Vec::new(),
             },
             scheduler: SchedulerStatus {
                 state: "RUNNING".into(),
@@ -755,6 +805,7 @@ mod tests {
             &WatchModel {
                 snapshot: sample_snapshot(),
                 selected_index: 0,
+                walltime_progress: None,
                 log_lines: vec!["booting".into(), "ready".into()],
             },
             100,
@@ -925,6 +976,7 @@ mod tests {
             &WatchModel {
                 snapshot: detail_snapshot,
                 selected_index: 1,
+                walltime_progress: None,
                 log_lines: vec!["tail".into()],
             },
             90,
@@ -943,12 +995,34 @@ mod tests {
             &WatchModel {
                 snapshot: pending_snapshot,
                 selected_index: 0,
+                walltime_progress: None,
                 log_lines: Vec::new(),
             },
             90,
             14,
         );
         assert!(pending_frame.contains("pending reason: Resources"));
+    }
+
+    #[test]
+    fn render_watch_frame_includes_walltime_bar_when_available() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: Some(WalltimeProgress {
+                    original: "00:10:00".into(),
+                    elapsed_seconds: 300,
+                    total_seconds: 600,
+                    remaining_seconds: 300,
+                }),
+                log_lines: Vec::new(),
+            },
+            100,
+            14,
+        );
+        assert!(frame.contains("walltime: ["));
+        assert!(frame.contains("50% 00:05:00 / 00:10:00 remaining 00:05:00"));
     }
 
     #[test]
@@ -975,6 +1049,7 @@ exit 0
                 &WatchModel {
                     snapshot: sample_snapshot(),
                     selected_index: 0,
+                    walltime_progress: None,
                     log_lines: vec!["line".into()],
                 },
                 (90, 14),

@@ -106,6 +106,12 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     if let Some(qos) = &plan.slurm.qos {
         out.push_str(&format!("#SBATCH --qos={qos}\n"));
     }
+    if let Some(mail_user) = plan.slurm.notify_email_recipient() {
+        out.push_str(&format!("#SBATCH --mail-user={mail_user}\n"));
+    }
+    if let Some(mail_type) = plan.slurm.notify_mail_type_value() {
+        out.push_str(&format!("#SBATCH --mail-type={mail_type}\n"));
+    }
     if let Some(time) = &plan.slurm.time {
         out.push_str(&format!("#SBATCH --time={time}\n"));
     }

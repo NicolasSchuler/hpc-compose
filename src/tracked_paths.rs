@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 pub(crate) const METADATA_DIR_NAME: &str = ".hpc-compose";
 pub(crate) const JOBS_DIR_NAME: &str = "jobs";
 pub(crate) const LATEST_RECORD_FILE_NAME: &str = "latest.json";
+pub(crate) const RUN_LATEST_RECORD_FILE_NAME: &str = "latest-run.json";
 pub(crate) const ATTEMPTS_DIR_NAME: &str = "attempts";
 pub(crate) const LOGS_DIR_NAME: &str = "logs";
 pub(crate) const METRICS_DIR_NAME: &str = "metrics";
@@ -34,6 +35,11 @@ pub(crate) fn jobs_dir_for(spec_path: &Path) -> PathBuf {
 #[must_use]
 pub(crate) fn latest_record_path_for(spec_path: &Path) -> PathBuf {
     metadata_root_for(spec_path).join(LATEST_RECORD_FILE_NAME)
+}
+
+#[must_use]
+pub(crate) fn latest_run_record_path_for(spec_path: &Path) -> PathBuf {
+    metadata_root_for(spec_path).join(RUN_LATEST_RECORD_FILE_NAME)
 }
 
 #[must_use]
@@ -128,6 +134,10 @@ mod tests {
         assert_eq!(
             latest_record_path_for(spec_path),
             Path::new("/tmp/project/.hpc-compose/latest.json")
+        );
+        assert_eq!(
+            latest_run_record_path_for(spec_path),
+            Path::new("/tmp/project/.hpc-compose/latest-run.json")
         );
     }
 

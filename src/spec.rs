@@ -81,6 +81,8 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub resume: Option<ResumeConfig>,
     #[serde(default)]
+    pub notify: Option<NotifyConfig>,
+    #[serde(default)]
     pub setup: Vec<String>,
     #[serde(default)]
     pub submit_args: Vec<String>,
@@ -120,6 +122,39 @@ pub struct ArtifactsConfig {
 #[serde(deny_unknown_fields)]
 pub struct ResumeConfig {
     pub path: String,
+}
+
+/// Top-level `x-slurm.notify` configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NotifyConfig {
+    #[serde(default)]
+    pub email: Option<EmailNotifyConfig>,
+}
+
+/// First-class Slurm email notification configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EmailNotifyConfig {
+    pub to: String,
+    #[serde(default)]
+    pub on: Vec<NotifyEvent>,
+}
+
+/// Email lifecycle events supported by Slurm mail hooks.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyEvent {
+    /// Send mail when the job begins executing.
+    Start,
+    /// Send mail when the job completes.
+    End,
+    /// Send mail when the job fails.
+    Fail,
+    /// Use Slurm's `ALL` shorthand.
+    All,
 }
 
 /// Named artifact bundle under `x-slurm.artifacts.bundles`.
@@ -199,6 +234,8 @@ pub struct ServiceSlurmConfig {
     #[serde(default)]
     pub gres: Option<String>,
     #[serde(default)]
+    pub time_limit: Option<String>,
+    #[serde(default)]
     pub extra_srun_args: Vec<String>,
     #[serde(default)]
     pub failure_policy: Option<ServiceFailurePolicySpec>,
@@ -267,6 +304,197 @@ impl Default for ServiceFailurePolicy {
             max_restarts_in_window: 0,
         }
     }
+}
+
+/// Stable, fully interpolated config surface used by `hpc-compose config`
+/// and persisted for resume-diff checks.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveComposeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(rename = "x-slurm")]
+    pub slurm: EffectiveSlurmConfig,
+    pub services: BTreeMap<String, EffectiveServiceConfig>,
+}
+
+/// Stable top-level `x-slurm` config with defaults materialized.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveSlurmConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qos: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ntasks: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ntasks_per_node: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus_per_task: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gres: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chdir: Option<String>,
+    pub cache_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<EffectiveMetricsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<EffectiveArtifactsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumeConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<EffectiveNotifyConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub setup: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub submit_args: Vec<String>,
+}
+
+/// Stable effective metrics config with defaults applied.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveMetricsConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub collectors: Vec<MetricsCollector>,
+}
+
+/// Stable effective artifacts config with defaults applied.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveArtifactsConfig {
+    pub collect: ArtifactCollectPolicy,
+    pub export_dir: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub paths: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub bundles: BTreeMap<String, ArtifactBundleSpec>,
+}
+
+/// Stable effective notify config with defaults applied.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveNotifyConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<EffectiveEmailNotifyConfig>,
+}
+
+/// Stable effective email notify config with normalized event order.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveEmailNotifyConfig {
+    pub to: String,
+    pub on: Vec<NotifyEvent>,
+}
+
+/// Stable service config surface with defaults applied where needed.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveServiceConfig {
+    pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<CommandSpec>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub environment: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub volumes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub depends_on: BTreeMap<String, EffectiveDependsOnCondition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ReadinessSpec>,
+    #[serde(rename = "x-slurm")]
+    pub slurm: EffectiveServiceSlurmConfig,
+    #[serde(rename = "x-enroot", skip_serializing_if = "Option::is_none")]
+    pub enroot: Option<EffectiveServiceEnrootConfig>,
+}
+
+/// Stable dependency representation used by effective config output.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveDependsOnCondition {
+    pub condition: DependencyCondition,
+}
+
+/// Stable per-service `x-slurm` config with advisory defaults applied.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveServiceSlurmConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ntasks: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ntasks_per_node: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus_per_task: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gres: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_limit: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub extra_srun_args: Vec<String>,
+    pub failure_policy: EffectiveFailurePolicyConfig,
+}
+
+/// Stable effective per-service failure policy.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveFailurePolicyConfig {
+    pub mode: ServiceFailureMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_restarts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backoff_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_restarts_in_window: Option<u32>,
+}
+
+/// Stable effective `x-enroot` config.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveServiceEnrootConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepare: Option<EffectivePrepareSpec>,
+}
+
+/// Stable effective `x-enroot.prepare` config with defaults applied.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectivePrepareSpec {
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub commands: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub mounts: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub env: BTreeMap<String, String>,
+    pub root: bool,
 }
 
 /// Per-service `x-enroot` configuration.
@@ -347,7 +575,7 @@ pub enum EnvironmentSpec {
 }
 
 /// Accepted command or entrypoint syntaxes.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum CommandSpec {
     /// Shell form command.
@@ -491,6 +719,136 @@ impl ComposeSpec {
             service.slurm.validate(name)?;
         }
         Ok(())
+    }
+
+    /// Builds a stable, fully interpolated effective config snapshot suitable
+    /// for `hpc-compose config` output and resume-diff persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when dependency or environment normalization fails.
+    pub fn effective_config(
+        &self,
+        cache_dir: &Path,
+        normalized_policies: &BTreeMap<String, ServiceFailurePolicy>,
+    ) -> Result<EffectiveComposeConfig> {
+        let mut services = BTreeMap::new();
+        for (name, service) in &self.services {
+            let environment = service
+                .environment
+                .to_pairs()?
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            let depends_on = service
+                .depends_on
+                .entries()?
+                .into_iter()
+                .map(|dependency| {
+                    (
+                        dependency.name,
+                        EffectiveDependsOnCondition {
+                            condition: dependency.condition,
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let normalized_policy = normalized_policies.get(name).cloned().unwrap_or_default();
+            let enroot = match service.enroot.prepare.as_ref() {
+                Some(prepare) => Some(EffectiveServiceEnrootConfig {
+                    prepare: Some(EffectivePrepareSpec {
+                        commands: prepare.commands.clone(),
+                        mounts: prepare.mounts.clone(),
+                        env: prepare
+                            .env
+                            .to_pairs()?
+                            .into_iter()
+                            .collect::<BTreeMap<_, _>>(),
+                        root: prepare.root,
+                    }),
+                }),
+                None => None,
+            };
+            services.insert(
+                name.clone(),
+                EffectiveServiceConfig {
+                    image: service.image.clone(),
+                    command: service.command.clone(),
+                    entrypoint: service.entrypoint.clone(),
+                    environment,
+                    volumes: service.volumes.clone(),
+                    working_dir: service.working_dir.clone(),
+                    depends_on,
+                    readiness: service.readiness.clone(),
+                    slurm: EffectiveServiceSlurmConfig {
+                        nodes: service.slurm.nodes,
+                        ntasks: service.slurm.ntasks,
+                        ntasks_per_node: service.slurm.ntasks_per_node,
+                        cpus_per_task: service.slurm.cpus_per_task,
+                        gpus: service.slurm.gpus,
+                        gres: service.slurm.gres.clone(),
+                        time_limit: service.slurm.time_limit.clone(),
+                        extra_srun_args: service.slurm.extra_srun_args.clone(),
+                        failure_policy: EffectiveFailurePolicyConfig::from_policy(
+                            &normalized_policy,
+                        ),
+                    },
+                    enroot,
+                },
+            );
+        }
+
+        Ok(EffectiveComposeConfig {
+            name: self.name.clone(),
+            slurm: EffectiveSlurmConfig {
+                job_name: self.slurm.job_name.clone(),
+                partition: self.slurm.partition.clone(),
+                account: self.slurm.account.clone(),
+                qos: self.slurm.qos.clone(),
+                time: self.slurm.time.clone(),
+                nodes: self.slurm.nodes,
+                ntasks: self.slurm.ntasks,
+                ntasks_per_node: self.slurm.ntasks_per_node,
+                cpus_per_task: self.slurm.cpus_per_task,
+                mem: self.slurm.mem.clone(),
+                gres: self.slurm.gres.clone(),
+                gpus: self.slurm.gpus,
+                constraint: self.slurm.constraint.clone(),
+                output: self.slurm.output.clone(),
+                error: self.slurm.error.clone(),
+                chdir: self.slurm.chdir.clone(),
+                cache_dir: cache_dir.display().to_string(),
+                metrics: self.slurm.metrics.as_ref().map(|_| EffectiveMetricsConfig {
+                    enabled: self.slurm.metrics_enabled(),
+                    interval_seconds: self.slurm.metrics_interval_seconds(),
+                    collectors: self.slurm.metrics_collectors(),
+                }),
+                artifacts: self.slurm.artifacts.as_ref().map(|artifacts| {
+                    EffectiveArtifactsConfig {
+                        collect: self.slurm.artifacts_collect_policy(),
+                        export_dir: artifacts.export_dir.clone().unwrap_or_default(),
+                        paths: artifacts.paths.clone(),
+                        bundles: artifacts.bundles.clone(),
+                    }
+                }),
+                resume: self.slurm.resume.clone(),
+                notify: self
+                    .slurm
+                    .notify
+                    .as_ref()
+                    .map(|notify| EffectiveNotifyConfig {
+                        email: notify
+                            .email
+                            .as_ref()
+                            .map(|email| EffectiveEmailNotifyConfig {
+                                to: email.to.clone(),
+                                on: normalize_notify_events(&email.on),
+                            }),
+                    }),
+                setup: self.slurm.setup.clone(),
+                submit_args: self.slurm.submit_args.clone(),
+            },
+            services,
+        })
     }
 }
 
@@ -702,6 +1060,45 @@ impl SlurmConfig {
         self.resume.as_ref().map(|resume| resume.path.as_str())
     }
 
+    /// Returns normalized email events in stable order.
+    #[must_use]
+    pub fn notify_email_events(&self) -> Vec<NotifyEvent> {
+        let Some(email) = self
+            .notify
+            .as_ref()
+            .and_then(|notify| notify.email.as_ref())
+        else {
+            return Vec::new();
+        };
+        normalize_notify_events(&email.on)
+    }
+
+    /// Returns the configured notification email recipient, if any.
+    #[must_use]
+    pub fn notify_email_recipient(&self) -> Option<&str> {
+        self.notify
+            .as_ref()
+            .and_then(|notify| notify.email.as_ref())
+            .map(|email| email.to.as_str())
+    }
+
+    /// Returns the normalized Slurm mail-type value when first-class
+    /// notifications are configured.
+    #[must_use]
+    pub fn notify_mail_type_value(&self) -> Option<String> {
+        let events = self.notify_email_events();
+        if events.is_empty() {
+            return None;
+        }
+        Some(
+            events
+                .into_iter()
+                .map(notify_event_mail_type)
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+    }
+
     /// Validates semantic rules that serde alone cannot express.
     ///
     /// # Errors
@@ -747,6 +1144,20 @@ impl SlurmConfig {
         if let Some(resume) = &self.resume {
             validate_resume_path(&resume.path)?;
         }
+        if let Some(email) = self
+            .notify
+            .as_ref()
+            .and_then(|notify| notify.email.as_ref())
+        {
+            if email.to.trim().is_empty() {
+                bail!("x-slurm.notify.email.to must not be empty");
+            }
+            if submit_args_contain_mail_settings(&self.submit_args) {
+                bail!(
+                    "x-slurm.notify.email cannot be combined with raw --mail-type/--mail-user submit args"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -768,6 +1179,9 @@ impl SlurmConfig {
         }
         if let Some(resume) = &mut self.resume {
             resume.interpolate(vars)?;
+        }
+        if let Some(notify) = &mut self.notify {
+            notify.interpolate(vars)?;
         }
         interpolate_vec_strings(&mut self.submit_args, vars)?;
         Ok(())
@@ -808,6 +1222,15 @@ impl ArtifactsConfig {
 impl ResumeConfig {
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         self.path = interpolate_string(&self.path, vars)?;
+        Ok(())
+    }
+}
+
+impl NotifyConfig {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        if let Some(email) = &mut self.email {
+            email.to = interpolate_string(&email.to, vars)?;
+        }
         Ok(())
     }
 }
@@ -891,6 +1314,11 @@ impl ServiceSlurmConfig {
             self.ntasks_per_node,
             &format!("service '{service_name}' x-slurm.ntasks_per_node"),
         )?;
+        if let Some(limit) = &self.time_limit {
+            parse_slurm_time_limit(limit).with_context(|| {
+                format!("service '{service_name}' x-slurm.time_limit is invalid")
+            })?;
+        }
         Ok(())
     }
 
@@ -966,8 +1394,22 @@ impl ServiceSlurmConfig {
 
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         interpolate_optional_string(&mut self.gres, vars)?;
+        interpolate_optional_string(&mut self.time_limit, vars)?;
         interpolate_vec_strings(&mut self.extra_srun_args, vars)?;
         Ok(())
+    }
+}
+
+impl EffectiveFailurePolicyConfig {
+    fn from_policy(policy: &ServiceFailurePolicy) -> Self {
+        let restart_mode = policy.mode == ServiceFailureMode::RestartOnFailure;
+        Self {
+            mode: policy.mode,
+            max_restarts: restart_mode.then_some(policy.max_restarts),
+            backoff_seconds: restart_mode.then_some(policy.backoff_seconds),
+            window_seconds: restart_mode.then_some(policy.window_seconds),
+            max_restarts_in_window: restart_mode.then_some(policy.max_restarts_in_window),
+        }
     }
 }
 
@@ -1060,6 +1502,102 @@ fn interpolation_vars(path: &Path) -> Result<InterpolationVars> {
         vars.insert(key, value);
     }
     Ok(vars)
+}
+
+/// Parses a Slurm-style walltime string into seconds.
+///
+/// Supports `MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, and
+/// `D-HH:MM:SS`.
+///
+/// # Errors
+///
+/// Returns an error when the input is empty or does not match a supported
+/// Slurm walltime format.
+pub fn parse_slurm_time_limit(input: &str) -> Result<u64> {
+    let input = input.trim();
+    if input.is_empty() {
+        bail!("time limit must not be empty");
+    }
+
+    let (days, rest) = if let Some((days, rest)) = input.split_once('-') {
+        (
+            parse_walltime_component(days, "days")?,
+            Some(rest.trim().to_string()),
+        )
+    } else {
+        (0, None)
+    };
+    let rest = rest.as_deref().unwrap_or(input);
+    let parts = rest
+        .split(':')
+        .map(|part| parse_walltime_component(part, "time component"))
+        .collect::<Result<Vec<_>>>()?;
+    let seconds = match parts.as_slice() {
+        [minutes] => minutes.saturating_mul(60),
+        [minutes, seconds] => minutes.saturating_mul(60).saturating_add(*seconds),
+        [hours, minutes, seconds] => hours
+            .saturating_mul(3_600)
+            .saturating_add(minutes.saturating_mul(60))
+            .saturating_add(*seconds),
+        _ => bail!("unsupported Slurm time limit format '{input}'"),
+    };
+
+    if days == 0 {
+        return Ok(seconds);
+    }
+    match parts.len() {
+        1 => Ok(days
+            .saturating_mul(86_400)
+            .saturating_add(parts[0].saturating_mul(3_600))),
+        2 => Ok(days
+            .saturating_mul(86_400)
+            .saturating_add(parts[0].saturating_mul(3_600))
+            .saturating_add(parts[1].saturating_mul(60))),
+        3 => Ok(days.saturating_mul(86_400).saturating_add(seconds)),
+        _ => bail!("unsupported Slurm time limit format '{input}'"),
+    }
+}
+
+fn parse_walltime_component(input: &str, label: &str) -> Result<u64> {
+    input
+        .parse::<u64>()
+        .with_context(|| format!("invalid {label} value '{input}'"))
+}
+
+fn normalize_notify_events(events: &[NotifyEvent]) -> Vec<NotifyEvent> {
+    if events.is_empty() {
+        return vec![NotifyEvent::End, NotifyEvent::Fail];
+    }
+    if events.contains(&NotifyEvent::All) {
+        return vec![NotifyEvent::All];
+    }
+
+    let mut normalized = Vec::new();
+    for event in [NotifyEvent::Start, NotifyEvent::End, NotifyEvent::Fail] {
+        if events.contains(&event) {
+            normalized.push(event);
+        }
+    }
+    normalized
+}
+
+fn notify_event_mail_type(event: NotifyEvent) -> &'static str {
+    match event {
+        NotifyEvent::Start => "BEGIN",
+        NotifyEvent::End => "END",
+        NotifyEvent::Fail => "FAIL",
+        NotifyEvent::All => "ALL",
+    }
+}
+
+fn submit_args_contain_mail_settings(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let trimmed = arg.trim();
+        trimmed.starts_with("--mail-user")
+            || trimmed.starts_with("--mail-type")
+            || trimmed.starts_with("mail-user")
+            || trimmed.starts_with("mail-type")
+    })
 }
 
 /// Returns variables that consumed `${VAR:-default}` or `${VAR-default}`

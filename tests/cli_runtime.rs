@@ -8,7 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 use hpc_compose::job::{
-    build_submission_record, latest_record_path_for, load_submission_record,
+    SubmissionKind, SubmissionRecordBuildOptions, build_submission_record,
+    build_submission_record_with_options, latest_record_path_for, load_submission_record,
     write_submission_record,
 };
 use hpc_compose::render::log_file_name_for_service;
@@ -1617,6 +1618,277 @@ fn cancel_reports_missing_record_and_scancel_failure() {
     assert_failure(&failed);
     assert!(stderr_text(&failed).contains("scancel failed for job 42"));
     assert!(stderr_text(&failed).contains("permission denied"));
+}
+
+#[test]
+fn run_command_sanitizes_default_script_path_for_service_names() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: demo
+x-slurm:
+  cache_dir: {}
+services:
+  "svc/name":
+    image: {}
+"#,
+            tmpdir.path().join("cache").display(),
+            local_image.display()
+        ),
+    );
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+
+    let run = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "svc/name",
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_success(&run);
+    assert!(
+        tmpdir
+            .path()
+            .join("hpc-compose-run-svc_x2f_name.sbatch")
+            .exists()
+    );
+    assert!(stdout_text(&run).contains(".hpc-compose/latest-run.json"));
+}
+
+#[test]
+fn cancel_without_job_id_targets_newest_run_record() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+    let scancel_log = tmpdir.path().join("scancel.log");
+    let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
+
+    let mut main_record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("main.sbatch"),
+        &plan,
+        "11111",
+    )
+    .expect("main record");
+    main_record.submitted_at = 10;
+    write_submission_record(&main_record).expect("write main");
+
+    let mut run_record = build_submission_record_with_options(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("run.sbatch"),
+        &plan,
+        "22222",
+        &SubmissionRecordBuildOptions {
+            kind: SubmissionKind::Run,
+            service_name: Some("app".into()),
+            command_override: Some(vec!["/bin/true".into()]),
+            ..SubmissionRecordBuildOptions::default()
+        },
+    )
+    .expect("run record");
+    run_record.submitted_at = 11;
+    write_submission_record(&run_record).expect("write run");
+
+    let cancel = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_success(&cancel);
+    assert_eq!(
+        fs::read_to_string(&scancel_log)
+            .expect("scancel log")
+            .trim(),
+        "22222"
+    );
+}
+
+#[test]
+fn cancel_with_purge_cache_requires_tracked_artifact_snapshot() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+    let record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("job.sbatch"),
+        &plan,
+        "12345",
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    if let Some(parent) = plan.ordered_services[0].runtime_image.parent() {
+        fs::create_dir_all(parent).expect("runtime image dir");
+    }
+    fs::write(&plan.ordered_services[0].runtime_image, "runtime").expect("runtime image");
+
+    let scancel_log = tmpdir.path().join("scancel.log");
+    let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
+    let cancel = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "12345",
+            "--purge-cache",
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&cancel);
+    assert!(
+        stderr_text(&cancel).contains("does not contain cached artifact snapshots"),
+        "stderr:\n{}",
+        stderr_text(&cancel)
+    );
+    assert!(plan.ordered_services[0].runtime_image.exists());
+    assert!(
+        !scancel_log.exists()
+            || fs::read_to_string(&scancel_log)
+                .expect("scancel log")
+                .trim()
+                .is_empty()
+    );
+}
+
+#[test]
+fn submit_json_keeps_stdout_parseable_when_resume_diff_blocks_submission() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let resume_dir = tmpdir.path().join("resume");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: demo
+x-slurm:
+  cache_dir: {}
+  resume:
+    path: {}
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            tmpdir.path().join("cache").display(),
+            resume_dir.display(),
+            local_image.display()
+        ),
+    );
+    let sbatch = write_fake_sbatch(tmpdir.path());
+
+    let first_submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&first_submit);
+
+    fs::write(
+        &compose,
+        format!(
+            r#"
+name: demo
+x-slurm:
+  cache_dir: {}
+  resume:
+    path: {}
+services:
+  app:
+    image: {}
+    command:
+      - /bin/echo
+      - changed
+"#,
+            tmpdir.path().join("cache").display(),
+            resume_dir.display(),
+            local_image.display()
+        ),
+    )
+    .expect("rewrite compose");
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&submit);
+    assert!(stdout_text(&submit).trim().is_empty());
+    assert!(stderr_text(&submit).contains("resume config drift detected"));
+
+    let diff_only = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--resume-diff-only",
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&diff_only);
+    assert!(stdout_text(&diff_only).trim().is_empty());
+    assert!(stderr_text(&diff_only).contains("--resume-diff-only does not support --format json"));
 }
 
 #[test]

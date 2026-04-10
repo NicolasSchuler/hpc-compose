@@ -30,7 +30,7 @@ It is intentionally **not** a full Docker Compose implementation. It focuses on 
 - `deploy`
 - arbitrary multi-node orchestration or partial-node service placement
 
-For the exact first-class vs raw pass-through vs out-of-scope Slurm boundary, see [Supported Slurm model](docs/src/supported-slurm-model.md).
+For the exact first-class vs raw pass-through vs out-of-scope Slurm boundary, see [Supported Slurm Model](docs/src/supported-slurm-model.md).
 
 ## Install
 
@@ -58,25 +58,26 @@ services:
 ```
 
 ```bash
-hpc-compose submit --watch -f compose.yaml
+hpc-compose up -f compose.yaml
 ```
 
-`submit --watch` is the normal run. On an interactive TTY it opens the live watch UI; later you can reconnect with `hpc-compose watch -f compose.yaml` or inspect a one-shot per-service snapshot with `hpc-compose ps -f compose.yaml`. Use `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are adapting a new spec or isolating a failure.
+`up` is the preferred normal run. On an interactive TTY it opens the live watch UI; later you can reconnect with `hpc-compose watch -f compose.yaml` or inspect a one-shot per-service snapshot with `hpc-compose ps -f compose.yaml`. `submit --watch` remains available as a compatibility path. Use `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are adapting a new spec or isolating a failure.
 
 ## Documentation
 
 - Published docs: [nicolasschuler.github.io/hpc-compose](https://nicolasschuler.github.io/hpc-compose/)
 - Installation: [docs/src/installation.md](docs/src/installation.md)
 - Quickstart: [docs/src/quickstart.md](docs/src/quickstart.md)
-- Support matrix: [docs/src/support-matrix.md](docs/src/support-matrix.md)
-- Task guide: [docs/src/task-guide.md](docs/src/task-guide.md)
-- Execution model: [docs/src/execution-model.md](docs/src/execution-model.md)
+- Support Matrix: [docs/src/support-matrix.md](docs/src/support-matrix.md)
+- Task Guide: [docs/src/task-guide.md](docs/src/task-guide.md)
+- CLI Reference: [docs/src/cli-reference.md](docs/src/cli-reference.md)
+- Execution Model: [docs/src/execution-model.md](docs/src/execution-model.md)
 - Runbook: [docs/src/runbook.md](docs/src/runbook.md)
 - Examples: [docs/src/examples.md](docs/src/examples.md)
-- Spec reference: [docs/src/spec-reference.md](docs/src/spec-reference.md)
-- Supported Slurm model: [docs/src/supported-slurm-model.md](docs/src/supported-slurm-model.md)
-- Docker Compose migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
-- Contributor architecture notes: [docs/src/architecture.md](docs/src/architecture.md)
+- Spec Reference: [docs/src/spec-reference.md](docs/src/spec-reference.md)
+- Supported Slurm Model: [docs/src/supported-slurm-model.md](docs/src/supported-slurm-model.md)
+- Docker Compose Migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
+- Contributor Architecture Notes: [docs/src/architecture.md](docs/src/architecture.md)
 
 Longer workflow guidance lives in the mdBook. Keep this README as the shortest project overview and use the docs site for task-specific guidance, examples, and spec details.
 

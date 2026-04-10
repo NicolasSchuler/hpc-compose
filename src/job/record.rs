@@ -20,6 +20,11 @@ pub fn latest_record_path_for(spec_path: &Path) -> PathBuf {
     tracked_paths::latest_record_path_for(spec_path)
 }
 
+/// Returns the path to the "latest tracked run job" record file.
+pub fn latest_run_record_path_for(spec_path: &Path) -> PathBuf {
+    tracked_paths::latest_run_record_path_for(spec_path)
+}
+
 /// Builds and persists a new submission record for a submitted job.
 pub fn persist_submission_record(
     spec_path: &Path,
@@ -28,13 +33,14 @@ pub fn persist_submission_record(
     plan: &RuntimePlan,
     job_id: &str,
 ) -> Result<SubmissionRecord> {
-    let record = build_submission_record_with_backend(
+    let record = build_submission_record_with_backend_and_options(
         spec_path,
         submit_dir,
         script_path,
         plan,
         job_id,
         SubmissionBackend::Slurm,
+        &SubmissionRecordBuildOptions::default(),
     )?;
     write_submission_record(&record)?;
     Ok(record)
@@ -48,13 +54,35 @@ pub fn build_submission_record(
     plan: &RuntimePlan,
     job_id: &str,
 ) -> Result<SubmissionRecord> {
-    build_submission_record_with_backend(
+    build_submission_record_with_backend_and_options(
         spec_path,
         submit_dir,
         script_path,
         plan,
         job_id,
         SubmissionBackend::Slurm,
+        &SubmissionRecordBuildOptions::default(),
+    )
+}
+
+/// Builds the submission record structure for a job without writing it, with
+/// extra tracked metadata.
+pub fn build_submission_record_with_options(
+    spec_path: &Path,
+    submit_dir: &Path,
+    script_path: &Path,
+    plan: &RuntimePlan,
+    job_id: &str,
+    options: &SubmissionRecordBuildOptions,
+) -> Result<SubmissionRecord> {
+    build_submission_record_with_backend_and_options(
+        spec_path,
+        submit_dir,
+        script_path,
+        plan,
+        job_id,
+        SubmissionBackend::Slurm,
+        options,
     )
 }
 
@@ -66,6 +94,28 @@ pub fn build_submission_record_with_backend(
     plan: &RuntimePlan,
     job_id: &str,
     backend: SubmissionBackend,
+) -> Result<SubmissionRecord> {
+    build_submission_record_with_backend_and_options(
+        spec_path,
+        submit_dir,
+        script_path,
+        plan,
+        job_id,
+        backend,
+        &SubmissionRecordBuildOptions::default(),
+    )
+}
+
+/// Builds the submission record structure for a job without writing it, with
+/// an explicit backend and extra tracked metadata.
+pub fn build_submission_record_with_backend_and_options(
+    spec_path: &Path,
+    submit_dir: &Path,
+    script_path: &Path,
+    plan: &RuntimePlan,
+    job_id: &str,
+    backend: SubmissionBackend,
+    options: &SubmissionRecordBuildOptions,
 ) -> Result<SubmissionRecord> {
     let compose_file = absolute_path(spec_path)?;
     let submit_dir = absolute_path(submit_dir)?;
@@ -86,6 +136,7 @@ pub fn build_submission_record_with_backend(
     Ok(SubmissionRecord {
         schema_version: SUBMISSION_SCHEMA_VERSION,
         backend,
+        kind: options.kind,
         job_id: job_id.to_string(),
         submitted_at: unix_timestamp_now(),
         compose_file,
@@ -100,6 +151,11 @@ pub fn build_submission_record_with_backend(
             .as_ref()
             .and_then(|artifacts| artifacts.export_dir.clone()),
         resume_dir: plan.slurm.resume_dir().map(PathBuf::from),
+        service_name: options.service_name.clone(),
+        command_override: options.command_override.clone(),
+        requested_walltime: options.requested_walltime.clone(),
+        config_snapshot_yaml: options.config_snapshot_yaml.clone(),
+        cached_artifacts: options.cached_artifacts.clone(),
     })
 }
 
@@ -108,7 +164,11 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
     let jobs_dir = jobs_dir_for(&record.compose_file);
     fs::create_dir_all(&jobs_dir).context(format!("failed to create {}", jobs_dir.display()))?;
     write_json(&jobs_dir.join(format!("{}.json", record.job_id)), record)?;
-    write_json(&latest_record_path_for(&record.compose_file), record)?;
+    let latest_path = match record.kind {
+        SubmissionKind::Main => latest_record_path_for(&record.compose_file),
+        SubmissionKind::Run => latest_run_record_path_for(&record.compose_file),
+    };
+    write_json(&latest_path, record)?;
     Ok(())
 }
 
@@ -116,7 +176,8 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
 pub fn remove_submission_record(record: &SubmissionRecord) -> Result<()> {
     let record_path = jobs_dir_for(&record.compose_file).join(format!("{}.json", record.job_id));
     remove_path_if_present(&record_path)?;
-    repair_latest_record(&record.compose_file)
+    remove_path_if_present(&runtime_job_root_for_record(record))?;
+    repair_latest_records(&record.compose_file)
 }
 
 /// Loads every tracked job record for the given compose file.
@@ -160,6 +221,30 @@ pub fn scan_job_inventory(scan_start: &Path, include_disk_usage: bool) -> Result
     Ok(JobInventoryScan { scan_root, jobs })
 }
 
+/// Resolves one tracked record by job id by scanning from the nearest repo
+/// root or current directory.
+pub fn find_submission_record_in_repo(scan_start: &Path, job_id: &str) -> Result<SubmissionRecord> {
+    let inventory = scan_job_inventory(scan_start, false)?;
+    let matches = inventory
+        .jobs
+        .into_iter()
+        .filter(|entry| entry.job_id == job_id)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => bail!(
+            "no tracked submission metadata exists for job '{}' under {}",
+            job_id,
+            inventory.scan_root.display()
+        ),
+        [entry] => read_json(&entry.record_path),
+        _ => bail!(
+            "multiple tracked submissions with job id '{}' were found under {}; pass -f/--file to disambiguate",
+            job_id,
+            inventory.scan_root.display()
+        ),
+    }
+}
+
 /// Builds the tracked-job cleanup report for a compose context.
 pub fn build_cleanup_report(
     spec_path: &Path,
@@ -170,12 +255,13 @@ pub fn build_cleanup_report(
     let compose_file = absolute_path(spec_path)?;
     let metadata_root = metadata_root_for(&compose_file);
     let now = unix_timestamp_now();
-    let latest_pointer_job_id_before = read_latest_pointer_job_id(&metadata_root);
+    let latest_pointer_job_id_before =
+        read_latest_pointer_job_id(&metadata_root, SubmissionKind::Main);
     let inventory =
         build_inventory_entries_for_metadata_root(&metadata_root, include_disk_usage, now)?;
     let latest_job_id_before = inventory
         .iter()
-        .find(|entry| entry.is_latest)
+        .find(|entry| entry.kind == SubmissionKind::Main && entry.is_latest)
         .map(|entry| entry.job_id.clone());
     let cutoff = match mode {
         CleanupMode::Age { age_days } => Some(now.saturating_sub(age_days * 86_400)),
@@ -216,7 +302,7 @@ pub fn build_cleanup_report(
         .collect::<Vec<_>>();
     let latest_job_id_after = jobs
         .iter()
-        .filter(|job| !job.selected)
+        .filter(|job| !job.selected && job.inventory.kind == SubmissionKind::Main)
         .max_by(|left, right| compare_records(&left.inventory, &right.inventory))
         .map(|job| job.inventory.job_id.clone());
     let total_bytes_reclaimed = if include_disk_usage {
@@ -250,7 +336,7 @@ pub fn run_cleanup_report(report: &CleanupReport) -> Result<()> {
             remove_path_if_present(path)?;
         }
     }
-    repair_latest_record(&report.compose_file)
+    repair_latest_records(&report.compose_file)
 }
 
 /// Loads one tracked submission record, defaulting to the latest job.
@@ -350,7 +436,8 @@ fn build_inventory_entries_for_metadata_root(
         return Ok(Vec::new());
     }
 
-    let latest_job_id = resolved_latest_job_id(metadata_root, &records);
+    let latest_main_job_id = resolved_latest_job_id(metadata_root, &records, SubmissionKind::Main);
+    let latest_run_job_id = resolved_latest_job_id(metadata_root, &records, SubmissionKind::Run);
     let mut inventory = Vec::with_capacity(records.len());
     for (record_path, record) in records {
         let runtime_job_root = tracked_paths::runtime_job_root(&record.submit_dir, &record.job_id);
@@ -366,7 +453,13 @@ fn build_inventory_entries_for_metadata_root(
             compose_file: record.compose_file.clone(),
             compose_metadata_root: metadata_root.to_path_buf(),
             job_id: record.job_id.clone(),
-            is_latest: latest_job_id.as_deref() == Some(record.job_id.as_str()),
+            kind: record.kind,
+            is_latest: match record.kind {
+                SubmissionKind::Main => {
+                    latest_main_job_id.as_deref() == Some(record.job_id.as_str())
+                }
+                SubmissionKind::Run => latest_run_job_id.as_deref() == Some(record.job_id.as_str()),
+            },
             submitted_at: record.submitted_at,
             age_seconds: now.saturating_sub(record.submitted_at),
             submit_dir: record.submit_dir.clone(),
@@ -404,8 +497,11 @@ fn scan_job_records_with_paths(metadata_root: &Path) -> Result<Vec<(PathBuf, Sub
     Ok(records)
 }
 
-fn read_latest_pointer_job_id(metadata_root: &Path) -> Option<String> {
-    let latest_path = metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME);
+fn read_latest_pointer_job_id(metadata_root: &Path, kind: SubmissionKind) -> Option<String> {
+    let latest_path = match kind {
+        SubmissionKind::Main => metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME),
+        SubmissionKind::Run => metadata_root.join(tracked_paths::RUN_LATEST_RECORD_FILE_NAME),
+    };
     read_json::<SubmissionRecord>(&latest_path)
         .ok()
         .map(|record| record.job_id)
@@ -414,14 +510,22 @@ fn read_latest_pointer_job_id(metadata_root: &Path) -> Option<String> {
 fn resolved_latest_job_id(
     metadata_root: &Path,
     records: &[(PathBuf, SubmissionRecord)],
+    kind: SubmissionKind,
 ) -> Option<String> {
-    let newest = records
+    let filtered = records
+        .iter()
+        .filter(|(_, record)| record.kind == kind)
+        .collect::<Vec<_>>();
+    let newest = filtered
         .iter()
         .max_by(|(_, left), (_, right)| compare_submission_records(left, right))?;
-    let latest_path = metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME);
+    let latest_path = match kind {
+        SubmissionKind::Main => metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME),
+        SubmissionKind::Run => metadata_root.join(tracked_paths::RUN_LATEST_RECORD_FILE_NAME),
+    };
     if latest_path.exists()
         && let Ok(latest) = read_json::<SubmissionRecord>(&latest_path)
-        && let Some((_, pointed_record)) = records
+        && let Some((_, pointed_record)) = filtered
             .iter()
             .find(|(_, record)| record.job_id == latest.job_id)
         && compare_submission_records(pointed_record, &newest.1) != Ordering::Less
@@ -519,11 +623,24 @@ fn remove_path_if_present(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn repair_latest_record(compose_file: &Path) -> Result<()> {
-    let latest_path = latest_record_path_for(compose_file);
+fn repair_latest_records(compose_file: &Path) -> Result<()> {
     let records = scan_job_records(compose_file)?;
+    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Main)?;
+    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Run)
+}
+
+fn repair_latest_record_for_kind(
+    compose_file: &Path,
+    records: &[SubmissionRecord],
+    kind: SubmissionKind,
+) -> Result<()> {
+    let latest_path = match kind {
+        SubmissionKind::Main => latest_record_path_for(compose_file),
+        SubmissionKind::Run => latest_run_record_path_for(compose_file),
+    };
     if let Some(latest) = records
         .iter()
+        .filter(|record| record.kind == kind)
         .max_by(|left, right| compare_submission_records(left, right))
     {
         write_json(&latest_path, latest)

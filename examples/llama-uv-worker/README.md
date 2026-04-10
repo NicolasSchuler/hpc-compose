@@ -10,7 +10,7 @@ This example shows the GGUF-serving pattern that commonly comes up on Slurm:
 ## Normal run
 
 ```bash
-hpc-compose submit --watch -f examples/llama-uv-worker.yaml
+hpc-compose up -f examples/llama-uv-worker.yaml
 ```
 
 ## Debugging flow
@@ -31,6 +31,6 @@ hpc-compose prepare -f examples/llama-uv-worker.yaml
 
 ## Rebuild behavior
 
-- Updating `worker.py` or other mounted source usually only needs another `submit`.
-- Changing the worker base image or `x-enroot.prepare.commands` is when `submit --force-rebuild` or `prepare --force` helps.
+- Updating `worker.py` or other mounted source usually only needs another `up`.
+- Changing the worker base image or `x-enroot.prepare.commands` is when `up --force-rebuild` or `prepare --force` helps.
 - `UV_CACHE_DIR` is pointed at `/hpc-compose/job/.uv-cache` so each job keeps its runtime cache inside the shared job mount.

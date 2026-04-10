@@ -107,6 +107,57 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             spec::inspect(context, verbose, format, json)
         }
+        Commands::Config { file, format } => {
+            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            spec::config(context, format)
+        }
+        Commands::Up {
+            file,
+            script_out,
+            sbatch_bin,
+            srun_bin,
+            enroot_bin,
+            squeue_bin,
+            sacct_bin,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            local,
+            allow_resume_changes,
+            resume_diff_only,
+            dry_run,
+        } => {
+            let mut binary_overrides = BinaryOverrides::default();
+            if value_is_explicit(options, "--enroot-bin") {
+                binary_overrides.enroot = Some(enroot_bin);
+            }
+            if value_is_explicit(options, "--sbatch-bin") {
+                binary_overrides.sbatch = Some(sbatch_bin);
+            }
+            if value_is_explicit(options, "--srun-bin") {
+                binary_overrides.srun = Some(srun_bin);
+            }
+            if value_is_explicit(options, "--squeue-bin") {
+                binary_overrides.squeue = Some(squeue_bin);
+            }
+            if value_is_explicit(options, "--sacct-bin") {
+                binary_overrides.sacct = Some(sacct_bin);
+            }
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::up(
+                context,
+                script_out,
+                keep_failed_prep,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
+                local,
+                allow_resume_changes,
+                resume_diff_only,
+                dry_run,
+            )
+        }
         Commands::Submit {
             file,
             script_out,
@@ -121,6 +172,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             no_preflight,
             watch,
             local,
+            allow_resume_changes,
+            resume_diff_only,
             dry_run,
             format,
         } => {
@@ -150,6 +203,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 no_preflight,
                 watch,
                 local,
+                allow_resume_changes,
+                resume_diff_only,
                 dry_run,
                 format,
             )
@@ -254,6 +309,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             file,
             job_id,
             scancel_bin,
+            purge_cache,
             format,
         } => {
             let mut binary_overrides = BinaryOverrides::default();
@@ -261,7 +317,64 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 binary_overrides.scancel = Some(scancel_bin);
             }
             let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::cancel(context, job_id, format)
+            runtime::cancel(context, job_id, purge_cache, format)
+        }
+        Commands::Down {
+            file,
+            job_id,
+            scancel_bin,
+            purge_cache,
+            format,
+        } => {
+            let mut binary_overrides = BinaryOverrides::default();
+            if value_is_explicit(options, "--scancel-bin") {
+                binary_overrides.scancel = Some(scancel_bin);
+            }
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::cancel(context, job_id, purge_cache, format)
+        }
+        Commands::Run {
+            file,
+            service,
+            cmd,
+            script_out,
+            sbatch_bin,
+            srun_bin,
+            enroot_bin,
+            squeue_bin,
+            sacct_bin,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+        } => {
+            let mut binary_overrides = BinaryOverrides::default();
+            if value_is_explicit(options, "--enroot-bin") {
+                binary_overrides.enroot = Some(enroot_bin);
+            }
+            if value_is_explicit(options, "--sbatch-bin") {
+                binary_overrides.sbatch = Some(sbatch_bin);
+            }
+            if value_is_explicit(options, "--srun-bin") {
+                binary_overrides.srun = Some(srun_bin);
+            }
+            if value_is_explicit(options, "--squeue-bin") {
+                binary_overrides.squeue = Some(squeue_bin);
+            }
+            if value_is_explicit(options, "--sacct-bin") {
+                binary_overrides.sacct = Some(sacct_bin);
+            }
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::run_service(
+                context,
+                service,
+                cmd,
+                script_out,
+                keep_failed_prep,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
+            )
         }
         Commands::New {
             template,

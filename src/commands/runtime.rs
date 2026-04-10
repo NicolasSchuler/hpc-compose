@@ -8,19 +8,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
 use hpc_compose::context::ResolvedContext;
+#[cfg(test)]
+use hpc_compose::job::build_submission_record_with_backend;
 use hpc_compose::job::{
-    ArtifactExportOptions, CleanupMode, SchedulerOptions, StatsOptions, SubmissionBackend,
-    SubmissionRecord, build_cleanup_report, build_ps_snapshot, build_stats_snapshot,
-    build_status_snapshot, build_submission_record, build_submission_record_with_backend,
-    export_artifacts, load_submission_record, print_logs, remove_submission_record,
-    run_cleanup_report, runtime_job_root_for_record, scan_job_inventory, state_path_for_record,
-    watch_submission, write_submission_record,
+    ArtifactExportOptions, CleanupMode, RequestedWalltime, SchedulerOptions, StatsOptions,
+    SubmissionBackend, SubmissionKind, SubmissionRecord, SubmissionRecordBuildOptions,
+    build_cleanup_report, build_ps_snapshot, build_stats_snapshot, build_status_snapshot,
+    build_submission_record_with_backend_and_options, build_submission_record_with_options,
+    export_artifacts, find_submission_record_in_repo, latest_record_path_for,
+    latest_run_record_path_for, load_submission_record, print_logs, remove_submission_record,
+    run_cleanup_report, runtime_job_root_for_record, scan_job_inventory, scan_job_records,
+    state_path_for_record, watch_submission, write_submission_record,
 };
-use hpc_compose::planner::ServicePlacementMode;
+use hpc_compose::planner::{ExecutionSpec, ImageSource, ServicePlacementMode};
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
-use hpc_compose::prepare::{PrepareOptions, RuntimePlan, prepare_runtime_plan};
+use hpc_compose::prepare::{PrepareOptions, RuntimePlan, base_image_path, prepare_runtime_plan};
 use hpc_compose::render::{log_file_name_for_service, render_local_script, render_script};
-use hpc_compose::spec::ServiceFailureMode;
+use hpc_compose::spec::{ServiceFailureMode, parse_slurm_time_limit};
 
 use crate::output;
 use crate::watch_ui;
@@ -44,6 +48,211 @@ fn watch_with_fallback(
         }
     }
     watch_submission(record, service, options, lines)
+}
+
+fn latest_record_path(record: &SubmissionRecord) -> PathBuf {
+    match record.kind {
+        SubmissionKind::Main => latest_record_path_for(&record.compose_file),
+        SubmissionKind::Run => latest_run_record_path_for(&record.compose_file),
+    }
+}
+
+fn default_run_script_path(compose_file: &Path, service_name: &str) -> PathBuf {
+    let parent = compose_file.parent().unwrap_or_else(|| Path::new("."));
+    let service_token = log_file_name_for_service(service_name)
+        .trim_end_matches(".log")
+        .to_string();
+    parent.join(format!("hpc-compose-run-{service_token}.sbatch"))
+}
+
+fn tracked_cached_artifacts(plan: &RuntimePlan) -> Vec<PathBuf> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut artifacts = Vec::new();
+    for service in &plan.ordered_services {
+        let mut candidates = vec![service.runtime_image.clone()];
+        if matches!(service.source, ImageSource::Remote(_)) {
+            candidates.push(base_image_path(&plan.cache_dir, service));
+        }
+        for candidate in candidates {
+            if candidate.starts_with(&plan.cache_dir) && seen.insert(candidate.clone()) {
+                artifacts.push(candidate);
+            }
+        }
+    }
+    artifacts
+}
+
+fn requested_walltime(plan: &RuntimePlan) -> Option<RequestedWalltime> {
+    let raw = plan.slurm.time.as_deref()?;
+    let seconds = parse_slurm_time_limit(raw).ok()?;
+    Some(RequestedWalltime {
+        original: raw.to_string(),
+        seconds,
+    })
+}
+
+fn diff_lines(previous: &str, current: &str) -> Option<String> {
+    if previous == current {
+        return None;
+    }
+    let previous_lines = previous.lines().collect::<Vec<_>>();
+    let current_lines = current.lines().collect::<Vec<_>>();
+    let max_len = previous_lines.len().max(current_lines.len());
+    let mut out = String::from("--- previous\n+++ current\n");
+    for index in 0..max_len {
+        match (previous_lines.get(index), current_lines.get(index)) {
+            (Some(left), Some(right)) if left == right => {
+                out.push(' ');
+                out.push_str(left);
+                out.push('\n');
+            }
+            (Some(left), Some(right)) => {
+                out.push('-');
+                out.push_str(left);
+                out.push('\n');
+                out.push('+');
+                out.push_str(right);
+                out.push('\n');
+            }
+            (Some(left), None) => {
+                out.push('-');
+                out.push_str(left);
+                out.push('\n');
+            }
+            (None, Some(right)) => {
+                out.push('+');
+                out.push_str(right);
+                out.push('\n');
+            }
+            (None, None) => {}
+        }
+    }
+    Some(out)
+}
+
+fn maybe_check_resume_diff(
+    compose_file: &Path,
+    resume_enabled: bool,
+    effective_config_yaml: &str,
+    allow_resume_changes: bool,
+    resume_diff_only: bool,
+    output_format: OutputFormat,
+) -> Result<bool> {
+    if resume_diff_only && output_format == OutputFormat::Json {
+        bail!("--resume-diff-only does not support --format json");
+    }
+
+    if !resume_enabled {
+        if resume_diff_only {
+            println!("resume diff: x-slurm.resume is not configured");
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
+    let previous = match load_submission_record(compose_file, None) {
+        Ok(record) if record.kind == SubmissionKind::Main => record,
+        Ok(_) => return Ok(false),
+        Err(_) => {
+            if resume_diff_only {
+                println!("resume diff: no prior tracked main submission exists");
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+    };
+    let Some(previous_yaml) = previous.config_snapshot_yaml.as_deref() else {
+        let note = "resume diff unavailable because the previous tracked submission has no config snapshot";
+        if resume_diff_only {
+            println!("{note}");
+            return Ok(true);
+        }
+        let _ = writeln!(io::stderr(), "warning: {note}");
+        let _ = io::stderr().flush();
+        return Ok(false);
+    };
+    let Some(diff) = diff_lines(previous_yaml, effective_config_yaml) else {
+        if resume_diff_only {
+            println!("resume diff: no changes");
+            return Ok(true);
+        }
+        return Ok(false);
+    };
+
+    if output_format == OutputFormat::Text {
+        println!("{diff}");
+    }
+    if resume_diff_only {
+        return Ok(true);
+    }
+    if !allow_resume_changes {
+        bail!("resume config drift detected; rerun with --allow-resume-changes to submit anyway");
+    }
+    Ok(false)
+}
+
+fn resolve_tracked_record(
+    context: &ResolvedContext,
+    job_id: Option<&str>,
+) -> Result<Option<SubmissionRecord>> {
+    match job_id {
+        Some(job_id) => {
+            if let Ok(record) = load_submission_record(&context.compose_file.value, Some(job_id)) {
+                return Ok(Some(record));
+            }
+            match find_submission_record_in_repo(&context.cwd, job_id) {
+                Ok(record) => Ok(Some(record)),
+                Err(_) => Ok(None),
+            }
+        }
+        None => {
+            let latest = scan_job_records(&context.compose_file.value)?
+                .into_iter()
+                .max_by(|left, right| {
+                    left.submitted_at
+                        .cmp(&right.submitted_at)
+                        .then_with(|| left.job_id.cmp(&right.job_id))
+                });
+            match latest {
+                Some(record) => Ok(Some(record)),
+                None => Ok(Some(load_submission_record(
+                    &context.compose_file.value,
+                    None,
+                )?)),
+            }
+        }
+    }
+}
+
+fn purge_cached_artifacts(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        if path.is_dir() {
+            fs::remove_dir_all(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        } else {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        removed.push(path.clone());
+    }
+    Ok(removed)
+}
+
+fn cached_artifacts_for_teardown(record: Option<&SubmissionRecord>) -> Result<Vec<PathBuf>> {
+    let record = record.context(
+        "--purge-cache requires tracked submission metadata with cached artifact snapshots",
+    )?;
+    if record.cached_artifacts.is_empty() {
+        bail!(
+            "tracked submission metadata for job '{}' does not contain cached artifact snapshots; refusing --purge-cache",
+            record.job_id
+        );
+    }
+    Ok(record.cached_artifacts.clone())
 }
 
 fn generate_local_job_id() -> String {
@@ -331,10 +540,15 @@ pub(crate) fn submit(
     no_preflight: bool,
     watch: bool,
     local: bool,
+    allow_resume_changes: bool,
+    resume_diff_only: bool,
     dry_run: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let file = context.compose_file.value.clone();
+    let effective_config =
+        output::load_effective_config_with_interpolation_vars(&file, &context.interpolation_vars)?;
+    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
     let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
@@ -347,6 +561,25 @@ pub(crate) fn submit(
         SubmissionBackend::Slurm
     };
     let local_job_id = local.then(generate_local_job_id);
+    let record_options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::Main,
+        service_name: None,
+        command_override: None,
+        requested_walltime: requested_walltime(&runtime_plan),
+        config_snapshot_yaml: Some(effective_config_yaml.clone()),
+        cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+    };
+
+    if maybe_check_resume_diff(
+        &file,
+        runtime_plan.slurm.resume_dir().is_some(),
+        &effective_config_yaml,
+        allow_resume_changes,
+        resume_diff_only,
+        output_format,
+    )? {
+        return Ok(());
+    }
 
     if local {
         ensure_local_submit_supported(&runtime_plan)?;
@@ -439,7 +672,7 @@ pub(crate) fn submit(
     }
 
     if local {
-        let record = build_submission_record_with_backend(
+        let record = build_submission_record_with_backend_and_options(
             &file,
             &submit_dir,
             &script_path,
@@ -448,6 +681,7 @@ pub(crate) fn submit(
                 .as_deref()
                 .context("missing synthetic local job id")?,
             SubmissionBackend::Local,
+            &record_options,
         )?;
         write_submission_record(&record)
             .context("failed to persist tracking metadata for local launch")?;
@@ -469,7 +703,7 @@ pub(crate) fn submit(
                 print_local_launch_details(&record, &runtime_plan, &script_path);
                 println!(
                     "tracked job metadata: {}",
-                    hpc_compose::job::latest_record_path_for(&record.compose_file).display()
+                    latest_record_path(&record).display()
                 );
             }
             OutputFormat::Json => {
@@ -486,9 +720,7 @@ pub(crate) fn submit(
                         sbatch_stdout: None,
                         job_id: Some(record.job_id.clone()),
                         tracking_persisted: true,
-                        tracked_metadata_path: Some(hpc_compose::job::latest_record_path_for(
-                            &record.compose_file,
-                        )),
+                        tracked_metadata_path: Some(latest_record_path(&record)),
                     })
                     .context("failed to serialize submit output")?
                 );
@@ -525,8 +757,14 @@ pub(crate) fn submit(
 
     let stdout = String::from_utf8_lossy(&output_result.stdout);
     let tracked_submission = if let Some(job_id) = output::extract_job_id(stdout.trim()) {
-        let record =
-            build_submission_record(&file, &submit_dir, &script_path, &runtime_plan, job_id)?;
+        let record = build_submission_record_with_options(
+            &file,
+            &submit_dir,
+            &script_path,
+            &runtime_plan,
+            job_id,
+            &record_options,
+        )?;
         let persisted = match write_submission_record(&record) {
             Ok(()) => true,
             Err(err) => {
@@ -542,9 +780,9 @@ pub(crate) fn submit(
     } else {
         None
     };
-    let tracked_metadata_path = tracked_submission.as_ref().and_then(|(record, persisted)| {
-        persisted.then(|| hpc_compose::job::latest_record_path_for(&record.compose_file))
-    });
+    let tracked_metadata_path = tracked_submission
+        .as_ref()
+        .and_then(|(record, persisted)| persisted.then(|| latest_record_path(record)));
 
     match output_format {
         OutputFormat::Text => {
@@ -554,7 +792,7 @@ pub(crate) fn submit(
                 if *persisted {
                     println!(
                         "tracked job metadata: {}",
-                        hpc_compose::job::latest_record_path_for(&record.compose_file).display()
+                        latest_record_path(record).display()
                     );
                 } else {
                     println!(
@@ -611,6 +849,164 @@ pub(crate) fn submit(
         )?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn up(
+    context: ResolvedContext,
+    script_out: Option<PathBuf>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    local: bool,
+    allow_resume_changes: bool,
+    resume_diff_only: bool,
+    dry_run: bool,
+) -> Result<()> {
+    submit(
+        context,
+        script_out,
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+        true,
+        local,
+        allow_resume_changes,
+        resume_diff_only,
+        dry_run,
+        Some(OutputFormat::Text),
+    )
+}
+
+pub(crate) fn run_service(
+    context: ResolvedContext,
+    service_name: String,
+    command: Vec<String>,
+    script_out: Option<PathBuf>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+) -> Result<()> {
+    let file = context.compose_file.value.clone();
+    let mut runtime_plan = output::load_runtime_plan_with_interpolation_vars(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+    )?;
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+    let Some(mut service) = runtime_plan
+        .ordered_services
+        .iter()
+        .find(|candidate| candidate.name == service_name)
+        .cloned()
+    else {
+        bail!(
+            "service '{}' does not exist in {}",
+            service_name,
+            file.display()
+        );
+    };
+    service.depends_on.clear();
+    service.execution = ExecutionSpec::Exec(command.clone());
+    runtime_plan.name = format!("{}-{}-run", runtime_plan.name, service_name);
+    runtime_plan.slurm.resume = None;
+    runtime_plan.ordered_services = vec![service];
+
+    if !no_preflight {
+        let report = run_preflight(
+            &runtime_plan,
+            &PreflightOptions {
+                enroot_bin: context.binaries.enroot.value.clone(),
+                sbatch_bin: context.binaries.sbatch.value.clone(),
+                srun_bin: context.binaries.srun.value.clone(),
+                scontrol_bin: "scontrol".to_string(),
+                require_submit_tools: true,
+                skip_prepare,
+            },
+        );
+        output::print_report(&report, false);
+        if report.has_errors() {
+            bail!("preflight failed; fix the reported errors before running");
+        }
+    }
+
+    if !skip_prepare {
+        let summary = prepare_runtime_plan(
+            &runtime_plan,
+            &PrepareOptions {
+                enroot_bin: context.binaries.enroot.value.clone(),
+                keep_failed_prep,
+                force_rebuild,
+            },
+        )?;
+        output::print_prepare_summary(&summary);
+    }
+
+    let script = render_script(&runtime_plan)?;
+    let script_path = script_out.unwrap_or_else(|| default_run_script_path(&file, &service_name));
+    fs::write(&script_path, script).with_context(|| {
+        format!(
+            "failed to write rendered script to {}",
+            script_path.display()
+        )
+    })?;
+
+    let output_result = Command::new(&context.binaries.sbatch.value)
+        .arg(&script_path)
+        .output()
+        .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))?;
+    if !output_result.status.success() {
+        bail!(
+            "sbatch failed: {}",
+            String::from_utf8_lossy(&output_result.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output_result.stdout);
+    print!("{stdout}");
+    output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
+
+    let Some(job_id) = output::extract_job_id(stdout.trim()) else {
+        println!(
+            "note: submit output did not include a numeric Slurm job id, so this run is not trackable"
+        );
+        return Ok(());
+    };
+
+    let record = build_submission_record_with_options(
+        &file,
+        &submit_dir,
+        &script_path,
+        &runtime_plan,
+        job_id,
+        &SubmissionRecordBuildOptions {
+            kind: SubmissionKind::Run,
+            service_name: Some(service_name.clone()),
+            command_override: Some(command),
+            requested_walltime: requested_walltime(&runtime_plan),
+            config_snapshot_yaml: None,
+            cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+        },
+    )?;
+    write_submission_record(&record)?;
+    println!(
+        "tracked job metadata: {}",
+        latest_record_path(&record).display()
+    );
+    output::finish_watch(
+        &record.job_id,
+        watch_with_fallback(
+            &record,
+            &SchedulerOptions {
+                squeue_bin: context.binaries.squeue.value.clone(),
+                sacct_bin: context.binaries.sacct.value.clone(),
+            },
+            Some(&service_name),
+            100,
+        )?,
+    )
 }
 
 pub(crate) fn status(
@@ -765,17 +1161,20 @@ pub(crate) fn watch(
 pub(crate) fn cancel(
     context: ResolvedContext,
     job_id: Option<String>,
+    purge_cache: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let record = match job_id.as_deref() {
-        Some(job_id) => load_submission_record(&context.compose_file.value, Some(job_id)).ok(),
-        None => Some(load_submission_record(&context.compose_file.value, None)?),
-    };
+    let record = resolve_tracked_record(&context, job_id.as_deref())?;
     let resolved_job_id = record
         .as_ref()
         .map(|record| record.job_id.clone())
         .or(job_id)
         .context("missing job id for cancel")?;
+    let cache_paths = if purge_cache {
+        cached_artifacts_for_teardown(record.as_ref())?
+    } else {
+        Vec::new()
+    };
 
     if record
         .as_ref()
@@ -789,12 +1188,25 @@ pub(crate) fn cancel(
         } else {
             false
         };
+        remove_submission_record(record)?;
+        let purged_cache_paths = if purge_cache {
+            purge_cached_artifacts(&cache_paths)?
+        } else {
+            Vec::new()
+        };
         return match output::resolve_output_format(format, false) {
             OutputFormat::Text => {
                 if cancelled {
                     println!("cancelled job: {resolved_job_id}");
                 } else {
                     println!("local job is not running: {resolved_job_id}");
+                }
+                println!(
+                    "removed tracked metadata: {}",
+                    latest_record_path(record).display()
+                );
+                for path in &purged_cache_paths {
+                    println!("purged cache artifact: {}", path.display());
                 }
                 Ok(())
             }
@@ -805,6 +1217,8 @@ pub(crate) fn cancel(
                         job_id: resolved_job_id,
                         cancelled,
                         command_stdout: None,
+                        tracking_removed: Some(true),
+                        purged_cache_paths,
                     })
                     .context("failed to serialize cancel output")?
                 );
@@ -814,7 +1228,31 @@ pub(crate) fn cancel(
     }
 
     match output::resolve_output_format(format, false) {
-        OutputFormat::Text => output::cancel_job(&resolved_job_id, &context.binaries.scancel.value),
+        OutputFormat::Text => {
+            output::cancel_job(&resolved_job_id, &context.binaries.scancel.value)?;
+            let tracking_removed = if let Some(record) = record.as_ref() {
+                remove_submission_record(record)?;
+                println!(
+                    "removed tracked metadata: {}",
+                    latest_record_path(record).display()
+                );
+                true
+            } else {
+                false
+            };
+            let purged_cache_paths = if purge_cache {
+                purge_cached_artifacts(&cache_paths)?
+            } else {
+                Vec::new()
+            };
+            for path in &purged_cache_paths {
+                println!("purged cache artifact: {}", path.display());
+            }
+            if !tracking_removed {
+                println!("note: no tracked metadata was found for job {resolved_job_id}");
+            }
+            Ok(())
+        }
         OutputFormat::Json => {
             let output = Command::new(&context.binaries.scancel.value)
                 .arg(&resolved_job_id)
@@ -833,12 +1271,25 @@ pub(crate) fn cancel(
                 bail!("scancel failed for job {resolved_job_id}: {detail}");
             }
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let tracking_removed = if let Some(record) = record.as_ref() {
+                remove_submission_record(record)?;
+                Some(true)
+            } else {
+                Some(false)
+            };
+            let purged_cache_paths = if purge_cache {
+                purge_cached_artifacts(&cache_paths)?
+            } else {
+                Vec::new()
+            };
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output::CancelOutput {
                     job_id: resolved_job_id,
                     cancelled: true,
                     command_stdout: (!stdout.is_empty()).then_some(stdout),
+                    tracking_removed,
+                    purged_cache_paths,
                 })
                 .context("failed to serialize cancel output")?
             );
@@ -998,6 +1449,8 @@ mod tests {
             true,
             false,
             false,
+            false,
+            false,
             true,
             None,
         )
@@ -1009,6 +1462,8 @@ mod tests {
             true,
             false,
             true,
+            false,
+            false,
             false,
             false,
             true,
@@ -1094,6 +1549,8 @@ mod tests {
             true,
             false,
             true,
+            false,
+            false,
             false,
             false,
             false,
@@ -1340,10 +1797,15 @@ mod tests {
         cancel(
             context_for(&compose, tmpdir.path()),
             Some(record.job_id.clone()),
+            false,
             Some(OutputFormat::Json),
         )
         .expect("cancel local without pid");
 
+        write_submission_record(&record).expect("rewrite record");
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("recreate state dir");
+        }
         let mut sleeper = Command::new("sleep")
             .arg("30")
             .spawn()
@@ -1363,6 +1825,7 @@ mod tests {
         cancel(
             context_for(&compose, tmpdir.path()),
             Some(record.job_id.clone()),
+            false,
             None,
         )
         .expect("cancel running local");
@@ -1500,6 +1963,7 @@ mod tests {
         cancel(
             context.clone(),
             Some(record.job_id.clone()),
+            false,
             Some(OutputFormat::Json),
         )
         .expect("cancel");

@@ -141,6 +141,14 @@ pub fn probe_scheduler_status(job_id: &str, options: &SchedulerOptions) -> Sched
     probe_status_components(job_id, options).0
 }
 
+/// Probes scheduler state and returns queue-facing diagnostics when available.
+pub fn probe_scheduler_status_with_queue_diagnostics(
+    job_id: &str,
+    options: &SchedulerOptions,
+) -> (SchedulerStatus, Option<QueueDiagnostics>) {
+    probe_status_components(job_id, options)
+}
+
 /// Returns the human-readable label for a scheduler source.
 pub fn scheduler_source_label(source: SchedulerSource) -> &'static str {
     match source {

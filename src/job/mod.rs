@@ -46,12 +46,17 @@ pub use logs::{print_logs, watch_submission};
 pub use ps::build_ps_snapshot;
 pub use record::{
     build_cleanup_report, build_submission_record, build_submission_record_with_backend,
-    clean_all_except_latest, clean_by_age, jobs_dir_for, latest_record_path_for,
-    load_submission_record, log_dir_for_record, metadata_root_for, persist_submission_record,
-    remove_submission_record, run_cleanup_report, runtime_job_root_for_record, scan_job_inventory,
-    scan_job_records, state_path_for_record, write_submission_record,
+    build_submission_record_with_backend_and_options, build_submission_record_with_options,
+    clean_all_except_latest, clean_by_age, find_submission_record_in_repo, jobs_dir_for,
+    latest_record_path_for, latest_run_record_path_for, load_submission_record, log_dir_for_record,
+    metadata_root_for, persist_submission_record, remove_submission_record, run_cleanup_report,
+    runtime_job_root_for_record, scan_job_inventory, scan_job_records, state_path_for_record,
+    write_submission_record,
 };
-pub use scheduler::{build_status_snapshot, probe_scheduler_status, scheduler_source_label};
+pub use scheduler::{
+    build_status_snapshot, probe_scheduler_status, probe_scheduler_status_with_queue_diagnostics,
+    scheduler_source_label,
+};
 pub use stats::{build_stats_snapshot, metrics_dir_for_record};
 
 const SUBMISSION_SCHEMA_VERSION: u32 = 2;
@@ -68,6 +73,8 @@ pub struct SubmissionRecord {
     pub schema_version: u32,
     #[serde(default = "default_submission_backend")]
     pub backend: SubmissionBackend,
+    #[serde(default = "default_submission_kind")]
+    pub kind: SubmissionKind,
     pub job_id: String,
     pub submitted_at: u64,
     pub compose_file: PathBuf,
@@ -80,6 +87,16 @@ pub struct SubmissionRecord {
     pub artifact_export_dir: Option<String>,
     #[serde(default)]
     pub resume_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub service_name: Option<String>,
+    #[serde(default)]
+    pub command_override: Option<Vec<String>>,
+    #[serde(default)]
+    pub requested_walltime: Option<RequestedWalltime>,
+    #[serde(default)]
+    pub config_snapshot_yaml: Option<String>,
+    #[serde(default)]
+    pub cached_artifacts: Vec<PathBuf>,
 }
 
 /// Backend used to execute a tracked submission.
@@ -91,6 +108,47 @@ pub enum SubmissionBackend {
     Slurm,
     /// The job was launched locally without Slurm.
     Local,
+}
+
+/// High-level submission flow used to create a tracked job.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionKind {
+    /// A normal compose application submission from `submit` or `up`.
+    #[default]
+    Main,
+    /// A one-off `run` submission scoped to one service.
+    Run,
+}
+
+/// Parsed requested allocation walltime persisted with a tracked record.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestedWalltime {
+    pub original: String,
+    pub seconds: u64,
+}
+
+/// Live walltime progress derived from a tracked job record and scheduler diagnostics.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalltimeProgress {
+    pub original: String,
+    pub elapsed_seconds: u64,
+    pub total_seconds: u64,
+    pub remaining_seconds: u64,
+}
+
+/// Optional metadata attached when building a tracked submission record.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default)]
+pub struct SubmissionRecordBuildOptions {
+    pub kind: SubmissionKind,
+    pub service_name: Option<String>,
+    pub command_override: Option<Vec<String>>,
+    pub requested_walltime: Option<RequestedWalltime>,
+    pub config_snapshot_yaml: Option<String>,
+    pub cached_artifacts: Vec<PathBuf>,
 }
 
 /// Source used to determine scheduler state.
@@ -107,6 +165,111 @@ pub enum SchedulerSource {
 
 fn default_submission_backend() -> SubmissionBackend {
     SubmissionBackend::Slurm
+}
+
+fn default_submission_kind() -> SubmissionKind {
+    SubmissionKind::Main
+}
+
+/// Formats a duration for watch output using `HH:MM:SS` or `D-HH:MM:SS` when needed.
+pub fn format_walltime_duration(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}-{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
+/// Formats one walltime progress line for watch output.
+pub fn format_walltime_summary(progress: &WalltimeProgress) -> String {
+    format!(
+        "{} / {} remaining {}",
+        format_walltime_duration(progress.elapsed_seconds),
+        format_walltime_duration(progress.total_seconds),
+        format_walltime_duration(progress.remaining_seconds)
+    )
+}
+
+/// Returns the integer completion percentage for a walltime progress sample.
+pub fn walltime_progress_percent(progress: &WalltimeProgress) -> u64 {
+    if progress.total_seconds == 0 {
+        return 100;
+    }
+    ((u128::from(progress.elapsed_seconds) * 100) / u128::from(progress.total_seconds)) as u64
+}
+
+/// Parses a scheduler timestamp like `2026-04-10T12:34:56` or `2026-04-10T12:34:56Z`.
+pub fn parse_scheduler_timestamp(input: &str) -> Option<u64> {
+    let trimmed = input.trim().trim_end_matches('Z');
+    let (date, time) = trimmed.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<i32>().ok()?;
+    let day = date_parts.next()?.parse::<i32>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<i32>().ok()?;
+    let minute = time_parts.next()?.parse::<i32>().ok()?;
+    let second = time_parts.next()?.split('.').next()?.parse::<i32>().ok()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+
+    #[cfg(unix)]
+    {
+        let mut tm = libc::tm {
+            tm_sec: second,
+            tm_min: minute,
+            tm_hour: hour,
+            tm_mday: day,
+            tm_mon: month - 1,
+            tm_year: year - 1900,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            tm_gmtoff: 0,
+            tm_zone: std::ptr::null_mut(),
+        };
+        let timestamp = unsafe { libc::timegm(&mut tm) };
+        (timestamp >= 0).then_some(timestamp as u64)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (year, month, day, hour, minute, second);
+        None
+    }
+}
+
+/// Derives live walltime progress for a running tracked job.
+pub fn walltime_progress(
+    record: &SubmissionRecord,
+    scheduler: &SchedulerStatus,
+    queue_diagnostics: Option<&QueueDiagnostics>,
+    now: u64,
+) -> Option<WalltimeProgress> {
+    if scheduler.state != "RUNNING" {
+        return None;
+    }
+    let requested = record.requested_walltime.as_ref()?;
+    let started_at = queue_diagnostics
+        .and_then(|queue| queue.start_time.as_deref())
+        .and_then(parse_scheduler_timestamp)
+        .or_else(|| Some(record.submitted_at))?;
+    let elapsed_seconds = now.saturating_sub(started_at).min(requested.seconds);
+    Some(WalltimeProgress {
+        original: requested.original.clone(),
+        elapsed_seconds,
+        total_seconds: requested.seconds,
+        remaining_seconds: requested.seconds.saturating_sub(elapsed_seconds),
+    })
 }
 
 /// Scheduler state as observed by the tracker.
@@ -624,6 +787,7 @@ pub struct JobInventoryEntry {
     pub compose_file: PathBuf,
     pub compose_metadata_root: PathBuf,
     pub job_id: String,
+    pub kind: SubmissionKind,
     pub is_latest: bool,
     pub submitted_at: u64,
     pub age_seconds: u64,
@@ -1230,6 +1394,7 @@ mod tests {
         let fallback_record = SubmissionRecord {
             schema_version: 1,
             backend: SubmissionBackend::Slurm,
+            kind: SubmissionKind::Main,
             job_id: "999".into(),
             submitted_at: 0,
             compose_file: tmpdir.path().join("compose.yaml"),
@@ -1240,6 +1405,11 @@ mod tests {
             service_logs: BTreeMap::new(),
             artifact_export_dir: None,
             resume_dir: None,
+            service_name: None,
+            command_override: None,
+            requested_walltime: None,
+            config_snapshot_yaml: None,
+            cached_artifacts: Vec::new(),
         };
         assert_eq!(
             log_dir_for_record(&fallback_record),

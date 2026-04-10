@@ -11,13 +11,14 @@ const FILE_ARG_HELP: &str = "Compose specification file to read; if omitted, use
 
 const TOP_LEVEL_HELP: &str = "\
 Normal run:
-  hpc-compose submit --watch -f compose.yaml
+  hpc-compose up -f compose.yaml
 
 Debugging flow:
   hpc-compose validate -f compose.yaml
   hpc-compose inspect --verbose -f compose.yaml
   hpc-compose preflight -f compose.yaml
   hpc-compose prepare -f compose.yaml
+  hpc-compose config -f compose.yaml
 
 Start a new spec:
   hpc-compose new --template minimal-batch --name my-app --output compose.yaml";
@@ -52,12 +53,24 @@ Examples:
   hpc-compose inspect --verbose -f compose.yaml
   hpc-compose inspect -f compose.yaml --format json";
 
+const CONFIG_HELP: &str = "\
+Examples:
+  hpc-compose config -f compose.yaml
+  hpc-compose config -f compose.yaml --format json";
+
+const UP_HELP: &str = "\
+Examples:
+  hpc-compose up -f compose.yaml
+  hpc-compose up --dry-run -f compose.yaml
+  hpc-compose up --skip-prepare -f compose.yaml";
+
 const SUBMIT_HELP: &str = "\
 Examples:
   hpc-compose submit --watch -f compose.yaml
   hpc-compose submit --dry-run -f compose.yaml
   hpc-compose submit --local --dry-run -f compose.yaml
-  hpc-compose submit --skip-prepare -f compose.yaml";
+  hpc-compose submit --skip-prepare -f compose.yaml
+  hpc-compose submit --resume-diff-only -f compose.yaml";
 
 const STATUS_HELP: &str = "\
 Examples:
@@ -98,6 +111,18 @@ const CANCEL_HELP: &str = "\
 Examples:
   hpc-compose cancel -f compose.yaml
   hpc-compose cancel -f compose.yaml --job-id 12345";
+
+const DOWN_HELP: &str = "\
+Examples:
+  hpc-compose down -f compose.yaml
+  hpc-compose down --job-id 12345
+  hpc-compose down --job-id 12345 --purge-cache";
+
+const RUN_HELP: &str = "\
+Examples:
+  hpc-compose run -f compose.yaml app -- python -m pytest
+  hpc-compose run -f compose.yaml app -- bash
+  hpc-compose run -f compose.yaml worker -- python worker.py --once";
 
 const NEW_HELP: &str = "\
 Examples:
@@ -161,9 +186,10 @@ Examples:
   hpc-compose completions fish > ~/.config/fish/completions/hpc-compose.fish";
 
 pub const TOP_LEVEL_EXAMPLES: &[&str] = &[
-    "hpc-compose submit --watch -f compose.yaml",
+    "hpc-compose up -f compose.yaml",
     "hpc-compose validate -f compose.yaml",
     "hpc-compose inspect --verbose -f compose.yaml",
+    "hpc-compose config -f compose.yaml",
     "hpc-compose preflight -f compose.yaml",
 ];
 
@@ -197,11 +223,23 @@ pub const INSPECT_EXAMPLES: &[&str] = &[
     "hpc-compose inspect -f compose.yaml --format json",
 ];
 
+pub const CONFIG_EXAMPLES: &[&str] = &[
+    "hpc-compose config -f compose.yaml",
+    "hpc-compose config -f compose.yaml --format json",
+];
+
+pub const UP_EXAMPLES: &[&str] = &[
+    "hpc-compose up -f compose.yaml",
+    "hpc-compose up --dry-run -f compose.yaml",
+    "hpc-compose up --skip-prepare -f compose.yaml",
+];
+
 pub const SUBMIT_EXAMPLES: &[&str] = &[
     "hpc-compose submit --watch -f compose.yaml",
     "hpc-compose submit --dry-run -f compose.yaml",
     "hpc-compose submit --local --dry-run -f compose.yaml",
     "hpc-compose submit --skip-prepare -f compose.yaml",
+    "hpc-compose submit --resume-diff-only -f compose.yaml",
 ];
 
 pub const STATUS_EXAMPLES: &[&str] = &[
@@ -242,6 +280,18 @@ pub const WATCH_EXAMPLES: &[&str] = &[
 pub const CANCEL_EXAMPLES: &[&str] = &[
     "hpc-compose cancel -f compose.yaml",
     "hpc-compose cancel -f compose.yaml --job-id 12345",
+];
+
+pub const DOWN_EXAMPLES: &[&str] = &[
+    "hpc-compose down -f compose.yaml",
+    "hpc-compose down --job-id 12345",
+    "hpc-compose down --job-id 12345 --purge-cache",
+];
+
+pub const RUN_EXAMPLES: &[&str] = &[
+    "hpc-compose run -f compose.yaml app -- python -m pytest",
+    "hpc-compose run -f compose.yaml app -- bash",
+    "hpc-compose run -f compose.yaml worker -- python worker.py --once",
 ];
 
 pub const NEW_EXAMPLES: &[&str] = &[
@@ -310,7 +360,7 @@ pub const COMPLETIONS_EXAMPLES: &[&str] = &[
     author,
     version,
     about = "Compile a compose-like spec into a single Slurm job using Enroot",
-    long_about = "Compile a compose-like specification into one Slurm batch job that launches one or more services through Enroot and Pyxis inside a single allocation. Use submit --watch for the normal run, and use validate, inspect, preflight, and prepare when adapting or debugging a spec.",
+    long_about = "Compile a compose-like specification into one Slurm batch job that launches one or more services through Enroot and Pyxis inside a single allocation. Use up for the normal run, and use config, validate, inspect, preflight, and prepare when adapting or debugging a spec.",
     after_help = TOP_LEVEL_HELP
 )]
 pub struct Cli {
@@ -492,6 +542,112 @@ pub enum Commands {
         json: bool,
     },
     #[command(
+        about = "Render the fully interpolated effective config",
+        long_about = "Print the normalized effective compose config after interpolation, healthcheck normalization, and default application. Use this to inspect what submit and inspect actually receive.",
+        after_help = CONFIG_HELP
+    )]
+    Config {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Submit, watch, and stream logs in one command",
+        long_about = "Run the normal end-to-end workflow: optional preflight, image preparation, script rendering, sbatch submission or local launch, and immediate live watching with log streaming and exit-code propagation.",
+        after_help = UP_HELP
+    )]
+    Up {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered launcher script to this path before submission or local launch"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            help = "Keep failed preparation state on disk for later inspection"
+        )]
+        keep_failed_prep: bool,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(
+            long,
+            help = "Refresh imported and prepared artifacts before submission"
+        )]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before submission")]
+        no_preflight: bool,
+        #[arg(
+            long,
+            help = "Launch the plan locally with Enroot instead of submitting it to Slurm",
+            conflicts_with_all = ["sbatch_bin", "srun_bin", "squeue_bin", "sacct_bin"]
+        )]
+        local: bool,
+        #[arg(
+            long,
+            help = "Allow submission even when resume config drift is detected"
+        )]
+        allow_resume_changes: bool,
+        #[arg(
+            long,
+            help = "Print the resume config diff and exit without preparing or submitting"
+        )]
+        resume_diff_only: bool,
+        #[arg(
+            long,
+            help = "Run preflight, prepare, and render without calling sbatch"
+        )]
+        dry_run: bool,
+    },
+    #[command(
         about = "Submit a job and optionally watch it",
         long_about = "Run the end-to-end submission flow: optional preflight, image preparation, script rendering, sbatch submission, and optional live watching of tracked state and logs.",
         after_help = SUBMIT_HELP
@@ -570,6 +726,16 @@ pub enum Commands {
             conflicts_with_all = ["sbatch_bin", "srun_bin", "squeue_bin", "sacct_bin"]
         )]
         local: bool,
+        #[arg(
+            long,
+            help = "Allow submission even when resume config drift is detected"
+        )]
+        allow_resume_changes: bool,
+        #[arg(
+            long,
+            help = "Print the resume config diff and exit without preparing or submitting"
+        )]
+        resume_diff_only: bool,
         #[arg(
             long,
             help = "Run preflight, prepare, and render without calling sbatch"
@@ -843,8 +1009,121 @@ pub enum Commands {
             help = "Path to the scancel executable"
         )]
         scancel_bin: String,
+        #[arg(long, help = "Also purge tracked cached image artifacts for this job")]
+        purge_cache: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Cancel a tracked job and clean tracked state",
+        long_about = "Cancel a tracked Slurm job by compose context or job id, remove tracked metadata and runtime state for that job, and optionally purge its tracked cached image artifacts.",
+        after_help = DOWN_HELP
+    )]
+    Down {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to cancel instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scancel",
+            help = "Path to the scancel executable"
+        )]
+        scancel_bin: String,
+        #[arg(long, help = "Also purge tracked cached image artifacts for this job")]
+        purge_cache: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Run a one-off command in one service environment",
+        long_about = "Submit a fresh one-off job using one service's image, environment, mounts, working directory, and prepare rules, then stream logs and propagate the final exit state.",
+        after_help = RUN_HELP
+    )]
+    Run {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(value_name = "SERVICE", help = "Service to run")]
+        service: String,
+        #[arg(
+            value_name = "CMD",
+            required = true,
+            num_args = 1..,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "Command argv to execute inside the service environment"
+        )]
+        cmd: Vec<String>,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered launcher script to this path before submission"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            help = "Keep failed preparation state on disk for later inspection"
+        )]
+        keep_failed_prep: bool,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(
+            long,
+            help = "Refresh imported and prepared artifacts before submission"
+        )]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before submission")]
+        no_preflight: bool,
     },
     #[command(
         about = "Write a starter compose file from a built-in template",
@@ -955,8 +1234,8 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
-        about = "Print resolved profile/settings context",
-        long_about = "Print the effective settings, profile, binaries, interpolation variables, and derived runtime paths for the active invocation context.",
+        about = "Print resolved project-local settings context",
+        long_about = "Print the effective project-local settings, selected profile, binaries, interpolation variables, and derived runtime paths for the active invocation context.",
         after_help = CONTEXT_HELP
     )]
     Context {
@@ -964,7 +1243,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
-        about = "Create or update repo-adjacent settings",
+        about = "Create or update the project-local settings file",
         long_about = "Create or update .hpc-compose/settings.toml with profile defaults, environment files, explicit environment variables, and binary overrides.",
         after_help = SETUP_HELP
     )]
@@ -1133,6 +1412,8 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["prepare"] => PREPARE_EXAMPLES,
         ["preflight"] => PREFLIGHT_EXAMPLES,
         ["inspect"] => INSPECT_EXAMPLES,
+        ["config"] => CONFIG_EXAMPLES,
+        ["up"] => UP_EXAMPLES,
         ["submit"] => SUBMIT_EXAMPLES,
         ["status"] => STATUS_EXAMPLES,
         ["stats"] => STATS_EXAMPLES,
@@ -1141,6 +1422,8 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["ps"] => PS_EXAMPLES,
         ["watch"] => WATCH_EXAMPLES,
         ["cancel"] => CANCEL_EXAMPLES,
+        ["down"] => DOWN_EXAMPLES,
+        ["run"] => RUN_EXAMPLES,
         ["new"] => NEW_EXAMPLES,
         ["cache"] => CACHE_EXAMPLES,
         ["cache", "list"] => CACHE_LIST_EXAMPLES,

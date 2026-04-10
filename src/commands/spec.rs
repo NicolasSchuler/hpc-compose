@@ -184,6 +184,26 @@ pub(crate) fn inspect(
     Ok(())
 }
 
+pub(crate) fn config(context: ResolvedContext, format: Option<OutputFormat>) -> Result<()> {
+    let config = output::load_effective_config_with_interpolation_vars(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+    )?;
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            print!("{}", output::effective_config_yaml(&config)?);
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&config)
+                    .context("failed to serialize config output")?
+            );
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct ContextRuntimePaths {
     compose_dir: PathBuf,

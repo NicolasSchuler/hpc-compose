@@ -10,7 +10,7 @@ This example shows a common Slurm pattern:
 ## Normal run
 
 ```bash
-hpc-compose submit --watch -f examples/vllm-uv-worker.yaml
+hpc-compose up -f examples/vllm-uv-worker.yaml
 ```
 
 That command already runs preflight, prepares the cached worker image when needed, renders the batch script, submits the job, and follows the logs.

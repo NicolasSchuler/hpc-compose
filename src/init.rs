@@ -285,7 +285,7 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
 pub fn next_commands(output: &Path) -> Vec<String> {
     let path = output.display().to_string();
     vec![
-        format!("hpc-compose submit --watch -f {path}"),
+        format!("hpc-compose up -f {path}"),
         format!("hpc-compose validate -f {path}"),
         format!("hpc-compose inspect -f {path}"),
     ]
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(
             next_commands(Path::new("/tmp/demo.yaml")),
             vec![
-                "hpc-compose submit --watch -f /tmp/demo.yaml",
+                "hpc-compose up -f /tmp/demo.yaml",
                 "hpc-compose validate -f /tmp/demo.yaml",
                 "hpc-compose inspect -f /tmp/demo.yaml",
             ]

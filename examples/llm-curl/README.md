@@ -20,7 +20,7 @@ For a real cluster, start with the home-directory variant:
 mkdir -p "$HOME/models"
 # Copy the real GGUF file, not just a symlink whose target lives elsewhere.
 cp /path/to/your/model.gguf "$HOME/models/model.gguf"
-hpc-compose submit --watch -f examples/llm-curl-workflow-workdir.yaml
+hpc-compose up -f examples/llm-curl-workflow-workdir.yaml
 ```
 
 This is the lowest-overhead path because it does not require `HPC_COMPOSE_HOME`, a helper script, or a separate request file.
@@ -28,10 +28,10 @@ This is the lowest-overhead path because it does not require `HPC_COMPOSE_HOME`,
 ## Repo-local variant
 
 ```bash
-hpc-compose submit --watch -f examples/llm-curl-workflow.yaml
+hpc-compose up -f examples/llm-curl-workflow.yaml
 ```
 
-`submit --watch` already runs preflight, prepares missing images, renders the batch script, calls `sbatch`, then follows the tracked job output.
+`up` already runs preflight, prepares missing images, renders the batch script, calls `sbatch`, then follows the tracked job output.
 
 ## Debugging flow
 

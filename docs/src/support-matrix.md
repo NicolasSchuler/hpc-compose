@@ -16,8 +16,8 @@ This page separates what `hpc-compose` can build, what CI currently exercises, a
 | --- | --- | --- |
 | Linux `x86_64` | Full CLI and runtime workflows | Requires Slurm client tools plus Enroot and Pyxis on the submission host/cluster |
 | Linux `arm64` | Full CLI and runtime workflows | Same cluster requirements as Linux `x86_64` |
-| macOS `x86_64` | Authoring and local inspection only | Supported for `new`, `validate`, `inspect`, `render`, and `completions`; not for cluster runtime commands |
-| macOS `arm64` | Authoring and local inspection only | Same scope as macOS `x86_64` |
+| macOS `x86_64` | Authoring and local non-runtime commands | Suitable for project-local authoring flows such as `new`, `setup`, `context`, `validate`, `inspect`, `render`, and `completions`; not for Slurm/Enroot runtime commands |
+| macOS `arm64` | Authoring and local non-runtime commands | Same scope as macOS `x86_64` |
 
 ## CI-tested
 
@@ -53,4 +53,4 @@ For full runtime support on Linux, the target environment should provide:
 - Enroot on the submission host for image import and prepare steps
 - shared storage for `x-slurm.cache_dir`
 
-Use [Runbook](runbook.md) and [Execution model](execution-model.md) before adapting a real workload to a cluster.
+Use [Runbook](runbook.md) and [Execution Model](execution-model.md) before adapting a real workload to a cluster.
