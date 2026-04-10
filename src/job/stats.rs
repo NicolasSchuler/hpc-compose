@@ -1,4 +1,5 @@
 use super::runtime_state::load_runtime_state;
+use super::scheduler::build_local_scheduler_status;
 use super::*;
 
 /// Builds the tracked metrics snapshot used by `hpc-compose stats`.
@@ -17,19 +18,25 @@ pub fn build_stats_snapshot(
             (record.job_id.clone(), Some(record))
         }
     };
-    let raw_scheduler = probe_scheduler_status(&job_id, &options.scheduler);
+    let runtime_state = record.as_ref().and_then(load_runtime_state);
+    let raw_scheduler = match record.as_ref().map(|record| record.backend) {
+        Some(SubmissionBackend::Local) => build_local_scheduler_status(runtime_state.as_ref()),
+        _ => probe_scheduler_status(&job_id, &options.scheduler),
+    };
     let scheduler = if let Some(record) = &record {
-        reconcile_scheduler_status(
-            raw_scheduler,
-            record.submitted_at,
-            None,
-            unix_timestamp_now(),
-        )
+        match record.backend {
+            SubmissionBackend::Slurm => reconcile_scheduler_status(
+                raw_scheduler,
+                record.submitted_at,
+                None,
+                unix_timestamp_now(),
+            ),
+            SubmissionBackend::Local => raw_scheduler,
+        }
     } else {
         raw_scheduler
     };
     let metrics_dir = record.as_ref().map(metrics_dir_for_record);
-    let runtime_state = record.as_ref().and_then(load_runtime_state);
     let SamplerLoadOutcome { sampler, mut notes } = if let Some(metrics_dir) = metrics_dir.as_ref()
     {
         load_sampler_snapshot(metrics_dir)
@@ -52,7 +59,9 @@ pub fn build_stats_snapshot(
     let used_sampler_steps = !steps.is_empty();
     let mut used_live_sstat = false;
 
-    if steps.is_empty() {
+    if steps.is_empty()
+        && record.as_ref().map(|record| record.backend) != Some(SubmissionBackend::Local)
+    {
         match probe_step_stats(&job_id, &options.sstat_bin) {
             Ok(probed_steps) => {
                 steps = probed_steps;
@@ -72,6 +81,9 @@ pub fn build_stats_snapshot(
             .as_ref()
             .and_then(|snapshot| snapshot.gpu.as_ref())
             .is_some();
+    if record.as_ref().map(|record| record.backend) == Some(SubmissionBackend::Local) {
+        notes.push("Slurm step statistics are unavailable for locally launched jobs".to_string());
+    }
     if available
         && sampler
             .as_ref()
@@ -84,14 +96,23 @@ pub fn build_stats_snapshot(
             "GPU accounting metrics are unavailable for this job; this cluster may not expose GPU TRES accounting via sstat".to_string(),
         );
     }
-    let source =
-        if sampler_contributed && (used_live_sstat || (!used_sampler_steps && !steps.is_empty())) {
-            "sampler+sstat"
-        } else if sampler_contributed {
-            "sampler"
-        } else {
-            "sstat"
-        };
+    let source = if record.as_ref().map(|record| record.backend) == Some(SubmissionBackend::Local) {
+        "sampler"
+    } else if sampler_contributed && (used_live_sstat || (!used_sampler_steps && !steps.is_empty()))
+    {
+        "sampler+sstat"
+    } else if sampler_contributed {
+        "sampler"
+    } else {
+        "sstat"
+    };
+    let reason = if !available
+        && record.as_ref().map(|record| record.backend) == Some(SubmissionBackend::Local)
+    {
+        Some("runtime metrics are not available because no local sampler data has been collected yet".to_string())
+    } else {
+        (!available).then(|| stats_unavailable_reason(&scheduler))
+    };
 
     Ok(StatsSnapshot {
         job_id,
@@ -99,7 +120,7 @@ pub fn build_stats_snapshot(
         metrics_dir,
         scheduler: scheduler.clone(),
         available,
-        reason: (!available).then(|| stats_unavailable_reason(&scheduler)),
+        reason,
         source: source.to_string(),
         notes,
         sampler,

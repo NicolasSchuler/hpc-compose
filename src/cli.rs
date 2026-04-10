@@ -17,7 +17,10 @@ Debugging flow:
   hpc-compose validate -f compose.yaml
   hpc-compose inspect --verbose -f compose.yaml
   hpc-compose preflight -f compose.yaml
-  hpc-compose prepare -f compose.yaml";
+  hpc-compose prepare -f compose.yaml
+
+Start a new spec:
+  hpc-compose new --template minimal-batch --name my-app --output compose.yaml";
 
 const VALIDATE_HELP: &str = "\
 Examples:
@@ -53,6 +56,7 @@ const SUBMIT_HELP: &str = "\
 Examples:
   hpc-compose submit --watch -f compose.yaml
   hpc-compose submit --dry-run -f compose.yaml
+  hpc-compose submit --local --dry-run -f compose.yaml
   hpc-compose submit --skip-prepare -f compose.yaml";
 
 const STATUS_HELP: &str = "\
@@ -78,16 +82,28 @@ Examples:
   hpc-compose logs -f compose.yaml --service app --follow
   hpc-compose logs -f compose.yaml --job-id 12345 --lines 200";
 
+const PS_HELP: &str = "\
+Examples:
+  hpc-compose ps -f compose.yaml
+  hpc-compose ps -f compose.yaml --job-id 12345
+  hpc-compose ps -f compose.yaml --format json";
+
+const WATCH_HELP: &str = "\
+Examples:
+  hpc-compose watch -f compose.yaml
+  hpc-compose watch -f compose.yaml --service app
+  hpc-compose watch -f compose.yaml --job-id 12345 --lines 200";
+
 const CANCEL_HELP: &str = "\
 Examples:
   hpc-compose cancel -f compose.yaml
   hpc-compose cancel -f compose.yaml --job-id 12345";
 
-const INIT_HELP: &str = "\
+const NEW_HELP: &str = "\
 Examples:
-  hpc-compose init --list-templates
-  hpc-compose init --describe-template minimal-batch
-  hpc-compose init --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml";
+  hpc-compose new --list-templates
+  hpc-compose new --describe-template minimal-batch
+  hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml";
 
 const CACHE_HELP: &str = "\
 Examples:
@@ -109,8 +125,9 @@ Examples:
 
 const CACHE_PRUNE_HELP: &str = "\
 Examples:
-  hpc-compose cache prune --age 14
+  hpc-compose --profile dev cache prune --age 14
   hpc-compose cache prune --all-unused -f compose.yaml
+  hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache
   hpc-compose cache prune --age 7 --format json";
 
 const JOBS_HELP: &str = "\
@@ -183,6 +200,7 @@ pub const INSPECT_EXAMPLES: &[&str] = &[
 pub const SUBMIT_EXAMPLES: &[&str] = &[
     "hpc-compose submit --watch -f compose.yaml",
     "hpc-compose submit --dry-run -f compose.yaml",
+    "hpc-compose submit --local --dry-run -f compose.yaml",
     "hpc-compose submit --skip-prepare -f compose.yaml",
 ];
 
@@ -209,15 +227,27 @@ pub const LOGS_EXAMPLES: &[&str] = &[
     "hpc-compose logs -f compose.yaml --job-id 12345 --lines 200",
 ];
 
+pub const PS_EXAMPLES: &[&str] = &[
+    "hpc-compose ps -f compose.yaml",
+    "hpc-compose ps -f compose.yaml --job-id 12345",
+    "hpc-compose ps -f compose.yaml --format json",
+];
+
+pub const WATCH_EXAMPLES: &[&str] = &[
+    "hpc-compose watch -f compose.yaml",
+    "hpc-compose watch -f compose.yaml --service app",
+    "hpc-compose watch -f compose.yaml --job-id 12345 --lines 200",
+];
+
 pub const CANCEL_EXAMPLES: &[&str] = &[
     "hpc-compose cancel -f compose.yaml",
     "hpc-compose cancel -f compose.yaml --job-id 12345",
 ];
 
-pub const INIT_EXAMPLES: &[&str] = &[
-    "hpc-compose init --list-templates",
-    "hpc-compose init --describe-template minimal-batch",
-    "hpc-compose init --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml",
+pub const NEW_EXAMPLES: &[&str] = &[
+    "hpc-compose new --list-templates",
+    "hpc-compose new --describe-template minimal-batch",
+    "hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml",
 ];
 
 pub const CACHE_EXAMPLES: &[&str] = &[
@@ -239,8 +269,9 @@ pub const CACHE_INSPECT_EXAMPLES: &[&str] = &[
 ];
 
 pub const CACHE_PRUNE_EXAMPLES: &[&str] = &[
-    "hpc-compose cache prune --age 14",
+    "hpc-compose --profile dev cache prune --age 14",
     "hpc-compose cache prune --all-unused -f compose.yaml",
+    "hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache",
     "hpc-compose cache prune --age 7 --format json",
 ];
 
@@ -476,7 +507,7 @@ pub enum Commands {
         #[arg(
             long,
             value_name = "OUTPUT",
-            help = "Write the rendered batch script to this path before submission"
+            help = "Write the rendered launcher script to this path before submission or local launch"
         )]
         script_out: Option<PathBuf>,
         #[arg(
@@ -530,14 +561,28 @@ pub enum Commands {
         no_preflight: bool,
         #[arg(
             long,
-            help = "Poll scheduler state and stream tracked logs after submission"
+            help = "Poll tracked state and stream logs after submission or local launch"
         )]
         watch: bool,
+        #[arg(
+            long,
+            help = "Launch the plan locally with Enroot instead of submitting it to Slurm",
+            conflicts_with_all = ["sbatch_bin", "srun_bin", "squeue_bin", "sacct_bin"]
+        )]
+        local: bool,
         #[arg(
             long,
             help = "Run preflight, prepare, and render without calling sbatch"
         )]
         dry_run: bool,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "FORMAT",
+            help = "Output format for non-watch submits",
+            conflicts_with = "watch"
+        )]
+        format: Option<OutputFormat>,
     },
     #[command(
         about = "Show tracked scheduler state and log locations",
@@ -690,6 +735,89 @@ pub enum Commands {
         lines: usize,
     },
     #[command(
+        about = "Show tracked per-service runtime state",
+        long_about = "Read tracked runtime state, log metadata, and scheduler state for each service in a submitted job. This is the compose-style per-service process view.",
+        after_help = PS_HELP
+    )]
+    Ps {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to inspect instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+    },
+    #[command(
+        about = "Watch a tracked job in a live terminal UI",
+        long_about = "Open a live watch view for a tracked job. On TTYs this uses the alternate-screen watch UI; otherwise it falls back to line-oriented scheduler and log streaming.",
+        after_help = WATCH_HELP
+    )]
+    Watch {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to watch instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "SERVICE",
+            help = "Service to focus initially in the watch UI"
+        )]
+        service: Option<String>,
+        #[arg(
+            long,
+            value_name = "LINES",
+            default_value_t = 100,
+            help = "Number of trailing log lines to seed into the watch view"
+        )]
+        lines: usize,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+    },
+    #[command(
         about = "Cancel a tracked Slurm job",
         long_about = "Cancel a tracked Slurm job by explicit job id or by the latest submission recorded for the compose file.",
         after_help = CANCEL_HELP
@@ -715,13 +843,17 @@ pub enum Commands {
             help = "Path to the scancel executable"
         )]
         scancel_bin: String,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
     },
     #[command(
         about = "Write a starter compose file from a built-in template",
         long_about = "Write a starter compose specification from a built-in template, or list and describe the available templates without writing a file.",
-        after_help = INIT_HELP
+        after_help = NEW_HELP,
+        name = "new",
+        alias = "init"
     )]
-    Init {
+    New {
         #[arg(
             long,
             value_name = "TEMPLATE",
@@ -762,6 +894,8 @@ pub enum Commands {
         output: PathBuf,
         #[arg(long, help = "Overwrite the output file if it already exists")]
         force: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
     },
     #[command(
         about = "Inspect and prune cached image artifacts",
@@ -872,6 +1006,8 @@ pub enum Commands {
             help = "Do not prompt; use provided flags and existing settings as defaults"
         )]
         non_interactive: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
     },
     #[command(
         about = "Generate shell completions",
@@ -925,7 +1061,7 @@ pub enum CacheCommands {
     },
     #[command(
         about = "Prune cached image artifacts",
-        long_about = "Delete cached artifacts by age or delete artifacts that the current compose plan no longer references.",
+        long_about = "Delete cached artifacts by age or delete artifacts that the current compose plan no longer references. In age mode, the active context resolves the cache directory unless --cache-dir is passed.",
         after_help = CACHE_PRUNE_HELP
     )]
     Prune {
@@ -933,24 +1069,24 @@ pub enum CacheCommands {
             short = 'f',
             long,
             value_name = "FILE",
-            help = "Compose specification file whose plan defines the live cache references"
+            help = "Compose specification file used to resolve the active context for --age or to define live cache references for --all-unused"
         )]
         file: Option<PathBuf>,
         #[arg(
             long,
             value_name = "CACHE_DIR",
-            help = "Cache directory to prune instead of the default or plan cache path"
+            help = "Cache directory to prune directly; in --age mode this overrides active context resolution and skips compose loading"
         )]
         cache_dir: Option<PathBuf>,
         #[arg(
             long,
             value_name = "DAYS",
-            help = "Remove cached artifacts older than this many days"
+            help = "Remove cached artifacts older than this many days; without --cache-dir, use the active context cache dir or the default cache path"
         )]
         age: Option<u64>,
         #[arg(
             long,
-            help = "Remove cached artifacts that the current compose plan no longer references"
+            help = "Remove cached artifacts that the current compose plan no longer references; requires -f/--file"
         )]
         all_unused: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
@@ -1002,8 +1138,10 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["stats"] => STATS_EXAMPLES,
         ["artifacts"] => ARTIFACTS_EXAMPLES,
         ["logs"] => LOGS_EXAMPLES,
+        ["ps"] => PS_EXAMPLES,
+        ["watch"] => WATCH_EXAMPLES,
         ["cancel"] => CANCEL_EXAMPLES,
-        ["init"] => INIT_EXAMPLES,
+        ["new"] => NEW_EXAMPLES,
         ["cache"] => CACHE_EXAMPLES,
         ["cache", "list"] => CACHE_LIST_EXAMPLES,
         ["cache", "inspect"] => CACHE_INSPECT_EXAMPLES,

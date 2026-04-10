@@ -13,7 +13,7 @@ Use the debugging flow (`validate`, `inspect`, `preflight`, `prepare`) when you 
 If you want one of these files written straight to your working directory, use:
 
 ```bash
-hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
+hpc-compose new --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
 ```
 
 ## Example matrix
@@ -60,7 +60,7 @@ Companion notes for the more involved examples live alongside the example assets
 
 ## Adaptation checklist
 
-1. Copy the closest example to your own `compose.yaml`, or run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
+1. Copy the closest example to your own `compose.yaml`, or run `hpc-compose new --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
 2. Set `x-slurm.cache_dir` to a path visible from both the login node and the compute nodes.
 3. Replace the example `image`, `command`, `environment`, and `volumes` with your workload.
 4. Keep active source in `volumes` and keep slower-changing dependency installation in `x-enroot.prepare.commands`.

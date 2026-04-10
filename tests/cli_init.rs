@@ -86,7 +86,7 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         let init = run_cli(
             tmpdir.path(),
             &[
-                "init",
+                "new",
                 "--template",
                 template,
                 "--name",
@@ -123,17 +123,28 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(top_help_stdout.contains("Normal run:"));
     assert!(top_help_stdout.contains("submit --watch -f compose.yaml"));
     assert!(top_help_stdout.contains("Debugging flow:"));
+    assert!(top_help_stdout.contains("Start a new spec:"));
     assert!(top_help_stdout.contains("logs         Print tracked service logs"));
+    assert!(top_help_stdout.contains("ps           Show tracked per-service runtime state"));
+    assert!(top_help_stdout.contains("watch        Watch a tracked job in a live terminal UI"));
     assert!(top_help_stdout.contains("cancel       Cancel a tracked Slurm job"));
+    assert!(
+        top_help_stdout
+            .contains("new          Write a starter compose file from a built-in template")
+    );
     assert!(top_help_stdout.contains("jobs         List tracked jobs under the current repo tree"));
     assert!(top_help_stdout.contains("clean        Remove old tracked job directories"));
     assert!(top_help_stdout.contains("completions  Generate shell completions"));
 
+    let new_help = run_cli(tmpdir.path(), &["new", "--help"]);
+    assert_success(&new_help);
+    let new_help_stdout = stdout_text(&new_help);
+    assert!(new_help_stdout.contains("--list-templates"));
+    assert!(new_help_stdout.contains("--describe-template <TEMPLATE>"));
+
     let init_help = run_cli(tmpdir.path(), &["init", "--help"]);
     assert_success(&init_help);
-    let init_help_stdout = stdout_text(&init_help);
-    assert!(init_help_stdout.contains("--list-templates"));
-    assert!(init_help_stdout.contains("--describe-template <TEMPLATE>"));
+    assert!(stdout_text(&init_help).contains("--list-templates"));
 
     let cache_help = run_cli(tmpdir.path(), &["cache", "--help"]);
     assert_success(&cache_help);
@@ -154,18 +165,19 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let submit_help_stdout = stdout_text(&submit_help);
     assert!(
         submit_help_stdout
-            .contains("Poll scheduler state and stream tracked logs after submission")
+            .contains("Poll tracked state and stream logs after submission or local launch")
     );
     assert!(
         submit_help_stdout.contains("Run preflight, prepare, and render without calling sbatch")
     );
+    assert!(submit_help_stdout.contains("--local"));
     assert!(submit_help_stdout.contains("active context compose file"));
 
     let preflight_help = run_cli(tmpdir.path(), &["preflight", "--help"]);
     assert_success(&preflight_help);
     assert!(stdout_text(&preflight_help).contains("Treat warnings as failures"));
 
-    let list_templates = run_cli(tmpdir.path(), &["init", "--list-templates"]);
+    let list_templates = run_cli(tmpdir.path(), &["new", "--list-templates"]);
     assert_success(&list_templates);
     let list_stdout = stdout_text(&list_templates);
     assert!(list_stdout.contains("minimal-batch"));
@@ -174,13 +186,20 @@ fn help_and_template_discovery_surface_guided_workflows() {
 
     let describe_template = run_cli(
         tmpdir.path(),
-        &["init", "--describe-template", "multi-node-mpi"],
+        &["new", "--describe-template", "multi-node-mpi"],
     );
     assert_success(&describe_template);
     let describe_stdout = stdout_text(&describe_template);
     assert!(describe_stdout.contains("template: multi-node-mpi"));
     assert!(describe_stdout.contains("allocation-wide"));
-    assert!(describe_stdout.contains("hpc-compose init --template multi-node-mpi"));
+    assert!(describe_stdout.contains("hpc-compose new --template multi-node-mpi"));
+
+    let init_alias = run_cli(
+        tmpdir.path(),
+        &["init", "--describe-template", "multi-node-mpi"],
+    );
+    assert_success(&init_alias);
+    assert!(stdout_text(&init_alias).contains("template: multi-node-mpi"));
 }
 
 #[test]
@@ -189,12 +208,7 @@ fn init_interactive_uses_prompted_values() {
     let output = tmpdir.path().join("interactive-init.yaml");
     let init = run_cli_with_stdin(
         tmpdir.path(),
-        &[
-            "init",
-            "--output",
-            output.to_str().expect("path"),
-            "--force",
-        ],
+        &["new", "--output", output.to_str().expect("path"), "--force"],
         "2\ninteractive-app\n/tmp/interactive-cache\n",
     );
     assert_success(&init);
@@ -220,4 +234,69 @@ fn completions_command_generates_output() {
         );
         assert!(out.len() > 100, "completions should be non-trivial");
     }
+}
+
+#[test]
+fn new_and_setup_commands_support_json_output() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let scaffold_path = tmpdir.path().join("scaffold.json.yaml");
+    let new_output = run_cli(
+        tmpdir.path(),
+        &[
+            "new",
+            "--template",
+            "minimal-batch",
+            "--name",
+            "json-app",
+            "--cache-dir",
+            "/tmp/json-cache",
+            "--output",
+            scaffold_path.to_str().expect("path"),
+            "--force",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&new_output);
+    let scaffold: Value = serde_json::from_str(&stdout_text(&new_output)).expect("new json");
+    assert_eq!(scaffold["template_name"], "minimal-batch");
+    assert_eq!(scaffold["app_name"], "json-app");
+    assert_eq!(scaffold["cache_dir"], "/tmp/json-cache");
+    assert!(
+        scaffold["output_path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("scaffold.json.yaml")
+    );
+    assert!(scaffold_path.exists());
+
+    let setup_output = run_cli(
+        tmpdir.path(),
+        &[
+            "setup",
+            "--profile-name",
+            "dev",
+            "--compose-file",
+            "compose.yaml",
+            "--env-file",
+            ".env",
+            "--env",
+            "CACHE_DIR=/shared/cache",
+            "--binary",
+            "srun=/opt/slurm/bin/srun",
+            "--default-profile",
+            "dev",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&setup_output);
+    let setup: Value = serde_json::from_str(&stdout_text(&setup_output)).expect("setup json");
+    assert_eq!(setup["profile"], "dev");
+    assert_eq!(setup["default_profile"], "dev");
+    assert_eq!(setup["compose_file"], "compose.yaml");
+    assert_eq!(setup["env_files"][0], ".env");
+    assert_eq!(setup["env"]["CACHE_DIR"], "/shared/cache");
+    assert_eq!(setup["binaries"]["srun"], "/opt/slurm/bin/srun");
 }

@@ -16,7 +16,7 @@ This page separates what `hpc-compose` can build, what CI currently exercises, a
 | --- | --- | --- |
 | Linux `x86_64` | Full CLI and runtime workflows | Requires Slurm client tools plus Enroot and Pyxis on the submission host/cluster |
 | Linux `arm64` | Full CLI and runtime workflows | Same cluster requirements as Linux `x86_64` |
-| macOS `x86_64` | Authoring and local inspection only | Supported for `init`, `validate`, `inspect`, `render`, and `completions`; not for cluster runtime commands |
+| macOS `x86_64` | Authoring and local inspection only | Supported for `new`, `validate`, `inspect`, `render`, and `completions`; not for cluster runtime commands |
 | macOS `arm64` | Authoring and local inspection only | Same scope as macOS `x86_64` |
 
 ## CI-tested

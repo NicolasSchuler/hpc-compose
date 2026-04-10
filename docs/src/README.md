@@ -70,7 +70,7 @@ services:
 hpc-compose submit --watch -f compose.yaml
 ```
 
-`submit --watch` is the normal run. Break out `inspect`, `preflight`, or `prepare` as the debugging flow when you are validating a new spec for the first time or isolating a failure.
+`submit --watch` is the normal run. On an interactive TTY it opens the live watch UI; later you can reconnect with `hpc-compose watch -f compose.yaml` or inspect a one-shot per-service snapshot with `hpc-compose ps -f compose.yaml`. Break out `inspect`, `preflight`, or `prepare` as the debugging flow when you are validating a new spec for the first time or isolating a failure.
 
 ## Read next
 

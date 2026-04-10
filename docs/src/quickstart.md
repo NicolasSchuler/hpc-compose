@@ -10,12 +10,12 @@ curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/ins
 
 The installer selects the newest published release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run full cluster workflows.
 
-The installed CLI also ships Unix manpages. Use `man hpc-compose` or `man hpc-compose-submit` as the concise command reference, and keep the longer mdBook docs for workflow guidance.
+The installed CLI also ships Unix manpages. Use `man hpc-compose` or `man hpc-compose-submit` as the concise command reference, and keep the longer mdBook docs for workflow guidance. If you want shell integration right away, generate completions with `hpc-compose completions bash|zsh|fish`.
 
-## 2. Initialize a starter spec
+## 2. Write a starter spec
 
 ```bash
-hpc-compose init \
+hpc-compose new \
   --template minimal-batch \
   --name my-app \
   --cache-dir /shared/$USER/hpc-compose-cache \
@@ -42,7 +42,7 @@ hpc-compose submit --watch -f compose.yaml
 hpc-compose --profile dev submit --watch
 ```
 
-`submit --watch` is the normal run. It runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs.
+`submit --watch` is the normal run. It runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to the line-oriented follower used in scripts and tests.
 
 ## 5. Debugging flow
 
@@ -71,11 +71,13 @@ Use the debugging flow when you want to confirm:
 ```bash
 hpc-compose jobs list
 hpc-compose status -f compose.yaml
+hpc-compose ps -f compose.yaml
+hpc-compose watch -f compose.yaml
 hpc-compose stats -f compose.yaml
 hpc-compose logs -f compose.yaml --follow
 ```
 
-Use `jobs list` first when you need to rediscover tracked runs under the current repo tree. If a service uses `x-slurm.failure_policy.mode: restart_on_failure`, `status` also shows the current retry state and rolling-window budget for that service.
+Use `jobs list` first when you need to rediscover tracked runs under the current repo tree. Use `ps` for a stable per-service runtime snapshot, `watch` to reconnect to the live TUI, and `logs --follow` when you want the simplest text-only follower. If a service uses `x-slurm.failure_policy.mode: restart_on_failure`, `status` also shows the current retry state and rolling-window budget for that service.
 
 ## From a source checkout
 
@@ -83,7 +85,7 @@ If you are running from a local checkout instead of an installed binary:
 
 ```bash
 cargo build --release
-target/release/hpc-compose init --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
+target/release/hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
 target/release/hpc-compose submit --watch -f compose.yaml
 ```
 

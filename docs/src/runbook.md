@@ -4,7 +4,7 @@ This runbook is for adapting `hpc-compose` to a real workload on a Slurm cluster
 
 Commands below assume `hpc-compose` is on your `PATH`. If you are running from a local checkout, replace `hpc-compose` with `target/release/hpc-compose`.
 
-All commands accept `-f` / `--file` to specify the compose spec path. When omitted, `hpc-compose` first uses the active context compose file from repo-adjacent settings, then falls back to `compose.yaml` in the current directory. (The `cache prune --all-unused` subcommand requires `-f` explicitly.)
+All commands accept `-f` / `--file` to specify the compose spec path. When omitted, `hpc-compose` first uses the active context compose file from repo-adjacent settings, then falls back to `compose.yaml` in the current directory. (`cache prune --all-unused` requires `-f` explicitly. `cache prune --age` can use the active context/profile unless you pass `--cache-dir`.)
 
 Global context flags are also available everywhere:
 
@@ -29,23 +29,24 @@ Make sure you have:
 | Command or step | When to use it |
 | --- | --- |
 | install or build `hpc-compose` | once per checkout or upgrade |
-| `init` or copy a shipped example | once per new spec |
+| `new` or copy a shipped example | once per new spec |
 | `setup` and `context` | once per repo or when directory/data/env defaults change |
 | `validate` and `inspect` | early while adapting a spec |
 | `submit --watch` | normal run |
+| `watch`, `ps`, `status`, `logs`, `stats` | revisit or inspect a tracked run later |
 | `preflight`, `prepare`, `render` | first-time cluster setup checks or the debugging flow |
 
 ## Normal progression
 
 For a new spec on a real cluster:
 
-1. Run `hpc-compose init --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`, or copy the closest shipped example.
+1. Run `hpc-compose new --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`, or copy the closest shipped example.
 2. Run `hpc-compose setup` once so compose path, env files, env vars, and binary overrides live in repo-adjacent settings.
 3. Run `hpc-compose context --format json` to verify resolved values and sources.
 4. Set `x-slurm.cache_dir` if you need an explicit shared cache path, and adjust any cluster-specific resource settings.
 5. Run `hpc-compose validate -f compose.yaml` and `hpc-compose inspect --verbose -f compose.yaml` while you are still adapting the file.
 6. Run `hpc-compose --profile <name> submit --watch` for the normal run.
-7. If that fails, or if you need more visibility, break out `preflight`, `prepare`, `render`, `status`, `stats`, or `logs` separately.
+7. If that fails, or if you need more visibility later, break out `preflight`, `prepare`, `render`, `status`, `ps`, `watch`, `stats`, or `logs` separately.
 
 ## Profiled context (repo-adjacent settings)
 
@@ -123,7 +124,7 @@ The fastest path is usually to copy the closest example and adapt it instead of 
 You can also let `hpc-compose` scaffold one of these examples directly:
 
 ```bash
-hpc-compose init --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
+hpc-compose new --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
 ```
 
 ## 1. Choose `x-slurm.cache_dir` early
@@ -217,6 +218,8 @@ With `--watch`, `submit` also:
 6. polls scheduler state with `squeue` / `sacct` when available,
 7. streams tracked service logs as they appear.
 
+On an interactive TTY, `submit --watch` launches the full-screen watch UI with a per-service table on the left and the selected service log on the right. In non-interactive contexts it keeps the line-oriented follower so scripts and tests still get stable plain text.
+
 <div class="callout note">
   <p><strong>Note</strong></p>
   <p><code>submit</code> treats preflight warnings as non-fatal. If you want warnings to block submission, run <code>preflight --strict</code> separately before <code>submit</code>.</p>
@@ -306,6 +309,9 @@ Use the tracked helpers for later inspection:
 
 ```bash
 hpc-compose status -f compose.yaml
+hpc-compose ps -f compose.yaml
+hpc-compose watch -f compose.yaml
+hpc-compose watch -f compose.yaml --service app
 hpc-compose stats -f compose.yaml
 hpc-compose stats -f compose.yaml --format csv
 hpc-compose stats -f compose.yaml --format jsonl
@@ -317,6 +323,10 @@ hpc-compose logs -f compose.yaml --service app --follow
 ```
 
 `status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created. When `services.<name>.x-slurm.failure_policy` is used, `status` includes per-service policy state (`failure_policy`, restart counters, rolling-window budget as `window=<current>/<max>@<seconds>s`, and last exit code) from tracked runtime state.
+
+`ps` is the stable per-service snapshot view. It reports the tracked step name, launcher PID, readiness state, derived service status (`starting`, `ready`, `running`, `exited`, `failed`, or `unknown`), restart counters, last exit code, and tracked log path. Use `ps --format json` when tooling needs those fields directly.
+
+`watch` reconnects to the latest tracked run without resubmitting. The live TUI refreshes scheduler state plus tracked logs and supports `q` to quit, `j` / `k` or the arrow keys to change services, `g` / `G` to jump to the first or last service, and `Tab` to cycle focus if needed.
 
 Example:
 
@@ -416,7 +426,7 @@ hpc-compose cache inspect -f compose.yaml --service app
 Prune old entries by age (in days):
 
 ```bash
-hpc-compose cache prune --age 14
+hpc-compose --profile dev cache prune --age 14
 ```
 
 Prune artifacts not referenced by the current plan:
@@ -425,7 +435,15 @@ Prune artifacts not referenced by the current plan:
 hpc-compose cache prune --all-unused -f compose.yaml
 ```
 
+Prune one cache directory directly without loading a compose plan:
+
+```bash
+hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache
+```
+
 The two strategies (`--age` and `--all-unused`) are mutually exclusive — pick one per invocation.
+
+When `--age` runs without `--cache-dir`, `hpc-compose` resolves the cache directory from the active context first and only falls back to the default cache path when no compose file is available. Passing `--cache-dir` makes age-based pruning context-free.
 
 Use `cache inspect` when you need to answer questions such as:
 
@@ -562,7 +580,7 @@ hpc-compose clean -f compose.yaml --age 7 --dry-run
 hpc-compose clean -f compose.yaml --all --format json
 ```
 
-`clean` stays compose-scoped even though `jobs list` scans the repo tree. Use `context` when you need to confirm the difference between the compose directory, which resolves spec-relative paths, and the current submit directory, which anchors new runtime job state under `.hpc-compose/<job-id>`.
+`clean` stays compose-scoped even though `jobs list` scans the repo tree. Use `context` when you need to confirm the difference between the compose directory, which resolves spec-relative paths, and the current submit directory, which anchors new runtime job state under `.hpc-compose/<job-id>`. JSON cleanup output reports effective latest job IDs for automation and also includes `latest_pointer_job_id_before` when a parseable `latest.json` pointer existed before repair.
 
 ### Shell completions
 

@@ -17,6 +17,14 @@ man hpc-compose
 man hpc-compose-submit
 ```
 
+If you want shell integration immediately after install, generate completions with:
+
+```bash
+hpc-compose completions bash > ~/.local/share/bash-completion/completions/hpc-compose
+hpc-compose completions zsh > ~/.zfunc/_hpc-compose
+hpc-compose completions fish > ~/.config/fish/completions/hpc-compose.fish
+```
+
 Installer availability does not imply full runtime support. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run submission, prepare, or watch workflows end to end.
 
 Useful overrides:

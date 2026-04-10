@@ -8,20 +8,20 @@ hpc\-compose cache prune [OPTIONS]
 .fi
 .SH DESCRIPTION
 .PP
-Delete cached artifacts by age or delete artifacts that the current compose plan no longer references.
+Delete cached artifacts by age or delete artifacts that the current compose plan no longer references. In age mode, the active context resolves the cache directory unless \-\-cache\-dir is passed.
 .SH OPTIONS
 .TP
 \fB-f\fR, \fB--file\fR \fIFILE\fR
-Compose specification file whose plan defines the live cache references.
+Compose specification file used to resolve the active context for \-\-age or to define live cache references for \-\-all\-unused.
 .TP
 \fB--cache\-dir\fR \fICACHE_DIR\fR
-Cache directory to prune instead of the default or plan cache path.
+Cache directory to prune directly; in \-\-age mode this overrides active context resolution and skips compose loading.
 .TP
 \fB--age\fR \fIDAYS\fR
-Remove cached artifacts older than this many days.
+Remove cached artifacts older than this many days; without \-\-cache\-dir, use the active context cache dir or the default cache path.
 .TP
 \fB--all\-unused\fR
-Remove cached artifacts that the current compose plan no longer references.
+Remove cached artifacts that the current compose plan no longer references; requires \-f/\-\-file.
 .TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.
@@ -36,8 +36,9 @@ Explicit settings file path; defaults to upward search for .hpc\-compose/setting
 Print help (see a summary with '\-h').
 .SH EXAMPLES
 .nf
-hpc\-compose cache prune \-\-age 14
+hpc\-compose \-\-profile dev cache prune \-\-age 14
 hpc\-compose cache prune \-\-all\-unused \-f compose.yaml
+hpc\-compose cache prune \-\-age 7 \-\-cache\-dir /shared/$USER/hpc\-compose\-cache
 hpc\-compose cache prune \-\-age 7 \-\-format json
 .fi
 .SH SEE ALSO

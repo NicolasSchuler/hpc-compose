@@ -4,18 +4,20 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap_complete::Shell;
+use hpc_compose::cli::OutputFormat;
 use hpc_compose::cli::build_cli_command;
 use hpc_compose::context::{
     BinaryOverrides, Settings, repo_adjacent_settings_path, write_settings,
 };
 use hpc_compose::init::{
-    next_commands, prompt_for_init, render_template, write_initialized_template,
+    default_cache_dir as default_init_cache_dir, next_commands, prompt_for_init, render_template,
+    write_initialized_template,
 };
 
 use crate::output;
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn init(
+pub(crate) fn new_command(
     template: Option<String>,
     list_templates: bool,
     describe_template: Option<String>,
@@ -23,13 +25,37 @@ pub(crate) fn init(
     cache_dir: Option<String>,
     output_path: PathBuf,
     force: bool,
+    format: Option<OutputFormat>,
 ) -> Result<()> {
     if list_templates {
-        output::print_template_list();
+        match output::resolve_output_format(format, false) {
+            OutputFormat::Text => output::print_template_list(),
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "templates": output::template_infos(),
+                        "default_cache_dir": default_init_cache_dir(),
+                    }))
+                    .context("failed to serialize template list output")?
+                );
+            }
+        }
         return Ok(());
     }
     if let Some(template_name) = describe_template {
-        output::print_template_description(&template_name)?;
+        match output::resolve_output_format(format, false) {
+            OutputFormat::Text => output::print_template_description(&template_name)?,
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output::build_template_description(
+                        &template_name,
+                    )?)
+                    .context("failed to serialize template description output")?
+                );
+            }
+        }
         return Ok(());
     }
     let answers = output::resolve_init_answers(template, name, cache_dir, prompt_for_init)?;
@@ -39,9 +65,27 @@ pub(crate) fn init(
         &answers.cache_dir,
     )?;
     let path = write_initialized_template(&output_path, &rendered, force)?;
-    println!("wrote {}", path.display());
-    for command in next_commands(&path) {
-        println!("{command}");
+    let next_commands = next_commands(&path);
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            println!("wrote {}", path.display());
+            for command in next_commands {
+                println!("{command}");
+            }
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output::TemplateWriteOutput {
+                    template_name: answers.template_name,
+                    app_name: answers.app_name,
+                    cache_dir: answers.cache_dir,
+                    output_path: path,
+                    next_commands,
+                })
+                .context("failed to serialize scaffold output")?
+            );
+        }
     }
     Ok(())
 }
@@ -57,6 +101,7 @@ pub(crate) fn setup(
     binary_entries: Vec<String>,
     default_profile: Option<String>,
     non_interactive: bool,
+    format: Option<OutputFormat>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current working directory")?;
     let settings_path = settings_file_override
@@ -209,13 +254,33 @@ pub(crate) fn setup(
     profile.env_files = env_files_value;
     profile.env = env_value;
     profile.binaries = binaries_value;
+    let setup_output = output::SetupOutput {
+        settings_path: settings_path.clone(),
+        profile: selected_profile.clone(),
+        default_profile: selected_default_profile.clone(),
+        compose_file: profile.compose_file.clone().unwrap_or_default(),
+        env_files: profile.env_files.clone(),
+        env: profile.env.clone(),
+        binaries: profile.binaries.clone(),
+    };
     settings.default_profile = Some(selected_default_profile.clone());
     settings.version = 1;
 
     write_settings(&settings_path, &settings)?;
-    println!("wrote {}", settings_path.display());
-    println!("profile: {}", selected_profile);
-    println!("default profile: {}", selected_default_profile);
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            println!("wrote {}", settings_path.display());
+            println!("profile: {}", selected_profile);
+            println!("default profile: {}", selected_default_profile);
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&setup_output)
+                    .context("failed to serialize setup output")?
+            );
+        }
+    }
     Ok(())
 }
 
@@ -440,6 +505,7 @@ mod tests {
             vec!["srun=/opt/slurm/bin/srun".to_string()],
             Some("dev".to_string()),
             true,
+            None,
         )
         .expect("setup");
 
@@ -470,6 +536,7 @@ mod tests {
             Vec::new(),
             None,
             true,
+            None,
         )
         .expect("setup reuse");
         let reused = load_settings(&settings_path).expect("reload settings");
@@ -496,7 +563,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let output_path = tmpdir.path().join("compose.yaml");
 
-        init(
+        new_command(
             Some("dev-python-app".to_string()),
             false,
             None,
@@ -504,11 +571,12 @@ mod tests {
             Some("/shared/cache".to_string()),
             output_path.clone(),
             false,
+            None,
         )
         .expect("init writes template");
         assert!(output_path.exists());
 
-        init(
+        new_command(
             None,
             true,
             None,
@@ -516,9 +584,10 @@ mod tests {
             None,
             tmpdir.path().join("ignored.yaml"),
             false,
+            None,
         )
         .expect("list templates");
-        init(
+        new_command(
             None,
             false,
             Some("dev-python-app".to_string()),
@@ -526,6 +595,7 @@ mod tests {
             None,
             tmpdir.path().join("ignored.yaml"),
             false,
+            None,
         )
         .expect("describe template");
 

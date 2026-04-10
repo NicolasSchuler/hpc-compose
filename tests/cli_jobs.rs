@@ -185,3 +185,42 @@ fn jobs_list_ignores_stale_latest_pointer() {
     assert_eq!(older_job["is_latest"], Value::from(false));
     assert_eq!(newer_job["is_latest"], Value::from(true));
 }
+
+#[test]
+fn jobs_list_ignores_latest_pointer_to_missing_record() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let submit_dir = tmpdir.path().join("submit");
+
+    write_record(&compose, &submit_dir, "11111", 10);
+    write_record(&compose, &submit_dir, "22222", 20);
+
+    let mut missing = load_submission_record(&compose, Some("11111")).expect("missing pointer");
+    missing.job_id = "99999".into();
+    fs::write(
+        latest_record_path_for(&compose),
+        serde_json::to_vec_pretty(&missing).expect("missing latest"),
+    )
+    .expect("overwrite latest");
+
+    let json = run_cli(tmpdir.path(), &["jobs", "list", "--format", "json"]);
+    assert_success(&json);
+    let payload: Value = serde_json::from_str(&stdout_text(&json)).expect("jobs json");
+    let jobs = payload["jobs"].as_array().expect("jobs array");
+    let older_job = jobs
+        .iter()
+        .find(|job| job["job_id"] == "11111")
+        .expect("older job");
+    let newer_job = jobs
+        .iter()
+        .find(|job| job["job_id"] == "22222")
+        .expect("newer job");
+    assert_eq!(older_job["is_latest"], Value::from(false));
+    assert_eq!(newer_job["is_latest"], Value::from(true));
+}

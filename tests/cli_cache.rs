@@ -180,6 +180,49 @@ fn prepare_and_cache_commands_manage_artifacts() {
 }
 
 #[test]
+fn cache_prune_age_with_cache_dir_skips_broken_context_resolution() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        r#"
+version = 1
+default_profile = "dev"
+
+[profiles.dev]
+compose_file = "missing-compose.yaml"
+"#,
+    )
+    .expect("settings");
+
+    let prune = run_cli(
+        tmpdir.path(),
+        &[
+            "--profile",
+            "dev",
+            "cache",
+            "prune",
+            "--age",
+            "1",
+            "--cache-dir",
+            cache_dir.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&prune);
+    let payload: Value = serde_json::from_str(&stdout_text(&prune)).expect("prune json");
+    assert_eq!(
+        payload["cache_dir"],
+        Value::from(cache_dir.display().to_string())
+    );
+    assert_eq!(payload["mode"], Value::from("age"));
+    assert_eq!(payload["removed_count"], Value::from(0));
+}
+
+#[test]
 fn cache_prune_argument_validation_and_all_unused_path_work() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();

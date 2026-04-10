@@ -131,7 +131,79 @@ case "$cmd" in
     mkdir -p "$ENROOT_DATA_PATH/$name"
     ;;
   start)
-    exit 0
+    image=""
+    declare -a mounts=()
+    declare -a envs=()
+    while (($#)); do
+      case "$1" in
+        --mount)
+          mounts+=("$2")
+          shift 2
+          ;;
+        --env)
+          envs+=("$2")
+          shift 2
+          ;;
+        --root|--rw)
+          shift
+          ;;
+        --*)
+          shift
+          ;;
+        *)
+          image="$1"
+          shift
+          break
+          ;;
+      esac
+    done
+    if [[ "$image" != */* && "$image" != *.sqsh && "$image" != *.squashfs ]]; then
+      exit 0
+    fi
+    declare -a cmd=("$@")
+    for pair in "${envs[@]-}"; do
+      [[ -z "$pair" ]] && continue
+      key="${pair%%=*}"
+      value="${pair#*=}"
+      for mount in "${mounts[@]-}"; do
+        [[ -z "$mount" ]] && continue
+        host="${mount%%:*}"
+        rest="${mount#*:}"
+        container="${rest%%:*}"
+        value="${value//$container/$host}"
+      done
+      export "$key=$value"
+    done
+    if [[ ${#cmd[@]} -eq 0 ]]; then
+      exit 0
+    fi
+    for i in "${!cmd[@]}"; do
+      value="${cmd[$i]}"
+      for mount in "${mounts[@]-}"; do
+        [[ -z "$mount" ]] && continue
+        host="${mount%%:*}"
+        rest="${mount#*:}"
+        container="${rest%%:*}"
+        value="${value//$container/$host}"
+      done
+      cmd[$i]="$value"
+    done
+    if [[ ${#cmd[@]} -ge 3 && "${cmd[0]}" == "/bin/sh" && "${cmd[1]}" == "-lc" ]]; then
+      script="${cmd[2]}"
+      for mount in "${mounts[@]-}"; do
+        [[ -z "$mount" ]] && continue
+        host="${mount%%:*}"
+        rest="${mount#*:}"
+        container="${rest%%:*}"
+        script="${script//$container/$host}"
+      done
+      declare -a args=("${cmd[@]:3}")
+      if [[ ${#args[@]} -eq 0 ]]; then
+        exec /bin/sh -lc "$script"
+      fi
+      exec /bin/sh -lc "$script" "${args[@]}"
+    fi
+    exec "${cmd[@]}"
     ;;
   export)
     output=""

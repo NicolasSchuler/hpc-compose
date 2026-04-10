@@ -32,6 +32,9 @@ Set settings.default_profile to this profile name.
 \fB--non\-interactive\fR
 Do not prompt; use provided flags and existing settings as defaults.
 .TP
+\fB--format\fR \fIFORMAT\fR
+Output format. Possible values: text, json.
+.TP
 \fB--profile\fR \fINAME\fR
 Profile name to load from .hpc\-compose/settings.toml.
 .TP
@@ -47,4 +50,4 @@ hpc\-compose setup \-\-profile\-name dev \-\-compose\-file compose.yaml \-\-defa
 hpc\-compose setup \-\-env CACHE_DIR=/shared/$USER/hpc\-compose\-cache \-\-binary srun=/opt/slurm/bin/srun \-\-non\-interactive
 .fi
 .SH SEE ALSO
-hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-context(1), hpc\-compose\-init(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-render(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-validate(1)
+hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-context(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)

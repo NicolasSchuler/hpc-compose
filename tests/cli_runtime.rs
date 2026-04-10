@@ -672,6 +672,305 @@ fn status_reports_pending_queue_diagnostics_in_text_and_json() {
 }
 
 #[test]
+fn submit_cancel_and_watch_conflict_support_json_output() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let scancel_log = tmpdir.path().join("scancel.log");
+    let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let submit_json: Value = serde_json::from_str(&stdout_text(&submit)).expect("submit json");
+    assert_eq!(submit_json["backend"], Value::from("slurm"));
+    assert_eq!(submit_json["launched"], Value::from(false));
+    assert_eq!(submit_json["submitted"], Value::from(true));
+    assert_eq!(submit_json["job_id"], Value::from("12345"));
+    assert_eq!(submit_json["tracking_persisted"], Value::from(true));
+    assert!(
+        submit_json["tracked_metadata_path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(".hpc-compose/latest.json")
+    );
+
+    let conflict = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--watch",
+            "--format",
+            "json",
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&conflict);
+    assert!(
+        stderr_text(&conflict).contains("cannot be used with '--watch'")
+            || stderr_text(&conflict).contains("cannot be used with")
+    );
+
+    let cancel = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_success(&cancel);
+    let cancel_json: Value = serde_json::from_str(&stdout_text(&cancel)).expect("cancel json");
+    assert_eq!(cancel_json["job_id"], Value::from("12345"));
+    assert_eq!(cancel_json["cancelled"], Value::from(true));
+    assert_eq!(
+        fs::read_to_string(&scancel_log)
+            .expect("scancel log")
+            .trim(),
+        "12345"
+    );
+}
+
+#[test]
+fn ps_command_reports_service_runtime_state_in_text_and_json() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let squeue_state = tmpdir.path().join("ps-squeue.state");
+    let sacct_state = tmpdir.path().join("ps-sacct.state");
+    fs::write(&squeue_state, "RUNNING\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let log_dir = tmpdir.path().join(".hpc-compose/12345/logs");
+    fs::create_dir_all(&log_dir).expect("log dir");
+    let log_path = log_dir.join(log_file_name_for_service("app"));
+    fs::write(&log_path, "booting\nready\n").expect("log");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/12345/state.json"),
+        format!(
+            r#"{{
+  "services": [
+    {{
+      "service_name": "app",
+      "step_name": "hpc-compose:app",
+      "log_path": "{}",
+      "launch_index": 0,
+      "launcher_pid": 4242,
+      "healthy": true,
+      "readiness_configured": true,
+      "failure_policy_mode": "restart_on_failure",
+      "restart_count": 1,
+      "max_restarts": 3
+    }}
+  ]
+}}"#,
+            log_path.display()
+        ),
+    )
+    .expect("state");
+
+    let ps = run_cli(
+        tmpdir.path(),
+        &[
+            "ps",
+            "-f",
+            compose.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&ps);
+    let ps_stdout = stdout_text(&ps);
+    assert!(ps_stdout.contains("service\tstep\tpid\tready\tstatus\trestarts\tlast_exit\tlog"));
+    assert!(ps_stdout.contains("app"));
+    assert!(ps_stdout.contains("hpc-compose:app"));
+    assert!(ps_stdout.contains("ready"));
+
+    let ps_json = run_cli(
+        tmpdir.path(),
+        &[
+            "ps",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&ps_json);
+    let value: Value = serde_json::from_str(&stdout_text(&ps_json)).expect("ps json");
+    let app = value["services"].as_array().expect("services")[0].clone();
+    assert_eq!(app["step_name"], Value::from("hpc-compose:app"));
+    assert_eq!(app["launcher_pid"], Value::from(4242));
+    assert_eq!(app["healthy"], Value::from(true));
+    assert_eq!(app["restart_count"], Value::from(1));
+    assert_eq!(app["status"], Value::from("ready"));
+}
+
+#[test]
+fn watch_command_falls_back_to_line_mode_on_non_tty() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let squeue_state = tmpdir.path().join("watch-command-squeue.state");
+    let sacct_state = tmpdir.path().join("watch-command-sacct.state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let sbatch = write_fake_watch_sbatch(
+        tmpdir.path(),
+        &squeue_state,
+        &sacct_state,
+        "COMPLETED",
+        "ready",
+        1,
+    );
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let watch = run_cli(
+        tmpdir.path(),
+        &[
+            "watch",
+            "-f",
+            compose.to_str().expect("path"),
+            "--service",
+            "app",
+            "--lines",
+            "1",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&watch);
+    let stdout = stdout_text(&watch);
+    assert!(stdout.contains("watching job 12345"));
+    assert!(stdout.contains("[app] ready"));
+    assert!(stdout.contains("scheduler state: COMPLETED (sacct)"));
+}
+
+#[test]
+fn submit_watch_falls_back_when_ui_initialization_fails() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let squeue_state = tmpdir.path().join("submit-watch-squeue.state");
+    let sacct_state = tmpdir.path().join("submit-watch-sacct.state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let sbatch = write_fake_watch_sbatch(
+        tmpdir.path(),
+        &squeue_state,
+        &sacct_state,
+        "COMPLETED",
+        "ready",
+        1,
+    );
+
+    let submit = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--watch",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+        &[("HPC_COMPOSE_FORCE_WATCH_UI", "1")],
+    );
+    assert_success(&submit);
+    let stdout = stdout_text(&submit);
+    assert!(stdout.contains("watching job 12345"));
+    assert!(stdout.contains("[app] ready"));
+    assert!(stdout.contains("scheduler state: COMPLETED (sacct)"));
+    assert!(stderr_text(&submit).contains("falling back to line mode"));
+}
+
+#[test]
 fn stats_command_reports_live_step_metrics_and_json() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -1547,6 +1846,476 @@ fn submit_dry_run_skips_sbatch() {
     assert!(script_out.exists());
 }
 
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn submit_local_rejects_non_linux_hosts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            "services:\n  app:\n    image: {}\n    command: /bin/true\n",
+            local_image.display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--local is only supported on Linux hosts"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn submit_local_dry_run_renders_local_launcher() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            "services:\n  app:\n    image: {}\n    command: /bin/true\n",
+            local_image.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+    let script_out = tmpdir.path().join("local-launch.sh");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--dry-run",
+            "--skip-prepare",
+            "--no-preflight",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("submit json");
+    assert_eq!(payload["backend"], Value::from("local"));
+    assert_eq!(payload["launched"], Value::from(false));
+    assert_eq!(payload["submitted"], Value::from(false));
+    assert!(script_out.exists());
+    let script = fs::read_to_string(&script_out).expect("script");
+    assert!(!script.contains("#SBATCH"));
+    assert!(script.contains("HPC_COMPOSE_LOCAL_ENROOT_BIN"));
+    assert!(script.contains("local srun shim requires --container-image"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn submit_local_lifecycle_covers_status_ps_watch_artifacts_and_stats() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  artifacts:
+    export_dir: ./exports/${{SLURM_JOB_ID}}
+    paths:
+      - /hpc-compose/job/result.txt
+services:
+  server:
+    image: {}
+    command: /bin/sh -lc "printf 'ready\n'; sleep 2"
+    readiness:
+      log:
+        pattern: ready
+        timeout_seconds: 5
+  client:
+    image: {}
+    command: /bin/sh -lc "cat \"$HPC_COMPOSE_NODELIST_FILE\" > /hpc-compose/job/result.txt"
+    depends_on:
+      server:
+        condition: service_healthy
+"#,
+            local_image.display(),
+            local_image.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let submit_json: Value = serde_json::from_str(&stdout_text(&submit)).expect("submit json");
+    let job_id = submit_json["job_id"].as_str().expect("job id").to_string();
+    assert_eq!(submit_json["backend"], Value::from("local"));
+    assert_eq!(submit_json["launched"], Value::from(true));
+    assert_eq!(submit_json["submitted"], Value::from(false));
+
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            &job_id,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&status);
+    let status_json: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    assert_eq!(status_json["record"]["backend"], Value::from("local"));
+    assert_eq!(
+        status_json["scheduler"]["source"],
+        Value::from("local_only")
+    );
+
+    let ps = run_cli(
+        tmpdir.path(),
+        &[
+            "ps",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            &job_id,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&ps);
+    let ps_json: Value = serde_json::from_str(&stdout_text(&ps)).expect("ps json");
+    assert_eq!(ps_json["record"]["backend"], Value::from("local"));
+    assert_eq!(ps_json["services"].as_array().map(Vec::len), Some(2));
+
+    let watch = run_cli(
+        tmpdir.path(),
+        &[
+            "watch",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            &job_id,
+            "--lines",
+            "20",
+        ],
+    );
+    assert_success(&watch);
+    assert!(stdout_text(&watch).contains("watching job"));
+
+    let artifacts = run_cli(
+        tmpdir.path(),
+        &[
+            "artifacts",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            &job_id,
+        ],
+    );
+    assert_success(&artifacts);
+    assert!(
+        tmpdir
+            .path()
+            .join("exports")
+            .join(&job_id)
+            .join("result.txt")
+            .exists()
+    );
+
+    let stats = run_cli(
+        tmpdir.path(),
+        &[
+            "stats",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            &job_id,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&stats);
+    let stats_json: Value = serde_json::from_str(&stdout_text(&stats)).expect("stats json");
+    assert_eq!(stats_json["record"]["backend"], Value::from("local"));
+    assert_eq!(stats_json["source"], Value::from("sampler"));
+    assert!(
+        stats_json["notes"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|note| note == "Slurm step statistics are unavailable for locally launched jobs")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn submit_local_cancel_terminates_supervisor() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/sh -lc "trap 'exit 0' TERM; while true; do sleep 1; done"
+"#,
+            local_image.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let submit_json: Value = serde_json::from_str(&stdout_text(&submit)).expect("submit json");
+    let job_id = submit_json["job_id"].as_str().expect("job id").to_string();
+
+    let cancel = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            &job_id,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&cancel);
+    let cancel_json: Value = serde_json::from_str(&stdout_text(&cancel)).expect("cancel json");
+    assert_eq!(cancel_json["cancelled"], Value::from(true));
+
+    let mut terminal = None;
+    for _ in 0..20 {
+        let status = run_cli(
+            tmpdir.path(),
+            &[
+                "status",
+                "-f",
+                compose.to_str().expect("path"),
+                "--job-id",
+                &job_id,
+                "--format",
+                "json",
+            ],
+        );
+        assert_success(&status);
+        let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+        if payload["scheduler"]["terminal"] == Value::from(true) {
+            terminal = Some(payload);
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    let status_json = terminal.expect("terminal local status");
+    assert_eq!(status_json["record"]["backend"], Value::from("local"));
+    assert_eq!(status_json["scheduler"]["state"], Value::from("CANCELLED"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn submit_local_failure_rolls_back_tracked_latest_record() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let batch_log_dir = tmpdir.path().join("batch-log-dir");
+    fs::create_dir_all(&batch_log_dir).expect("batch log dir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  output: {}
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            batch_log_dir.display(),
+            local_image.display()
+        ),
+    );
+    let previous_record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("previous.sbatch"),
+        &runtime_plan(&compose),
+        "12345",
+    )
+    .expect("previous record");
+    write_submission_record(&previous_record).expect("write previous");
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            write_fake_enroot(tmpdir.path()).to_str().expect("path"),
+        ],
+    );
+    assert_failure(&submit);
+    assert!(stderr_text(&submit).contains("failed to open"));
+
+    let latest = load_submission_record(&compose, None).expect("latest record after rollback");
+    assert_eq!(latest.job_id, "12345");
+
+    let jobs_dir = tmpdir.path().join(".hpc-compose/jobs");
+    let records = fs::read_dir(&jobs_dir)
+        .expect("jobs dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .count();
+    assert_eq!(records, 1);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn submit_local_rejects_multi_node_distributed_and_extra_srun_args() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+
+    let multi_node = write_compose(
+        tmpdir.path(),
+        "multi-node.yaml",
+        &format!(
+            "x-slurm:\n  nodes: 2\nservices:\n  app:\n    image: {}\n    command: /bin/true\n  helper:\n    image: {}\n    command: /bin/true\n",
+            local_image.display(),
+            local_image.display()
+        ),
+    );
+    let multi_node_output = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            multi_node.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&multi_node_output);
+    assert!(stderr_text(&multi_node_output).contains("single-host specs"));
+
+    let distributed = write_compose(
+        tmpdir.path(),
+        "distributed.yaml",
+        &format!(
+            r#"
+x-slurm:
+  nodes: 2
+services:
+  app:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      nodes: 2
+"#,
+            local_image.display()
+        ),
+    );
+    let distributed_output = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            distributed.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&distributed_output);
+    assert!(stderr_text(&distributed_output).contains("distributed placement"));
+
+    let extra_srun = write_compose(
+        tmpdir.path(),
+        "extra-srun.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      extra_srun_args:
+        - --mpi=none
+"#,
+            local_image.display()
+        ),
+    );
+    let extra_srun_output = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            extra_srun.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&extra_srun_output);
+    assert!(stderr_text(&extra_srun_output).contains("x-slurm.extra_srun_args"));
+}
+
 #[test]
 fn submit_reports_script_write_errors_before_submission() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
@@ -1987,6 +2756,10 @@ fn clean_command_removes_old_job_directories() {
         Value::from("12345")
     );
     assert_eq!(
+        clean_all_payload["latest_pointer_job_id_before"],
+        Value::from("12345")
+    );
+    assert_eq!(
         clean_all_payload["latest_job_id_after"],
         Value::from("12345")
     );
@@ -2018,6 +2791,10 @@ fn clean_command_removes_old_job_directories() {
     assert_eq!(clean_age_payload["kept_job_ids"], serde_json::json!([]));
     assert_eq!(
         clean_age_payload["latest_job_id_before"],
+        Value::from("12345")
+    );
+    assert_eq!(
+        clean_age_payload["latest_pointer_job_id_before"],
         Value::from("12345")
     );
     assert_eq!(clean_age_payload["latest_job_id_after"], Value::Null);
@@ -2066,6 +2843,9 @@ fn clean_text_reports_selected_jobs_and_kept_ids() {
     assert_success(&clean);
     let stdout = stdout_text(&clean);
     assert!(stdout.contains("mode: age"));
+    assert!(stdout.contains("effective latest before: 22222"));
+    assert!(stdout.contains("pointer before: 22222"));
+    assert!(stdout.contains("effective latest after: 22222"));
     assert!(stdout.contains("selected jobs: 1"));
     assert!(stdout.contains("selected ids: 11111"));
     assert!(stdout.contains("kept ids: 22222"));
@@ -2135,6 +2915,10 @@ fn clean_all_preserves_latest_tracked_submission() {
     assert_eq!(payload["removed_job_ids"], serde_json::json!(["11111"]));
     assert_eq!(payload["kept_job_ids"], serde_json::json!(["22222"]));
     assert_eq!(payload["latest_job_id_before"], Value::from("22222"));
+    assert_eq!(
+        payload["latest_pointer_job_id_before"],
+        Value::from("22222")
+    );
     assert_eq!(payload["latest_job_id_after"], Value::from("22222"));
     assert!(!tmpdir.path().join(".hpc-compose/jobs/11111.json").exists());
     assert!(tmpdir.path().join(".hpc-compose/jobs/22222.json").exists());
@@ -2203,6 +2987,10 @@ fn clean_dry_run_does_not_remove_state_and_reports_json_contract() {
     assert_eq!(payload["removed_job_ids"], serde_json::json!(["12345"]));
     assert_eq!(payload["kept_job_ids"], serde_json::json!([]));
     assert_eq!(payload["latest_job_id_before"], Value::from("12345"));
+    assert_eq!(
+        payload["latest_pointer_job_id_before"],
+        Value::from("12345")
+    );
     assert_eq!(payload["latest_job_id_after"], Value::Null);
     assert!(payload["total_bytes_reclaimed"].as_u64().unwrap_or(0) > 0);
     let jobs = payload["jobs"].as_array().expect("jobs array");
@@ -2329,6 +3117,10 @@ fn clean_repairs_latest_pointer_and_removes_it_when_no_jobs_remain() {
         serde_json::json!(["11111"])
     );
     assert_eq!(first_payload["latest_job_id_before"], Value::from("22222"));
+    assert_eq!(
+        first_payload["latest_pointer_job_id_before"],
+        Value::from("11111")
+    );
     assert_eq!(first_payload["latest_job_id_after"], Value::from("22222"));
     let latest_after_first: Value = serde_json::from_str(
         &fs::read_to_string(latest_record_path_for(&compose)).expect("latest after first"),
@@ -2357,6 +3149,77 @@ fn clean_repairs_latest_pointer_and_removes_it_when_no_jobs_remain() {
     );
     assert_eq!(second_payload["latest_job_id_after"], Value::Null);
     assert!(!latest_record_path_for(&compose).exists());
+}
+
+#[test]
+fn clean_reports_missing_latest_pointer_separately_from_effective_latest() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("unix time")
+        .as_secs();
+
+    let mut old_record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("submit-old.sbatch"),
+        &plan,
+        "11111",
+    )
+    .expect("old record");
+    old_record.submitted_at = now.saturating_sub(10 * 86_400);
+    write_submission_record(&old_record).expect("write old");
+
+    let mut new_record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("submit-new.sbatch"),
+        &plan,
+        "22222",
+    )
+    .expect("new record");
+    new_record.submitted_at = now.saturating_sub(1);
+    write_submission_record(&new_record).expect("write new");
+
+    let mut missing_pointer = old_record.clone();
+    missing_pointer.job_id = "99999".into();
+    fs::write(
+        latest_record_path_for(&compose),
+        serde_json::to_vec_pretty(&missing_pointer).expect("missing latest"),
+    )
+    .expect("overwrite latest");
+
+    let clean = run_cli(
+        tmpdir.path(),
+        &[
+            "clean",
+            "--age",
+            "7",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&clean);
+    let payload: Value = serde_json::from_str(&stdout_text(&clean)).expect("clean json");
+    assert_eq!(payload["removed_job_ids"], serde_json::json!(["11111"]));
+    assert_eq!(payload["latest_job_id_before"], Value::from("22222"));
+    assert_eq!(
+        payload["latest_pointer_job_id_before"],
+        Value::from("99999")
+    );
+    assert_eq!(payload["latest_job_id_after"], Value::from("22222"));
+
+    let latest_after: Value = serde_json::from_str(
+        &fs::read_to_string(latest_record_path_for(&compose)).expect("latest after"),
+    )
+    .expect("latest json");
+    assert_eq!(latest_after["job_id"], Value::from("22222"));
 }
 
 #[test]

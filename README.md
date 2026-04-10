@@ -40,6 +40,8 @@ curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/ins
 
 The installer selects the newest GitHub release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Installer availability is not the same thing as full runtime support; see the [Support Matrix](docs/src/support-matrix.md) before assuming a platform/cluster combination is supported end to end. Manual release downloads remain documented in [docs/src/installation.md](docs/src/installation.md).
 
+Unix installs also ship section-1 manpages, and the binary can generate Bash, Zsh, and Fish completions with `hpc-compose completions <shell>`.
+
 ## Minimal example
 
 ```yaml
@@ -59,7 +61,7 @@ services:
 hpc-compose submit --watch -f compose.yaml
 ```
 
-`submit --watch` is the normal run. Use `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are adapting a new spec or isolating a failure.
+`submit --watch` is the normal run. On an interactive TTY it opens the live watch UI; later you can reconnect with `hpc-compose watch -f compose.yaml` or inspect a one-shot per-service snapshot with `hpc-compose ps -f compose.yaml`. Use `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are adapting a new spec or isolating a failure.
 
 ## Documentation
 

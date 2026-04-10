@@ -5,7 +5,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 ## First run
 
 - Read [Quickstart](quickstart.md).
-- Start from `minimal-batch` with `hpc-compose init --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
+- Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
 - Run `hpc-compose submit --watch -f compose.yaml`.
 
 ## Remember directory/data/env settings once
@@ -57,21 +57,25 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 - Use `hpc-compose cache list` to inspect imported/prepared artifacts.
 - Use `hpc-compose cache inspect -f compose.yaml` to see per-service reuse expectations.
+- Use `hpc-compose --profile dev cache prune --age 14` when you want age-based cleanup to follow the active context cache dir.
+- Use `hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache` when you want a direct cache cleanup that does not depend on compose resolution.
 - Use `hpc-compose artifacts -f compose.yaml` after a run to export tracked payloads.
 
 ## Find and clean tracked runs
 
 - Use `hpc-compose jobs list` to scan the current repo tree for tracked runs.
+- Use `hpc-compose ps -f compose.yaml` when you want a one-shot per-service runtime table.
+- Use `hpc-compose watch -f compose.yaml` to reconnect to the live watch UI for the latest tracked job.
 - Use `hpc-compose jobs list --disk-usage` when you need a quick size estimate before deleting old state.
 - Use `hpc-compose clean -f compose.yaml --dry-run --age 7` to preview what a cleanup would remove.
-- Use `hpc-compose clean -f compose.yaml --all --format json` when automation needs a stable cleanup report for one compose context.
+- Use `hpc-compose clean -f compose.yaml --all --format json` when automation needs a stable cleanup report for one compose context, including effective latest IDs plus stale-pointer diagnostics.
 
 ## Automation and scripting with JSON output
 
-- Prefer `--format json` for machine-readable output on `validate`, `render`, `prepare`, `preflight`, `inspect`, `status`, `stats`, `artifacts`, and `cache` subcommands.
+- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `validate`, `render`, `prepare`, `preflight`, `inspect`, `submit`, `status`, `ps`, `stats`, `artifacts`, `cancel`, `setup`, `cache`, `clean`, and `context`.
 - Include `context --format json` when automation needs resolved compose path, binaries, interpolation vars, and runtime path roots.
 - Use `hpc-compose stats --format jsonl` or `--format csv` when downstream tooling wants row-oriented metrics.
-- Treat `--json` as a compatibility alias on older machine-readable commands; new automation should prefer `--format json`.
+- Treat `--json` as a compatibility alias on older machine-readable commands; new automation should prefer `--format json`. Streaming commands such as `logs --follow`, `watch`, and `completions` keep their native text or script output.
 
 ## Related docs
 

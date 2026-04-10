@@ -23,6 +23,7 @@ use crate::tracked_paths;
 
 mod artifacts;
 mod logs;
+mod ps;
 mod record;
 mod runtime_state;
 mod scheduler;
@@ -42,16 +43,18 @@ pub use artifacts::{
     export_artifacts,
 };
 pub use logs::{print_logs, watch_submission};
+pub use ps::build_ps_snapshot;
 pub use record::{
-    build_cleanup_report, build_submission_record, clean_all_except_latest, clean_by_age,
-    jobs_dir_for, latest_record_path_for, load_submission_record, log_dir_for_record,
-    metadata_root_for, persist_submission_record, run_cleanup_report, scan_job_inventory,
-    scan_job_records, write_submission_record,
+    build_cleanup_report, build_submission_record, build_submission_record_with_backend,
+    clean_all_except_latest, clean_by_age, jobs_dir_for, latest_record_path_for,
+    load_submission_record, log_dir_for_record, metadata_root_for, persist_submission_record,
+    remove_submission_record, run_cleanup_report, runtime_job_root_for_record, scan_job_inventory,
+    scan_job_records, state_path_for_record, write_submission_record,
 };
 pub use scheduler::{build_status_snapshot, probe_scheduler_status, scheduler_source_label};
 pub use stats::{build_stats_snapshot, metrics_dir_for_record};
 
-const SUBMISSION_SCHEMA_VERSION: u32 = 1;
+const SUBMISSION_SCHEMA_VERSION: u32 = 2;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS: u64 = 15;
 const ACCOUNTING_GAP_GRACE_SECONDS: u64 = 15;
@@ -63,6 +66,8 @@ const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 2;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmissionRecord {
     pub schema_version: u32,
+    #[serde(default = "default_submission_backend")]
+    pub backend: SubmissionBackend,
     pub job_id: String,
     pub submitted_at: u64,
     pub compose_file: PathBuf,
@@ -77,6 +82,17 @@ pub struct SubmissionRecord {
     pub resume_dir: Option<PathBuf>,
 }
 
+/// Backend used to execute a tracked submission.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionBackend {
+    /// The job was submitted to Slurm.
+    #[default]
+    Slurm,
+    /// The job was launched locally without Slurm.
+    Local,
+}
+
 /// Source used to determine scheduler state.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +103,10 @@ pub enum SchedulerSource {
     Sacct,
     /// No scheduler data was available; only local tracking data exists.
     LocalOnly,
+}
+
+fn default_submission_backend() -> SubmissionBackend {
+    SubmissionBackend::Slurm
 }
 
 /// Scheduler state as observed by the tracker.
@@ -103,12 +123,26 @@ pub struct SchedulerStatus {
 /// Presence and freshness information for one tracked service log.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceLogStatus {
+pub struct PsServiceRow {
     pub service_name: String,
     pub path: PathBuf,
     pub present: bool,
     pub updated_at: Option<u64>,
     pub updated_age_seconds: Option<u64>,
+    #[serde(default)]
+    pub log_path: Option<PathBuf>,
+    #[serde(default)]
+    pub step_name: Option<String>,
+    #[serde(default)]
+    pub launch_index: Option<u32>,
+    #[serde(default)]
+    pub launcher_pid: Option<u32>,
+    #[serde(default)]
+    pub healthy: Option<bool>,
+    #[serde(default)]
+    pub readiness_configured: Option<bool>,
+    #[serde(default)]
+    pub status: Option<String>,
     #[serde(default)]
     pub failure_policy_mode: Option<String>,
     #[serde(default)]
@@ -135,6 +169,9 @@ pub struct ServiceLogStatus {
     pub nodelist: Option<String>,
 }
 
+/// Backwards-compatible alias for one tracked service row.
+pub type ServiceLogStatus = PsServiceRow;
+
 /// Presence and freshness information for the top-level batch log.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +192,22 @@ pub struct StatusSnapshot {
     pub queue_diagnostics: Option<QueueDiagnostics>,
     pub log_dir: PathBuf,
     pub batch_log: BatchLogStatus,
-    pub services: Vec<ServiceLogStatus>,
+    pub services: Vec<PsServiceRow>,
+    pub attempt: Option<u32>,
+    pub is_resume: Option<bool>,
+    pub resume_dir: Option<PathBuf>,
+}
+
+/// Compose-style per-service snapshot returned by `ps`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PsSnapshot {
+    pub record: SubmissionRecord,
+    pub scheduler: SchedulerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_diagnostics: Option<QueueDiagnostics>,
+    pub log_dir: PathBuf,
+    pub services: Vec<PsServiceRow>,
     pub attempt: Option<u32>,
     pub is_resume: Option<bool>,
     pub resume_dir: Option<PathBuf>,
@@ -489,6 +541,8 @@ pub enum WatchOutcome {
     Failed(SchedulerStatus),
     /// The tracker stopped with only local information available.
     Unknown(SchedulerStatus),
+    /// The user detached from the watch UI before a terminal state.
+    Interrupted(SchedulerStatus),
 }
 
 #[derive(Debug, Clone)]
@@ -501,6 +555,15 @@ struct LogCursor {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ServiceRuntimeStateFile {
+    #[allow(dead_code)]
+    #[serde(default)]
+    backend: Option<SubmissionBackend>,
+    #[serde(default)]
+    job_status: Option<String>,
+    #[serde(default)]
+    job_exit_code: Option<i32>,
+    #[serde(default)]
+    supervisor_pid: Option<u32>,
     #[serde(default)]
     attempt: Option<u32>,
     #[serde(default)]
@@ -514,6 +577,18 @@ struct ServiceRuntimeStateFile {
 #[derive(Debug, Clone, Deserialize)]
 struct ServiceRuntimeStateEntry {
     service_name: String,
+    #[serde(default)]
+    step_name: Option<String>,
+    #[serde(default)]
+    log_path: Option<PathBuf>,
+    #[serde(default)]
+    launch_index: Option<u32>,
+    #[serde(default)]
+    launcher_pid: Option<u32>,
+    #[serde(default)]
+    healthy: Option<bool>,
+    #[serde(default)]
+    readiness_configured: Option<bool>,
     #[serde(default)]
     failure_policy_mode: Option<String>,
     #[serde(default)]
@@ -579,6 +654,7 @@ pub struct CleanupReport {
     pub dry_run: bool,
     pub removed_job_ids: Vec<String>,
     pub kept_job_ids: Vec<String>,
+    pub latest_pointer_job_id_before: Option<String>,
     pub latest_job_id_before: Option<String>,
     pub latest_job_id_after: Option<String>,
     pub total_bytes_reclaimed: Option<u64>,
@@ -684,12 +760,16 @@ fn build_batch_log_status(path: &Path, now: u64) -> BatchLogStatus {
     }
 }
 
-fn batch_log_path_for(plan: &RuntimePlan, submit_dir: &Path, job_id: &str) -> PathBuf {
-    let raw = plan
-        .slurm
-        .output
-        .clone()
-        .unwrap_or_else(|| "slurm-%j.out".to_string());
+fn batch_log_path_for_backend(
+    plan: &RuntimePlan,
+    submit_dir: &Path,
+    job_id: &str,
+    backend: SubmissionBackend,
+) -> PathBuf {
+    let raw = plan.slurm.output.clone().unwrap_or_else(|| match backend {
+        SubmissionBackend::Slurm => "slurm-%j.out".to_string(),
+        SubmissionBackend::Local => "hpc-compose-local-%j.out".to_string(),
+    });
     let rendered =
         expand_slurm_filename_pattern(&raw, job_id, &plan.name, current_user_name().as_deref());
     let candidate = PathBuf::from(rendered);
@@ -698,6 +778,11 @@ fn batch_log_path_for(plan: &RuntimePlan, submit_dir: &Path, job_id: &str) -> Pa
     } else {
         submit_dir.join(candidate)
     }
+}
+
+#[cfg(test)]
+fn batch_log_path_for(plan: &RuntimePlan, submit_dir: &Path, job_id: &str) -> PathBuf {
+    batch_log_path_for_backend(plan, submit_dir, job_id, SubmissionBackend::Slurm)
 }
 
 fn expand_slurm_filename_pattern(
@@ -1144,6 +1229,7 @@ mod tests {
 
         let fallback_record = SubmissionRecord {
             schema_version: 1,
+            backend: SubmissionBackend::Slurm,
             job_id: "999".into(),
             submitted_at: 0,
             compose_file: tmpdir.path().join("compose.yaml"),
@@ -1223,6 +1309,12 @@ mod tests {
   "services": [
     {{
       "service_name": "api",
+      "step_name": "hpc-compose:api",
+      "log_path": "{}",
+      "launch_index": 0,
+      "launcher_pid": 4242,
+      "healthy": true,
+      "readiness_configured": true,
       "failure_policy_mode": "restart_on_failure",
       "restart_count": 1,
       "max_restarts": 3,
@@ -1231,14 +1323,35 @@ mod tests {
       "restart_failures_in_window": 2,
       "restart_failure_timestamps": [{}, {}],
       "last_exit_code": 0
+    }},
+    {{
+      "service_name": "worker",
+      "step_name": "hpc-compose:worker",
+      "log_path": "{}",
+      "launch_index": 1,
+      "launcher_pid": 5252,
+      "healthy": false,
+      "readiness_configured": false,
+      "last_exit_code": 42
     }}
   ]
 }}"#,
+                record.service_logs.get("api").expect("api log").display(),
                 now.saturating_sub(10),
-                now.saturating_sub(90)
+                now.saturating_sub(90),
+                record
+                    .service_logs
+                    .get("worker")
+                    .expect("worker log")
+                    .display()
             ),
         )
         .expect("state");
+
+        let parsed_state: ServiceRuntimeStateFile =
+            read_json(&tmpdir.path().join(".hpc-compose/12345/state.json"))
+                .expect("parse runtime state");
+        assert_eq!(parsed_state.attempt, Some(1));
 
         let squeue = tmpdir.path().join("squeue");
         let sacct = tmpdir.path().join("sacct");
@@ -1279,6 +1392,12 @@ mod tests {
         assert_eq!(api.max_restarts_in_window, Some(3));
         assert_eq!(api.restart_failures_in_window, Some(1));
         assert_eq!(api.last_exit_code, Some(0));
+        assert_eq!(api.step_name.as_deref(), Some("hpc-compose:api"));
+        assert_eq!(api.launch_index, Some(0));
+        assert_eq!(api.launcher_pid, Some(4242));
+        assert_eq!(api.healthy, Some(true));
+        assert_eq!(api.readiness_configured, Some(true));
+        assert_eq!(api.status.as_deref(), Some("ready"));
         let worker = snapshot
             .services
             .iter()
@@ -1290,7 +1409,13 @@ mod tests {
         assert!(worker.window_seconds.is_none());
         assert!(worker.max_restarts_in_window.is_none());
         assert!(worker.restart_failures_in_window.is_none());
-        assert!(worker.last_exit_code.is_none());
+        assert_eq!(worker.last_exit_code, Some(42));
+        assert_eq!(worker.step_name.as_deref(), Some("hpc-compose:worker"));
+        assert_eq!(worker.launch_index, Some(1));
+        assert_eq!(worker.launcher_pid, Some(5252));
+        assert_eq!(worker.healthy, Some(false));
+        assert_eq!(worker.readiness_configured, Some(false));
+        assert_eq!(worker.status.as_deref(), Some("running"));
 
         let selected = selected_service_logs(&record, Some("api")).expect("selected");
         assert_eq!(selected.len(), 1);
@@ -2884,6 +3009,7 @@ services:
         )
         .expect("cleanup report");
         assert_eq!(report.removed_job_ids, vec!["500"]);
+        assert_eq!(report.latest_pointer_job_id_before.as_deref(), Some("500"));
         assert_eq!(report.latest_job_id_before.as_deref(), Some("600"));
         assert_eq!(report.latest_job_id_after.as_deref(), Some("600"));
         let selected = report
@@ -2906,5 +3032,31 @@ services:
         .expect("final cleanup report");
         run_cleanup_report(&final_report).expect("final cleanup");
         assert!(!latest_record_path_for(&compose_path).exists());
+    }
+
+    #[test]
+    fn local_scheduler_status_marks_dead_supervisor_as_failed() {
+        let state = ServiceRuntimeStateFile {
+            backend: Some(SubmissionBackend::Local),
+            job_status: Some("RUNNING".into()),
+            job_exit_code: None,
+            supervisor_pid: Some(u32::MAX),
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+            services: Vec::new(),
+        };
+
+        let status = scheduler::build_local_scheduler_status(Some(&state));
+        assert_eq!(status.state, "FAILED");
+        assert!(status.terminal);
+        assert!(status.failed);
+        assert!(
+            status
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("exited before recording a terminal outcome")
+        );
     }
 }

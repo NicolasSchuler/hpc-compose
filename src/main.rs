@@ -1,5 +1,6 @@
 mod commands;
 mod output;
+mod watch_ui;
 
 use anyhow::Result;
 use hpc_compose::cli::parse_cli;

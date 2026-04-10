@@ -119,7 +119,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             force_rebuild,
             no_preflight,
             watch,
+            local,
             dry_run,
+            format,
         } => {
             let mut binary_overrides = BinaryOverrides::default();
             if value_is_explicit(options, "--enroot-bin") {
@@ -146,7 +148,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 force_rebuild,
                 no_preflight,
                 watch,
+                local,
                 dry_run,
+                format,
             )
         }
         Commands::Status {
@@ -210,19 +214,55 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             runtime::logs(context, job_id, service, follow, lines)
         }
+        Commands::Ps {
+            file,
+            job_id,
+            format,
+            squeue_bin,
+            sacct_bin,
+        } => {
+            let mut binary_overrides = BinaryOverrides::default();
+            if value_is_explicit(options, "--squeue-bin") {
+                binary_overrides.squeue = Some(squeue_bin);
+            }
+            if value_is_explicit(options, "--sacct-bin") {
+                binary_overrides.sacct = Some(sacct_bin);
+            }
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::ps(context, job_id, format)
+        }
+        Commands::Watch {
+            file,
+            job_id,
+            service,
+            lines,
+            squeue_bin,
+            sacct_bin,
+        } => {
+            let mut binary_overrides = BinaryOverrides::default();
+            if value_is_explicit(options, "--squeue-bin") {
+                binary_overrides.squeue = Some(squeue_bin);
+            }
+            if value_is_explicit(options, "--sacct-bin") {
+                binary_overrides.sacct = Some(sacct_bin);
+            }
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::watch(context, job_id, service, lines)
+        }
         Commands::Cancel {
             file,
             job_id,
             scancel_bin,
+            format,
         } => {
             let mut binary_overrides = BinaryOverrides::default();
             if value_is_explicit(options, "--scancel-bin") {
                 binary_overrides.scancel = Some(scancel_bin);
             }
             let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::cancel(context, job_id)
+            runtime::cancel(context, job_id, format)
         }
-        Commands::Init {
+        Commands::New {
             template,
             list_templates,
             describe_template,
@@ -230,7 +270,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             cache_dir,
             output,
             force,
-        } => init::init(
+            format,
+        } => init::new_command(
             template,
             list_templates,
             describe_template,
@@ -238,6 +279,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             cache_dir,
             output,
             force,
+            format,
         ),
         Commands::Cache { command } => match command {
             CacheCommands::List { cache_dir, format } => cache::list(cache_dir, format),
@@ -307,6 +349,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             binaries,
             default_profile,
             non_interactive,
+            format,
         } => init::setup(
             options.settings_file.clone(),
             options.profile.clone(),
@@ -317,6 +360,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             binaries,
             default_profile,
             non_interactive,
+            format,
         ),
         Commands::Completions { shell } => init::completions(shell),
     }

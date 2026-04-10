@@ -9,8 +9,8 @@ use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
 use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
 use hpc_compose::init::{default_cache_dir as default_init_cache_dir, resolve_template, templates};
 use hpc_compose::job::{
-    ArtifactExportReport, CleanupReport, JobInventoryScan, StatsSnapshot, StatusSnapshot,
-    WatchOutcome, scheduler_source_label,
+    ArtifactExportReport, CleanupReport, JobInventoryScan, PsSnapshot, StatsSnapshot,
+    StatusSnapshot, SubmissionBackend, WatchOutcome, scheduler_source_label,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, build_plan, registry_host_for_remote,
@@ -71,6 +71,61 @@ pub(crate) struct CachePruneReport {
     pub(crate) mode: String,
     pub(crate) removed_count: usize,
     pub(crate) removed_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SubmitOutput {
+    pub(crate) backend: SubmissionBackend,
+    pub(crate) compose_file: PathBuf,
+    pub(crate) script_path: PathBuf,
+    pub(crate) cache_dir: PathBuf,
+    pub(crate) dry_run: bool,
+    pub(crate) launched: bool,
+    pub(crate) submitted: bool,
+    pub(crate) sbatch_stdout: Option<String>,
+    pub(crate) job_id: Option<String>,
+    pub(crate) tracking_persisted: bool,
+    pub(crate) tracked_metadata_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CancelOutput {
+    pub(crate) job_id: String,
+    pub(crate) cancelled: bool,
+    pub(crate) command_stdout: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TemplateInfoOutput {
+    pub(crate) name: String,
+    pub(crate) description: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TemplateDescriptionOutput {
+    pub(crate) template: TemplateInfoOutput,
+    pub(crate) default_cache_dir: String,
+    pub(crate) command: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TemplateWriteOutput {
+    pub(crate) template_name: String,
+    pub(crate) app_name: String,
+    pub(crate) cache_dir: String,
+    pub(crate) output_path: PathBuf,
+    pub(crate) next_commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SetupOutput {
+    pub(crate) settings_path: PathBuf,
+    pub(crate) profile: String,
+    pub(crate) default_profile: String,
+    pub(crate) compose_file: String,
+    pub(crate) env_files: Vec<String>,
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) binaries: hpc_compose::context::BinaryOverrides,
 }
 
 #[cfg(test)]
@@ -154,6 +209,11 @@ pub(crate) fn default_script_path(spec_path: &Path) -> PathBuf {
     parent.join("hpc-compose.sbatch")
 }
 
+pub(crate) fn default_local_script_path(spec_path: &Path) -> PathBuf {
+    let parent = spec_path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join("hpc-compose.local.sh")
+}
+
 pub(crate) fn default_cache_dir() -> PathBuf {
     let home = match env::var_os("HOME") {
         Some(home) => PathBuf::from(home),
@@ -217,6 +277,10 @@ fn artifact_role_label(name: &str) -> &'static str {
 
 pub(crate) fn print_status_snapshot(snapshot: &StatusSnapshot) {
     let _ = write_status_snapshot(&mut io::stdout(), snapshot);
+}
+
+pub(crate) fn print_ps_snapshot(snapshot: &PsSnapshot) {
+    let _ = write_ps_snapshot(&mut io::stdout(), snapshot);
 }
 
 pub(crate) fn print_stats_snapshot(snapshot: &StatsSnapshot) {
@@ -295,12 +359,15 @@ fn write_cleanup_report(
     writeln!(writer, "dry run: {}", yes_no(report.dry_run))?;
     writeln!(
         writer,
-        "latest before: {}",
+        "effective latest before: {}",
         report.latest_job_id_before.as_deref().unwrap_or("<none>")
     )?;
+    if let Some(job_id) = report.latest_pointer_job_id_before.as_deref() {
+        writeln!(writer, "pointer before: {job_id}")?;
+    }
     writeln!(
         writer,
-        "latest after: {}",
+        "effective latest after: {}",
         report.latest_job_id_after.as_deref().unwrap_or("<none>")
     )?;
     writeln!(writer, "selected jobs: {}", report.removed_job_ids.len())?;
@@ -423,6 +490,24 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
             yes_no(service.present),
             age
         )?;
+        if service.step_name.is_some()
+            || service.launcher_pid.is_some()
+            || service.healthy.is_some()
+            || service.status.is_some()
+        {
+            let step_name = service.step_name.as_deref().unwrap_or("unknown");
+            let pid = service
+                .launcher_pid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let ready = service.healthy.map(yes_no).unwrap_or("unknown");
+            let status = service.status.as_deref().unwrap_or("unknown");
+            writeln!(
+                writer,
+                "    step: {} pid: {} ready: {} status: {}",
+                step_name, pid, ready, status
+            )?;
+        }
         if service.failure_policy_mode.is_some()
             || service.restart_count.is_some()
             || service.max_restarts.is_some()
@@ -500,6 +585,55 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
                 service.nodelist.as_deref().unwrap_or("unknown"),
             )?;
         }
+    }
+    Ok(())
+}
+
+fn write_ps_snapshot(writer: &mut impl Write, snapshot: &PsSnapshot) -> io::Result<()> {
+    writeln!(writer, "job id: {}", snapshot.record.job_id)?;
+    writeln!(
+        writer,
+        "scheduler: {} ({})",
+        snapshot.scheduler.state,
+        scheduler_source_label(snapshot.scheduler.source)
+    )?;
+    if let Some(queue) = &snapshot.queue_diagnostics
+        && let Some(reason) = &queue.pending_reason
+    {
+        writeln!(writer, "pending reason: {reason}")?;
+    }
+    writeln!(
+        writer,
+        "service\tstep\tpid\tready\tstatus\trestarts\tlast_exit\tlog"
+    )?;
+    for service in &snapshot.services {
+        let step = service.step_name.as_deref().unwrap_or("-");
+        let pid = service
+            .launcher_pid
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let ready = service.healthy.map(yes_no).unwrap_or("unknown");
+        let status = service.status.as_deref().unwrap_or("unknown");
+        let restarts = service
+            .restart_count
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let last_exit = service
+            .last_exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            service.service_name,
+            step,
+            pid,
+            ready,
+            status,
+            restarts,
+            last_exit,
+            service.path.display()
+        )?;
     }
     Ok(())
 }
@@ -1260,22 +1394,44 @@ fn service_names(plan: &RuntimePlan) -> Vec<&str> {
         .collect()
 }
 
+pub(crate) fn template_infos() -> Vec<TemplateInfoOutput> {
+    templates()
+        .iter()
+        .map(|template| TemplateInfoOutput {
+            name: template.name.to_string(),
+            description: template.description.to_string(),
+        })
+        .collect()
+}
+
 pub(crate) fn print_template_list() {
     for template in templates() {
         println!("{}\t{}", template.name, template.description);
     }
 }
 
-pub(crate) fn print_template_description(template_name: &str) -> Result<()> {
+pub(crate) fn build_template_description(template_name: &str) -> Result<TemplateDescriptionOutput> {
     let template = resolve_template(template_name)?;
-    println!("template: {}", template.name);
-    println!("description: {}", template.description);
+    Ok(TemplateDescriptionOutput {
+        template: TemplateInfoOutput {
+            name: template.name.to_string(),
+            description: template.description.to_string(),
+        },
+        default_cache_dir: default_init_cache_dir().to_string(),
+        command: format!(
+            "hpc-compose new --template {} --name my-app --cache-dir {} --output compose.yaml",
+            template.name,
+            default_init_cache_dir()
+        ),
+    })
+}
+
+pub(crate) fn print_template_description(template_name: &str) -> Result<()> {
+    let description = build_template_description(template_name)?;
+    println!("template: {}", description.template.name);
+    println!("description: {}", description.template.description);
     println!("command:");
-    println!(
-        "hpc-compose init --template {} --name my-app --cache-dir {} --output compose.yaml",
-        template.name,
-        default_init_cache_dir()
-    );
+    println!("{}", description.command);
     Ok(())
 }
 
@@ -1389,6 +1545,7 @@ pub(crate) fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
 pub(crate) fn finish_watch(job_id: &str, outcome: WatchOutcome) -> Result<()> {
     match outcome {
         WatchOutcome::Completed(_) => Ok(()),
+        WatchOutcome::Interrupted(_) => Ok(()),
         WatchOutcome::Unknown(status) => {
             if let Some(detail) = status.detail {
                 bail!(
@@ -1689,6 +1846,35 @@ services:
             gpu_count: Some("1".into()),
             gpu_util: Some("87".into()),
             gpu_mem: Some("4096M".into()),
+        }
+    }
+
+    fn sample_service_status(path: PathBuf) -> ServiceLogStatus {
+        ServiceLogStatus {
+            service_name: "svc/name".into(),
+            path,
+            present: false,
+            updated_at: None,
+            updated_age_seconds: None,
+            log_path: None,
+            step_name: None,
+            launch_index: None,
+            launcher_pid: None,
+            healthy: None,
+            readiness_configured: None,
+            status: None,
+            failure_policy_mode: None,
+            restart_count: None,
+            max_restarts: None,
+            window_seconds: None,
+            max_restarts_in_window: None,
+            restart_failures_in_window: None,
+            last_exit_code: None,
+            placement_mode: None,
+            nodes: None,
+            ntasks: None,
+            ntasks_per_node: None,
+            nodelist: None,
         }
     }
 
@@ -2031,11 +2217,6 @@ services:
                 updated_age_seconds: Some(70),
             },
             services: vec![ServiceLogStatus {
-                service_name: "svc/name".into(),
-                path: tmpdir.path().join(".hpc-compose/12345/logs/svc.log"),
-                present: false,
-                updated_at: None,
-                updated_age_seconds: None,
                 failure_policy_mode: Some("restart_on_failure".into()),
                 restart_count: Some(1),
                 max_restarts: Some(3),
@@ -2048,6 +2229,12 @@ services:
                 ntasks: Some(4),
                 ntasks_per_node: Some(2),
                 nodelist: Some("node01 node02".into()),
+                step_name: Some("hpc-compose:svc_name".into()),
+                launcher_pid: Some(4242),
+                healthy: Some(true),
+                readiness_configured: Some(true),
+                status: Some("ready".into()),
+                ..sample_service_status(tmpdir.path().join(".hpc-compose/12345/logs/svc.log"))
             }],
             attempt: Some(1),
             is_resume: Some(true),
@@ -2543,6 +2730,7 @@ services:
             dry_run: true,
             removed_job_ids: vec!["12345".into()],
             kept_job_ids: vec!["67890".into()],
+            latest_pointer_job_id_before: Some("12345".into()),
             latest_job_id_before: Some("12345".into()),
             latest_job_id_after: Some("67890".into()),
             total_bytes_reclaimed: Some(2_048),
@@ -2691,7 +2879,9 @@ services:
             force_rebuild: false,
             no_preflight: true,
             watch: false,
+            local: false,
             dry_run: false,
+            format: None,
         })
         .expect_err("sbatch fail");
         assert!(err.to_string().contains("sbatch failed"));
@@ -2709,7 +2899,9 @@ services:
             force_rebuild: false,
             no_preflight: false,
             watch: false,
+            local: false,
             dry_run: false,
+            format: None,
         })
         .expect("submit");
         run_command(Commands::Submit {
@@ -2725,7 +2917,9 @@ services:
             force_rebuild: false,
             no_preflight: true,
             watch: false,
+            local: false,
             dry_run: false,
+            format: None,
         })
         .expect("submit without id");
 
@@ -2801,12 +2995,14 @@ services:
             file: Some(compose.clone()),
             job_id: Some("12345".into()),
             scancel_bin: scancel_ok.display().to_string(),
+            format: None,
         })
         .expect("cancel ok");
         let cancel_err = run_command(Commands::Cancel {
             file: Some(compose.clone()),
             job_id: Some("12345".into()),
             scancel_bin: scancel_fail.display().to_string(),
+            format: None,
         })
         .expect_err("cancel fail");
         assert!(
@@ -2816,7 +3012,7 @@ services:
         );
 
         let init_output = tmpdir.path().join("init-compose.yaml");
-        run_command(Commands::Init {
+        run_command(Commands::New {
             template: Some("dev-python-app".into()),
             list_templates: false,
             describe_template: None,
@@ -2824,6 +3020,7 @@ services:
             cache_dir: Some("/tmp/custom-cache".into()),
             output: init_output.clone(),
             force: true,
+            format: None,
         })
         .expect("init");
         assert!(init_output.exists());
@@ -2863,10 +3060,6 @@ services:
             services: vec![
                 ServiceLogStatus {
                     service_name: "ignore".into(),
-                    path: tmpdir.path().join(".hpc-compose/12345/logs/ignore.log"),
-                    present: true,
-                    updated_at: Some(1),
-                    updated_age_seconds: Some(1),
                     failure_policy_mode: Some("ignore".into()),
                     restart_count: Some(0),
                     max_restarts: Some(0),
@@ -2879,13 +3072,16 @@ services:
                     ntasks: None,
                     ntasks_per_node: None,
                     nodelist: None,
-                },
-                ServiceLogStatus {
-                    service_name: "legacy".into(),
-                    path: tmpdir.path().join(".hpc-compose/12345/logs/legacy.log"),
+                    status: Some("failed".into()),
                     present: true,
                     updated_at: Some(1),
                     updated_age_seconds: Some(1),
+                    ..sample_service_status(
+                        tmpdir.path().join(".hpc-compose/12345/logs/ignore.log"),
+                    )
+                },
+                ServiceLogStatus {
+                    service_name: "legacy".into(),
                     failure_policy_mode: Some("restart_on_failure".into()),
                     restart_count: Some(1),
                     max_restarts: Some(3),
@@ -2898,6 +3094,17 @@ services:
                     ntasks: None,
                     ntasks_per_node: None,
                     nodelist: None,
+                    status: Some("failed".into()),
+                    present: true,
+                    updated_at: Some(1),
+                    updated_age_seconds: Some(1),
+                    path: tmpdir.path().join(".hpc-compose/12345/logs/legacy.log"),
+                    log_path: None,
+                    step_name: None,
+                    launch_index: None,
+                    launcher_pid: None,
+                    healthy: None,
+                    readiness_configured: None,
                 },
             ],
             attempt: None,

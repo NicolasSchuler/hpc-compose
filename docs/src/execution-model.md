@@ -10,7 +10,7 @@ This page explains the few runtime rules that matter most when a Compose mental 
 | `prepare` | login node or local shell with Enroot access | Import base images and build prepared runtime artifacts |
 | `submit` | login node or local shell with Slurm access | Run preflight, prepare missing artifacts, render the batch script, and call `sbatch` |
 | Batch script and services | compute-node allocation | Launch the planned services through `srun` and Pyxis |
-| `status`, `stats`, `logs`, `artifacts` | login node or local shell | Read tracked metadata and job outputs after submission |
+| `status`, `ps`, `watch`, `stats`, `logs`, `artifacts` | login node or local shell | Read tracked metadata and job outputs after submission |
 
 The main consequence is simple: image preparation and validation happen before the job starts, but the containers themselves run later inside the Slurm allocation.
 
@@ -84,7 +84,8 @@ Recommended default:
 
 ## Command vocabulary
 
-- The <strong>normal run</strong> is <code>hpc-compose submit --watch -f compose.yaml</code>.
+- The <strong>normal run</strong> is <code>hpc-compose submit --watch -f compose.yaml</code>; on an interactive TTY that opens the watch UI automatically.
+- The <strong>tracked follow-up tools</strong> are <code>status</code> for scheduler/log summaries, <code>ps</code> for a stable per-service snapshot, and <code>watch</code> when you want to reconnect to the live TUI later.
 - The <strong>debugging flow</strong> is <code>validate</code>, <code>inspect</code>, <code>preflight</code>, and <code>prepare</code> run separately when you need more visibility.
 
 Read [Runbook](runbook.md) for the operational workflow, [Examples](examples.md) for starting points, and [Spec reference](spec-reference.md) for exact field behavior.

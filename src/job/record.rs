@@ -28,7 +28,14 @@ pub fn persist_submission_record(
     plan: &RuntimePlan,
     job_id: &str,
 ) -> Result<SubmissionRecord> {
-    let record = build_submission_record(spec_path, submit_dir, script_path, plan, job_id)?;
+    let record = build_submission_record_with_backend(
+        spec_path,
+        submit_dir,
+        script_path,
+        plan,
+        job_id,
+        SubmissionBackend::Slurm,
+    )?;
     write_submission_record(&record)?;
     Ok(record)
 }
@@ -40,6 +47,25 @@ pub fn build_submission_record(
     script_path: &Path,
     plan: &RuntimePlan,
     job_id: &str,
+) -> Result<SubmissionRecord> {
+    build_submission_record_with_backend(
+        spec_path,
+        submit_dir,
+        script_path,
+        plan,
+        job_id,
+        SubmissionBackend::Slurm,
+    )
+}
+
+/// Builds the submission record structure for a job without writing it.
+pub fn build_submission_record_with_backend(
+    spec_path: &Path,
+    submit_dir: &Path,
+    script_path: &Path,
+    plan: &RuntimePlan,
+    job_id: &str,
+    backend: SubmissionBackend,
 ) -> Result<SubmissionRecord> {
     let compose_file = absolute_path(spec_path)?;
     let submit_dir = absolute_path(submit_dir)?;
@@ -59,13 +85,14 @@ pub fn build_submission_record(
 
     Ok(SubmissionRecord {
         schema_version: SUBMISSION_SCHEMA_VERSION,
+        backend,
         job_id: job_id.to_string(),
         submitted_at: unix_timestamp_now(),
         compose_file,
         submit_dir: submit_dir.clone(),
         script_path,
         cache_dir: plan.cache_dir.clone(),
-        batch_log: batch_log_path_for(plan, &submit_dir, job_id),
+        batch_log: batch_log_path_for_backend(plan, &submit_dir, job_id, backend),
         service_logs,
         artifact_export_dir: plan
             .slurm
@@ -83,6 +110,13 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
     write_json(&jobs_dir.join(format!("{}.json", record.job_id)), record)?;
     write_json(&latest_record_path_for(&record.compose_file), record)?;
     Ok(())
+}
+
+/// Removes one tracked submission record and repairs the latest pointer.
+pub fn remove_submission_record(record: &SubmissionRecord) -> Result<()> {
+    let record_path = jobs_dir_for(&record.compose_file).join(format!("{}.json", record.job_id));
+    remove_path_if_present(&record_path)?;
+    repair_latest_record(&record.compose_file)
 }
 
 /// Loads every tracked job record for the given compose file.
@@ -136,6 +170,7 @@ pub fn build_cleanup_report(
     let compose_file = absolute_path(spec_path)?;
     let metadata_root = metadata_root_for(&compose_file);
     let now = unix_timestamp_now();
+    let latest_pointer_job_id_before = read_latest_pointer_job_id(&metadata_root);
     let inventory =
         build_inventory_entries_for_metadata_root(&metadata_root, include_disk_usage, now)?;
     let latest_job_id_before = inventory
@@ -200,6 +235,7 @@ pub fn build_cleanup_report(
         dry_run,
         removed_job_ids,
         kept_job_ids,
+        latest_pointer_job_id_before,
         latest_job_id_before,
         latest_job_id_after,
         total_bytes_reclaimed,
@@ -254,6 +290,16 @@ pub fn log_dir_for_record(record: &SubmissionRecord) -> PathBuf {
                 &record.job_id,
             ))
         })
+}
+
+/// Returns the tracked runtime root for a submission record.
+pub fn runtime_job_root_for_record(record: &SubmissionRecord) -> PathBuf {
+    tracked_paths::runtime_job_root(&record.submit_dir, &record.job_id)
+}
+
+/// Returns the tracked runtime state path for a submission record.
+pub fn state_path_for_record(record: &SubmissionRecord) -> PathBuf {
+    tracked_paths::latest_state_path(&runtime_job_root_for_record(record))
 }
 
 fn scan_inventory_recursive(
@@ -356,6 +402,13 @@ fn scan_job_records_with_paths(metadata_root: &Path) -> Result<Vec<(PathBuf, Sub
         }
     }
     Ok(records)
+}
+
+fn read_latest_pointer_job_id(metadata_root: &Path) -> Option<String> {
+    let latest_path = metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME);
+    read_json::<SubmissionRecord>(&latest_path)
+        .ok()
+        .map(|record| record.job_id)
 }
 
 fn resolved_latest_job_id(

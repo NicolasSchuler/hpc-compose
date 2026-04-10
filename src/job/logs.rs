@@ -28,10 +28,15 @@ pub fn print_logs(
 /// Streams tracked logs and scheduler state changes until the job finishes.
 pub fn watch_submission(
     record: &SubmissionRecord,
+    service: Option<&str>,
     options: &SchedulerOptions,
     lines: usize,
 ) -> Result<WatchOutcome> {
-    let selected = selected_service_logs(record, None)?;
+    if record.backend == SubmissionBackend::Local {
+        return watch_local_submission(record, service, options, lines);
+    }
+
+    let selected = selected_service_logs(record, service)?;
     let mut stdout = io::stdout();
     writeln!(stdout, "watching job {}...", record.job_id).ok();
     emit_initial_tail(&selected, lines, &mut stdout)?;
@@ -81,6 +86,51 @@ pub fn watch_submission(
             }
             _ => thread::sleep(POLL_INTERVAL),
         }
+    }
+}
+
+fn watch_local_submission(
+    record: &SubmissionRecord,
+    service: Option<&str>,
+    options: &SchedulerOptions,
+    lines: usize,
+) -> Result<WatchOutcome> {
+    let selected = selected_service_logs(record, service)?;
+    let mut stdout = io::stdout();
+    writeln!(stdout, "watching job {}...", record.job_id).ok();
+    emit_initial_tail(&selected, lines, &mut stdout)?;
+    let mut cursors = build_cursors(&selected);
+    let mut last_state: Option<String> = None;
+
+    loop {
+        let _ = drain_log_cursors(&mut cursors, &mut stdout)?;
+        let snapshot = build_status_snapshot(&record.compose_file, Some(&record.job_id), options)?;
+        if last_state.as_ref() != Some(&snapshot.scheduler.state) {
+            writeln!(
+                stdout,
+                "scheduler state: {} ({})",
+                snapshot.scheduler.state,
+                scheduler_source_label(snapshot.scheduler.source)
+            )
+            .ok();
+            if let Some(detail) = &snapshot.scheduler.detail {
+                writeln!(stdout, "note: {detail}").ok();
+            }
+            stdout.flush().ok();
+            last_state = Some(snapshot.scheduler.state.clone());
+        }
+
+        if snapshot.scheduler.terminal {
+            let _ = drain_log_cursors(&mut cursors, &mut stdout)?;
+            stdout.flush().ok();
+            return Ok(if snapshot.scheduler.failed {
+                WatchOutcome::Failed(snapshot.scheduler)
+            } else {
+                WatchOutcome::Completed(snapshot.scheduler)
+            });
+        }
+
+        thread::sleep(POLL_INTERVAL);
     }
 }
 
