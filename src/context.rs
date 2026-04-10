@@ -762,4 +762,183 @@ mod tests {
         let expected = repo.join(".hpc-compose/settings.toml");
         assert_eq!(repo_adjacent_settings_path(&nested), expected);
     }
+
+    #[test]
+    fn helper_functions_cover_defaults_paths_and_env_parsing() {
+        assert_eq!(default_settings_schema_version(), 1);
+        let request = ResolveRequest::from_current_dir().expect("request");
+        assert_eq!(request.cwd, env::current_dir().expect("cwd"));
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let missing = tmp.path().join("missing.toml");
+        assert!(
+            load_settings_if_exists(&missing)
+                .expect("missing")
+                .is_none()
+        );
+
+        let invalid_settings = Settings {
+            version: 99,
+            ..Settings::default()
+        };
+        let err = write_settings(&tmp.path().join("nested/settings.toml"), &invalid_settings)
+            .expect_err("invalid version");
+        assert!(err.to_string().contains("unsupported schema version"));
+
+        let env_file = tmp.path().join("vars.env");
+        fs::write(
+            &env_file,
+            "\n# comment\nexport QUOTED=\"value\"\nSINGLE='two'\nPLAIN=three\n",
+        )
+        .expect("env file");
+        let parsed = parse_env_file(&env_file).expect("parse env");
+        assert_eq!(parsed.get("QUOTED").map(String::as_str), Some("value"));
+        assert_eq!(parsed.get("SINGLE").map(String::as_str), Some("two"));
+        assert_eq!(parsed.get("PLAIN").map(String::as_str), Some("three"));
+
+        let invalid_syntax = tmp.path().join("invalid-syntax.env");
+        fs::write(&invalid_syntax, "MISSING\n").expect("invalid syntax env");
+        assert!(
+            parse_env_file(&invalid_syntax)
+                .expect_err("missing equals")
+                .to_string()
+                .contains("must use KEY=VALUE syntax")
+        );
+
+        let invalid_key = tmp.path().join("invalid-key.env");
+        fs::write(&invalid_key, "=oops\n").expect("invalid key env");
+        assert!(
+            parse_env_file(&invalid_key)
+                .expect_err("empty key")
+                .to_string()
+                .contains("empty variable name")
+        );
+
+        assert_eq!(
+            settings_base_dir(&tmp.path().join("settings.toml")),
+            tmp.path()
+        );
+        assert_eq!(
+            resolve_string_path("compose.yaml", tmp.path()),
+            tmp.path().join("compose.yaml")
+        );
+        assert_eq!(
+            absolute_path(Path::new("/tmp/absolute"), tmp.path()),
+            PathBuf::from("/tmp/absolute")
+        );
+        assert!(quoted("\"value\"", '"'));
+        assert!(!quoted("value", '"'));
+    }
+
+    #[test]
+    fn resolve_with_explicit_settings_file_covers_defaults_and_errors() {
+        let tmp = tempfile::tempdir().expect("tmp");
+
+        let settings_dir = tmp.path().join("config");
+        fs::create_dir_all(&settings_dir).expect("settings dir");
+        let settings_path = settings_dir.join("settings.toml");
+
+        let mut settings = Settings::default();
+        settings.defaults.compose_file = Some("compose-default.yaml".into());
+        settings.defaults.env_files = vec!["defaults.env".into()];
+        settings
+            .defaults
+            .env
+            .insert("MAP".into(), "defaults-map".into());
+        settings.defaults.binaries.squeue = Some("/defaults/squeue".into());
+        write_settings(&settings_path, &settings).expect("write settings");
+
+        fs::write(
+            settings_dir.join("compose-default.yaml"),
+            "services:\n  app:\n    image: redis:7\n",
+        )
+        .expect("compose");
+        fs::write(settings_dir.join(".env"), "DOTENV=compose\n").expect("dotenv");
+        fs::write(settings_dir.join("defaults.env"), "FILE_ENV=defaults\n").expect("defaults env");
+
+        let resolved = resolve(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            settings_file: Some(settings_path.clone()),
+            ..ResolveRequest::default()
+        })
+        .expect("resolve explicit settings");
+        assert_eq!(resolved.compose_file.source, ValueSource::Defaults);
+        assert_eq!(resolved.binaries.squeue.source, ValueSource::Defaults);
+        assert_eq!(
+            resolved
+                .interpolation_vars
+                .get("DOTENV")
+                .map(String::as_str),
+            Some("compose")
+        );
+        assert_eq!(
+            resolved.interpolation_var_sources.get("DOTENV"),
+            Some(&ValueSource::Compose)
+        );
+        assert_eq!(
+            resolved
+                .interpolation_vars
+                .get("FILE_ENV")
+                .map(String::as_str),
+            Some("defaults")
+        );
+        assert_eq!(
+            resolved.interpolation_var_sources.get("FILE_ENV"),
+            Some(&ValueSource::Defaults)
+        );
+        assert_eq!(
+            resolved.interpolation_vars.get("MAP").map(String::as_str),
+            Some("defaults-map")
+        );
+        assert_eq!(resolved.settings_base_dir, Some(settings_dir.clone()));
+
+        let missing_settings = resolve(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            settings_file: Some(tmp.path().join("missing.toml")),
+            ..ResolveRequest::default()
+        })
+        .expect_err("missing settings");
+        assert!(
+            missing_settings
+                .to_string()
+                .contains("settings file does not exist")
+        );
+
+        let missing_profile = resolve(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            profile: Some("dev".into()),
+            ..ResolveRequest::default()
+        })
+        .expect_err("profile without settings");
+        assert!(
+            missing_profile
+                .to_string()
+                .contains("no settings file was found")
+        );
+
+        let bad_dir = tmp.path().join("bad");
+        fs::create_dir_all(&bad_dir).expect("bad dir");
+        let bad_settings_path = bad_dir.join("settings.toml");
+        let mut bad_settings = Settings::default();
+        bad_settings.defaults.compose_file = Some("compose.yaml".into());
+        bad_settings.defaults.env_files = vec!["missing.env".into()];
+        write_settings(&bad_settings_path, &bad_settings).expect("bad settings");
+        fs::write(
+            bad_dir.join("compose.yaml"),
+            "services:\n  app:\n    image: redis:7\n",
+        )
+        .expect("bad compose");
+
+        let missing_env = resolve(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            settings_file: Some(bad_settings_path),
+            ..ResolveRequest::default()
+        })
+        .expect_err("missing env file");
+        assert!(
+            missing_env
+                .to_string()
+                .contains("settings env file does not exist")
+        );
+    }
 }

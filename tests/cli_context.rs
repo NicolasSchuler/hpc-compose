@@ -343,6 +343,45 @@ compose_file = "missing.yaml"
 }
 
 #[test]
+fn context_text_reports_resume_export_and_interpolation_sources() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("local image");
+    fs::write(tmpdir.path().join(".env"), "FROM_DOTENV=hello\n").expect("dotenv");
+    write_compose(
+        tmpdir.path(),
+        "compose-context.yaml",
+        &format!(
+            r#"
+name: context-demo
+x-slurm:
+  cache_dir: ./cache
+  resume:
+    path: /shared/runs/demo
+  artifacts:
+    export_dir: ./results/${{SLURM_JOB_ID}}
+    paths:
+      - /hpc-compose/job/logs/**
+services:
+  app:
+    image: {}
+    environment:
+      FROM_DOTENV: ${{FROM_DOTENV}}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+
+    let output = run_cli(tmpdir.path(), &["context", "--format", "text"]);
+    assert_success(&output);
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("compose file:"));
+    assert!(stdout.contains("runtime paths:"));
+    assert!(stdout.contains("interpolation vars:"));
+}
+
+#[test]
 fn setup_interactive_writes_settings_and_is_idempotent() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let setup_input = "dev\ncompose.yaml\n.env,.env.dev\nCACHE_DIR=/shared/cache\nsrun=/opt/slurm/bin/srun\ndev\n";

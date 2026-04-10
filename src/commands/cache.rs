@@ -134,3 +134,100 @@ pub(crate) fn prune_no_context(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    use hpc_compose::context::{ResolvedBinaries, ResolvedValue, ValueSource};
+
+    fn write_compose(root: &std::path::Path) -> PathBuf {
+        let local_image = root.join("local.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        let cache_dir = root.join("cache");
+        fs::create_dir_all(&cache_dir).expect("cache dir");
+        let compose = root.join("compose.yaml");
+        fs::write(
+            &compose,
+            format!(
+                r#"
+name: cache-demo
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+                cache_dir.display(),
+                local_image.display()
+            ),
+        )
+        .expect("compose");
+        compose
+    }
+
+    fn context_for(compose: &std::path::Path) -> ResolvedContext {
+        let binary = |name: &str| ResolvedValue {
+            value: name.to_string(),
+            source: ValueSource::Builtin,
+        };
+        ResolvedContext {
+            cwd: compose.parent().expect("compose dir").to_path_buf(),
+            settings_path: None,
+            settings_base_dir: None,
+            selected_profile: None,
+            compose_file: ResolvedValue {
+                value: compose.to_path_buf(),
+                source: ValueSource::Cli,
+            },
+            binaries: ResolvedBinaries {
+                enroot: binary("enroot"),
+                sbatch: binary("sbatch"),
+                srun: binary("srun"),
+                squeue: binary("squeue"),
+                sacct: binary("sacct"),
+                sstat: binary("sstat"),
+                scancel: binary("scancel"),
+            },
+            interpolation_vars: BTreeMap::new(),
+            interpolation_var_sources: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn cache_commands_cover_json_and_error_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_compose(tmpdir.path());
+        let context = context_for(&compose);
+        let cache_dir = tmpdir.path().join("cache");
+
+        list(Some(cache_dir.clone()), Some(OutputFormat::Json)).expect("list");
+        inspect(
+            context.clone(),
+            Some("app".to_string()),
+            Some(OutputFormat::Json),
+        )
+        .expect("inspect");
+        prune(
+            context.clone(),
+            Some(cache_dir.clone()),
+            Some(999),
+            false,
+            Some(OutputFormat::Json),
+        )
+        .expect("prune age");
+        prune(context, None, None, true, Some(OutputFormat::Json)).expect("prune all unused");
+        prune_no_context(Some(cache_dir.clone()), Some(999), Some(OutputFormat::Json))
+            .expect("prune no context");
+        assert!(
+            prune_no_context(Some(cache_dir), None, None)
+                .expect_err("missing days")
+                .to_string()
+                .contains("day value")
+        );
+    }
+}

@@ -308,3 +308,149 @@ pub(crate) fn clean(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use hpc_compose::context::{ResolvedBinaries, ResolvedValue, ValueSource};
+
+    fn write_compose(root: &Path) -> PathBuf {
+        let compose = root.join("compose.yaml");
+        fs::write(
+            &compose,
+            format!(
+                "name: demo\nservices:\n  app:\n    image: docker://redis:7\nx-slurm:\n  cache_dir: {}\n",
+                root.join("cache").display()
+            ),
+        )
+        .expect("write compose");
+        compose
+    }
+
+    fn write_local_compose(root: &Path) -> PathBuf {
+        let local_image = root.join("local.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        let compose = root.join("compose-local.yaml");
+        fs::write(
+            &compose,
+            format!(
+                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n",
+                local_image.display(),
+                root.join("cache-local").display()
+            ),
+        )
+        .expect("write local compose");
+        compose
+    }
+
+    fn resolved_string(value: &str) -> ResolvedValue<String> {
+        ResolvedValue {
+            value: value.to_string(),
+            source: ValueSource::Cli,
+        }
+    }
+
+    fn context_for(compose: &Path, cwd: &Path) -> ResolvedContext {
+        ResolvedContext {
+            cwd: cwd.to_path_buf(),
+            settings_path: None,
+            settings_base_dir: None,
+            selected_profile: None,
+            compose_file: ResolvedValue {
+                value: compose.to_path_buf(),
+                source: ValueSource::Cli,
+            },
+            binaries: ResolvedBinaries {
+                enroot: resolved_string("/definitely/missing-enroot"),
+                sbatch: resolved_string("/definitely/missing-sbatch"),
+                srun: resolved_string("/definitely/missing-srun"),
+                squeue: resolved_string("/definitely/missing-squeue"),
+                sacct: resolved_string("/definitely/missing-sacct"),
+                sstat: resolved_string("/definitely/missing-sstat"),
+                scancel: resolved_string("/definitely/missing-scancel"),
+            },
+            interpolation_vars: BTreeMap::new(),
+            interpolation_var_sources: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn runtime_command_wrappers_cover_success_and_error_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_compose(tmpdir.path());
+        let context = context_for(&compose, tmpdir.path());
+        let local_compose = write_local_compose(tmpdir.path());
+
+        submit(
+            context_for(&local_compose, tmpdir.path()),
+            Some(tmpdir.path().join("job.sbatch")),
+            false,
+            true,
+            false,
+            true,
+            false,
+            true,
+        )
+        .expect("submit dry run");
+
+        let status_err = status(
+            context.clone(),
+            Some("12345".into()),
+            Some(OutputFormat::Json),
+            false,
+        )
+        .expect_err("status should require tracked metadata");
+        assert!(
+            status_err
+                .to_string()
+                .contains("no tracked submission metadata exists")
+        );
+
+        let stats_err = stats(
+            context.clone(),
+            Some("12345".into()),
+            false,
+            Some(StatsOutputFormat::Json),
+        )
+        .expect_err("stats should surface scheduler execution failure");
+        assert!(stats_err.to_string().contains("failed to execute"));
+
+        let artifacts_err = artifacts(
+            context.clone(),
+            None,
+            Some(OutputFormat::Json),
+            false,
+            Vec::new(),
+            false,
+        )
+        .expect_err("artifacts should require a tracked submission");
+        assert!(
+            artifacts_err
+                .to_string()
+                .contains("no tracked submission metadata exists")
+        );
+
+        let logs_err = logs(context.clone(), None, None, false, 10)
+            .expect_err("logs should require a tracked submission");
+        assert!(
+            logs_err
+                .to_string()
+                .contains("no tracked submission metadata exists")
+        );
+
+        jobs_list(false, Some(OutputFormat::Json)).expect("jobs list");
+        clean(
+            context,
+            Some(7),
+            false,
+            true,
+            true,
+            Some(OutputFormat::Json),
+        )
+        .expect("clean");
+    }
+}

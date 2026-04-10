@@ -355,3 +355,119 @@ fn has_long_flag(options: &GlobalCommandOptions, long_flag: &str) -> bool {
                 .is_some_and(|value| value.starts_with(&format!("{long_flag}=")))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flag_helpers_and_strategy_validation_cover_remaining_paths() {
+        let options = GlobalCommandOptions {
+            raw_args: vec![
+                OsString::from("-f"),
+                OsString::from("compose.yaml"),
+                OsString::from("--srun-bin=/opt/slurm/bin/srun"),
+                OsString::from("--sbatch-bin"),
+            ],
+            ..GlobalCommandOptions::default()
+        };
+        assert!(value_is_explicit(&options, "--file"));
+        assert!(has_short_flag(&options, "-f"));
+        assert!(has_long_flag(&options, "--srun-bin"));
+        assert!(has_long_flag(&options, "--sbatch-bin"));
+        assert!(!value_is_explicit(&options, "--enroot-bin"));
+
+        let assume_explicit = GlobalCommandOptions {
+            assume_explicit_values: true,
+            ..GlobalCommandOptions::default()
+        };
+        assert!(value_is_explicit(&assume_explicit, "--any-flag"));
+
+        let missing_cache_strategy = run_command(Commands::Cache {
+            command: CacheCommands::Prune {
+                file: None,
+                cache_dir: None,
+                age: None,
+                all_unused: false,
+                format: None,
+            },
+        })
+        .expect_err("cache prune should require a strategy");
+        assert!(
+            missing_cache_strategy
+                .to_string()
+                .contains("either --age DAYS or --all-unused")
+        );
+
+        let conflicting_cache_strategy = run_command(Commands::Cache {
+            command: CacheCommands::Prune {
+                file: Some(PathBuf::from("compose.yaml")),
+                cache_dir: None,
+                age: Some(1),
+                all_unused: true,
+                format: None,
+            },
+        })
+        .expect_err("cache prune should reject multiple strategies");
+        assert!(
+            conflicting_cache_strategy
+                .to_string()
+                .contains("accepts only one strategy")
+        );
+
+        let all_unused_without_file = run_command(Commands::Cache {
+            command: CacheCommands::Prune {
+                file: None,
+                cache_dir: None,
+                age: None,
+                all_unused: true,
+                format: None,
+            },
+        })
+        .expect_err("all-unused requires a file");
+        assert!(
+            all_unused_without_file
+                .to_string()
+                .contains("requires -f/--file")
+        );
+
+        let missing_clean_strategy = run_command(Commands::Clean {
+            file: None,
+            age: None,
+            all: false,
+            dry_run: false,
+            disk_usage: false,
+            format: None,
+        })
+        .expect_err("clean should require a strategy");
+        assert!(
+            missing_clean_strategy
+                .to_string()
+                .contains("clean requires either --age DAYS or --all")
+        );
+    }
+
+    #[test]
+    fn run_cli_dispatches_jobs_list() {
+        run_cli(
+            Cli {
+                profile: None,
+                settings_file: None,
+                command: Commands::Jobs {
+                    command: JobsCommands::List {
+                        disk_usage: false,
+                        format: Some(hpc_compose::cli::OutputFormat::Json),
+                    },
+                },
+            },
+            &[
+                OsString::from("hpc-compose"),
+                OsString::from("jobs"),
+                OsString::from("list"),
+                OsString::from("--format"),
+                OsString::from("json"),
+            ],
+        )
+        .expect("run cli jobs list");
+    }
+}

@@ -340,3 +340,208 @@ fn absolute_path(path: &Path, cwd: &Path) -> PathBuf {
         cwd.join(path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io::Cursor;
+
+    use clap_complete::Shell;
+    use hpc_compose::context::load_settings;
+
+    #[test]
+    fn helper_parsers_cover_success_and_error_paths() {
+        assert_eq!(
+            parse_csv_entries(" .env , .env.dev ,,"),
+            vec![".env".to_string(), ".env.dev".to_string()]
+        );
+        assert_eq!(
+            dedup_preserve_order(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "a".to_string(),
+                "c".to_string(),
+            ]),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+
+        let env = parse_env_entries(&["A=1".to_string(), "B=two".to_string()]).expect("env");
+        assert_eq!(env.get("A"), Some(&"1".to_string()));
+        assert_eq!(env.get("B"), Some(&"two".to_string()));
+        assert!(
+            parse_env_entries(&["missing".to_string()])
+                .expect_err("missing equals")
+                .to_string()
+                .contains("expected KEY=VALUE")
+        );
+        assert!(
+            parse_env_entries(&[" =value".to_string()])
+                .expect_err("empty key")
+                .to_string()
+                .contains("key must not be empty")
+        );
+
+        let binaries = parse_binary_entries(&[
+            "enroot=/bin/enroot".to_string(),
+            "sbatch=/bin/sbatch".to_string(),
+            "srun=/bin/srun".to_string(),
+            "squeue=/bin/squeue".to_string(),
+            "sacct=/bin/sacct".to_string(),
+            "sstat=/bin/sstat".to_string(),
+            "scancel=/bin/scancel".to_string(),
+        ])
+        .expect("binaries");
+        assert_eq!(binaries.enroot.as_deref(), Some("/bin/enroot"));
+        assert_eq!(binaries.scancel.as_deref(), Some("/bin/scancel"));
+        let formatted = format_binary_entries(&binaries);
+        assert!(formatted.contains("enroot=/bin/enroot"));
+        assert!(formatted.contains("scancel=/bin/scancel"));
+        assert!(
+            parse_binary_entries(&["unknown=/bin/x".to_string()])
+                .expect_err("unknown binary")
+                .to_string()
+                .contains("invalid binary name")
+        );
+        assert!(
+            parse_binary_entries(&["srun=".to_string()])
+                .expect_err("empty path")
+                .to_string()
+                .contains("path must not be empty")
+        );
+
+        let cwd = Path::new("/tmp/project");
+        assert_eq!(
+            absolute_path(Path::new("compose.yaml"), cwd),
+            cwd.join("compose.yaml")
+        );
+        assert_eq!(
+            absolute_path(Path::new("/tmp/abs"), cwd),
+            PathBuf::from("/tmp/abs")
+        );
+    }
+
+    #[test]
+    fn setup_non_interactive_writes_and_reuses_settings() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let settings_path = tmpdir.path().join(".hpc-compose/settings.toml");
+
+        setup(
+            Some(settings_path.clone()),
+            Some("dev".to_string()),
+            None,
+            Some("compose.yaml".to_string()),
+            vec![
+                ".env".to_string(),
+                ".env".to_string(),
+                ".env.dev".to_string(),
+            ],
+            vec!["CACHE_DIR=/shared/cache".to_string()],
+            vec!["srun=/opt/slurm/bin/srun".to_string()],
+            Some("dev".to_string()),
+            true,
+        )
+        .expect("setup");
+
+        let settings = load_settings(&settings_path).expect("load settings");
+        assert_eq!(settings.default_profile.as_deref(), Some("dev"));
+        let profile = settings.profiles.get("dev").expect("dev profile");
+        assert_eq!(profile.compose_file.as_deref(), Some("compose.yaml"));
+        assert_eq!(
+            profile.env_files,
+            vec![".env".to_string(), ".env.dev".to_string()]
+        );
+        assert_eq!(
+            profile.env.get("CACHE_DIR"),
+            Some(&"/shared/cache".to_string())
+        );
+        assert_eq!(
+            profile.binaries.srun.as_deref(),
+            Some("/opt/slurm/bin/srun")
+        );
+
+        setup(
+            Some(settings_path.clone()),
+            None,
+            Some("dev".to_string()),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            true,
+        )
+        .expect("setup reuse");
+        let reused = load_settings(&settings_path).expect("reload settings");
+        let reused_profile = reused.profiles.get("dev").expect("dev profile");
+        assert_eq!(reused_profile.compose_file.as_deref(), Some("compose.yaml"));
+        assert_eq!(
+            reused_profile.env_files,
+            vec![".env".to_string(), ".env.dev".to_string()]
+        );
+        assert_eq!(
+            reused_profile.binaries.srun.as_deref(),
+            Some("/opt/slurm/bin/srun")
+        );
+    }
+
+    #[test]
+    fn completions_emits_supported_shell_output() {
+        completions(Shell::Bash).expect("bash completions");
+        completions(Shell::Zsh).expect("zsh completions");
+    }
+
+    #[test]
+    fn init_command_and_prompt_cover_remaining_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let output_path = tmpdir.path().join("compose.yaml");
+
+        init(
+            Some("dev-python-app".to_string()),
+            false,
+            None,
+            Some("demo-app".to_string()),
+            Some("/shared/cache".to_string()),
+            output_path.clone(),
+            false,
+        )
+        .expect("init writes template");
+        assert!(output_path.exists());
+
+        init(
+            None,
+            true,
+            None,
+            None,
+            None,
+            tmpdir.path().join("ignored.yaml"),
+            false,
+        )
+        .expect("list templates");
+        init(
+            None,
+            false,
+            Some("dev-python-app".to_string()),
+            None,
+            None,
+            tmpdir.path().join("ignored.yaml"),
+            false,
+        )
+        .expect("describe template");
+
+        let mut default_input = Cursor::new(b"\n");
+        let mut captured = Vec::new();
+        assert_eq!(
+            prompt(&mut default_input, &mut captured, "Profile name", "dev")
+                .expect("default prompt"),
+            "dev"
+        );
+
+        let mut explicit_input = Cursor::new(b"prod\n");
+        assert_eq!(
+            prompt(&mut explicit_input, &mut captured, "Profile name", "dev")
+                .expect("explicit prompt"),
+            "prod"
+        );
+    }
+}

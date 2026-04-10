@@ -118,3 +118,29 @@ fn jobs_list_reports_disk_usage_in_json_when_requested() {
     assert_eq!(jobs[0]["job_id"], Value::from("44444"));
     assert!(jobs[0]["disk_usage_bytes"].as_u64().unwrap_or(0) > 0);
 }
+
+#[test]
+fn jobs_list_reports_disk_usage_in_text_when_requested() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let submit_dir = tmpdir.path().join("submit");
+
+    write_record(&compose, &submit_dir, "55555", 50);
+    let runtime_dir = submit_dir.join(".hpc-compose/55555/logs");
+    fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    fs::write(runtime_dir.join("app.log"), "hello world\n").expect("runtime log");
+
+    let text = run_cli(&project, &["jobs", "list", "--disk-usage"]);
+    assert_success(&text);
+    let stdout = stdout_text(&text);
+    assert!(stdout.contains("scan root:"));
+    assert!(stdout.contains("* 55555"));
+    assert!(stdout.contains("runtime=runtime"));
+    assert!(stdout.contains("size="));
+}

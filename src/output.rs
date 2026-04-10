@@ -1503,10 +1503,10 @@ mod tests {
     use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
     use hpc_compose::cli::{CacheCommands, Commands};
     use hpc_compose::job::{
-        ArtifactExportReport, ArtifactManifest, BatchLogStatus, CollectorStatus, GpuDeviceSample,
-        GpuProcessSample, GpuSnapshot, QueueDiagnostics, SamplerSnapshot, SchedulerSource,
-        SchedulerStatus, ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats,
-        SubmissionRecord,
+        ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
+        CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, JobInventoryEntry,
+        JobInventoryScan, QueueDiagnostics, SamplerSnapshot, SchedulerSource, SchedulerStatus,
+        ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats, SubmissionRecord,
     };
     use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use hpc_compose::spec::{
@@ -2430,6 +2430,151 @@ services:
         )
         .expect_err("missing binary");
         assert!(err.to_string().contains("failed to execute"));
+    }
+
+    #[test]
+    fn stdout_entrypoints_cover_public_output_wrappers() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache_root = safe_cache_dir();
+        let cache_dir = cache_root.path().to_path_buf();
+        let compose = write_valid_compose(tmpdir.path(), &cache_dir);
+        let plan = load_plan(&compose).expect("plan");
+        let runtime = build_runtime_plan(&plan);
+        let record = submission_record(tmpdir.path(), &runtime, "12345");
+
+        let status = StatusSnapshot {
+            record: record.clone(),
+            scheduler: SchedulerStatus {
+                state: "RUNNING".into(),
+                source: SchedulerSource::Squeue,
+                terminal: false,
+                failed: false,
+                detail: Some("visible".into()),
+            },
+            queue_diagnostics: Some(QueueDiagnostics {
+                pending_reason: None,
+                eligible_time: Some("2026-04-06T10:00:00".into()),
+                start_time: Some("2026-04-06T10:05:00".into()),
+            }),
+            log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
+            batch_log: BatchLogStatus {
+                path: tmpdir.path().join("slurm-12345.out"),
+                present: false,
+                updated_at: None,
+                updated_age_seconds: None,
+            },
+            services: Vec::new(),
+            attempt: Some(1),
+            is_resume: Some(false),
+            resume_dir: None,
+        };
+
+        let stats = StatsSnapshot {
+            job_id: "12345".into(),
+            record: Some(record.clone()),
+            metrics_dir: Some(tmpdir.path().join(".hpc-compose/12345/metrics")),
+            scheduler: SchedulerStatus {
+                state: "RUNNING".into(),
+                source: SchedulerSource::Squeue,
+                terminal: false,
+                failed: false,
+                detail: None,
+            },
+            available: true,
+            reason: None,
+            source: "sstat".into(),
+            notes: Vec::new(),
+            sampler: None,
+            steps: vec![sample_step()],
+            attempt: Some(1),
+            is_resume: Some(false),
+            resume_dir: None,
+        };
+
+        let artifact_report = ArtifactExportReport {
+            record: record.clone(),
+            manifest_path: tmpdir.path().join("manifest.json"),
+            payload_dir: tmpdir.path().join("payload"),
+            export_dir: tmpdir.path().join("results"),
+            manifest: ArtifactManifest {
+                schema_version: 2,
+                job_id: "12345".into(),
+                collect_policy: "always".into(),
+                collected_at: "2026-04-05T10:00:00Z".into(),
+                job_outcome: "success".into(),
+                attempt: Some(1),
+                is_resume: Some(false),
+                resume_dir: None,
+                declared_source_patterns: vec!["/x/**".into()],
+                matched_source_paths: vec!["/x/a".into()],
+                copied_relative_paths: vec!["a".into()],
+                warnings: Vec::new(),
+                bundles: BTreeMap::new(),
+            },
+            selected_bundles: vec!["default".into()],
+            bundles: Vec::new(),
+            exported_paths: vec![tmpdir.path().join("results/a")],
+            tarball_paths: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let inventory = JobInventoryEntry {
+            compose_file: compose.clone(),
+            compose_metadata_root: tmpdir.path().join(".hpc-compose"),
+            job_id: "12345".into(),
+            is_latest: true,
+            submitted_at: 1_775_807_600,
+            age_seconds: 42,
+            submit_dir: tmpdir.path().to_path_buf(),
+            record_path: tmpdir.path().join(".hpc-compose/jobs/12345.json"),
+            runtime_job_root: tmpdir.path().join(".hpc-compose/12345"),
+            runtime_job_root_present: true,
+            legacy_runtime_job_root: tmpdir.path().join(".hpc-compose/legacy/12345"),
+            legacy_runtime_job_root_present: false,
+            disk_usage_bytes: Some(2_048),
+        };
+        let scan = JobInventoryScan {
+            scan_root: tmpdir.path().to_path_buf(),
+            jobs: vec![inventory.clone()],
+        };
+        let cleanup = CleanupReport {
+            compose_file: compose,
+            mode: "age".into(),
+            dry_run: true,
+            removed_job_ids: vec!["12345".into()],
+            kept_job_ids: vec!["67890".into()],
+            latest_job_id_before: Some("12345".into()),
+            latest_job_id_after: Some("67890".into()),
+            total_bytes_reclaimed: Some(2_048),
+            jobs: vec![CleanupJobReport {
+                inventory,
+                selected: true,
+                bytes_reclaimed: Some(2_048),
+                removable_paths: vec![tmpdir.path().join(".hpc-compose/jobs/12345.json")],
+            }],
+        };
+
+        assert_eq!(
+            resolve_stats_output_format(None, false),
+            StatsOutputFormat::Text
+        );
+        assert_eq!(
+            resolve_stats_output_format(Some(StatsOutputFormat::Csv), false),
+            StatsOutputFormat::Csv
+        );
+        assert_eq!(
+            resolve_stats_output_format(Some(StatsOutputFormat::Text), true),
+            StatsOutputFormat::Json
+        );
+
+        print_status_snapshot(&status);
+        print_stats_snapshot(&stats);
+        print_artifact_export_report(&artifact_report);
+        print_plan_inspect_verbose(&plan, &runtime);
+        print_job_inventory_scan(&scan, true);
+        print_cleanup_report(&cleanup, true);
+        print_template_list();
+        print_template_description("dev-python-app").expect("template description");
     }
 
     #[test]

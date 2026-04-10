@@ -845,6 +845,70 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
 }
 
 #[test]
+fn stats_command_supports_csv_output() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let squeue_state = tmpdir.path().join("stats-csv-squeue.state");
+    let sacct_state = tmpdir.path().join("stats-csv-sacct.state");
+    fs::write(&squeue_state, "RUNNING\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let sstat_output = tmpdir.path().join("stats-csv.output");
+    fs::write(
+        &sstat_output,
+        "\
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
+12345.0|1|00:00:10|512M|1G|cpu=1,mem=4G,gres/gpu=1|cpu=00:00:10,gres/gpuutil=65,gres/gpumem=1024M
+",
+    )
+    .expect("sstat output");
+    let sstat = write_fake_sstat(tmpdir.path(), &sstat_output);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let stats_csv = run_cli(
+        tmpdir.path(),
+        &[
+            "stats",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "csv",
+            "--sstat-bin",
+            sstat.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&stats_csv);
+    let stdout = stdout_text(&stats_csv);
+    assert!(stdout.contains("job_id,scheduler_state,scheduler_source,stats_source"));
+    assert!(stdout.contains("\"12345\",\"RUNNING\",\"squeue\",\"sstat\""));
+}
+
+#[test]
 fn stats_command_prefers_sampler_metrics_when_present() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -1357,6 +1421,37 @@ fn submit_watch_covers_completed_and_failed_states() {
 }
 
 #[test]
+fn submit_watch_skips_when_job_id_is_not_trackable() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let sbatch = tmpdir.path().join("sbatch-no-job-id");
+    write_script(
+        &sbatch,
+        "#!/bin/bash\nset -euo pipefail\necho 'submitted without parsable id'\n",
+    );
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--watch",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let stdout = stdout_text(&submit);
+    assert!(stdout.contains("did not include a numeric Slurm job id"));
+    assert!(stdout.contains("skipping watch because the submission is not trackable"));
+}
+
+#[test]
 fn logs_follow_streams_appended_lines() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -1450,6 +1545,32 @@ fn submit_dry_run_skips_sbatch() {
     assert!(out.contains("dry run: skipping sbatch submission"));
     assert!(!out.contains("Submitted batch job"));
     assert!(script_out.exists());
+}
+
+#[test]
+fn submit_reports_script_write_errors_before_submission() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let script_out = tmpdir.path().join("missing/script/out.sbatch");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            write_fake_sbatch(tmpdir.path()).to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("failed to write rendered script"));
 }
 
 #[test]
@@ -1903,6 +2024,52 @@ fn clean_command_removes_old_job_directories() {
     assert!(!tmpdir.path().join(".hpc-compose/jobs/12345.json").exists());
     assert!(!runtime_dir.exists());
     assert!(!tmpdir.path().join(".hpc-compose/latest.json").exists());
+}
+
+#[test]
+fn clean_text_reports_selected_jobs_and_kept_ids() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+
+    let mut old_record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("submit-old.sbatch"),
+        &plan,
+        "11111",
+    )
+    .expect("old record");
+    old_record.submitted_at = 1;
+    write_submission_record(&old_record).expect("write old");
+
+    let mut latest_record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("submit-latest.sbatch"),
+        &plan,
+        "22222",
+    )
+    .expect("latest record");
+    latest_record.submitted_at = u64::MAX / 2;
+    write_submission_record(&latest_record).expect("write latest");
+
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose/11111/logs")).expect("old runtime");
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose/22222/logs")).expect("latest runtime");
+
+    let clean = run_cli(
+        tmpdir.path(),
+        &["clean", "--age", "0", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&clean);
+    let stdout = stdout_text(&clean);
+    assert!(stdout.contains("mode: age"));
+    assert!(stdout.contains("selected jobs: 1"));
+    assert!(stdout.contains("selected ids: 11111"));
+    assert!(stdout.contains("kept ids: 22222"));
+    assert!(stdout.contains("removed 11111"));
 }
 
 #[test]

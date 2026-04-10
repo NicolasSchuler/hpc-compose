@@ -404,3 +404,316 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use hpc_compose::context::{ResolvedBinaries, ResolvedContext};
+
+    fn write_script(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("script");
+        let mut perms = fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    fn write_compose(root: &std::path::Path) -> PathBuf {
+        let local_image = root.join("local.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        let cache_dir = root.join("cache");
+        fs::create_dir_all(&cache_dir).expect("cache dir");
+        let compose = root.join("compose.yaml");
+        fs::write(
+            &compose,
+            format!(
+                r#"
+name: command-demo
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+                cache_dir.display(),
+                local_image.display()
+            ),
+        )
+        .expect("compose");
+        compose
+    }
+
+    fn write_remote_compose(root: &std::path::Path) -> PathBuf {
+        let cache_dir = root.join("cache-remote");
+        fs::create_dir_all(&cache_dir).expect("remote cache dir");
+        let compose = root.join("compose-remote.yaml");
+        fs::write(
+            &compose,
+            format!(
+                r#"
+name: remote-demo
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: redis:7
+    command: /bin/true
+"#,
+                cache_dir.display()
+            ),
+        )
+        .expect("remote compose");
+        compose
+    }
+
+    fn write_context_compose(root: &std::path::Path) -> PathBuf {
+        let local_image = root.join("context.sqsh");
+        fs::write(&local_image, "sqsh").expect("context image");
+        let cache_dir = root.join("cache-context");
+        fs::create_dir_all(&cache_dir).expect("context cache");
+        let compose = root.join("compose-context.yaml");
+        fs::write(
+            &compose,
+            format!(
+                r#"
+name: context-demo
+x-slurm:
+  cache_dir: {}
+  resume:
+    path: /shared/runs/demo
+  artifacts:
+    export_dir: ./results/${{SLURM_JOB_ID}}
+    paths:
+      - /hpc-compose/job/logs/**
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+                cache_dir.display(),
+                local_image.display()
+            ),
+        )
+        .expect("context compose");
+        compose
+    }
+
+    fn write_missing_image_compose(root: &std::path::Path) -> PathBuf {
+        let cache_dir = root.join("cache-missing");
+        fs::create_dir_all(&cache_dir).expect("missing cache");
+        let compose = root.join("compose-missing.yaml");
+        fs::write(
+            &compose,
+            format!(
+                r#"
+name: missing-demo
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+                cache_dir.display(),
+                root.join("missing.sqsh").display()
+            ),
+        )
+        .expect("missing compose");
+        compose
+    }
+
+    fn binaries(root: &std::path::Path) -> ResolvedBinaries {
+        let enroot = root.join("enroot");
+        let sbatch = root.join("sbatch");
+        let srun = root.join("srun");
+        write_script(&enroot, "#!/bin/bash\nexit 0\n");
+        write_script(&sbatch, "#!/bin/bash\nexit 0\n");
+        write_script(
+            &srun,
+            "#!/bin/bash\nif [ \"$1\" = \"--help\" ]; then echo '--container-image'; fi\nexit 0\n",
+        );
+        let resolved = |value: &std::path::Path| ResolvedValue {
+            value: value.display().to_string(),
+            source: ValueSource::Cli,
+        };
+        ResolvedBinaries {
+            enroot: resolved(&enroot),
+            sbatch: resolved(&sbatch),
+            srun: resolved(&srun),
+            squeue: ResolvedValue {
+                value: "squeue".to_string(),
+                source: ValueSource::Builtin,
+            },
+            sacct: ResolvedValue {
+                value: "sacct".to_string(),
+                source: ValueSource::Builtin,
+            },
+            sstat: ResolvedValue {
+                value: "sstat".to_string(),
+                source: ValueSource::Builtin,
+            },
+            scancel: ResolvedValue {
+                value: "scancel".to_string(),
+                source: ValueSource::Builtin,
+            },
+        }
+    }
+
+    fn context_for(compose: &std::path::Path, root: &std::path::Path) -> ResolvedContext {
+        ResolvedContext {
+            cwd: root.to_path_buf(),
+            settings_path: None,
+            settings_base_dir: None,
+            selected_profile: None,
+            compose_file: ResolvedValue {
+                value: compose.to_path_buf(),
+                source: ValueSource::Cli,
+            },
+            binaries: binaries(root),
+            interpolation_vars: BTreeMap::new(),
+            interpolation_var_sources: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn command_wrappers_cover_json_and_text_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_compose(tmpdir.path());
+        let resolved_context = context_for(&compose, tmpdir.path());
+
+        validate(resolved_context.clone(), false, Some(OutputFormat::Json)).expect("validate json");
+        render(resolved_context.clone(), None, Some(OutputFormat::Json)).expect("render json");
+        render(
+            resolved_context.clone(),
+            Some(tmpdir.path().join("rendered.sbatch")),
+            Some(OutputFormat::Json),
+        )
+        .expect("render file json");
+        prepare(
+            resolved_context.clone(),
+            false,
+            true,
+            Some(OutputFormat::Json),
+        )
+        .expect("prepare json");
+        preflight(
+            resolved_context.clone(),
+            false,
+            true,
+            Some(OutputFormat::Json),
+            false,
+        )
+        .expect("preflight json");
+        inspect(
+            resolved_context.clone(),
+            false,
+            Some(OutputFormat::Json),
+            false,
+        )
+        .expect("inspect json");
+        context(resolved_context.clone(), Some(OutputFormat::Json)).expect("context json");
+        context(resolved_context, None).expect("context text");
+    }
+
+    #[test]
+    fn context_succeeds_when_compose_cannot_be_loaded() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let missing = tmpdir.path().join("missing.yaml");
+        let resolved_context = context_for(&missing, tmpdir.path());
+        context(resolved_context.clone(), Some(OutputFormat::Json)).expect("context json");
+        context(resolved_context, None).expect("context text");
+    }
+
+    #[test]
+    fn render_preflight_and_context_cover_error_and_optional_text_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_compose(tmpdir.path());
+        let resolved_context = context_for(&compose, tmpdir.path());
+
+        let render_err = render(
+            resolved_context.clone(),
+            Some(tmpdir.path().join("missing/output/rendered.sbatch")),
+            None,
+        )
+        .expect_err("render should report write failures");
+        assert!(
+            render_err
+                .to_string()
+                .contains("failed to write rendered script")
+        );
+
+        let remote_compose = write_remote_compose(tmpdir.path());
+        let strict_warning_context = context_for(&remote_compose, tmpdir.path());
+        let strict_warning =
+            preflight(strict_warning_context, true, false, None, false).expect_err("warnings");
+        assert!(
+            strict_warning
+                .to_string()
+                .contains("preflight reported warnings")
+        );
+
+        let missing_compose = write_missing_image_compose(tmpdir.path());
+        let missing_context = context_for(&missing_compose, tmpdir.path());
+        let preflight_err =
+            preflight(missing_context, false, false, None, false).expect_err("missing image");
+        assert!(preflight_err.to_string().contains("preflight failed"));
+
+        let context_compose = write_context_compose(tmpdir.path());
+        let mut context_with_vars = context_for(&context_compose, tmpdir.path());
+        context_with_vars
+            .interpolation_vars
+            .insert("EXTRA_VAR".into(), "value".into());
+        context_with_vars
+            .interpolation_var_sources
+            .insert("EXTRA_VAR".into(), ValueSource::Profile);
+        context(context_with_vars, None).expect("context text with optional fields");
+    }
+
+    #[test]
+    fn validate_render_and_inspect_cover_additional_text_and_strict_env_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_compose(tmpdir.path());
+        let resolved_context = context_for(&compose, tmpdir.path());
+
+        validate(resolved_context.clone(), false, None).expect("validate text");
+        render(
+            resolved_context.clone(),
+            Some(tmpdir.path().join("rendered-text.sbatch")),
+            None,
+        )
+        .expect("render text");
+        inspect(resolved_context, true, None, false).expect("inspect verbose text");
+
+        let strict_compose = tmpdir.path().join("compose-strict.yaml");
+        fs::create_dir_all(tmpdir.path().join("cache-strict")).expect("strict cache");
+        fs::write(
+            &strict_compose,
+            format!(
+                r#"
+name: strict-demo
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: redis:7
+    command: /bin/sh -lc "echo ${{NEEDS_DEFAULT:-fallback}}"
+"#,
+                tmpdir.path().join("cache-strict").display()
+            ),
+        )
+        .expect("strict compose");
+        let strict_context = context_for(&strict_compose, tmpdir.path());
+        let strict_err =
+            validate(strict_context, true, Some(OutputFormat::Json)).expect_err("strict env");
+        assert!(
+            strict_err
+                .to_string()
+                .contains("strict env validation failed")
+        );
+    }
+}
