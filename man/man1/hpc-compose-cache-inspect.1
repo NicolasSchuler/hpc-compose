@@ -12,13 +12,19 @@ Show which cached artifacts the current compose plan expects to reuse or rebuild
 .SH OPTIONS
 .TP
 \fB-f\fR, \fB--file\fR \fIFILE\fR
-Compose specification file to read. Default: compose.yaml.
+Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP
 \fB--service\fR \fISERVICE\fR
 Limit the report to one service.
 .TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.
+.TP
+\fB--profile\fR \fINAME\fR
+Profile name to load from .hpc\-compose/settings.toml.
+.TP
+\fB--settings\-file\fR \fIPATH\fR
+Explicit settings file path; defaults to upward search for .hpc\-compose/settings.toml.
 .TP
 \fB-h\fR, \fB--help\fR
 Print help (see a summary with '\-h').

@@ -6,10 +6,11 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
+use hpc_compose::context::ResolvedContext;
 use hpc_compose::job::{
-    ArtifactExportOptions, SchedulerOptions, StatsOptions, build_stats_snapshot,
-    build_status_snapshot, build_submission_record, clean_all_except_latest, clean_by_age,
-    export_artifacts, load_submission_record, print_logs, watch_submission,
+    ArtifactExportOptions, CleanupMode, SchedulerOptions, StatsOptions, build_cleanup_report,
+    build_stats_snapshot, build_status_snapshot, build_submission_record, export_artifacts,
+    load_submission_record, print_logs, run_cleanup_report, scan_job_inventory, watch_submission,
     write_submission_record,
 };
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
@@ -20,13 +21,8 @@ use crate::output;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn submit(
-    file: PathBuf,
+    context: ResolvedContext,
     script_out: Option<PathBuf>,
-    sbatch_bin: String,
-    srun_bin: String,
-    enroot_bin: String,
-    squeue_bin: String,
-    sacct_bin: String,
     keep_failed_prep: bool,
     skip_prepare: bool,
     force_rebuild: bool,
@@ -34,16 +30,20 @@ pub(crate) fn submit(
     watch: bool,
     dry_run: bool,
 ) -> Result<()> {
-    let runtime_plan = output::load_runtime_plan(&file)?;
+    let file = context.compose_file.value.clone();
+    let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+    )?;
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
 
     if !no_preflight {
         let report = run_preflight(
             &runtime_plan,
             &PreflightOptions {
-                enroot_bin: enroot_bin.clone(),
-                sbatch_bin: sbatch_bin.clone(),
-                srun_bin,
+                enroot_bin: context.binaries.enroot.value.clone(),
+                sbatch_bin: context.binaries.sbatch.value.clone(),
+                srun_bin: context.binaries.srun.value.clone(),
                 scontrol_bin: "scontrol".to_string(),
                 require_submit_tools: true,
                 skip_prepare,
@@ -59,7 +59,7 @@ pub(crate) fn submit(
         let summary = prepare_runtime_plan(
             &runtime_plan,
             &PrepareOptions {
-                enroot_bin,
+                enroot_bin: context.binaries.enroot.value.clone(),
                 keep_failed_prep,
                 force_rebuild,
             },
@@ -83,10 +83,10 @@ pub(crate) fn submit(
         return Ok(());
     }
 
-    let output_result = Command::new(&sbatch_bin)
+    let output_result = Command::new(&context.binaries.sbatch.value)
         .arg(&script_path)
         .output()
-        .with_context(|| format!("failed to execute '{sbatch_bin}'"))?;
+        .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))?;
     if !output_result.status.success() {
         bail!(
             "sbatch failed: {}",
@@ -141,8 +141,8 @@ pub(crate) fn submit(
             watch_submission(
                 record,
                 &SchedulerOptions {
-                    squeue_bin,
-                    sacct_bin,
+                    squeue_bin: context.binaries.squeue.value.clone(),
+                    sacct_bin: context.binaries.sacct.value.clone(),
                 },
                 100,
             )?,
@@ -152,19 +152,17 @@ pub(crate) fn submit(
 }
 
 pub(crate) fn status(
-    file: PathBuf,
+    context: ResolvedContext,
     job_id: Option<String>,
     format: Option<OutputFormat>,
     json: bool,
-    squeue_bin: String,
-    sacct_bin: String,
 ) -> Result<()> {
     let snapshot = build_status_snapshot(
-        &file,
+        &context.compose_file.value,
         job_id.as_deref(),
         &SchedulerOptions {
-            squeue_bin,
-            sacct_bin,
+            squeue_bin: context.binaries.squeue.value,
+            sacct_bin: context.binaries.sacct.value,
         },
     )?;
     match output::resolve_output_format(format, json) {
@@ -181,23 +179,20 @@ pub(crate) fn status(
 }
 
 pub(crate) fn stats(
-    file: PathBuf,
+    context: ResolvedContext,
     job_id: Option<String>,
     json: bool,
     format: Option<StatsOutputFormat>,
-    sstat_bin: String,
-    squeue_bin: String,
-    sacct_bin: String,
 ) -> Result<()> {
     let snapshot = build_stats_snapshot(
-        &file,
+        &context.compose_file.value,
         job_id.as_deref(),
         &StatsOptions {
             scheduler: SchedulerOptions {
-                squeue_bin,
-                sacct_bin,
+                squeue_bin: context.binaries.squeue.value,
+                sacct_bin: context.binaries.sacct.value,
             },
-            sstat_bin,
+            sstat_bin: context.binaries.sstat.value,
         },
     )?;
     match output::resolve_stats_output_format(format, json) {
@@ -220,7 +215,7 @@ pub(crate) fn stats(
 }
 
 pub(crate) fn artifacts(
-    file: PathBuf,
+    context: ResolvedContext,
     job_id: Option<String>,
     format: Option<OutputFormat>,
     json: bool,
@@ -228,7 +223,7 @@ pub(crate) fn artifacts(
     tarball: bool,
 ) -> Result<()> {
     let report = export_artifacts(
-        &file,
+        &context.compose_file.value,
         job_id.as_deref(),
         &ArtifactExportOptions {
             selected_bundles: bundles,
@@ -249,39 +244,67 @@ pub(crate) fn artifacts(
 }
 
 pub(crate) fn logs(
-    file: PathBuf,
+    context: ResolvedContext,
     job_id: Option<String>,
     service: Option<String>,
     follow: bool,
     lines: usize,
 ) -> Result<()> {
-    let record = load_submission_record(&file, job_id.as_deref())?;
+    let record = load_submission_record(&context.compose_file.value, job_id.as_deref())?;
     print_logs(&record, service.as_deref(), lines, follow)
 }
 
-pub(crate) fn cancel(file: PathBuf, job_id: Option<String>, scancel_bin: String) -> Result<()> {
+pub(crate) fn cancel(context: ResolvedContext, job_id: Option<String>) -> Result<()> {
     let resolved_job_id = match job_id {
         Some(job_id) => job_id,
-        None => load_submission_record(&file, None)?.job_id,
+        None => load_submission_record(&context.compose_file.value, None)?.job_id,
     };
-    output::cancel_job(&resolved_job_id, &scancel_bin)
+    output::cancel_job(&resolved_job_id, &context.binaries.scancel.value)
 }
 
-pub(crate) fn clean(file: PathBuf, age: Option<u64>, all: bool) -> Result<()> {
-    let result = if let Some(days) = age {
-        clean_by_age(&file, days)?
+pub(crate) fn jobs_list(disk_usage: bool, format: Option<OutputFormat>) -> Result<()> {
+    let cwd = env::current_dir().context("failed to determine current working directory")?;
+    let report = scan_job_inventory(&cwd, disk_usage)?;
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => output::print_job_inventory_scan(&report, disk_usage),
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .context("failed to serialize jobs list output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn clean(
+    context: ResolvedContext,
+    age: Option<u64>,
+    all: bool,
+    dry_run: bool,
+    disk_usage: bool,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let mode = if let Some(days) = age {
+        CleanupMode::Age { age_days: days }
     } else {
         debug_assert!(all);
-        clean_all_except_latest(&file)?
+        CleanupMode::AllExceptLatest
     };
-    if result.removed_jobs.is_empty() {
-        println!("no job directories to clean");
-    } else {
-        println!(
-            "removed {} tracked job(s): {}",
-            result.removed_jobs.len(),
-            result.removed_jobs.join(", ")
-        );
+    let report = build_cleanup_report(&context.compose_file.value, mode, disk_usage, dry_run)?;
+    if !dry_run {
+        run_cleanup_report(&report)?;
+    }
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => output::print_cleanup_report(&report, disk_usage),
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .context("failed to serialize clean output")?
+            );
+        }
     }
     Ok(())
 }

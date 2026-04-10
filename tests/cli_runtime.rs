@@ -7,6 +7,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use hpc_compose::job::{
+    build_submission_record, latest_record_path_for, load_submission_record,
+    write_submission_record,
+};
 use hpc_compose::render::log_file_name_for_service;
 use serde_json::Value;
 use support::*;
@@ -1830,21 +1834,75 @@ fn clean_command_removes_old_job_directories() {
         ],
     );
     assert_success(&submit);
+    let mut record = load_submission_record(&compose, Some("12345")).expect("record");
+    record.submitted_at = 1;
+    write_submission_record(&record).expect("rewrite record");
+    let runtime_dir = tmpdir.path().join(".hpc-compose/12345");
+    fs::create_dir_all(runtime_dir.join("logs")).expect("job runtime dir");
+    fs::write(runtime_dir.join("logs/app.log"), "hello\n").expect("job log");
 
-    // clean --all should report nothing to remove (only one job = latest)
+    // clean --all should keep the only tracked job.
     let clean_all = run_cli(
         tmpdir.path(),
-        &["clean", "--all", "-f", compose.to_str().expect("path")],
+        &[
+            "clean",
+            "--all",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
     );
     assert_success(&clean_all);
-    assert!(stdout_text(&clean_all).contains("no job directories to clean"));
+    let clean_all_payload: Value =
+        serde_json::from_str(&stdout_text(&clean_all)).expect("clean all json");
+    assert_eq!(clean_all_payload["removed_job_ids"], serde_json::json!([]));
+    assert_eq!(
+        clean_all_payload["kept_job_ids"],
+        serde_json::json!(["12345"])
+    );
+    assert_eq!(
+        clean_all_payload["latest_job_id_before"],
+        Value::from("12345")
+    );
+    assert_eq!(
+        clean_all_payload["latest_job_id_after"],
+        Value::from("12345")
+    );
+    assert!(runtime_dir.exists());
+    assert!(tmpdir.path().join(".hpc-compose/jobs/12345.json").exists());
 
-    // clean --age 0 should remove the job (it's older than 0 days)
+    // clean --age 0 should remove the job because it is older than "now".
     let clean_age = run_cli(
         tmpdir.path(),
-        &["clean", "--age", "0", "-f", compose.to_str().expect("path")],
+        &[
+            "clean",
+            "--age",
+            "0",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
     );
     assert_success(&clean_age);
+    let clean_age_payload: Value =
+        serde_json::from_str(&stdout_text(&clean_age)).expect("clean age json");
+    assert_eq!(clean_age_payload["mode"], Value::from("age"));
+    assert_eq!(clean_age_payload["dry_run"], Value::from(false));
+    assert_eq!(
+        clean_age_payload["removed_job_ids"],
+        serde_json::json!(["12345"])
+    );
+    assert_eq!(clean_age_payload["kept_job_ids"], serde_json::json!([]));
+    assert_eq!(
+        clean_age_payload["latest_job_id_before"],
+        Value::from("12345")
+    );
+    assert_eq!(clean_age_payload["latest_job_id_after"], Value::Null);
+    assert!(!tmpdir.path().join(".hpc-compose/jobs/12345.json").exists());
+    assert!(!runtime_dir.exists());
+    assert!(!tmpdir.path().join(".hpc-compose/latest.json").exists());
 }
 
 #[test]
@@ -1896,10 +1954,21 @@ fn clean_all_preserves_latest_tracked_submission() {
 
     let clean = run_cli(
         tmpdir.path(),
-        &["clean", "--all", "-f", compose.to_str().expect("path")],
+        &[
+            "clean",
+            "--all",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
     );
     assert_success(&clean);
-    assert!(stdout_text(&clean).contains("removed 1 tracked job(s): 11111"));
+    let payload: Value = serde_json::from_str(&stdout_text(&clean)).expect("clean json");
+    assert_eq!(payload["removed_job_ids"], serde_json::json!(["11111"]));
+    assert_eq!(payload["kept_job_ids"], serde_json::json!(["22222"]));
+    assert_eq!(payload["latest_job_id_before"], Value::from("22222"));
+    assert_eq!(payload["latest_job_id_after"], Value::from("22222"));
     assert!(!tmpdir.path().join(".hpc-compose/jobs/11111.json").exists());
     assert!(tmpdir.path().join(".hpc-compose/jobs/22222.json").exists());
     assert!(!tmpdir.path().join(".hpc-compose/11111").exists());
@@ -1910,6 +1979,217 @@ fn clean_all_preserves_latest_tracked_submission() {
     )
     .expect("latest json");
     assert_eq!(latest["job_id"], Value::from("22222"));
+}
+
+#[test]
+fn clean_dry_run_does_not_remove_state_and_reports_json_contract() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            write_fake_sbatch(tmpdir.path()).to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let mut record = load_submission_record(&compose, Some("12345")).expect("record");
+    record.submitted_at = 1;
+    write_submission_record(&record).expect("rewrite record");
+
+    let runtime_dir = tmpdir.path().join(".hpc-compose/12345");
+    fs::create_dir_all(runtime_dir.join("logs")).expect("runtime dir");
+    fs::write(runtime_dir.join("logs/app.log"), "hello\n").expect("runtime log");
+    let record_path = tmpdir.path().join(".hpc-compose/jobs/12345.json");
+    let latest_path = tmpdir.path().join(".hpc-compose/latest.json");
+
+    let clean = run_cli(
+        tmpdir.path(),
+        &[
+            "clean",
+            "--age",
+            "0",
+            "--dry-run",
+            "--disk-usage",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&clean);
+    let payload: Value = serde_json::from_str(&stdout_text(&clean)).expect("clean json");
+    assert_eq!(
+        payload["compose_file"],
+        Value::from(compose.display().to_string())
+    );
+    assert_eq!(payload["mode"], Value::from("age"));
+    assert_eq!(payload["dry_run"], Value::from(true));
+    assert_eq!(payload["removed_job_ids"], serde_json::json!(["12345"]));
+    assert_eq!(payload["kept_job_ids"], serde_json::json!([]));
+    assert_eq!(payload["latest_job_id_before"], Value::from("12345"));
+    assert_eq!(payload["latest_job_id_after"], Value::Null);
+    assert!(payload["total_bytes_reclaimed"].as_u64().unwrap_or(0) > 0);
+    let jobs = payload["jobs"].as_array().expect("jobs array");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["job_id"], Value::from("12345"));
+    assert_eq!(jobs[0]["selected"], Value::from(true));
+    assert!(jobs[0]["bytes_reclaimed"].as_u64().unwrap_or(0) > 0);
+    assert!(record_path.exists());
+    assert!(runtime_dir.exists());
+    assert!(latest_path.exists());
+}
+
+#[test]
+fn clean_uses_recorded_submit_dir_for_runtime_cleanup() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose_root = tmpdir.path().join("repo");
+    let submit_root = tmpdir.path().join("submit-dir");
+    fs::create_dir_all(&compose_root).expect("compose root");
+    fs::create_dir_all(&submit_root).expect("submit root");
+
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(&compose_root, &cache_dir);
+    let sbatch = write_fake_sbatch(&submit_root);
+
+    let submit = run_cli(
+        &submit_root,
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let mut record = load_submission_record(&compose, Some("12345")).expect("record");
+    record.submitted_at = 1;
+    write_submission_record(&record).expect("rewrite record");
+
+    let submit_runtime_dir = submit_root.join(".hpc-compose/12345");
+    fs::create_dir_all(submit_runtime_dir.join("logs")).expect("runtime dir");
+    fs::write(submit_runtime_dir.join("logs/app.log"), "hello\n").expect("runtime log");
+
+    let clean = run_cli(
+        &compose_root,
+        &[
+            "clean",
+            "--age",
+            "0",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&clean);
+    let payload: Value = serde_json::from_str(&stdout_text(&clean)).expect("clean json");
+    assert_eq!(payload["removed_job_ids"], serde_json::json!(["12345"]));
+    assert!(!submit_runtime_dir.exists());
+    assert!(!compose_root.join(".hpc-compose/jobs/12345.json").exists());
+    assert!(!compose_root.join(".hpc-compose/latest.json").exists());
+}
+
+#[test]
+fn clean_repairs_latest_pointer_and_removes_it_when_no_jobs_remain() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("unix time")
+        .as_secs();
+
+    let mut old_record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("submit-old.sbatch"),
+        &plan,
+        "11111",
+    )
+    .expect("old record");
+    old_record.submitted_at = now.saturating_sub(10 * 86_400);
+    write_submission_record(&old_record).expect("write old");
+
+    let mut new_record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("submit-new.sbatch"),
+        &plan,
+        "22222",
+    )
+    .expect("new record");
+    new_record.submitted_at = now.saturating_sub(1);
+    write_submission_record(&new_record).expect("write new");
+
+    fs::write(
+        latest_record_path_for(&compose),
+        serde_json::to_vec_pretty(&old_record).expect("stale latest"),
+    )
+    .expect("overwrite latest");
+
+    let first_clean = run_cli(
+        tmpdir.path(),
+        &[
+            "clean",
+            "--age",
+            "7",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&first_clean);
+    let first_payload: Value =
+        serde_json::from_str(&stdout_text(&first_clean)).expect("first clean json");
+    assert_eq!(
+        first_payload["removed_job_ids"],
+        serde_json::json!(["11111"])
+    );
+    assert_eq!(first_payload["latest_job_id_before"], Value::from("11111"));
+    assert_eq!(first_payload["latest_job_id_after"], Value::from("22222"));
+    let latest_after_first: Value = serde_json::from_str(
+        &fs::read_to_string(latest_record_path_for(&compose)).expect("latest after first"),
+    )
+    .expect("latest json");
+    assert_eq!(latest_after_first["job_id"], Value::from("22222"));
+
+    let second_clean = run_cli(
+        tmpdir.path(),
+        &[
+            "clean",
+            "--age",
+            "0",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&second_clean);
+    let second_payload: Value =
+        serde_json::from_str(&stdout_text(&second_clean)).expect("second clean json");
+    assert_eq!(
+        second_payload["removed_job_ids"],
+        serde_json::json!(["22222"])
+    );
+    assert_eq!(second_payload["latest_job_id_after"], Value::Null);
+    assert!(!latest_record_path_for(&compose).exists());
 }
 
 #[test]
