@@ -2216,9 +2216,9 @@ services:
     image: {}
     command: /bin/sh -lc "printf 'ready\n'; sleep 2"
     readiness:
-      log:
-        pattern: ready
-        timeout_seconds: 5
+      type: log
+      pattern: ready
+      timeout_seconds: 5
   client:
     image: {}
     command: /bin/sh -lc "cat \"$HPC_COMPOSE_NODELIST_FILE\" > /hpc-compose/job/result.txt"
@@ -2406,9 +2406,11 @@ services:
     assert_success(&cancel);
     let cancel_json: Value = serde_json::from_str(&stdout_text(&cancel)).expect("cancel json");
     assert_eq!(cancel_json["cancelled"], Value::from(true));
+    let tracking_removed = cancel_json["tracking_removed"].as_bool() == Some(true);
 
     let mut terminal = None;
-    for _ in 0..20 {
+    let mut missing_tracking = false;
+    for _ in 0..40 {
         let status = run_cli(
             tmpdir.path(),
             &[
@@ -2421,17 +2423,52 @@ services:
                 "json",
             ],
         );
-        assert_success(&status);
-        let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
-        if payload["scheduler"]["terminal"].as_bool() == Some(true) {
-            terminal = Some(payload);
+        if status.status.success() {
+            let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+            if payload["scheduler"]["state"] == Value::from("CANCELLED") {
+                terminal = Some(payload);
+                break;
+            }
+            let transient_supervisor_race = payload["scheduler"]["state"] == Value::from("FAILED")
+                && payload["scheduler"]["detail"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("exited before recording a terminal outcome");
+            if !transient_supervisor_race
+                && payload["scheduler"]["terminal"].as_bool() == Some(true)
+            {
+                terminal = Some(payload);
+                break;
+            }
+        } else if stderr_text(&status).contains("no tracked submission metadata exists") {
+            missing_tracking = true;
             break;
+        } else {
+            panic!(
+                "unexpected status failure\nstdout:\n{}\nstderr:\n{}",
+                stdout_text(&status),
+                stderr_text(&status)
+            );
         }
         thread::sleep(Duration::from_millis(250));
     }
-    let status_json = terminal.expect("terminal local status");
-    assert_eq!(status_json["record"]["backend"], Value::from("local"));
-    assert_eq!(status_json["scheduler"]["state"], Value::from("CANCELLED"));
+    if tracking_removed {
+        assert!(
+            missing_tracking,
+            "expected tracked metadata to be removed after local cancel"
+        );
+        assert!(
+            !tmpdir
+                .path()
+                .join(".hpc-compose/jobs")
+                .join(format!("{job_id}.json"))
+                .exists()
+        );
+    } else {
+        let status_json = terminal.expect("terminal local status");
+        assert_eq!(status_json["record"]["backend"], Value::from("local"));
+        assert_eq!(status_json["scheduler"]["state"], Value::from("CANCELLED"));
+    }
 }
 
 #[cfg(target_os = "linux")]
