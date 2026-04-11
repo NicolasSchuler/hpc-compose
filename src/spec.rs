@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_yml::{Mapping, Value};
+use serde_norway::{Mapping, Value};
 
 mod validation;
 
@@ -699,10 +699,10 @@ impl ComposeSpec {
     ) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .context(format!("failed to read spec at {}", path.display()))?;
-        let value: Value = serde_yml::from_str(&raw)
+        let value: Value = serde_norway::from_str(&raw)
             .context(format!("failed to parse YAML at {}", path.display()))?;
         validate_root(&value)?;
-        let mut spec: ComposeSpec = serde_yml::from_value(value)
+        let mut spec: ComposeSpec = serde_norway::from_value(value)
             .context(format!("failed to deserialize spec at {}", path.display()))?;
         spec.interpolate_with_vars(vars)?;
         spec.validate()?;
@@ -1627,8 +1627,8 @@ pub fn missing_defaulted_variables(
 ) -> Result<BTreeSet<String>> {
     let raw =
         fs::read_to_string(path).context(format!("failed to read spec at {}", path.display()))?;
-    let value: Value =
-        serde_yml::from_str(&raw).context(format!("failed to parse YAML at {}", path.display()))?;
+    let value: Value = serde_norway::from_str(&raw)
+        .context(format!("failed to parse YAML at {}", path.display()))?;
     let mut missing = BTreeSet::new();
     collect_missing_defaulted_variables_from_value(&value, vars, &mut missing)?;
     Ok(missing)

@@ -220,7 +220,7 @@ pub(crate) fn load_effective_config_with_interpolation_vars(
 }
 
 pub(crate) fn effective_config_yaml(config: &EffectiveComposeConfig) -> Result<String> {
-    serde_yml::to_string(config).context("failed to serialize effective config as yaml")
+    serde_norway::to_string(config).context("failed to serialize effective config as yaml")
 }
 
 pub(crate) fn load_plan_and_runtime_with_interpolation_vars(

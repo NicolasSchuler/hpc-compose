@@ -5,7 +5,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde_yml::{Mapping, Value};
+use serde_norway::{Mapping, Value};
 
 /// A shipped compose template exposed by `hpc-compose init`.
 #[derive(Debug)]
@@ -255,8 +255,8 @@ fn render_template_body(
     app_name: &str,
     cache_dir: &str,
 ) -> Result<String> {
-    let mut value: Value =
-        serde_yml::from_str(body).context(format!("failed to parse template {template_name}"))?;
+    let mut value: Value = serde_norway::from_str(body)
+        .context(format!("failed to parse template {template_name}"))?;
     let root = value
         .as_mapping_mut()
         .context("template root must be a mapping")?;
@@ -282,7 +282,7 @@ fn render_template_body(
         Value::String(cache_dir.to_string()),
     );
 
-    serde_yml::to_string(&value).context("failed to serialize initialized template")
+    serde_norway::to_string(&value).context("failed to serialize initialized template")
 }
 
 /// Writes a rendered template to disk and returns the absolute output path.
@@ -419,7 +419,7 @@ mod tests {
     fn render_template_rewrites_name_job_and_cache_dir() {
         let rendered =
             render_template("dev-python-app", "custom-app", "/cache/path").expect("render");
-        let value: Value = serde_yml::from_str(&rendered).expect("yaml");
+        let value: Value = serde_norway::from_str(&rendered).expect("yaml");
         let root = value.as_mapping().expect("root");
         assert_eq!(
             root.get(Value::String("name".to_string()))
@@ -453,7 +453,7 @@ mod tests {
             "/cache/path",
         )
         .expect("render");
-        let value: Value = serde_yml::from_str(&rendered).expect("yaml");
+        let value: Value = serde_norway::from_str(&rendered).expect("yaml");
         let root = value.as_mapping().expect("root");
         let slurm = root
             .get(Value::String("x-slurm".to_string()))
