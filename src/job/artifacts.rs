@@ -420,3 +420,179 @@ fn copy_symlink(source: &Path, _destination: &Path) -> Result<()> {
         source.display()
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_export_dir_handles_absolute_and_relative() {
+        let compose = Path::new("/project/compose.yaml");
+        assert_eq!(
+            resolve_export_dir(compose, "/shared/results/${SLURM_JOB_ID}", "42"),
+            PathBuf::from("/shared/results/42")
+        );
+        assert_eq!(
+            resolve_export_dir(compose, "./results", "42"),
+            PathBuf::from("/project/results")
+        );
+    }
+
+    #[test]
+    fn resolve_export_dir_replaces_job_id_placeholder() {
+        let compose = Path::new("/project/compose.yaml");
+        let result = resolve_export_dir(compose, "/out/${SLURM_JOB_ID}/artifacts", "123");
+        assert_eq!(result, PathBuf::from("/out/123/artifacts"));
+    }
+
+    #[test]
+    fn bundle_export_dir_defaults_to_root_for_default_bundle() {
+        assert_eq!(
+            bundle_export_dir(Path::new("/export"), "default"),
+            PathBuf::from("/export")
+        );
+        assert_eq!(
+            bundle_export_dir(Path::new("/export"), "checkpoints"),
+            PathBuf::from("/export/bundles/checkpoints")
+        );
+    }
+
+    #[test]
+    fn resolve_selected_bundles_returns_all_when_empty() {
+        let bundles = BTreeMap::from([
+            (
+                "default".to_string(),
+                ArtifactBundleManifest {
+                    declared_source_patterns: vec!["/a".into()],
+                    matched_source_paths: vec!["/a".into()],
+                    copied_relative_paths: vec!["a".into()],
+                    warnings: Vec::new(),
+                },
+            ),
+            (
+                "logs".to_string(),
+                ArtifactBundleManifest {
+                    declared_source_patterns: vec!["/b".into()],
+                    matched_source_paths: vec!["/b".into()],
+                    copied_relative_paths: vec!["b".into()],
+                    warnings: Vec::new(),
+                },
+            ),
+        ]);
+        let selected = resolve_selected_bundles(&bundles, &[]).expect("select all");
+        assert_eq!(selected, vec!["default", "logs"]);
+    }
+
+    #[test]
+    fn resolve_selected_bundles_filters_to_requested() {
+        let bundles = BTreeMap::from([
+            (
+                "default".to_string(),
+                ArtifactBundleManifest {
+                    declared_source_patterns: vec!["/a".into()],
+                    matched_source_paths: vec!["/a".into()],
+                    copied_relative_paths: vec!["a".into()],
+                    warnings: Vec::new(),
+                },
+            ),
+            (
+                "logs".to_string(),
+                ArtifactBundleManifest {
+                    declared_source_patterns: vec!["/b".into()],
+                    matched_source_paths: vec!["/b".into()],
+                    copied_relative_paths: vec!["b".into()],
+                    warnings: Vec::new(),
+                },
+            ),
+        ]);
+        let selected = resolve_selected_bundles(&bundles, &["logs".to_string()]).expect("select");
+        assert_eq!(selected, vec!["logs"]);
+    }
+
+    #[test]
+    fn resolve_selected_bundles_rejects_unknown_bundle() {
+        let bundles = BTreeMap::new();
+        let err = resolve_selected_bundles(&bundles, &["missing".to_string()])
+            .expect_err("unknown bundle");
+        assert!(err.to_string().contains("not available"));
+    }
+
+    #[test]
+    fn copy_path_recursive_copies_files_and_directories() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let src_dir = tmpdir.path().join("src");
+        fs::create_dir_all(src_dir.join("sub")).expect("sub");
+        fs::write(src_dir.join("a.txt"), "hello").expect("a");
+        fs::write(src_dir.join("sub/b.txt"), "world").expect("b");
+
+        let dest = tmpdir.path().join("dest");
+        copy_path_recursive(&src_dir, &dest).expect("copy");
+        assert!(dest.join("a.txt").exists());
+        assert!(dest.join("sub/b.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dest.join("a.txt")).expect("read"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn remove_existing_destination_handles_missing_path() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let missing = tmpdir.path().join("does-not-exist");
+        remove_existing_destination(&missing).expect("no error for missing");
+    }
+
+    #[test]
+    fn remove_existing_destination_removes_file() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let file = tmpdir.path().join("file.txt");
+        fs::write(&file, "x").expect("write");
+        remove_existing_destination(&file).expect("remove");
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn remove_existing_destination_removes_directory() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let dir = tmpdir.path().join("subdir");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(dir.join("inner.txt"), "x").expect("write");
+        remove_existing_destination(&dir).expect("remove");
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn hash_file_produces_sha256_hex() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let file = tmpdir.path().join("data.bin");
+        fs::write(&file, "hello world").expect("write");
+        let hash = hash_file(&file).expect("hash");
+        assert_eq!(hash.len(), 64);
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn collect_bundle_metadata_lists_files_and_directories() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::write(tmpdir.path().join("a.txt"), "aaa").expect("a");
+        fs::create_dir_all(tmpdir.path().join("sub")).expect("sub");
+        fs::write(tmpdir.path().join("sub/b.txt"), "bbb").expect("b");
+
+        let files = collect_bundle_metadata(tmpdir.path(), &["a.txt".into(), "sub".into()])
+            .expect("collect");
+        let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+        assert!(paths.contains(&"a.txt"));
+        assert!(paths.contains(&"sub"));
+        assert!(paths.contains(&"sub/b.txt"));
+        let file_entry = files
+            .iter()
+            .find(|f| f.relative_path == "a.txt")
+            .expect("a.txt");
+        assert_eq!(file_entry.entry_type, "file");
+        assert!(file_entry.size_bytes.is_some());
+        assert!(file_entry.sha256.is_some());
+    }
+}

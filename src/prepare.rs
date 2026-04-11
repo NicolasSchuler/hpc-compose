@@ -391,11 +391,17 @@ where
 /// Returns the cache location used for a service's imported base image.
 #[must_use]
 pub fn base_image_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf {
-    let key = base_image_cache_key(service);
+    base_image_path_from_source(cache_dir, &service.source)
+}
+
+/// Returns the cache location for a base image given its source reference.
+#[must_use]
+pub fn base_image_path_from_source(cache_dir: &Path, source: &ImageSource) -> PathBuf {
+    let key = base_image_cache_key_from_source(source);
     cache_dir.join("base").join(format!(
         "{}-{}.sqsh",
         short_hash(&key),
-        sanitize_name(&image_label(&service.source))
+        sanitize_name(&image_label(source))
     ))
 }
 
@@ -403,22 +409,7 @@ fn runtime_image_path(plan: &Plan, service: &PlannedService) -> PathBuf {
     match (&service.image, &service.prepare) {
         (ImageSource::LocalSqsh(path), None) => path.clone(),
         (ImageSource::Remote(_), None) => {
-            let runtime = RuntimeService {
-                name: service.name.clone(),
-                runtime_image: PathBuf::new(),
-                execution: service.execution.clone(),
-                environment: service.environment.clone(),
-                volumes: service.volumes.clone(),
-                working_dir: service.working_dir.clone(),
-                depends_on: service.depends_on.clone(),
-                readiness: service.readiness.clone(),
-                failure_policy: service.failure_policy.clone(),
-                placement: service.placement.clone(),
-                slurm: service.slurm.clone(),
-                prepare: service.prepare.clone(),
-                source: service.image.clone(),
-            };
-            base_image_path(&plan.cache_dir, &runtime)
+            base_image_path_from_source(&plan.cache_dir, &service.image)
         }
         (_, Some(prepare)) => plan.cache_dir.join("prepared").join(format!(
             "{}-{}.sqsh",
@@ -464,7 +455,11 @@ fn prepared_image_cache_key(service: &RuntimeService, prepare: &PreparedImageSpe
 }
 
 fn base_image_cache_key(service: &RuntimeService) -> String {
-    let image_key = match &service.source {
+    base_image_cache_key_from_source(&service.source)
+}
+
+fn base_image_cache_key_from_source(source: &ImageSource) -> String {
+    let image_key = match source {
         ImageSource::LocalSqsh(path) => path.to_string_lossy().into_owned(),
         ImageSource::Remote(remote) => remote.clone(),
     };

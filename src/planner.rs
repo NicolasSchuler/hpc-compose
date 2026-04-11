@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{
     CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, ServiceDependency,
     ServiceEnrootConfig, ServiceFailureMode, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
@@ -327,34 +328,6 @@ fn resolve_service_placement(
         ntasks_per_node,
         pin_to_primary_node,
     })
-}
-
-fn readiness_uses_implicit_localhost(readiness: Option<&ReadinessSpec>) -> bool {
-    match readiness {
-        None | Some(ReadinessSpec::Sleep { .. } | ReadinessSpec::Log { .. }) => false,
-        Some(ReadinessSpec::Tcp { host, .. }) => host.as_deref().is_none_or(is_localhost_host),
-        Some(ReadinessSpec::Http { url, .. }) => {
-            http_readiness_host(url).is_none_or(is_localhost_host)
-        }
-    }
-}
-
-fn http_readiness_host(url: &str) -> Option<&str> {
-    let (_, after_scheme) = url.split_once("://")?;
-    let authority = after_scheme.split('/').next()?;
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    if authority.is_empty() {
-        return None;
-    }
-    if authority.starts_with('[') {
-        let end = authority.find(']')?;
-        return Some(&authority[1..end]);
-    }
-    Some(authority.split(':').next().unwrap_or(authority))
-}
-
-fn is_localhost_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn normalize_prepare(

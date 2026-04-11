@@ -662,3 +662,92 @@ fn repair_latest_record_for_kind(
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removable_paths_deduplicates_identical_paths() {
+        let record = PathBuf::from("/tmp/job/42.json");
+        let runtime = PathBuf::from("/tmp/job/42");
+        let legacy = PathBuf::from("/tmp/job/42");
+        let paths = removable_paths_from_paths(&record, &runtime, &legacy);
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn removable_paths_keeps_distinct_paths() {
+        let record = PathBuf::from("/tmp/a/42.json");
+        let runtime = PathBuf::from("/tmp/b/42");
+        let legacy = PathBuf::from("/tmp/c/42");
+        let paths = removable_paths_from_paths(&record, &runtime, &legacy);
+        assert_eq!(paths.len(), 3);
+    }
+
+    #[test]
+    fn cleanup_mode_label_matches_variants() {
+        assert_eq!(cleanup_mode_label(CleanupMode::Age { age_days: 7 }), "age");
+        assert_eq!(
+            cleanup_mode_label(CleanupMode::AllExceptLatest),
+            "all_except_latest"
+        );
+    }
+
+    #[test]
+    fn size_of_path_returns_zero_for_missing() {
+        let missing = PathBuf::from("/definitely/does/not/exist/xyz");
+        assert_eq!(size_of_path(&missing).expect("size"), 0);
+    }
+
+    #[test]
+    fn size_of_path_measures_file_and_directory() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let file = tmpdir.path().join("data.bin");
+        fs::write(&file, [0u8; 100]).expect("write");
+        assert!(size_of_path(&file).expect("file size") >= 100);
+
+        let sub = tmpdir.path().join("sub");
+        fs::create_dir_all(&sub).expect("dir");
+        fs::write(sub.join("inner.txt"), "hi").expect("inner");
+        let dir_size = size_of_path(tmpdir.path()).expect("dir size");
+        assert!(dir_size > 0);
+    }
+
+    #[test]
+    fn remove_path_if_present_is_ok_for_missing() {
+        let missing = PathBuf::from("/definitely/does/not/exist/xyz");
+        remove_path_if_present(&missing).expect("no error for missing");
+    }
+
+    #[test]
+    fn remove_path_if_present_removes_file_and_dir() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let file = tmpdir.path().join("f.txt");
+        fs::write(&file, "x").expect("write");
+        remove_path_if_present(&file).expect("remove file");
+        assert!(!file.exists());
+
+        let dir = tmpdir.path().join("d");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(dir.join("inner.txt"), "x").expect("write");
+        remove_path_if_present(&dir).expect("remove dir");
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn scan_inventory_recursive_skips_git_and_target() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::create_dir_all(tmpdir.path().join(".git/objects")).expect("git");
+        fs::create_dir_all(tmpdir.path().join("target/debug")).expect("target");
+        fs::create_dir_all(
+            tmpdir
+                .path()
+                .join(format!("{}/jobs", tracked_paths::METADATA_DIR_NAME)),
+        )
+        .expect("meta");
+        let mut jobs = Vec::new();
+        scan_inventory_recursive(tmpdir.path(), false, 0, &mut jobs).expect("scan");
+        assert!(jobs.is_empty());
+    }
+}

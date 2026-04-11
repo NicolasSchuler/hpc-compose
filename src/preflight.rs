@@ -12,6 +12,7 @@ use crate::planner::{
     ImageSource, ServicePlacementMode, cache_path_policy_issue, registry_host_for_remote,
 };
 use crate::prepare::RuntimePlan;
+use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{MetricsCollector, ReadinessSpec};
 
 /// Severity level for one preflight item.
@@ -575,7 +576,7 @@ fn check_readiness_host_tools(report: &mut Report, plan: &RuntimePlan) {
         if service.placement.mode != ServicePlacementMode::Distributed {
             continue;
         }
-        if !distributed_readiness_uses_localhost(service.readiness.as_ref()) {
+        if !readiness_uses_implicit_localhost(service.readiness.as_ref()) {
             continue;
         }
         report.items.push(Item {
@@ -590,34 +591,6 @@ fn check_readiness_host_tools(report: &mut Report, plan: &RuntimePlan) {
             ),
         });
     }
-}
-
-fn distributed_readiness_uses_localhost(readiness: Option<&ReadinessSpec>) -> bool {
-    match readiness {
-        None | Some(ReadinessSpec::Sleep { .. } | ReadinessSpec::Log { .. }) => false,
-        Some(ReadinessSpec::Tcp { host, .. }) => host.as_deref().is_none_or(is_localhost_host),
-        Some(ReadinessSpec::Http { url, .. }) => {
-            distributed_http_host(url).is_none_or(is_localhost_host)
-        }
-    }
-}
-
-fn distributed_http_host(url: &str) -> Option<&str> {
-    let (_, after_scheme) = url.split_once("://")?;
-    let authority = after_scheme.split('/').next()?;
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    if authority.is_empty() {
-        return None;
-    }
-    if authority.starts_with('[') {
-        let end = authority.find(']')?;
-        return Some(&authority[1..end]);
-    }
-    Some(authority.split(':').next().unwrap_or(authority))
-}
-
-fn is_localhost_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn check_haicore_mount_helpers(report: &mut Report) {
