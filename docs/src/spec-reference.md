@@ -10,7 +10,7 @@ version: "3.9"
 
 x-slurm:
   time: "00:30:00"
-  cache_dir: /shared/$USER/hpc-compose-cache
+  cache_dir: /cluster/shared/hpc-compose-cache
 
 services:
   app:
@@ -65,6 +65,7 @@ These fields live under the top-level `x-slurm` block.
 | `metrics` | mapping | omitted | Enables runtime metrics sampling. |
 | `artifacts` | mapping | omitted | Enables tracked artifact collection and export metadata. |
 | `resume` | mapping | omitted | Enables checkpoint-aware resume semantics with a shared host path mounted into every service. |
+| `notify` | mapping | omitted | First-class Slurm email notification settings. |
 | `setup` | list of strings | omitted | Raw shell lines inserted into the generated batch script before service launches. |
 | `submit_args` | list of strings | omitted | Extra raw Slurm arguments appended as `#SBATCH ...` lines. |
 
@@ -99,6 +100,37 @@ x-slurm:
 - Notes:
   - Each entry is emitted as `#SBATCH {arg}`.
   - Entries are not validated against Slurm option syntax.
+
+### `x-slurm.notify`
+
+```yaml
+x-slurm:
+  notify:
+    email:
+      to: user@example.com
+      on: [end, fail]
+```
+
+| Field | Shape | Default | Notes |
+| --- | --- | --- | --- |
+| `notify.email` | mapping | omitted | Required when `notify` is present. |
+| `notify.email.to` | string | required | Rendered as `#SBATCH --mail-user`. |
+| `notify.email.on` | list of events | `[end, fail]` | Rendered as `#SBATCH --mail-type`. |
+
+Supported events:
+
+| Event | Slurm mail type |
+| --- | --- |
+| `start` | `BEGIN` |
+| `end` | `END` |
+| `fail` | `FAIL` |
+| `all` | `ALL` |
+
+Rules:
+
+- When `on` is omitted or empty, defaults to `[end, fail]`.
+- If `all` is present, it replaces all other events.
+- Cannot be combined with raw `--mail-type` or `--mail-user` in `x-slurm.submit_args`.
 
 ### `x-slurm.cache_dir`
 
@@ -421,6 +453,7 @@ These fields live under `services.<name>.x-slurm`.
 | `cpus_per_task` | integer | omitted | Adds `--cpus-per-task` to that service's `srun`. |
 | `gpus` | integer | omitted | Adds `--gpus` when `gres` is not set. |
 | `gres` | string | omitted | Adds `--gres` to that service's `srun`. Takes priority over `gpus`. |
+| `time_limit` | string | omitted | Advisory per-service time limit. Validated against Slurm time formats but not passed to `srun`. `inspect` surfaces warnings when the limit exceeds allocation time or conflicts with dependencies. Accepted formats: `MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, `D-HH:MM:SS`. |
 | `extra_srun_args` | list of strings | omitted | Appended directly to the service's `srun` command. |
 | `failure_policy` | mapping | omitted | Per-service failure handling (`fail_job`, `ignore`, `restart_on_failure`). |
 

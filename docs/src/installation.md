@@ -88,6 +88,32 @@ cargo test --locked --test release_metadata
 man -l man/man1/hpc-compose.1
 ```
 
+## Install through a native package manager
+
+GitHub Releases also attach Linux-native packages for the published Linux targets:
+
+```bash
+RELEASE_TAG=vX.Y.Z
+
+sudo apt install "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.deb"
+sudo dpkg -i "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.deb"
+
+sudo dnf install "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.rpm"
+sudo rpm -i "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.rpm"
+```
+
+Pick the package that matches your machine from the release page. Package availability does not change the runtime support policy; Linux cluster workflows still require the same Slurm, Pyxis, Enroot, and shared-storage assumptions described in the [Support Matrix](support-matrix.md).
+
+## Install with Homebrew on macOS
+
+The repository also exposes a same-repo Homebrew tap:
+
+```bash
+brew install NicolasSchuler/hpc-compose/hpc-compose
+```
+
+The formula tracks the latest published release on `main`. It installs the same prebuilt macOS tarballs and their shipped manpages.
+
 ## Local docs commands
 
 The repo ships two documentation layers:
@@ -108,6 +134,8 @@ cargo doc --no-deps
 Before using a local build on a cluster workflow, validate the binary and one example spec:
 
 ```bash
-target/release/hpc-compose validate -f examples/minimal-batch.yaml
-target/release/hpc-compose inspect --verbose -f examples/minimal-batch.yaml
+env CACHE_DIR=/cluster/shared/hpc-compose-cache \
+  target/release/hpc-compose validate -f examples/minimal-batch.yaml
+env CACHE_DIR=/cluster/shared/hpc-compose-cache \
+  target/release/hpc-compose inspect --verbose -f examples/minimal-batch.yaml
 ```

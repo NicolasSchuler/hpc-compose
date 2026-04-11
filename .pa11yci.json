@@ -9,10 +9,17 @@
   },
   "urls": [
     "http://127.0.0.1:3000/",
+    "http://127.0.0.1:3000/installation.html",
     "http://127.0.0.1:3000/quickstart.html",
+    "http://127.0.0.1:3000/support-matrix.html",
+    "http://127.0.0.1:3000/task-guide.html",
+    "http://127.0.0.1:3000/cli-reference.html",
+    "http://127.0.0.1:3000/execution-model.html",
     "http://127.0.0.1:3000/runbook.html",
     "http://127.0.0.1:3000/examples.html",
-    "http://127.0.0.1:3000/support-matrix.html",
-    "http://127.0.0.1:3000/task-guide.html"
+    "http://127.0.0.1:3000/spec-reference.html",
+    "http://127.0.0.1:3000/supported-slurm-model.html",
+    "http://127.0.0.1:3000/docker-compose-migration.html",
+    "http://127.0.0.1:3000/architecture.html"
   ]
 }

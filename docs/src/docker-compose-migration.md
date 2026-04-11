@@ -63,7 +63,7 @@ x-slurm:
   time: "01:00:00"
   mem: 8G
   cpus_per_task: 4
-  cache_dir: /shared/$USER/hpc-compose-cache
+  cache_dir: /cluster/shared/hpc-compose-cache
 
 services:
   redis:

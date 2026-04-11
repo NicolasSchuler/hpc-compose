@@ -16,6 +16,8 @@ permissions:
 
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  CARGO_DEB_VERSION: "3.6.3"
+  CARGO_GENERATE_RPM_VERSION: "0.20.0"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -114,8 +116,14 @@ jobs:
         if: endsWith(matrix.target, '-unknown-linux-musl')
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config
+          sudo apt-get install -y musl-tools pkg-config rpm cpio
           rustup target add ${{ matrix.target }}
+
+      - name: Install Linux packaging tools
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        run: |
+          cargo install cargo-deb --locked --version "${CARGO_DEB_VERSION}"
+          cargo install cargo-generate-rpm --locked --version "${CARGO_GENERATE_RPM_VERSION}"
 
       - name: Build release binary
         run: cargo build --locked --release --target ${{ matrix.target }}
@@ -140,6 +148,45 @@ jobs:
           hash="$(shasum -a 256 "dist/${asset}" | cut -d ' ' -f 1)"
           printf '%s  %s\n' "${hash}" "${asset}" > "dist/${checksum}"
 
+      - name: Package Linux native assets
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#v}"
+          target_dir="target/${{ matrix.target }}/release"
+          mkdir -p target/release
+          cp "${target_dir}/${{ matrix.binary_name }}" target/release/hpc-compose
+
+          deb_suffix="$(dpkg --print-architecture)"
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-musl)
+              rpm_arch="x86_64"
+              ;;
+            aarch64-unknown-linux-musl)
+              rpm_arch="aarch64"
+              ;;
+            *)
+              echo "unsupported linux packaging target: ${{ matrix.target }}" >&2
+              exit 1
+              ;;
+          esac
+
+          cargo deb --no-build --no-strip --target "${{ matrix.target }}"
+          deb_src="target/${{ matrix.target }}/debian/hpc-compose_${version}-1_${deb_suffix}.deb"
+          deb_asset="hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.deb"
+          cp "${deb_src}" "dist/${deb_asset}"
+          deb_hash="$(shasum -a 256 "dist/${deb_asset}" | cut -d ' ' -f 1)"
+          printf '%s  %s\n' "${deb_hash}" "${deb_asset}" > "dist/${deb_asset}.sha256"
+
+          cargo generate-rpm
+          rpm_src="target/generate-rpm/hpc-compose-${version}-1.${rpm_arch}.rpm"
+          rpm_asset="hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.rpm"
+          cp "${rpm_src}" "dist/${rpm_asset}"
+          rpm_hash="$(shasum -a 256 "dist/${rpm_asset}" | cut -d ' ' -f 1)"
+          printf '%s  %s\n' "${rpm_hash}" "${rpm_asset}" > "dist/${rpm_asset}.sha256"
+
       - name: Smoke test Unix release assets
         if: runner.os != 'Windows'
         shell: bash
@@ -154,6 +201,31 @@ jobs:
           "${smoke_dir}/${{ matrix.binary_name }}" --version >/dev/null
           test -f "${smoke_dir}/share/man/man1/hpc-compose.1"
           test -f "${smoke_dir}/share/man/man1/hpc-compose-submit.1"
+
+      - name: Smoke test Linux native assets
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deb_asset="dist/hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.deb"
+          rpm_asset="dist/hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.rpm"
+          smoke_dir="$(mktemp -d)"
+          deb_root="${smoke_dir}/deb-root"
+          rpm_root="${smoke_dir}/rpm-root"
+
+          dpkg-deb --contents "${deb_asset}" >/dev/null
+          dpkg-deb --extract "${deb_asset}" "${deb_root}"
+          "${deb_root}/usr/bin/hpc-compose" --version >/dev/null
+          test -f "${deb_root}/usr/share/man/man1/hpc-compose.1"
+          test -f "${deb_root}/usr/share/man/man1/hpc-compose-submit.1"
+
+          rpm --query --list --package "${rpm_asset}" >/dev/null
+          mkdir -p "${rpm_root}"
+          rpm2cpio "${rpm_asset}" | (cd "${rpm_root}" && cpio -idmu --quiet)
+          "${rpm_root}/usr/bin/hpc-compose" --version >/dev/null
+          test -f "${rpm_root}/usr/share/man/man1/hpc-compose.1"
+          test -f "${rpm_root}/usr/share/man/man1/hpc-compose-submit.1"
 
       - name: Package Windows release assets
         if: runner.os == 'Windows'

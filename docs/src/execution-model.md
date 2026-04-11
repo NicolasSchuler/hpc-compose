@@ -47,6 +47,18 @@ Use `logs` to inspect the corresponding restart messages from the batch script w
 
 Use `/hpc-compose/job` for small shared state inside the allocation, such as ready files, request payloads, logs, metrics, or teardown signals.
 
+### Enroot runtime paths
+
+The generated batch script sets three Enroot runtime paths scoped per job under the configured cache directory:
+
+| Variable | Value | Purpose |
+| --- | --- | --- |
+| `ENROOT_CACHE_PATH` | `$CACHE_ROOT/runtime/$SLURM_JOB_ID/cache` | Enroot image cache for the current job |
+| `ENROOT_DATA_PATH` | `$CACHE_ROOT/runtime/$SLURM_JOB_ID/data` | Enroot data directory for the current job |
+| `ENROOT_TEMP_PATH` | `$CACHE_ROOT/runtime/$SLURM_JOB_ID/tmp` | Enroot temp directory for the current job |
+
+These paths are created at batch startup and are available inside the batch script and to tooling that reads Enroot environment variables. They are not injected into service containers.
+
 <div class="callout warning">
   <p><strong>Warning</strong></p>
   <p>Do not put <code>x-slurm.cache_dir</code> under <code>/tmp</code>, <code>/var/tmp</code>, <code>/private/tmp</code>, or <code>/dev/shm</code>. Those paths are not safe for login-node prepare plus compute-node reuse.</p>
@@ -84,7 +96,7 @@ Recommended default:
 
 ## Command vocabulary
 
-- The <strong>normal run</strong> is <code>hpc-compose up -f compose.yaml</code>; on an interactive TTY that opens the watch UI automatically. <code>submit --watch</code> remains as a compatibility spelling for the same end-to-end flow.
+- The **normal run** is <code>hpc-compose up -f compose.yaml</code>. See [Quickstart](quickstart.md) for the full end-to-end description.
 - The <strong>tracked follow-up tools</strong> are <code>status</code> for scheduler/log summaries, <code>ps</code> for a stable per-service snapshot, and <code>watch</code> when you want to reconnect to the live TUI later.
 - The <strong>debugging flow</strong> is <code>validate</code>, <code>inspect</code>, <code>preflight</code>, and <code>prepare</code> run separately when you need more visibility.
 

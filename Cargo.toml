@@ -1,6 +1,6 @@
 [package]
 name = "hpc-compose"
-version = "0.1.23"
+version = "0.1.24"
 edition = "2024"
 autobins = false
 default-run = "hpc-compose"
@@ -45,3 +45,23 @@ tempfile = "3.23.0"
 
 [profile.release]
 opt-level = "s"
+
+[package.metadata.deb]
+maintainer = "Nicolas Schuler"
+section = "utility"
+priority = "optional"
+depends = "$auto"
+assets = [
+  ["target/release/hpc-compose", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/hpc-compose/README.md", "644"],
+  ["man/man1/*.1", "usr/share/man/man1/", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Compose-like specs for single-allocation Slurm jobs with Enroot and Pyxis"
+assets = [
+  { source = "target/release/hpc-compose", dest = "/usr/bin/hpc-compose", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/hpc-compose/README.md", mode = "644", doc = true },
+  { source = "man/man1/*.1", dest = "/usr/share/man/man1/", mode = "644", doc = true },
+]
+require-sh = false

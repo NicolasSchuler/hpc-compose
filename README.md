@@ -40,7 +40,15 @@ curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/ins
 
 The installer selects the newest GitHub release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Installer availability is not the same thing as full runtime support; see the [Support Matrix](docs/src/support-matrix.md) before assuming a platform/cluster combination is supported end to end. Manual release downloads remain documented in [docs/src/installation.md](docs/src/installation.md).
 
+Additional install paths:
+
+- Linux `.deb`: `apt install ./hpc-compose-vX.Y.Z-x86_64-unknown-linux-musl.deb` or `dpkg -i ./...`
+- Linux `.rpm`: `dnf install ./hpc-compose-vX.Y.Z-x86_64-unknown-linux-musl.rpm` or `rpm -i ./...`
+- macOS Homebrew tap: `brew install NicolasSchuler/hpc-compose/hpc-compose`
+
 Unix installs also ship section-1 manpages, and the binary can generate Bash, Zsh, and Fish completions with `hpc-compose completions <shell>`.
+
+When you scaffold or adapt a real cluster spec, choose `x-slurm.cache_dir` explicitly. It must be visible from both the submission host and the compute nodes. The shipped repository examples default to `x-slurm.cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}` so they validate out of the box, and you can override that shared path through `.env`, shell environment variables, or `hpc-compose setup`.
 
 ## Minimal example
 
@@ -61,7 +69,7 @@ services:
 hpc-compose up -f compose.yaml
 ```
 
-`up` is the preferred normal run. On an interactive TTY it opens the live watch UI; later you can reconnect with `hpc-compose watch -f compose.yaml` or inspect a one-shot per-service snapshot with `hpc-compose ps -f compose.yaml`. `submit --watch` remains available as a compatibility path. Use `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are adapting a new spec or isolating a failure.
+`up` is the preferred normal run. See [Quickstart](docs/src/quickstart.md) for the full end-to-end flow.
 
 ## Documentation
 
@@ -74,6 +82,7 @@ hpc-compose up -f compose.yaml
 - Execution Model: [docs/src/execution-model.md](docs/src/execution-model.md)
 - Runbook: [docs/src/runbook.md](docs/src/runbook.md)
 - Examples: [docs/src/examples.md](docs/src/examples.md)
+- Example Source: [docs/src/example-source.md](docs/src/example-source.md)
 - Spec Reference: [docs/src/spec-reference.md](docs/src/spec-reference.md)
 - Supported Slurm Model: [docs/src/supported-slurm-model.md](docs/src/supported-slurm-model.md)
 - Docker Compose Migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
@@ -96,7 +105,7 @@ If you use `hpc-compose` in research, please cite the software. GitHub also expo
 @software{schuler_hpc_compose_2026,
   author = {Schuler, Nicolas},
   title = {hpc-compose},
-  version = {0.1.23},
+  version = {0.1.24},
   year = {2026},
   publisher = {Karlsruhe Institute of Technology (KIT)},
   url = {https://github.com/NicolasSchuler/hpc-compose}

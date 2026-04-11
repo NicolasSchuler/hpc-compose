@@ -200,7 +200,10 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let describe_stdout = stdout_text(&describe_template);
     assert!(describe_stdout.contains("template: multi-node-mpi"));
     assert!(describe_stdout.contains("allocation-wide"));
+    assert!(describe_stdout.contains("cache dir: required"));
+    assert!(describe_stdout.contains("placeholder: <shared-cache-dir>"));
     assert!(describe_stdout.contains("hpc-compose new --template multi-node-mpi"));
+    assert!(describe_stdout.contains("--cache-dir '<shared-cache-dir>'"));
 
     let init_alias = run_cli(
         tmpdir.path(),
@@ -208,6 +211,42 @@ fn help_and_template_discovery_surface_guided_workflows() {
     );
     assert_success(&init_alias);
     assert!(stdout_text(&init_alias).contains("template: multi-node-mpi"));
+
+    let list_templates_json = run_cli(
+        tmpdir.path(),
+        &["new", "--list-templates", "--format", "json"],
+    );
+    assert_success(&list_templates_json);
+    let list_payload: Value =
+        serde_json::from_str(&stdout_text(&list_templates_json)).expect("list json");
+    assert_eq!(list_payload["cache_dir_required"], true);
+    assert_eq!(list_payload["cache_dir_placeholder"], "<shared-cache-dir>");
+    assert!(list_payload["default_cache_dir"].is_null());
+
+    let describe_template_json = run_cli(
+        tmpdir.path(),
+        &[
+            "new",
+            "--describe-template",
+            "minimal-batch",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&describe_template_json);
+    let describe_payload: Value =
+        serde_json::from_str(&stdout_text(&describe_template_json)).expect("describe json");
+    assert_eq!(describe_payload["cache_dir_required"], true);
+    assert_eq!(
+        describe_payload["cache_dir_placeholder"],
+        "<shared-cache-dir>"
+    );
+    assert!(
+        describe_payload["command"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--cache-dir '<shared-cache-dir>'")
+    );
 }
 
 #[test]
@@ -227,6 +266,30 @@ fn init_interactive_uses_prompted_values() {
     let stdout = stdout_text(&init);
     assert!(stdout.contains("Choose a template:"));
     assert!(stdout.contains("hpc-compose up -f"));
+}
+
+#[test]
+fn init_interactive_uses_cli_cache_dir_as_prompt_default() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output = tmpdir.path().join("interactive-cli-cache.yaml");
+    let init = run_cli_with_stdin(
+        tmpdir.path(),
+        &[
+            "new",
+            "--cache-dir",
+            "/tmp/cli-cache",
+            "--output",
+            output.to_str().expect("path"),
+            "--force",
+        ],
+        "2\ninteractive-app\n\n",
+    );
+    assert_success(&init);
+    let rendered = fs::read_to_string(&output).expect("rendered");
+    assert!(rendered.contains("name: interactive-app"));
+    assert!(rendered.contains("job_name: interactive-app"));
+    assert!(rendered.contains("cache_dir: /tmp/cli-cache"));
+    assert!(stdout_text(&init).contains("Cache dir [/tmp/cli-cache]:"));
 }
 
 #[test]
@@ -307,6 +370,23 @@ fn new_and_setup_commands_support_json_output() {
     assert_eq!(setup["env_files"][0], ".env");
     assert_eq!(setup["env"]["CACHE_DIR"], "/shared/cache");
     assert_eq!(setup["binaries"]["srun"], "/opt/slurm/bin/srun");
+}
+
+#[test]
+fn new_requires_cache_dir_when_writing_a_template() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "new",
+            "--template",
+            "minimal-batch",
+            "--name",
+            "missing-cache",
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--cache-dir is required"));
 }
 
 #[test]

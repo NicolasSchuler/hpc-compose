@@ -9,6 +9,7 @@
 - [Execution Model](execution-model.md)
 - [Runbook](runbook.md)
 - [Examples](examples.md)
+- [Example Source](example-source.md)
 - [Spec Reference](spec-reference.md)
 - [Supported Slurm Model](supported-slurm-model.md)
 - [Docker Compose Migration](docker-compose-migration.md)

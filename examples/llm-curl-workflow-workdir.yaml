@@ -9,8 +9,8 @@ x-slurm:
   # Uncomment if your cluster requires them.
   # partition: gpu
   # account: my-project
-  # Set cache_dir explicitly if your cluster prefers a shared scratch path.
-  # cache_dir: /shared/$USER/hpc-compose-cache
+  # Set CACHE_DIR to a path visible from the submission host and compute nodes.
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
 
 services:
   llm:

@@ -5,7 +5,7 @@ x-slurm:
   time: "00:30:00"
   mem: 8G
   cpus_per_task: 2
-  cache_dir: /shared/$USER/hpc-compose-cache
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
 
 services:
   app:

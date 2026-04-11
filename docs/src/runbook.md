@@ -4,7 +4,7 @@ This runbook is for adapting `hpc-compose` to a real workload on a Slurm cluster
 
 Commands below assume `hpc-compose` is on your `PATH`. If you are running from a local checkout, replace `hpc-compose` with `target/release/hpc-compose`.
 
-All commands accept `-f` / `--file` to specify the compose spec path. When omitted, `hpc-compose` first uses the active context compose file from the project-local settings file, then falls back to `compose.yaml` in the current directory. (`cache prune --all-unused` requires `-f` explicitly. `cache prune --age` can use the active context/profile unless you pass `--cache-dir`.)
+Compose-aware commands accept `-f` / `--file` to specify the compose spec path. When omitted, `hpc-compose` first uses the active context compose file from the project-local settings file, then falls back to `compose.yaml` in the current directory. Commands such as `new`, `setup`, `context`, and `completions` do not take `-f`. (`cache prune --all-unused` requires `-f` explicitly. `cache prune --age` can use the active context/profile unless you pass `--cache-dir`.)
 
 Global context flags are also available everywhere:
 
@@ -22,7 +22,12 @@ Make sure you have:
 - Pyxis support in `srun` (`srun --help` should mention `--container-image`),
 - a shared filesystem path for `x-slurm.cache_dir`,
 - any required local source trees or local `.sqsh` images in place,
-- registry credentials available if your cluster or registry requires them.
+- registry credentials available if your cluster or registry requires them,
+- `curl` on the compute node when using `readiness.type: http`,
+- `nvidia-smi` on the compute node when the `gpu` metrics collector is enabled,
+- `sstat` on the compute node when the `slurm` metrics collector is enabled.
+
+`preflight` validates all of these automatically. See the full preflight checklist below.
 
 ## Command cadence
 
@@ -40,10 +45,10 @@ Make sure you have:
 
 For a new spec on a real cluster:
 
-1. Run `hpc-compose new --template <name> --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`, or copy the closest shipped example.
+1. Run `hpc-compose new --template <name> --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml`, or copy the closest shipped example.
 2. Run `hpc-compose setup` once so compose path, env files, env vars, and binary overrides live in the project-local settings file.
 3. Run `hpc-compose context --format json` to verify resolved values and sources.
-4. Set `x-slurm.cache_dir` if you need an explicit shared cache path, and adjust any cluster-specific resource settings.
+4. Set or confirm `x-slurm.cache_dir`, and adjust any cluster-specific resource settings.
 5. Run `hpc-compose validate -f compose.yaml` and `hpc-compose inspect --verbose -f compose.yaml` while you are still adapting the file.
 6. Run `hpc-compose --profile <name> up` for the normal run.
 7. If that fails, or if you need more visibility later, break out `preflight`, `prepare`, `render`, `status`, `ps`, `watch`, `stats`, or `logs` separately.
@@ -63,7 +68,7 @@ hpc-compose --profile dev context --format json
 Non-interactive setup is available for scripting:
 
 ```bash
-hpc-compose setup --profile-name dev --compose-file compose.yaml --env-file .env --env-file .env.dev --env CACHE_DIR=/shared/$USER/hpc-compose-cache --default-profile dev --non-interactive
+hpc-compose setup --profile-name dev --compose-file compose.yaml --env-file .env --env-file .env.dev --env 'CACHE_DIR=<shared-cache-dir>' --default-profile dev --non-interactive
 ```
 
 Settings file shape (`.hpc-compose/settings.toml`):
@@ -77,7 +82,7 @@ compose_file = "compose.yaml"
 env_files = [".env"]
 
 [defaults.env]
-CACHE_DIR = "/shared/$USER/hpc-compose-cache"
+CACHE_DIR = "/cluster/shared/hpc-compose-cache"
 
 [profiles.dev]
 compose_file = "compose.yaml"
@@ -101,30 +106,30 @@ Use `context` whenever you want to inspect effective compose path, binaries, int
 
 | Example | Use it when you need | File |
 | --- | --- | --- |
-| Dev app | mounted source tree plus a small prepare step | [`examples/dev-python-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/dev-python-app.yaml) |
-| Redis worker stack | multi-service launch ordering and readiness checks | [`examples/app-redis-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/app-redis-worker.yaml) |
-| LLM curl workflow | one GPU-backed LLM plus a one-shot `curl` request from a second service | [`examples/llm-curl-workflow.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow.yaml) |
-| LLM curl workflow (home) | the same request flow, but anchored under `$HOME/models` for direct use on a login node | [`examples/llm-curl-workflow-workdir.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl-workflow-workdir.yaml) |
-| GPU-backed app | one GPU service plus a dependent application | [`examples/llama-app.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-app.yaml) |
-| llama.cpp + uv worker | llama.cpp serving plus a source-mounted Python worker run through `uv` | [`examples/llama-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker.yaml) |
-| Minimal batch | simplest single-service batch job | [`examples/minimal-batch.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/minimal-batch.yaml) |
-| Multi-node MPI | one helper on the primary node plus one allocation-wide distributed step | [`examples/multi-node-mpi.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-node-mpi.yaml) |
-| Multi-node torchrun | allocation-wide GPU training with the primary node as rendezvous | [`examples/multi-node-torchrun.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-node-torchrun.yaml) |
-| Training checkpoints | GPU training with checkpoints to shared storage | [`examples/training-checkpoints.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-checkpoints.yaml) |
-| Training resume | GPU training with a shared resume directory and attempt-aware checkpoints | [`examples/training-resume.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/training-resume.yaml) |
-| Postgres ETL | PostgreSQL plus a Python data processing job | [`examples/postgres-etl.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/postgres-etl.yaml) |
-| vLLM serving | vLLM with an in-job Python client | [`examples/vllm-openai.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-openai.yaml) |
-| vLLM + uv worker | vLLM serving with a source-mounted Python worker run through `uv` | [`examples/vllm-uv-worker.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-uv-worker.yaml) |
-| MPI hello | MPI hello world with Open MPI | [`examples/mpi-hello.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/mpi-hello.yaml) |
-| Multi-stage pipeline | two-stage pipeline with file-based handoff | [`examples/multi-stage-pipeline.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/multi-stage-pipeline.yaml) |
-| Data preprocessing | CPU-heavy NLP preprocessing pipeline | [`examples/fairseq-preprocess.yaml`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/fairseq-preprocess.yaml) |
+| Dev app | mounted source tree plus a small prepare step | [`examples/dev-python-app.yaml`](example-source.md#dev-python-app) |
+| Redis worker stack | multi-service launch ordering and readiness checks | [`examples/app-redis-worker.yaml`](example-source.md#app-redis-worker) |
+| LLM curl workflow | one GPU-backed LLM plus a one-shot `curl` request from a second service | [`examples/llm-curl-workflow.yaml`](example-source.md#llm-curl-workflow) |
+| LLM curl workflow (home) | the same request flow, but anchored under `$HOME/models` for direct use on a login node | [`examples/llm-curl-workflow-workdir.yaml`](example-source.md#llm-curl-workflow-workdir) |
+| GPU-backed app | one GPU service plus a dependent application | [`examples/llama-app.yaml`](example-source.md#llama-app) |
+| llama.cpp + uv worker | llama.cpp serving plus a source-mounted Python worker run through `uv` | [`examples/llama-uv-worker.yaml`](example-source.md#llama-uv-worker) |
+| Minimal batch | simplest single-service batch job | [`examples/minimal-batch.yaml`](example-source.md#minimal-batch) |
+| Multi-node MPI | one helper on the primary node plus one allocation-wide distributed step | [`examples/multi-node-mpi.yaml`](example-source.md#multi-node-mpi) |
+| Multi-node torchrun | allocation-wide GPU training with the primary node as rendezvous | [`examples/multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) |
+| Training checkpoints | GPU training with checkpoints to shared storage | [`examples/training-checkpoints.yaml`](example-source.md#training-checkpoints) |
+| Training resume | GPU training with a shared resume directory and attempt-aware checkpoints | [`examples/training-resume.yaml`](example-source.md#training-resume) |
+| Postgres ETL | PostgreSQL plus a Python data processing job | [`examples/postgres-etl.yaml`](example-source.md#postgres-etl) |
+| vLLM serving | vLLM with an in-job Python client | [`examples/vllm-openai.yaml`](example-source.md#vllm-openai) |
+| vLLM + uv worker | vLLM serving with a source-mounted Python worker run through `uv` | [`examples/vllm-uv-worker.yaml`](example-source.md#vllm-uv-worker) |
+| MPI hello | MPI hello world with Open MPI | [`examples/mpi-hello.yaml`](example-source.md#mpi-hello) |
+| Multi-stage pipeline | two-stage pipeline with file-based handoff | [`examples/multi-stage-pipeline.yaml`](example-source.md#multi-stage-pipeline) |
+| Data preprocessing | CPU-heavy NLP preprocessing pipeline | [`examples/fairseq-preprocess.yaml`](example-source.md#fairseq-preprocess) |
 
 The fastest path is usually to copy the closest example and adapt it instead of starting from scratch.
 
 You can also let `hpc-compose` scaffold one of these examples directly:
 
 ```bash
-hpc-compose new --template dev-python-app --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
+hpc-compose new --template dev-python-app --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
 ```
 
 ## 1. Choose `x-slurm.cache_dir` early
@@ -133,7 +138,7 @@ Set `x-slurm.cache_dir` to a path that is visible from both the login node and t
 
 ```yaml
 x-slurm:
-  cache_dir: /shared/$USER/hpc-compose-cache
+  cache_dir: /cluster/shared/hpc-compose-cache
 ```
 
 Rules:
@@ -142,6 +147,8 @@ Rules:
 - If you leave `cache_dir` unset, the default is `$HOME/.cache/hpc-compose`.
 - The default is convenient for small or home-directory workflows, but a shared project or workspace path is usually safer on real clusters.
 - The important constraint is visibility: `prepare` runs on the login node, but the batch job later reuses those cached artifacts from compute nodes.
+
+The shipped repository examples default `x-slurm.cache_dir` to `/cluster/shared/hpc-compose-cache` and still honor `CACHE_DIR`, so you can set the shared path once in `.env`, the shell environment, or `hpc-compose setup`.
 
 ## 2. Adapt the example to your workload
 
@@ -224,6 +231,9 @@ On an interactive TTY, `up` launches the full-screen watch UI with a per-service
 
 Useful options:
 
+- `--local` runs the plan on the current Linux host through Enroot instead of calling `sbatch`.
+- `--resume-diff-only` prints the resume-sensitive config diff without submitting.
+- `--allow-resume-changes` confirms that you intend to change resume-coupled config between tracked runs.
 - `--script-out path/to/job.sbatch` keeps a copy of the rendered script.
 - When `--script-out` is omitted, the script is written to `<compose-file-dir>/hpc-compose.sbatch`.
 - `--force-rebuild` refreshes imported and prepared artifacts during submission.
@@ -245,9 +255,16 @@ hpc-compose preflight --verbose -f compose.yaml
 - `scontrol` when `x-slurm.nodes > 1`,
 - Pyxis container support in `srun`,
 - cache directory policy and writability,
+- cache directory under `$HOME` warning (shared storage is safer on real clusters),
 - local mount and image paths,
 - registry credentials,
-- skip-prepare reuse safety when relevant.
+- skip-prepare reuse safety when relevant,
+- `nvidia-smi` availability when the `gpu` metrics collector is enabled,
+- `sstat` availability when the `slurm` metrics collector is enabled,
+- `curl` availability when any service uses `readiness.type: http`,
+- distributed service readiness does not rely on localhost,
+- resume path does not use a node-local temporary directory (`/tmp`, `/var/tmp`),
+- HAICORE/Pyxis helper mount paths (task prolog and shared libraries) when present.
 
 If your cluster installs these tools in non-standard locations, pass explicit paths:
 
@@ -443,7 +460,7 @@ hpc-compose cache prune --all-unused -f compose.yaml
 Prune one cache directory directly without loading a compose plan:
 
 ```bash
-hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache
+hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
 ```
 
 The two strategies (`--age` and `--all-unused`) are mutually exclusive — pick one per invocation.
