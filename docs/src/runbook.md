@@ -53,6 +53,8 @@ For a new spec on a real cluster:
 6. Run `hpc-compose --profile <name> up` for the normal run.
 7. If that fails, or if you need more visibility later, break out `preflight`, `prepare`, `render`, `status`, `ps`, `watch`, `stats`, or `logs` separately.
 
+For a minimal cluster smoke test from a checkout, set `CACHE_DIR` to shared storage and run `scripts/cluster_smoke.sh`. It validates, preflights, and renders by default; set `HPC_COMPOSE_SMOKE_SUBMIT=1` only when you want it to submit the smoke job.
+
 ## Profiled Context (Project-Local Settings File)
 
 `hpc-compose` can discover `.hpc-compose/settings.toml` by walking upward from the current directory. You can also pin a file with `--settings-file`.

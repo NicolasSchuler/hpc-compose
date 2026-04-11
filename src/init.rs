@@ -293,7 +293,7 @@ fn render_template_body(
 /// the parent directory cannot be created, or when the rendered template
 /// cannot be written.
 pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) -> Result<PathBuf> {
-    let output = absolute_path(output)?;
+    let output = crate::path_util::absolute_path_cwd(output)?;
     if output.exists() && !force {
         bail!(
             "refusing to overwrite {}; pass --force to replace it",
@@ -355,15 +355,6 @@ fn prompt_required(
         bail!("{label} cannot be empty; {guidance}");
     }
     Ok(trimmed.to_string())
-}
-
-fn absolute_path(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    Ok(std::env::current_dir()
-        .context("failed to determine current directory")?
-        .join(path))
 }
 
 #[cfg(test)]
@@ -590,14 +581,14 @@ mod tests {
         let current_dir = std::env::current_dir().expect("current dir");
 
         assert_eq!(
-            absolute_path(Path::new("nested/compose.yaml"))
+            crate::path_util::absolute_path_cwd(Path::new("nested/compose.yaml"))
                 .expect("absolute")
                 .strip_prefix(&current_dir)
                 .expect("relative to cwd"),
             Path::new("nested/compose.yaml")
         );
         assert_eq!(
-            absolute_path(Path::new("/tmp/absolute.yaml")).expect("absolute"),
+            crate::path_util::absolute_path_cwd(Path::new("/tmp/absolute.yaml")).expect("absolute"),
             PathBuf::from("/tmp/absolute.yaml")
         );
 

@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose.schema.json",
+  "title": "hpc-compose specification",
+  "description": "Compose-like specification accepted by hpc-compose. Rust validation remains the semantic source of truth.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["services"],
+  "properties": {
+    "version": {
+      "type": ["string", "number"],
+      "description": "Compose compatibility field accepted for migration convenience."
+    },
+    "name": {
+      "type": "string"
+    },
+    "services": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/service"
+      }
+    },
+    "x-slurm": {
+      "$ref": "#/$defs/slurm"
+    }
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "lineSafeString": {
+      "type": "string",
+      "not": {
+        "anyOf": [
+          { "pattern": "\\n|\\r" },
+          { "pattern": "\\u0000" }
+        ]
+      }
+    },
+    "command": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      ]
+    },
+    "environment": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      ]
+    },
+    "duration": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "string" }
+      ]
+    },
+    "slurm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job_name": { "$ref": "#/$defs/lineSafeString" },
+        "partition": { "$ref": "#/$defs/lineSafeString" },
+        "account": { "$ref": "#/$defs/lineSafeString" },
+        "qos": { "$ref": "#/$defs/lineSafeString" },
+        "time": { "$ref": "#/$defs/lineSafeString" },
+        "nodes": { "$ref": "#/$defs/positiveInteger" },
+        "ntasks": { "$ref": "#/$defs/positiveInteger" },
+        "ntasks_per_node": { "$ref": "#/$defs/positiveInteger" },
+        "cpus_per_task": { "$ref": "#/$defs/positiveInteger" },
+        "mem": { "$ref": "#/$defs/lineSafeString" },
+        "gres": { "$ref": "#/$defs/lineSafeString" },
+        "gpus": { "$ref": "#/$defs/positiveInteger" },
+        "constraint": { "$ref": "#/$defs/lineSafeString" },
+        "output": { "$ref": "#/$defs/lineSafeString" },
+        "error": { "$ref": "#/$defs/lineSafeString" },
+        "chdir": { "$ref": "#/$defs/lineSafeString" },
+        "cache_dir": { "type": "string" },
+        "metrics": { "$ref": "#/$defs/metrics" },
+        "artifacts": { "$ref": "#/$defs/artifacts" },
+        "resume": { "$ref": "#/$defs/resume" },
+        "notify": { "$ref": "#/$defs/notify" },
+        "setup": { "$ref": "#/$defs/stringList" },
+        "submit_args": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/lineSafeString" },
+          "description": "Raw SBATCH pass-through lines. hpc-compose validates line safety but not Slurm semantics."
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval_seconds": { "$ref": "#/$defs/positiveInteger" },
+        "collectors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["gpu", "slurm"]
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "collect": {
+          "type": "string",
+          "enum": ["always", "on_success", "on_failure"]
+        },
+        "export_dir": { "type": "string" },
+        "paths": { "$ref": "#/$defs/stringList" },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/artifactBundle"
+          }
+        }
+      }
+    },
+    "artifactBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string" }
+      }
+    },
+    "notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "email": { "$ref": "#/$defs/emailNotify" }
+      }
+    },
+    "emailNotify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["to"],
+      "properties": {
+        "to": { "$ref": "#/$defs/lineSafeString" },
+        "on": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["start", "end", "fail", "all"]
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image"],
+      "properties": {
+        "image": { "type": "string" },
+        "command": { "$ref": "#/$defs/command" },
+        "entrypoint": { "$ref": "#/$defs/command" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "volumes": { "$ref": "#/$defs/stringList" },
+        "working_dir": { "type": "string" },
+        "depends_on": { "$ref": "#/$defs/dependsOn" },
+        "readiness": { "$ref": "#/$defs/readiness" },
+        "healthcheck": { "$ref": "#/$defs/healthcheck" },
+        "x-slurm": { "$ref": "#/$defs/serviceSlurm" },
+        "x-enroot": { "$ref": "#/$defs/serviceEnroot" }
+      }
+    },
+    "dependsOn": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/dependencyCondition"
+          }
+        }
+      ]
+    },
+    "dependencyCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "condition": {
+          "type": "string",
+          "enum": ["service_started", "service_healthy"]
+        }
+      }
+    },
+    "readiness": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "seconds"],
+          "properties": {
+            "type": { "const": "sleep" },
+            "seconds": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "port"],
+          "properties": {
+            "type": { "const": "tcp" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "host": { "type": "string" },
+            "timeout_seconds": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "pattern"],
+          "properties": {
+            "type": { "const": "log" },
+            "pattern": { "type": "string" },
+            "timeout_seconds": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "url"],
+          "properties": {
+            "type": { "const": "http" },
+            "url": { "type": "string" },
+            "status_code": { "type": "integer", "minimum": 100, "maximum": 599 },
+            "timeout_seconds": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        }
+      ]
+    },
+    "healthcheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "test": { "$ref": "#/$defs/command" },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "disable": { "type": "boolean" },
+        "interval": { "$ref": "#/$defs/duration" },
+        "retries": { "$ref": "#/$defs/nonNegativeInteger" },
+        "start_period": { "$ref": "#/$defs/duration" }
+      }
+    },
+    "serviceSlurm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nodes": { "$ref": "#/$defs/positiveInteger" },
+        "ntasks": { "$ref": "#/$defs/positiveInteger" },
+        "ntasks_per_node": { "$ref": "#/$defs/positiveInteger" },
+        "cpus_per_task": { "$ref": "#/$defs/positiveInteger" },
+        "gpus": { "$ref": "#/$defs/positiveInteger" },
+        "gres": { "type": "string" },
+        "time_limit": { "type": "string" },
+        "extra_srun_args": { "$ref": "#/$defs/stringList" },
+        "failure_policy": { "$ref": "#/$defs/failurePolicy" }
+      }
+    },
+    "failurePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["fail_job", "ignore", "restart_on_failure"]
+        },
+        "max_restarts": { "$ref": "#/$defs/nonNegativeInteger" },
+        "backoff_seconds": { "$ref": "#/$defs/nonNegativeInteger" },
+        "window_seconds": { "$ref": "#/$defs/nonNegativeInteger" },
+        "max_restarts_in_window": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "serviceEnroot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prepare": { "$ref": "#/$defs/prepare" }
+      }
+    },
+    "prepare": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commands": { "$ref": "#/$defs/stringList" },
+        "mounts": { "$ref": "#/$defs/stringList" },
+        "env": { "$ref": "#/$defs/environment" },
+        "root": { "type": "boolean" }
+      }
+    }
+  }
+}

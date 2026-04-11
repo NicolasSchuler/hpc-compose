@@ -303,40 +303,46 @@ fn artifact_role_label(name: &str) -> &'static str {
     }
 }
 
-pub(crate) fn print_status_snapshot(snapshot: &StatusSnapshot) {
-    let _ = write_status_snapshot(&mut io::stdout(), snapshot);
+pub(crate) fn print_status_snapshot(snapshot: &StatusSnapshot) -> io::Result<()> {
+    write_status_snapshot(&mut io::stdout(), snapshot)
 }
 
-pub(crate) fn print_ps_snapshot(snapshot: &PsSnapshot) {
-    let _ = write_ps_snapshot(&mut io::stdout(), snapshot);
+pub(crate) fn print_ps_snapshot(snapshot: &PsSnapshot) -> io::Result<()> {
+    write_ps_snapshot(&mut io::stdout(), snapshot)
 }
 
-pub(crate) fn print_stats_snapshot(snapshot: &StatsSnapshot) {
-    let _ = write_stats_snapshot(&mut io::stdout(), snapshot);
+pub(crate) fn print_stats_snapshot(snapshot: &StatsSnapshot) -> io::Result<()> {
+    write_stats_snapshot(&mut io::stdout(), snapshot)
 }
 
-pub(crate) fn print_artifact_export_report(report: &ArtifactExportReport) {
-    let _ = write_artifact_export_report(&mut io::stdout(), report);
+pub(crate) fn print_artifact_export_report(report: &ArtifactExportReport) -> io::Result<()> {
+    write_artifact_export_report(&mut io::stdout(), report)
 }
 
-pub(crate) fn print_plan_inspect_verbose(plan: &Plan, runtime_plan: &RuntimePlan) {
-    let _ = write_plan_inspect_verbose(&mut io::stdout(), plan, runtime_plan);
+pub(crate) fn print_plan_inspect_verbose(
+    plan: &Plan,
+    runtime_plan: &RuntimePlan,
+) -> io::Result<()> {
+    write_plan_inspect_verbose(&mut io::stdout(), plan, runtime_plan)
 }
 
-pub(crate) fn print_plan_inspect(plan: &RuntimePlan) {
-    let _ = write_plan_inspect(&mut io::stdout(), plan);
+pub(crate) fn print_plan_inspect(plan: &RuntimePlan) -> io::Result<()> {
+    write_plan_inspect(&mut io::stdout(), plan)
 }
 
 pub(crate) fn print_cache_inspect(report: &CacheInspectReport) -> Result<()> {
     write_cache_inspect(&mut io::stdout(), report)
 }
 
-pub(crate) fn print_job_inventory_scan(report: &JobInventoryScan, disk_usage: bool) {
-    let _ = write_job_inventory_scan(&mut io::stdout(), report, disk_usage);
+pub(crate) fn print_job_inventory_scan(
+    report: &JobInventoryScan,
+    disk_usage: bool,
+) -> io::Result<()> {
+    write_job_inventory_scan(&mut io::stdout(), report, disk_usage)
 }
 
-pub(crate) fn print_cleanup_report(report: &CleanupReport, disk_usage: bool) {
-    let _ = write_cleanup_report(&mut io::stdout(), report, disk_usage);
+pub(crate) fn print_cleanup_report(report: &CleanupReport, disk_usage: bool) -> io::Result<()> {
+    write_cleanup_report(&mut io::stdout(), report, disk_usage)
 }
 
 fn write_job_inventory_scan(
@@ -2281,8 +2287,8 @@ services:
                 },
             }],
         });
-        print_plan_inspect(&plan);
-        print_plan_inspect(&local_plan);
+        print_plan_inspect(&plan).expect("print plan inspect");
+        print_plan_inspect(&local_plan).expect("print local plan inspect");
         print_cache_inspect(&build_cache_inspect_report(&plan, None).expect("inspect report"))
             .expect("inspect");
         print_cache_inspect(
@@ -2933,12 +2939,12 @@ services:
             StatsOutputFormat::Json
         );
 
-        print_status_snapshot(&status);
-        print_stats_snapshot(&stats);
-        print_artifact_export_report(&artifact_report);
-        print_plan_inspect_verbose(&plan, &runtime);
-        print_job_inventory_scan(&scan, true);
-        print_cleanup_report(&cleanup, true);
+        print_status_snapshot(&status).expect("print status snapshot");
+        print_stats_snapshot(&stats).expect("print stats snapshot");
+        print_artifact_export_report(&artifact_report).expect("print artifact export report");
+        print_plan_inspect_verbose(&plan, &runtime).expect("print verbose inspect");
+        print_job_inventory_scan(&scan, true).expect("print job inventory");
+        print_cleanup_report(&cleanup, true).expect("print cleanup report");
         print_template_list();
         print_template_description("dev-python-app").expect("template description");
     }

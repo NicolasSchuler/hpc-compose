@@ -168,9 +168,11 @@ pub(crate) fn inspect(
     match output::resolve_output_format(format, json) {
         OutputFormat::Text => {
             if verbose {
-                output::print_plan_inspect_verbose(&plan, &runtime_plan);
+                output::print_plan_inspect_verbose(&plan, &runtime_plan)
+                    .context("failed to write inspect output")?;
             } else {
-                output::print_plan_inspect(&runtime_plan);
+                output::print_plan_inspect(&runtime_plan)
+                    .context("failed to write inspect output")?;
             }
         }
         OutputFormat::Json => {

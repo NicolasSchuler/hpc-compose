@@ -28,7 +28,7 @@ These capabilities are usable, but `hpc-compose` does not model or validate thei
 | `services.<name>.x-slurm.extra_srun_args` | Raw `srun` arguments for site-specific launch flags such as MPI or exclusivity settings |
 | Existing reservations | Joining an already-created reservation through raw submit args is supported as pass-through |
 
-Pass-through is appropriate when a site-specific flag is useful but does not justify a first-class schema field. It is not a guarantee that `hpc-compose` understands the operational consequences of that flag.
+Pass-through is appropriate when a site-specific flag is useful but does not justify a first-class schema field. `hpc-compose` rejects line breaks and null bytes in raw `#SBATCH` entries so one list entry cannot emit multiple directives, but it does not validate the Slurm semantics of those flags.
 
 ## Unsupported or out of scope
 

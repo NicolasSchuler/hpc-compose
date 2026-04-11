@@ -381,7 +381,7 @@ fn merge_service_name(service_names: &mut Vec<String>, service_name: &str) {
 fn unix_timestamp_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("time")
+        .unwrap_or_default()
         .as_secs()
 }
 

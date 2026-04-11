@@ -474,7 +474,7 @@ fn base_image_cache_key(service: &RuntimeService) -> String {
 fn temporary_rootfs_name(service: &RuntimeService) -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("time")
+        .unwrap_or_default()
         .as_secs();
     format!("hpc-compose-{}-{}", sanitize_name(&service.name), ts)
 }

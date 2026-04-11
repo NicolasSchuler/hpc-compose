@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -629,7 +629,7 @@ fn resolve_path(value: &str, project_dir: &Path) -> Result<PathBuf> {
     } else {
         project_dir.join(raw)
     };
-    Ok(normalize_path(path))
+    Ok(crate::path_util::normalize_path(path))
 }
 
 fn expand_home(value: &str) -> String {
@@ -650,20 +650,6 @@ fn expand_home(value: &str) -> String {
 fn normalize_existing_path(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .context(format!("failed to canonicalize {}", path.display()))
-}
-
-fn normalize_path(path: PathBuf) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 #[cfg(test)]
@@ -1149,7 +1135,7 @@ mod tests {
             tmpdir.path().join("relative/path")
         );
         assert_eq!(
-            normalize_path(PathBuf::from("/tmp/a/./b/../c")),
+            crate::path_util::normalize_path(PathBuf::from("/tmp/a/./b/../c")),
             PathBuf::from("/tmp/a/c")
         );
     }

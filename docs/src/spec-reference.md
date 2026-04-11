@@ -38,6 +38,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, and `--default-profile`. |
 | `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, interpolation vars, runtime paths, and value sources; supports `--format json`. |
 | `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
+| `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
 
 ## `x-slurm`
 
@@ -99,6 +100,7 @@ x-slurm:
 - Default: omitted
 - Notes:
   - Each entry is emitted as `#SBATCH {arg}`.
+  - Entries are rejected if they contain line breaks or null bytes.
   - Entries are not validated against Slurm option syntax.
 
 ### `x-slurm.notify`

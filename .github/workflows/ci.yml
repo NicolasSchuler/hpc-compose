@@ -158,13 +158,61 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
+        with:
+          toolchain: stable
+          rustflags: ""
+
       - name: Install shellcheck
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
       - name: Run shellcheck
-        run: shellcheck install.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck install.sh scripts/cluster_smoke.sh
+
+          cargo build --locked
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          for f in examples/*.yaml; do
+            echo "Shellchecking rendered $f"
+            out="$tmpdir/$(basename "$f" .yaml).sbatch"
+            env -u CACHE_DIR cargo run --locked -- render -f "$f" --output "$out"
+            shellcheck -x -s bash "$out"
+          done
+
+  macos-authoring:
+    name: macOS Authoring (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
+        with:
+          toolchain: stable
+          rustflags: ""
+
+      - name: Run authoring-focused tests
+        run: cargo test --locked --test cli_context --test cli_init --test cli_spec --test public_api --test release_metadata
+
+      - name: Smoke test authoring commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked -- validate -f examples/minimal-batch.yaml
+          cargo run --locked -- render -f examples/minimal-batch.yaml --output "$RUNNER_TEMP/minimal.sbatch"
+          cargo run --locked -- schema > "$RUNNER_TEMP/hpc-compose.schema.json"
+          python3 -m json.tool "$RUNNER_TEMP/hpc-compose.schema.json" >/dev/null
 
   cargo-deny:
     name: Cargo Deny

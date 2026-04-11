@@ -236,7 +236,7 @@ pub fn find_submission_record_in_repo(scan_start: &Path, job_id: &str) -> Result
             job_id,
             inventory.scan_root.display()
         ),
-        [entry] => read_json(&entry.record_path),
+        [entry] => validate_submission_record(read_json(&entry.record_path)?, &entry.record_path),
         _ => bail!(
             "multiple tracked submissions with job id '{}' were found under {}; pass -f/--file to disambiguate",
             job_id,
@@ -360,7 +360,19 @@ pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<
             compose_file.display()
         );
     }
-    read_json(&path)
+    validate_submission_record(read_json(&path)?, &path)
+}
+
+fn validate_submission_record(record: SubmissionRecord, path: &Path) -> Result<SubmissionRecord> {
+    if record.schema_version > SUBMISSION_SCHEMA_VERSION {
+        bail!(
+            "submission record {} uses schema version {} but this version of hpc-compose only supports up to {}; please upgrade hpc-compose",
+            path.display(),
+            record.schema_version,
+            SUBMISSION_SCHEMA_VERSION
+        );
+    }
+    Ok(record)
 }
 
 /// Returns the tracked log directory for a submission record.
@@ -571,7 +583,7 @@ fn removable_paths_from_paths(
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for path in [record_path, runtime_job_root, legacy_runtime_job_root] {
-        let normalized = normalize_path(path.to_path_buf());
+        let normalized = crate::path_util::normalize_path(path.to_path_buf());
         if seen.insert(normalized.clone()) {
             out.push(normalized);
         }

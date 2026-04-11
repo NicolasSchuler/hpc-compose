@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(test)]
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use clap_complete::Shell;
@@ -109,7 +112,7 @@ pub(crate) fn setup(
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to determine current working directory")?;
     let settings_path = settings_file_override
-        .map(|path| absolute_path(&path, &cwd))
+        .map(|path| crate::path_util::absolute_path(&path, &cwd))
         .unwrap_or_else(|| repo_adjacent_settings_path(&cwd));
     let mut settings = hpc_compose::context::load_settings_if_exists(&settings_path)?
         .unwrap_or_else(Settings::default);
@@ -289,8 +292,12 @@ pub(crate) fn setup(
 }
 
 pub(crate) fn completions(shell: Shell) -> Result<()> {
+    completions_to_writer(shell, &mut io::stdout())
+}
+
+fn completions_to_writer(shell: Shell, writer: &mut impl Write) -> Result<()> {
     let mut cmd = build_cli_command();
-    clap_complete::generate(shell, &mut cmd, "hpc-compose", &mut io::stdout());
+    clap_complete::generate(shell, &mut cmd, "hpc-compose", writer);
     Ok(())
 }
 
@@ -402,14 +409,6 @@ fn dedup_preserve_order(items: Vec<String>) -> Vec<String> {
     out
 }
 
-fn absolute_path(path: &Path, cwd: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,11 +480,11 @@ mod tests {
 
         let cwd = Path::new("/tmp/project");
         assert_eq!(
-            absolute_path(Path::new("compose.yaml"), cwd),
+            crate::path_util::absolute_path(Path::new("compose.yaml"), cwd),
             cwd.join("compose.yaml")
         );
         assert_eq!(
-            absolute_path(Path::new("/tmp/abs"), cwd),
+            crate::path_util::absolute_path(Path::new("/tmp/abs"), cwd),
             PathBuf::from("/tmp/abs")
         );
     }
@@ -558,8 +557,13 @@ mod tests {
 
     #[test]
     fn completions_emits_supported_shell_output() {
-        completions(Shell::Bash).expect("bash completions");
-        completions(Shell::Zsh).expect("zsh completions");
+        let mut bash = Vec::new();
+        completions_to_writer(Shell::Bash, &mut bash).expect("bash completions");
+        assert!(String::from_utf8_lossy(&bash).contains("hpc-compose"));
+
+        let mut zsh = Vec::new();
+        completions_to_writer(Shell::Zsh, &mut zsh).expect("zsh completions");
+        assert!(String::from_utf8_lossy(&zsh).contains("#compdef hpc-compose"));
     }
 
     #[test]

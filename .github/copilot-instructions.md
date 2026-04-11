@@ -4,8 +4,8 @@
 
 - Build the release binary with `cargo build --release`.
 - Run the full test suite with `cargo test`.
-- Run only the CLI integration tests with `cargo test --test cli`.
-- Run a single integration test with `cargo test --test cli submit_command_runs_end_to_end_with_fake_tools -- --exact`.
+- Run the split CLI integration tests with `cargo test --test cli_spec --test cli_runtime --test cli_cache --test cli_context --test cli_init --test cli_jobs`.
+- Run a single integration test with `cargo test --test cli_runtime submit_command_runs_end_to_end_with_fake_tools -- --exact`.
 - Run a single unit test with `cargo test planner::tests::prepare_mounts_force_rebuild -- --exact`.
 
 ## High-level architecture
@@ -22,11 +22,11 @@
 
 ## Key conventions
 
-- Preserve the repo's intentional scope: one Slurm allocation, one node in v1, multiple services inside that allocation. `x-slurm.nodes` must stay `1` or be omitted.
+- Preserve the repo's intentional scope: one Slurm allocation per application, with single-node jobs and constrained multi-node runs where one distributed service spans the allocation.
 - Keep the README and parser behavior aligned. The unsupported Compose features called out in `README.md` are also enforced in `src/spec.rs`; adding or changing spec fields usually requires updates in both places.
 - Relative paths are anchored to the compose file's parent directory, not the shell's current working directory. That applies to local `.sqsh` images, `volumes`, and `x-slurm.cache_dir`.
 - `depends_on` only controls launch order. Actual startup gating is handled separately by `readiness` and rendered into the batch script.
-- `depends_on` map syntax only supports `condition: service_started`. Other Compose conditions are rejected.
+- `depends_on` map syntax supports `condition: service_started` and `condition: service_healthy`. Other Compose conditions are rejected.
 - `working_dir` is only valid when the service also has an explicit `command` or `entrypoint`.
 - Mixed string/array `entrypoint` and `command` combinations are rejected in v1. Keep both sides in the same form.
 - `x-enroot.prepare.commands` is required when `x-enroot.prepare` is present. If `prepare.mounts` is non-empty, the service intentionally rebuilds on every prepare/submit instead of reusing a cached prepared image.
@@ -35,4 +35,4 @@
 - Cache manifests are part of the product behavior, not disposable metadata. If you change cache keys or artifact naming in `prepare.rs`, update `cache.rs`, `inspect` output in `main.rs`, and prune behavior together.
 - If you change cache keys, artifact naming, or prepared-image semantics in code, the docs (`docs/src/spec-reference.md`, `docs/src/runbook.md`) and cache behavior should be updated together.
 - `render.rs` encodes service names into bash-safe tokens via `service_token()`, replacing non-alphanumeric bytes with `_x{hex}_`. This encoding is used for both bash function names (`launch_<token>`) and log filenames. Tests in `render.rs` verify that names differing only in punctuation (e.g. `api.v1` vs `api_v1`) produce distinct tokens.
-- New spec features usually need coordinated changes across `src/spec.rs` (schema and validation), `src/planner.rs` (normalization), `src/prepare.rs` or `src/render.rs` (runtime behavior), and `tests/cli.rs` (end-to-end coverage with fake `enroot`/`srun`/`sbatch` binaries).
+- New spec features usually need coordinated changes across `src/spec.rs` (schema and validation), `schema/hpc-compose.schema.json` (authoring schema), `src/planner.rs` (normalization), `src/prepare.rs` or `src/render.rs` (runtime behavior), and the relevant split `tests/cli_*.rs` integration tests with fake `enroot`/`srun`/`sbatch` binaries.

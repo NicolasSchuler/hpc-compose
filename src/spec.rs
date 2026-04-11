@@ -9,6 +9,12 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
+mod validation;
+
+use validation::{
+    validate_positive_u32, validate_sbatch_safe_string, validate_sbatch_safe_strings,
+};
+
 const ROOT_ALLOWED_KEYS: &[&str] = &["name", "services", "version", "x-slurm"];
 const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "image",
@@ -1109,6 +1115,21 @@ impl SlurmConfig {
         validate_positive_u32(self.nodes, "x-slurm.nodes")?;
         validate_positive_u32(self.ntasks, "x-slurm.ntasks")?;
         validate_positive_u32(self.ntasks_per_node, "x-slurm.ntasks_per_node")?;
+        validate_sbatch_safe_string(self.job_name.as_deref(), "x-slurm.job-name")?;
+        validate_sbatch_safe_string(self.partition.as_deref(), "x-slurm.partition")?;
+        validate_sbatch_safe_string(self.account.as_deref(), "x-slurm.account")?;
+        validate_sbatch_safe_string(self.qos.as_deref(), "x-slurm.qos")?;
+        validate_sbatch_safe_string(self.constraint.as_deref(), "x-slurm.constraint")?;
+        validate_sbatch_safe_string(self.time.as_deref(), "x-slurm.time")?;
+        validate_sbatch_safe_string(self.mem.as_deref(), "x-slurm.mem")?;
+        validate_sbatch_safe_string(self.gres.as_deref(), "x-slurm.gres")?;
+        validate_sbatch_safe_string(self.output.as_deref(), "x-slurm.output")?;
+        validate_sbatch_safe_string(self.error.as_deref(), "x-slurm.error")?;
+        validate_sbatch_safe_string(self.chdir.as_deref(), "x-slurm.chdir")?;
+        validate_sbatch_safe_strings(
+            self.submit_args.iter().map(String::as_str),
+            "x-slurm.submit_args",
+        )?;
         if let Some(metrics) = &self.metrics
             && matches!(metrics.interval_seconds, Some(0))
         {
@@ -1152,6 +1173,7 @@ impl SlurmConfig {
             if email.to.trim().is_empty() {
                 bail!("x-slurm.notify.email.to must not be empty");
             }
+            validate_sbatch_safe_string(Some(email.to.as_str()), "x-slurm.notify.email.to")?;
             if submit_args_contain_mail_settings(&self.submit_args) {
                 bail!(
                     "x-slurm.notify.email cannot be combined with raw --mail-type/--mail-user submit args"
@@ -1411,13 +1433,6 @@ impl EffectiveFailurePolicyConfig {
             max_restarts_in_window: restart_mode.then_some(policy.max_restarts_in_window),
         }
     }
-}
-
-fn validate_positive_u32(value: Option<u32>, field: &str) -> Result<()> {
-    if matches!(value, Some(0)) {
-        bail!("{field} must be at least 1");
-    }
-    Ok(())
 }
 
 impl ServiceEnrootConfig {
@@ -3457,5 +3472,45 @@ services:
             }
             other => panic!("expected Http readiness, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn slurm_config_rejects_newlines_in_sbatch_fields() {
+        let config = SlurmConfig {
+            job_name: Some("valid-name".to_string()),
+            ..SlurmConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = SlurmConfig {
+            job_name: Some("bad\nname".to_string()),
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("newline in job_name");
+        assert!(err.to_string().contains("x-slurm.job-name"));
+
+        let config = SlurmConfig {
+            partition: Some("bad\0partition".to_string()),
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("null in partition");
+        assert!(err.to_string().contains("x-slurm.partition"));
+
+        let config = SlurmConfig {
+            output: Some("bad\rpath".to_string()),
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("line break in output");
+        assert!(err.to_string().contains("x-slurm.output"));
+
+        let config = SlurmConfig {
+            submit_args: vec![
+                "--reservation=ok".to_string(),
+                "--comment=bad\narg".to_string(),
+            ],
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("line break in submit arg");
+        assert!(err.to_string().contains("x-slurm.submit_args[1]"));
     }
 }

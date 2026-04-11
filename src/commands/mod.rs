@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -68,10 +69,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             force,
             format,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--enroot-bin") {
-                binary_overrides.enroot = Some(enroot_bin);
-            }
+            let binary_overrides =
+                resolve_binary_overrides(options, &[("--enroot-bin", &enroot_bin)]);
             let context = resolve_command_context(options, file, binary_overrides)?;
             spec::prepare(context, keep_failed_prep, force, format)
         }
@@ -85,16 +84,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             sbatch_bin,
             srun_bin,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--enroot-bin") {
-                binary_overrides.enroot = Some(enroot_bin);
-            }
-            if value_is_explicit(options, "--sbatch-bin") {
-                binary_overrides.sbatch = Some(sbatch_bin);
-            }
-            if value_is_explicit(options, "--srun-bin") {
-                binary_overrides.srun = Some(srun_bin);
-            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                ],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             spec::preflight(context, strict, verbose, format, json)
         }
@@ -111,6 +108,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             spec::config(context, format)
         }
+        Commands::Schema => print_schema(),
         Commands::Up {
             file,
             script_out,
@@ -128,22 +126,16 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             resume_diff_only,
             dry_run,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--enroot-bin") {
-                binary_overrides.enroot = Some(enroot_bin);
-            }
-            if value_is_explicit(options, "--sbatch-bin") {
-                binary_overrides.sbatch = Some(sbatch_bin);
-            }
-            if value_is_explicit(options, "--srun-bin") {
-                binary_overrides.srun = Some(srun_bin);
-            }
-            if value_is_explicit(options, "--squeue-bin") {
-                binary_overrides.squeue = Some(squeue_bin);
-            }
-            if value_is_explicit(options, "--sacct-bin") {
-                binary_overrides.sacct = Some(sacct_bin);
-            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                ],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::up(
                 context,
@@ -177,22 +169,16 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             dry_run,
             format,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--enroot-bin") {
-                binary_overrides.enroot = Some(enroot_bin);
-            }
-            if value_is_explicit(options, "--sbatch-bin") {
-                binary_overrides.sbatch = Some(sbatch_bin);
-            }
-            if value_is_explicit(options, "--srun-bin") {
-                binary_overrides.srun = Some(srun_bin);
-            }
-            if value_is_explicit(options, "--squeue-bin") {
-                binary_overrides.squeue = Some(squeue_bin);
-            }
-            if value_is_explicit(options, "--sacct-bin") {
-                binary_overrides.sacct = Some(sacct_bin);
-            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                ],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::submit(
                 context,
@@ -217,13 +203,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             squeue_bin,
             sacct_bin,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--squeue-bin") {
-                binary_overrides.squeue = Some(squeue_bin);
-            }
-            if value_is_explicit(options, "--sacct-bin") {
-                binary_overrides.sacct = Some(sacct_bin);
-            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::status(context, job_id, format, json)
         }
@@ -236,16 +219,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             squeue_bin,
             sacct_bin,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--sstat-bin") {
-                binary_overrides.sstat = Some(sstat_bin);
-            }
-            if value_is_explicit(options, "--squeue-bin") {
-                binary_overrides.squeue = Some(squeue_bin);
-            }
-            if value_is_explicit(options, "--sacct-bin") {
-                binary_overrides.sacct = Some(sacct_bin);
-            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--sstat-bin", &sstat_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                ],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::stats(context, job_id, json, format)
         }
@@ -277,13 +258,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             squeue_bin,
             sacct_bin,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--squeue-bin") {
-                binary_overrides.squeue = Some(squeue_bin);
-            }
-            if value_is_explicit(options, "--sacct-bin") {
-                binary_overrides.sacct = Some(sacct_bin);
-            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::ps(context, job_id, format)
         }
@@ -295,13 +273,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             squeue_bin,
             sacct_bin,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--squeue-bin") {
-                binary_overrides.squeue = Some(squeue_bin);
-            }
-            if value_is_explicit(options, "--sacct-bin") {
-                binary_overrides.sacct = Some(sacct_bin);
-            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::watch(context, job_id, service, lines)
         }
@@ -312,10 +287,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             purge_cache,
             format,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--scancel-bin") {
-                binary_overrides.scancel = Some(scancel_bin);
-            }
+            let binary_overrides =
+                resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::cancel(context, job_id, purge_cache, format)
         }
@@ -326,10 +299,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             purge_cache,
             format,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--scancel-bin") {
-                binary_overrides.scancel = Some(scancel_bin);
-            }
+            let binary_overrides =
+                resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::cancel(context, job_id, purge_cache, format)
         }
@@ -348,22 +319,16 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             force_rebuild,
             no_preflight,
         } => {
-            let mut binary_overrides = BinaryOverrides::default();
-            if value_is_explicit(options, "--enroot-bin") {
-                binary_overrides.enroot = Some(enroot_bin);
-            }
-            if value_is_explicit(options, "--sbatch-bin") {
-                binary_overrides.sbatch = Some(sbatch_bin);
-            }
-            if value_is_explicit(options, "--srun-bin") {
-                binary_overrides.srun = Some(srun_bin);
-            }
-            if value_is_explicit(options, "--squeue-bin") {
-                binary_overrides.squeue = Some(squeue_bin);
-            }
-            if value_is_explicit(options, "--sacct-bin") {
-                binary_overrides.sacct = Some(sacct_bin);
-            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                ],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             runtime::run_service(
                 context,
@@ -516,6 +481,91 @@ fn has_long_flag(options: &GlobalCommandOptions, long_flag: &str) -> bool {
                 .to_str()
                 .is_some_and(|value| value.starts_with(&format!("{long_flag}=")))
     })
+}
+
+struct BinaryOverrideEntry {
+    flag: &'static str,
+    setter: fn(BinaryOverrides, String) -> BinaryOverrides,
+}
+
+const BINARY_OVERRIDE_ENTRIES: &[BinaryOverrideEntry] = &[
+    BinaryOverrideEntry {
+        flag: "--enroot-bin",
+        setter: |mut o, v| {
+            o.enroot = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--sbatch-bin",
+        setter: |mut o, v| {
+            o.sbatch = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--srun-bin",
+        setter: |mut o, v| {
+            o.srun = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--squeue-bin",
+        setter: |mut o, v| {
+            o.squeue = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--sacct-bin",
+        setter: |mut o, v| {
+            o.sacct = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--sstat-bin",
+        setter: |mut o, v| {
+            o.sstat = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--scancel-bin",
+        setter: |mut o, v| {
+            o.scancel = Some(v);
+            o
+        },
+    },
+];
+
+fn resolve_binary_overrides(
+    options: &GlobalCommandOptions,
+    explicit_values: &[(&str, &str)],
+) -> BinaryOverrides {
+    let mut overrides = BinaryOverrides::default();
+    for entry in BINARY_OVERRIDE_ENTRIES {
+        if let Some((_, value)) = explicit_values.iter().find(|(flag, _)| *flag == entry.flag)
+            && value_is_explicit(options, entry.flag)
+        {
+            overrides = (entry.setter)(overrides, value.to_string());
+        }
+    }
+    overrides
+}
+
+fn print_schema() -> Result<()> {
+    let mut stdout = io::stdout();
+    stdout
+        .write_all(hpc_compose::schema::schema_json().as_bytes())
+        .context("failed to write schema to stdout")?;
+    if !hpc_compose::schema::schema_json().ends_with('\n') {
+        stdout
+            .write_all(b"\n")
+            .context("failed to write schema newline to stdout")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

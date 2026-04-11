@@ -1025,7 +1025,9 @@ pub(crate) fn status(
         },
     )?;
     match output::resolve_output_format(format, json) {
-        OutputFormat::Text => output::print_status_snapshot(&snapshot),
+        OutputFormat::Text => {
+            output::print_status_snapshot(&snapshot).context("failed to write status output")?;
+        }
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -1055,7 +1057,9 @@ pub(crate) fn stats(
         },
     )?;
     match output::resolve_stats_output_format(format, json) {
-        StatsOutputFormat::Text => output::print_stats_snapshot(&snapshot),
+        StatsOutputFormat::Text => {
+            output::print_stats_snapshot(&snapshot).context("failed to write stats output")?;
+        }
         StatsOutputFormat::Json => {
             println!(
                 "{}",
@@ -1090,7 +1094,10 @@ pub(crate) fn artifacts(
         },
     )?;
     match output::resolve_output_format(format, json) {
-        OutputFormat::Text => output::print_artifact_export_report(&report),
+        OutputFormat::Text => {
+            output::print_artifact_export_report(&report)
+                .context("failed to write artifacts output")?;
+        }
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -1127,7 +1134,9 @@ pub(crate) fn ps(
         },
     )?;
     match output::resolve_output_format(format, false) {
-        OutputFormat::Text => output::print_ps_snapshot(&snapshot),
+        OutputFormat::Text => {
+            output::print_ps_snapshot(&snapshot).context("failed to write ps output")?;
+        }
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -1303,7 +1312,10 @@ pub(crate) fn jobs_list(disk_usage: bool, format: Option<OutputFormat>) -> Resul
     let cwd = env::current_dir().context("failed to determine current working directory")?;
     let report = scan_job_inventory(&cwd, disk_usage)?;
     match output::resolve_output_format(format, false) {
-        OutputFormat::Text => output::print_job_inventory_scan(&report, disk_usage),
+        OutputFormat::Text => {
+            output::print_job_inventory_scan(&report, disk_usage)
+                .context("failed to write jobs list output")?;
+        }
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -1334,7 +1346,10 @@ pub(crate) fn clean(
         run_cleanup_report(&report)?;
     }
     match output::resolve_output_format(format, false) {
-        OutputFormat::Text => output::print_cleanup_report(&report, disk_usage),
+        OutputFormat::Text => {
+            output::print_cleanup_report(&report, disk_usage)
+                .context("failed to write clean output")?;
+        }
         OutputFormat::Json => {
             println!(
                 "{}",

@@ -149,6 +149,38 @@ fn jobs_list_reports_disk_usage_in_text_when_requested() {
 }
 
 #[test]
+fn jobs_list_handles_large_record_fixture_without_timing_gate() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let submit_dir = tmpdir.path().join("submit");
+
+    for index in 0..120 {
+        write_record(
+            &compose,
+            &submit_dir,
+            &format!("large-{index:03}"),
+            1_000 + index,
+        );
+    }
+
+    let json = run_cli(tmpdir.path(), &["jobs", "list", "--format", "json"]);
+    assert_success(&json);
+    let payload: Value = serde_json::from_str(&stdout_text(&json)).expect("jobs json");
+    let jobs = payload["jobs"].as_array().expect("jobs array");
+    assert_eq!(jobs.len(), 120);
+    assert_eq!(jobs[0]["job_id"], Value::from("large-119"));
+    assert_eq!(jobs[119]["job_id"], Value::from("large-000"));
+    assert_eq!(jobs[0]["is_latest"], Value::from(true));
+    assert_eq!(jobs[119]["is_latest"], Value::from(false));
+}
+
+#[test]
 fn jobs_list_ignores_stale_latest_pointer() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");

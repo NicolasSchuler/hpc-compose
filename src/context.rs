@@ -276,7 +276,7 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         if !path.exists() {
             bail!("settings file does not exist: {}", path.display());
         }
-        Some(absolute_path(path, &request.cwd))
+        Some(crate::path_util::absolute_path(path, &request.cwd))
     } else {
         discover_settings_path(&request.cwd)
     };
@@ -394,7 +394,7 @@ fn resolve_compose_file(
 ) -> ResolvedValue<PathBuf> {
     if let Some(path) = cli_override {
         return ResolvedValue {
-            value: absolute_path(path, cwd),
+            value: crate::path_util::absolute_path(path, cwd),
             source: ValueSource::Cli,
         };
     }
@@ -411,7 +411,7 @@ fn resolve_compose_file(
         };
     }
     ResolvedValue {
-        value: absolute_path(Path::new(DEFAULT_COMPOSE_FILE), cwd),
+        value: crate::path_util::absolute_path(Path::new(DEFAULT_COMPOSE_FILE), cwd),
         source: ValueSource::Builtin,
     }
 }
@@ -564,15 +564,7 @@ fn settings_base_dir(path: &Path) -> PathBuf {
 fn resolve_string_path(value: &str, base: &Path) -> PathBuf {
     let expanded = shellexpand::tilde(value).to_string();
     let raw = PathBuf::from(expanded);
-    absolute_path(&raw, base)
-}
-
-fn absolute_path(path: &Path, base: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base.join(path)
-    }
+    crate::path_util::absolute_path(&raw, base)
 }
 
 fn parse_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
@@ -823,7 +815,7 @@ mod tests {
             tmp.path().join("compose.yaml")
         );
         assert_eq!(
-            absolute_path(Path::new("/tmp/absolute"), tmp.path()),
+            crate::path_util::absolute_path(Path::new("/tmp/absolute"), tmp.path()),
             PathBuf::from("/tmp/absolute")
         );
         assert!(quoted("\"value\"", '"'));

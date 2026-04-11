@@ -33,6 +33,7 @@ hpc-compose context --format json
 | --- | --- | --- |
 | `validate` | Check YAML shape and field validation | Add `--strict-env` when interpolation fallbacks should fail. |
 | `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. |
+| `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
 | `inspect` | View the normalized runtime plan | `--verbose` can reveal resolved secrets and final mount mappings. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later submit. |
 | `prepare` | Import images and build prepared runtime artifacts | Use `--force` when the base image or prepare inputs changed. |
@@ -44,6 +45,7 @@ hpc-compose context --format json
 ```bash
 hpc-compose validate -f compose.yaml
 hpc-compose config -f compose.yaml
+hpc-compose schema > hpc-compose.schema.json
 hpc-compose inspect --verbose -f compose.yaml
 hpc-compose preflight -f compose.yaml
 hpc-compose prepare -f compose.yaml

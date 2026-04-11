@@ -58,6 +58,11 @@ Examples:
   hpc-compose config -f compose.yaml
   hpc-compose config -f compose.yaml --format json";
 
+const SCHEMA_HELP: &str = "\
+Examples:
+  hpc-compose schema
+  hpc-compose schema > hpc-compose.schema.json";
+
 const UP_HELP: &str = "\
 Examples:
   hpc-compose up -f compose.yaml
@@ -226,6 +231,11 @@ pub const INSPECT_EXAMPLES: &[&str] = &[
 pub const CONFIG_EXAMPLES: &[&str] = &[
     "hpc-compose config -f compose.yaml",
     "hpc-compose config -f compose.yaml --format json",
+];
+
+pub const SCHEMA_EXAMPLES: &[&str] = &[
+    "hpc-compose schema",
+    "hpc-compose schema > hpc-compose.schema.json",
 ];
 
 pub const UP_EXAMPLES: &[&str] = &[
@@ -557,6 +567,12 @@ pub enum Commands {
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
+    #[command(
+        about = "Print the hpc-compose JSON Schema",
+        long_about = "Print the checked-in JSON Schema for compose authoring tools. Rust validation remains the semantic source of truth.",
+        after_help = SCHEMA_HELP
+    )]
+    Schema,
     #[command(
         about = "Submit, watch, and stream logs in one command",
         long_about = "Run the normal end-to-end workflow: optional preflight, image preparation, script rendering, sbatch submission or local launch, and immediate live watching with log streaming and exit-code propagation.",
@@ -1413,6 +1429,7 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["preflight"] => PREFLIGHT_EXAMPLES,
         ["inspect"] => INSPECT_EXAMPLES,
         ["config"] => CONFIG_EXAMPLES,
+        ["schema"] => SCHEMA_EXAMPLES,
         ["up"] => UP_EXAMPLES,
         ["submit"] => SUBMIT_EXAMPLES,
         ["status"] => STATUS_EXAMPLES,
