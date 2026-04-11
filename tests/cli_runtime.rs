@@ -2425,11 +2425,11 @@ services:
         );
         if status.status.success() {
             let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
-            if payload["scheduler"]["state"] == Value::from("CANCELLED") {
+            if payload["scheduler"]["state"].as_str() == Some("CANCELLED") {
                 terminal = Some(payload);
                 break;
             }
-            let transient_supervisor_race = payload["scheduler"]["state"] == Value::from("FAILED")
+            let transient_supervisor_race = payload["scheduler"]["state"].as_str() == Some("FAILED")
                 && payload["scheduler"]["detail"]
                     .as_str()
                     .unwrap_or("")
