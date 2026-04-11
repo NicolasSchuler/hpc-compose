@@ -2429,7 +2429,8 @@ services:
                 terminal = Some(payload);
                 break;
             }
-            let transient_supervisor_race = payload["scheduler"]["state"].as_str() == Some("FAILED")
+            let transient_supervisor_race = payload["scheduler"]["state"].as_str()
+                == Some("FAILED")
                 && payload["scheduler"]["detail"]
                     .as_str()
                     .unwrap_or("")
