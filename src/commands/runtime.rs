@@ -880,6 +880,7 @@ pub(crate) fn up(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_service(
     context: ResolvedContext,
     service_name: String,

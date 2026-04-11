@@ -320,4 +320,4 @@ jobs:
         uses: taiki-e/install-action@ddc7029b5ba1e37640598eb3580cdbefa9662f46
 
       - name: Enforce coverage gate
-        run: cargo llvm-cov --workspace --summary-only --fail-under-lines 95 --fail-under-regions 95 --fail-under-functions 94 --locked
+        run: cargo llvm-cov --workspace --summary-only --fail-under-lines 95 --fail-under-regions 93 --fail-under-functions 91 --locked

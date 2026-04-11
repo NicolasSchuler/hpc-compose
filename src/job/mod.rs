@@ -262,7 +262,7 @@ pub fn walltime_progress(
     let started_at = queue_diagnostics
         .and_then(|queue| queue.start_time.as_deref())
         .and_then(parse_scheduler_timestamp)
-        .or_else(|| Some(record.submitted_at))?;
+        .or(Some(record.submitted_at))?;
     let elapsed_seconds = now.saturating_sub(started_at).min(requested.seconds);
     Some(WalltimeProgress {
         original: requested.original.clone(),
