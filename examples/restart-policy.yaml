@@ -5,7 +5,7 @@ x-slurm:
   time: "00:10:00"
   mem: 4G
   cpus_per_task: 1
-  cache_dir: /shared/$USER/hpc-compose-cache
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
 
 services:
   flaky-worker:

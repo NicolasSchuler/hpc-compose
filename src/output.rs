@@ -7,7 +7,9 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
 use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
-use hpc_compose::init::{default_cache_dir as default_init_cache_dir, resolve_template, templates};
+use hpc_compose::init::{
+    cache_dir_placeholder as init_cache_dir_placeholder, resolve_template, templates,
+};
 use hpc_compose::job::{
     ArtifactExportReport, CleanupReport, JobInventoryScan, PsSnapshot, StatsSnapshot,
     StatusSnapshot, SubmissionBackend, WatchOutcome, scheduler_source_label,
@@ -111,7 +113,8 @@ pub(crate) struct TemplateInfoOutput {
 #[derive(Debug, Serialize)]
 pub(crate) struct TemplateDescriptionOutput {
     pub(crate) template: TemplateInfoOutput,
-    pub(crate) default_cache_dir: String,
+    pub(crate) cache_dir_required: bool,
+    pub(crate) cache_dir_placeholder: String,
     pub(crate) command: String,
 }
 
@@ -1546,11 +1549,12 @@ pub(crate) fn build_template_description(template_name: &str) -> Result<Template
             name: template.name.to_string(),
             description: template.description.to_string(),
         },
-        default_cache_dir: default_init_cache_dir().to_string(),
+        cache_dir_required: true,
+        cache_dir_placeholder: init_cache_dir_placeholder().to_string(),
         command: format!(
-            "hpc-compose new --template {} --name my-app --cache-dir {} --output compose.yaml",
+            "hpc-compose new --template {} --name my-app --cache-dir '{}' --output compose.yaml",
             template.name,
-            default_init_cache_dir()
+            init_cache_dir_placeholder()
         ),
     })
 }
@@ -1559,6 +1563,10 @@ pub(crate) fn print_template_description(template_name: &str) -> Result<()> {
     let description = build_template_description(template_name)?;
     println!("template: {}", description.template.name);
     println!("description: {}", description.template.description);
+    println!(
+        "cache dir: required; choose a path visible from both the login node and the compute nodes"
+    );
+    println!("placeholder: {}", description.cache_dir_placeholder);
     println!("command:");
     println!("{}", description.command);
     Ok(())
@@ -1572,16 +1580,22 @@ pub(crate) fn resolve_init_answers(
 ) -> Result<hpc_compose::init::InitAnswers> {
     if let Some(template_name) = template {
         let template = resolve_template(&template_name)?;
+        let cache_dir = match cache_dir {
+            Some(cache_dir) if !cache_dir.trim().is_empty() => cache_dir,
+            Some(_) => bail!(
+                "--cache-dir cannot be empty; choose a path visible from both the login node and the compute nodes"
+            ),
+            None => bail!(
+                "--cache-dir is required when using --template; choose a path visible from both the login node and the compute nodes"
+            ),
+        };
         Ok(hpc_compose::init::InitAnswers {
             template_name: template.name.to_string(),
             app_name: match name {
                 Some(name) => name,
                 None => template.name.to_string(),
             },
-            cache_dir: match cache_dir {
-                Some(cache_dir) => cache_dir,
-                None => default_init_cache_dir().to_string(),
-            },
+            cache_dir,
         })
     } else {
         let mut answers = prompt_for_answers()?;
@@ -1589,6 +1603,11 @@ pub(crate) fn resolve_init_answers(
             answers.app_name = name;
         }
         if let Some(cache_dir) = cache_dir {
+            if cache_dir.trim().is_empty() {
+                bail!(
+                    "--cache-dir cannot be empty; choose a path visible from both the login node and the compute nodes"
+                );
+            }
             answers.cache_dir = cache_dir;
         }
         Ok(answers)
@@ -2708,12 +2727,30 @@ services:
 
     #[test]
     fn resolve_init_answers_and_cancel_job_cover_remaining_paths() {
-        let answers = resolve_init_answers(Some("dev-python-app".into()), None, None, || {
+        let err = resolve_init_answers(Some("dev-python-app".into()), None, None, || {
             unreachable!("template path should not prompt")
         })
+        .expect_err("missing required cache dir");
+        assert!(err.to_string().contains("--cache-dir is required"));
+
+        let answers = resolve_init_answers(
+            Some("dev-python-app".into()),
+            None,
+            Some("/cache".into()),
+            || unreachable!("template path should not prompt"),
+        )
         .expect("template answers");
         assert_eq!(answers.app_name, "dev-python-app");
-        assert_eq!(answers.cache_dir, default_init_cache_dir());
+        assert_eq!(answers.cache_dir, "/cache");
+
+        let err = resolve_init_answers(
+            Some("dev-python-app".into()),
+            None,
+            Some("   ".into()),
+            || unreachable!("template path should not prompt"),
+        )
+        .expect_err("blank cache dir");
+        assert!(err.to_string().contains("--cache-dir cannot be empty"));
 
         let prompted =
             resolve_init_answers(None, Some("override".into()), Some("/cache".into()), || {
@@ -2726,6 +2763,16 @@ services:
             .expect("prompted");
         assert_eq!(prompted.app_name, "override");
         assert_eq!(prompted.cache_dir, "/cache");
+
+        let err = resolve_init_answers(None, None, Some("   ".into()), || {
+            Ok(hpc_compose::init::InitAnswers {
+                template_name: "app-redis-worker".into(),
+                app_name: "prompted".into(),
+                cache_dir: "/default".into(),
+            })
+        })
+        .expect_err("blank prompted override");
+        assert!(err.to_string().contains("--cache-dir cannot be empty"));
 
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let empty_fail = tmpdir.path().join("scancel-empty");

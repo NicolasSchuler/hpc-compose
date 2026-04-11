@@ -148,7 +148,7 @@ jobs:
           cargo build --locked
           for f in examples/*.yaml; do
             echo "Validating $f"
-            cargo run -- validate -f "$f"
+            env -u CACHE_DIR cargo run -- validate -f "$f"
           done
 
   shellcheck:
@@ -302,6 +302,91 @@ jobs:
             echo "expected checksum verification failure" >&2
             exit 1
           fi
+          grep -q "checksum verification failed" /tmp/install-bad.err
+
+  homebrew-smoke:
+    name: Homebrew Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
+        with:
+          toolchain: stable
+          rustflags: ""
+
+      - name: Package checkout artifact for formula smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            arm64)
+              target="aarch64-apple-darwin"
+              ;;
+            x86_64)
+              target="x86_64-apple-darwin"
+              ;;
+            *)
+              echo "unsupported Homebrew smoke-test platform" >&2
+              exit 1
+              ;;
+          esac
+
+          version="$(awk '
+            BEGIN { in_pkg = 0 }
+            $0 == "[package]" { in_pkg = 1; next }
+            /^\[/ && in_pkg { in_pkg = 0 }
+            in_pkg && $1 == "version" {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)"
+          if [ -z "${version}" ]; then
+            echo "failed to read [package].version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          asset_dir="$PWD/.tmp/homebrew-dist"
+          stage_dir="$PWD/.tmp/homebrew-stage"
+          formula_path="$PWD/.tmp/hpc-compose-local.rb"
+          asset_path="$asset_dir/hpc-compose-v${version}-${target}.tar.gz"
+
+          rm -rf "$asset_dir" "$stage_dir"
+          mkdir -p "$asset_dir" "$stage_dir/share/man"
+
+          cargo build --locked --release --target "$target"
+
+          cp "target/${target}/release/hpc-compose" "$stage_dir/"
+          cp README.md "$stage_dir/"
+          cp -R man/man1 "$stage_dir/share/man/"
+          tar -C "$stage_dir" -czf "$asset_path" hpc-compose README.md share/man/man1
+
+          sha="$(shasum -a 256 "$asset_path" | cut -d ' ' -f 1)"
+          cp Formula/hpc-compose.rb "$formula_path"
+          perl -0pi -e 's/version "[^"]+"/version "'"$version"'"/; s#url "[^"]+"#url "file://'"$asset_path"'"#g; s/sha256 "[^"]+"/sha256 "'"$sha"'"/g' "$formula_path"
+
+          printf 'HPC_COMPOSE_HOMEBREW_FORMULA=%s\n' "$formula_path" >> "$GITHUB_ENV"
+
+      - name: Install formula from checkout artifact
+        run: brew install --formula "$HPC_COMPOSE_HOMEBREW_FORMULA"
+
+      - name: Smoke test installed formula
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          hpc-compose --version >/dev/null
+          brew test hpc-compose
+          prefix="$(brew --prefix hpc-compose)"
+          test -f "${prefix}/share/man/man1/hpc-compose.1"
 
   coverage:
     name: Coverage

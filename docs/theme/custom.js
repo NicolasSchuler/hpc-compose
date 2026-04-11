@@ -6,7 +6,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const logo = document.createElement("img");
   logo.src = `${window.HPC_COMPOSE_ROOT || ""}logo.png`;
-  logo.alt = "hpc-compose logo";
+  logo.alt = "";
+  logo.setAttribute("aria-hidden", "true");
   logo.className = "hpc-compose-header-logo";
 
   title.prepend(logo);

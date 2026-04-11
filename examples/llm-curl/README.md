@@ -10,6 +10,7 @@ This example is the smallest end-to-end `hpc-compose` LLM workflow:
 ## Prerequisites
 
 - a supported login node with `enroot`, `srun`, and `sbatch`,
+- `CACHE_DIR` set to a shared path visible from the submission host and compute nodes,
 - a GGUF model at [`../models/model.gguf`](../models/model.gguf) for the repo-local example, or at `$HOME/models/model.gguf` for the home-directory example.
 
 ## Normal run
@@ -17,6 +18,7 @@ This example is the smallest end-to-end `hpc-compose` LLM workflow:
 For a real cluster, start with the home-directory variant:
 
 ```bash
+export CACHE_DIR=/cluster/shared/hpc-compose-cache
 mkdir -p "$HOME/models"
 # Copy the real GGUF file, not just a symlink whose target lives elsewhere.
 cp /path/to/your/model.gguf "$HOME/models/model.gguf"
@@ -28,6 +30,7 @@ This is the lowest-overhead path because it does not require `HPC_COMPOSE_HOME`,
 ## Repo-local variant
 
 ```bash
+export CACHE_DIR=/cluster/shared/hpc-compose-cache
 hpc-compose up -f examples/llm-curl-workflow.yaml
 ```
 
@@ -87,7 +90,7 @@ You can change:
 The home-directory variant:
 
 - uses `$HOME/models:/models`,
-- relies on the default cache directory at `$HOME/.cache/hpc-compose` unless you set `x-slurm.cache_dir`,
+- defaults `x-slurm.cache_dir` to `/cluster/shared/hpc-compose-cache` and still lets you override it with `CACHE_DIR`,
 - and no longer needs `HPC_COMPOSE_HOME`, `run-request.sh`, or `request.json`.
 
 Logs land under:

@@ -10,6 +10,7 @@ This example shows a common Slurm pattern:
 ## Normal run
 
 ```bash
+export CACHE_DIR=/cluster/shared/hpc-compose-cache
 hpc-compose up -f examples/vllm-uv-worker.yaml
 ```
 

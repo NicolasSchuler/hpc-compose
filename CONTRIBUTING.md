@@ -22,6 +22,15 @@ mdbook build docs
 cargo run --locked --features manpage-bin --bin gen-manpages -- --check
 ```
 
+Release/distribution helpers:
+
+```bash
+python3 scripts/update_homebrew_formula.py \
+  --version 0.1.23 \
+  --arm64-sha256 <aarch64-apple-darwin tarball sha256> \
+  --x86-64-sha256 <x86_64-apple-darwin tarball sha256>
+```
+
 ## Expectations for changes
 
 - Keep the project scope aligned with one Slurm allocation per application.
@@ -50,6 +59,12 @@ done
 - Describe the user-visible change in the PR body.
 - List the verification commands you ran.
 - Call out any coordinated documentation or example updates.
+
+## Releases
+
+- Tagging `vX.Y.Z` publishes GitHub release tarballs plus Linux `.deb` and `.rpm` assets.
+- After the release assets are live, update `Formula/hpc-compose.rb` with `scripts/update_homebrew_formula.py` and commit that formula refresh on `main`.
+- Treat package availability as a distribution convenience only. Do not widen the supported runtime matrix unless `docs/src/support-matrix.md` changes too.
 
 ## Reporting bugs
 

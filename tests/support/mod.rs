@@ -859,10 +859,22 @@ pub(crate) fn write_example_compose(
 ) -> PathBuf {
     let source = repo_root().join("examples").join(example_name);
     let body = fs::read_to_string(&source).expect("read example");
-    let rewritten = body.replace(
-        "/shared/$USER/hpc-compose-cache",
-        &cache_dir.display().to_string(),
-    );
+    if body.contains("${CACHE_DIR") {
+        fs::write(
+            tmpdir.join(".env"),
+            format!("CACHE_DIR={}\n", cache_dir.display()),
+        )
+        .expect("write example .env");
+    }
+    let rewritten = body
+        .replace(
+            "/shared/$USER/hpc-compose-cache",
+            &cache_dir.display().to_string(),
+        )
+        .replace(
+            "/cluster/shared/hpc-compose-cache",
+            &cache_dir.display().to_string(),
+        );
     write_compose(tmpdir, example_name, &rewritten)
 }
 

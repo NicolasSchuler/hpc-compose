@@ -18,7 +18,7 @@ pub struct Template {
     pub body: &'static str,
 }
 
-const DEFAULT_CACHE_DIR: &str = "/shared/$USER/hpc-compose-cache";
+const CACHE_DIR_PLACEHOLDER: &str = "<shared-cache-dir>";
 
 const TEMPLATES: &[Template] = &[
     Template {
@@ -70,6 +70,11 @@ const TEMPLATES: &[Template] = &[
         name: "postgres-etl",
         description: "PostgreSQL plus a Python data processing job.",
         body: include_str!("../examples/postgres-etl.yaml"),
+    },
+    Template {
+        name: "restart-policy",
+        description: "Per-service restart_on_failure with bounded retries and a rolling-window crash-loop guard.",
+        body: include_str!("../examples/restart-policy.yaml"),
     },
     Template {
         name: "vllm-openai",
@@ -125,10 +130,25 @@ pub fn templates() -> &'static [Template] {
     TEMPLATES
 }
 
-/// Returns the default shared cache directory suggested by `init`.
+/// Returns the placeholder shown for the required scaffold cache directory.
 #[must_use]
-pub fn default_cache_dir() -> &'static str {
-    DEFAULT_CACHE_DIR
+pub fn cache_dir_placeholder() -> &'static str {
+    CACHE_DIR_PLACEHOLDER
+}
+
+/// Prompts on stdin/stdout for template, app name, and cache directory, using
+/// the supplied cache directory as the interactive default when present.
+///
+/// # Errors
+///
+/// Returns an error when stdin/stdout interaction fails or the selected
+/// template number is out of range.
+pub fn prompt_for_init_with_cache_dir_default(
+    default_cache_dir: Option<&str>,
+) -> Result<InitAnswers> {
+    let mut stdin = io::stdin().lock();
+    let mut stdout = io::stdout();
+    prompt_for_init_with_io(&mut stdin, &mut stdout, default_cache_dir)
 }
 
 /// Resolves a template by name, accepting names with or without `.yaml`.
@@ -159,14 +179,13 @@ pub fn resolve_template(name: &str) -> Result<&'static Template> {
 /// Returns an error when stdin/stdout interaction fails or the selected
 /// template number is out of range.
 pub fn prompt_for_init() -> Result<InitAnswers> {
-    let mut stdin = io::stdin().lock();
-    let mut stdout = io::stdout();
-    prompt_for_init_with_io(&mut stdin, &mut stdout)
+    prompt_for_init_with_cache_dir_default(None)
 }
 
 fn prompt_for_init_with_io(
     input: &mut impl BufRead,
     output: &mut impl Write,
+    default_cache_dir: Option<&str>,
 ) -> Result<InitAnswers> {
     writeln!(output, "Choose a template:").ok();
     for (index, template) in TEMPLATES.iter().enumerate() {
@@ -191,7 +210,15 @@ fn prompt_for_init_with_io(
     let template = &TEMPLATES[template_index];
 
     let app_name = prompt(input, output, "Application name", template.name)?;
-    let cache_dir = prompt(input, output, "Cache dir", DEFAULT_CACHE_DIR)?;
+    let cache_dir = match default_cache_dir.filter(|value| !value.trim().is_empty()) {
+        Some(default) => prompt(input, output, "Cache dir", default)?,
+        None => prompt_required(
+            input,
+            output,
+            "Cache dir",
+            "choose a path visible from both the login node and the compute nodes",
+        )?,
+    };
 
     Ok(InitAnswers {
         template_name: template.name.to_string(),
@@ -206,10 +233,10 @@ fn prompt_for_init_with_io(
 /// let rendered = hpc_compose::init::render_template(
 ///     "minimal-batch",
 ///     "demo-app",
-///     "/shared/$USER/hpc-compose-cache",
+///     "/cluster/shared/hpc-compose-cache",
 /// )?;
 /// assert!(rendered.contains("name: demo-app"));
-/// assert!(rendered.contains("cache_dir: /shared/$USER/hpc-compose-cache"));
+/// assert!(rendered.contains("cache_dir: /cluster/shared/hpc-compose-cache"));
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -311,6 +338,25 @@ fn prompt(
     }
 }
 
+fn prompt_required(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    label: &str,
+    guidance: &str,
+) -> Result<String> {
+    write!(output, "{label}: ").ok();
+    output.flush().ok();
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .context("failed to read interactive input")?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        bail!("{label} cannot be empty; {guidance}");
+    }
+    Ok(trimmed.to_string())
+}
+
 fn absolute_path(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_path_buf());
@@ -341,8 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn default_cache_dir_and_next_commands_match_expected_defaults() {
-        assert_eq!(default_cache_dir(), "/shared/$USER/hpc-compose-cache");
+    fn cache_dir_placeholder_and_next_commands_match_expected_defaults() {
+        assert_eq!(cache_dir_placeholder(), "<shared-cache-dir>");
         assert_eq!(
             next_commands(Path::new("/tmp/demo.yaml")),
             vec![
@@ -467,14 +513,27 @@ mod tests {
     }
 
     #[test]
+    fn prompt_required_rejects_blank_values() {
+        let mut input = Cursor::new(b"\n");
+        let mut output = Vec::new();
+        let err = prompt_required(&mut input, &mut output, "Cache dir", "choose a shared path")
+            .expect_err("blank required value");
+        assert_eq!(
+            err.to_string(),
+            "Cache dir cannot be empty; choose a shared path"
+        );
+        assert_eq!(String::from_utf8(output).expect("utf8"), "Cache dir: ");
+    }
+
+    #[test]
     fn prompt_for_init_with_io_covers_defaults_custom_values_and_validation() {
-        let mut defaults_input = Cursor::new(b"\n\n\n");
+        let mut defaults_input = Cursor::new(b"\n\n/shared/cache\n");
         let mut defaults_output = Vec::new();
-        let answers =
-            prompt_for_init_with_io(&mut defaults_input, &mut defaults_output).expect("defaults");
+        let answers = prompt_for_init_with_io(&mut defaults_input, &mut defaults_output, None)
+            .expect("defaults");
         assert_eq!(answers.template_name, "dev-python-app");
         assert_eq!(answers.app_name, "dev-python-app");
-        assert_eq!(answers.cache_dir, DEFAULT_CACHE_DIR);
+        assert_eq!(answers.cache_dir, "/shared/cache");
         assert!(
             String::from_utf8(defaults_output)
                 .expect("utf8")
@@ -484,18 +543,44 @@ mod tests {
         let mut custom_input = Cursor::new(b"2\ncustom-app\n/custom-cache\n");
         let mut custom_output = Vec::new();
         let answers =
-            prompt_for_init_with_io(&mut custom_input, &mut custom_output).expect("custom");
+            prompt_for_init_with_io(&mut custom_input, &mut custom_output, None).expect("custom");
         assert_eq!(answers.template_name, "app-redis-worker");
         assert_eq!(answers.app_name, "custom-app");
         assert_eq!(answers.cache_dir, "/custom-cache");
 
         let mut invalid_input = Cursor::new(b"99\n");
         let mut invalid_output = Vec::new();
-        let err =
-            prompt_for_init_with_io(&mut invalid_input, &mut invalid_output).expect_err("invalid");
+        let err = prompt_for_init_with_io(&mut invalid_input, &mut invalid_output, None)
+            .expect_err("invalid");
         assert!(
             err.to_string()
                 .contains("template selection must be one of the listed numbers")
+        );
+
+        let mut blank_cache_input = Cursor::new(b"\n\n\n");
+        let mut blank_cache_output = Vec::new();
+        let err = prompt_for_init_with_io(&mut blank_cache_input, &mut blank_cache_output, None)
+            .expect_err("blank cache dir");
+        assert!(err.to_string().contains("Cache dir cannot be empty"));
+    }
+
+    #[test]
+    fn prompt_for_init_with_io_uses_supplied_cache_dir_default() {
+        let mut input = Cursor::new(b"2\ncustom-app\n\n");
+        let mut output = Vec::new();
+        let answers = prompt_for_init_with_io(
+            &mut input,
+            &mut output,
+            Some("/cluster/shared/custom-cache"),
+        )
+        .expect("answers");
+        assert_eq!(answers.template_name, "app-redis-worker");
+        assert_eq!(answers.app_name, "custom-app");
+        assert_eq!(answers.cache_dir, "/cluster/shared/custom-cache");
+        assert!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .contains("Cache dir [/cluster/shared/custom-cache]: ")
         );
     }
 

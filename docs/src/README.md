@@ -13,6 +13,7 @@
     <a href="spec-reference.html">Spec Reference</a>
     <a href="supported-slurm-model.html">Supported Slurm Model</a>
     <a href="examples.html">Examples</a>
+    <a href="example-source.html">Example Source</a>
   </div>
 </div>
 
@@ -27,8 +28,9 @@
 5. Read [Execution Model](execution-model.md) to understand what runs on the login node, what runs on the compute node, and which paths must be shared.
 6. Use [Runbook](runbook.md) when adapting a real workload to a real cluster.
 7. Use [Examples](examples.md) when you want the closest known-good starting point.
-8. Use [Spec Reference](spec-reference.md) when you need exact field behavior or validation rules.
-9. Use [Supported Slurm Model](supported-slurm-model.md) when you need the product boundary spelled out clearly.
+8. Use [Example Source](example-source.md) when you want the runnable repository YAML embedded directly in the docs.
+9. Use [Spec Reference](spec-reference.md) when you need exact field behavior or validation rules.
+10. Use [Supported Slurm Model](supported-slurm-model.md) when you need the product boundary spelled out clearly.
 
 ## What It Is For
 
@@ -72,7 +74,7 @@ services:
 hpc-compose up -f compose.yaml
 ```
 
-`up` is the preferred normal run. On an interactive TTY it opens the live watch UI; later you can reconnect with `hpc-compose watch -f compose.yaml` or inspect a one-shot per-service snapshot with `hpc-compose ps -f compose.yaml`. `submit --watch` remains available as a compatibility path. Break out `validate`, `inspect`, `preflight`, or `prepare` as the debugging flow when you are validating a new spec for the first time or isolating a failure.
+`up` is the preferred normal run. See [Quickstart](quickstart.md) for the full end-to-end flow.
 
 ## Read next
 
@@ -84,6 +86,7 @@ hpc-compose up -f compose.yaml
 - [Execution Model](execution-model.md) for the login-node / compute-node split
 - [Runbook](runbook.md) for real-cluster setup and debugging
 - [Examples](examples.md) for example selection and adaptation
+- [Example Source](example-source.md) for the embedded repository YAML files
 - [Spec Reference](spec-reference.md) for the supported Compose subset
 - [Supported Slurm Model](supported-slurm-model.md) for the first-class / pass-through / out-of-scope boundary
 - [Docker Compose Migration](docker-compose-migration.md) for feature mapping and conversion guidance

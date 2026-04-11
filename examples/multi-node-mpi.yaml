@@ -5,7 +5,7 @@ x-slurm:
   time: "00:20:00"
   nodes: 2
   ntasks_per_node: 2
-  cache_dir: /shared/$USER/hpc-compose-cache
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
 
 services:
   bootstrap:

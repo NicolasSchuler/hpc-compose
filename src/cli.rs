@@ -21,7 +21,7 @@ Debugging flow:
   hpc-compose config -f compose.yaml
 
 Start a new spec:
-  hpc-compose new --template minimal-batch --name my-app --output compose.yaml";
+  hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml";
 
 const VALIDATE_HELP: &str = "\
 Examples:
@@ -128,7 +128,7 @@ const NEW_HELP: &str = "\
 Examples:
   hpc-compose new --list-templates
   hpc-compose new --describe-template minimal-batch
-  hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml";
+  hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml";
 
 const CACHE_HELP: &str = "\
 Examples:
@@ -139,7 +139,7 @@ Examples:
 const CACHE_LIST_HELP: &str = "\
 Examples:
   hpc-compose cache list
-  hpc-compose cache list --cache-dir /shared/$USER/hpc-compose-cache
+  hpc-compose cache list --cache-dir '<shared-cache-dir>'
   hpc-compose cache list --format json";
 
 const CACHE_INSPECT_HELP: &str = "\
@@ -152,7 +152,7 @@ const CACHE_PRUNE_HELP: &str = "\
 Examples:
   hpc-compose --profile dev cache prune --age 14
   hpc-compose cache prune --all-unused -f compose.yaml
-  hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache
+  hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
   hpc-compose cache prune --age 7 --format json";
 
 const JOBS_HELP: &str = "\
@@ -177,7 +177,7 @@ const SETUP_HELP: &str = "\
 Examples:
   hpc-compose setup
   hpc-compose setup --profile-name dev --compose-file compose.yaml --default-profile dev --non-interactive
-  hpc-compose setup --env CACHE_DIR=/shared/$USER/hpc-compose-cache --binary srun=/opt/slurm/bin/srun --non-interactive";
+  hpc-compose setup --env 'CACHE_DIR=<shared-cache-dir>' --binary srun=/opt/slurm/bin/srun --non-interactive";
 
 const COMPLETIONS_HELP: &str = "\
 Examples:
@@ -297,7 +297,7 @@ pub const RUN_EXAMPLES: &[&str] = &[
 pub const NEW_EXAMPLES: &[&str] = &[
     "hpc-compose new --list-templates",
     "hpc-compose new --describe-template minimal-batch",
-    "hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml",
+    "hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml",
 ];
 
 pub const CACHE_EXAMPLES: &[&str] = &[
@@ -308,7 +308,7 @@ pub const CACHE_EXAMPLES: &[&str] = &[
 
 pub const CACHE_LIST_EXAMPLES: &[&str] = &[
     "hpc-compose cache list",
-    "hpc-compose cache list --cache-dir /shared/$USER/hpc-compose-cache",
+    "hpc-compose cache list --cache-dir '<shared-cache-dir>'",
     "hpc-compose cache list --format json",
 ];
 
@@ -321,7 +321,7 @@ pub const CACHE_INSPECT_EXAMPLES: &[&str] = &[
 pub const CACHE_PRUNE_EXAMPLES: &[&str] = &[
     "hpc-compose --profile dev cache prune --age 14",
     "hpc-compose cache prune --all-unused -f compose.yaml",
-    "hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache",
+    "hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'",
     "hpc-compose cache prune --age 7 --format json",
 ];
 
@@ -346,7 +346,7 @@ pub const CONTEXT_EXAMPLES: &[&str] = &[
 pub const SETUP_EXAMPLES: &[&str] = &[
     "hpc-compose setup",
     "hpc-compose setup --profile-name dev --compose-file compose.yaml --default-profile dev --non-interactive",
-    "hpc-compose setup --env CACHE_DIR=/shared/$USER/hpc-compose-cache --binary srun=/opt/slurm/bin/srun --non-interactive",
+    "hpc-compose setup --env 'CACHE_DIR=<shared-cache-dir>' --binary srun=/opt/slurm/bin/srun --non-interactive",
 ];
 
 pub const COMPLETIONS_EXAMPLES: &[&str] = &[
@@ -1127,7 +1127,7 @@ pub enum Commands {
     },
     #[command(
         about = "Write a starter compose file from a built-in template",
-        long_about = "Write a starter compose specification from a built-in template, or list and describe the available templates without writing a file.",
+        long_about = "Write a starter compose specification from a built-in template, or list and describe the available templates without writing a file. Writing a template requires an explicit shared cache directory.",
         after_help = NEW_HELP,
         name = "new",
         alias = "init"
@@ -1161,7 +1161,7 @@ pub enum Commands {
         #[arg(
             long,
             value_name = "CACHE_DIR",
-            help = "Shared cache directory written into the generated spec"
+            help = "Shared cache directory written into the generated spec; required when writing a template"
         )]
         cache_dir: Option<String>,
         #[arg(

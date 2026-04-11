@@ -10,8 +10,8 @@ use hpc_compose::context::{
     BinaryOverrides, Settings, repo_adjacent_settings_path, write_settings,
 };
 use hpc_compose::init::{
-    default_cache_dir as default_init_cache_dir, next_commands, prompt_for_init, render_template,
-    write_initialized_template,
+    cache_dir_placeholder as init_cache_dir_placeholder, next_commands,
+    prompt_for_init_with_cache_dir_default, render_template, write_initialized_template,
 };
 
 use crate::output;
@@ -35,7 +35,8 @@ pub(crate) fn new_command(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "templates": output::template_infos(),
-                        "default_cache_dir": default_init_cache_dir(),
+                        "cache_dir_required": true,
+                        "cache_dir_placeholder": init_cache_dir_placeholder(),
                     }))
                     .context("failed to serialize template list output")?
                 );
@@ -58,7 +59,10 @@ pub(crate) fn new_command(
         }
         return Ok(());
     }
-    let answers = output::resolve_init_answers(template, name, cache_dir, prompt_for_init)?;
+    let prompt_cache_dir = cache_dir.clone();
+    let answers = output::resolve_init_answers(template, name, cache_dir, || {
+        prompt_for_init_with_cache_dir_default(prompt_cache_dir.as_deref())
+    })?;
     let rendered = render_template(
         &answers.template_name,
         &answers.app_name,

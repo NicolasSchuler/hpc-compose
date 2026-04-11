@@ -15,14 +15,14 @@ This page maps the public `hpc-compose` CLI by workflow. Use [Quickstart](quicks
 
 | Command | Use it for | Notes |
 | --- | --- | --- |
-| `new` | Generate a starter compose file from a built-in template | Use `--list-templates` and `--describe-template <name>` to inspect templates before writing a file. |
+| `new` (alias: `init`) | Generate a starter compose file from a built-in template | Use `--list-templates` and `--describe-template <name>` to inspect templates before writing a file. Writing a template requires `--cache-dir`. |
 | `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, and binary overrides. |
 | `context` | Print the resolved execution context | Shows the selected profile, binaries, interpolation vars, runtime paths, and value sources. |
 
 ```bash
 hpc-compose new --list-templates
 hpc-compose new --describe-template minimal-batch
-hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml
+hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
 hpc-compose setup
 hpc-compose context --format json
 ```
@@ -38,7 +38,7 @@ hpc-compose context --format json
 | `prepare` | Import images and build prepared runtime artifacts | Use `--force` when the base image or prepare inputs changed. |
 | `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. |
 | `up` | Run the one-command submit/watch/logs workflow | Preferred normal run on a real cluster. |
-| `submit` | Run the end-to-end flow | Kept as a compatibility path and for lower-level flag combinations such as `--local`. |
+| `submit` | Run the end-to-end flow | Kept as a compatibility path for workflows that still prefer the older spelling. |
 | `run` | Launch one service in a fresh one-off allocation | Ignores `depends_on` and follows logs until the one-off command finishes. |
 
 ```bash
@@ -53,12 +53,24 @@ hpc-compose run app -- python -m smoke_test
 hpc-compose submit --dry-run -f compose.yaml
 ```
 
-### `submit --local`
+### `up` / `submit` options
 
-`submit --local` launches the planned services through Enroot on the current host instead of calling `sbatch`. It is useful for local authoring and script inspection, not for distributed Slurm execution.
+Useful workflow flags:
+
+- `--local` runs the plan on the current Linux host through Enroot instead of calling `sbatch`.
+- `--allow-resume-changes` acknowledges an intentional change to resume-coupled config between tracked runs.
+- `--resume-diff-only` prints the resume-sensitive config diff without submitting.
+- `--script-out <PATH>` keeps a copy of the rendered batch script.
+- `--force-rebuild` refreshes imported and prepared artifacts before launch.
+- `--skip-prepare` skips image import and prepare reuse checks.
+- `--keep-failed-prep` leaves the failed Enroot rootfs behind for inspection.
+
+### `up --local` / `submit --local`
+
+`up --local` and `submit --local` launch the planned services through Enroot on the current host instead of calling `sbatch`. They are useful for local authoring and script inspection, not for distributed Slurm execution.
 
 ```bash
-hpc-compose submit --local --dry-run -f compose.yaml
+hpc-compose up --local --dry-run -f compose.yaml
 ```
 
 Current constraints:
@@ -71,6 +83,8 @@ Current constraints:
 - `x-slurm.error` is ignored, and local batch stderr is written into the tracked local batch log
 
 Use `--watch` to follow the tracked local launch the same way you would follow a submitted job.
+
+In local mode the batch script also exports `HPC_COMPOSE_BACKEND_OVERRIDE=local`, `HPC_COMPOSE_LOCAL_ENROOT_BIN` pointing to the resolved `enroot` binary, and `HPC_COMPOSE_LOCAL_BIN_DIR` containing a generated `srun` shim. These variables are internal to `hpc-compose` and not intended for direct use in compose specs.
 
 ## Tracked Runtime
 
@@ -111,7 +125,7 @@ hpc-compose clean -f compose.yaml --age 7 --dry-run
 ```bash
 hpc-compose cache list
 hpc-compose cache inspect -f compose.yaml --service app
-hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache
+hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
 hpc-compose cache prune --all-unused -f compose.yaml
 ```
 

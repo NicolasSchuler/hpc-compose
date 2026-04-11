@@ -6,7 +6,8 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 - Read [Quickstart](quickstart.md).
 - Run `hpc-compose new --list-templates` if you want to inspect the built-in starter templates before choosing one.
-- Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --cache-dir /shared/$USER/hpc-compose-cache --output compose.yaml`.
+- Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml`.
+- If you copy a repository example directly, override `CACHE_DIR` for your cluster before submitting it; the shipped YAML files default to `/cluster/shared/hpc-compose-cache`.
 - Run `hpc-compose up -f compose.yaml`.
 
 ## Remember directory/data/env settings once
@@ -24,25 +25,25 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 ## Single-node multi-service app
 
-- Start from [app-redis-worker.yaml](examples.md).
+- Start from [app-redis-worker.yaml](example-source.md#app-redis-worker).
 - Add `depends_on` and `readiness` only where ordering really matters.
 - Use [Execution Model](execution-model.md) to confirm which services can rely on localhost.
 
 ## Multi-node distributed training
 
-- Start from [multi-node-torchrun.yaml](examples.md) or [multi-node-mpi.yaml](examples.md).
+- Start from [multi-node-torchrun.yaml](example-source.md#multi-node-torchrun) or [multi-node-mpi.yaml](example-source.md#multi-node-mpi).
 - Treat helper services as primary-node-only and the distributed job as the single allocation-wide step.
 - Use allocation metadata such as `HPC_COMPOSE_PRIMARY_NODE` instead of Docker-style service discovery.
 
 ## Checkpoint and resume workflows
 
-- Start from [training-checkpoints.yaml](examples.md) when you only need artifact output.
-- Start from [training-resume.yaml](examples.md) when the run should resume from shared storage across retries or later submissions.
+- Start from [training-checkpoints.yaml](example-source.md#training-checkpoints) when you only need artifact output.
+- Start from [training-resume.yaml](example-source.md#training-resume) when the run should resume from shared storage across retries or later submissions.
 - Keep the canonical resume source in `x-slurm.resume.path`, not in exported artifact bundles.
 
 ## LLM serving workflows
 
-- Start from [llm-curl-workflow.yaml](examples.md), [llm-curl-workflow-workdir.yaml](examples.md), [llama-uv-worker.yaml](examples.md), or [vllm-uv-worker.yaml](examples.md).
+- Start from [llm-curl-workflow.yaml](example-source.md#llm-curl-workflow), [llm-curl-workflow-workdir.yaml](example-source.md#llm-curl-workflow-workdir), [llama-uv-worker.yaml](example-source.md#llama-uv-worker), or [vllm-uv-worker.yaml](example-source.md#vllm-uv-worker).
 - Use `volumes` for model directories and fast-changing code.
 - Use `x-enroot.prepare.commands` for slower-changing dependencies.
 
@@ -59,7 +60,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 - Use `hpc-compose cache list` to inspect imported/prepared artifacts.
 - Use `hpc-compose cache inspect -f compose.yaml` to see per-service reuse expectations.
 - Use `hpc-compose --profile dev cache prune --age 14` when you want age-based cleanup to follow the active context cache dir.
-- Use `hpc-compose cache prune --age 7 --cache-dir /shared/$USER/hpc-compose-cache` when you want a direct cache cleanup that does not depend on compose resolution.
+- Use `hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'` when you want a direct cache cleanup that does not depend on compose resolution.
 - Use `hpc-compose artifacts -f compose.yaml` after a run to export tracked payloads.
 
 ## Find and clean tracked runs

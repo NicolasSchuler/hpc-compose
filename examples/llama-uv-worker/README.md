@@ -10,6 +10,7 @@ This example shows the GGUF-serving pattern that commonly comes up on Slurm:
 ## Normal run
 
 ```bash
+export CACHE_DIR=/cluster/shared/hpc-compose-cache
 hpc-compose up -f examples/llama-uv-worker.yaml
 ```
 
