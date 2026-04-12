@@ -13,13 +13,37 @@ The repository examples default `x-slurm.cache_dir` to `/cluster/shared/hpc-comp
 export CACHE_DIR=/cluster/shared/hpc-compose-cache
 ```
 
-For almost every example, the preferred normal run is:
+## Start Here: The Four Promoted Examples
 
-```bash
-hpc-compose up -f examples/<example>.yaml
-```
+These four examples are the intended conversion funnel.
 
-Use the debugging flow (`validate`, `inspect`, `preflight`, `prepare`) when you are wiring up the example for the first time or isolating a failure.
+### `minimal-batch.yaml`
+
+- Demonstrates: one service, no dependencies, no image prepare step
+- Expected prerequisites: any machine for `validate` and `inspect`; Slurm and Enroot for `up`
+- Run: `hpc-compose up -f examples/minimal-batch.yaml`
+- Success signal: the batch log prints `Hello from Slurm!`
+
+### `app-redis-worker.yaml`
+
+- Demonstrates: multi-service startup ordering plus TCP readiness inside one allocation
+- Expected prerequisites: a normal Slurm + Enroot submission host and shared `CACHE_DIR`
+- Run: `hpc-compose up -f examples/app-redis-worker.yaml`
+- Success signal: `worker.log` shows a successful Redis `PING` followed by repeated `INCR jobs` calls
+
+### `llm-curl-workflow-workdir.yaml`
+
+- Demonstrates: one GPU-backed LLM service plus one client service in the same job
+- Expected prerequisites: a GGUF model at `$HOME/models/model.gguf`, a GPU-capable Slurm target, and shared `CACHE_DIR`
+- Run: `hpc-compose up -f examples/llm-curl-workflow-workdir.yaml`
+- Success signal: `curl_client.log` contains a JSON response from `/v1/chat/completions`
+
+### `training-resume.yaml`
+
+- Demonstrates: checkpoint export, resume-aware reruns, and attempt-aware training state
+- Expected prerequisites: shared storage for `x-slurm.resume.path` plus shared `CACHE_DIR`
+- Run: `hpc-compose up -f examples/training-resume.yaml`
+- Success signal: `results/<job-id>/` contains exported checkpoints and later attempts resume from the previously saved epoch
 
 ## Built-In Starter Templates
 
@@ -33,23 +57,18 @@ hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cach
 
 If the workflow you want is not listed by `--list-templates`, copy the closest repository example directly from `examples/`.
 
-## Repository Example Matrix
+## Broader Repository Example Matrix
 
-The matrix below covers the broader set of runnable repository examples, whether or not a matching built-in template exists.
+The matrix below covers the broader set of runnable repository examples beyond the four promoted starts.
 
 | Example | What it demonstrates | When to start from it |
 | --- | --- | --- |
-| [`app-redis-worker.yaml`](example-source.md#app-redis-worker) | Multiple services, `depends_on`, and TCP readiness checks | You need service startup ordering or a small multi-service stack |
 | [`dev-python-app.yaml`](example-source.md#dev-python-app) | Mounted source code plus `x-enroot.prepare.commands` for dependencies | You want an iterative development workflow |
-| [`llm-curl-workflow.yaml`](example-source.md#llm-curl-workflow) | End-to-end LLM request flow with a login-node prepare step and a `curl` client | You want the smallest concrete inference workflow |
-| [`llm-curl-workflow-workdir.yaml`](example-source.md#llm-curl-workflow-workdir) | Same LLM workflow, but anchored under `$HOME/models` for direct use on a login node | You want the lowest-overhead path from a login-node home directory |
+| [`llm-curl-workflow.yaml`](example-source.md#llm-curl-workflow) | Repo-local variant of the smallest concrete inference workflow | You want the same LLM stack but with models under the repository tree |
 | [`llama-app.yaml`](example-source.md#llama-app) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
-| [`llama-uv-worker.yaml`](example-source.md#llama-uv-worker) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server + mounted worker pattern |
-| [`minimal-batch.yaml`](example-source.md#minimal-batch) | Single service, no dependencies, no GPU, no prepare | You want the simplest possible starting point |
-| [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) | One primary-node helper plus one allocation-wide distributed CPU step | You want a minimal multi-node pattern without adding orchestration |
+| [`llama-uv-worker.yaml`](example-source.md#llama-uv-worker) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server plus mounted worker pattern |
+| [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) | One primary-node helper plus one allocation-wide distributed CPU step | You want a minimal multi-node pattern without extra orchestration |
 | [`multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) | Allocation-wide torchrun launch using the primary node as rendezvous | You want a multi-node GPU training starting point |
-| [`training-checkpoints.yaml`](example-source.md#training-checkpoints) | GPU training with checkpoints written to shared storage | You need a batch training workflow with artifact collection |
-| [`training-resume.yaml`](example-source.md#training-resume) | GPU training with a shared resume directory and attempt-aware checkpoints | You need restart-safe checkpoint semantics across requeues or repeated submissions |
 | [`postgres-etl.yaml`](example-source.md#postgres-etl) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
 | [`restart-policy.yaml`](example-source.md#restart-policy) | Per-service `restart_on_failure` with bounded retries and a rolling-window crash-loop guard | You need transient-failure retries without letting one service spin forever |
 | [`vllm-openai.yaml`](example-source.md#vllm-openai) | vLLM serving with an in-job Python client | You want vLLM-based inference instead of llama.cpp |
@@ -61,14 +80,13 @@ The matrix below covers the broader set of runnable repository examples, whether
 ## Which Example Should I Start From?
 
 - Start with [`minimal-batch.yaml`](example-source.md#minimal-batch) if you are new to `hpc-compose` and want the smallest possible file.
-- Start with [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) if you need one distributed step plus small helper services on the primary node.
+- Start with [`app-redis-worker.yaml`](example-source.md#app-redis-worker) if your workload depends on multi-service startup ordering.
+- Start with [`llm-curl-workflow-workdir.yaml`](example-source.md#llm-curl-workflow-workdir) if you want the smallest real-cluster inference workflow.
+- Start with [`training-resume.yaml`](example-source.md#training-resume) if you need resume-aware checkpoints on shared storage.
+- Start with [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) if you need one distributed step plus helper services on the primary node.
 - Start with [`multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) if you need a torchrun-style rendezvous pattern across multiple nodes.
 - Start with [`dev-python-app.yaml`](example-source.md#dev-python-app) if you want a source-mounted development loop.
-- Start with [`llm-curl-workflow-workdir.yaml`](example-source.md#llm-curl-workflow-workdir) if you want the fastest real-cluster GPU inference example.
-- Start with [`training-checkpoints.yaml`](example-source.md#training-checkpoints) if you need a GPU training job with checkpoint output.
-- Start with [`training-resume.yaml`](example-source.md#training-resume) if you need resume-aware checkpoints on shared storage.
 - Start with [`restart-policy.yaml`](example-source.md#restart-policy) if you need a clear starting point for `restart_on_failure` tuning and `status`-visible retry budgets.
-- Start with [`app-redis-worker.yaml`](example-source.md#app-redis-worker) or [`postgres-etl.yaml`](example-source.md#postgres-etl) if your workload depends on multi-service startup ordering.
 
 Companion notes for the more involved examples live alongside the example assets:
 
@@ -86,11 +104,11 @@ Companion notes for the more involved examples live alongside the example assets
 5. Keep active source in `volumes` and keep slower-changing dependency installation in `x-enroot.prepare.commands`.
 6. Add `readiness` to services that must be reachable before dependents continue.
 7. Adjust top-level or per-service `x-slurm` settings for your cluster.
-8. Use `hpc-compose new --list-templates` and `hpc-compose new --describe-template <name>` when you are not sure whether a built-in template already covers your use case.
-9. Run the debugging flow before the first submit when you need to confirm planning, prerequisites, or cache behavior.
+8. Run the debugging flow before the first submit when you need to confirm planning, prerequisites, or cache behavior.
 
 ## Related Docs
 
+- [Quickstart](quickstart.md)
 - [CLI Reference](cli-reference.md)
 - [Execution Model](execution-model.md)
 - [Runbook](runbook.md)

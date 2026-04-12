@@ -1,0 +1,37 @@
+name: Adoption feedback
+description: Report how hpc-compose fit or failed to fit your cluster workflow.
+title: "[adoption] "
+labels:
+  - feedback
+body:
+  - type: textarea
+    id: cluster_type
+    attributes:
+      label: Cluster type
+      description: What kind of cluster or environment are you using?
+      placeholder: Slurm version, Linux distro, Enroot/Pyxis notes, shared storage layout
+    validations:
+      required: true
+  - type: textarea
+    id: workload_type
+    attributes:
+      label: Workload type
+      description: What kind of job were you trying to run?
+      placeholder: training, inference, ETL, MPI, database + worker, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: friction_point
+    attributes:
+      label: Main failure or friction point
+      description: What was the single biggest thing that slowed you down or blocked adoption?
+      placeholder: authoring mismatch, unsupported Compose behavior, preflight issue, cluster-specific runtime problem, docs gap
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: Extra detail
+      description: Share logs, commands, example specs, or any context that would make the report actionable.
+    validations:
+      required: false

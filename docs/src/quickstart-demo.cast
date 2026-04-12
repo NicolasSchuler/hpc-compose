@@ -1,0 +1,12 @@
+{"version":3,"term":{"cols":100,"rows":28},"timestamp":1775981916,"command":"bash -lc 'printf \"$ hpc-compose validate -f examples/minimal-batch.yaml\\n\"; target/release/hpc-compose validate -f examples/minimal-batch.yaml; printf \"\\n$ hpc-compose inspect -f examples/minimal-batch.yaml\\n\"; target/release/hpc-compose inspect -f examples/minimal-batch.yaml; printf \"\\n$ hpc-compose up --dry-run --skip-prepare --no-preflight --script-out /tmp/hpc-compose-demo.sbatch -f examples/minimal-batch.yaml\\n\"; target/release/hpc-compose up --dry-run --skip-prepare --no-preflight --script-out /tmp/hpc-compose-demo.sbatch -f examples/minimal-batch.yaml'","title":"hpc-compose quickstart","env":{"SHELL":"/bin/zsh"}}
+[0.033, "o", "$ hpc-compose validate -f examples/minimal-batch.yaml\r\n"]
+[0.003, "o", "spec is valid\r\n"]
+[0.000, "o", "\r\n$ hpc-compose inspect -f examples/minimal-batch.yaml\r\n"]
+[0.002, "o", "name: minimal-batch\r\nruntime mode: pyxis\r\ncache dir: /cluster/shared/hpc-compose-cache\r\nallocation geometry: nodes=1 ntasks=auto ntasks_per_node=auto\r\nservice order: app\r\n"]
+[0.000, "o", "\r\nservice: app\r\nsource image: docker://python:3.11-slim\r\n"]
+[0.000, "o", "base cache artifact: /cluster/shared/hpc-compose-cache/base/304e432cfea082c2-python-3_11-slim.sqsh\r\nbase cache state: cache miss\r\nruntime image: /cluster/shared/hpc-compose-cache/base/304e432cfea082c2-python-3_11-slim.sqsh\r\nruntime image state: cache miss\r\n"]
+[0.000, "o", "step geometry: mode=primary_node nodes=1 ntasks=1 ntasks_per_node=auto\r\n"]
+[0.000, "o", "reuse policy: reuse imported base image when the cached artifact exists\r\n"]
+[0.001, "o", "\r\n$ hpc-compose up --dry-run --skip-prepare --no-preflight --script-out /tmp/hpc-compose-demo.sbatch -f examples/minimal-batch.yaml\r\n"]
+[0.002, "o", "  script: /tmp/hpc-compose-demo.sbatch\r\n  cache:  /cluster/shared/hpc-compose-cache\r\ndry run: skipping sbatch submission\r\n"]
+[0.000, "x", "0"]
