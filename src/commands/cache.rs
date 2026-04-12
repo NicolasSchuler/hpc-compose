@@ -5,12 +5,12 @@ use hpc_compose::cache::{CacheEntryKind, prune_all_unused, prune_by_age, scan_ca
 use hpc_compose::cli::OutputFormat;
 use hpc_compose::context::{ResolvedContext, ValueSource};
 
-use crate::output;
+use crate::output::{cache as output_cache, common as output_common};
 
 pub(crate) fn list(cache_dir: Option<PathBuf>, format: Option<OutputFormat>) -> Result<()> {
-    let cache_dir = cache_dir.unwrap_or_else(output::default_cache_dir);
+    let cache_dir = cache_dir.unwrap_or_else(output_common::default_cache_dir);
     let manifests = scan_cache(&cache_dir)?;
-    match output::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format, false) {
         OutputFormat::Text => {
             if manifests.is_empty() {
                 println!("no cache entries found in {}", cache_dir.display());
@@ -46,13 +46,13 @@ pub(crate) fn inspect(
     service: Option<String>,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
+    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
-    let report = output::build_cache_inspect_report(&runtime_plan, service.as_deref())?;
-    match output::resolve_output_format(format, false) {
-        OutputFormat::Text => output::print_cache_inspect(&report)?,
+    let report = output_cache::build_cache_inspect_report(&runtime_plan, service.as_deref())?;
+    match output_common::resolve_output_format(format, false) {
+        OutputFormat::Text => output_cache::print_cache_inspect(&report)?,
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -77,7 +77,7 @@ pub(crate) fn prune(
             None => active_cache_dir(&context)?,
         };
         let result = prune_by_age(&target, days)?;
-        output::CachePruneReport {
+        output_cache::CachePruneReport {
             cache_dir: target,
             mode: "age".to_string(),
             removed_count: result.removed.len(),
@@ -85,21 +85,23 @@ pub(crate) fn prune(
         }
     } else {
         debug_assert!(all_unused);
-        let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
+        let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
             &context.compose_file.value,
             &context.interpolation_vars,
         )?;
         let target = cache_dir.unwrap_or_else(|| runtime_plan.cache_dir.clone());
         let result = prune_all_unused(&target, &runtime_plan)?;
-        output::CachePruneReport {
+        output_cache::CachePruneReport {
             cache_dir: target,
             mode: "all_unused".to_string(),
             removed_count: result.removed.len(),
             removed_paths: result.removed,
         }
     };
-    match output::resolve_output_format(format, false) {
-        OutputFormat::Text => output::print_prune_result(&report.cache_dir, &report.removed_paths),
+    match output_common::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            output_cache::print_prune_result(&report.cache_dir, &report.removed_paths)
+        }
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -113,9 +115,9 @@ pub(crate) fn prune(
 
 fn active_cache_dir(context: &ResolvedContext) -> Result<PathBuf> {
     if context.compose_file.source == ValueSource::Builtin && !context.compose_file.value.exists() {
-        return Ok(output::default_cache_dir());
+        return Ok(output_common::default_cache_dir());
     }
-    let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
+    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
@@ -128,16 +130,18 @@ pub(crate) fn prune_no_context(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let days = age.context("cache prune --age requires a day value")?;
-    let target = cache_dir.unwrap_or_else(output::default_cache_dir);
+    let target = cache_dir.unwrap_or_else(output_common::default_cache_dir);
     let result = prune_by_age(&target, days)?;
-    let report = output::CachePruneReport {
+    let report = output_cache::CachePruneReport {
         cache_dir: target,
         mode: "age".to_string(),
         removed_count: result.removed.len(),
         removed_paths: result.removed,
     };
-    match output::resolve_output_format(format, false) {
-        OutputFormat::Text => output::print_prune_result(&report.cache_dir, &report.removed_paths),
+    match output_common::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            output_cache::print_prune_result(&report.cache_dir, &report.removed_paths)
+        }
         OutputFormat::Json => {
             println!(
                 "{}",

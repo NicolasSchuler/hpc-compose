@@ -1,4 +1,28 @@
+use super::scheduler::{
+    is_transitional_local_only, reconcile_scheduler_status, unix_timestamp_now,
+};
 use super::*;
+
+/// Final outcome returned by `watch_submission`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchOutcome {
+    /// The job reached a successful terminal scheduler state.
+    Completed(SchedulerStatus),
+    /// The job reached a failed terminal scheduler state.
+    Failed(SchedulerStatus),
+    /// The tracker stopped with only local information available.
+    Unknown(SchedulerStatus),
+    /// The user detached from the watch UI before a terminal state.
+    Interrupted(SchedulerStatus),
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct LogCursor {
+    pub(super) service_name: String,
+    pub(super) path: PathBuf,
+    pub(super) offset: u64,
+    pub(super) pending: String,
+}
 
 /// Prints tracked service logs, optionally following them until interrupted.
 pub fn print_logs(

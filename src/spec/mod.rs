@@ -1,34 +1,27 @@
 //! Compose-like spec parsing, interpolation, and validation.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::env;
-use std::fs;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_norway::{Mapping, Value};
 
+mod interpolate;
+mod parse;
 mod validation;
 
-use validation::{
-    validate_positive_u32, validate_sbatch_safe_string, validate_sbatch_safe_strings,
-};
+pub use interpolate::missing_defaulted_variables;
 
-const ROOT_ALLOWED_KEYS: &[&str] = &["name", "services", "version", "x-slurm"];
-const SERVICE_ALLOWED_KEYS: &[&str] = &[
-    "image",
-    "command",
-    "entrypoint",
-    "environment",
-    "volumes",
-    "working_dir",
-    "depends_on",
-    "readiness",
-    "healthcheck",
-    "x-slurm",
-    "x-enroot",
-];
+use interpolate::{
+    InterpolationVars, interpolate_optional_string, interpolate_string, interpolate_vec_strings,
+    interpolation_vars,
+};
+use parse::load_raw_spec;
+use validation::{
+    parse_duration_seconds, parse_healthcheck_argv, parse_http_probe, parse_nc_probe,
+    validate_artifact_bundle_name, validate_artifact_path, validate_positive_u32,
+    validate_resume_path, validate_sbatch_safe_string, validate_sbatch_safe_strings,
+};
 
 /// Top-level compose file accepted by `hpc-compose`.
 #[allow(missing_docs)]
@@ -697,13 +690,7 @@ impl ComposeSpec {
         path: &Path,
         vars: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        let raw = fs::read_to_string(path)
-            .context(format!("failed to read spec at {}", path.display()))?;
-        let value: Value = serde_norway::from_str(&raw)
-            .context(format!("failed to parse YAML at {}", path.display()))?;
-        validate_root(&value)?;
-        let mut spec: ComposeSpec = serde_norway::from_value(value)
-            .context(format!("failed to deserialize spec at {}", path.display()))?;
+        let mut spec = load_raw_spec(path)?;
         spec.interpolate_with_vars(vars)?;
         spec.validate()?;
         Ok(spec)
@@ -1509,16 +1496,6 @@ impl HealthcheckDuration {
     }
 }
 
-type InterpolationVars = BTreeMap<String, String>;
-
-fn interpolation_vars(path: &Path) -> Result<InterpolationVars> {
-    let mut vars = load_dotenv_vars(path.parent().unwrap_or_else(|| Path::new(".")))?;
-    for (key, value) in env::vars() {
-        vars.insert(key, value);
-    }
-    Ok(vars)
-}
-
 /// Parses a Slurm-style walltime string into seconds.
 ///
 /// Supports `MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, and
@@ -1615,580 +1592,15 @@ fn submit_args_contain_mail_settings(args: &[String]) -> bool {
     })
 }
 
-/// Returns variables that consumed `${VAR:-default}` or `${VAR-default}`
-/// defaults because `VAR` was missing from `vars`.
-///
-/// # Errors
-///
-/// Returns an error when interpolation syntax is malformed.
-pub fn missing_defaulted_variables(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-) -> Result<BTreeSet<String>> {
-    let raw =
-        fs::read_to_string(path).context(format!("failed to read spec at {}", path.display()))?;
-    let value: Value = serde_norway::from_str(&raw)
-        .context(format!("failed to parse YAML at {}", path.display()))?;
-    let mut missing = BTreeSet::new();
-    collect_missing_defaulted_variables_from_value(&value, vars, &mut missing)?;
-    Ok(missing)
-}
-
-fn collect_missing_defaulted_variables_from_value(
-    value: &Value,
-    vars: &BTreeMap<String, String>,
-    out: &mut BTreeSet<String>,
-) -> Result<()> {
-    match value {
-        Value::String(current) => collect_missing_defaulted_variables_in_string(current, vars, out),
-        Value::Sequence(items) => {
-            for item in items {
-                collect_missing_defaulted_variables_from_value(item, vars, out)?;
-            }
-            Ok(())
-        }
-        Value::Mapping(entries) => {
-            for value in entries.values() {
-                collect_missing_defaulted_variables_from_value(value, vars, out)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn collect_missing_defaulted_variables_in_string(
-    input: &str,
-    vars: &BTreeMap<String, String>,
-    out: &mut BTreeSet<String>,
-) -> Result<()> {
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] != '$' {
-            index += 1;
-            continue;
-        }
-        if matches!(chars.get(index + 1), Some('$')) {
-            index += 2;
-            continue;
-        }
-        if matches!(chars.get(index + 1), Some('{')) {
-            let start = index;
-            index += 2;
-            let (expr, next_index) = read_braced_expression(&chars, index, input, start)?;
-            index = next_index;
-            collect_missing_from_braced_expr(&expr, vars, out, input, start)?;
-            continue;
-        }
-        index += 1;
-    }
-    Ok(())
-}
-
-fn collect_missing_from_braced_expr(
-    expr: &str,
-    vars: &BTreeMap<String, String>,
-    out: &mut BTreeSet<String>,
-    input: &str,
-    start: usize,
-) -> Result<()> {
-    let mut chars = expr.chars();
-    let Some(first) = chars.next() else {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    };
-    if !is_var_start(first) {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    }
-    let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
-    let name = &expr[..name_len];
-    let suffix = &expr[name_len..];
-
-    match suffix {
-        "" => {}
-        _ if suffix.starts_with(":-") => {
-            let default_used = match vars.get(name) {
-                Some(value) => value.is_empty(),
-                None => true,
-            };
-            if !vars.contains_key(name) {
-                out.insert(name.to_string());
-            }
-            if default_used {
-                collect_missing_defaulted_variables_in_string(&suffix[2..], vars, out)?;
-            }
-        }
-        _ if suffix.starts_with('-') => {
-            if !vars.contains_key(name) {
-                out.insert(name.to_string());
-                collect_missing_defaulted_variables_in_string(&suffix[1..], vars, out)?;
-            }
-        }
-        _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
-    }
-    Ok(())
-}
-
-fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
-    let dotenv_path = project_dir.join(".env");
-    if !dotenv_path.exists() {
-        return Ok(BTreeMap::new());
-    }
-
-    let raw = fs::read_to_string(&dotenv_path)
-        .context(format!("failed to read {}", dotenv_path.display()))?;
-    let mut vars = BTreeMap::new();
-    for (line_no, line) in raw.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-        let Some((key, value)) = trimmed.split_once('=') else {
-            bail!(
-                "failed to parse {}: line {} must use KEY=VALUE syntax",
-                dotenv_path.display(),
-                line_no + 1
-            );
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            bail!(
-                "failed to parse {}: line {} has an empty variable name",
-                dotenv_path.display(),
-                line_no + 1
-            );
-        }
-        let value = value.trim();
-        let value = if quoted(value, '"') || quoted(value, '\'') {
-            value[1..value.len() - 1].to_string()
-        } else {
-            value.to_string()
-        };
-        vars.insert(key.to_string(), value);
-    }
-    Ok(vars)
-}
-
-fn quoted(value: &str, quote: char) -> bool {
-    value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote)
-}
-
-fn interpolate_optional_string(value: &mut Option<String>, vars: &InterpolationVars) -> Result<()> {
-    if let Some(current) = value {
-        *current = interpolate_string(current, vars)?;
-    }
-    Ok(())
-}
-
-fn interpolate_vec_strings(values: &mut [String], vars: &InterpolationVars) -> Result<()> {
-    for value in values {
-        *value = interpolate_string(value, vars)?;
-    }
-    Ok(())
-}
-
-fn interpolate_string(input: &str, vars: &InterpolationVars) -> Result<String> {
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut out = String::new();
-    let mut index = 0;
-
-    while index < chars.len() {
-        if chars[index] != '$' {
-            out.push(chars[index]);
-            index += 1;
-            continue;
-        }
-
-        if matches!(chars.get(index + 1), Some('$')) {
-            out.push('$');
-            index += 2;
-            continue;
-        }
-
-        if matches!(chars.get(index + 1), Some('{')) {
-            let start = index;
-            index += 2;
-            let (expr, next_index) = read_braced_expression(&chars, index, input, start)?;
-            index = next_index;
-            out.push_str(&resolve_braced_variable(&expr, vars, input, start)?);
-            continue;
-        }
-
-        index += 1;
-        if !matches!(chars.get(index), Some(ch) if is_var_start(*ch)) {
-            out.push('$');
-            continue;
-        }
-
-        let mut name = String::new();
-        while let Some(ch) = chars.get(index) {
-            if is_var_char(*ch) {
-                name.push(*ch);
-                index += 1;
-            } else {
-                break;
-            }
-        }
-
-        let Some(value) = vars.get(&name) else {
-            bail!("missing variable '{name}' referenced in '{input}'");
-        };
-        out.push_str(value);
-    }
-
-    Ok(out)
-}
-
-fn read_braced_expression(
-    chars: &[char],
-    mut index: usize,
-    input: &str,
-    start: usize,
-) -> Result<(String, usize)> {
-    let mut expr = String::new();
-    let mut nested_braces = 0usize;
-
-    while let Some(ch) = chars.get(index) {
-        if *ch == '$' {
-            if matches!(chars.get(index + 1), Some('$')) {
-                expr.push('$');
-                expr.push('$');
-                index += 2;
-                continue;
-            }
-            if matches!(chars.get(index + 1), Some('{')) {
-                nested_braces += 1;
-                expr.push('$');
-                expr.push('{');
-                index += 2;
-                continue;
-            }
-        }
-
-        if *ch == '}' {
-            if nested_braces == 0 {
-                return Ok((expr, index + 1));
-            }
-            nested_braces -= 1;
-        }
-
-        expr.push(*ch);
-        index += 1;
-    }
-
-    bail!("unterminated variable expression in '{}'", &input[start..]);
-}
-
-fn resolve_braced_variable(
-    expr: &str,
-    vars: &InterpolationVars,
-    input: &str,
-    start: usize,
-) -> Result<String> {
-    let mut chars = expr.chars();
-    let Some(first) = chars.next() else {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    };
-    if !is_var_start(first) {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    }
-    let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
-    let name = &expr[..name_len];
-    let suffix = &expr[name_len..];
-
-    match suffix {
-        "" => resolve_required_variable(name, vars),
-        _ if suffix.starts_with(":-") => {
-            let default = &suffix[2..];
-            match vars.get(name) {
-                Some(value) if !value.is_empty() => Ok(value.clone()),
-                _ => interpolate_string(default, vars),
-            }
-        }
-        _ if suffix.starts_with('-') => match vars.get(name) {
-            Some(value) => Ok(value.clone()),
-            None => interpolate_string(&suffix[1..], vars),
-        },
-        _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
-    }
-}
-
-fn resolve_required_variable(name: &str, vars: &InterpolationVars) -> Result<String> {
-    vars.get(name)
-        .cloned()
-        .context(format!("missing variable '{name}'"))
-}
-
-fn parse_healthcheck_argv(items: &[String]) -> Result<Vec<String>> {
-    if items.is_empty() {
-        bail!("healthcheck.test must not be empty");
-    }
-    match items[0].as_str() {
-        "CMD" => {
-            if items.len() < 2 {
-                bail!("healthcheck.test CMD form must include a command");
-            }
-            Ok(items[1..].to_vec())
-        }
-        "CMD-SHELL" => {
-            let Some(shell) = items.get(1) else {
-                bail!("healthcheck.test CMD-SHELL form must include a shell command");
-            };
-            Ok(shell.split_whitespace().map(ToString::to_string).collect())
-        }
-        _ => bail!("healthcheck.test must start with CMD or CMD-SHELL for Compose compatibility"),
-    }
-}
-
-fn parse_nc_probe(argv: &[String]) -> Result<Option<(String, u16)>> {
-    if argv.first().map(String::as_str) != Some("nc") {
-        return Ok(None);
-    }
-    let mut non_flags = Vec::new();
-    let mut has_zero_scan = false;
-    let mut index = 1;
-    while index < argv.len() {
-        match argv[index].as_str() {
-            "-z" => {
-                has_zero_scan = true;
-                index += 1;
-            }
-            flag if flag.starts_with('-') => {
-                index += 1;
-            }
-            value => {
-                non_flags.push(value.to_string());
-                index += 1;
-            }
-        }
-    }
-    if !has_zero_scan {
-        bail!("healthcheck nc probes must include '-z'; use explicit readiness otherwise");
-    }
-    if non_flags.len() != 2 {
-        bail!("healthcheck nc probes must use 'nc -z HOST PORT'");
-    }
-    let port = non_flags[1]
-        .parse::<u16>()
-        .context("healthcheck nc probe port must be a valid TCP port")?;
-    Ok(Some((non_flags[0].clone(), port)))
-}
-
-fn parse_http_probe(argv: &[String]) -> Option<String> {
-    match argv.first().map(String::as_str) {
-        Some("curl") => argv.iter().rev().find(|item| looks_like_url(item)).cloned(),
-        Some("wget") if argv.iter().any(|item| item == "--spider") => {
-            argv.iter().rev().find(|item| looks_like_url(item)).cloned()
-        }
-        _ => None,
-    }
-}
-
-fn looks_like_url(value: &str) -> bool {
-    value.starts_with("http://") || value.starts_with("https://")
-}
-
-fn parse_duration_seconds(raw: &str) -> Result<u64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        bail!("healthcheck duration must not be empty");
-    }
-    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
-        return trimmed
-            .parse::<u64>()
-            .context("healthcheck duration must be a valid integer number of seconds");
-    }
-
-    let mut total = 0_u64;
-    let mut number = String::new();
-    for ch in trimmed.chars() {
-        if ch.is_ascii_digit() {
-            number.push(ch);
-            continue;
-        }
-        if number.is_empty() {
-            bail!("unsupported healthcheck duration '{trimmed}'; use values like 30s or 2m");
-        }
-        let value = number
-            .parse::<u64>()
-            .context("healthcheck duration segment must be numeric")?;
-        let factor = match ch {
-            'h' => 3600,
-            'm' => 60,
-            's' => 1,
-            _ => {
-                bail!("unsupported healthcheck duration unit '{ch}' in '{trimmed}'; use h, m, or s")
-            }
-        };
-        total = total.saturating_add(value.saturating_mul(factor));
-        number.clear();
-    }
-    if !number.is_empty() {
-        bail!("unsupported healthcheck duration '{trimmed}'; include a unit suffix");
-    }
-    Ok(total)
-}
-
-fn validate_artifact_bundle_name(name: &str) -> Result<()> {
-    if name == "default" {
-        bail!("x-slurm.artifacts bundle name 'default' is reserved for top-level artifact paths");
-    }
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-    {
-        bail!("x-slurm.artifacts bundle names must match [A-Za-z0-9_-]+, got '{name}'");
-    }
-    Ok(())
-}
-
-fn is_var_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
-}
-
-fn is_var_char(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
-}
-
-fn validate_artifact_path(path: &str) -> Result<()> {
-    let candidate = Path::new(path);
-    if !candidate.is_absolute() {
-        bail!(
-            "x-slurm.artifacts.paths entries must be absolute paths under /hpc-compose/job, got '{path}'"
-        );
-    }
-
-    let mut normalized = Vec::new();
-    for component in candidate.components() {
-        match component {
-            std::path::Component::RootDir => {}
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop().context(format!(
-                    "x-slurm.artifacts.paths entry '{path}' escapes the root path"
-                ))?;
-            }
-            std::path::Component::Normal(part) => {
-                normalized.push(part.to_string_lossy().into_owned())
-            }
-            std::path::Component::Prefix(_) => {
-                bail!("x-slurm.artifacts.paths entry '{path}' must use Unix-style absolute paths");
-            }
-        }
-    }
-
-    if normalized.first().map(String::as_str) != Some("hpc-compose")
-        || normalized.get(1).map(String::as_str) != Some("job")
-    {
-        bail!("x-slurm.artifacts.paths entries must stay under /hpc-compose/job, got '{path}'");
-    }
-    if normalized.get(2).map(String::as_str) == Some("artifacts") {
-        bail!("x-slurm.artifacts.paths must not read from /hpc-compose/job/artifacts");
-    }
-    Ok(())
-}
-
-fn validate_resume_path(path: &str) -> Result<()> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        bail!("x-slurm.resume.path must not be empty");
-    }
-
-    let candidate = Path::new(trimmed);
-    if !candidate.is_absolute() {
-        bail!("x-slurm.resume.path must be an absolute host path, got '{path}'");
-    }
-
-    let mut normalized = Vec::new();
-    for component in candidate.components() {
-        match component {
-            std::path::Component::RootDir => {}
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop().context(format!(
-                    "x-slurm.resume.path entry '{path}' escapes the root path"
-                ))?;
-            }
-            std::path::Component::Normal(part) => {
-                normalized.push(part.to_string_lossy().into_owned())
-            }
-            std::path::Component::Prefix(_) => {
-                bail!("x-slurm.resume.path '{path}' must use Unix-style absolute paths");
-            }
-        }
-    }
-
-    if normalized.first().map(String::as_str) == Some("hpc-compose") {
-        bail!("x-slurm.resume.path must be a host path, not a container-visible /hpc-compose path");
-    }
-    Ok(())
-}
-
-fn validate_root(value: &Value) -> Result<()> {
-    let Some(root) = value.as_mapping() else {
-        bail!("top-level YAML document must be a mapping");
-    };
-    validate_mapping_keys("root", root, ROOT_ALLOWED_KEYS)?;
-    let Some(services) = root.get(Value::String("services".into())) else {
-        bail!("spec must contain a top-level 'services' mapping");
-    };
-    let Some(service_map) = services.as_mapping() else {
-        bail!("'services' must be a mapping");
-    };
-    for (name, service) in service_map {
-        let Some(service_name) = name.as_str() else {
-            bail!("service names must be strings");
-        };
-        let Some(service_mapping) = service.as_mapping() else {
-            bail!("service '{service_name}' must be a mapping");
-        };
-        validate_mapping_keys(
-            &format!("service '{service_name}'"),
-            service_mapping,
-            SERVICE_ALLOWED_KEYS,
-        )?;
-    }
-    Ok(())
-}
-
-fn validate_mapping_keys(scope: &str, mapping: &Mapping, allowed: &[&str]) -> Result<()> {
-    for key in mapping.keys() {
-        let Some(key_name) = key.as_str() else {
-            bail!("{scope} contains a non-string key");
-        };
-        if allowed.contains(&key_name) {
-            continue;
-        }
-        let message = match key_name {
-            "build" => {
-                "build is not supported in v1; use image: plus x-enroot.prepare to customize an Enroot image before submission"
-            }
-            "ports" => {
-                "ports are not supported; use host-network semantics and explicit readiness checks"
-            }
-            "networks" | "network_mode" => {
-                "custom container networking is not supported under this Slurm/Enroot execution model"
-            }
-            "restart" => {
-                "Compose restart policies are not supported; use services.<name>.x-slurm.failure_policy instead"
-            }
-            "deploy" => {
-                "deploy is not supported; this tool targets one Slurm allocation, not a long-running orchestrator"
-            }
-            other => bail!("{scope} uses unsupported key '{other}'"),
-        };
-        bail!("{scope}: {message}");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::env;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
+
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
 
     use super::*;
 
@@ -2201,6 +1613,22 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn prop_config() -> ProptestConfig {
+        ProptestConfig {
+            cases: 64,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        }
+    }
+
+    fn key_strategy() -> impl Strategy<Value = String> {
+        string_regex("[A-Za-z_][A-Za-z0-9_-]{0,15}").expect("key regex")
+    }
+
+    fn value_strategy() -> impl Strategy<Value = String> {
+        string_regex("[A-Za-z0-9_./:-]{0,12}").expect("value regex")
     }
 
     #[test]
@@ -3512,5 +2940,187 @@ services:
         };
         let err = config.validate().expect_err("line break in submit arg");
         assert!(err.to_string().contains("x-slurm.submit_args[1]"));
+    }
+
+    proptest! {
+        #![proptest_config(prop_config())]
+
+        #[test]
+        fn property_rejects_unsupported_root_keys(
+            key in key_strategy().prop_filter("unsupported root key", |key| {
+                !matches!(key.as_str(), "name" | "services" | "version" | "x-slurm")
+            })
+        ) {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let path = write_spec(
+                tmpdir.path(),
+                &format!(
+                    "services:\n  app:\n    image: redis:7\n{key}: true\n"
+                ),
+            );
+            let err = ComposeSpec::load(&path).expect_err("unsupported root key");
+            let needle = format!("unsupported key '{key}'");
+            prop_assert!(err.to_string().contains(&needle));
+        }
+
+        #[test]
+        fn property_rejects_unsupported_service_keys(
+            key in key_strategy().prop_filter("unsupported service key", |key| {
+                !matches!(
+                    key.as_str(),
+                    "image"
+                        | "command"
+                        | "entrypoint"
+                        | "environment"
+                        | "volumes"
+                        | "working_dir"
+                        | "depends_on"
+                        | "readiness"
+                        | "healthcheck"
+                        | "x-slurm"
+                        | "x-enroot"
+                )
+            })
+        ) {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let path = write_spec(
+                tmpdir.path(),
+                &format!(
+                    "services:\n  app:\n    image: redis:7\n    {key}: true\n"
+                ),
+            );
+            let err = ComposeSpec::load(&path).expect_err("unsupported service key");
+            let needle = format!("unsupported key '{key}'");
+            prop_assert!(err.to_string().contains(&needle));
+        }
+
+        #[test]
+        fn property_accepts_minimal_valid_specs_with_allowed_keys_only(
+            name in prop::option::of(string_regex("[a-z][a-z0-9_-]{0,8}").expect("name regex")),
+            version in prop::option::of(Just("3".to_string())),
+            working_dir in prop::option::of(string_regex("/[A-Za-z0-9_/-]{1,12}").expect("dir regex")),
+            command in prop::option::of(value_strategy()),
+        ) {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let mut body = String::new();
+            if let Some(name) = name {
+                body.push_str(&format!("name: {name}\n"));
+            }
+            if let Some(version) = version {
+                body.push_str(&format!("version: \"{version}\"\n"));
+            }
+            body.push_str("services:\n  app:\n    image: redis:7\n");
+            if let Some(command) = command {
+                body.push_str(&format!("    command: \"echo {command}\"\n"));
+            }
+            if let Some(working_dir) = working_dir {
+                body.push_str(&format!("    working_dir: {working_dir}\n"));
+            }
+            let path = write_spec(tmpdir.path(), &body);
+            prop_assert!(ComposeSpec::load(&path).is_ok());
+        }
+
+        #[test]
+        fn property_nested_defaults_resolve_expected_value(
+            a in prop::option::of(value_strategy()),
+            b in prop::option::of(value_strategy()),
+        ) {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let path = write_spec(
+                tmpdir.path(),
+                r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      KEEP: "${A:-${B:-fallback}}"
+"#,
+            );
+            let mut vars = BTreeMap::new();
+            if let Some(a) = a.clone() {
+                vars.insert("A".to_string(), a);
+            }
+            if let Some(b) = b.clone() {
+                vars.insert("B".to_string(), b);
+            }
+            let spec = ComposeSpec::load_with_interpolation_vars(&path, &vars).expect("load");
+            let expected = a
+                .filter(|value| !value.is_empty())
+                .or_else(|| b.filter(|value| !value.is_empty()))
+                .unwrap_or_else(|| "fallback".to_string());
+            prop_assert_eq!(
+                spec.services
+                    .get("app")
+                    .expect("app")
+                    .environment
+                    .to_pairs()
+                    .expect("pairs"),
+                vec![("KEEP".into(), expected)]
+            );
+        }
+
+        #[test]
+        fn property_strict_env_scanner_tracks_defaulted_variables(
+            a in prop::option::of(value_strategy()),
+            b in prop::option::of(value_strategy()),
+        ) {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let path = write_spec(
+                tmpdir.path(),
+                r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      KEEP: "${A:-${B:-fallback}}"
+      ESCAPED: "$${C:-literal}"
+"#,
+            );
+            let mut vars = BTreeMap::new();
+            if let Some(a) = a.clone() {
+                vars.insert("A".to_string(), a);
+            }
+            if let Some(b) = b.clone() {
+                vars.insert("B".to_string(), b);
+            }
+            let missing = missing_defaulted_variables(&path, &vars).expect("scan");
+            let mut expected = BTreeSet::new();
+            let outer_default_used = a.as_ref().is_none_or(|value| value.is_empty());
+            if a.is_none() {
+                expected.insert("A".to_string());
+            }
+            if outer_default_used && b.is_none() {
+                expected.insert("B".to_string());
+            }
+            prop_assert_eq!(missing, expected);
+        }
+
+        #[test]
+        fn property_malformed_interpolation_fails_without_panicking(
+            prefix in value_strategy(),
+            suffix in value_strategy(),
+            malformed in prop_oneof![
+                Just("${}".to_string()),
+                Just("${A".to_string()),
+                Just("${1BAD}".to_string()),
+                Just("${A:+oops}".to_string()),
+            ],
+        ) {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let path = write_spec(
+                tmpdir.path(),
+                &format!(
+                    "services:\n  app:\n    image: redis:7\n    environment:\n      KEEP: \"{prefix}{malformed}{suffix}\"\n      ESCAPED: \"$${{SAFE:-literal}}\"\n"
+                ),
+            );
+
+            let strict_scan = std::panic::catch_unwind(|| missing_defaulted_variables(&path, &BTreeMap::new()));
+            prop_assert!(strict_scan.is_ok());
+            prop_assert!(strict_scan.expect("strict scan result").is_err());
+
+            let load = std::panic::catch_unwind(|| ComposeSpec::load_with_interpolation_vars(&path, &BTreeMap::new()));
+            prop_assert!(load.is_ok());
+            prop_assert!(load.expect("load result").is_err());
+        }
     }
 }

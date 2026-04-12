@@ -29,6 +29,12 @@ use hpc_compose::spec::{
 };
 use serde::Serialize;
 
+pub(crate) mod cache;
+pub(crate) mod common;
+pub(crate) mod init;
+pub(crate) mod runtime;
+pub(crate) mod spec;
+
 #[derive(Debug, Serialize)]
 pub(crate) struct ValidateOutput {
     pub(crate) valid: bool,

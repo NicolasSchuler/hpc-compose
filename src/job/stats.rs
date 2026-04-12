@@ -1,6 +1,192 @@
 use super::runtime_state::load_runtime_state;
-use super::scheduler::build_local_scheduler_status;
+use super::scheduler::{
+    build_local_scheduler_status, reconcile_scheduler_status, stats_unavailable_reason,
+    unix_timestamp_now,
+};
 use super::*;
+
+/// Combined metrics and scheduler view returned by the `stats` command.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct StatsSnapshot {
+    pub job_id: String,
+    pub record: Option<SubmissionRecord>,
+    pub metrics_dir: Option<PathBuf>,
+    pub scheduler: SchedulerStatus,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub source: String,
+    pub notes: Vec<String>,
+    pub sampler: Option<SamplerSnapshot>,
+    pub steps: Vec<StepStats>,
+    pub attempt: Option<u32>,
+    pub is_resume: Option<bool>,
+    pub resume_dir: Option<PathBuf>,
+}
+
+/// One Slurm step metrics row as presented by `hpc-compose stats`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StepStats {
+    pub step_id: String,
+    pub ntasks: String,
+    pub ave_cpu: String,
+    pub ave_rss: String,
+    pub max_rss: String,
+    pub alloc_tres: String,
+    pub tres_usage_in_ave: String,
+    pub alloc_tres_map: BTreeMap<String, String>,
+    pub usage_tres_in_ave_map: BTreeMap<String, String>,
+    pub gpu_count: Option<String>,
+    pub gpu_util: Option<String>,
+    pub gpu_mem: Option<String>,
+}
+
+/// Snapshot of the job-local metrics sampler outputs.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct SamplerSnapshot {
+    pub interval_seconds: u64,
+    pub collectors: Vec<CollectorStatus>,
+    pub gpu: Option<GpuSnapshot>,
+    pub slurm: Option<SlurmSamplerSnapshot>,
+}
+
+/// Availability metadata for one configured metrics collector.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectorStatus {
+    pub name: String,
+    pub enabled: bool,
+    pub available: bool,
+    pub note: Option<String>,
+    pub last_sampled_at: Option<String>,
+}
+
+/// GPU telemetry snapshot collected by the job-local sampler.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct GpuSnapshot {
+    pub sampled_at: String,
+    pub gpus: Vec<GpuDeviceSample>,
+    pub processes: Vec<GpuProcessSample>,
+}
+
+/// One sampled GPU device record.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GpuDeviceSample {
+    pub index: Option<String>,
+    pub uuid: Option<String>,
+    pub name: Option<String>,
+    pub utilization_gpu: Option<String>,
+    pub utilization_memory: Option<String>,
+    pub memory_used_mib: Option<String>,
+    pub memory_total_mib: Option<String>,
+    pub temperature_c: Option<String>,
+    pub power_draw_w: Option<String>,
+    pub power_limit_w: Option<String>,
+}
+
+/// One sampled GPU process record.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GpuProcessSample {
+    pub gpu_uuid: Option<String>,
+    pub pid: Option<String>,
+    pub process_name: Option<String>,
+    pub used_memory_mib: Option<String>,
+}
+
+/// Slurm metrics sampler output for all observed steps.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct SlurmSamplerSnapshot {
+    pub sampled_at: String,
+    pub steps: Vec<StepStats>,
+}
+
+/// External binaries used to query scheduler state.
+#[allow(missing_docs)]
+#[derive(Debug, Clone)]
+pub struct SchedulerOptions {
+    pub squeue_bin: String,
+    pub sacct_bin: String,
+}
+
+impl Default for SchedulerOptions {
+    fn default() -> Self {
+        Self {
+            squeue_bin: "squeue".to_string(),
+            sacct_bin: "sacct".to_string(),
+        }
+    }
+}
+
+/// Options for building a metrics snapshot.
+#[allow(missing_docs)]
+#[derive(Debug, Clone)]
+pub struct StatsOptions {
+    pub scheduler: SchedulerOptions,
+    pub sstat_bin: String,
+}
+
+impl Default for StatsOptions {
+    fn default() -> Self {
+        Self {
+            scheduler: SchedulerOptions::default(),
+            sstat_bin: "sstat".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SamplerMetaFile {
+    pub(super) interval_seconds: u64,
+    pub(super) collectors: Vec<CollectorStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct GpuDeviceSampleRow {
+    pub(super) sampled_at: String,
+    pub(super) index: Option<String>,
+    pub(super) uuid: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) utilization_gpu: Option<String>,
+    pub(super) utilization_memory: Option<String>,
+    pub(super) memory_used_mib: Option<String>,
+    pub(super) memory_total_mib: Option<String>,
+    pub(super) temperature_c: Option<String>,
+    pub(super) power_draw_w: Option<String>,
+    pub(super) power_limit_w: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct GpuProcessSampleRow {
+    pub(super) sampled_at: String,
+    pub(super) gpu_uuid: Option<String>,
+    pub(super) pid: Option<String>,
+    pub(super) process_name: Option<String>,
+    pub(super) used_memory_mib: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SlurmSampleRow {
+    pub(super) sampled_at: String,
+    pub(super) step_id: Option<String>,
+    pub(super) ntasks: Option<String>,
+    pub(super) ave_cpu: Option<String>,
+    pub(super) ave_rss: Option<String>,
+    pub(super) max_rss: Option<String>,
+    pub(super) alloc_tres: Option<String>,
+    pub(super) tres_usage_in_ave: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SamplerLoadOutcome {
+    pub(super) sampler: Option<SamplerSnapshot>,
+    pub(super) notes: Vec<String>,
+}
 
 /// Builds the tracked metrics snapshot used by `hpc-compose stats`.
 pub fn build_stats_snapshot(
@@ -139,6 +325,12 @@ pub fn metrics_dir_for_record(record: &SubmissionRecord) -> PathBuf {
         &record.submit_dir,
         &record.job_id,
     ))
+}
+
+impl StepStats {
+    pub(super) fn has_live_gpu_metrics(&self) -> bool {
+        self.gpu_util.is_some() || self.gpu_mem.is_some()
+    }
 }
 
 pub(crate) fn load_sampler_snapshot(metrics_dir: &Path) -> SamplerLoadOutcome {

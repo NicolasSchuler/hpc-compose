@@ -208,6 +208,26 @@ services:
 }
 
 #[test]
+fn validate_surfaces_interpolation_errors() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+services:
+  app:
+    image: ${MISSING_IMAGE}
+"#,
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    assert!(stderr_text(&validate).contains("missing variable 'MISSING_IMAGE'"));
+}
+
+#[test]
 fn schema_command_emits_checked_in_schema() {
     let output = run_cli(&repo_root(), &["schema"]);
     assert_success(&output);

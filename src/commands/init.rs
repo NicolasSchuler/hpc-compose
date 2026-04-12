@@ -17,7 +17,7 @@ use hpc_compose::init::{
     prompt_for_init_with_cache_dir_default, render_template, write_initialized_template,
 };
 
-use crate::output;
+use crate::output::{common as output_common, init as output_init};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new_command(
@@ -31,13 +31,13 @@ pub(crate) fn new_command(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     if list_templates {
-        match output::resolve_output_format(format, false) {
-            OutputFormat::Text => output::print_template_list(),
+        match output_common::resolve_output_format(format, false) {
+            OutputFormat::Text => output_init::print_template_list(),
             OutputFormat::Json => {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "templates": output::template_infos(),
+                        "templates": output_init::template_infos(),
                         "cache_dir_required": true,
                         "cache_dir_placeholder": init_cache_dir_placeholder(),
                     }))
@@ -48,12 +48,12 @@ pub(crate) fn new_command(
         return Ok(());
     }
     if let Some(template_name) = describe_template {
-        match output::resolve_output_format(format, false) {
-            OutputFormat::Text => output::print_template_description(&template_name)?,
+        match output_common::resolve_output_format(format, false) {
+            OutputFormat::Text => output_init::print_template_description(&template_name)?,
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output::build_template_description(
+                    serde_json::to_string_pretty(&output_init::build_template_description(
                         &template_name,
                     )?)
                     .context("failed to serialize template description output")?
@@ -63,7 +63,7 @@ pub(crate) fn new_command(
         return Ok(());
     }
     let prompt_cache_dir = cache_dir.clone();
-    let answers = output::resolve_init_answers(template, name, cache_dir, || {
+    let answers = output_init::resolve_init_answers(template, name, cache_dir, || {
         prompt_for_init_with_cache_dir_default(prompt_cache_dir.as_deref())
     })?;
     let rendered = render_template(
@@ -73,7 +73,7 @@ pub(crate) fn new_command(
     )?;
     let path = write_initialized_template(&output_path, &rendered, force)?;
     let next_commands = next_commands(&path);
-    match output::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format, false) {
         OutputFormat::Text => {
             println!("wrote {}", path.display());
             for command in next_commands {
@@ -83,7 +83,7 @@ pub(crate) fn new_command(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::TemplateWriteOutput {
+                serde_json::to_string_pretty(&output_init::TemplateWriteOutput {
                     template_name: answers.template_name,
                     app_name: answers.app_name,
                     cache_dir: answers.cache_dir,
@@ -261,7 +261,7 @@ pub(crate) fn setup(
     profile.env_files = env_files_value;
     profile.env = env_value;
     profile.binaries = binaries_value;
-    let setup_output = output::SetupOutput {
+    let setup_output = output_init::SetupOutput {
         settings_path: settings_path.clone(),
         profile: selected_profile.clone(),
         default_profile: selected_default_profile.clone(),
@@ -274,7 +274,7 @@ pub(crate) fn setup(
     settings.version = 1;
 
     write_settings(&settings_path, &settings)?;
-    match output::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format, false) {
         OutputFormat::Text => {
             println!("wrote {}", settings_path.display());
             println!("profile: {}", selected_profile);

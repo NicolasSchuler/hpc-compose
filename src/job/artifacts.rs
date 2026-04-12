@@ -1,4 +1,151 @@
+use super::scheduler::unix_timestamp_now;
 use super::*;
+
+/// Manifest produced when teardown exports tracked artifacts.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactManifest {
+    #[serde(default = "default_artifact_manifest_schema_version")]
+    pub schema_version: u32,
+    pub job_id: String,
+    pub collect_policy: String,
+    pub collected_at: String,
+    pub job_outcome: String,
+    #[serde(default)]
+    pub attempt: Option<u32>,
+    #[serde(default)]
+    pub is_resume: Option<bool>,
+    #[serde(default)]
+    pub resume_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub declared_source_patterns: Vec<String>,
+    #[serde(default)]
+    pub matched_source_paths: Vec<String>,
+    #[serde(default)]
+    pub copied_relative_paths: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub bundles: BTreeMap<String, ArtifactBundleManifest>,
+}
+
+/// Bundle-specific entries tracked in an artifact manifest.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactBundleManifest {
+    #[serde(default)]
+    pub declared_source_patterns: Vec<String>,
+    #[serde(default)]
+    pub matched_source_paths: Vec<String>,
+    #[serde(default)]
+    pub copied_relative_paths: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Result of copying tracked artifacts into the configured export directory.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactExportReport {
+    pub record: SubmissionRecord,
+    pub manifest_path: PathBuf,
+    pub payload_dir: PathBuf,
+    pub export_dir: PathBuf,
+    pub manifest: ArtifactManifest,
+    pub selected_bundles: Vec<String>,
+    pub bundles: Vec<BundleExportReport>,
+    pub exported_paths: Vec<PathBuf>,
+    pub tarball_paths: Vec<PathBuf>,
+    pub warnings: Vec<String>,
+}
+
+/// Export result for one artifact bundle.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleExportReport {
+    pub name: String,
+    pub export_dir: PathBuf,
+    pub provenance_path: PathBuf,
+    pub tarball_path: Option<PathBuf>,
+    pub exported_paths: Vec<PathBuf>,
+    pub files: Vec<ArtifactEntryMetadata>,
+    pub warnings: Vec<String>,
+}
+
+/// One exported artifact entry captured in provenance output.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactEntryMetadata {
+    pub relative_path: String,
+    pub entry_type: String,
+    pub size_bytes: Option<u64>,
+    pub sha256: Option<String>,
+    pub link_target: Option<String>,
+}
+
+/// Per-bundle provenance file written during artifact export.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactBundleProvenance {
+    pub schema_version: u32,
+    pub job_id: String,
+    pub attempt: Option<u32>,
+    pub is_resume: Option<bool>,
+    pub resume_dir: Option<PathBuf>,
+    pub bundle: String,
+    pub compose_file: PathBuf,
+    pub script_path: PathBuf,
+    pub collect_policy: String,
+    pub job_outcome: String,
+    pub collected_at: String,
+    pub exported_at_unix: u64,
+    pub export_dir: PathBuf,
+    pub tarball_path: Option<PathBuf>,
+    pub selected_bundles: Vec<String>,
+    pub declared_source_patterns: Vec<String>,
+    pub matched_source_paths: Vec<String>,
+    pub copied_relative_paths: Vec<String>,
+    pub warnings: Vec<String>,
+    pub files: Vec<ArtifactEntryMetadata>,
+}
+
+/// Options controlling tracked artifact export.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactExportOptions {
+    pub selected_bundles: Vec<String>,
+    pub tarball: bool,
+}
+
+pub(super) fn default_artifact_manifest_schema_version() -> u32 {
+    1
+}
+
+impl ArtifactManifest {
+    pub(super) fn normalized_bundles(&self) -> BTreeMap<String, ArtifactBundleManifest> {
+        if !self.bundles.is_empty() {
+            return self.bundles.clone();
+        }
+
+        if self.declared_source_patterns.is_empty()
+            && self.matched_source_paths.is_empty()
+            && self.copied_relative_paths.is_empty()
+            && self.warnings.is_empty()
+        {
+            return BTreeMap::new();
+        }
+
+        BTreeMap::from([(
+            "default".to_string(),
+            ArtifactBundleManifest {
+                declared_source_patterns: self.declared_source_patterns.clone(),
+                matched_source_paths: self.matched_source_paths.clone(),
+                copied_relative_paths: self.copied_relative_paths.clone(),
+                warnings: self.warnings.clone(),
+            },
+        )])
+    }
+}
 
 /// Returns the tracked artifacts directory for a submission record.
 pub fn artifacts_dir_for_record(record: &SubmissionRecord) -> PathBuf {

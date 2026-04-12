@@ -3,7 +3,73 @@ use std::collections::BTreeSet;
 
 use crate::context::repo_root_or_cwd;
 
+use super::scheduler::unix_timestamp_now;
 use super::*;
+
+/// One tracked job discovered from recorded submission metadata.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobInventoryEntry {
+    pub compose_file: PathBuf,
+    pub compose_metadata_root: PathBuf,
+    pub job_id: String,
+    pub kind: SubmissionKind,
+    pub is_latest: bool,
+    pub submitted_at: u64,
+    pub age_seconds: u64,
+    pub submit_dir: PathBuf,
+    pub record_path: PathBuf,
+    pub runtime_job_root: PathBuf,
+    pub runtime_job_root_present: bool,
+    pub legacy_runtime_job_root: PathBuf,
+    pub legacy_runtime_job_root_present: bool,
+    #[serde(default)]
+    pub disk_usage_bytes: Option<u64>,
+}
+
+/// Repo-tree scan result returned by `jobs list`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobInventoryScan {
+    pub scan_root: PathBuf,
+    pub jobs: Vec<JobInventoryEntry>,
+}
+
+/// Planned or executed tracked-job cleanup report.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct CleanupReport {
+    pub compose_file: PathBuf,
+    pub mode: String,
+    pub dry_run: bool,
+    pub removed_job_ids: Vec<String>,
+    pub kept_job_ids: Vec<String>,
+    pub latest_pointer_job_id_before: Option<String>,
+    pub latest_job_id_before: Option<String>,
+    pub latest_job_id_after: Option<String>,
+    pub total_bytes_reclaimed: Option<u64>,
+    pub jobs: Vec<CleanupJobReport>,
+}
+
+/// Cleanup planning details for one tracked job.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct CleanupJobReport {
+    #[serde(flatten)]
+    pub inventory: JobInventoryEntry,
+    pub selected: bool,
+    pub bytes_reclaimed: Option<u64>,
+    #[serde(skip)]
+    pub removable_paths: Vec<PathBuf>,
+}
+
+/// Cleanup selection strategy.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupMode {
+    Age { age_days: u64 },
+    AllExceptLatest,
+}
 
 /// Returns the `.hpc-compose` metadata directory for a compose file.
 pub fn metadata_root_for(spec_path: &Path) -> PathBuf {

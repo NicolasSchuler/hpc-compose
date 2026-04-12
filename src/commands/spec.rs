@@ -11,7 +11,7 @@ use hpc_compose::render::render_script;
 use hpc_compose::spec::missing_defaulted_variables;
 use serde::Serialize;
 
-use crate::output;
+use crate::output::{common as output_common, spec as output_spec};
 use crate::progress::ProgressReporter;
 
 pub(crate) fn validate(
@@ -19,7 +19,7 @@ pub(crate) fn validate(
     strict_env: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let plan = output::load_plan_with_interpolation_vars(
+    let plan = output_common::load_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
@@ -33,12 +33,12 @@ pub(crate) fn validate(
             );
         }
     }
-    match output::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format, false) {
         OutputFormat::Text => println!("spec is valid"),
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::build_validate_output(&plan))
+                serde_json::to_string_pretty(&output_spec::build_validate_output(&plan))
                     .context("failed to serialize validate output")?
             );
         }
@@ -51,7 +51,7 @@ pub(crate) fn render(
     output_path: Option<PathBuf>,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let plan = output::load_plan_with_interpolation_vars(
+    let plan = output_common::load_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
@@ -61,7 +61,7 @@ pub(crate) fn render(
         fs::write(path, &script)
             .with_context(|| format!("failed to write rendered script to {}", path.display()))?;
     }
-    match output::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format, false) {
         OutputFormat::Text => {
             if let Some(path) = output_path {
                 println!("{}", path.display());
@@ -72,7 +72,7 @@ pub(crate) fn render(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::RenderOutput {
+                serde_json::to_string_pretty(&output_spec::RenderOutput {
                     compose_file: plan.spec_path,
                     output_path,
                     script,
@@ -90,9 +90,9 @@ pub(crate) fn prepare(
     force: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output_common::resolve_output_format(format, false);
     let progress = ProgressReporter::new(output_format == OutputFormat::Text);
-    let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
+    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
@@ -107,7 +107,7 @@ pub(crate) fn prepare(
         )
     })?;
     match output_format {
-        OutputFormat::Text => output::print_prepare_summary(&summary),
+        OutputFormat::Text => output_spec::print_prepare_summary(&summary),
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -126,9 +126,9 @@ pub(crate) fn preflight(
     format: Option<OutputFormat>,
     json: bool,
 ) -> Result<()> {
-    let output_format = output::resolve_output_format(format, json);
+    let output_format = output_common::resolve_output_format(format, json);
     let progress = ProgressReporter::new(output_format == OutputFormat::Text);
-    let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
+    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
@@ -146,7 +146,7 @@ pub(crate) fn preflight(
         ))
     })?;
     match output_format {
-        OutputFormat::Text => output::print_report(&report, verbose),
+        OutputFormat::Text => output_spec::print_report(&report, verbose),
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -170,17 +170,17 @@ pub(crate) fn inspect(
     format: Option<OutputFormat>,
     json: bool,
 ) -> Result<()> {
-    let (plan, runtime_plan) = output::load_plan_and_runtime_with_interpolation_vars(
+    let (plan, runtime_plan) = output_common::load_plan_and_runtime_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
-    match output::resolve_output_format(format, json) {
+    match output_common::resolve_output_format(format, json) {
         OutputFormat::Text => {
             if verbose {
-                output::print_plan_inspect_verbose(&plan, &runtime_plan)
+                output_spec::print_plan_inspect_verbose(&plan, &runtime_plan)
                     .context("failed to write inspect output")?;
             } else {
-                output::print_plan_inspect(&runtime_plan)
+                output_spec::print_plan_inspect(&runtime_plan)
                     .context("failed to write inspect output")?;
             }
         }
@@ -196,13 +196,13 @@ pub(crate) fn inspect(
 }
 
 pub(crate) fn config(context: ResolvedContext, format: Option<OutputFormat>) -> Result<()> {
-    let config = output::load_effective_config_with_interpolation_vars(
+    let config = output_common::load_effective_config_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
-    match output::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format, false) {
         OutputFormat::Text => {
-            print!("{}", output::effective_config_yaml(&config)?);
+            print!("{}", output_common::effective_config_yaml(&config)?);
         }
         OutputFormat::Json => {
             println!(
@@ -251,7 +251,7 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
         .to_path_buf();
     let current_submit_dir = context.cwd.clone();
     let (cache_dir, resume_dir, artifact_export_dir, compose_load_error) =
-        match output::load_plan_and_runtime_with_interpolation_vars(
+        match output_common::load_plan_and_runtime_with_interpolation_vars(
             &context.compose_file.value,
             &context.interpolation_vars,
         ) {
@@ -284,7 +284,7 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
     let runtime_paths = ContextRuntimePaths {
         compose_dir: compose_dir.clone(),
         current_submit_dir: current_submit_dir.clone(),
-        default_script_path: output::default_script_path(&context.compose_file.value),
+        default_script_path: output_common::default_script_path(&context.compose_file.value),
         runtime_job_root_pattern: current_submit_dir
             .join(".hpc-compose")
             .join("{job_id}")
@@ -315,7 +315,7 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
         runtime_paths,
     };
 
-    match output::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format, false) {
         OutputFormat::Json => {
             println!(
                 "{}",

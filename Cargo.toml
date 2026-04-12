@@ -41,6 +41,7 @@ tar = "0.4.44"
 toml = "0.8.19"
 
 [dev-dependencies]
+proptest = { version = "1.9.0", default-features = false, features = ["std"] }
 tempfile = "3.23.0"
 
 [profile.release]

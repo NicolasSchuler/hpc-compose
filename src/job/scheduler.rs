@@ -1,7 +1,228 @@
 use super::runtime_state::{
-    active_restart_failures_in_window, load_runtime_state, runtime_state_by_service,
+    ServiceRuntimeStateEntry, ServiceRuntimeStateFile, active_restart_failures_in_window,
+    load_runtime_state, runtime_state_by_service,
 };
 use super::*;
+
+/// Live walltime progress derived from a tracked job record and scheduler diagnostics.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalltimeProgress {
+    pub original: String,
+    pub elapsed_seconds: u64,
+    pub total_seconds: u64,
+    pub remaining_seconds: u64,
+}
+
+/// Scheduler state as observed by the tracker.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchedulerStatus {
+    pub state: String,
+    pub source: SchedulerSource,
+    pub terminal: bool,
+    pub failed: bool,
+    pub detail: Option<String>,
+}
+
+/// Presence and freshness information for one tracked service log.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PsServiceRow {
+    pub service_name: String,
+    pub path: PathBuf,
+    pub present: bool,
+    pub updated_at: Option<u64>,
+    pub updated_age_seconds: Option<u64>,
+    #[serde(default)]
+    pub log_path: Option<PathBuf>,
+    #[serde(default)]
+    pub step_name: Option<String>,
+    #[serde(default)]
+    pub launch_index: Option<u32>,
+    #[serde(default)]
+    pub launcher_pid: Option<u32>,
+    #[serde(default)]
+    pub healthy: Option<bool>,
+    #[serde(default)]
+    pub readiness_configured: Option<bool>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub failure_policy_mode: Option<String>,
+    #[serde(default)]
+    pub restart_count: Option<u32>,
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    #[serde(default)]
+    pub window_seconds: Option<u64>,
+    #[serde(default)]
+    pub max_restarts_in_window: Option<u32>,
+    #[serde(default)]
+    pub restart_failures_in_window: Option<u32>,
+    #[serde(default)]
+    pub last_exit_code: Option<i32>,
+    #[serde(default)]
+    pub placement_mode: Option<String>,
+    #[serde(default)]
+    pub nodes: Option<u32>,
+    #[serde(default)]
+    pub ntasks: Option<u32>,
+    #[serde(default)]
+    pub ntasks_per_node: Option<u32>,
+    #[serde(default)]
+    pub nodelist: Option<String>,
+}
+
+/// Backwards-compatible alias for one tracked service row.
+pub type ServiceLogStatus = PsServiceRow;
+
+/// Presence and freshness information for the top-level batch log.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchLogStatus {
+    pub path: PathBuf,
+    pub present: bool,
+    pub updated_at: Option<u64>,
+    pub updated_age_seconds: Option<u64>,
+}
+
+/// Combined tracked-job status returned by the `status` command.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusSnapshot {
+    pub record: SubmissionRecord,
+    pub scheduler: SchedulerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_diagnostics: Option<QueueDiagnostics>,
+    pub log_dir: PathBuf,
+    pub batch_log: BatchLogStatus,
+    pub services: Vec<PsServiceRow>,
+    pub attempt: Option<u32>,
+    pub is_resume: Option<bool>,
+    pub resume_dir: Option<PathBuf>,
+}
+
+/// Optional queue-facing scheduler diagnostics returned only by `status`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct QueueDiagnosticsProbe {
+    pub(super) state: Option<String>,
+    pub(super) pending_reason: Option<String>,
+    pub(super) eligible_time: Option<String>,
+    pub(super) start_time: Option<String>,
+}
+
+/// Formats a duration for watch output using `HH:MM:SS` or `D-HH:MM:SS` when needed.
+pub fn format_walltime_duration(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}-{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
+/// Formats one walltime progress line for watch output.
+pub fn format_walltime_summary(progress: &WalltimeProgress) -> String {
+    format!(
+        "{} / {} remaining {}",
+        format_walltime_duration(progress.elapsed_seconds),
+        format_walltime_duration(progress.total_seconds),
+        format_walltime_duration(progress.remaining_seconds)
+    )
+}
+
+/// Returns the integer completion percentage for a walltime progress sample.
+pub fn walltime_progress_percent(progress: &WalltimeProgress) -> u64 {
+    if progress.total_seconds == 0 {
+        return 100;
+    }
+    ((u128::from(progress.elapsed_seconds) * 100) / u128::from(progress.total_seconds)) as u64
+}
+
+/// Parses a scheduler timestamp like `2026-04-10T12:34:56` or `2026-04-10T12:34:56Z`.
+pub fn parse_scheduler_timestamp(input: &str) -> Option<u64> {
+    let trimmed = input.trim().trim_end_matches('Z');
+    let (date, time) = trimmed.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<i32>().ok()?;
+    let day = date_parts.next()?.parse::<i32>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<i32>().ok()?;
+    let minute = time_parts.next()?.parse::<i32>().ok()?;
+    let second = time_parts.next()?.split('.').next()?.parse::<i32>().ok()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+
+    #[cfg(unix)]
+    {
+        let mut tm = libc::tm {
+            tm_sec: second,
+            tm_min: minute,
+            tm_hour: hour,
+            tm_mday: day,
+            tm_mon: month - 1,
+            tm_year: year - 1900,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            tm_gmtoff: 0,
+            tm_zone: std::ptr::null_mut(),
+        };
+        let timestamp = unsafe { libc::timegm(&mut tm) };
+        (timestamp >= 0).then_some(timestamp as u64)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (year, month, day, hour, minute, second);
+        None
+    }
+}
+
+/// Derives live walltime progress for a running tracked job.
+pub fn walltime_progress(
+    record: &SubmissionRecord,
+    scheduler: &SchedulerStatus,
+    queue_diagnostics: Option<&QueueDiagnostics>,
+    now: u64,
+) -> Option<WalltimeProgress> {
+    if scheduler.state != "RUNNING" {
+        return None;
+    }
+    let requested = record.requested_walltime.as_ref()?;
+    let started_at = queue_diagnostics
+        .and_then(|queue| queue.start_time.as_deref())
+        .and_then(parse_scheduler_timestamp)
+        .or(Some(record.submitted_at))?;
+    let elapsed_seconds = now.saturating_sub(started_at).min(requested.seconds);
+    Some(WalltimeProgress {
+        original: requested.original.clone(),
+        elapsed_seconds,
+        total_seconds: requested.seconds,
+        remaining_seconds: requested.seconds.saturating_sub(elapsed_seconds),
+    })
+}
 
 /// Builds the tracked status snapshot used by `hpc-compose status`.
 pub fn build_status_snapshot(
@@ -158,6 +379,183 @@ pub fn scheduler_source_label(source: SchedulerSource) -> &'static str {
     }
 }
 
+pub(crate) fn build_batch_log_status(path: &Path, now: u64) -> BatchLogStatus {
+    let status = build_log_status(path, now);
+    BatchLogStatus {
+        path: path.to_path_buf(),
+        present: status.present,
+        updated_at: status.updated_at,
+        updated_age_seconds: status.updated_age_seconds,
+    }
+}
+
+pub(super) fn build_log_status(path: &Path, now: u64) -> BatchLogStatus {
+    let metadata = fs::metadata(path).ok();
+    let updated_at = metadata
+        .as_ref()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(system_time_to_unix);
+    BatchLogStatus {
+        path: path.to_path_buf(),
+        present: metadata.is_some(),
+        updated_at,
+        updated_age_seconds: updated_at.map(|ts| now.saturating_sub(ts)),
+    }
+}
+
+pub(super) fn probe_squeue_queue_diagnostics(
+    job_id: &str,
+    binary: &str,
+) -> Option<QueueDiagnosticsProbe> {
+    let output = Command::new(binary)
+        .args(["-h", "-j", job_id, "-o", "%T|%r|%S"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let mut fields = row.split('|').map(str::trim);
+    let state = fields.next().and_then(normalize_scheduler_state_field);
+    let pending_reason = fields.next().and_then(normalize_scheduler_metadata);
+    let start_time = fields.next().and_then(normalize_scheduler_metadata);
+    Some(QueueDiagnosticsProbe {
+        state,
+        pending_reason,
+        start_time,
+        ..QueueDiagnosticsProbe::default()
+    })
+}
+
+pub(super) fn probe_sacct_queue_diagnostics(
+    job_id: &str,
+    binary: &str,
+) -> Option<QueueDiagnosticsProbe> {
+    let output = Command::new(binary)
+        .args([
+            "-n",
+            "-X",
+            "-j",
+            job_id,
+            "--format=State,Eligible,Start,Reason",
+            "--parsable2",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let mut fields = row.split('|').map(str::trim);
+    let state = fields.next().and_then(normalize_scheduler_state_field);
+    let eligible_time = fields.next().and_then(normalize_scheduler_metadata);
+    let start_time = fields.next().and_then(normalize_scheduler_metadata);
+    let pending_reason = fields.next().and_then(normalize_scheduler_metadata);
+    Some(QueueDiagnosticsProbe {
+        state,
+        pending_reason,
+        eligible_time,
+        start_time,
+    })
+}
+
+pub(super) fn build_scheduler_status(state: String, source: SchedulerSource) -> SchedulerStatus {
+    let terminal = is_terminal_state(&state);
+    SchedulerStatus {
+        failed: terminal && state != "COMPLETED",
+        terminal,
+        source,
+        state,
+        detail: None,
+    }
+}
+
+pub(crate) fn reconcile_scheduler_status(
+    status: SchedulerStatus,
+    submitted_at: u64,
+    last_visible_at: Option<u64>,
+    now: u64,
+) -> SchedulerStatus {
+    if status.source != SchedulerSource::LocalOnly {
+        return status;
+    }
+
+    if now.saturating_sub(submitted_at) <= INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS {
+        return SchedulerStatus {
+            state: "WAITING_FOR_SCHEDULER".to_string(),
+            source: SchedulerSource::LocalOnly,
+            terminal: false,
+            failed: false,
+            detail: Some(
+                "job is not visible in squeue or sacct yet; this is common just after submission"
+                    .to_string(),
+            ),
+        };
+    }
+
+    if let Some(last_visible_at) = last_visible_at
+        && now.saturating_sub(last_visible_at) <= ACCOUNTING_GAP_GRACE_SECONDS
+    {
+        return SchedulerStatus {
+            state: "WAITING_FOR_ACCOUNTING".to_string(),
+            source: SchedulerSource::LocalOnly,
+            terminal: false,
+            failed: false,
+            detail: Some(
+                "job just disappeared from squeue and has not appeared in sacct yet; waiting for accounting data"
+                    .to_string(),
+            ),
+        };
+    }
+
+    status
+}
+
+pub(crate) fn is_transitional_local_only(status: &SchedulerStatus) -> bool {
+    status.source == SchedulerSource::LocalOnly
+        && matches!(
+            status.state.as_str(),
+            "WAITING_FOR_SCHEDULER" | "WAITING_FOR_ACCOUNTING"
+        )
+}
+
+pub(crate) fn stats_unavailable_reason(scheduler: &SchedulerStatus) -> String {
+    match scheduler.state.as_str() {
+        "PENDING" | "CONFIGURING" | "WAITING_FOR_SCHEDULER" => {
+            "live step statistics are not available because the job is not running yet".to_string()
+        }
+        "WAITING_FOR_ACCOUNTING" => {
+            "live step statistics are unavailable while Slurm accounting data is catching up"
+                .to_string()
+        }
+        _ if scheduler.terminal => {
+            "live step statistics are not available because the job is no longer running"
+                .to_string()
+        }
+        "RUNNING" => "sstat did not report any numbered job steps for this running job".to_string(),
+        _ => "sstat did not report any numbered job steps for this job".to_string(),
+    }
+}
+
+pub(super) fn system_time_to_unix(value: SystemTime) -> Option<u64> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+pub(crate) fn unix_timestamp_now() -> u64 {
+    system_time_to_unix(SystemTime::now()).unwrap_or(0)
+}
+
 fn probe_status_components(
     job_id: &str,
     options: &SchedulerOptions,
@@ -242,9 +640,10 @@ pub(crate) fn build_local_scheduler_status(
     if let Some(state) = runtime_state
         .and_then(|state| state.job_status.clone())
         .map(|state| normalize_scheduler_state(&state))
-        && is_terminal_state(&state)
     {
-        return build_scheduler_status(state, SchedulerSource::LocalOnly);
+        if is_terminal_state(&state) {
+            return build_scheduler_status(state, SchedulerSource::LocalOnly);
+        }
     }
 
     if let Some(exit_code) = runtime_state.and_then(|state| state.job_exit_code) {
@@ -318,8 +717,59 @@ fn pid_is_running(pid: u32) -> bool {
     }
 }
 
+fn normalize_scheduler_state_field(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    Some(normalize_scheduler_state(trimmed))
+}
+
+fn normalize_scheduler_metadata(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "n/a" | "na" | "none" | "null" | "unknown" | "invalid" | "not_set" | "not set"
+    ) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn normalize_scheduler_state(raw: &str) -> String {
+    raw.split_whitespace()
+        .next()
+        .unwrap_or(raw)
+        .trim_end_matches('+')
+        .to_ascii_uppercase()
+}
+
+pub(crate) fn is_terminal_state(state: &str) -> bool {
+    matches!(
+        state,
+        "BOOT_FAIL"
+            | "CANCELLED"
+            | "COMPLETED"
+            | "DEADLINE"
+            | "FAILED"
+            | "LAUNCH_FAILED"
+            | "NODE_FAIL"
+            | "OUT_OF_MEMORY"
+            | "PREEMPTED"
+            | "RECONFIG_FAIL"
+            | "REVOKED"
+            | "TIMEOUT"
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::job::runtime_state::{ServiceRuntimeStateEntry, ServiceRuntimeStateFile};
+
     use super::*;
 
     fn runtime_entry() -> ServiceRuntimeStateEntry {
