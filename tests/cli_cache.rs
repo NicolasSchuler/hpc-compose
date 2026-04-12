@@ -25,6 +25,9 @@ fn prepare_and_cache_commands_manage_artifacts() {
         ],
     );
     assert_success(&prepare);
+    let prepare_stderr = stderr_text(&prepare);
+    assert!(prepare_stderr.contains("[run] Preparing runtime artifacts"));
+    assert!(prepare_stderr.contains("[done] Preparing runtime artifacts"));
     assert!(stdout_text(&prepare).contains("BUILD service 'app' runtime image"));
     assert!(plan.ordered_services[0].runtime_image.exists());
     assert!(

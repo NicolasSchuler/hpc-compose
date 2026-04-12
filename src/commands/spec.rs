@@ -12,6 +12,7 @@ use hpc_compose::spec::missing_defaulted_variables;
 use serde::Serialize;
 
 use crate::output;
+use crate::progress::ProgressReporter;
 
 pub(crate) fn validate(
     context: ResolvedContext,
@@ -89,19 +90,23 @@ pub(crate) fn prepare(
     force: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
+    let output_format = output::resolve_output_format(format, false);
+    let progress = ProgressReporter::new(output_format == OutputFormat::Text);
     let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
-    let summary = prepare_runtime_plan(
-        &runtime_plan,
-        &PrepareOptions {
-            enroot_bin: context.binaries.enroot.value,
-            keep_failed_prep,
-            force_rebuild: force,
-        },
-    )?;
-    match output::resolve_output_format(format, false) {
+    let summary = progress.run_result("Preparing runtime artifacts", || {
+        prepare_runtime_plan(
+            &runtime_plan,
+            &PrepareOptions {
+                enroot_bin: context.binaries.enroot.value.clone(),
+                keep_failed_prep,
+                force_rebuild: force,
+            },
+        )
+    })?;
+    match output_format {
         OutputFormat::Text => output::print_prepare_summary(&summary),
         OutputFormat::Json => {
             println!(
@@ -121,22 +126,26 @@ pub(crate) fn preflight(
     format: Option<OutputFormat>,
     json: bool,
 ) -> Result<()> {
+    let output_format = output::resolve_output_format(format, json);
+    let progress = ProgressReporter::new(output_format == OutputFormat::Text);
     let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
-    let report = run_preflight(
-        &runtime_plan,
-        &PreflightOptions {
-            enroot_bin: context.binaries.enroot.value,
-            sbatch_bin: context.binaries.sbatch.value,
-            srun_bin: context.binaries.srun.value,
-            scontrol_bin: "scontrol".to_string(),
-            require_submit_tools: true,
-            skip_prepare: false,
-        },
-    );
-    match output::resolve_output_format(format, json) {
+    let report = progress.run_result("Running preflight checks", || {
+        Ok::<_, anyhow::Error>(run_preflight(
+            &runtime_plan,
+            &PreflightOptions {
+                enroot_bin: context.binaries.enroot.value.clone(),
+                sbatch_bin: context.binaries.sbatch.value.clone(),
+                srun_bin: context.binaries.srun.value.clone(),
+                scontrol_bin: "scontrol".to_string(),
+                require_submit_tools: true,
+                skip_prepare: false,
+            },
+        ))
+    })?;
+    match output_format {
         OutputFormat::Text => output::print_report(&report, verbose),
         OutputFormat::Json => {
             println!(

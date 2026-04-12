@@ -50,6 +50,7 @@ pub(crate) mod path_util;
 pub mod planner;
 pub mod preflight;
 pub mod prepare;
+pub(crate) mod progress;
 pub(crate) mod readiness_util;
 pub mod render;
 pub mod schema;

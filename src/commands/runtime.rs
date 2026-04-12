@@ -27,6 +27,7 @@ use hpc_compose::render::{log_file_name_for_service, render_local_script, render
 use hpc_compose::spec::{ServiceFailureMode, parse_slurm_time_limit};
 
 use crate::output;
+use crate::progress::ProgressReporter;
 use crate::watch_ui;
 
 fn watch_with_fallback(
@@ -555,6 +556,7 @@ pub(crate) fn submit(
     )?;
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let output_format = output::resolve_output_format(format, false);
+    let progress = ProgressReporter::new(output_format == OutputFormat::Text);
     let backend = if local {
         SubmissionBackend::Local
     } else {
@@ -587,17 +589,19 @@ pub(crate) fn submit(
     }
 
     if !no_preflight {
-        let report = run_preflight(
-            &runtime_plan,
-            &PreflightOptions {
-                enroot_bin: context.binaries.enroot.value.clone(),
-                sbatch_bin: context.binaries.sbatch.value.clone(),
-                srun_bin: context.binaries.srun.value.clone(),
-                scontrol_bin: "scontrol".to_string(),
-                require_submit_tools: !local,
-                skip_prepare,
-            },
-        );
+        let report = progress.run_result("Running preflight checks", || {
+            Ok::<_, anyhow::Error>(run_preflight(
+                &runtime_plan,
+                &PreflightOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    sbatch_bin: context.binaries.sbatch.value.clone(),
+                    srun_bin: context.binaries.srun.value.clone(),
+                    scontrol_bin: "scontrol".to_string(),
+                    require_submit_tools: !local,
+                    skip_prepare,
+                },
+            ))
+        })?;
         output::print_report(&report, false);
         if report.has_errors() {
             bail!("preflight failed; fix the reported errors before submitting");
@@ -605,24 +609,28 @@ pub(crate) fn submit(
     }
 
     if !skip_prepare {
-        let summary = prepare_runtime_plan(
-            &runtime_plan,
-            &PrepareOptions {
-                enroot_bin: context.binaries.enroot.value.clone(),
-                keep_failed_prep,
-                force_rebuild,
-            },
-        )?;
+        let summary = progress.run_result("Preparing runtime artifacts", || {
+            prepare_runtime_plan(
+                &runtime_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    keep_failed_prep,
+                    force_rebuild,
+                },
+            )
+        })?;
         if output_format == OutputFormat::Text {
             output::print_prepare_summary(&summary);
         }
     }
 
-    let script = if let Some(job_id) = local_job_id.as_deref() {
-        render_local_script(&runtime_plan, job_id, &context.binaries.enroot.value)?
-    } else {
-        render_script(&runtime_plan)?
-    };
+    let script = progress.run_result("Rendering submission script", || {
+        if let Some(job_id) = local_job_id.as_deref() {
+            render_local_script(&runtime_plan, job_id, &context.binaries.enroot.value)
+        } else {
+            render_script(&runtime_plan)
+        }
+    })?;
     let script_path = script_out.unwrap_or_else(|| {
         if local {
             output::default_local_script_path(&file)
@@ -744,10 +752,12 @@ pub(crate) fn submit(
         return Ok(());
     }
 
-    let output_result = Command::new(&context.binaries.sbatch.value)
-        .arg(&script_path)
-        .output()
-        .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))?;
+    let output_result = progress.run_result("Submitting job to Slurm", || {
+        Command::new(&context.binaries.sbatch.value)
+            .arg(&script_path)
+            .output()
+            .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))
+    })?;
     if !output_result.status.success() {
         bail!(
             "sbatch failed: {}",
@@ -892,6 +902,7 @@ pub(crate) fn run_service(
     no_preflight: bool,
 ) -> Result<()> {
     let file = context.compose_file.value.clone();
+    let progress = ProgressReporter::new(true);
     let mut runtime_plan = output::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
@@ -916,17 +927,19 @@ pub(crate) fn run_service(
     runtime_plan.ordered_services = vec![service];
 
     if !no_preflight {
-        let report = run_preflight(
-            &runtime_plan,
-            &PreflightOptions {
-                enroot_bin: context.binaries.enroot.value.clone(),
-                sbatch_bin: context.binaries.sbatch.value.clone(),
-                srun_bin: context.binaries.srun.value.clone(),
-                scontrol_bin: "scontrol".to_string(),
-                require_submit_tools: true,
-                skip_prepare,
-            },
-        );
+        let report = progress.run_result("Running preflight checks", || {
+            Ok::<_, anyhow::Error>(run_preflight(
+                &runtime_plan,
+                &PreflightOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    sbatch_bin: context.binaries.sbatch.value.clone(),
+                    srun_bin: context.binaries.srun.value.clone(),
+                    scontrol_bin: "scontrol".to_string(),
+                    require_submit_tools: true,
+                    skip_prepare,
+                },
+            ))
+        })?;
         output::print_report(&report, false);
         if report.has_errors() {
             bail!("preflight failed; fix the reported errors before running");
@@ -934,18 +947,20 @@ pub(crate) fn run_service(
     }
 
     if !skip_prepare {
-        let summary = prepare_runtime_plan(
-            &runtime_plan,
-            &PrepareOptions {
-                enroot_bin: context.binaries.enroot.value.clone(),
-                keep_failed_prep,
-                force_rebuild,
-            },
-        )?;
+        let summary = progress.run_result("Preparing runtime artifacts", || {
+            prepare_runtime_plan(
+                &runtime_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    keep_failed_prep,
+                    force_rebuild,
+                },
+            )
+        })?;
         output::print_prepare_summary(&summary);
     }
 
-    let script = render_script(&runtime_plan)?;
+    let script = progress.run_result("Rendering run script", || render_script(&runtime_plan))?;
     let script_path = script_out.unwrap_or_else(|| default_run_script_path(&file, &service_name));
     fs::write(&script_path, script).with_context(|| {
         format!(
@@ -954,10 +969,12 @@ pub(crate) fn run_service(
         )
     })?;
 
-    let output_result = Command::new(&context.binaries.sbatch.value)
-        .arg(&script_path)
-        .output()
-        .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))?;
+    let output_result = progress.run_result("Submitting run job to Slurm", || {
+        Command::new(&context.binaries.sbatch.value)
+            .arg(&script_path)
+            .output()
+            .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))
+    })?;
     if !output_result.status.success() {
         bail!(
             "sbatch failed: {}",

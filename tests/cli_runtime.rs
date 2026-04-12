@@ -46,6 +46,11 @@ fn submit_command_runs_end_to_end_with_fake_tools() {
     );
     assert_success(&submit);
     let submit_stdout = stdout_text(&submit);
+    let submit_stderr = stderr_text(&submit);
+    assert!(submit_stderr.contains("[run] Running preflight checks"));
+    assert!(submit_stderr.contains("[done] Preparing runtime artifacts"));
+    assert!(submit_stderr.contains("[done] Rendering submission script"));
+    assert!(submit_stderr.contains("[done] Submitting job to Slurm"));
     assert!(submit_stdout.contains("Submitted batch job 12345"));
     assert!(submit_stdout.contains("rendered script:"));
     assert!(submit_stdout.contains("log  service 'app':"));
