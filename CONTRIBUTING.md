@@ -62,8 +62,21 @@ done
 
 ## Releases
 
+- Create an annotated `vX.Y.Z` tag. The tag body becomes the curated summary block in the published release notes.
 - Tagging `vX.Y.Z` publishes GitHub release tarballs plus Linux `.deb` and `.rpm` assets.
-- After the release assets are live, update `Formula/hpc-compose.rb` with `scripts/update_homebrew_formula.py` and commit that formula refresh on `main`.
+- Published releases now include `SHA256SUMS`, per-asset `.sha256` sidecars, and GitHub artifact attestations for the release assets.
+- After the release assets are live, verify the published release and at least one downloaded asset:
+
+```bash
+gh release verify vX.Y.Z -R NicolasSchuler/hpc-compose
+gh release verify-asset vX.Y.Z ./hpc-compose-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz -R NicolasSchuler/hpc-compose
+gh attestation verify ./hpc-compose-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz \
+  --repo NicolasSchuler/hpc-compose \
+  --signer-workflow NicolasSchuler/hpc-compose/.github/workflows/release.yml
+```
+
+- The release workflow opens a follow-up PR to refresh `Formula/hpc-compose.rb` on `main`; merge that PR after verifying the generated checksums.
+- Keep the version-pinned installer docs aligned with the published tag and keep the release notes links accurate.
 - Treat package availability as a distribution convenience only. Do not widen the supported runtime matrix unless `docs/src/support-matrix.md` changes too.
 
 ## Reporting bugs

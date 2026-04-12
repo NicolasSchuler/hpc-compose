@@ -275,12 +275,57 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
       - name: Download packaged assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
+
+      - name: Generate aggregate checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assets=()
+          while IFS= read -r -d '' file; do
+            assets+=("${file#dist/}")
+          done < <(find dist -maxdepth 1 -type f ! -name '*.sha256' ! -name 'SHA256SUMS' -print0 | sort -z)
+
+          : > dist/SHA256SUMS
+          for asset in "${assets[@]}"; do
+            hash="$(shasum -a 256 "dist/${asset}" | cut -d ' ' -f 1)"
+            printf '%s  %s\n' "${hash}" "${asset}" >> dist/SHA256SUMS
+          done
+
+      - name: Prepare release notes inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p .tmp
+          git tag -l --format='%(contents)' "${RELEASE_TAG}" > .tmp/tag-release-notes.txt
+          if [ ! -s .tmp/tag-release-notes.txt ]; then
+            printf '%s\n' "See the tagged commit history for the user-visible changes in this release." > .tmp/tag-release-notes.txt
+          fi
+
+          find dist -maxdepth 1 -type f -exec basename {} \; | sort > .tmp/release-assets.txt
+
+      - name: Render release notes
+        run: |
+          python3 scripts/render_release_notes.py \
+            --template .github/RELEASE_TEMPLATE.md \
+            --tag "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --assets .tmp/release-assets.txt \
+            --notes-file .tmp/tag-release-notes.txt \
+            --output .tmp/release-notes.md
 
       - name: Create or update release
         env:
@@ -293,7 +338,105 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null
 
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --notes-file .tmp/release-notes.md --repo "${GITHUB_REPOSITORY}"
             gh release upload "${tag}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"
           else
-            gh release create "${tag}" dist/* --generate-notes --repo "${GITHUB_REPOSITORY}"
+            gh release create "${tag}" dist/* --notes-file .tmp/release-notes.md --repo "${GITHUB_REPOSITORY}"
+          fi
+
+  homebrew-formula-refresh:
+    name: Refresh Homebrew formula
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: main
+
+      - name: Download packaged assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate aggregate checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assets=()
+          while IFS= read -r -d '' file; do
+            assets+=("${file#dist/}")
+          done < <(find dist -maxdepth 1 -type f ! -name '*.sha256' ! -name 'SHA256SUMS' -print0 | sort -z)
+
+          : > dist/SHA256SUMS
+          for asset in "${assets[@]}"; do
+            hash="$(shasum -a 256 "dist/${asset}" | cut -d ' ' -f 1)"
+            printf '%s  %s\n' "${hash}" "${asset}" >> dist/SHA256SUMS
+          done
+
+      - name: Update Homebrew formula
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#v}"
+          arm64_asset="hpc-compose-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz"
+          x86_64_asset="hpc-compose-${RELEASE_TAG}-x86_64-apple-darwin.tar.gz"
+          arm64_sha="$(awk -v asset="${arm64_asset}" '$2 == asset { print $1 }' dist/SHA256SUMS)"
+          x86_64_sha="$(awk -v asset="${x86_64_asset}" '$2 == asset { print $1 }' dist/SHA256SUMS)"
+
+          [ -n "${arm64_sha}" ] || { echo "missing checksum for ${arm64_asset}" >&2; exit 1; }
+          [ -n "${x86_64_sha}" ] || { echo "missing checksum for ${x86_64_asset}" >&2; exit 1; }
+
+          python3 scripts/update_homebrew_formula.py \
+            --version "${version}" \
+            --arm64-sha256 "${arm64_sha}" \
+            --x86-64-sha256 "${x86_64_sha}"
+
+      - name: Open formula refresh pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- Formula/hpc-compose.rb; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+
+          branch="release/homebrew-formula-${RELEASE_TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git add Formula/hpc-compose.rb
+          git commit -m "Update Homebrew formula for ${RELEASE_TAG}"
+          git push --force origin "${branch}"
+
+          pr_number="$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --head "${branch}" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number')"
+
+          if [ -n "${pr_number}" ]; then
+            gh pr edit "${pr_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Update Homebrew formula for ${RELEASE_TAG}" \
+              --body "Refresh \`Formula/hpc-compose.rb\` to point at the macOS release tarballs for ${RELEASE_TAG}."
+          else
+            gh pr create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --base main \
+              --head "${branch}" \
+              --title "Update Homebrew formula for ${RELEASE_TAG}" \
+              --body "Refresh \`Formula/hpc-compose.rb\` to point at the macOS release tarballs for ${RELEASE_TAG}."
           fi

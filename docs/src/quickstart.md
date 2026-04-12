@@ -2,17 +2,32 @@
 
 This is the shortest path from an empty shell to a validated spec, an inspectable batch script, and a real cluster submission.
 
-## 1. Install a release binary
+## 1. Install the CLI
+
+If the repository's [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page is still empty, build from source first:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+git clone https://github.com/NicolasSchuler/hpc-compose.git
+cd hpc-compose
+cargo build --release
+./target/release/hpc-compose --help
 ```
 
-The installer selects the newest published release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run full cluster workflows.
+Once a release tag is published, use the matching installer script from that tag:
+
+```bash
+RELEASE_TAG=vX.Y.Z
+curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
+  | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
+```
+
+The pinned installer selects the matching published release asset for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run full cluster workflows.
 
 If you prefer native packages, published Linux releases also ship `.deb` and `.rpm` assets, and macOS users can install with `brew install NicolasSchuler/hpc-compose/hpc-compose`.
 
 The installed CLI also ships Unix manpages. Use `man hpc-compose`, `man hpc-compose-up`, or `man hpc-compose-submit` as the concise command reference, and keep the longer docs for workflow guidance.
+
+When you install from a published release, verify it with the [release verification steps](installation.md#verify-a-release) before using it on a cluster or internal mirror.
 
 ## 2. Choose the smallest starting point
 

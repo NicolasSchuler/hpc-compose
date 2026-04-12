@@ -1,14 +1,31 @@
 # Installation
 
-## One-line installer
+## Build from source today
 
-For supported Linux and macOS targets, the repo now ships a small installer script that picks the newest release and the matching archive for your machine:
+If the repository's [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page is still empty, build from source until the first public release is published:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+git clone https://github.com/NicolasSchuler/hpc-compose.git
+cd hpc-compose
+cargo build --release
+./target/release/hpc-compose --help
 ```
 
-By default this installs `hpc-compose` into `~/.local/bin` and verifies the published SHA-256 checksum before placing the binary.
+This path is also the safest choice when you want to inspect or modify the checkout before using the CLI on a cluster.
+
+## Install from a published release
+
+For supported Linux and macOS targets, use a version-pinned installer so the installer script and the downloaded archive come from the same tag:
+
+```bash
+RELEASE_TAG=vX.Y.Z
+curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
+  | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
+```
+
+Replace `vX.Y.Z` with a tag that exists on the GitHub Releases page.
+
+By default this installs `hpc-compose` into `~/.local/bin` and verifies the published SHA-256 checksum before placing the binary. The checksum sidecars protect against download corruption or mismatched assets; use GitHub release verification and artifact attestations as the primary authenticity check.
 
 On Unix installs, the release archive also ships section-1 manpages. After installation you can use:
 
@@ -32,11 +49,21 @@ Useful overrides:
 ```bash
 RELEASE_TAG=vX.Y.Z
 
-curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | env HPC_COMPOSE_INSTALL_DIR=/usr/local/bin sh
-curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | env HPC_COMPOSE_VERSION="$RELEASE_TAG" sh
+curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
+  | env HPC_COMPOSE_INSTALL_DIR=/usr/local/bin HPC_COMPOSE_VERSION="$RELEASE_TAG" sh
+curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
+  | env HPC_COMPOSE_VERSION="$RELEASE_TAG" sh
 ```
 
 Replace `vX.Y.Z` with the release tag you want from the GitHub Releases page.
+
+For unreleased testing only, you can still fetch the installer script from `main`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+```
+
+Treat that path as a moving target rather than a pinned release install.
 
 Supported targets match the release workflow:
 
@@ -65,21 +92,6 @@ Pick the archive that matches your platform from the release page. Linux x86_64 
 
 Unix release archives also contain `share/man/man1/` so the shipped manpages can be installed alongside the binary.
 
-## Build from source
-
-Requirements:
-
-- Rust stable toolchain
-- A normal local build machine for the CLI itself
-- Slurm/Enroot tools only when you actually run `preflight`, `prepare`, or `submit`
-
-```bash
-git clone https://github.com/NicolasSchuler/hpc-compose.git
-cd hpc-compose
-cargo build --release
-./target/release/hpc-compose --help
-```
-
 The repository keeps generated manpages under `man/man1`. Regenerate them from a checkout with:
 
 ```bash
@@ -87,6 +99,37 @@ cargo run --features manpage-bin --bin gen-manpages
 cargo test --locked --test release_metadata
 man -l man/man1/hpc-compose.1
 ```
+
+## Verify a release
+
+Use GitHub-native verification as the primary trust path for published binaries.
+
+1. Verify that the release itself has a valid GitHub attestation:
+
+```bash
+RELEASE_TAG=vX.Y.Z
+gh release verify "$RELEASE_TAG" -R NicolasSchuler/hpc-compose
+```
+
+2. Verify that a downloaded asset matches the attested release:
+
+```bash
+RELEASE_TAG=vX.Y.Z
+ASSET="hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.tar.gz"
+
+gh release download "$RELEASE_TAG" -R NicolasSchuler/hpc-compose -p "$ASSET"
+gh release verify-asset "$RELEASE_TAG" "./$ASSET" -R NicolasSchuler/hpc-compose
+```
+
+3. Verify the artifact attestation directly and pin it to the release workflow identity:
+
+```bash
+gh attestation verify "./$ASSET" \
+  --repo NicolasSchuler/hpc-compose \
+  --signer-workflow NicolasSchuler/hpc-compose/.github/workflows/release.yml
+```
+
+Published releases also ship `SHA256SUMS` and per-asset `.sha256` files. Those checksums are primarily for installer compatibility, mirroring, and corruption checks. They are not the primary authenticity mechanism.
 
 ## Install through a native package manager
 
@@ -113,6 +156,25 @@ brew install NicolasSchuler/hpc-compose/hpc-compose
 ```
 
 The formula tracks the latest published release on `main`. It installs the same prebuilt macOS tarballs and their shipped manpages.
+
+## Internal mirrors and cluster-admin installs
+
+For internal mirrors, preserve the release filenames exactly, including:
+
+- the platform archives or native packages
+- `SHA256SUMS`
+- each per-asset `.sha256` sidecar
+
+Then point the installer at the mirrored base URL and pin the matching version:
+
+```bash
+RELEASE_TAG=vX.Y.Z
+curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
+  | env HPC_COMPOSE_BASE_URL="https://mirror.example.org/hpc-compose/${RELEASE_TAG}" \
+        HPC_COMPOSE_VERSION="$RELEASE_TAG" sh
+```
+
+This keeps the installer version, mirrored assets, and checksum files aligned.
 
 ## Local docs commands
 

@@ -166,3 +166,43 @@ fn linux_package_metadata_matches_release_layout() {
         "https://github.com/NicolasSchuler/hpc-compose"
     );
 }
+
+#[test]
+fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release workflow");
+    assert!(
+        workflow.contains("dist/SHA256SUMS"),
+        "release workflow should publish an aggregate checksum manifest"
+    );
+    assert!(
+        workflow.contains("scripts/render_release_notes.py"),
+        "release workflow should render release notes from the checked-in template"
+    );
+    assert!(
+        workflow.contains("homebrew-formula-refresh"),
+        "release workflow should refresh the Homebrew formula after publishing assets"
+    );
+}
+
+#[test]
+fn release_template_mentions_verification_commands() {
+    let template = fs::read_to_string(repo_root().join(".github/RELEASE_TEMPLATE.md"))
+        .expect("read release template");
+    assert!(
+        template.contains("gh release verify {{TAG}} -R {{REPO}}"),
+        "release template should include release verification guidance"
+    );
+    assert!(
+        template.contains("gh release verify-asset {{TAG}} ./<downloaded-asset> -R {{REPO}}"),
+        "release template should include asset verification guidance"
+    );
+    assert!(
+        template.contains("gh attestation verify ./<downloaded-asset>"),
+        "release template should include attestation verification guidance"
+    );
+    assert!(
+        template.contains("SHA256SUMS"),
+        "release template should mention the aggregate checksum manifest"
+    );
+}

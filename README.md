@@ -103,17 +103,36 @@ For the exact first-class vs raw pass-through vs out-of-scope Slurm boundary, se
 
 ## Install
 
+If the repository's [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page is still empty, build from source for now:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+cargo build --release
+./target/release/hpc-compose --help
 ```
 
-The installer selects the newest GitHub release for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Installer availability is not the same thing as full runtime support; see the [Support Matrix](docs/src/support-matrix.md) before assuming a platform/cluster combination is supported end to end. Manual release downloads remain documented in [docs/src/installation.md](docs/src/installation.md).
+Once a release tag is published on the Releases page, use a version-pinned installer so the installer script and the downloaded assets come from the same tag:
+
+```bash
+RELEASE_TAG=vX.Y.Z
+curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
+  | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
+```
+
+Replace `vX.Y.Z` with a tag that exists on the Releases page. The installer selects the matching release asset for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Installer availability is not the same thing as full runtime support; see the [Support Matrix](docs/src/support-matrix.md) before assuming a platform/cluster combination is supported end to end. Manual release downloads, release verification, and internal mirror notes live in [docs/src/installation.md](docs/src/installation.md).
 
 Additional install paths:
 
 - Linux `.deb`: `apt install ./hpc-compose-vX.Y.Z-x86_64-unknown-linux-musl.deb` or `dpkg -i ./...`
 - Linux `.rpm`: `dnf install ./hpc-compose-vX.Y.Z-x86_64-unknown-linux-musl.rpm` or `rpm -i ./...`
 - macOS Homebrew tap: `brew install NicolasSchuler/hpc-compose/hpc-compose`
+
+For unreleased testing only, you can still run the installer script from `main`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+```
+
+Treat that path as a moving target rather than a pinned release install.
 
 Unix installs also ship section-1 manpages, and the binary can generate Bash, Zsh, and Fish completions with `hpc-compose completions <shell>`.
 
@@ -142,6 +161,7 @@ The near-term roadmap is intentionally short:
 - Supported Slurm Model: [docs/src/supported-slurm-model.md](docs/src/supported-slurm-model.md)
 - Docker Compose Migration: [docs/src/docker-compose-migration.md](docs/src/docker-compose-migration.md)
 - Canonical explainer: [docs/src/running-compose-style-workflows-on-slurm.md](docs/src/running-compose-style-workflows-on-slurm.md)
+- Release verification and internal mirrors: [docs/src/installation.md#verify-a-release](docs/src/installation.md#verify-a-release)
 
 ## Feedback
 

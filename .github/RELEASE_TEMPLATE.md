@@ -1,31 +1,39 @@
-# Release Summary
+# hpc-compose {{TAG}}
 
-One short paragraph on what changed for users and why this release matters.
+{{CHANGELOG_NOTES}}
 
-## Workflow Improvements
+## Install
 
-- authoring and validation improvements
-- runtime or tracking improvements
-- any behavior change users should notice immediately
+Version-pinned installer:
 
-## Example and Docs Updates
+```bash
+RELEASE_TAG={{TAG}}
+curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
+  | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
+```
 
-- promoted examples added or improved
-- quickstart or examples funnel changes
-- migration or support-policy clarifications
+Homebrew:
 
-## Compatibility and Observability
+```bash
+brew install NicolasSchuler/hpc-compose/hpc-compose
+```
 
-- support matrix changes
-- cluster compatibility notes
-- new status, stats, watch, or artifact visibility improvements
+## Verify
 
-## Notes for Existing Users
+```bash
+gh release verify {{TAG}} -R {{REPO}}
+gh release verify-asset {{TAG}} ./<downloaded-asset> -R {{REPO}}
+gh attestation verify ./<downloaded-asset> \
+  --repo {{REPO}} \
+  --signer-workflow {{REPO}}/.github/workflows/release.yml
+```
 
-- any compatibility caveats
-- any flags, workflows, or expectations that changed
+Published releases ship `SHA256SUMS` plus per-asset `.sha256` sidecars. Treat the attestations as the primary authenticity check and the checksums as corruption or mirroring checks.
 
-## Try It
+## Assets
 
-- `curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh`
-- link the most relevant example or docs page for this release
+{{ASSET_LIST}}
+
+See the installation guide for manual downloads, verification steps, and internal mirror notes:
+
+- https://nicolasschuler.github.io/hpc-compose/installation.html

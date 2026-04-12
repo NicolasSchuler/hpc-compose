@@ -17,11 +17,14 @@ Supporting line:
   - `llm-curl-workflow-workdir.yaml`
   - `training-resume.yaml`
 - confirm the support matrix still reflects what is actually supported
-- update the release notes using `.github/RELEASE_TEMPLATE.md`
+- create an annotated `vX.Y.Z` tag with a short user-facing summary for the release notes
 - choose one primary link to reuse everywhere:
   - docs overview
   - examples page
   - or `running-compose-style-workflows-on-slurm.md`
+- after publishing, verify the release attestation and one downloaded asset
+- confirm the automatic Homebrew formula PR exists and points at the new macOS tarball checksums
+- confirm docs and install commands still match the published tag
 
 ## Lightweight Launch Round
 
