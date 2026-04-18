@@ -7,6 +7,7 @@ use clap::{CommandFactory, Parser, ValueEnum};
 mod commands;
 mod help;
 
+pub use crate::term::ColorPolicy;
 pub use commands::{CacheCommands, Cli, Commands, JobsCommands};
 pub use help::examples_for_path;
 

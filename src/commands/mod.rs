@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{CacheCommands, Cli, Commands, JobsCommands};
 use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};
+use hpc_compose::term;
 
 mod cache;
 mod init;
@@ -22,6 +23,7 @@ struct GlobalCommandOptions {
 
 /// Dispatches a parsed CLI invocation using the provided raw argument vector.
 pub fn run_cli(cli: Cli, raw_args: &[OsString]) -> Result<()> {
+    term::init_color(cli.color);
     run_command_with_options(
         cli.command,
         &GlobalCommandOptions {
@@ -663,6 +665,7 @@ mod tests {
     fn run_cli_dispatches_jobs_list() {
         run_cli(
             Cli {
+                color: hpc_compose::cli::ColorPolicy::Auto,
                 profile: None,
                 settings_file: None,
                 command: Commands::Jobs {

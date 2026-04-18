@@ -327,7 +327,7 @@ compose_file = "missing.yaml"
         payload["compose_load_error"]
             .as_str()
             .expect("compose load error")
-            .contains("failed to read spec")
+            .contains("missing.yaml")
     );
     assert!(payload["runtime_paths"]["cache_dir"].is_null());
     assert!(payload["runtime_paths"]["resume_dir"].is_null());

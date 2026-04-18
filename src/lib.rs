@@ -55,5 +55,13 @@ pub(crate) mod readiness_util;
 pub mod render;
 pub mod schema;
 pub mod spec;
+pub(crate) mod spec_error;
+pub(crate) mod term;
 pub(crate) mod tracked_paths;
 pub(crate) mod watch_ui;
+
+/// Converts a CLI failure into a rendered diagnostic report while preserving
+/// structured spec diagnostics when they are present inside an `anyhow::Error`.
+pub fn cli_error_report(error: anyhow::Error) -> miette::Report {
+    spec_error::cli_error_report(error)
+}

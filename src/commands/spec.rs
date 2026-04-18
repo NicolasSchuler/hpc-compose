@@ -9,6 +9,7 @@ use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{PrepareOptions, build_runtime_plan, prepare_runtime_plan};
 use hpc_compose::render::render_script;
 use hpc_compose::spec::missing_defaulted_variables;
+use hpc_compose::term;
 use serde::Serialize;
 
 use crate::output::{common as output_common, spec as output_spec};
@@ -34,7 +35,7 @@ pub(crate) fn validate(
         }
     }
     match output_common::resolve_output_format(format, false) {
-        OutputFormat::Text => println!("spec is valid"),
+        OutputFormat::Text => println!("{}", term::styled_success("spec is valid")),
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -324,112 +325,182 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
             );
         }
         OutputFormat::Text => {
-            println!("cwd: {}", output.cwd.display());
             println!(
-                "settings file: {}",
-                output
-                    .settings_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<none>".to_string())
+                "{}",
+                term::styled_label("cwd", &output.cwd.display().to_string())
             );
             println!(
-                "settings base dir: {}",
-                output
-                    .settings_base_dir
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<none>".to_string())
+                "{}",
+                term::styled_label(
+                    "settings file",
+                    &output
+                        .settings_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<none>".to_string())
+                )
             );
             println!(
-                "profile: {}",
-                output
-                    .selected_profile
-                    .as_deref()
-                    .unwrap_or("<none (builtin defaults)>")
+                "{}",
+                term::styled_label(
+                    "settings base dir",
+                    &output
+                        .settings_base_dir
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<none>".to_string())
+                )
             );
             println!(
-                "compose file: {} ({:?})",
-                output.compose_file.value.display(),
-                output.compose_file.source
+                "{}",
+                term::styled_label(
+                    "profile",
+                    output
+                        .selected_profile
+                        .as_deref()
+                        .unwrap_or("<none (builtin defaults)>")
+                )
+            );
+            println!(
+                "{}",
+                term::styled_label(
+                    "compose file",
+                    &format!(
+                        "{} ({:?})",
+                        output.compose_file.value.display(),
+                        output.compose_file.source
+                    )
+                )
             );
             if let Some(error) = output.compose_load_error.as_deref() {
-                println!("compose load error: {error}");
+                println!(
+                    "{}",
+                    term::styled_label("compose load error", &term::styled_error(error))
+                );
             }
             println!(
-                "compose dir: {}",
-                output.runtime_paths.compose_dir.display()
+                "{}",
+                term::styled_label(
+                    "compose dir",
+                    &output.runtime_paths.compose_dir.display().to_string()
+                )
             );
             println!(
-                "current submit dir: {}",
-                output.runtime_paths.current_submit_dir.display()
+                "{}",
+                term::styled_label(
+                    "current submit dir",
+                    &output
+                        .runtime_paths
+                        .current_submit_dir
+                        .display()
+                        .to_string()
+                )
             );
             println!(
-                "default script path: {}",
-                output.runtime_paths.default_script_path.display()
+                "{}",
+                term::styled_label(
+                    "default script path",
+                    &output
+                        .runtime_paths
+                        .default_script_path
+                        .display()
+                        .to_string()
+                )
             );
             println!(
-                "runtime job root pattern: {}",
-                output.runtime_paths.runtime_job_root_pattern
+                "{}",
+                term::styled_label(
+                    "runtime job root pattern",
+                    &output.runtime_paths.runtime_job_root_pattern
+                )
             );
             println!(
-                "binaries: enroot={} ({:?}) sbatch={} ({:?}) srun={} ({:?}) squeue={} ({:?}) sacct={} ({:?}) sstat={} ({:?}) scancel={} ({:?})",
-                output.binaries.enroot.value,
-                output.binaries.enroot.source,
-                output.binaries.sbatch.value,
-                output.binaries.sbatch.source,
-                output.binaries.srun.value,
-                output.binaries.srun.source,
-                output.binaries.squeue.value,
-                output.binaries.squeue.source,
-                output.binaries.sacct.value,
-                output.binaries.sacct.source,
-                output.binaries.sstat.value,
-                output.binaries.sstat.source,
-                output.binaries.scancel.value,
-                output.binaries.scancel.source,
+                "{}",
+                term::styled_label(
+                    "binaries",
+                    &format!(
+                        "enroot={} ({:?}) sbatch={} ({:?}) srun={} ({:?}) squeue={} ({:?}) sacct={} ({:?}) sstat={} ({:?}) scancel={} ({:?})",
+                        output.binaries.enroot.value,
+                        output.binaries.enroot.source,
+                        output.binaries.sbatch.value,
+                        output.binaries.sbatch.source,
+                        output.binaries.srun.value,
+                        output.binaries.srun.source,
+                        output.binaries.squeue.value,
+                        output.binaries.squeue.source,
+                        output.binaries.sacct.value,
+                        output.binaries.sacct.source,
+                        output.binaries.sstat.value,
+                        output.binaries.sstat.source,
+                        output.binaries.scancel.value,
+                        output.binaries.scancel.source,
+                    )
+                )
             );
-            println!("runtime paths:");
+            println!("{}:", term::styled_section_header("runtime paths"));
             if let Some(cache_dir) = &output.runtime_paths.cache_dir {
                 println!(
-                    "  cache dir: {} ({:?})",
-                    cache_dir.value.display(),
-                    cache_dir.source
+                    "  {}",
+                    term::styled_label(
+                        "cache dir",
+                        &format!("{} ({:?})", cache_dir.value.display(), cache_dir.source)
+                    )
                 );
             } else {
-                println!("  cache dir: <unavailable>");
+                println!("  {}", term::styled_label("cache dir", "<unavailable>"));
             }
             if let Some(resume) = &output.runtime_paths.resume_dir {
                 println!(
-                    "  resume dir: {} ({:?})",
-                    resume.value.display(),
-                    resume.source
+                    "  {}",
+                    term::styled_label(
+                        "resume dir",
+                        &format!("{} ({:?})", resume.value.display(), resume.source)
+                    )
                 );
             }
             if let Some(export) = &output.runtime_paths.artifact_export_dir {
                 println!(
-                    "  artifact export dir: {} ({:?})",
-                    export.value, export.source
+                    "  {}",
+                    term::styled_label(
+                        "artifact export dir",
+                        &format!("{} ({:?})", export.value, export.source)
+                    )
                 );
             }
             println!(
-                "  metadata root: {} ({:?})",
-                output.runtime_paths.metadata_root.value.display(),
-                output.runtime_paths.metadata_root.source
+                "  {}",
+                term::styled_label(
+                    "metadata root",
+                    &format!(
+                        "{} ({:?})",
+                        output.runtime_paths.metadata_root.value.display(),
+                        output.runtime_paths.metadata_root.source
+                    )
+                )
             );
             println!(
-                "  jobs dir: {} ({:?})",
-                output.runtime_paths.jobs_dir.value.display(),
-                output.runtime_paths.jobs_dir.source
+                "  {}",
+                term::styled_label(
+                    "jobs dir",
+                    &format!(
+                        "{} ({:?})",
+                        output.runtime_paths.jobs_dir.value.display(),
+                        output.runtime_paths.jobs_dir.source
+                    )
+                )
             );
-            println!("interpolation vars:");
+            println!("{}:", term::styled_section_header("interpolation vars"));
             for (key, value) in &output.interpolation_vars {
                 let source = output
                     .interpolation_var_sources
                     .get(key)
                     .copied()
                     .unwrap_or(ValueSource::Builtin);
-                println!("  {key}={value} ({source:?})");
+                println!(
+                    "  {}={}",
+                    term::styled_bold(key),
+                    term::styled_dim(&format!("{value} ({source:?})"))
+                );
             }
         }
     }

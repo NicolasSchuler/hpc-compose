@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
 use super::help::*;
-use super::{OutputFormat, StatsOutputFormat};
+use super::{ColorPolicy, OutputFormat, StatsOutputFormat};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -15,6 +15,14 @@ use super::{OutputFormat, StatsOutputFormat};
     after_help = TOP_LEVEL_HELP
 )]
 pub struct Cli {
+    #[arg(
+        long,
+        global = true,
+        value_name = "WHEN",
+        help = "Controls colored output",
+        default_value = "auto"
+    )]
+    pub color: ColorPolicy,
     #[arg(
         long,
         global = true,

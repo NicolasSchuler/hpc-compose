@@ -1,3 +1,5 @@
+use crate::term;
+
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
@@ -268,7 +270,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     let selected = model.snapshot.services.get(model.selected_index);
     let scheduler = format!(
         "{} ({})",
-        model.snapshot.scheduler.state,
+        term::styled_scheduler_state(&model.snapshot.scheduler.state),
         hpc_compose::job::scheduler_source_label(model.snapshot.scheduler.source)
     );
     let selected_name = selected
@@ -277,7 +279,11 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
 
     let mut lines = vec![
         fit_line(
-            &format!("hpc-compose watch | job {}", model.snapshot.record.job_id),
+            &format!(
+                "{} | job {}",
+                term::styled_bold("hpc-compose watch"),
+                model.snapshot.record.job_id
+            ),
             width,
         ),
         fit_line(
@@ -298,7 +304,10 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     } else if let Some(queue) = &model.snapshot.queue_diagnostics
         && let Some(reason) = queue.pending_reason.as_deref()
     {
-        lines.push(fit_line(&format!("pending reason: {reason}"), width));
+        lines.push(fit_line(
+            &format!("{}: {reason}", term::styled_warning("pending reason")),
+            width,
+        ));
     }
     lines.push("-".repeat(width));
 
@@ -312,9 +321,9 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     ));
     for (index, service) in model.snapshot.services.iter().enumerate() {
         let marker = if index == model.selected_index {
-            '>'
+            term::styled_success(">")
         } else {
-            ' '
+            " ".to_string()
         };
         let step = service.step_name.as_deref().unwrap_or("-");
         let pid = service
@@ -323,6 +332,13 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
             .unwrap_or_else(|| "-".to_string());
         let ready = service.healthy.map(yes_no_short).unwrap_or("-");
         let status = service.status.as_deref().unwrap_or("unknown");
+        let status_raw = truncate_cell(status, 8);
+        let status_styled = term::styled_service_status(&status_raw);
+        let status_col = format!(
+            "{:<width$}",
+            status_styled,
+            width = 8 + status_styled.len() - status_raw.len()
+        );
         let restarts = service
             .restart_count
             .map(|value| value.to_string())
@@ -333,12 +349,12 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
             .unwrap_or_else(|| "-".to_string());
         table_lines.push(fit_line(
             &format!(
-                "{marker} {:<16} {:<12} {:<6} {:<5} {:<8} {:<8} {:<4}",
+                "{marker} {:<16} {:<12} {:<6} {:<5} {} {:<8} {:<4}",
                 truncate_cell(&service.service_name, 16),
                 truncate_cell(step, 12),
                 pid,
                 ready,
-                truncate_cell(status, 8),
+                status_col,
                 truncate_cell(&restarts, 8),
                 exit
             ),
@@ -347,7 +363,10 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     }
 
     let mut log_lines = Vec::with_capacity(body_height);
-    log_lines.push(fit_line(&format!("logs: {}", selected_name), log_width));
+    log_lines.push(fit_line(
+        &format!("{}: {}", term::styled_bold("logs"), selected_name),
+        log_width,
+    ));
     for line in &model.log_lines {
         log_lines.push(fit_line(line, log_width));
     }
@@ -599,10 +618,87 @@ fn yes_no_short(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+const ANSI_RESET_ALL: &str = "\x1b[0m";
+
+fn ansi_escape_len(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'\x1b') {
+        return None;
+    }
+    match bytes.get(start + 1).copied() {
+        Some(b'[') => {
+            let mut index = start + 2;
+            while let Some(&byte) = bytes.get(index) {
+                if (0x40..=0x7e).contains(&byte) {
+                    return Some(index - start + 1);
+                }
+                index += 1;
+            }
+            Some(bytes.len() - start)
+        }
+        Some(b']') => {
+            let mut index = start + 2;
+            while let Some(&byte) = bytes.get(index) {
+                if byte == 0x07 {
+                    return Some(index - start + 1);
+                }
+                if byte == b'\x1b' && bytes.get(index + 1) == Some(&b'\\') {
+                    return Some(index - start + 2);
+                }
+                index += 1;
+            }
+            Some(bytes.len() - start)
+        }
+        _ => None,
+    }
+}
+
+fn visible_width(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    let mut width = 0;
+    let mut index = 0;
+    while index < value.len() {
+        if let Some(len) = ansi_escape_len(bytes, index) {
+            index += len;
+            continue;
+        }
+        let ch = value[index..]
+            .chars()
+            .next()
+            .expect("visible_width walked a valid UTF-8 boundary");
+        width += 1;
+        index += ch.len_utf8();
+    }
+    width
+}
+
 fn truncate_cell(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let bytes = value.as_bytes();
     let mut out = String::new();
-    for ch in value.chars().take(width) {
+    let mut index = 0;
+    let mut visible = 0;
+    while index < value.len() {
+        if let Some(len) = ansi_escape_len(bytes, index) {
+            out.push_str(&value[index..index + len]);
+            index += len;
+            continue;
+        }
+        if visible >= width {
+            break;
+        }
+        let ch = value[index..]
+            .chars()
+            .next()
+            .expect("truncate_cell walked a valid UTF-8 boundary");
         out.push(ch);
+        visible += 1;
+        index += ch.len_utf8();
+    }
+    if visible >= width && value[index..].contains("\x1b[") {
+        out.push_str(ANSI_RESET_ALL);
     }
     out
 }
@@ -612,7 +708,7 @@ fn fit_line(value: &str, width: usize) -> String {
 }
 
 fn pad_line(value: &str, width: usize) -> String {
-    let len = value.chars().count();
+    let len = visible_width(value);
     if len >= width {
         truncate_cell(value, width)
     } else {
@@ -811,9 +907,11 @@ mod tests {
             100,
             18,
         );
-        assert!(frame.contains("hpc-compose watch | job 12345"));
-        assert!(frame.contains("logs: api"));
-        assert!(frame.contains("> api"));
+        assert!(frame.contains("hpc-compose watch"));
+        assert!(frame.contains("job 12345"));
+        assert!(frame.contains("logs"));
+        assert!(frame.contains(">"));
+        assert!(frame.contains("api"));
         assert!(frame.contains("ready"));
         assert!(frame.contains("worker"));
     }
@@ -871,6 +969,20 @@ mod tests {
             capped_lines(vec!["a".into(), "b".into(), "c".into()], 2),
             vec!["b", "c"]
         );
+    }
+
+    #[test]
+    fn ansi_aware_formatting_uses_visible_width() {
+        let truncated = fit_line("\x1b[31mabcdef\x1b[39m", 4);
+        assert_eq!(visible_width(&truncated), 4);
+        assert!(truncated.starts_with("\x1b[31m"));
+        assert!(truncated.ends_with(ANSI_RESET_ALL));
+        assert!(truncated.contains("abcd"));
+        assert!(!truncated.contains("abcde"));
+
+        let padded = pad_line("\x1b[32mabc\x1b[39m", 5);
+        assert_eq!(visible_width(&padded), 5);
+        assert!(padded.ends_with("  "));
     }
 
     #[test]
@@ -1001,7 +1113,8 @@ mod tests {
             90,
             14,
         );
-        assert!(pending_frame.contains("pending reason: Resources"));
+        assert!(pending_frame.contains("pending reason"));
+        assert!(pending_frame.contains("Resources"));
     }
 
     #[test]

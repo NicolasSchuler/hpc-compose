@@ -14,6 +14,7 @@ use crate::planner::{
 use crate::prepare::RuntimePlan;
 use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{MetricsCollector, ReadinessSpec};
+use crate::term;
 
 /// Severity level for one preflight item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -148,46 +149,82 @@ impl Report {
         }
 
         let grouped = self.grouped();
+        let blocker_label = if grouped.summary.blockers > 0 {
+            term::styled_error(&grouped.summary.blockers.to_string())
+        } else {
+            grouped.summary.blockers.to_string()
+        };
+        let warn_label = if grouped.summary.actionable_warnings > 0 {
+            term::styled_warning(&grouped.summary.actionable_warnings.to_string())
+        } else {
+            grouped.summary.actionable_warnings.to_string()
+        };
+        let ctx_label = if grouped.summary.contextual_warnings > 0 {
+            term::styled_warning(&grouped.summary.contextual_warnings.to_string())
+        } else {
+            grouped.summary.contextual_warnings.to_string()
+        };
+        let passed_label = term::styled_success(&grouped.summary.passed_checks.to_string());
         let mut lines = vec![format!(
             "Summary: {} blocker(s), {} actionable warning(s), {} contextual warning(s), {} passed checks",
-            grouped.summary.blockers,
-            grouped.summary.actionable_warnings,
-            grouped.summary.contextual_warnings,
-            grouped.summary.passed_checks
+            blocker_label, warn_label, ctx_label, passed_label
         )];
 
-        render_section(&mut lines, "Blockers", &grouped.blockers);
+        render_section(
+            &mut lines,
+            "Blockers",
+            &grouped.blockers,
+            term::styled_error,
+        );
         render_section(
             &mut lines,
             "Actionable warnings",
             &grouped.actionable_warnings,
+            term::styled_warning,
         );
         render_section(
             &mut lines,
             "Contextual warnings",
             &grouped.contextual_warnings,
+            term::styled_warning,
         );
 
         if verbose {
-            render_section(&mut lines, "Passed checks", &grouped.passed_checks);
+            render_section(
+                &mut lines,
+                "Passed checks",
+                &grouped.passed_checks,
+                term::styled_success,
+            );
         } else {
-            lines.push(format!("Passed checks: {}", grouped.summary.passed_checks));
+            lines.push(format!(
+                "Passed checks: {}",
+                term::styled_success(&grouped.summary.passed_checks.to_string())
+            ));
         }
 
         lines.join("\n")
     }
 }
 
-fn render_section(lines: &mut Vec<String>, title: &str, items: &[Item]) {
+fn render_section(
+    lines: &mut Vec<String>,
+    title: &str,
+    items: &[Item],
+    style_fn: fn(&str) -> String,
+) {
     if items.is_empty() {
         return;
     }
 
-    lines.push(format!("{title}:"));
+    lines.push(format!("{}:", term::styled_section_header(title)));
     for item in items {
-        lines.push(format!("- {}", item.message));
+        lines.push(format!("- {}", style_fn(&item.message)));
         if let Some(remediation) = &item.remediation {
-            lines.push(format!("  remediation: {remediation}"));
+            lines.push(format!(
+                "  {}: {remediation}",
+                term::styled_note("remediation")
+            ));
         }
     }
 }

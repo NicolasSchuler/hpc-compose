@@ -27,6 +27,7 @@ use hpc_compose::spec::{
     ComposeSpec, DependencyCondition, EffectiveComposeConfig, ServiceDependency,
     parse_slurm_time_limit,
 };
+use hpc_compose::term;
 use serde::Serialize;
 
 pub(crate) mod cache;
@@ -274,25 +275,38 @@ pub(crate) fn print_prepare_summary(summary: &PrepareSummary) {
         if let Some(base) = &service.base_image {
             println!(
                 "{} service '{}' base image {}: {}",
-                action_label(base.action),
+                styled_action_label(base.action),
                 service.service_name,
                 artifact_role_label("base"),
-                base.path.display()
+                term::styled_dim(&base.path.display().to_string())
             );
         }
         println!(
             "{} service '{}' runtime image {}: {}",
-            action_label(service.runtime_image.action),
+            styled_action_label(service.runtime_image.action),
             service.service_name,
             artifact_role_label("runtime"),
-            service.runtime_image.path.display()
+            term::styled_dim(&service.runtime_image.path.display().to_string())
         );
         if let Some(note) = &service.runtime_image.note {
-            println!("note  service '{}': {note}", service.service_name);
+            println!(
+                "{}  service '{}': {note}",
+                term::styled_note("note"),
+                service.service_name
+            );
         }
     }
 }
 
+fn styled_action_label(action: ArtifactAction) -> String {
+    match action {
+        ArtifactAction::Present => term::styled_action_ok(),
+        ArtifactAction::Reused => term::styled_action_reuse(),
+        ArtifactAction::Built => term::styled_action_build(),
+    }
+}
+
+#[cfg(test)]
 fn action_label(action: ArtifactAction) -> &'static str {
     match action {
         ArtifactAction::Present => "OK",
@@ -356,26 +370,37 @@ fn write_job_inventory_scan(
     report: &JobInventoryScan,
     disk_usage: bool,
 ) -> io::Result<()> {
-    writeln!(writer, "scan root: {}", report.scan_root.display())?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("scan root", &report.scan_root.display().to_string())
+    )?;
     if report.jobs.is_empty() {
         writeln!(writer, "no tracked jobs found")?;
         return Ok(());
     }
 
     for job in &report.jobs {
-        let latest_marker = if job.is_latest { "*" } else { "-" };
+        let latest_marker = if job.is_latest {
+            term::styled_success("*")
+        } else {
+            "-".to_string()
+        };
         write!(
             writer,
-            "{} {} kind={} compose={} age={} submit_dir={} runtime={}",
+            "{} {} kind={} compose={} {}={} {}={} {}={}",
             latest_marker,
             job.job_id,
             match job.kind {
                 hpc_compose::job::SubmissionKind::Main => "main",
                 hpc_compose::job::SubmissionKind::Run => "run",
             },
-            job.compose_file.display(),
+            term::styled_dim(&job.compose_file.display().to_string()),
+            term::styled_bold("age"),
             format_age_seconds(job.age_seconds),
-            job.submit_dir.display(),
+            term::styled_bold("submit_dir"),
+            term::styled_dim(&job.submit_dir.display().to_string()),
+            term::styled_bold("runtime"),
             runtime_presence_label(
                 job.runtime_job_root_present,
                 job.legacy_runtime_job_root_present,
@@ -398,9 +423,17 @@ fn write_cleanup_report(
     report: &CleanupReport,
     disk_usage: bool,
 ) -> io::Result<()> {
-    writeln!(writer, "compose file: {}", report.compose_file.display())?;
-    writeln!(writer, "mode: {}", report.mode)?;
-    writeln!(writer, "dry run: {}", yes_no(report.dry_run))?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("compose file", &report.compose_file.display().to_string())
+    )?;
+    writeln!(writer, "{}", term::styled_label("mode", &report.mode))?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("dry run", yes_no(report.dry_run))
+    )?;
     writeln!(
         writer,
         "effective latest before: {}",
@@ -463,45 +496,75 @@ fn write_cleanup_report(
 }
 
 fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> io::Result<()> {
-    writeln!(writer, "job id: {}", snapshot.record.job_id)?;
-    writeln!(writer, "Scheduler:")?;
     writeln!(
         writer,
-        "  state: {} ({})",
-        snapshot.scheduler.state,
+        "{}",
+        term::styled_label("job id", &snapshot.record.job_id)
+    )?;
+    writeln!(writer, "{}", term::styled_section_header("Scheduler:"))?;
+    writeln!(
+        writer,
+        "  {}: {} ({})",
+        term::styled_bold("state"),
+        term::styled_scheduler_state(&snapshot.scheduler.state),
         scheduler_source_label(snapshot.scheduler.source)
     )?;
     if let Some(detail) = &snapshot.scheduler.detail {
-        writeln!(writer, "  note: {detail}")?;
+        writeln!(writer, "  {}: {detail}", term::styled_bold("note"))?;
     }
     if let Some(queue) = &snapshot.queue_diagnostics {
         if let Some(reason) = &queue.pending_reason {
-            writeln!(writer, "  pending reason: {reason}")?;
+            writeln!(
+                writer,
+                "  {}: {reason}",
+                term::styled_bold("pending reason")
+            )?;
         }
         if let Some(eligible_time) = &queue.eligible_time {
-            writeln!(writer, "  eligible time: {eligible_time}")?;
+            writeln!(
+                writer,
+                "  {}: {eligible_time}",
+                term::styled_bold("eligible time")
+            )?;
         }
         if let Some(start_time) = &queue.start_time {
-            writeln!(writer, "  start time: {start_time}")?;
+            writeln!(
+                writer,
+                "  {}: {start_time}",
+                term::styled_bold("start time")
+            )?;
         }
     }
-    writeln!(writer, "Runtime:")?;
+    writeln!(writer, "{}", term::styled_section_header("Runtime:"))?;
     writeln!(
         writer,
-        "  compose file: {}",
-        snapshot.record.compose_file.display()
+        "  {}",
+        term::styled_label(
+            "compose file",
+            &snapshot.record.compose_file.display().to_string()
+        )
     )?;
     writeln!(
         writer,
-        "  script path: {}",
-        snapshot.record.script_path.display()
+        "  {}",
+        term::styled_label(
+            "script path",
+            &snapshot.record.script_path.display().to_string()
+        )
     )?;
     writeln!(
         writer,
-        "  cache dir: {}",
-        snapshot.record.cache_dir.display()
+        "  {}",
+        term::styled_label(
+            "cache dir",
+            &snapshot.record.cache_dir.display().to_string()
+        )
     )?;
-    writeln!(writer, "  log dir: {}", snapshot.log_dir.display())?;
+    writeln!(
+        writer,
+        "  {}",
+        term::styled_label("log dir", &snapshot.log_dir.display().to_string())
+    )?;
     if let Some(attempt) = snapshot.attempt {
         writeln!(writer, "  attempt: {attempt}")?;
     }
@@ -548,8 +611,15 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
             let status = service.status.as_deref().unwrap_or("unknown");
             writeln!(
                 writer,
-                "    step: {} pid: {} ready: {} status: {}",
-                step_name, pid, ready, status
+                "    {}: {} {}: {} {}: {} {}: {}",
+                term::styled_bold("step"),
+                step_name,
+                term::styled_bold("pid"),
+                pid,
+                term::styled_bold("ready"),
+                ready,
+                term::styled_bold("status"),
+                term::styled_service_status(status)
             )?;
         }
         if service.failure_policy_mode.is_some()
@@ -634,22 +704,35 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
 }
 
 fn write_ps_snapshot(writer: &mut impl Write, snapshot: &PsSnapshot) -> io::Result<()> {
-    writeln!(writer, "job id: {}", snapshot.record.job_id)?;
     writeln!(
         writer,
-        "scheduler: {} ({})",
-        snapshot.scheduler.state,
+        "{}",
+        term::styled_label("job id", &snapshot.record.job_id)
+    )?;
+    writeln!(
+        writer,
+        "{}: {} ({})",
+        term::styled_bold("scheduler"),
+        term::styled_scheduler_state(&snapshot.scheduler.state),
         scheduler_source_label(snapshot.scheduler.source)
     )?;
     if let Some(queue) = &snapshot.queue_diagnostics
         && let Some(reason) = &queue.pending_reason
     {
-        writeln!(writer, "pending reason: {reason}")?;
+        writeln!(writer, "{}: {reason}", term::styled_bold("pending reason"))?;
     }
-    writeln!(
-        writer,
-        "service\tstep\tpid\tready\tstatus\trestarts\tlast_exit\tlog"
-    )?;
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+    table.set_header(vec![
+        "service",
+        "step",
+        "pid",
+        "ready",
+        "status",
+        "restarts",
+        "last_exit",
+        "log",
+    ]);
     for service in &snapshot.services {
         let step = service.step_name.as_deref().unwrap_or("-");
         let pid = service
@@ -666,34 +749,38 @@ fn write_ps_snapshot(writer: &mut impl Write, snapshot: &PsSnapshot) -> io::Resu
             .last_exit_code
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string());
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            service.service_name,
-            step,
+        table.add_row(vec![
+            service.service_name.clone(),
+            step.to_string(),
             pid,
-            ready,
-            status,
+            ready.to_string(),
+            term::styled_service_status(status),
             restarts,
             last_exit,
-            service.path.display()
-        )?;
+            term::styled_dim(&service.path.display().to_string()),
+        ]);
     }
+    write!(writer, "{table}")?;
     Ok(())
 }
 
 fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io::Result<()> {
-    writeln!(writer, "job id: {}", snapshot.job_id)?;
+    writeln!(writer, "{}", term::styled_label("job id", &snapshot.job_id))?;
     writeln!(
         writer,
-        "scheduler state: {} ({})",
-        snapshot.scheduler.state,
+        "{}: {} ({})",
+        term::styled_bold("scheduler state"),
+        term::styled_scheduler_state(&snapshot.scheduler.state),
         scheduler_source_label(snapshot.scheduler.source)
     )?;
     if let Some(detail) = &snapshot.scheduler.detail {
-        writeln!(writer, "scheduler note: {detail}")?;
+        writeln!(writer, "scheduler {}: {detail}", term::styled_bold("note"))?;
     }
-    writeln!(writer, "stats source: {}", snapshot.source)?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("stats source", &snapshot.source)
+    )?;
     if let Some(metrics_dir) = &snapshot.metrics_dir {
         writeln!(writer, "metrics dir: {}", metrics_dir.display())?;
     }
@@ -933,12 +1020,36 @@ fn write_artifact_export_report(
     writer: &mut impl Write,
     report: &ArtifactExportReport,
 ) -> io::Result<()> {
-    writeln!(writer, "job id: {}", report.record.job_id)?;
-    writeln!(writer, "manifest: {}", report.manifest_path.display())?;
-    writeln!(writer, "payload dir: {}", report.payload_dir.display())?;
-    writeln!(writer, "export dir: {}", report.export_dir.display())?;
-    writeln!(writer, "collect policy: {}", report.manifest.collect_policy)?;
-    writeln!(writer, "job outcome: {}", report.manifest.job_outcome)?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("job id", &report.record.job_id)
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("manifest", &report.manifest_path.display().to_string())
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("payload dir", &report.payload_dir.display().to_string())
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("export dir", &report.export_dir.display().to_string())
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("collect policy", &report.manifest.collect_policy)
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("job outcome", &report.manifest.job_outcome)
+    )?;
     if let Some(attempt) = report.manifest.attempt {
         writeln!(writer, "attempt: {attempt}")?;
     }
@@ -1215,18 +1326,22 @@ fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
 }
 
 fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result<()> {
-    writeln!(writer, "name: {}", plan.name)?;
+    writeln!(writer, "{}", term::styled_label("name", &plan.name))?;
     writeln!(writer, "runtime mode: pyxis")?;
-    writeln!(writer, "cache dir: {}", plan.cache_dir.display())?;
     writeln!(
         writer,
-        "allocation geometry: {}",
-        format_allocation_geometry(plan)
+        "{}",
+        term::styled_label("cache dir", &plan.cache_dir.display().to_string())
     )?;
     writeln!(
         writer,
-        "service order: {}",
-        service_names(plan).join(" -> ")
+        "{}",
+        term::styled_label("allocation geometry", &format_allocation_geometry(plan))
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("service order", &service_names(plan).join(" -> "))
     )?;
     let warnings = inspect_time_limit_warnings(plan);
     if !warnings.is_empty() {
@@ -1550,7 +1665,11 @@ pub(crate) fn template_infos() -> Vec<TemplateInfoOutput> {
 
 pub(crate) fn print_template_list() {
     for template in templates() {
-        println!("{}\t{}", template.name, template.description);
+        println!(
+            "{}\t{}",
+            term::styled_bold(template.name),
+            term::styled_dim(template.description)
+        );
     }
 }
 
@@ -1573,14 +1692,27 @@ pub(crate) fn build_template_description(template_name: &str) -> Result<Template
 
 pub(crate) fn print_template_description(template_name: &str) -> Result<()> {
     let description = build_template_description(template_name)?;
-    println!("template: {}", description.template.name);
-    println!("description: {}", description.template.description);
     println!(
-        "cache dir: required; choose a path visible from both the login node and the compute nodes"
+        "{}",
+        term::styled_label("template", &description.template.name)
     );
-    println!("placeholder: {}", description.cache_dir_placeholder);
-    println!("command:");
-    println!("{}", description.command);
+    println!(
+        "{}",
+        term::styled_label("description", &description.template.description)
+    );
+    println!(
+        "{}",
+        term::styled_label(
+            "cache dir",
+            "required; choose a path visible from both the login node and the compute nodes"
+        )
+    );
+    println!(
+        "{}",
+        term::styled_label("placeholder", &description.cache_dir_placeholder)
+    );
+    println!("{}:", term::styled_bold("command"));
+    println!("{}", term::styled_dim(&description.command));
     Ok(())
 }
 
@@ -1668,14 +1800,24 @@ pub(crate) fn extract_job_id(text: &str) -> Option<&str> {
 }
 
 pub(crate) fn print_prune_result(cache_dir: &Path, removed: &[PathBuf]) {
-    println!("cache dir: {}", cache_dir.display());
+    println!(
+        "{}",
+        term::styled_label("cache dir", &cache_dir.display().to_string())
+    );
     if removed.is_empty() {
         println!("removed: 0");
         return;
     }
-    println!("removed: {}", removed.len());
+    println!(
+        "{}",
+        term::styled_label("removed", &removed.len().to_string())
+    );
     for path in removed {
-        println!("pruned: {}", path.display());
+        println!(
+            "{}: {}",
+            term::styled_warning("pruned"),
+            term::styled_dim(&path.display().to_string())
+        );
     }
 }
 
@@ -2201,12 +2343,9 @@ services:
             PathBuf::from("hpc-compose.sbatch")
         );
         assert!(default_cache_dir().ends_with(".cache/hpc-compose"));
-        assert_eq!(
-            render_from_path(Path::new("/definitely/missing/compose.yaml"))
-                .expect_err("missing")
-                .to_string(),
-            "failed to read spec at /definitely/missing/compose.yaml"
-        );
+        let err =
+            render_from_path(Path::new("/definitely/missing/compose.yaml")).expect_err("missing");
+        assert!(err.to_string().contains("/definitely/missing/compose.yaml"));
     }
 
     #[test]

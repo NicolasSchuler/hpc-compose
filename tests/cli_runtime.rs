@@ -344,7 +344,10 @@ services:
     );
     assert_failure(&submit);
     let combined = format!("{}\n{}", stdout_text(&submit), stderr_text(&submit));
-    assert!(combined.contains("after 2/2 restart-triggering exits in 60s"));
+    assert!(
+        combined.contains("2/2 restart-triggering exits"),
+        "combined:\n{combined}"
+    );
 }
 
 #[test]
@@ -838,7 +841,14 @@ fn ps_command_reports_service_runtime_state_in_text_and_json() {
     );
     assert_success(&ps);
     let ps_stdout = stdout_text(&ps);
-    assert!(ps_stdout.contains("service\tstep\tpid\tready\tstatus\trestarts\tlast_exit\tlog"));
+    assert!(ps_stdout.contains("service"));
+    assert!(ps_stdout.contains("step"));
+    assert!(ps_stdout.contains("pid"));
+    assert!(ps_stdout.contains("ready"));
+    assert!(ps_stdout.contains("status"));
+    assert!(ps_stdout.contains("restarts"));
+    assert!(ps_stdout.contains("last_exit"));
+    assert!(ps_stdout.contains("log"));
     assert!(ps_stdout.contains("app"));
     assert!(ps_stdout.contains("hpc-compose:app"));
     assert!(ps_stdout.contains("ready"));
@@ -1779,7 +1789,7 @@ fn cancel_with_purge_cache_requires_tracked_artifact_snapshot() {
     );
     assert_failure(&cancel);
     assert!(
-        stderr_text(&cancel).contains("does not contain cached artifact snapshots"),
+        stderr_text(&cancel).contains("refusing --purge-cache"),
         "stderr:\n{}",
         stderr_text(&cancel)
     );

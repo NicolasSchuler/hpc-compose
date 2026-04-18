@@ -16,6 +16,7 @@ use hpc_compose::init::{
     cache_dir_placeholder as init_cache_dir_placeholder, next_commands,
     prompt_for_init_with_cache_dir_default, render_template, write_initialized_template,
 };
+use hpc_compose::term;
 
 use crate::output::{common as output_common, init as output_init};
 
@@ -307,7 +308,13 @@ fn prompt(
     label: &str,
     default: &str,
 ) -> Result<String> {
-    write!(output, "{label} [{default}]: ").ok();
+    write!(
+        output,
+        "{} [{}]: ",
+        term::styled_bold(label),
+        term::styled_dim(default)
+    )
+    .ok();
     output.flush().ok();
     let mut line = String::new();
     input

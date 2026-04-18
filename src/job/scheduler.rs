@@ -640,10 +640,9 @@ pub(crate) fn build_local_scheduler_status(
     if let Some(state) = runtime_state
         .and_then(|state| state.job_status.clone())
         .map(|state| normalize_scheduler_state(&state))
+        && is_terminal_state(&state)
     {
-        if is_terminal_state(&state) {
-            return build_scheduler_status(state, SchedulerSource::LocalOnly);
-        }
+        return build_scheduler_status(state, SchedulerSource::LocalOnly);
     }
 
     if let Some(exit_code) = runtime_state.and_then(|state| state.job_exit_code) {

@@ -1,5 +1,7 @@
 //! Interactive and non-interactive helpers for `hpc-compose init`.
 
+use crate::term;
+
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -187,14 +189,14 @@ fn prompt_for_init_with_io(
     output: &mut impl Write,
     default_cache_dir: Option<&str>,
 ) -> Result<InitAnswers> {
-    writeln!(output, "Choose a template:").ok();
+    writeln!(output, "{}", term::styled_bold("Choose a template:")).ok();
     for (index, template) in TEMPLATES.iter().enumerate() {
         writeln!(
             output,
             "  {}. {} - {}",
             index + 1,
-            template.name,
-            template.description
+            term::styled_bold(template.name),
+            term::styled_dim(template.description)
         )
         .ok();
     }
@@ -324,7 +326,13 @@ fn prompt(
     label: &str,
     default: &str,
 ) -> Result<String> {
-    write!(output, "{label} [{default}]: ").ok();
+    write!(
+        output,
+        "{} [{}]: ",
+        term::styled_bold(label),
+        term::styled_dim(default)
+    )
+    .ok();
     output.flush().ok();
     let mut line = String::new();
     input
@@ -344,7 +352,7 @@ fn prompt_required(
     label: &str,
     guidance: &str,
 ) -> Result<String> {
-    write!(output, "{label}: ").ok();
+    write!(output, "{}: ", term::styled_bold(label)).ok();
     output.flush().ok();
     let mut line = String::new();
     input
@@ -499,8 +507,10 @@ mod tests {
             "custom"
         );
         let transcript = String::from_utf8(output).expect("utf8");
-        assert!(transcript.contains("Application name [demo]: "));
-        assert!(transcript.contains("Cache dir [/cache]: "));
+        assert!(transcript.contains("Application name"));
+        assert!(transcript.contains("demo"));
+        assert!(transcript.contains("Cache dir"));
+        assert!(transcript.contains("/cache"));
     }
 
     #[test]
@@ -513,7 +523,8 @@ mod tests {
             err.to_string(),
             "Cache dir cannot be empty; choose a shared path"
         );
-        assert_eq!(String::from_utf8(output).expect("utf8"), "Cache dir: ");
+        let output_str = String::from_utf8(output).expect("utf8");
+        assert!(output_str.contains("Cache dir"));
     }
 
     #[test]
@@ -568,11 +579,9 @@ mod tests {
         assert_eq!(answers.template_name, "app-redis-worker");
         assert_eq!(answers.app_name, "custom-app");
         assert_eq!(answers.cache_dir, "/cluster/shared/custom-cache");
-        assert!(
-            String::from_utf8(output)
-                .expect("utf8")
-                .contains("Cache dir [/cluster/shared/custom-cache]: ")
-        );
+        let output_str = String::from_utf8(output).expect("utf8");
+        assert!(output_str.contains("Cache dir"));
+        assert!(output_str.contains("/cluster/shared/custom-cache"));
     }
 
     #[test]

@@ -1,10 +1,9 @@
 use std::io::{self, IsTerminal, Write};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread;
 use std::time::{Duration, Instant};
+
+use indicatif::{ProgressBar, ProgressStyle};
+
+use crate::term;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgressMode {
@@ -13,33 +12,23 @@ enum ProgressMode {
     Spinner,
 }
 
-/// Small stderr progress reporter for long-running CLI phases.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ProgressReporter {
     mode: ProgressMode,
 }
 
 impl ProgressReporter {
-    /// Builds a reporter that stays quiet unless progress output is desired.
     #[must_use]
     pub(crate) fn new(enabled: bool) -> Self {
-        let mode = if !enabled {
-            ProgressMode::Hidden
-        } else if io::stderr().is_terminal() {
-            ProgressMode::Spinner
-        } else {
-            ProgressMode::Plain
-        };
+        let mode = progress_mode(enabled, io::stderr().is_terminal());
         Self { mode }
     }
 
-    /// Starts a progress step that the caller will finish explicitly.
     #[must_use]
     pub(crate) fn start(self, message: impl Into<String>) -> ProgressStep {
         ProgressStep::new(self.mode, message.into())
     }
 
-    /// Runs a fallible operation while emitting phase progress.
     pub(crate) fn run_result<T, E>(
         self,
         message: impl Into<String>,
@@ -59,58 +48,80 @@ impl ProgressReporter {
     }
 }
 
-/// One in-flight progress phase.
+fn progress_mode(enabled: bool, stderr_is_terminal: bool) -> ProgressMode {
+    if !enabled {
+        ProgressMode::Hidden
+    } else if stderr_is_terminal {
+        ProgressMode::Spinner
+    } else {
+        ProgressMode::Plain
+    }
+}
+
 pub(crate) struct ProgressStep {
     mode: ProgressMode,
     message: String,
     started_at: Instant,
-    spinner: Option<SpinnerHandle>,
+    pb: Option<ProgressBar>,
     finished: bool,
 }
 
 impl ProgressStep {
     fn new(mode: ProgressMode, message: String) -> Self {
-        match mode {
-            ProgressMode::Hidden => {}
-            ProgressMode::Plain => write_plain_line("run", &message, None),
-            ProgressMode::Spinner => {}
-        }
-
-        let spinner = matches!(mode, ProgressMode::Spinner).then(|| SpinnerHandle::new(&message));
+        let pb = match mode {
+            ProgressMode::Hidden => None,
+            ProgressMode::Plain => {
+                write_plain_start(&message);
+                None
+            }
+            ProgressMode::Spinner => {
+                let pb = ProgressBar::new_spinner();
+                pb.set_style(
+                    ProgressStyle::with_template("{spinner} {msg}")
+                        .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+                );
+                pb.set_message(message.clone());
+                pb.enable_steady_tick(Duration::from_millis(100));
+                Some(pb)
+            }
+        };
 
         Self {
             mode,
             message,
             started_at: Instant::now(),
-            spinner,
+            pb,
             finished: false,
         }
     }
 
-    /// Marks the step as completed.
     pub(crate) fn finish(mut self) {
-        self.complete("done");
+        self.complete(true);
     }
 
-    /// Marks the step as failed.
     pub(crate) fn fail(mut self) {
-        self.complete("fail");
+        self.complete(false);
     }
 
-    fn complete(&mut self, state: &'static str) {
+    fn complete(&mut self, success: bool) {
         if self.finished {
             return;
         }
 
-        if let Some(spinner) = self.spinner.take() {
-            spinner.stop();
+        if let Some(pb) = self.pb.take() {
+            pb.finish_and_clear();
         }
 
         let elapsed = format_elapsed(self.started_at.elapsed());
+
         match self.mode {
             ProgressMode::Hidden => {}
-            ProgressMode::Plain => write_plain_line(state, &self.message, Some(&elapsed)),
-            ProgressMode::Spinner => write_spinner_line(state, &self.message, &elapsed),
+            ProgressMode::Plain => {
+                write_plain_complete(success, &self.message, &elapsed);
+            }
+            ProgressMode::Spinner => {
+                write_spinner_complete(success, &self.message, &elapsed);
+            }
         }
 
         self.finished = true;
@@ -119,65 +130,37 @@ impl ProgressStep {
 
 impl Drop for ProgressStep {
     fn drop(&mut self) {
-        if let Some(spinner) = self.spinner.take() {
-            spinner.stop();
+        if let Some(pb) = self.pb.take() {
+            pb.finish_and_clear();
         }
     }
 }
 
-struct SpinnerHandle {
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl SpinnerHandle {
-    fn new(message: &str) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_signal = Arc::clone(&stop);
-        let message = message.to_string();
-        let handle = thread::spawn(move || {
-            const FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
-            let mut frame_index = 0usize;
-            while !stop_signal.load(Ordering::Relaxed) {
-                let mut stderr = io::stderr();
-                let _ = write!(
-                    stderr,
-                    "\r\x1b[2K[{}] {}",
-                    FRAMES[frame_index % FRAMES.len()],
-                    message
-                );
-                let _ = stderr.flush();
-                frame_index += 1;
-                thread::sleep(Duration::from_millis(100));
-            }
-        });
-
-        Self {
-            stop,
-            handle: Some(handle),
-        }
-    }
-
-    fn stop(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-fn write_plain_line(state: &str, message: &str, elapsed: Option<&str>) {
+fn write_plain_start(message: &str) {
+    let state = term::styled_state_run_stderr();
     let mut stderr = io::stderr();
-    let _ = match elapsed {
-        Some(elapsed) => writeln!(stderr, "[{state}] {message} ({elapsed})"),
-        None => writeln!(stderr, "[{state}] {message}"),
-    };
+    let _ = writeln!(stderr, "[{state}] {message}");
     let _ = stderr.flush();
 }
 
-fn write_spinner_line(state: &str, message: &str, elapsed: &str) {
+fn write_plain_complete(success: bool, message: &str, elapsed: &str) {
+    let state = if success {
+        term::styled_state_done_stderr()
+    } else {
+        term::styled_state_fail_stderr()
+    };
     let mut stderr = io::stderr();
-    let _ = write!(stderr, "\r\x1b[2K");
+    let _ = writeln!(stderr, "[{state}] {message} ({elapsed})");
+    let _ = stderr.flush();
+}
+
+fn write_spinner_complete(success: bool, message: &str, elapsed: &str) {
+    let state = if success {
+        term::styled_state_done_stderr()
+    } else {
+        term::styled_state_fail_stderr()
+    };
+    let mut stderr = io::stderr();
     let _ = writeln!(stderr, "[{state}] {message} ({elapsed})");
     let _ = stderr.flush();
 }
@@ -192,5 +175,56 @@ fn format_elapsed(duration: Duration) -> String {
         format!("{:.1}s", duration.as_secs_f64())
     } else {
         format!("{}ms", duration.as_millis())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_mode_covers_hidden_plain_and_spinner() {
+        assert_eq!(progress_mode(false, false), ProgressMode::Hidden);
+        assert_eq!(progress_mode(true, false), ProgressMode::Plain);
+        assert_eq!(progress_mode(true, true), ProgressMode::Spinner);
+    }
+
+    #[test]
+    fn progress_reporter_run_result_covers_success_and_failure() {
+        let ok = ProgressReporter {
+            mode: ProgressMode::Hidden,
+        }
+        .run_result("ok", || -> Result<_, &'static str> { Ok(7) })
+        .expect("success result");
+        assert_eq!(ok, 7);
+
+        let err = ProgressReporter {
+            mode: ProgressMode::Hidden,
+        }
+        .run_result("err", || -> Result<(), &'static str> { Err("boom") })
+        .expect_err("failure result");
+        assert_eq!(err, "boom");
+    }
+
+    #[test]
+    fn progress_step_helpers_cover_plain_and_spinner_paths() {
+        let plain = ProgressStep::new(ProgressMode::Plain, "plain".into());
+        assert!(plain.pb.is_none());
+        assert!(!plain.finished);
+        plain.finish();
+
+        let spinner = ProgressStep::new(ProgressMode::Spinner, "spinner".into());
+        assert!(spinner.pb.is_some());
+        spinner.fail();
+
+        let hidden = ProgressStep::new(ProgressMode::Hidden, "hidden".into());
+        hidden.finish();
+    }
+
+    #[test]
+    fn format_elapsed_covers_subsecond_seconds_and_minutes() {
+        assert_eq!(format_elapsed(Duration::from_millis(345)), "345ms");
+        assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.5s");
+        assert_eq!(format_elapsed(Duration::from_secs(125)), "2m05s");
     }
 }

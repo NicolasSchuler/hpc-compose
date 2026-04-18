@@ -4,6 +4,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # `indicatif` still depends on `number_prefix`; this is an unmaintained advisory,
+  # not a memory-safety or code-execution issue, and there is no patched release to upgrade to.
+  "RUSTSEC-2025-0119",
+]
 
 [licenses]
 version = 2
