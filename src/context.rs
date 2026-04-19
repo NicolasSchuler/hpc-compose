@@ -385,6 +385,59 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
     })
 }
 
+/// Resolves only the effective binary paths from settings, profile, and CLI
+/// overrides.
+///
+/// # Errors
+///
+/// Returns an error when settings parsing fails, a requested profile is
+/// missing, or a requested settings file path does not exist.
+pub fn resolve_binaries_only(request: &ResolveRequest) -> Result<ResolvedBinaries> {
+    let settings_path = if let Some(path) = request.settings_file.as_ref() {
+        if !path.exists() {
+            bail!("settings file does not exist: {}", path.display());
+        }
+        Some(crate::path_util::absolute_path(path, &request.cwd))
+    } else {
+        discover_settings_path(&request.cwd)
+    };
+
+    let settings = match settings_path.as_ref() {
+        Some(path) => Some(load_settings(path)?),
+        None => None,
+    };
+
+    let selected_profile = request.profile.clone().or_else(|| {
+        settings
+            .as_ref()
+            .and_then(|cfg| cfg.default_profile.clone())
+    });
+    let profile_cfg = match (settings.as_ref(), selected_profile.as_ref()) {
+        (Some(cfg), Some(name)) => {
+            let profile = cfg
+                .profiles
+                .get(name)
+                .with_context(|| format!("profile '{name}' is not defined in settings"))?;
+            Some(profile)
+        }
+        (None, Some(name)) => {
+            bail!(
+                "profile '{}' was requested, but no settings file was found (expected {} in this repository tree)",
+                name,
+                SETTINGS_RELATIVE_PATH
+            );
+        }
+        _ => None,
+    };
+
+    let defaults_cfg = settings.as_ref().map(|cfg| &cfg.defaults);
+    Ok(resolve_binaries(
+        &request.binary_overrides,
+        profile_cfg.map(|profile| &profile.binaries),
+        defaults_cfg.map(|defaults| &defaults.binaries),
+    ))
+}
+
 fn resolve_compose_file(
     cli_override: Option<&Path>,
     profile_value: Option<&str>,

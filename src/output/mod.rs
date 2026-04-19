@@ -274,23 +274,21 @@ pub(crate) fn print_prepare_summary(summary: &PrepareSummary) {
     for service in &summary.services {
         if let Some(base) = &service.base_image {
             println!(
-                "{} service '{}' base image {}: {}",
+                "[service {} {}] base image {}",
+                term::styled_bold(&service.service_name),
                 styled_action_label(base.action),
-                service.service_name,
-                artifact_role_label("base"),
                 term::styled_dim(&base.path.display().to_string())
             );
         }
         println!(
-            "{} service '{}' runtime image {}: {}",
+            "[service {} {}] {}",
+            term::styled_bold(&service.service_name),
             styled_action_label(service.runtime_image.action),
-            service.service_name,
-            artifact_role_label("runtime"),
             term::styled_dim(&service.runtime_image.path.display().to_string())
         );
         if let Some(note) = &service.runtime_image.note {
             println!(
-                "{}  service '{}': {note}",
+                "  {} service '{}': {note}",
                 term::styled_note("note"),
                 service.service_name
             );
@@ -315,6 +313,7 @@ fn action_label(action: ArtifactAction) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn artifact_role_label(name: &str) -> &'static str {
     match name {
         "base" => "cache artifact",
@@ -1101,6 +1100,164 @@ fn write_artifact_export_report(
     Ok(())
 }
 
+fn write_plan_inspect_tree(
+    writer: &mut impl Write,
+    plan: &Plan,
+    runtime_plan: &RuntimePlan,
+) -> io::Result<()> {
+    let services: Vec<&hpc_compose::planner::PlannedService> =
+        plan.ordered_services.iter().collect();
+    let name_to_index: std::collections::HashMap<&str, usize> = services
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.name.as_str(), i))
+        .collect();
+
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); services.len()];
+    let mut has_parent = vec![false; services.len()];
+    for (idx, svc) in services.iter().enumerate() {
+        for dep in &svc.depends_on {
+            if let Some(&dep_idx) = name_to_index.get(dep.name.as_str()) {
+                children[dep_idx].push(idx);
+                has_parent[idx] = true;
+            }
+        }
+    }
+
+    let roots: Vec<usize> = (0..services.len()).filter(|&i| !has_parent[i]).collect();
+
+    for (root_i, &root_idx) in roots.iter().enumerate() {
+        let is_last_root = root_i == roots.len() - 1;
+        write_tree_node(
+            writer,
+            root_idx,
+            &services,
+            &children,
+            &runtime_plan,
+            "",
+            is_last_root,
+        )?;
+        if !is_last_root {
+            writeln!(writer)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_tree_node(
+    writer: &mut impl Write,
+    idx: usize,
+    services: &[&hpc_compose::planner::PlannedService],
+    children: &[Vec<usize>],
+    runtime_plan: &RuntimePlan,
+    prefix: &str,
+    is_last: bool,
+) -> io::Result<()> {
+    let connector = if is_last {
+        "\u{2514}\u{2500}\u{2500} "
+    } else {
+        "\u{251c}\u{2500}\u{2500} "
+    };
+    let svc = services[idx];
+    let state = runtime_plan
+        .ordered_services
+        .iter()
+        .find(|rs| rs.name == svc.name)
+        .map(|rs| runtime_cache_state(rs))
+        .unwrap_or("unknown");
+
+    let state_colored = match state {
+        "cache hit" | "local image present" => term::styled_success_raw(state),
+        "rebuild on submit" | "cache miss" | "local image missing" => {
+            term::styled_warning_raw(state)
+        }
+        _ => state.to_string(),
+    };
+
+    if prefix.is_empty() {
+        writeln!(writer, "{} {}", term::styled_bold(&svc.name), state_colored,)?;
+    } else {
+        writeln!(
+            writer,
+            "{}{}{} {}",
+            prefix,
+            connector,
+            term::styled_bold(&svc.name),
+            state_colored,
+        )?;
+    }
+
+    let child_prefix = if prefix.is_empty() {
+        "    ".to_string()
+    } else if is_last {
+        format!("{prefix}    ")
+    } else {
+        format!("{prefix}\u{2502}   ")
+    };
+
+    let deps: Vec<String> = svc
+        .depends_on
+        .iter()
+        .map(|d| {
+            let cond = match d.condition {
+                DependencyCondition::ServiceStarted => "service_started",
+                DependencyCondition::ServiceHealthy => "service_healthy",
+            };
+            format!(
+                "{} [{}]",
+                term::styled_dim(d.name.as_str()),
+                term::styled_dim(cond)
+            )
+        })
+        .collect();
+
+    let mut details = Vec::new();
+    if !deps.is_empty() {
+        details.push(format!("depends_on: {}", deps.join(", ")));
+    }
+    if let Some(ref readiness) = svc.readiness {
+        details.push(format!(
+            "readiness: {}",
+            readiness_description(Some(readiness))
+        ));
+    }
+    if !svc.volumes.is_empty() {
+        details.push(format!("mounts: {}", svc.volumes.len()));
+    }
+
+    let detail_count = details.len() + children[idx].len();
+    for (di, detail) in details.iter().enumerate() {
+        let detail_is_last = di == detail_count - 1;
+        let detail_connector = if detail_is_last {
+            "\u{2514}\u{2500}\u{2500} "
+        } else {
+            "\u{251c}\u{2500}\u{2500} "
+        };
+        writeln!(writer, "{}{}{}", child_prefix, detail_connector, detail)?;
+    }
+
+    for (ci, &child_idx) in children[idx].iter().enumerate() {
+        let child_is_last = ci == children[idx].len() - 1;
+        write_tree_node(
+            writer,
+            child_idx,
+            services,
+            children,
+            runtime_plan,
+            &child_prefix,
+            child_is_last,
+        )?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn print_plan_inspect_tree(plan: &Plan, runtime_plan: &RuntimePlan) -> Result<()> {
+    let mut writer = io::stdout();
+    write_plan_inspect_tree(&mut writer, plan, runtime_plan).context("failed to write tree output")
+}
+
 fn write_plan_inspect_verbose(
     writer: &mut impl Write,
     plan: &Plan,
@@ -1791,6 +1948,80 @@ pub(crate) fn print_submit_details(
         }
     }
     Ok(())
+}
+
+pub(crate) fn print_submit_summary_box(
+    plan: &RuntimePlan,
+    job_id: &str,
+    script_path: &Path,
+    tracked_metadata_path: Option<&Path>,
+) {
+    let separator = "\u{2500}".repeat(50);
+    println!("{separator}");
+    println!(
+        " {} Job {} submitted",
+        term::styled_success_raw("\u{2713}"),
+        term::styled_bold(job_id)
+    );
+    println!(
+        " {} {}",
+        term::styled_bold("script:"),
+        term::styled_dim(&script_path.display().to_string())
+    );
+    println!(
+        " {} {}",
+        term::styled_bold("cache:"),
+        term::styled_dim(&plan.cache_dir.display().to_string())
+    );
+    println!(
+        " {} {}",
+        term::styled_bold("services:"),
+        plan.ordered_services.len()
+    );
+    if let Some(path) = tracked_metadata_path {
+        println!(
+            " {} {}",
+            term::styled_bold("track:"),
+            term::styled_dim(&path.display().to_string())
+        );
+    }
+    println!("{separator}");
+}
+
+use hpc_compose::context::ValueSource;
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct InterpolationVarsOutput {
+    pub variables: BTreeMap<String, String>,
+    pub sources: BTreeMap<String, String>,
+}
+
+pub(crate) fn print_interpolation_vars(
+    vars: &BTreeMap<String, String>,
+    sources: &BTreeMap<String, ValueSource>,
+) {
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+    table.set_header(vec![
+        term::styled_bold("VARIABLE").to_string(),
+        term::styled_bold("VALUE").to_string(),
+        term::styled_bold("SOURCE").to_string(),
+    ]);
+    let mut sorted_keys: Vec<&String> = vars.keys().collect();
+    sorted_keys.sort();
+    for key in sorted_keys {
+        let value = vars.get(key).map(|s| s.as_str()).unwrap_or("");
+        let source = sources
+            .get(key)
+            .map(|s| format!("{s:?}").to_lowercase())
+            .unwrap_or_else(|| "unknown".to_string());
+        table.add_row(vec![
+            key.clone(),
+            term::styled_dim(value).to_string(),
+            source,
+        ]);
+    }
+    println!("{table}");
 }
 
 pub(crate) fn extract_job_id(text: &str) -> Option<&str> {
@@ -3190,6 +3421,7 @@ services:
         run_command(Commands::Inspect {
             file: Some(compose.clone()),
             verbose: false,
+            tree: false,
             format: None,
             json: false,
         })
@@ -3461,5 +3693,53 @@ services:
         ));
         assert!(!status_text.contains("window=0/0@0s"));
         assert!(!status_text.contains("window=unknown/unknown@unknowns"));
+    }
+
+    #[test]
+    fn inspect_tree_preserves_indentation_for_root_descendants() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_compose(
+            tmpdir.path(),
+            r#"
+name: demo
+x-slurm:
+  cache_dir: ./cache
+services:
+  root:
+    image: redis:7
+    command: /bin/true
+  child:
+    image: redis:7
+    command: /bin/true
+    depends_on:
+      root:
+        condition: service_started
+  grandchild:
+    image: redis:7
+    command: /bin/true
+    depends_on:
+      child:
+        condition: service_started
+"#,
+        );
+        let plan = load_plan(&compose).expect("plan");
+        let runtime_plan = build_runtime_plan(&plan);
+        let mut out = Vec::new();
+        write_plan_inspect_tree(&mut out, &plan, &runtime_plan).expect("tree");
+        let text = String::from_utf8(out).expect("utf8");
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("    └── ") && line.contains("child")),
+            "{text}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("        └── ") && line.contains("grandchild")),
+            "{text}"
+        );
     }
 }

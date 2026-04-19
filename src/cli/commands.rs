@@ -26,6 +26,12 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
+        help = "Suppress progress indicators and non-essential labels"
+    )]
+    pub quiet: bool,
+    #[arg(
+        long,
+        global = true,
         value_name = "NAME",
         help = "Profile name to load from .hpc-compose/settings.toml"
     )]
@@ -181,6 +187,8 @@ pub enum Commands {
             help = "Include resolved environment values and final mount mappings"
         )]
         verbose: bool,
+        #[arg(long, help = "Show services as a dependency tree")]
+        tree: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(long, hide = true, conflicts_with = "format")]
@@ -201,6 +209,8 @@ pub enum Commands {
         file: Option<PathBuf>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
+        #[arg(long, help = "Show resolved interpolation variables and their sources")]
+        variables: bool,
     },
     #[command(
         about = "Print the hpc-compose JSON Schema",
@@ -208,6 +218,14 @@ pub enum Commands {
         after_help = SCHEMA_HELP
     )]
     Schema,
+    #[command(
+        about = "Check cluster readiness and tool availability",
+        long_about = "Run environment diagnostics without requiring a compose file. Checks Slurm, Enroot, Pyxis, GPU, and cache directory availability."
+    )]
+    Doctor {
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
     #[command(
         about = "Submit, watch, and stream logs in one command",
         long_about = "Run the normal end-to-end workflow: optional preflight, image preparation, script rendering, sbatch submission or local launch, and immediate live watching with log streaming and exit-code propagation.",

@@ -5,16 +5,20 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{CacheCommands, Cli, Commands, JobsCommands};
-use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};
+use hpc_compose::context::{
+    BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
+};
 use hpc_compose::term;
 
 mod cache;
+mod doctor;
 mod init;
 mod runtime;
 mod spec;
 
 #[derive(Debug, Clone, Default)]
 struct GlobalCommandOptions {
+    quiet: bool,
     profile: Option<String>,
     settings_file: Option<PathBuf>,
     raw_args: Vec<OsString>,
@@ -27,6 +31,7 @@ pub fn run_cli(cli: Cli, raw_args: &[OsString]) -> Result<()> {
     run_command_with_options(
         cli.command,
         &GlobalCommandOptions {
+            quiet: cli.quiet,
             profile: cli.profile,
             settings_file: cli.settings_file,
             raw_args: raw_args.to_vec(),
@@ -74,7 +79,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--enroot-bin", &enroot_bin)]);
             let context = resolve_command_context(options, file, binary_overrides)?;
-            spec::prepare(context, keep_failed_prep, force, format)
+            spec::prepare(context, keep_failed_prep, force, format, options.quiet)
         }
         Commands::Preflight {
             file,
@@ -95,22 +100,31 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
-            spec::preflight(context, strict, verbose, format, json)
+            spec::preflight(context, strict, verbose, format, json, options.quiet)
         }
         Commands::Inspect {
             file,
             verbose,
+            tree,
             format,
             json,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
-            spec::inspect(context, verbose, format, json)
+            spec::inspect(context, verbose, tree, format, json)
         }
-        Commands::Config { file, format } => {
+        Commands::Config {
+            file,
+            format,
+            variables,
+        } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
-            spec::config(context, format)
+            spec::config(context, format, variables)
         }
         Commands::Schema => print_schema(),
+        Commands::Doctor { format } => {
+            let binaries = resolve_command_binaries(options, BinaryOverrides::default())?;
+            doctor::doctor(format, &binaries)
+        }
         Commands::Up {
             file,
             script_out,
@@ -150,6 +164,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 allow_resume_changes,
                 resume_diff_only,
                 dry_run,
+                options.quiet,
             )
         }
         Commands::Submit {
@@ -195,6 +210,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 resume_diff_only,
                 dry_run,
                 format,
+                options.quiet,
             )
         }
         Commands::Status {
@@ -341,6 +357,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 skip_prepare,
                 force_rebuild,
                 no_preflight,
+                options.quiet,
             )
         }
         Commands::New {
@@ -458,6 +475,20 @@ fn resolve_command_context(
         profile: options.profile.clone(),
         settings_file: options.settings_file.clone(),
         compose_file_override: compose_file,
+        binary_overrides,
+    })
+}
+
+fn resolve_command_binaries(
+    options: &GlobalCommandOptions,
+    binary_overrides: BinaryOverrides,
+) -> Result<hpc_compose::context::ResolvedBinaries> {
+    let cwd = env::current_dir().context("failed to determine current working directory")?;
+    resolve_binaries_only(&ResolveRequest {
+        cwd,
+        profile: options.profile.clone(),
+        settings_file: options.settings_file.clone(),
+        compose_file_override: None,
         binary_overrides,
     })
 }
@@ -666,6 +697,7 @@ mod tests {
         run_cli(
             Cli {
                 color: hpc_compose::cli::ColorPolicy::Auto,
+                quiet: false,
                 profile: None,
                 settings_file: None,
                 command: Commands::Jobs {

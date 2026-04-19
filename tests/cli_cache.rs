@@ -28,7 +28,8 @@ fn prepare_and_cache_commands_manage_artifacts() {
     let prepare_stderr = stderr_text(&prepare);
     assert!(prepare_stderr.contains("[run] Preparing runtime artifacts"));
     assert!(prepare_stderr.contains("[done] Preparing runtime artifacts"));
-    assert!(stdout_text(&prepare).contains("BUILD service 'app' runtime image"));
+    let prepare_stdout = stdout_text(&prepare);
+    assert!(prepare_stdout.contains("BUILD") && prepare_stdout.contains("app"));
     assert!(plan.ordered_services[0].runtime_image.exists());
     assert!(
         hpc_compose::cache::manifest_path_for(&plan.ordered_services[0].runtime_image).exists()

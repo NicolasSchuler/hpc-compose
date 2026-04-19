@@ -13,7 +13,7 @@ use hpc_compose::term;
 use serde::Serialize;
 
 use crate::output::{common as output_common, spec as output_spec};
-use crate::progress::ProgressReporter;
+use crate::progress::{PrepareProgress, ProgressReporter};
 
 pub(crate) fn validate(
     context: ResolvedContext,
@@ -90,13 +90,16 @@ pub(crate) fn prepare(
     keep_failed_prep: bool,
     force: bool,
     format: Option<OutputFormat>,
+    quiet: bool,
 ) -> Result<()> {
     let output_format = output_common::resolve_output_format(format, false);
-    let progress = ProgressReporter::new(output_format == OutputFormat::Text);
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
     let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
+    let prepare_progress =
+        PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
     let summary = progress.run_result("Preparing runtime artifacts", || {
         prepare_runtime_plan(
             &runtime_plan,
@@ -107,8 +110,10 @@ pub(crate) fn prepare(
             },
         )
     })?;
+    prepare_progress.finish_from_summary(&summary);
     match output_format {
-        OutputFormat::Text => output_spec::print_prepare_summary(&summary),
+        OutputFormat::Text if !quiet => output_spec::print_prepare_summary(&summary),
+        OutputFormat::Text => {}
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -126,9 +131,10 @@ pub(crate) fn preflight(
     verbose: bool,
     format: Option<OutputFormat>,
     json: bool,
+    quiet: bool,
 ) -> Result<()> {
     let output_format = output_common::resolve_output_format(format, json);
-    let progress = ProgressReporter::new(output_format == OutputFormat::Text);
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
     let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
@@ -147,7 +153,8 @@ pub(crate) fn preflight(
         ))
     })?;
     match output_format {
-        OutputFormat::Text => output_spec::print_report(&report, verbose),
+        OutputFormat::Text if !quiet => output_spec::print_report(&report, verbose),
+        OutputFormat::Text => {}
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -168,6 +175,7 @@ pub(crate) fn preflight(
 pub(crate) fn inspect(
     context: ResolvedContext,
     verbose: bool,
+    tree: bool,
     format: Option<OutputFormat>,
     json: bool,
 ) -> Result<()> {
@@ -177,7 +185,10 @@ pub(crate) fn inspect(
     )?;
     match output_common::resolve_output_format(format, json) {
         OutputFormat::Text => {
-            if verbose {
+            if tree {
+                output_spec::print_plan_inspect_tree(&plan, &runtime_plan)
+                    .context("failed to write tree output")?;
+            } else if verbose {
                 output_spec::print_plan_inspect_verbose(&plan, &runtime_plan)
                     .context("failed to write inspect output")?;
             } else {
@@ -196,12 +207,44 @@ pub(crate) fn inspect(
     Ok(())
 }
 
-pub(crate) fn config(context: ResolvedContext, format: Option<OutputFormat>) -> Result<()> {
+pub(crate) fn config(
+    context: ResolvedContext,
+    format: Option<OutputFormat>,
+    variables: bool,
+) -> Result<()> {
     let config = output_common::load_effective_config_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
-    match output_common::resolve_output_format(format, false) {
+    let output_format = output_common::resolve_output_format(format, false);
+    if variables {
+        match output_format {
+            OutputFormat::Text => output_spec::print_interpolation_vars(
+                &context.interpolation_vars,
+                &context.interpolation_var_sources,
+            ),
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output_spec::InterpolationVarsOutput {
+                        variables: context
+                            .interpolation_vars
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                        sources: context
+                            .interpolation_var_sources
+                            .iter()
+                            .map(|(k, v)| (k.clone(), format!("{v:?}").to_lowercase()))
+                            .collect(),
+                    })
+                    .context("failed to serialize variables output")?
+                );
+            }
+        }
+        return Ok(());
+    }
+    match output_format {
         OutputFormat::Text => {
             print!("{}", output_common::effective_config_yaml(&config)?);
         }
@@ -709,6 +752,7 @@ services:
             false,
             true,
             Some(OutputFormat::Json),
+            false,
         )
         .expect("prepare json");
         preflight(
@@ -717,10 +761,12 @@ services:
             true,
             Some(OutputFormat::Json),
             false,
+            false,
         )
         .expect("preflight json");
         inspect(
             resolved_context.clone(),
+            false,
             false,
             Some(OutputFormat::Json),
             false,
@@ -759,8 +805,8 @@ services:
 
         let remote_compose = write_remote_compose(tmpdir.path());
         let strict_warning_context = context_for(&remote_compose, tmpdir.path());
-        let strict_warning =
-            preflight(strict_warning_context, true, false, None, false).expect_err("warnings");
+        let strict_warning = preflight(strict_warning_context, true, false, None, false, false)
+            .expect_err("warnings");
         assert!(
             strict_warning
                 .to_string()
@@ -769,8 +815,8 @@ services:
 
         let missing_compose = write_missing_image_compose(tmpdir.path());
         let missing_context = context_for(&missing_compose, tmpdir.path());
-        let preflight_err =
-            preflight(missing_context, false, false, None, false).expect_err("missing image");
+        let preflight_err = preflight(missing_context, false, false, None, false, false)
+            .expect_err("missing image");
         assert!(preflight_err.to_string().contains("preflight failed"));
 
         let context_compose = write_context_compose(tmpdir.path());
@@ -797,7 +843,7 @@ services:
             None,
         )
         .expect("render text");
-        inspect(resolved_context, true, None, false).expect("inspect verbose text");
+        inspect(resolved_context, true, false, None, false).expect("inspect verbose text");
 
         let strict_compose = tmpdir.path().join("compose-strict.yaml");
         fs::create_dir_all(tmpdir.path().join("cache-strict")).expect("strict cache");

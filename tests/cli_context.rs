@@ -343,6 +343,108 @@ compose_file = "missing.yaml"
 }
 
 #[test]
+fn doctor_uses_profile_binary_overrides_and_detects_pyxis_from_srun_help() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let home = tmpdir.path().join("home");
+    let xdg_cache = tmpdir.path().join("xdg-cache");
+    fs::create_dir_all(home.join(".hpc-compose")).expect("home dir");
+    fs::create_dir_all(&xdg_cache).expect("xdg cache");
+
+    let enroot = tmpdir.path().join("enroot-custom");
+    write_script(
+        &enroot,
+        "#!/bin/bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"version\" ]]; then echo 'enroot 3.5.0'; exit 0; fi\nexit 0\n",
+    );
+    let sbatch = tmpdir.path().join("sbatch-custom");
+    write_script(
+        &sbatch,
+        "#!/bin/bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then echo 'sbatch 23.11'; exit 0; fi\necho 'Submitted batch job 1'\n",
+    );
+    let srun = tmpdir.path().join("srun-custom");
+    write_script(
+        &srun,
+        "#!/bin/bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then echo 'srun 23.11'; exit 0; fi\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'usage: srun --container-image=IMAGE'; exit 0; fi\nexit 0\n",
+    );
+    let squeue = tmpdir.path().join("squeue-custom");
+    write_script(
+        &squeue,
+        "#!/bin/bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then echo 'squeue 23.11'; exit 0; fi\nexit 0\n",
+    );
+    let sacct = tmpdir.path().join("sacct-custom");
+    write_script(
+        &sacct,
+        "#!/bin/bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then echo 'sacct 23.11'; exit 0; fi\nexit 0\n",
+    );
+    let scancel = tmpdir.path().join("scancel-custom");
+    write_script(
+        &scancel,
+        "#!/bin/bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then echo 'scancel 23.11'; exit 0; fi\nexit 0\n",
+    );
+
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "dev"
+
+[profiles.dev.binaries]
+enroot = "{enroot}"
+sbatch = "{sbatch}"
+srun = "{srun}"
+squeue = "{squeue}"
+sacct = "{sacct}"
+scancel = "{scancel}"
+"#,
+            enroot = enroot.display(),
+            sbatch = sbatch.display(),
+            srun = srun.display(),
+            squeue = squeue.display(),
+            sacct = sacct.display(),
+            scancel = scancel.display(),
+        ),
+    )
+    .expect("settings");
+
+    let output = run_cli_with_env(
+        tmpdir.path(),
+        &["--profile", "dev", "doctor", "--format", "json"],
+        &[
+            ("HOME", home.to_str().expect("home")),
+            ("XDG_CACHE_HOME", xdg_cache.to_str().expect("cache")),
+        ],
+    );
+    assert_success(&output);
+
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("doctor json");
+    let passed_checks = payload["passed_checks"]
+        .as_array()
+        .expect("passed checks array");
+
+    assert!(
+        passed_checks
+            .iter()
+            .any(|item| item["message"] == Value::from("sbatch: sbatch 23.11"))
+    );
+    assert!(
+        passed_checks
+            .iter()
+            .any(|item| item["message"] == Value::from("srun: srun 23.11"))
+    );
+    assert!(
+        passed_checks
+            .iter()
+            .any(|item| item["message"] == Value::from("enroot: enroot 3.5.0"))
+    );
+    assert!(
+        passed_checks
+            .iter()
+            .any(|item| item["message"] == Value::from("Pyxis: available"))
+    );
+}
+
+#[test]
 fn context_text_reports_resume_export_and_interpolation_sources() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");

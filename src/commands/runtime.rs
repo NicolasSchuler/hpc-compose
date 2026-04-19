@@ -27,7 +27,7 @@ use hpc_compose::render::{log_file_name_for_service, render_local_script, render
 use hpc_compose::spec::{ServiceFailureMode, parse_slurm_time_limit};
 
 use crate::output;
-use crate::progress::ProgressReporter;
+use crate::progress::{PrepareProgress, ProgressReporter};
 use crate::watch_ui;
 
 fn watch_with_fallback(
@@ -545,6 +545,7 @@ pub(crate) fn submit(
     resume_diff_only: bool,
     dry_run: bool,
     format: Option<OutputFormat>,
+    quiet: bool,
 ) -> Result<()> {
     let file = context.compose_file.value.clone();
     let effective_config =
@@ -556,7 +557,7 @@ pub(crate) fn submit(
     )?;
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let output_format = output::resolve_output_format(format, false);
-    let progress = ProgressReporter::new(output_format == OutputFormat::Text);
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
     let backend = if local {
         SubmissionBackend::Local
     } else {
@@ -602,13 +603,17 @@ pub(crate) fn submit(
                 },
             ))
         })?;
-        output::print_report(&report, false);
+        if !quiet {
+            output::print_report(&report, false);
+        }
         if report.has_errors() {
             bail!("preflight failed; fix the reported errors before submitting");
         }
     }
 
     if !skip_prepare {
+        let prepare_progress =
+            PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
         let summary = progress.run_result("Preparing runtime artifacts", || {
             prepare_runtime_plan(
                 &runtime_plan,
@@ -619,7 +624,8 @@ pub(crate) fn submit(
                 },
             )
         })?;
-        if output_format == OutputFormat::Text {
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet && output_format == OutputFormat::Text {
             output::print_prepare_summary(&summary);
         }
     }
@@ -709,9 +715,11 @@ pub(crate) fn submit(
         match output_format {
             OutputFormat::Text => {
                 print_local_launch_details(&record, &runtime_plan, &script_path);
-                println!(
-                    "tracked job metadata: {}",
-                    latest_record_path(&record).display()
+                output::print_submit_summary_box(
+                    &runtime_plan,
+                    &record.job_id,
+                    &script_path,
+                    Some(&latest_record_path(&record)),
                 );
             }
             OutputFormat::Json => {
@@ -800,9 +808,12 @@ pub(crate) fn submit(
             output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
             if let Some((record, persisted)) = tracked_submission.as_ref() {
                 if *persisted {
-                    println!(
-                        "tracked job metadata: {}",
-                        latest_record_path(record).display()
+                    let meta_path = latest_record_path(record);
+                    output::print_submit_summary_box(
+                        &runtime_plan,
+                        &record.job_id,
+                        &script_path,
+                        Some(&meta_path),
                     );
                 } else {
                     println!(
@@ -873,6 +884,7 @@ pub(crate) fn up(
     allow_resume_changes: bool,
     resume_diff_only: bool,
     dry_run: bool,
+    quiet: bool,
 ) -> Result<()> {
     submit(
         context,
@@ -887,6 +899,7 @@ pub(crate) fn up(
         resume_diff_only,
         dry_run,
         Some(OutputFormat::Text),
+        quiet,
     )
 }
 
@@ -900,9 +913,10 @@ pub(crate) fn run_service(
     skip_prepare: bool,
     force_rebuild: bool,
     no_preflight: bool,
+    quiet: bool,
 ) -> Result<()> {
     let file = context.compose_file.value.clone();
-    let progress = ProgressReporter::new(true);
+    let progress = ProgressReporter::new(!quiet);
     let mut runtime_plan = output::load_runtime_plan_with_interpolation_vars(
         &context.compose_file.value,
         &context.interpolation_vars,
@@ -940,13 +954,16 @@ pub(crate) fn run_service(
                 },
             ))
         })?;
-        output::print_report(&report, false);
+        if !quiet {
+            output::print_report(&report, false);
+        }
         if report.has_errors() {
             bail!("preflight failed; fix the reported errors before running");
         }
     }
 
     if !skip_prepare {
+        let prepare_progress = PrepareProgress::new(&runtime_plan, !quiet);
         let summary = progress.run_result("Preparing runtime artifacts", || {
             prepare_runtime_plan(
                 &runtime_plan,
@@ -957,7 +974,10 @@ pub(crate) fn run_service(
                 },
             )
         })?;
-        output::print_prepare_summary(&summary);
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet {
+            output::print_prepare_summary(&summary);
+        }
     }
 
     let script = progress.run_result("Rendering run script", || render_script(&runtime_plan))?;
@@ -1009,9 +1029,11 @@ pub(crate) fn run_service(
         },
     )?;
     write_submission_record(&record)?;
-    println!(
-        "tracked job metadata: {}",
-        latest_record_path(&record).display()
+    output::print_submit_summary_box(
+        &runtime_plan,
+        &record.job_id,
+        &script_path,
+        Some(&latest_record_path(&record)),
     );
     output::finish_watch(
         &record.job_id,
@@ -1486,6 +1508,7 @@ mod tests {
             false,
             true,
             None,
+            false,
         )
         .expect("submit dry run");
         submit(
@@ -1501,6 +1524,7 @@ mod tests {
             false,
             true,
             Some(OutputFormat::Json),
+            false,
         )
         .expect("submit dry run json");
 
@@ -1588,6 +1612,7 @@ mod tests {
             false,
             false,
             None,
+            false,
         )
         .expect_err("sbatch failure");
         assert!(

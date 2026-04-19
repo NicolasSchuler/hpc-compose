@@ -96,7 +96,9 @@ fn submit_skip_prepare_reuses_existing_artifact() {
         ],
     );
     assert_success(&submit);
-    assert!(!stdout_text(&submit).contains("BUILD service 'app' runtime image"));
+    assert!(
+        !stdout_text(&submit).contains("BUILD") || !stdout_text(&submit).contains("service 'app'")
+    );
     assert!(stdout_text(&submit).contains("Submitted batch job 12345"));
 }
 

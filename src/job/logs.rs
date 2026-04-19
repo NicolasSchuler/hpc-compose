@@ -2,6 +2,7 @@ use super::scheduler::{
     is_transitional_local_only, reconcile_scheduler_status, unix_timestamp_now,
 };
 use super::*;
+use crate::term;
 
 /// Final outcome returned by `watch_submission`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,7 +237,12 @@ fn emit_initial_tail(
     for index in 0..max_len {
         for (service, lines) in &tailed {
             if let Some(line) = lines.get(index) {
-                writeln!(writer, "[{service}] {line}").context("failed to write log output")?;
+                writeln!(
+                    writer,
+                    "{} {line}",
+                    term::styled_service_log_prefix(service)
+                )
+                .context("failed to write log output")?;
             }
         }
     }
@@ -264,8 +270,12 @@ fn drain_log_cursors(cursors: &mut [LogCursor], writer: &mut impl Write) -> Resu
     let mut emitted = false;
     for cursor in cursors {
         for line in read_new_lines(cursor)? {
-            writeln!(writer, "[{}] {}", cursor.service_name, line)
-                .context("failed to write log output")?;
+            writeln!(
+                writer,
+                "{} {line}",
+                term::styled_service_log_prefix(&cursor.service_name)
+            )
+            .context("failed to write log output")?;
             emitted = true;
         }
     }
@@ -384,14 +394,14 @@ mod tests {
         let mut rendered = Vec::new();
         emit_initial_tail(&selected, 2, &mut rendered).expect("emit initial");
         let rendered = String::from_utf8(rendered).expect("utf8");
-        assert!(rendered.contains("[api] ready"));
+        assert!(rendered.contains("api") && rendered.contains("ready"));
 
         let mut cursors = build_cursors(&selected);
         fs::write(api_log, "boot\nready\npartial\nnext\n").expect("append api log");
         let mut followed = Vec::new();
         assert!(drain_log_cursors(&mut cursors, &mut followed).expect("drain"));
         let followed = String::from_utf8(followed).expect("utf8");
-        assert!(followed.contains("[api] next"));
+        assert!(followed.contains("api") && followed.contains("next"));
 
         let state_path = state_path_for_record(&record);
         if let Some(parent) = state_path.parent() {

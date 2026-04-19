@@ -161,25 +161,114 @@ pub(crate) fn styled_service_status(status: &str) -> String {
 
 pub(crate) fn styled_action_ok() -> String {
     if colors_enabled() {
-        "OK".green().bold().to_string()
+        symbol_ok().green().bold().to_string()
     } else {
-        "OK".to_string()
+        symbol_ok().to_string()
     }
 }
 
 pub(crate) fn styled_action_build() -> String {
     if colors_enabled() {
-        "BUILD".yellow().bold().to_string()
+        symbol_build().yellow().bold().to_string()
     } else {
-        "BUILD".to_string()
+        symbol_build().to_string()
     }
 }
 
 pub(crate) fn styled_action_reuse() -> String {
     if colors_enabled() {
-        "REUSE".cyan().bold().to_string()
+        symbol_reuse().cyan().bold().to_string()
     } else {
-        "REUSE".to_string()
+        symbol_reuse().to_string()
+    }
+}
+
+pub(crate) fn symbol_ok() -> &'static str {
+    if unicode_allowed() {
+        "\u{2713} OK"
+    } else {
+        "OK"
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn symbol_fail() -> &'static str {
+    if unicode_allowed() {
+        "\u{2717} FAIL"
+    } else {
+        "FAIL"
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn symbol_run() -> &'static str {
+    if unicode_allowed() {
+        "\u{25cf} RUN"
+    } else {
+        "RUN"
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn symbol_pending() -> &'static str {
+    if unicode_allowed() {
+        "\u{25d0} PEND"
+    } else {
+        "PEND"
+    }
+}
+
+fn symbol_build() -> &'static str {
+    if unicode_allowed() {
+        "\u{25cf} BUILD"
+    } else {
+        "BUILD"
+    }
+}
+
+fn symbol_reuse() -> &'static str {
+    if unicode_allowed() {
+        "\u{25d0} REUSE"
+    } else {
+        "REUSE"
+    }
+}
+
+fn unicode_allowed() -> bool {
+    if colors_enabled() {
+        unicode_allowed_raw()
+    } else {
+        false
+    }
+}
+
+pub(crate) fn unicode_allowed_raw() -> bool {
+    std::env::var("LANG")
+        .or_else(|_| std::env::var("LC_ALL"))
+        .is_ok_and(|v| v.contains("UTF-8") || v.contains("utf8") || v.contains("utf-8"))
+}
+
+pub(crate) fn styled_success_raw(text: &str) -> String {
+    if colors_enabled() {
+        text.green().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub(crate) fn styled_warning_raw(text: &str) -> String {
+    if colors_enabled() {
+        text.yellow().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub(crate) fn styled_error_raw(text: &str) -> String {
+    if colors_enabled() {
+        text.red().to_string()
+    } else {
+        text.to_string()
     }
 }
 
@@ -197,6 +286,30 @@ pub(crate) fn styled_note(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+pub(crate) fn styled_service_log_prefix(service: &str) -> String {
+    if !colors_enabled() {
+        return format!("[{service}]");
+    }
+    let color_index = simple_hash(service) as usize % 7;
+    match color_index {
+        0 => format!("[{}]", service.cyan()),
+        1 => format!("[{}]", service.magenta()),
+        2 => format!("[{}]", service.blue()),
+        3 => format!("[{}]", service.green()),
+        4 => format!("[{}]", service.yellow()),
+        5 => format!("[{}]", service.red()),
+        _ => format!("[{}]", service.purple()),
+    }
+}
+
+fn simple_hash(s: &str) -> u32 {
+    let mut hash: u32 = 5381;
+    for byte in s.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(byte as u32);
+    }
+    hash
 }
 
 #[cfg(test)]

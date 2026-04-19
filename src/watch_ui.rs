@@ -33,6 +33,14 @@ pub(crate) enum WatchKey {
     Last,
     Tab,
     Quit,
+    Help,
+    Search,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputMode {
+    Normal,
+    Search,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +49,9 @@ pub(crate) struct WatchModel {
     pub(crate) selected_index: usize,
     pub(crate) walltime_progress: Option<WalltimeProgress>,
     pub(crate) log_lines: Vec<String>,
+    pub(crate) show_help: bool,
+    pub(crate) filter: Option<String>,
+    pub(crate) input_mode: InputMode,
 }
 
 #[derive(Debug, Clone)]
@@ -171,14 +182,26 @@ pub(crate) fn run_watch_ui(
         log_capacity(height),
     );
     let mut last_refresh = Instant::now();
+    let mut show_help = false;
+    let mut filter: Option<String> = None;
+    let mut input_mode = InputMode::Normal;
+    let mut search_buffer = String::new();
 
     loop {
         if last_refresh.elapsed() >= DATA_REFRESH_INTERVAL {
             snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), options)?;
-            selected_index = clamp_selected_index(&snapshot, selected_index);
+            let effective = filtered_services(&snapshot.services, filter.as_deref());
+            selected_index = clamp_selected_index_raw(&effective, selected_index);
             let (_, height) = terminal_size();
+            let resolved = effective.get(selected_index);
+            let original_index = resolved.and_then(|r| {
+                snapshot
+                    .services
+                    .iter()
+                    .position(|s| s.service_name == r.service_name)
+            });
             log_buffer.reseed_if_needed(
-                snapshot.services.get(selected_index),
+                original_index.map(|i| &snapshot.services[i]),
                 lines,
                 log_capacity(height),
             );
@@ -198,6 +221,9 @@ pub(crate) fn run_watch_ui(
                 selected_index,
                 walltime_progress,
                 log_lines: log_buffer.lines.clone(),
+                show_help,
+                filter: filter.clone(),
+                input_mode,
             },
             terminal_size(),
         )?;
@@ -214,19 +240,56 @@ pub(crate) fn run_watch_ui(
         let read = input
             .read(&mut bytes)
             .context("failed to read watch UI input")?;
-        if read > 0 {
+        if read > 0 && input_mode == InputMode::Search {
+            pending_input.extend_from_slice(&bytes[..read]);
+            for key in parse_search_keys(&mut pending_input) {
+                match key {
+                    SearchKey::Char(ch) => search_buffer.push(ch),
+                    SearchKey::Backspace => {
+                        search_buffer.pop();
+                    }
+                    SearchKey::Submit => {
+                        filter = if search_buffer.is_empty() {
+                            None
+                        } else {
+                            Some(search_buffer.clone())
+                        };
+                        input_mode = InputMode::Normal;
+                        selected_index = 0;
+                    }
+                    SearchKey::Cancel => {
+                        search_buffer.clear();
+                        input_mode = InputMode::Normal;
+                    }
+                }
+            }
+        } else if read > 0 {
             pending_input.extend_from_slice(&bytes[..read]);
             for key in parse_keys(&mut pending_input) {
                 match key {
                     WatchKey::Quit => {
                         return Ok(WatchOutcome::Interrupted(snapshot.scheduler.clone()));
                     }
+                    WatchKey::Help => {
+                        show_help = !show_help;
+                    }
+                    WatchKey::Search => {
+                        input_mode = InputMode::Search;
+                        search_buffer = filter.clone().unwrap_or_default();
+                    }
                     other => {
-                        selected_index =
-                            apply_watch_key(selected_index, snapshot.services.len(), other);
+                        let effective = filtered_services(&snapshot.services, filter.as_deref());
+                        selected_index = apply_watch_key(selected_index, effective.len(), other);
                         let (_, height) = terminal_size();
+                        let resolved = effective.get(selected_index);
+                        let original_index = resolved.and_then(|r| {
+                            snapshot
+                                .services
+                                .iter()
+                                .position(|s| s.service_name == r.service_name)
+                        });
                         log_buffer.reseed_if_needed(
-                            snapshot.services.get(selected_index),
+                            original_index.map(|i| &snapshot.services[i]),
                             lines,
                             log_capacity(height),
                         );
@@ -260,14 +323,15 @@ pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: 
         WatchKey::Down | WatchKey::Tab => (selected_index + 1).min(service_count - 1),
         WatchKey::First => 0,
         WatchKey::Last => service_count - 1,
-        WatchKey::Quit => selected_index,
+        WatchKey::Quit | WatchKey::Help | WatchKey::Search => selected_index,
     }
 }
 
 pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize) -> String {
     let width = width.max(80);
     let height = height.max(12);
-    let selected = model.snapshot.services.get(model.selected_index);
+    let effective = filtered_services(&model.snapshot.services, model.filter.as_deref());
+    let selected = effective.get(model.selected_index);
     let scheduler = format!(
         "{} ({})",
         term::styled_scheduler_state(&model.snapshot.scheduler.state),
@@ -277,12 +341,19 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         .map(|service| service.service_name.as_str())
         .unwrap_or("<none>");
 
+    let filter_indicator = model
+        .filter
+        .as_deref()
+        .map(|f| format!(" | {}", term::styled_warning(&format!("filter: {f}"))))
+        .unwrap_or_default();
+
     let mut lines = vec![
         fit_line(
             &format!(
-                "{} | job {}",
+                "{} | job {}{}",
                 term::styled_bold("hpc-compose watch"),
-                model.snapshot.record.job_id
+                model.snapshot.record.job_id,
+                filter_indicator
             ),
             width,
         ),
@@ -290,7 +361,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
             &format!(
                 "scheduler: {} | services: {} | selected: {}",
                 scheduler,
-                model.snapshot.services.len(),
+                effective.len(),
                 selected_name
             ),
             width,
@@ -319,7 +390,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         "svc              step         pid    ready status   restarts exit",
         table_width,
     ));
-    for (index, service) in model.snapshot.services.iter().enumerate() {
+    for (index, service) in effective.iter().enumerate() {
         let marker = if index == model.selected_index {
             term::styled_success(">")
         } else {
@@ -382,6 +453,31 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         ));
     }
 
+    if model.input_mode == InputMode::Search {
+        lines.push("-".repeat(width));
+        lines.push(fit_line(
+            &format!(
+                "{}: {}",
+                term::styled_bold("filter"),
+                model.filter.as_deref().unwrap_or("")
+            ),
+            width,
+        ));
+    }
+
+    if model.show_help {
+        lines.push("-".repeat(width));
+        lines.push(fit_line(&term::styled_bold("Keybindings:"), width));
+        lines.push(fit_line("  j / Down    scroll down", width));
+        lines.push(fit_line("  k / Up      scroll up", width));
+        lines.push(fit_line("  g           first service", width));
+        lines.push(fit_line("  G           last service", width));
+        lines.push(fit_line("  /           filter services", width));
+        lines.push(fit_line("  ?           toggle help", width));
+        lines.push(fit_line("  q           quit", width));
+        lines.push("-".repeat(width));
+    }
+
     lines.join("\n")
 }
 
@@ -409,12 +505,78 @@ fn initial_selected_index(snapshot: &PsSnapshot, initial_service: Option<&str>) 
     }
 }
 
+#[cfg(test)]
 fn clamp_selected_index(snapshot: &PsSnapshot, selected_index: usize) -> usize {
     if snapshot.services.is_empty() {
         0
     } else {
         selected_index.min(snapshot.services.len() - 1)
     }
+}
+
+fn clamp_selected_index_raw(services: &[&PsServiceRow], selected_index: usize) -> usize {
+    if services.is_empty() {
+        0
+    } else {
+        selected_index.min(services.len() - 1)
+    }
+}
+
+fn filtered_services<'a>(
+    services: &'a [PsServiceRow],
+    filter: Option<&str>,
+) -> Vec<&'a PsServiceRow> {
+    match filter {
+        Some(pattern) if !pattern.is_empty() => services
+            .iter()
+            .filter(|s| s.service_name.contains(pattern))
+            .collect(),
+        _ => services.iter().collect(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchKey {
+    Char(char),
+    Backspace,
+    Submit,
+    Cancel,
+}
+
+fn parse_search_keys(buffer: &mut Vec<u8>) -> Vec<SearchKey> {
+    let mut keys = Vec::new();
+    let mut index = 0;
+    while index < buffer.len() {
+        match buffer[index] {
+            0x7f | 0x08 => {
+                keys.push(SearchKey::Backspace);
+                index += 1;
+            }
+            b'\n' | b'\r' => {
+                keys.push(SearchKey::Submit);
+                index += 1;
+            }
+            0x1b => {
+                keys.push(SearchKey::Cancel);
+                let mut consume = 1;
+                if buffer.len() > index + 1 && buffer[index + 1] == b'[' {
+                    consume = 3.min(buffer.len() - index);
+                }
+                index += consume;
+            }
+            byte if byte >= 0x20 && byte < 0x7f => {
+                keys.push(SearchKey::Char(byte as char));
+                index += 1;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    if index > 0 {
+        buffer.drain(0..index);
+    }
+    keys
 }
 
 fn log_capacity(height: usize) -> usize {
@@ -445,7 +607,29 @@ fn render_walltime_bar(progress: &WalltimeProgress, width: usize) -> String {
             / u128::from(progress.total_seconds)) as usize
     }
     .min(bar_width);
-    let bar = format!("{}{}", "=".repeat(filled), "-".repeat(bar_width - filled));
+    let pct = if progress.total_seconds == 0 {
+        0
+    } else {
+        u128::from(progress.elapsed_seconds) * 100 / u128::from(progress.total_seconds)
+    };
+    let bar = if term::unicode_allowed_raw() {
+        let filled_char = "\u{2588}";
+        let empty_char = "\u{2591}";
+        let raw_bar = format!(
+            "{}{}",
+            filled_char.repeat(filled),
+            empty_char.repeat(bar_width - filled)
+        );
+        if pct >= 90 {
+            term::styled_error_raw(&raw_bar)
+        } else if pct >= 75 {
+            term::styled_warning_raw(&raw_bar)
+        } else {
+            term::styled_success_raw(&raw_bar)
+        }
+    } else {
+        format!("{}{}", "=".repeat(filled), "-".repeat(bar_width - filled))
+    };
     summary.replacen("{}", &bar, 1)
 }
 
@@ -523,6 +707,14 @@ fn parse_keys(buffer: &mut Vec<u8>) -> Vec<WatchKey> {
             }
             b'\t' => {
                 keys.push(WatchKey::Tab);
+                index += 1;
+            }
+            b'?' => {
+                keys.push(WatchKey::Help);
+                index += 1;
+            }
+            b'/' => {
+                keys.push(WatchKey::Search);
                 index += 1;
             }
             0x1b if buffer.len().saturating_sub(index) < 3 => break,
@@ -866,7 +1058,7 @@ mod tests {
     #[test]
     fn parse_keys_recognizes_navigation_sequences() {
         let mut raw = vec![
-            b'j', b'k', b'g', b'G', b'\t', 0x1b, b'[', b'A', 0x1b, b'[', b'B', b'q',
+            b'j', b'k', b'g', b'G', b'\t', 0x1b, b'[', b'A', 0x1b, b'[', b'B', b'q', b'?', b'/',
         ];
         assert_eq!(
             parse_keys(&mut raw),
@@ -879,6 +1071,8 @@ mod tests {
                 WatchKey::Up,
                 WatchKey::Down,
                 WatchKey::Quit,
+                WatchKey::Help,
+                WatchKey::Search,
             ]
         );
         assert!(raw.is_empty());
@@ -903,6 +1097,9 @@ mod tests {
                 selected_index: 0,
                 walltime_progress: None,
                 log_lines: vec!["booting".into(), "ready".into()],
+                show_help: false,
+                filter: None,
+                input_mode: InputMode::Normal,
             },
             100,
             18,
@@ -1090,6 +1287,9 @@ mod tests {
                 selected_index: 1,
                 walltime_progress: None,
                 log_lines: vec!["tail".into()],
+                show_help: false,
+                filter: None,
+                input_mode: InputMode::Normal,
             },
             90,
             14,
@@ -1109,6 +1309,9 @@ mod tests {
                 selected_index: 0,
                 walltime_progress: None,
                 log_lines: Vec::new(),
+                show_help: false,
+                filter: None,
+                input_mode: InputMode::Normal,
             },
             90,
             14,
@@ -1130,6 +1333,9 @@ mod tests {
                     remaining_seconds: 300,
                 }),
                 log_lines: Vec::new(),
+                show_help: false,
+                filter: None,
+                input_mode: InputMode::Normal,
             },
             100,
             14,
@@ -1164,6 +1370,9 @@ exit 0
                     selected_index: 0,
                     walltime_progress: None,
                     log_lines: vec!["line".into()],
+                    show_help: false,
+                    filter: None,
+                    input_mode: InputMode::Normal,
                 },
                 (90, 14),
             )
@@ -1224,5 +1433,74 @@ exit 0
             .expect("run watch ui");
             assert!(matches!(outcome, WatchOutcome::Completed(_)));
         });
+    }
+
+    #[test]
+    fn filtered_services_narrows_by_name() {
+        let snapshot = sample_snapshot();
+        let all = filtered_services(&snapshot.services, None);
+        assert_eq!(all.len(), 2);
+        let narrowed = filtered_services(&snapshot.services, Some("api"));
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].service_name, "api");
+        let none = filtered_services(&snapshot.services, Some("missing"));
+        assert_eq!(none.len(), 0);
+    }
+
+    #[test]
+    fn render_watch_frame_shows_help_overlay() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: Vec::new(),
+                show_help: true,
+                filter: None,
+                input_mode: InputMode::Normal,
+            },
+            100,
+            22,
+        );
+        assert!(frame.contains("Keybindings:"));
+        assert!(frame.contains("j / Down"));
+        assert!(frame.contains("q           quit"));
+    }
+
+    #[test]
+    fn render_watch_frame_shows_filter_indicator() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: Vec::new(),
+                show_help: false,
+                filter: Some("api".into()),
+                input_mode: InputMode::Normal,
+            },
+            100,
+            14,
+        );
+        assert!(frame.contains("filter: api"));
+    }
+
+    #[test]
+    fn search_keys_parse_correctly() {
+        let mut buf = vec![b'a', b'b', 0x7f, b'\n'];
+        let keys = parse_search_keys(&mut buf);
+        assert_eq!(
+            keys,
+            vec![
+                SearchKey::Char('a'),
+                SearchKey::Char('b'),
+                SearchKey::Backspace,
+                SearchKey::Submit,
+            ]
+        );
+
+        let mut cancel_buf = vec![0x1b];
+        let keys = parse_search_keys(&mut cancel_buf);
+        assert_eq!(keys, vec![SearchKey::Cancel]);
     }
 }

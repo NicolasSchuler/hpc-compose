@@ -1,7 +1,8 @@
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use indicatif::{ProgressBar, ProgressStyle};
+use hpc_compose::prepare::{ArtifactAction, PrepareSummary, RuntimePlan};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::term;
 
@@ -175,6 +176,56 @@ fn format_elapsed(duration: Duration) -> String {
         format!("{:.1}s", duration.as_secs_f64())
     } else {
         format!("{}ms", duration.as_millis())
+    }
+}
+
+pub(crate) struct PrepareProgress {
+    #[allow(dead_code)]
+    multi: Option<MultiProgress>,
+    bars: Vec<ProgressBar>,
+}
+
+impl PrepareProgress {
+    pub(crate) fn new(plan: &RuntimePlan, enabled: bool) -> Self {
+        if !enabled || !io::stderr().is_terminal() || plan.ordered_services.len() <= 1 {
+            return Self {
+                multi: None,
+                bars: Vec::new(),
+            };
+        }
+        let multi = MultiProgress::new();
+        let style = ProgressStyle::with_template("  {wide_msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_bar());
+        let bars: Vec<ProgressBar> = plan
+            .ordered_services
+            .iter()
+            .map(|svc| {
+                let pb = multi.add(ProgressBar::new_spinner());
+                pb.set_style(style.clone());
+                pb.set_message(format!("{} ...", svc.name));
+                pb.enable_steady_tick(Duration::from_millis(200));
+                pb
+            })
+            .collect();
+        Self {
+            multi: Some(multi),
+            bars,
+        }
+    }
+
+    pub(crate) fn finish_from_summary(&self, summary: &PrepareSummary) {
+        for (i, svc) in summary.services.iter().enumerate() {
+            if let Some(bar) = self.bars.get(i) {
+                let action_label = match svc.runtime_image.action {
+                    ArtifactAction::Present => "present",
+                    ArtifactAction::Reused => "reused",
+                    ArtifactAction::Built => "built",
+                };
+                bar.set_message(format!("{} {}", svc.service_name, action_label));
+                bar.finish_and_clear();
+            }
+        }
+        drop(self.bars.clone());
     }
 }
 
