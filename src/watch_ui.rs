@@ -564,7 +564,7 @@ fn parse_search_keys(buffer: &mut Vec<u8>) -> Vec<SearchKey> {
                 }
                 index += consume;
             }
-            byte if byte >= 0x20 && byte < 0x7f => {
+            byte if (0x20..0x7f).contains(&byte) => {
                 keys.push(SearchKey::Char(byte as char));
                 index += 1;
             }

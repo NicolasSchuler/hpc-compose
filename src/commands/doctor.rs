@@ -226,16 +226,16 @@ fn check_completions(items: &mut Vec<Item>) {
 
     let mut found = false;
     for (rc_path, shell) in &shell_rcs {
-        if let Ok(contents) = std::fs::read_to_string(rc_path) {
-            if contents.contains("hpc-compose") {
-                items.push(Item {
-                    level: Level::Ok,
-                    message: format!("shell completions: found in {shell} config"),
-                    remediation: None,
-                });
-                found = true;
-                break;
-            }
+        if let Ok(contents) = std::fs::read_to_string(rc_path)
+            && contents.contains("hpc-compose")
+        {
+            items.push(Item {
+                level: Level::Ok,
+                message: format!("shell completions: found in {shell} config"),
+                remediation: None,
+            });
+            found = true;
+            break;
         }
     }
 

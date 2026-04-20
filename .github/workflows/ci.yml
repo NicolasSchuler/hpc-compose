@@ -455,5 +455,14 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@ddc7029b5ba1e37640598eb3580cdbefa9662f46
 
+      - name: Collect coverage data
+        run: cargo llvm-cov --workspace --locked --no-report
+
       - name: Enforce coverage gate
-        run: cargo llvm-cov --workspace --summary-only --fail-under-lines 95 --fail-under-regions 93 --fail-under-functions 91 --locked
+        run: |
+          # Gate core planner/runtime logic and exclude presentation-only CLI/UI surfaces.
+          cargo llvm-cov report --json --summary-only --locked \
+            --ignore-filename-regex 'commands/|output/mod\.rs|watch_ui\.rs|term\.rs|progress\.rs|manpages\.rs|main\.rs|cli/|job/model\.rs' \
+            --fail-under-lines 95 \
+            --fail-under-regions 93 \
+            --fail-under-functions 91

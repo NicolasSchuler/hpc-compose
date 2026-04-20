@@ -1133,7 +1133,7 @@ fn write_plan_inspect_tree(
             root_idx,
             &services,
             &children,
-            &runtime_plan,
+            runtime_plan,
             "",
             is_last_root,
         )?;

@@ -425,22 +425,22 @@ scancel = "{scancel}"
     assert!(
         passed_checks
             .iter()
-            .any(|item| item["message"] == Value::from("sbatch: sbatch 23.11"))
+            .any(|item| item["message"].as_str() == Some("sbatch: sbatch 23.11"))
     );
     assert!(
         passed_checks
             .iter()
-            .any(|item| item["message"] == Value::from("srun: srun 23.11"))
+            .any(|item| item["message"].as_str() == Some("srun: srun 23.11"))
     );
     assert!(
         passed_checks
             .iter()
-            .any(|item| item["message"] == Value::from("enroot: enroot 3.5.0"))
+            .any(|item| item["message"].as_str() == Some("enroot: enroot 3.5.0"))
     );
     assert!(
         passed_checks
             .iter()
-            .any(|item| item["message"] == Value::from("Pyxis: available"))
+            .any(|item| item["message"].as_str() == Some("Pyxis: available"))
     );
 }
 
