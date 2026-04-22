@@ -283,6 +283,7 @@
       "additionalProperties": false,
       "properties": {
         "nodes": { "$ref": "#/$defs/positiveInteger" },
+        "placement": { "$ref": "#/$defs/servicePlacement" },
         "ntasks": { "$ref": "#/$defs/positiveInteger" },
         "ntasks_per_node": { "$ref": "#/$defs/positiveInteger" },
         "cpus_per_task": { "$ref": "#/$defs/positiveInteger" },
@@ -293,6 +294,25 @@
         "mpi": { "$ref": "#/$defs/mpi" },
         "failure_policy": { "$ref": "#/$defs/failurePolicy" }
       }
+    },
+    "servicePlacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node_range": { "type": "string", "minLength": 1 },
+        "node_count": { "$ref": "#/$defs/positiveInteger" },
+        "node_percent": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "share_with": { "type": "string", "minLength": 1 },
+        "start_index": { "$ref": "#/$defs/nonNegativeInteger" },
+        "exclude": { "type": "string", "minLength": 1 },
+        "allow_overlap": { "type": "boolean" }
+      },
+      "oneOf": [
+        { "required": ["node_range"] },
+        { "required": ["node_count"] },
+        { "required": ["node_percent"] },
+        { "required": ["share_with"] }
+      ]
     },
     "mpi": {
       "type": "object",

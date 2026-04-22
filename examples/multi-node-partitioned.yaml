@@ -1,0 +1,69 @@
+name: multi-node-partitioned
+
+x-slurm:
+  job_name: multi-node-partitioned
+  time: "00:20:00"
+  nodes: 8
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  service-a:
+    image: alpine:3.20
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "service-a nodes=$$HPC_COMPOSE_SERVICE_NODELIST"
+        sleep 30
+    readiness:
+      type: sleep
+      seconds: 1
+    x-slurm:
+      placement:
+        node_range: "0-3"
+
+  service-b:
+    image: alpine:3.20
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "service-b nodes=$$HPC_COMPOSE_SERVICE_NODELIST"
+        sleep 30
+    readiness:
+      type: sleep
+      seconds: 1
+    x-slurm:
+      placement:
+        node_range: "4-7"
+
+  parameter-server:
+    image: alpine:3.20
+    depends_on:
+      service-b:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "co-located with service-b on $$HPC_COMPOSE_SERVICE_NODELIST"
+        sleep 30
+    readiness:
+      type: sleep
+      seconds: 1
+    x-slurm:
+      placement:
+        share_with: service-b
+
+  monitor:
+    image: alpine:3.20
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "monitor nodes=$$HPC_COMPOSE_SERVICE_NODELIST"
+        sleep 30
+    x-slurm:
+      placement:
+        node_percent: 25
+        allow_overlap: true

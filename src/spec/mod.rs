@@ -223,6 +223,8 @@ pub struct ServiceSlurmConfig {
     #[serde(default)]
     pub nodes: Option<u32>,
     #[serde(default)]
+    pub placement: Option<ServicePlacementSpec>,
+    #[serde(default)]
     pub ntasks: Option<u32>,
     #[serde(default)]
     pub ntasks_per_node: Option<u32>,
@@ -240,6 +242,27 @@ pub struct ServiceSlurmConfig {
     pub mpi: Option<MpiConfig>,
     #[serde(default)]
     pub failure_policy: Option<ServiceFailurePolicySpec>,
+}
+
+/// First-class service placement selector inside one Slurm allocation.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServicePlacementSpec {
+    #[serde(default)]
+    pub node_range: Option<String>,
+    #[serde(default)]
+    pub node_count: Option<u32>,
+    #[serde(default)]
+    pub node_percent: Option<u32>,
+    #[serde(default)]
+    pub share_with: Option<String>,
+    #[serde(default)]
+    pub start_index: Option<u32>,
+    #[serde(default)]
+    pub exclude: Option<String>,
+    #[serde(default)]
+    pub allow_overlap: bool,
 }
 
 /// First-class MPI launch configuration for one service step.
@@ -481,6 +504,8 @@ pub struct EffectiveDependsOnCondition {
 pub struct EffectiveServiceSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nodes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ServicePlacementSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ntasks: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -814,6 +839,7 @@ impl ComposeSpec {
                     readiness: service.readiness.clone(),
                     slurm: EffectiveServiceSlurmConfig {
                         nodes: service.slurm.nodes,
+                        placement: service.slurm.placement.clone(),
                         ntasks: service.slurm.ntasks,
                         ntasks_per_node: service.slurm.ntasks_per_node,
                         cpus_per_task: service.slurm.cpus_per_task,
@@ -1364,6 +1390,9 @@ impl ServiceSlurmConfig {
             self.ntasks_per_node,
             &format!("service '{service_name}' x-slurm.ntasks_per_node"),
         )?;
+        if let Some(placement) = &self.placement {
+            placement.validate(service_name)?;
+        }
         if let Some(limit) = &self.time_limit {
             parse_slurm_time_limit(limit).with_context(|| {
                 format!("service '{service_name}' x-slurm.time_limit is invalid")
@@ -1453,11 +1482,107 @@ impl ServiceSlurmConfig {
     }
 
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        if let Some(placement) = &mut self.placement {
+            placement.interpolate(vars)?;
+        }
         interpolate_optional_string(&mut self.gres, vars)?;
         interpolate_optional_string(&mut self.time_limit, vars)?;
         interpolate_vec_strings(&mut self.extra_srun_args, vars)?;
         Ok(())
     }
+}
+
+impl ServicePlacementSpec {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        let selector_count = usize::from(self.node_range.is_some())
+            + usize::from(self.node_count.is_some())
+            + usize::from(self.node_percent.is_some())
+            + usize::from(self.share_with.is_some());
+        if selector_count != 1 {
+            bail!(
+                "service '{service_name}' x-slurm.placement must set exactly one of node_range, node_count, node_percent, or share_with"
+            );
+        }
+
+        validate_node_index_expr(
+            self.node_range.as_deref(),
+            &format!("service '{service_name}' x-slurm.placement.node_range"),
+        )?;
+        validate_node_index_expr(
+            self.exclude.as_deref(),
+            &format!("service '{service_name}' x-slurm.placement.exclude"),
+        )?;
+
+        if let Some(count) = self.node_count
+            && count == 0
+        {
+            bail!("service '{service_name}' x-slurm.placement.node_count must be at least 1");
+        }
+        if let Some(percent) = self.node_percent
+            && !(1..=100).contains(&percent)
+        {
+            bail!(
+                "service '{service_name}' x-slurm.placement.node_percent must be between 1 and 100"
+            );
+        }
+        if let Some(target) = self.share_with.as_deref() {
+            if target.trim().is_empty() {
+                bail!("service '{service_name}' x-slurm.placement.share_with must not be empty");
+            }
+            if self.start_index.is_some() || self.exclude.is_some() {
+                bail!(
+                    "service '{service_name}' x-slurm.placement.share_with cannot be combined with start_index or exclude"
+                );
+            }
+        } else if self.start_index.is_some()
+            && self.node_count.is_none()
+            && self.node_percent.is_none()
+        {
+            bail!(
+                "service '{service_name}' x-slurm.placement.start_index is only valid with node_count or node_percent"
+            );
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_optional_string(&mut self.node_range, vars)?;
+        interpolate_optional_string(&mut self.share_with, vars)?;
+        interpolate_optional_string(&mut self.exclude, vars)?;
+        Ok(())
+    }
+}
+
+fn validate_node_index_expr(value: Option<&str>, label: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.trim().is_empty() {
+        bail!("{label} must not be empty");
+    }
+    for part in value.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            bail!("{label} contains an empty range segment");
+        }
+        let (start, end) = match part.split_once('-') {
+            Some((start, end)) => (start.trim(), end.trim()),
+            None => (part, part),
+        };
+        if start.is_empty() || end.is_empty() {
+            bail!("{label} contains an incomplete range '{part}'");
+        }
+        let start = start
+            .parse::<u32>()
+            .with_context(|| format!("{label} contains invalid node index '{start}'"))?;
+        let end = end
+            .parse::<u32>()
+            .with_context(|| format!("{label} contains invalid node index '{end}'"))?;
+        if end < start {
+            bail!("{label} contains descending range '{part}'");
+        }
+    }
+    Ok(())
 }
 
 impl EffectiveFailurePolicyConfig {
@@ -2986,6 +3111,146 @@ services:
                 .expect("mpi");
             assert_eq!(mpi.mpi_type, expected);
             assert_eq!(mpi.mpi_type.as_srun_value(), raw);
+        }
+    }
+
+    #[test]
+    fn service_placement_deserializes_interpolates_and_validates() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let valid = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_range: "${APP_RANGE:-0-2}"
+        exclude: "${APP_EXCLUDE:-1}"
+        allow_overlap: true
+"#,
+        );
+        let spec = ComposeSpec::load(&valid).expect("load");
+        let placement = spec
+            .services
+            .get("app")
+            .expect("service")
+            .slurm
+            .placement
+            .as_ref()
+            .expect("placement");
+        assert_eq!(placement.node_range.as_deref(), Some("0-2"));
+        assert_eq!(placement.exclude.as_deref(), Some("1"));
+        assert!(placement.allow_overlap);
+
+        for (name, body, needle) in [
+            (
+                "missing-selector",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        allow_overlap: true
+"#,
+                "exactly one",
+            ),
+            (
+                "multiple-selectors",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_range: "0-1"
+        node_count: 2
+"#,
+                "exactly one",
+            ),
+            (
+                "zero-count",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_count: 0
+"#,
+                "node_count must be at least 1",
+            ),
+            (
+                "bad-percent",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_percent: 101
+"#,
+                "node_percent must be between 1 and 100",
+            ),
+            (
+                "share-with-exclude",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        share_with: workers
+        exclude: "0"
+"#,
+                "share_with cannot be combined",
+            ),
+            (
+                "start-index-with-range",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_range: "0-1"
+        start_index: 1
+"#,
+                "start_index is only valid",
+            ),
+            (
+                "descending-range",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_range: "3-1"
+"#,
+                "descending range",
+            ),
+            (
+                "empty-exclude-segment",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_count: 2
+        exclude: "0,,2"
+"#,
+                "empty range segment",
+            ),
+        ] {
+            let path = write_spec(tmpdir.path(), body);
+            let err = ComposeSpec::load(&path).unwrap_err();
+            assert!(
+                err.to_string().contains(needle),
+                "{name}: expected error containing '{needle}', got {err}"
+            );
         }
     }
 

@@ -79,7 +79,7 @@ Current constraints:
 
 - Linux hosts only
 - single-host specs only
-- no distributed placement
+- no distributed or partitioned placement
 - no `x-slurm.extra_srun_args`
 - no `services.<name>.x-slurm.mpi`
 - reservation-related `x-slurm.submit_args` are ignored

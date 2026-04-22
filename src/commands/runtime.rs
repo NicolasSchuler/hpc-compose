@@ -279,10 +279,11 @@ fn ensure_local_host_supported() -> Result<()> {
 
 fn ensure_local_plan_supported(plan: &RuntimePlan) -> Result<()> {
     for service in &plan.ordered_services {
-        if service.placement.mode == ServicePlacementMode::Distributed {
+        if service.placement.mode != ServicePlacementMode::PrimaryNode {
             bail!(
-                "--local does not support distributed placement; service '{}' spans the full allocation",
-                service.name
+                "--local does not support distributed or partitioned placement; service '{}' uses {} placement",
+                service.name,
+                local_placement_mode_label(service.placement.mode)
             );
         }
         if !service.slurm.extra_srun_args.is_empty() {
@@ -340,6 +341,7 @@ fn local_failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
 fn local_placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     match mode {
         ServicePlacementMode::PrimaryNode => "primary_node",
+        ServicePlacementMode::Partitioned => "partitioned",
         ServicePlacementMode::Distributed => "distributed",
     }
 }
@@ -1665,6 +1667,10 @@ mod tests {
             local_placement_mode_label(ServicePlacementMode::Distributed),
             "distributed"
         );
+        assert_eq!(
+            local_placement_mode_label(ServicePlacementMode::Partitioned),
+            "partitioned"
+        );
         assert_eq!(local_service_step_name("api"), "hpc-compose:api");
         assert_eq!(
             local_service_step_name("api.worker-1"),
@@ -1764,7 +1770,7 @@ mod tests {
         assert!(
             distributed_err
                 .to_string()
-                .contains("does not support distributed placement")
+                .contains("does not support distributed or partitioned placement")
         );
 
         let extra_args = tmpdir.path().join("extra-args.yaml");

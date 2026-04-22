@@ -1,6 +1,6 @@
 //! Normalization from parsed spec into an execution plan.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -51,6 +51,8 @@ pub struct PlannedService {
 pub enum ServicePlacementMode {
     /// The service is pinned to the allocation's primary node.
     PrimaryNode,
+    /// The service is pinned to an explicit subset of allocation nodes.
+    Partitioned,
     /// The service spans the full allocation.
     Distributed,
 }
@@ -68,6 +70,12 @@ pub struct ServicePlacement {
     pub ntasks_per_node: Option<u32>,
     /// Whether this step should be pinned to the primary node.
     pub pin_to_primary_node: bool,
+    /// Zero-based allocation node indices selected for this step when known.
+    pub node_indices: Option<Vec<u32>>,
+    /// Zero-based allocation node indices excluded from this step.
+    pub exclude_indices: Vec<u32>,
+    /// Whether this step is allowed to overlap another service placement.
+    pub allow_overlap: bool,
 }
 
 impl Default for ServicePlacement {
@@ -78,6 +86,9 @@ impl Default for ServicePlacement {
             ntasks: Some(1),
             ntasks_per_node: None,
             pin_to_primary_node: false,
+            node_indices: None,
+            exclude_indices: Vec::new(),
+            allow_overlap: false,
         }
     }
 }
@@ -183,6 +194,9 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
                     ntasks: Some(1),
                     ntasks_per_node: None,
                     pin_to_primary_node: false,
+                    node_indices: None,
+                    exclude_indices: Vec::new(),
+                    allow_overlap: false,
                 },
                 slurm: service.slurm.clone(),
                 prepare,
@@ -214,34 +228,229 @@ fn assign_service_placements(
     services: &mut BTreeMap<String, PlannedService>,
 ) -> Result<()> {
     let allocation_nodes = slurm.allocation_nodes();
-    let default_distributed_service = allocation_nodes > 1 && services.len() == 1;
-    let mut distributed_services = Vec::new();
+    let mut resolved = BTreeMap::new();
+    let mut marks = HashMap::new();
+    let names = services.keys().cloned().collect::<Vec<_>>();
 
-    for service in services.values_mut() {
-        let placement = resolve_service_placement(
-            service,
+    for name in &names {
+        let placement = resolve_service_placement_by_name(
+            name,
+            services,
             slurm,
             allocation_nodes,
-            default_distributed_service,
+            &mut resolved,
+            &mut marks,
         )?;
-        if placement.mode == ServicePlacementMode::Distributed {
-            distributed_services.push(service.name.clone());
-        }
+        resolved.insert(name.clone(), placement);
+    }
+
+    for (name, placement) in resolved {
+        let service = services
+            .get_mut(&name)
+            .expect("resolved placement belongs to existing service");
         service.placement = placement;
     }
 
-    if distributed_services.len() > 1 {
-        bail!(
-            "multi-node allocations support at most one distributed service, but {} request full-allocation placement: {}",
-            distributed_services.len(),
-            distributed_services.join(", ")
-        );
-    }
+    validate_service_placement_overlaps(allocation_nodes, services)?;
 
     Ok(())
 }
 
-fn resolve_service_placement(
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum PlacementMark {
+    Visiting,
+    Visited,
+}
+
+fn resolve_service_placement_by_name(
+    name: &str,
+    services: &BTreeMap<String, PlannedService>,
+    slurm: &SlurmConfig,
+    allocation_nodes: u32,
+    resolved: &mut BTreeMap<String, ServicePlacement>,
+    marks: &mut HashMap<String, PlacementMark>,
+) -> Result<ServicePlacement> {
+    if let Some(placement) = resolved.get(name) {
+        return Ok(placement.clone());
+    }
+    match marks.get(name).copied() {
+        Some(PlacementMark::Visiting) => {
+            bail!("x-slurm.placement.share_with cycle detected around service '{name}'");
+        }
+        Some(PlacementMark::Visited) => {
+            return Ok(resolved
+                .get(name)
+                .expect("visited placement is resolved")
+                .clone());
+        }
+        None => {}
+    }
+
+    let service = services
+        .get(name)
+        .with_context(|| format!("service '{name}' does not exist"))?;
+    marks.insert(name.to_string(), PlacementMark::Visiting);
+    let default_distributed_service = allocation_nodes > 1 && services.len() == 1;
+    let placement = match &service.slurm.placement {
+        Some(spec) => {
+            if let Some(target) = spec.share_with.as_deref() {
+                let shared = resolve_service_placement_by_name(
+                    target,
+                    services,
+                    slurm,
+                    allocation_nodes,
+                    resolved,
+                    marks,
+                )
+                .with_context(|| {
+                    format!(
+                        "service '{}' x-slurm.placement.share_with references '{target}'",
+                        service.name
+                    )
+                })?;
+                resolve_shared_service_placement(service, slurm, &shared)?
+            } else {
+                resolve_explicit_service_placement(service, slurm, allocation_nodes)?
+            }
+        }
+        None => resolve_legacy_service_placement(
+            service,
+            slurm,
+            allocation_nodes,
+            default_distributed_service,
+        )?,
+    };
+    marks.insert(name.to_string(), PlacementMark::Visited);
+    resolved.insert(name.to_string(), placement.clone());
+    Ok(placement)
+}
+
+fn resolve_shared_service_placement(
+    service: &PlannedService,
+    slurm: &SlurmConfig,
+    shared: &ServicePlacement,
+) -> Result<ServicePlacement> {
+    ensure_service_nodes_match(service, shared.nodes)?;
+    let (ntasks, ntasks_per_node) = resolve_step_tasks(service, slurm, shared.nodes);
+    Ok(ServicePlacement {
+        mode: shared.mode,
+        nodes: shared.nodes,
+        ntasks,
+        ntasks_per_node,
+        pin_to_primary_node: shared.pin_to_primary_node,
+        node_indices: shared.node_indices.clone(),
+        exclude_indices: shared.exclude_indices.clone(),
+        allow_overlap: true,
+    })
+}
+
+fn resolve_explicit_service_placement(
+    service: &PlannedService,
+    slurm: &SlurmConfig,
+    allocation_nodes: u32,
+) -> Result<ServicePlacement> {
+    let spec = service
+        .slurm
+        .placement
+        .as_ref()
+        .expect("explicit placement exists");
+    if let Some(nodes) = service.slurm.nodes
+        && nodes > allocation_nodes
+    {
+        bail!(
+            "service '{}' requests x-slurm.nodes={}, but the allocation only reserves {} node(s)",
+            service.name,
+            nodes,
+            allocation_nodes
+        );
+    }
+
+    let exclude_indices = spec
+        .exclude
+        .as_deref()
+        .map(|expr| {
+            parse_node_index_expr(
+                expr,
+                allocation_nodes,
+                &format!("service '{}' x-slurm.placement.exclude", service.name),
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let exclude_set = exclude_indices.iter().copied().collect::<BTreeSet<_>>();
+    let mut node_indices = if let Some(expr) = spec.node_range.as_deref() {
+        parse_node_index_expr(
+            expr,
+            allocation_nodes,
+            &format!("service '{}' x-slurm.placement.node_range", service.name),
+        )?
+        .into_iter()
+        .filter(|index| !exclude_set.contains(index))
+        .collect::<Vec<_>>()
+    } else if let Some(count) = spec.node_count {
+        select_eligible_node_indices(
+            allocation_nodes,
+            &exclude_set,
+            spec.start_index.unwrap_or(0),
+            count,
+            &service.name,
+        )?
+    } else if let Some(percent) = spec.node_percent {
+        let eligible_count =
+            allocation_nodes.saturating_sub(u32::try_from(exclude_set.len()).unwrap_or(u32::MAX));
+        let count = ((u64::from(eligible_count) * u64::from(percent)).div_ceil(100)) as u32;
+        select_eligible_node_indices(
+            allocation_nodes,
+            &exclude_set,
+            spec.start_index.unwrap_or(0),
+            count.max(1),
+            &service.name,
+        )?
+    } else {
+        unreachable!("share_with handled before explicit selector resolution");
+    };
+    node_indices.sort_unstable();
+    node_indices.dedup();
+    if node_indices.is_empty() {
+        bail!(
+            "service '{}' x-slurm.placement resolves to an empty node set",
+            service.name
+        );
+    }
+
+    let nodes = u32::try_from(node_indices.len()).context("node count overflow")?;
+    ensure_service_nodes_match(service, nodes)?;
+    if nodes > 1 && readiness_uses_implicit_localhost(service.readiness.as_ref()) {
+        bail!(
+            "service '{}' uses readiness that relies on localhost semantics, but services spanning multiple nodes must use sleep/log readiness or explicit non-local hosts",
+            service.name
+        );
+    }
+    let full_allocation = nodes == allocation_nodes
+        && exclude_indices.is_empty()
+        && node_indices.iter().copied().eq(0..allocation_nodes);
+    let mode = if full_allocation {
+        ServicePlacementMode::Distributed
+    } else if node_indices == [0] {
+        ServicePlacementMode::PrimaryNode
+    } else {
+        ServicePlacementMode::Partitioned
+    };
+    let (ntasks, ntasks_per_node) = resolve_step_tasks(service, slurm, nodes);
+
+    Ok(ServicePlacement {
+        mode,
+        nodes,
+        ntasks,
+        ntasks_per_node,
+        pin_to_primary_node: node_indices == [0],
+        node_indices: (!full_allocation).then_some(node_indices),
+        exclude_indices,
+        allow_overlap: spec.allow_overlap,
+    })
+}
+
+fn resolve_legacy_service_placement(
     service: &PlannedService,
     slurm: &SlurmConfig,
     allocation_nodes: u32,
@@ -275,10 +484,9 @@ fn resolve_service_placement(
             Some(nodes) if nodes == allocation_nodes => true,
             Some(nodes) => {
                 bail!(
-                    "service '{}' requests x-slurm.nodes={}, but multi-node v1 only supports helpers on 1 node or one distributed service spanning all {} nodes",
+                    "service '{}' requests partial x-slurm.nodes={} without x-slurm.placement; use x-slurm.placement.node_count to choose allocation nodes explicitly",
                     service.name,
                     nodes,
-                    allocation_nodes
                 );
             }
             None => default_distributed_service,
@@ -287,14 +495,49 @@ fn resolve_service_placement(
 
     if distributed && readiness_uses_implicit_localhost(service.readiness.as_ref()) {
         bail!(
-            "service '{}' uses readiness that relies on localhost semantics, but distributed services must use sleep/log readiness or explicit non-local hosts",
+            "service '{}' uses readiness that relies on localhost semantics, but services spanning multiple nodes must use sleep/log readiness or explicit non-local hosts",
             service.name
         );
     }
 
-    let (nodes, ntasks, ntasks_per_node, pin_to_primary_node, mode) = if distributed {
+    let (nodes, mode, pin_to_primary_node, node_indices, allow_overlap) = if distributed {
         (
             allocation_nodes,
+            ServicePlacementMode::Distributed,
+            false,
+            None,
+            false,
+        )
+    } else {
+        (
+            1,
+            ServicePlacementMode::PrimaryNode,
+            allocation_nodes > 1,
+            None,
+            true,
+        )
+    };
+    let (ntasks, ntasks_per_node) = resolve_step_tasks(service, slurm, nodes);
+
+    Ok(ServicePlacement {
+        mode,
+        nodes,
+        ntasks,
+        ntasks_per_node,
+        pin_to_primary_node,
+        node_indices,
+        exclude_indices: Vec::new(),
+        allow_overlap,
+    })
+}
+
+fn resolve_step_tasks(
+    service: &PlannedService,
+    slurm: &SlurmConfig,
+    nodes: u32,
+) -> (Option<u32>, Option<u32>) {
+    if nodes > 1 {
+        (
             service.slurm.ntasks.or(slurm.ntasks),
             service.slurm.ntasks_per_node.or_else(|| {
                 if service.slurm.ntasks.is_some() {
@@ -305,29 +548,135 @@ fn resolve_service_placement(
                         .or_else(|| slurm.ntasks.is_none().then_some(1))
                 }
             }),
-            false,
-            ServicePlacementMode::Distributed,
         )
     } else {
         (
-            1,
             service
                 .slurm
                 .ntasks
                 .or_else(|| service.slurm.ntasks_per_node.is_none().then_some(1)),
             service.slurm.ntasks_per_node,
-            allocation_nodes > 1,
-            ServicePlacementMode::PrimaryNode,
         )
-    };
+    }
+}
 
-    Ok(ServicePlacement {
-        mode,
-        nodes,
-        ntasks,
-        ntasks_per_node,
-        pin_to_primary_node,
-    })
+fn ensure_service_nodes_match(service: &PlannedService, resolved_nodes: u32) -> Result<()> {
+    if let Some(nodes) = service.slurm.nodes
+        && nodes != resolved_nodes
+    {
+        bail!(
+            "service '{}' sets x-slurm.nodes={} but x-slurm.placement resolves to {} node(s)",
+            service.name,
+            nodes,
+            resolved_nodes
+        );
+    }
+    Ok(())
+}
+
+fn parse_node_index_expr(expr: &str, allocation_nodes: u32, label: &str) -> Result<Vec<u32>> {
+    let mut indices = BTreeSet::new();
+    for part in expr.split(',') {
+        let part = part.trim();
+        let (start, end) = match part.split_once('-') {
+            Some((start, end)) => (start.trim(), end.trim()),
+            None => (part, part),
+        };
+        let start = start
+            .parse::<u32>()
+            .with_context(|| format!("{label} contains invalid node index '{start}'"))?;
+        let end = end
+            .parse::<u32>()
+            .with_context(|| format!("{label} contains invalid node index '{end}'"))?;
+        if end >= allocation_nodes {
+            bail!(
+                "{label} references node index {end}, but the allocation only has {} node(s)",
+                allocation_nodes
+            );
+        }
+        for index in start..=end {
+            indices.insert(index);
+        }
+    }
+    Ok(indices.into_iter().collect())
+}
+
+fn select_eligible_node_indices(
+    allocation_nodes: u32,
+    exclude_set: &BTreeSet<u32>,
+    start_index: u32,
+    count: u32,
+    service_name: &str,
+) -> Result<Vec<u32>> {
+    if start_index >= allocation_nodes {
+        bail!(
+            "service '{service_name}' x-slurm.placement.start_index={} is outside the {} node allocation",
+            start_index,
+            allocation_nodes
+        );
+    }
+    let nodes = (start_index..allocation_nodes)
+        .filter(|index| !exclude_set.contains(index))
+        .take(count as usize)
+        .collect::<Vec<_>>();
+    if nodes.len() != count as usize {
+        bail!(
+            "service '{service_name}' x-slurm.placement requests {} node(s), but only {} eligible node(s) are available from start_index {}",
+            count,
+            nodes.len(),
+            start_index
+        );
+    }
+    Ok(nodes)
+}
+
+fn validate_service_placement_overlaps(
+    allocation_nodes: u32,
+    services: &BTreeMap<String, PlannedService>,
+) -> Result<()> {
+    let names = services.keys().collect::<Vec<_>>();
+    for (left_pos, left_name) in names.iter().enumerate() {
+        let left = &services[*left_name];
+        let left_indices = service_allocation_indices(&left.placement, allocation_nodes);
+        for right_name in names.iter().skip(left_pos + 1) {
+            let right = &services[*right_name];
+            if left.placement.allow_overlap || right.placement.allow_overlap {
+                continue;
+            }
+            let right_indices = service_allocation_indices(&right.placement, allocation_nodes);
+            let overlap = left_indices
+                .intersection(&right_indices)
+                .copied()
+                .collect::<Vec<_>>();
+            if !overlap.is_empty() {
+                bail!(
+                    "services '{}' and '{}' overlap on allocation node index/indices {}; set x-slurm.placement.allow_overlap=true or use share_with for intentional co-location",
+                    left.name,
+                    right.name,
+                    overlap
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn service_allocation_indices(
+    placement: &ServicePlacement,
+    allocation_nodes: u32,
+) -> BTreeSet<u32> {
+    if let Some(indices) = &placement.node_indices {
+        return indices.iter().copied().collect();
+    }
+    match placement.mode {
+        ServicePlacementMode::PrimaryNode => BTreeSet::from([0]),
+        ServicePlacementMode::Partitioned => BTreeSet::new(),
+        ServicePlacementMode::Distributed => (0..allocation_nodes).collect(),
+    }
 }
 
 fn normalize_prepare(
@@ -634,7 +983,7 @@ mod tests {
     use crate::spec::{
         ComposeSpec, DependsOnConditionSpec, DependsOnSpec, EnvironmentSpec, ReadinessSpec,
         ServiceDependency, ServiceEnrootConfig, ServiceFailureMode, ServiceFailurePolicy,
-        ServiceFailurePolicySpec, ServiceSlurmConfig, ServiceSpec,
+        ServiceFailurePolicySpec, ServicePlacementSpec, ServiceSlurmConfig, ServiceSpec,
     };
 
     fn service(image: &str) -> ServiceSpec {
@@ -874,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn build_plan_rejects_multiple_distributed_services_in_multi_node_allocations() {
+    fn build_plan_rejects_overlapping_full_allocation_services() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let compose = tmpdir.path().join("compose.yaml");
         std::fs::write(&compose, "services: {}\n").expect("write");
@@ -909,8 +1258,330 @@ mod tests {
             ]),
         };
 
-        let err = build_plan(&compose, spec).expect_err("multiple distributed services");
-        assert!(err.to_string().contains("at most one distributed service"));
+        let err = build_plan(&compose, spec).expect_err("overlapping distributed services");
+        assert!(err.to_string().contains("overlap"));
+    }
+
+    #[test]
+    fn build_plan_accepts_disjoint_partitioned_services() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(8),
+                    ..SlurmConfig::default()
+                },
+                services: BTreeMap::from([
+                    (
+                        "a".into(),
+                        ServiceSpec {
+                            slurm: ServiceSlurmConfig {
+                                placement: Some(ServicePlacementSpec {
+                                    node_range: Some("0-3".into()),
+                                    ..ServicePlacementSpec::default()
+                                }),
+                                ..ServiceSlurmConfig::default()
+                            },
+                            ..service("redis:7")
+                        },
+                    ),
+                    (
+                        "b".into(),
+                        ServiceSpec {
+                            slurm: ServiceSlurmConfig {
+                                placement: Some(ServicePlacementSpec {
+                                    node_range: Some("4-7".into()),
+                                    ..ServicePlacementSpec::default()
+                                }),
+                                ..ServiceSlurmConfig::default()
+                            },
+                            ..service("python:3.11-slim")
+                        },
+                    ),
+                ]),
+            },
+        )
+        .expect("partitioned plan");
+
+        let a = plan
+            .ordered_services
+            .iter()
+            .find(|service| service.name == "a")
+            .expect("a");
+        let b = plan
+            .ordered_services
+            .iter()
+            .find(|service| service.name == "b")
+            .expect("b");
+        assert_eq!(a.placement.mode, ServicePlacementMode::Partitioned);
+        assert_eq!(a.placement.nodes, 4);
+        assert_eq!(a.placement.node_indices, Some(vec![0, 1, 2, 3]));
+        assert_eq!(b.placement.node_indices, Some(vec![4, 5, 6, 7]));
+    }
+
+    #[test]
+    fn build_plan_resolves_percent_with_ceil_minimum_one() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(8),
+                    ..SlurmConfig::default()
+                },
+                services: BTreeMap::from([(
+                    "workers".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_percent: Some(60),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                )]),
+            },
+        )
+        .expect("percent plan");
+
+        let workers = &plan.ordered_services[0];
+        assert_eq!(workers.placement.nodes, 5);
+        assert_eq!(workers.placement.node_indices, Some(vec![0, 1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn build_plan_rejects_accidental_overlap_unless_allowed_or_shared() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let overlapping = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(8),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([
+                (
+                    "a".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_range: Some("0-3".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "b".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_range: Some("3-5".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                ),
+            ]),
+        };
+        let err = build_plan(&compose, overlapping).expect_err("overlap");
+        assert!(err.to_string().contains("overlap"));
+
+        let allowed = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(8),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([
+                (
+                    "a".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_range: Some("0-3".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "b".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_range: Some("3-5".into()),
+                                allow_overlap: true,
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                ),
+            ]),
+        };
+        build_plan(&compose, allowed).expect("overlap allowed");
+
+        let shared = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(8),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([
+                (
+                    "ps".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                share_with: Some("workers".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "workers".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_range: Some("2-5".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                ),
+            ]),
+        };
+        let plan = build_plan(&compose, shared).expect("share placement");
+        let ps = plan
+            .ordered_services
+            .iter()
+            .find(|service| service.name == "ps")
+            .expect("ps");
+        let workers = plan
+            .ordered_services
+            .iter()
+            .find(|service| service.name == "workers")
+            .expect("workers");
+        assert_eq!(ps.placement.node_indices, workers.placement.node_indices);
+    }
+
+    #[test]
+    fn build_plan_rejects_invalid_partitioned_placements() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let out_of_bounds = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([(
+                "a".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        placement: Some(ServicePlacementSpec {
+                            node_range: Some("0-2".into()),
+                            ..ServicePlacementSpec::default()
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("redis:7")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, out_of_bounds).expect_err("out of bounds");
+        assert!(err.to_string().contains("only has 2 node"));
+
+        let empty_after_exclude = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([(
+                "a".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        placement: Some(ServicePlacementSpec {
+                            node_range: Some("0-1".into()),
+                            exclude: Some("0-1".into()),
+                            ..ServicePlacementSpec::default()
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("redis:7")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, empty_after_exclude).expect_err("empty placement");
+        assert!(err.to_string().contains("empty node set"));
+
+        let cycle = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([
+                (
+                    "a".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                share_with: Some("b".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "b".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                share_with: Some("a".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                ),
+            ]),
+        };
+        let err = build_plan(&compose, cycle).expect_err("share cycle");
+        let err_text = format!("{err:#}");
+        assert!(err_text.contains("cycle"), "{err_text}");
     }
 
     #[test]

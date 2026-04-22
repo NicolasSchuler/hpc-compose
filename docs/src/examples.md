@@ -68,6 +68,7 @@ The matrix below covers the broader set of runnable repository examples beyond t
 | [`llama-app.yaml`](example-source.md#llama-app) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
 | [`llama-uv-worker.yaml`](example-source.md#llama-uv-worker) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server plus mounted worker pattern |
 | [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) | First-class MPI launch, generated MPI hostfile, and one primary-node helper | You want a minimal multi-node MPI pattern without extra orchestration |
+| [`multi-node-partitioned.yaml`](example-source.md#multi-node-partitioned) | Disjoint node ranges, fractional node selection, and explicit co-location | You want multiple distributed roles inside one allocation |
 | [`multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) | Allocation-wide torchrun launch using the primary node as rendezvous | You want a multi-node GPU training starting point |
 | [`postgres-etl.yaml`](example-source.md#postgres-etl) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
 | [`restart-policy.yaml`](example-source.md#restart-policy) | Per-service `restart_on_failure` with bounded retries and a rolling-window crash-loop guard | You need transient-failure retries without letting one service spin forever |
@@ -84,6 +85,7 @@ The matrix below covers the broader set of runnable repository examples beyond t
 - Start with [`llm-curl-workflow-workdir.yaml`](example-source.md#llm-curl-workflow-workdir) if you want the smallest real-cluster inference workflow.
 - Start with [`training-resume.yaml`](example-source.md#training-resume) if you need resume-aware checkpoints on shared storage.
 - Start with [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) if you need one distributed step plus helper services on the primary node.
+- Start with [`multi-node-partitioned.yaml`](example-source.md#multi-node-partitioned) if services need explicit node ranges or `share_with` co-location.
 - Start with [`multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) if you need a torchrun-style rendezvous pattern across multiple nodes.
 - Start with [`dev-python-app.yaml`](example-source.md#dev-python-app) if you want a source-mounted development loop.
 - Start with [`restart-policy.yaml`](example-source.md#restart-policy) if you need a clear starting point for `restart_on_failure` tuning and `status`-visible retry budgets.

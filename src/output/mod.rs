@@ -1466,6 +1466,28 @@ fn format_service_step_geometry(service: &RuntimeService) -> String {
     if service.placement.pin_to_primary_node {
         parts.push("nodelist=$HPC_COMPOSE_PRIMARY_NODE".to_string());
     }
+    if let Some(indices) = &service.placement.node_indices {
+        parts.push(format!(
+            "node_indices={}",
+            indices
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if !service.placement.exclude_indices.is_empty() {
+        parts.push(format!(
+            "exclude_indices={}",
+            service
+                .placement
+                .exclude_indices
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
     parts.join(" ")
 }
 
@@ -1478,6 +1500,7 @@ fn format_optional_u32(value: Option<u32>) -> String {
 fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     match mode {
         ServicePlacementMode::PrimaryNode => "primary_node",
+        ServicePlacementMode::Partitioned => "partitioned",
         ServicePlacementMode::Distributed => "distributed",
     }
 }

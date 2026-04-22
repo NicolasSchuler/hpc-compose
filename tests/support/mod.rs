@@ -389,6 +389,7 @@ for arg in "$@"; do
 done
 printf 'args:%s\n' "$*" >> '{}'
 printf 'env:%s|%s|%s|%s\n' "${{HPC_COMPOSE_PRIMARY_NODE:-}}" "${{HPC_COMPOSE_NODE_COUNT:-}}" "${{HPC_COMPOSE_NODELIST:-}}" "${{HPC_COMPOSE_NODELIST_FILE:-}}" >> '{}'
+printf 'service_env:%s|%s|%s|%s\n' "${{HPC_COMPOSE_SERVICE_PRIMARY_NODE:-}}" "${{HPC_COMPOSE_SERVICE_NODE_COUNT:-}}" "${{HPC_COMPOSE_SERVICE_NODELIST:-}}" "${{HPC_COMPOSE_SERVICE_NODELIST_FILE:-}}" >> '{}'
 printf 'mpi_env:%s|%s\n' "${{HPC_COMPOSE_MPI_HOSTFILE:-}}" "${{HPC_COMPOSE_MPI_TYPE:-}}" >> '{}'
 if [[ -n "$output_path" ]]; then
   mkdir -p "$(dirname "$output_path")"
@@ -397,6 +398,7 @@ fi
 sleep 3
 exit 0
 "#,
+            log_path.display(),
             log_path.display(),
             log_path.display(),
             log_path.display()

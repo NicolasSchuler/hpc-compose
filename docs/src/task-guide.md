@@ -32,8 +32,9 @@ Use this page when you know what you want to do, but not yet which command or ex
 ## Multi-node distributed training
 
 - Start from [multi-node-torchrun.yaml](example-source.md#multi-node-torchrun) or [multi-node-mpi.yaml](example-source.md#multi-node-mpi).
-- Treat helper services as primary-node-only and the distributed job as the single allocation-wide step.
+- Start from [multi-node-partitioned.yaml](example-source.md#multi-node-partitioned) when independent distributed roles need disjoint node ranges or explicit co-location.
 - Use allocation metadata such as `HPC_COMPOSE_PRIMARY_NODE` instead of Docker-style service discovery.
+- Use service metadata such as `HPC_COMPOSE_SERVICE_NODELIST` when a service uses `x-slurm.placement`.
 
 ## Checkpoint and resume workflows
 

@@ -43,7 +43,7 @@ Use `logs` to inspect the corresponding restart messages from the batch script w
 - Relative host paths in `volumes`, local image paths, and `x-enroot.prepare.mounts` resolve against the compose file directory.
 - Each submitted job writes tracked state under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}` on the host.
 - That per-job directory is mounted into every container at `/hpc-compose/job`.
-- Multi-node jobs also populate `/hpc-compose/job/allocation/{primary_node,nodes.txt}` and export `HPC_COMPOSE_PRIMARY_NODE`, `HPC_COMPOSE_NODE_COUNT`, `HPC_COMPOSE_NODELIST`, and `HPC_COMPOSE_NODELIST_FILE`.
+- Multi-node jobs also populate `/hpc-compose/job/allocation/{primary_node,nodes.txt}` and export allocation-wide `HPC_COMPOSE_NODE...` variables plus service-scoped `HPC_COMPOSE_SERVICE_NODE...` variables.
 
 Use `/hpc-compose/job` for small shared state inside the allocation, such as ready files, request payloads, logs, metrics, or teardown signals.
 
@@ -68,11 +68,12 @@ These paths are created at batch startup and are available inside the batch scri
 
 - Single-node services share the host network on one node.
 - In a multi-node job, helper services stay on the allocation's primary node by default.
-- The one distributed service spans the full allocation and must use explicit non-localhost coordination.
+- A distributed service may span the full allocation, or services may use `x-slurm.placement` to select explicit allocation node subsets.
+- Partitioned services should use service-scoped metadata such as `HPC_COMPOSE_SERVICE_PRIMARY_NODE`, `HPC_COMPOSE_SERVICE_NODE_COUNT`, `HPC_COMPOSE_SERVICE_NODELIST`, and `HPC_COMPOSE_SERVICE_NODELIST_FILE`.
 - `ports`, custom Docker networks, and service-name DNS are not part of the model.
 - Use `depends_on` plus `readiness` when a dependent service must wait for real availability rather than process start.
 
-Use `127.0.0.1` only when both sides are intentionally on the same node. For multi-node distributed runs, derive rendezvous addresses from the allocation metadata files or environment variables instead of relying on localhost.
+Use `127.0.0.1` only when both sides are intentionally on the same node. For multi-node distributed or partitioned runs, derive rendezvous addresses from allocation or service metadata files and environment variables instead of relying on localhost.
 
 If a service binds its TCP port before it is actually ready, prefer HTTP or log-based readiness over plain TCP readiness.
 

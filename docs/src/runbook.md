@@ -116,6 +116,7 @@ Use `context` whenever you want to inspect effective compose path, binaries, int
 | llama.cpp + uv worker | llama.cpp serving plus a source-mounted Python worker run through `uv` | [`examples/llama-uv-worker.yaml`](example-source.md#llama-uv-worker) |
 | Minimal batch | simplest single-service batch job | [`examples/minimal-batch.yaml`](example-source.md#minimal-batch) |
 | Multi-node MPI | first-class MPI launch, generated MPI hostfile, and one primary-node helper | [`examples/multi-node-mpi.yaml`](example-source.md#multi-node-mpi) |
+| Multi-node partitioned | disjoint node ranges and explicit co-location within one allocation | [`examples/multi-node-partitioned.yaml`](example-source.md#multi-node-partitioned) |
 | Multi-node torchrun | allocation-wide GPU training with the primary node as rendezvous | [`examples/multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) |
 | Training checkpoints | GPU training with checkpoints to shared storage | [`examples/training-checkpoints.yaml`](example-source.md#training-checkpoints) |
 | Training resume | GPU training with a shared resume directory and attempt-aware checkpoints | [`examples/training-resume.yaml`](example-source.md#training-resume) |
@@ -264,7 +265,7 @@ hpc-compose preflight --verbose -f compose.yaml
 - `nvidia-smi` availability when the `gpu` metrics collector is enabled,
 - `sstat` availability when the `slurm` metrics collector is enabled,
 - `curl` availability when any service uses `readiness.type: http`,
-- distributed service readiness does not rely on localhost,
+- multi-node service readiness does not rely on localhost,
 - resume path does not use a node-local temporary directory (`/tmp`, `/var/tmp`),
 - HAICORE/Pyxis helper mount paths (task prolog and shared libraries) when present.
 

@@ -82,7 +82,7 @@ See the [asciinema-style golden-path demo cast](docs/src/quickstart-demo.cast) a
 - `networks` / `network_mode`
 - Compose `restart` (use `services.<name>.x-slurm.failure_policy` instead)
 - `deploy`
-- arbitrary multi-node orchestration or partial-node service placement
+- dynamic multi-node scheduling or automatic node bin packing
 
 For the exact first-class vs raw pass-through vs out-of-scope Slurm boundary, see [Supported Slurm Model](docs/src/supported-slurm-model.md).
 
@@ -99,7 +99,7 @@ For the exact first-class vs raw pass-through vs out-of-scope Slurm boundary, se
 - You need custom container networking or `ports`.
 - You need broad Docker Compose compatibility.
 - You want a long-running orchestration control plane.
-- You need arbitrary cross-node service placement beyond one distributed service plus primary-node helpers.
+- You need dynamic cross-node scheduling instead of explicit `x-slurm.placement` node selectors.
 
 ## Install
 

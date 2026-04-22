@@ -54,6 +54,7 @@ compose-like spec
                 |
                 +--> primary-node helper services
                 +--> optional allocation-wide distributed service
+                +--> optional explicitly partitioned service steps
                 +--> shared /hpc-compose/job scratch for coordination
 ```
 
@@ -102,7 +103,7 @@ Do not use `hpc-compose` when you need:
 - custom container networking
 - broad Docker Compose compatibility
 - a long-running orchestration control plane
-- arbitrary cross-node service placement beyond one distributed service plus primary-node helpers
+- dynamic cross-node scheduling instead of explicit `x-slurm.placement` node selectors
 
 If that list rules out your workload, that is not a failure of the tool. It is the intended product boundary.
 

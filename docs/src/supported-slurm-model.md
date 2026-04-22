@@ -12,9 +12,9 @@ These capabilities are modeled, validated, and intentionally supported by the pl
 | Submission flow | `new`, `validate`, `config`, `inspect`, `preflight`, `prepare`, `render`, `up`, `submit`, `run` |
 | Tracked job workflow | `status`, `ps`, `watch`, `stats`, `logs`, `down`, `cancel`, `artifacts`, `clean`, cache inspection/pruning |
 | Top-level Slurm fields | `job_name`, `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, `constraint`, `output`, `error`, `chdir` |
-| Service step fields | `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, `mpi` |
-| Multi-node model | Single-node jobs and constrained multi-node runs with at most one distributed service spanning the allocation |
-| Runtime orchestration | `depends_on`, readiness checks, service failure policies, primary-node helper placement |
+| Service step fields | `nodes`, `placement`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, `mpi` |
+| Multi-node model | Single-node jobs, full-allocation distributed steps, and explicit node-index partitioning within one allocation |
+| Runtime orchestration | `depends_on`, readiness checks, service failure policies, primary-node helper placement, explicit co-location through `placement.share_with` |
 | Container workflow | Remote images, local `.sqsh` images, `x-enroot.prepare`, shared cache handling |
 | Job tracking | Scheduler state via `squeue`/`sacct`, step stats via `sstat`, tracked logs, runtime state, metrics, artifacts, resume metadata |
 
@@ -42,7 +42,7 @@ These capabilities are intentionally outside the product seam.
 | Federation / multi-cluster control | Out of scope |
 | Generic `scontrol` mutation | Out of scope |
 | Broad cluster inspection tools such as a full `sinfo` / `sprio` / `sreport` frontend | Out of scope |
-| Arbitrary multi-node orchestration or partial-node service placement | Not supported in v1 |
+| Dynamic scheduling or bin packing across nodes | Not supported; use explicit `x-slurm.placement` selectors |
 | Heterogeneous jobs and job arrays as first-class workflow concepts | Not supported in v1 |
 | Compose `build`, `ports`, custom networks, `restart`, `deploy` | Not supported |
 

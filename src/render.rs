@@ -203,6 +203,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         "NODELIST_FILE=\"$ALLOCATION_DIR/{}\"\n",
         tracked_paths::NODELIST_FILE_NAME
     ));
+    out.push_str("SERVICE_NODELIST_DIR=\"$ALLOCATION_DIR/service-nodelists\"\n");
+    out.push_str(
+        "SERVICE_NODELIST_CONTAINER_DIR=\"/hpc-compose/job/allocation/service-nodelists\"\n",
+    );
     if mpi_enabled {
         out.push_str("MPI_HOSTFILE_DIR=\"$ALLOCATION_DIR/mpi-hostfiles\"\n");
         out.push_str("MPI_HOSTFILE_CONTAINER_DIR=\"/hpc-compose/job/allocation/mpi-hostfiles\"\n");
@@ -246,7 +250,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("export ENROOT_CACHE_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/cache\"\n");
     out.push_str("export ENROOT_DATA_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/data\"\n");
     out.push_str("export ENROOT_TEMP_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/tmp\"\n");
-    out.push_str("mkdir -p \"$LOG_DIR\" \"$ALLOCATION_DIR\"");
+    out.push_str("mkdir -p \"$LOG_DIR\" \"$ALLOCATION_DIR\" \"$SERVICE_NODELIST_DIR\"");
     if artifacts_enabled {
         out.push_str(" \"$ARTIFACTS_DIR\"");
     }
@@ -278,6 +282,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("SERVICE_STEP_NTASKS=()\n");
     out.push_str("SERVICE_STEP_NTASKS_PER_NODE=()\n");
     out.push_str("SERVICE_STEP_NODELIST=()\n");
+    out.push_str("ALLOCATION_NODES=()\n");
     out.push_str("SERVICE_LAUNCH_FNS=()\n");
     out.push_str("SERVICE_DEPENDENTS=()\n");
     out.push_str("WAIT_HELPER_EXITED=0\n");
@@ -526,7 +531,72 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  HPC_COMPOSE_NODELIST_FILE=\"/hpc-compose/job/allocation/nodes.txt\"\n");
     out.push_str("  printf '%s\\n' \"${allocation_nodes[@]}\" > \"$NODELIST_FILE\"\n");
     out.push_str("  printf '%s\\n' \"$HPC_COMPOSE_PRIMARY_NODE\" > \"$PRIMARY_NODE_FILE\"\n");
+    out.push_str("  ALLOCATION_NODES=(\"${allocation_nodes[@]}\")\n");
     out.push_str("  export HPC_COMPOSE_PRIMARY_NODE HPC_COMPOSE_NODE_COUNT HPC_COMPOSE_NODELIST HPC_COMPOSE_NODELIST_FILE\n");
+    out.push_str("}\n\n");
+
+    out.push_str("nodes_for_indices() {\n");
+    out.push_str("  local -a nodes=()\n");
+    out.push_str("  local index\n");
+    out.push_str("  for index in \"$@\"; do\n");
+    out.push_str("    if [[ -z \"$index\" ]]; then\n");
+    out.push_str("      continue\n");
+    out.push_str("    fi\n");
+    out.push_str("    if (( index < 0 || index >= ${#ALLOCATION_NODES[@]} )); then\n");
+    out.push_str("      echo \"service placement references allocation node index $index, but ${#ALLOCATION_NODES[@]} node(s) are available\" >&2\n");
+    out.push_str("      exit 1\n");
+    out.push_str("    fi\n");
+    out.push_str("    nodes+=(\"${ALLOCATION_NODES[index]}\")\n");
+    out.push_str("  done\n");
+    out.push_str("  printf '%s' \"${nodes[*]}\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("comma_join_words() {\n");
+    out.push_str("  local raw=${1:-}\n");
+    out.push_str("  local -a words=()\n");
+    out.push_str("  local joined=\"\"\n");
+    out.push_str("  local word\n");
+    out.push_str("  read -r -a words <<< \"$raw\"\n");
+    out.push_str("  for word in \"${words[@]}\"; do\n");
+    out.push_str("    [[ -z \"$word\" ]] && continue\n");
+    out.push_str("    if [[ -n \"$joined\" ]]; then\n");
+    out.push_str("      joined+=\",\"\n");
+    out.push_str("    fi\n");
+    out.push_str("    joined+=\"$word\"\n");
+    out.push_str("  done\n");
+    out.push_str("  printf '%s' \"$joined\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("word_count() {\n");
+    out.push_str("  local raw=${1:-}\n");
+    out.push_str("  local -a words=()\n");
+    out.push_str("  if [[ -z \"$raw\" ]]; then\n");
+    out.push_str("    printf '0'\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  read -r -a words <<< \"$raw\"\n");
+    out.push_str("  printf '%s' \"${#words[@]}\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("first_word() {\n");
+    out.push_str("  local raw=${1:-}\n");
+    out.push_str("  local -a words=()\n");
+    out.push_str("  read -r -a words <<< \"$raw\"\n");
+    out.push_str("  printf '%s' \"${words[0]:-}\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_nodelist_file() {\n");
+    out.push_str("  local path=$1\n");
+    out.push_str("  local nodelist=$2\n");
+    out.push_str("  local -a nodes=()\n");
+    out.push_str("  local node\n");
+    out.push_str("  mkdir -p \"$(dirname \"$path\")\"\n");
+    out.push_str("  : > \"$path\"\n");
+    out.push_str("  read -r -a nodes <<< \"$nodelist\"\n");
+    out.push_str("  for node in \"${nodes[@]}\"; do\n");
+    out.push_str("    [[ -z \"$node\" ]] && continue\n");
+    out.push_str("    printf '%s\\n' \"$node\" >> \"$path\"\n");
+    out.push_str("  done\n");
     out.push_str("}\n\n");
 
     if mpi_enabled {
@@ -1755,12 +1825,57 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     out.push_str("  if [[ -n \"$pyxis_mounts\" ]]; then\n");
     out.push_str("    srun_cmd+=(\"--container-mounts=$pyxis_mounts\")\n");
     out.push_str("  fi\n");
-    if service.placement.pin_to_primary_node {
+    if let Some(indices) = &service.placement.node_indices {
+        let index_args = indices.iter().map(u32::to_string).collect::<Vec<_>>();
+        out.push_str(&format!(
+            "  local -a service_node_indices={}\n",
+            bash_array_literal(&index_args)
+        ));
+        out.push_str("  local service_nodelist\n");
+        out.push_str("  service_nodelist=$(nodes_for_indices \"${service_node_indices[@]}\")\n");
+        out.push_str("  local service_srun_nodelist\n");
+        out.push_str("  service_srun_nodelist=$(comma_join_words \"$service_nodelist\")\n");
+        out.push_str("  srun_cmd+=(\"--nodelist=$service_srun_nodelist\")\n");
+    } else if service.placement.pin_to_primary_node {
         out.push_str("  local service_nodelist=\"$HPC_COMPOSE_PRIMARY_NODE\"\n");
-        out.push_str("  srun_cmd+=(\"--nodelist=$service_nodelist\")\n");
+        out.push_str("  local service_srun_nodelist=\"$HPC_COMPOSE_PRIMARY_NODE\"\n");
+        out.push_str("  srun_cmd+=(\"--nodelist=$service_srun_nodelist\")\n");
     } else {
         out.push_str("  local service_nodelist=\"$HPC_COMPOSE_NODELIST\"\n");
+        out.push_str("  local service_srun_nodelist=\"\"\n");
     }
+    if !service.placement.exclude_indices.is_empty() {
+        let exclude_args = service
+            .placement
+            .exclude_indices
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>();
+        out.push_str(&format!(
+            "  local -a service_exclude_indices={}\n",
+            bash_array_literal(&exclude_args)
+        ));
+        out.push_str("  local service_exclude_nodelist\n");
+        out.push_str(
+            "  service_exclude_nodelist=$(nodes_for_indices \"${service_exclude_indices[@]}\")\n",
+        );
+        out.push_str("  local service_srun_exclude\n");
+        out.push_str("  service_srun_exclude=$(comma_join_words \"$service_exclude_nodelist\")\n");
+        out.push_str("  srun_cmd+=(\"--exclude=$service_srun_exclude\")\n");
+    }
+    out.push_str("  local service_primary_node\n");
+    out.push_str("  service_primary_node=$(first_word \"$service_nodelist\")\n");
+    out.push_str("  local service_node_count\n");
+    out.push_str("  service_node_count=$(word_count \"$service_nodelist\")\n");
+    out.push_str(&format!(
+        "  local service_nodelist_file=\"$SERVICE_NODELIST_DIR/{}.nodes.txt\"\n",
+        service_id
+    ));
+    out.push_str(&format!(
+        "  local service_nodelist_container=\"$SERVICE_NODELIST_CONTAINER_DIR/{}.nodes.txt\"\n",
+        service_id
+    ));
+    out.push_str("  write_nodelist_file \"$service_nodelist_file\" \"$service_nodelist\"\n");
     if let Some(mpi) = &service.slurm.mpi {
         let hostfile_name = format!("{}.hostfile", service_token(&service.name));
         let slots = mpi_hostfile_slots(service)
@@ -1791,6 +1906,12 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODE_COUNT=$HPC_COMPOSE_NODE_COUNT\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODELIST=$HPC_COMPOSE_NODELIST\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODELIST_FILE=$HPC_COMPOSE_NODELIST_FILE\")\n");
+    out.push_str("  launch_env+=(\"HPC_COMPOSE_SERVICE_PRIMARY_NODE=$service_primary_node\")\n");
+    out.push_str("  launch_env+=(\"HPC_COMPOSE_SERVICE_NODE_COUNT=$service_node_count\")\n");
+    out.push_str("  launch_env+=(\"HPC_COMPOSE_SERVICE_NODELIST=$service_nodelist\")\n");
+    out.push_str(
+        "  launch_env+=(\"HPC_COMPOSE_SERVICE_NODELIST_FILE=$service_nodelist_container\")\n",
+    );
     if service.slurm.mpi.is_some() {
         out.push_str("  launch_env+=(\"HPC_COMPOSE_MPI_HOSTFILE=$mpi_hostfile_container\")\n");
         out.push_str("  launch_env+=(\"HPC_COMPOSE_MPI_TYPE=$mpi_type\")\n");
@@ -1978,6 +2099,10 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
         "HPC_COMPOSE_NODE_COUNT",
         "HPC_COMPOSE_NODELIST",
         "HPC_COMPOSE_NODELIST_FILE",
+        "HPC_COMPOSE_SERVICE_PRIMARY_NODE",
+        "HPC_COMPOSE_SERVICE_NODE_COUNT",
+        "HPC_COMPOSE_SERVICE_NODELIST",
+        "HPC_COMPOSE_SERVICE_NODELIST_FILE",
         "HPC_COMPOSE_RESUME_DIR",
         "HPC_COMPOSE_ATTEMPT",
         "HPC_COMPOSE_IS_RESUME",
@@ -2043,8 +2168,29 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
 /// Builds the user-visible `srun` command line for one runtime service.
 pub fn display_srun_command(service: &RuntimeService) -> Vec<String> {
     let mut args = build_srun_command(service);
-    if service.placement.pin_to_primary_node {
+    if let Some(indices) = &service.placement.node_indices {
+        args.push(format!(
+            "--nodelist=<allocation-indices:{}>",
+            indices
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    } else if service.placement.pin_to_primary_node {
         args.push("--nodelist=$HPC_COMPOSE_PRIMARY_NODE".to_string());
+    }
+    if !service.placement.exclude_indices.is_empty() {
+        args.push(format!(
+            "--exclude=<allocation-indices:{}>",
+            service
+                .placement
+                .exclude_indices
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
     }
     args
 }
@@ -2102,6 +2248,7 @@ fn failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
 fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     match mode {
         ServicePlacementMode::PrimaryNode => "primary_node",
+        ServicePlacementMode::Partitioned => "partitioned",
         ServicePlacementMode::Distributed => "distributed",
     }
 }
@@ -2191,6 +2338,7 @@ for mount in "${mount_items[@]}"; do
 done
 printf 'resume_dir=%s attempt=%s is_resume=%s\n' "${HPC_COMPOSE_RESUME_DIR:-}" "${HPC_COMPOSE_ATTEMPT:-}" "${HPC_COMPOSE_IS_RESUME:-}"
 printf 'node_meta=%s|%s|%s|%s\n' "${HPC_COMPOSE_PRIMARY_NODE:-}" "${HPC_COMPOSE_NODE_COUNT:-}" "${HPC_COMPOSE_NODELIST:-}" "${HPC_COMPOSE_NODELIST_FILE:-}"
+printf 'service_node_meta=%s|%s|%s|%s\n' "${HPC_COMPOSE_SERVICE_PRIMARY_NODE:-}" "${HPC_COMPOSE_SERVICE_NODE_COUNT:-}" "${HPC_COMPOSE_SERVICE_NODELIST:-}" "${HPC_COMPOSE_SERVICE_NODELIST_FILE:-}"
 if [[ -n "$job_mount" ]]; then
   mkdir -p "$job_mount/checkpoints"
   printf 'checkpoint %s\n' "${HPC_COMPOSE_ATTEMPT:-missing}" > "$job_mount/checkpoints/checkpoint-${HPC_COMPOSE_ATTEMPT:-missing}.txt"
@@ -2599,6 +2747,9 @@ exit 1
             ntasks: None,
             ntasks_per_node: Some(4),
             pin_to_primary_node: false,
+            node_indices: None,
+            exclude_indices: Vec::new(),
+            allow_overlap: false,
         };
         let plan = RuntimePlan {
             name: "mpi-demo".into(),
@@ -2647,6 +2798,9 @@ exit 1
             ntasks: Some(1),
             ntasks_per_node: None,
             pin_to_primary_node: true,
+            node_indices: None,
+            exclude_indices: Vec::new(),
+            allow_overlap: true,
         };
 
         let mut distributed = runtime_service();
@@ -2658,6 +2812,9 @@ exit 1
             ntasks: None,
             ntasks_per_node: Some(4),
             pin_to_primary_node: false,
+            node_indices: None,
+            exclude_indices: Vec::new(),
+            allow_overlap: false,
         };
 
         let plan = RuntimePlan {

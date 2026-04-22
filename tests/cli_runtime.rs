@@ -2612,6 +2612,38 @@ services:
     assert_failure(&distributed_output);
     assert!(stderr_text(&distributed_output).contains("distributed placement"));
 
+    let partitioned = write_compose(
+        tmpdir.path(),
+        "partitioned.yaml",
+        &format!(
+            r#"
+x-slurm:
+  nodes: 3
+services:
+  app:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      placement:
+        node_range: "0-1"
+"#,
+            local_image.display()
+        ),
+    );
+    let partitioned_output = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            partitioned.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&partitioned_output);
+    assert!(stderr_text(&partitioned_output).contains("partitioned placement"));
+
     let extra_srun = write_compose(
         tmpdir.path(),
         "extra-srun.yaml",
@@ -3007,6 +3039,148 @@ fn submit_multi_node_mpi_example_pins_helper_and_tracks_allocation_metadata() {
     assert_eq!(mpi["nodes"], 2);
     assert_eq!(mpi["ntasks_per_node"], 2);
     assert_eq!(mpi["nodelist"], "node01 node02");
+}
+
+#[test]
+fn submit_partitioned_multi_node_services_emit_subset_nodelists_and_service_metadata() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "partitioned.yaml",
+        &format!(
+            r#"
+name: partitioned-demo
+x-slurm:
+  job_name: partitioned-demo
+  nodes: 8
+  cache_dir: {}
+services:
+  a:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      placement:
+        node_range: "0-3"
+  ps:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      placement:
+        share_with: a
+  b:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      ntasks_per_node: 2
+      mpi:
+        type: pmix
+      placement:
+        node_range: "4-7"
+  excluded:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      placement:
+        node_count: 2
+        exclude: "1,7"
+        allow_overlap: true
+"#,
+            cache_dir.display(),
+            local_image.display(),
+            local_image.display(),
+            local_image.display(),
+            local_image.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun_log = tmpdir.path().join("partitioned-srun.log");
+    let srun = write_fake_srun_capture(tmpdir.path(), &srun_log);
+    let sbatch = write_fake_sbatch_runs_script_with_nodelist(
+        tmpdir.path(),
+        "sbatch-partitioned",
+        "node01,node02,node03,node04,node05,node06,node07,node08",
+    );
+
+    let inspect = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--verbose",
+        ],
+    );
+    assert_success(&inspect);
+    let inspect_text = stdout_text(&inspect);
+    assert!(inspect_text.contains("step geometry: mode=partitioned nodes=4"));
+    assert!(inspect_text.contains("node_indices=0,1,2,3"));
+    assert!(inspect_text.contains("exclude_indices=1,7"));
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--no-preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let srun_text = fs::read_to_string(&srun_log).expect("srun log");
+    assert!(srun_text.contains("--job-name=hpc-compose:a"));
+    assert!(srun_text.contains("--nodes=4"));
+    assert!(srun_text.contains("--nodelist=node01,node02,node03,node04"));
+    assert!(srun_text.contains("--job-name=hpc-compose:b"));
+    assert!(srun_text.contains("--nodelist=node05,node06,node07,node08"));
+    assert!(srun_text.contains("--mpi=pmix"));
+    assert!(srun_text.contains("--exclude=node02,node08"));
+    assert!(srun_text.contains(
+        "service_env:node01|4|node01 node02 node03 node04|/hpc-compose/job/allocation/service-nodelists/a.nodes.txt"
+    ));
+
+    let hostfile = fs::read_to_string(
+        tmpdir
+            .path()
+            .join(".hpc-compose/12345/allocation/mpi-hostfiles/b.hostfile"),
+    )
+    .expect("mpi hostfile");
+    assert_eq!(
+        hostfile,
+        "node05 slots=2\nnode06 slots=2\nnode07 slots=2\nnode08 slots=2\n"
+    );
+
+    let state: Value = serde_json::from_str(
+        &fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/state.json")).expect("state"),
+    )
+    .expect("state json");
+    let services = state["services"].as_array().expect("services");
+    let a = services
+        .iter()
+        .find(|service| service["service_name"] == "a")
+        .expect("a state");
+    let ps = services
+        .iter()
+        .find(|service| service["service_name"] == "ps")
+        .expect("ps state");
+    let b = services
+        .iter()
+        .find(|service| service["service_name"] == "b")
+        .expect("b state");
+    assert_eq!(a["placement_mode"], "partitioned");
+    assert_eq!(a["nodelist"], "node01 node02 node03 node04");
+    assert_eq!(ps["nodelist"], a["nodelist"]);
+    assert_eq!(b["nodelist"], "node05 node06 node07 node08");
 }
 
 #[test]

@@ -88,6 +88,14 @@ Source: `examples/multi-node-mpi.yaml`
 {{#include ../../examples/multi-node-mpi.yaml}}
 ```
 
+## Multi Node Partitioned
+
+Source: `examples/multi-node-partitioned.yaml`
+
+```yaml
+{{#include ../../examples/multi-node-partitioned.yaml}}
+```
+
 ## Multi Node Torchrun
 
 Source: `examples/multi-node-torchrun.yaml`

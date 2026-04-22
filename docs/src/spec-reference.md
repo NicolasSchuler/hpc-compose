@@ -146,10 +146,11 @@ Rules:
 ### Multi-node placement rules
 
 - `x-slurm.nodes > 1` reserves a multi-node allocation.
-- Multi-node v1 supports at most one distributed service spanning the full allocation.
 - Helper services remain single-node steps and are pinned to the allocation's primary node.
 - When a multi-node job has exactly one service, that service defaults to the distributed full-allocation step.
-- Distributed services may use `readiness.type: sleep` or `readiness.type: log`, or TCP/HTTP readiness only with an explicit non-local host or URL.
+- Services may use `services.<name>.x-slurm.placement` to select explicit allocation node indices.
+- Overlapping explicit placements are rejected unless one side sets `allow_overlap: true` or uses `share_with`.
+- Any service spanning more than one node may use `readiness.type: sleep` or `readiness.type: log`, or TCP/HTTP readiness only with an explicit non-local host or URL.
 
 ### `x-slurm.metrics`
 
@@ -235,8 +236,12 @@ Every service receives:
 - `HPC_COMPOSE_NODE_COUNT`
 - `HPC_COMPOSE_NODELIST`
 - `HPC_COMPOSE_NODELIST_FILE`
+- `HPC_COMPOSE_SERVICE_PRIMARY_NODE`
+- `HPC_COMPOSE_SERVICE_NODE_COUNT`
+- `HPC_COMPOSE_SERVICE_NODELIST`
+- `HPC_COMPOSE_SERVICE_NODELIST_FILE`
 
-The same data is also written under `/hpc-compose/job/allocation/primary_node` and `/hpc-compose/job/allocation/nodes.txt`.
+The allocation-wide data is also written under `/hpc-compose/job/allocation/primary_node` and `/hpc-compose/job/allocation/nodes.txt`. Service-scoped node lists are written under `/hpc-compose/job/allocation/service-nodelists/`.
 
 Services that configure `services.<name>.x-slurm.mpi` also receive:
 
@@ -458,7 +463,8 @@ These fields live under `services.<name>.x-slurm`.
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
-| `nodes` | integer | omitted | `1` for a helper step, or the full top-level allocation node count for the one distributed service. |
+| `nodes` | integer | omitted | Legacy shorthand: `1` for a helper step, or the full top-level allocation node count for a full-allocation distributed service. Partial multi-node counts require `placement.node_count`. |
+| `placement` | mapping | omitted | Explicit node-index placement inside the allocation. |
 | `ntasks` | integer | omitted | Adds `--ntasks` to that service's `srun`. |
 | `ntasks_per_node` | integer | omitted | Adds `--ntasks-per-node` to that service's `srun`. |
 | `cpus_per_task` | integer | omitted | Adds `--cpus-per-task` to that service's `srun`. |
@@ -468,6 +474,41 @@ These fields live under `services.<name>.x-slurm`.
 | `extra_srun_args` | list of strings | omitted | Appended directly to the service's `srun` command. |
 | `mpi` | mapping | omitted | Adds first-class MPI launch metadata and `srun --mpi=<type>`. |
 | `failure_policy` | mapping | omitted | Per-service failure handling (`fail_job`, `ignore`, `restart_on_failure`). |
+
+### `services.<name>.x-slurm.placement`
+
+```yaml
+services:
+  a:
+    image: app:a
+    x-slurm:
+      placement: { node_range: "0-3" }
+  b:
+    image: app:b
+    x-slurm:
+      placement: { node_range: "4-7" }
+  ps:
+    image: app:b
+    x-slurm:
+      placement: { share_with: b }
+```
+
+Exactly one selector is required:
+
+| Field | Shape | Notes |
+| --- | --- | --- |
+| `node_range` | string | Zero-based inclusive allocation indices, for example `"0-3"` or `"0-3,6"`. |
+| `node_count` | integer | Selects this many eligible nodes starting at `start_index`, default `0`. |
+| `node_percent` | integer `1..100` | Selects `ceil(percent * eligible_nodes / 100)`, minimum one node. |
+| `share_with` | string | Reuses another service's resolved node set for explicit co-location. |
+
+Optional fields:
+
+- `start_index`: applies to `node_count` and `node_percent`.
+- `exclude`: zero-based allocation indices removed from the eligible set and passed to `srun --exclude`.
+- `allow_overlap`: permits intentional overlap with another explicit placement.
+
+Node indices are resolved against the Slurm allocation order from `scontrol show hostnames "$SLURM_JOB_NODELIST"`. At runtime, containers receive both allocation-wide metadata (`HPC_COMPOSE_NODELIST`) and service-scoped metadata (`HPC_COMPOSE_SERVICE_NODELIST`, `HPC_COMPOSE_SERVICE_NODELIST_FILE`, `HPC_COMPOSE_SERVICE_PRIMARY_NODE`, `HPC_COMPOSE_SERVICE_NODE_COUNT`).
 
 ### `services.<name>.x-slurm.mpi`
 
@@ -517,9 +558,8 @@ services:
 
 Rules:
 
-- In a multi-node allocation, at most one service may resolve to distributed placement.
-- Distributed placement requires `services.<name>.x-slurm.nodes` to equal the top-level allocation node count when it is set explicitly.
-- Helper services in multi-node jobs are pinned to `HPC_COMPOSE_PRIMARY_NODE`.
+- In a multi-node allocation, implicit helper services are pinned to `HPC_COMPOSE_PRIMARY_NODE`.
+- Explicit service placements may not overlap unless one side sets `placement.allow_overlap: true` or uses `placement.share_with`.
 - `max_restarts`, `backoff_seconds`, `window_seconds`, and `max_restarts_in_window` are rejected unless `mode: restart_on_failure`.
 - Restart attempts count relaunches after the initial launch.
 - Restarts trigger only for non-zero exits.

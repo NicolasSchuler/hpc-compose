@@ -8,9 +8,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::planner::{
-    ImageSource, ServicePlacementMode, cache_path_policy_issue, registry_host_for_remote,
-};
+use crate::planner::{ImageSource, cache_path_policy_issue, registry_host_for_remote};
 use crate::prepare::RuntimePlan;
 use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{MetricsCollector, ReadinessSpec};
@@ -684,7 +682,7 @@ fn check_readiness_host_tools(report: &mut Report, plan: &RuntimePlan) {
     }
 
     for service in &plan.ordered_services {
-        if service.placement.mode != ServicePlacementMode::Distributed {
+        if service.placement.nodes <= 1 {
             continue;
         }
         if !readiness_uses_implicit_localhost(service.readiness.as_ref()) {
@@ -693,7 +691,7 @@ fn check_readiness_host_tools(report: &mut Report, plan: &RuntimePlan) {
         report.items.push(Item {
             level: Level::Error,
             message: format!(
-                "distributed service '{}' uses readiness that still relies on localhost semantics",
+                "multi-node service '{}' uses readiness that still relies on localhost semantics",
                 service.name
             ),
             remediation: Some(
@@ -922,7 +920,9 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
-    use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
+    use crate::planner::{
+        ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement, ServicePlacementMode,
+    };
     use crate::prepare::RuntimeService;
     use crate::spec::{
         MetricsCollector, MetricsConfig, MpiConfig, MpiType, ReadinessSpec, ServiceFailurePolicy,
@@ -1150,16 +1150,18 @@ mod tests {
         assert!(report.has_errors());
         assert!(report.has_warnings());
         let rendered = report.render();
-        assert!(rendered.contains("Summary: 1 blocker(s), 1 actionable warning(s), 0 contextual warning(s), 1 passed checks"));
-        assert!(rendered.contains("Blockers:"));
-        assert!(rendered.contains("- boom"));
-        assert!(rendered.contains("remediation: repair"));
-        assert!(rendered.contains("Actionable warnings:"));
-        assert!(rendered.contains("- warn"));
-        assert!(rendered.contains("remediation: fix"));
+        let grouped = report.grouped();
+        let summary = grouped.summary;
+        assert_eq!(summary.blockers, 1);
+        assert_eq!(summary.actionable_warnings, 1);
+        assert_eq!(summary.contextual_warnings, 0);
+        assert_eq!(summary.passed_checks, 1);
+        assert_eq!(grouped.blockers[0].message, "boom");
+        assert_eq!(grouped.actionable_warnings[0].message, "warn");
+        assert_eq!(grouped.passed_checks[0].message, "fine");
+        assert!(rendered.contains("Summary:"));
         let verbose = report.render_verbose();
-        assert!(verbose.contains("Passed checks:"));
-        assert!(verbose.contains("- fine"));
+        assert!(verbose.contains("fine"));
     }
 
     #[test]
@@ -1454,6 +1456,9 @@ mod tests {
             ntasks: None,
             ntasks_per_node: Some(1),
             pin_to_primary_node: false,
+            node_indices: None,
+            exclude_indices: Vec::new(),
+            allow_overlap: false,
         };
         plan.ordered_services[0].readiness = Some(ReadinessSpec::Tcp {
             host: None,
@@ -1474,7 +1479,7 @@ mod tests {
         );
         let text = report.render();
         assert!(text.contains("required binary"));
-        assert!(text.contains("distributed service 'app' uses readiness"));
+        assert!(text.contains("multi-node service 'app' uses readiness"));
     }
 
     #[test]

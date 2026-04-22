@@ -108,6 +108,7 @@ compose.yaml
               |
               +--> primary-node helper services
               +--> optional allocation-wide distributed service
+              +--> optional explicitly partitioned service steps
               +--> shared /hpc-compose/job scratch for coordination
 ```
 
@@ -128,14 +129,14 @@ For the exact boundary, read [Execution Model](execution-model.md) and [Supporte
 - `networks` / `network_mode`
 - Compose `restart` as a Docker key
 - `deploy`
-- arbitrary multi-node orchestration or partial-node service placement
+- dynamic multi-node scheduling or automatic node bin packing
 
 ## When Not To Use `hpc-compose`
 
 - You need custom container networking.
 - You need broad Docker Compose compatibility.
 - You want a long-running orchestration control plane.
-- You need arbitrary cross-node service placement beyond one distributed service plus primary-node helpers.
+- You need dynamic cross-node scheduling instead of explicit `x-slurm.placement` node selectors.
 
 ## Roadmap
 
