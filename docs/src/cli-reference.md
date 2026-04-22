@@ -81,6 +81,7 @@ Current constraints:
 - single-host specs only
 - no distributed placement
 - no `x-slurm.extra_srun_args`
+- no `services.<name>.x-slurm.mpi`
 - reservation-related `x-slurm.submit_args` are ignored
 - `x-slurm.error` is ignored, and local batch stderr is written into the tracked local batch log
 

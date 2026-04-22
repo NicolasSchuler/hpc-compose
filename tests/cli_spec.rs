@@ -181,6 +181,68 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
 }
 
 #[test]
+fn mpi_config_is_exposed_in_machine_readable_outputs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "mpi.yaml",
+        &format!(
+            r#"
+name: mpi-json
+x-slurm:
+  nodes: 2
+  cache_dir: "{}"
+services:
+  worker:
+    image: debian:bookworm-slim
+    command: /usr/local/bin/worker
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 2
+      mpi:
+        type: pmix
+"#,
+            cache_root.path().display()
+        ),
+    );
+
+    let config = run_cli(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&config);
+    let config_value: Value = serde_json::from_str(&stdout_text(&config)).expect("config json");
+    assert_eq!(
+        config_value["services"]["worker"]["x-slurm"]["mpi"]["type"],
+        Value::from("pmix")
+    );
+
+    let inspect = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&inspect);
+    let inspect_value: Value = serde_json::from_str(&stdout_text(&inspect)).expect("inspect json");
+    assert_eq!(
+        inspect_value["ordered_services"][0]["slurm"]["mpi"]["type"],
+        Value::from("pmix")
+    );
+}
+
+#[test]
 fn validate_rejects_dependency_on_ignore_service() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_compose(
@@ -245,6 +307,10 @@ fn schema_command_emits_checked_in_schema() {
     assert_eq!(
         value["$defs"]["dependencyCondition"]["properties"]["condition"]["enum"][1],
         Value::from("service_healthy")
+    );
+    assert_eq!(
+        value["$defs"]["mpi"]["properties"]["type"]["enum"],
+        serde_json::json!(["pmix", "pmi2", "pmi1", "openmpi"])
     );
 
     let checked_in = fs::read_to_string(repo_root().join("schema/hpc-compose.schema.json"))

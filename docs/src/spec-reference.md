@@ -238,6 +238,15 @@ Every service receives:
 
 The same data is also written under `/hpc-compose/job/allocation/primary_node` and `/hpc-compose/job/allocation/nodes.txt`.
 
+Services that configure `services.<name>.x-slurm.mpi` also receive:
+
+- `HPC_COMPOSE_MPI_TYPE`
+- `HPC_COMPOSE_MPI_HOSTFILE`
+
+The MPI hostfile is written under `/hpc-compose/job/allocation/mpi-hostfiles/` and contains the service's effective node list. When `ntasks_per_node` is known, each host line includes `slots=<ntasks_per_node>`. For a single-node service with `ntasks` but no `ntasks_per_node`, the hostfile uses `slots=<ntasks>`. Otherwise it emits one node per line without slots.
+
+MPI services also forward common PMI, PMIx, and Slurm rank variables into the container through Pyxis `--container-env`, including `PMI_RANK`, `PMI_SIZE`, `PMIX_RANK`, `PMIX_NAMESPACE`, `SLURM_PROCID`, `SLURM_LOCALID`, `SLURM_NODEID`, `SLURM_NTASKS`, and `SLURM_TASKS_PER_NODE`.
+
 ### `gres` and `gpus`
 
 When both `gres` and `gpus` are set at the same level, `gres` takes priority and `gpus` is ignored.
@@ -457,7 +466,31 @@ These fields live under `services.<name>.x-slurm`.
 | `gres` | string | omitted | Adds `--gres` to that service's `srun`. Takes priority over `gpus`. |
 | `time_limit` | string | omitted | Advisory per-service time limit. Validated against Slurm time formats but not passed to `srun`. `inspect` surfaces warnings when the limit exceeds allocation time or conflicts with dependencies. Accepted formats: `MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, `D-HH:MM:SS`. |
 | `extra_srun_args` | list of strings | omitted | Appended directly to the service's `srun` command. |
+| `mpi` | mapping | omitted | Adds first-class MPI launch metadata and `srun --mpi=<type>`. |
 | `failure_policy` | mapping | omitted | Per-service failure handling (`fail_job`, `ignore`, `restart_on_failure`). |
+
+### `services.<name>.x-slurm.mpi`
+
+```yaml
+services:
+  trainer:
+    image: mpi-image:latest
+    command: /usr/local/bin/train
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 4
+      mpi:
+        type: pmix
+```
+
+- Shape: mapping
+- Default: omitted
+- Supported `type` values: `pmix`, `pmi2`, `pmi1`, `openmpi`
+- Notes:
+  - Rendered as `--mpi=<type>` on the service's `srun` command.
+  - Cannot be combined with raw `--mpi...` entries in `extra_srun_args`.
+  - MPI services receive `HPC_COMPOSE_MPI_TYPE` and `HPC_COMPOSE_MPI_HOSTFILE`.
+  - hpc-compose does not rewrite `command`; if you use `mpirun`, pass `--hostfile "$HPC_COMPOSE_MPI_HOSTFILE"` yourself.
 
 ### `services.<name>.x-slurm.failure_policy`
 

@@ -2641,6 +2641,36 @@ services:
     );
     assert_failure(&extra_srun_output);
     assert!(stderr_text(&extra_srun_output).contains("x-slurm.extra_srun_args"));
+
+    let mpi = write_compose(
+        tmpdir.path(),
+        "mpi.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/true
+    x-slurm:
+      mpi:
+        type: pmix
+"#,
+            local_image.display()
+        ),
+    );
+    let mpi_output = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            mpi.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&mpi_output);
+    assert!(stderr_text(&mpi_output).contains("x-slurm.mpi"));
 }
 
 #[test]
@@ -2944,7 +2974,18 @@ fn submit_multi_node_mpi_example_pins_helper_and_tracks_allocation_metadata() {
     assert!(srun_text.contains("--job-name=hpc-compose:mpi"));
     assert!(srun_text.contains("--nodes=2"));
     assert!(srun_text.contains("--ntasks-per-node=2"));
+    assert!(srun_text.contains("--mpi=pmix"));
     assert!(srun_text.contains("env:node01|2|node01 node02|/hpc-compose/job/allocation/nodes.txt"));
+    assert!(
+        srun_text.contains("mpi_env:/hpc-compose/job/allocation/mpi-hostfiles/mpi.hostfile|pmix")
+    );
+    let hostfile = fs::read_to_string(
+        tmpdir
+            .path()
+            .join(".hpc-compose/12345/allocation/mpi-hostfiles/mpi.hostfile"),
+    )
+    .expect("mpi hostfile");
+    assert_eq!(hostfile, "node01 slots=2\nnode02 slots=2\n");
 
     let state: Value = serde_json::from_str(
         &fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/state.json")).expect("state"),

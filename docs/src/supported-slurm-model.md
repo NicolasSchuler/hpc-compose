@@ -12,7 +12,7 @@ These capabilities are modeled, validated, and intentionally supported by the pl
 | Submission flow | `new`, `validate`, `config`, `inspect`, `preflight`, `prepare`, `render`, `up`, `submit`, `run` |
 | Tracked job workflow | `status`, `ps`, `watch`, `stats`, `logs`, `down`, `cancel`, `artifacts`, `clean`, cache inspection/pruning |
 | Top-level Slurm fields | `job_name`, `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, `constraint`, `output`, `error`, `chdir` |
-| Service step fields | `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus` |
+| Service step fields | `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, `mpi` |
 | Multi-node model | Single-node jobs and constrained multi-node runs with at most one distributed service spanning the allocation |
 | Runtime orchestration | `depends_on`, readiness checks, service failure policies, primary-node helper placement |
 | Container workflow | Remote images, local `.sqsh` images, `x-enroot.prepare`, shared cache handling |
@@ -25,7 +25,7 @@ These capabilities are usable, but `hpc-compose` does not model or validate thei
 | Mechanism | What it allows |
 | --- | --- |
 | `x-slurm.submit_args` | Raw `#SBATCH ...` lines for site-specific flags such as mail settings, reservations, or other submit-time options |
-| `services.<name>.x-slurm.extra_srun_args` | Raw `srun` arguments for site-specific launch flags such as MPI or exclusivity settings |
+| `services.<name>.x-slurm.extra_srun_args` | Raw `srun` arguments for site-specific launch flags such as exclusivity settings |
 | Existing reservations | Joining an already-created reservation through raw submit args is supported as pass-through |
 
 Pass-through is appropriate when a site-specific flag is useful but does not justify a first-class schema field. `hpc-compose` rejects line breaks and null bytes in raw `#SBATCH` entries so one list entry cannot emit multiple directives, but it does not validate the Slurm semantics of those flags.

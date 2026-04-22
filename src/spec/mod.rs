@@ -237,7 +237,45 @@ pub struct ServiceSlurmConfig {
     #[serde(default)]
     pub extra_srun_args: Vec<String>,
     #[serde(default)]
+    pub mpi: Option<MpiConfig>,
+    #[serde(default)]
     pub failure_policy: Option<ServiceFailurePolicySpec>,
+}
+
+/// First-class MPI launch configuration for one service step.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MpiConfig {
+    #[serde(rename = "type")]
+    pub mpi_type: MpiType,
+}
+
+/// Slurm MPI plugin type used for `srun --mpi=<type>`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MpiType {
+    /// Slurm PMIx support.
+    Pmix,
+    /// Slurm PMI-2 support.
+    Pmi2,
+    /// Slurm PMI-1 support.
+    Pmi1,
+    /// Slurm Open MPI plugin.
+    Openmpi,
+}
+
+impl MpiType {
+    /// Returns the exact value passed to `srun --mpi`.
+    #[must_use]
+    pub fn as_srun_value(self) -> &'static str {
+        match self {
+            Self::Pmix => "pmix",
+            Self::Pmi2 => "pmi2",
+            Self::Pmi1 => "pmi1",
+            Self::Openmpi => "openmpi",
+        }
+    }
 }
 
 /// Per-service failure mode inside a single batch job.
@@ -457,6 +495,8 @@ pub struct EffectiveServiceSlurmConfig {
     pub time_limit: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub extra_srun_args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mpi: Option<MpiConfig>,
     pub failure_policy: EffectiveFailurePolicyConfig,
 }
 
@@ -781,6 +821,7 @@ impl ComposeSpec {
                         gres: service.slurm.gres.clone(),
                         time_limit: service.slurm.time_limit.clone(),
                         extra_srun_args: service.slurm.extra_srun_args.clone(),
+                        mpi: service.slurm.mpi.clone(),
                         failure_policy: EffectiveFailurePolicyConfig::from_policy(
                             &normalized_policy,
                         ),
@@ -1327,6 +1368,16 @@ impl ServiceSlurmConfig {
             parse_slurm_time_limit(limit).with_context(|| {
                 format!("service '{service_name}' x-slurm.time_limit is invalid")
             })?;
+        }
+        if self.mpi.is_some()
+            && self
+                .extra_srun_args
+                .iter()
+                .any(|arg| arg.trim_start().starts_with("--mpi"))
+        {
+            bail!(
+                "service '{service_name}' sets both x-slurm.mpi and x-slurm.extra_srun_args with --mpi; use one MPI source"
+            );
         }
         Ok(())
     }
@@ -2900,6 +2951,76 @@ services:
             }
             other => panic!("expected Http readiness, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn service_mpi_config_deserializes_supported_types() {
+        for (raw, expected) in [
+            ("pmix", MpiType::Pmix),
+            ("pmi2", MpiType::Pmi2),
+            ("pmi1", MpiType::Pmi1),
+            ("openmpi", MpiType::Openmpi),
+        ] {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let path = write_spec(
+                tmpdir.path(),
+                &format!(
+                    r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: {raw}
+"#
+                ),
+            );
+            let spec = ComposeSpec::load(&path).expect("load");
+            let mpi = spec
+                .services
+                .get("app")
+                .expect("service")
+                .slurm
+                .mpi
+                .as_ref()
+                .expect("mpi");
+            assert_eq!(mpi.mpi_type, expected);
+            assert_eq!(mpi.mpi_type.as_srun_value(), raw);
+        }
+    }
+
+    #[test]
+    fn service_mpi_rejects_invalid_type_and_raw_mpi_conflict() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let invalid = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: mvapich
+"#,
+        );
+        let err = ComposeSpec::load(&invalid).expect_err("invalid mpi type");
+        assert!(err.to_string().contains("failed to deserialize spec"));
+
+        let conflict = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: pmix
+      extra_srun_args:
+        - --mpi=pmi2
+"#,
+        );
+        let err = ComposeSpec::load(&conflict).expect_err("mpi conflict");
+        assert!(err.to_string().contains("use one MPI source"));
     }
 
     #[test]

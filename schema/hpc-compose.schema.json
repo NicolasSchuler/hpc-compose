@@ -290,7 +290,19 @@
         "gres": { "type": "string" },
         "time_limit": { "type": "string" },
         "extra_srun_args": { "$ref": "#/$defs/stringList" },
+        "mpi": { "$ref": "#/$defs/mpi" },
         "failure_policy": { "$ref": "#/$defs/failurePolicy" }
+      }
+    },
+    "mpi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["pmix", "pmi2", "pmi1", "openmpi"]
+        }
       }
     },
     "failurePolicy": {

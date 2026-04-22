@@ -33,10 +33,13 @@ services:
       - |
         echo "primary=$(cat /hpc-compose/job/allocation/primary_node)"
         echo "nodes=$(tr '\n' ' ' < /hpc-compose/job/allocation/nodes.txt)"
+        echo "mpi_hostfile=$$HPC_COMPOSE_MPI_HOSTFILE"
+        cat "$$HPC_COMPOSE_MPI_HOSTFILE"
         python - <<'PY'
         import os
         print("mpi placeholder")
         print("node_count", os.environ["HPC_COMPOSE_NODE_COUNT"])
+        print("mpi_type", os.environ["HPC_COMPOSE_MPI_TYPE"])
         PY
     readiness:
       type: sleep
@@ -44,3 +47,5 @@ services:
     x-slurm:
       nodes: 2
       ntasks_per_node: 2
+      mpi:
+        type: pmix

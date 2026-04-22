@@ -67,13 +67,13 @@ The matrix below covers the broader set of runnable repository examples beyond t
 | [`llm-curl-workflow.yaml`](example-source.md#llm-curl-workflow) | Repo-local variant of the smallest concrete inference workflow | You want the same LLM stack but with models under the repository tree |
 | [`llama-app.yaml`](example-source.md#llama-app) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
 | [`llama-uv-worker.yaml`](example-source.md#llama-uv-worker) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server plus mounted worker pattern |
-| [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) | One primary-node helper plus one allocation-wide distributed CPU step | You want a minimal multi-node pattern without extra orchestration |
+| [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) | First-class MPI launch, generated MPI hostfile, and one primary-node helper | You want a minimal multi-node MPI pattern without extra orchestration |
 | [`multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) | Allocation-wide torchrun launch using the primary node as rendezvous | You want a multi-node GPU training starting point |
 | [`postgres-etl.yaml`](example-source.md#postgres-etl) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
 | [`restart-policy.yaml`](example-source.md#restart-policy) | Per-service `restart_on_failure` with bounded retries and a rolling-window crash-loop guard | You need transient-failure retries without letting one service spin forever |
 | [`vllm-openai.yaml`](example-source.md#vllm-openai) | vLLM serving with an in-job Python client | You want vLLM-based inference instead of llama.cpp |
 | [`vllm-uv-worker.yaml`](example-source.md#vllm-uv-worker) | vLLM serving plus a source-mounted Python worker executed through `uv` | You want a common LLM stack with mounted app code |
-| [`mpi-hello.yaml`](example-source.md#mpi-hello) | MPI hello world compiled and run with Open MPI | You need an MPI workload |
+| [`mpi-hello.yaml`](example-source.md#mpi-hello) | MPI hello world using service-level `x-slurm.mpi` | You need a small first-class MPI workload |
 | [`multi-stage-pipeline.yaml`](example-source.md#multi-stage-pipeline) | Two-stage pipeline coordinating through the shared job mount | You need file-based stage-to-stage handoff |
 | [`fairseq-preprocess.yaml`](example-source.md#fairseq-preprocess) | CPU-heavy NLP data preprocessing with parallel workers | You need a CPU-bound data preprocessing pipeline |
 

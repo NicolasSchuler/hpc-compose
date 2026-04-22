@@ -115,14 +115,14 @@ Use `context` whenever you want to inspect effective compose path, binaries, int
 | GPU-backed app | one GPU service plus a dependent application | [`examples/llama-app.yaml`](example-source.md#llama-app) |
 | llama.cpp + uv worker | llama.cpp serving plus a source-mounted Python worker run through `uv` | [`examples/llama-uv-worker.yaml`](example-source.md#llama-uv-worker) |
 | Minimal batch | simplest single-service batch job | [`examples/minimal-batch.yaml`](example-source.md#minimal-batch) |
-| Multi-node MPI | one helper on the primary node plus one allocation-wide distributed step | [`examples/multi-node-mpi.yaml`](example-source.md#multi-node-mpi) |
+| Multi-node MPI | first-class MPI launch, generated MPI hostfile, and one primary-node helper | [`examples/multi-node-mpi.yaml`](example-source.md#multi-node-mpi) |
 | Multi-node torchrun | allocation-wide GPU training with the primary node as rendezvous | [`examples/multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) |
 | Training checkpoints | GPU training with checkpoints to shared storage | [`examples/training-checkpoints.yaml`](example-source.md#training-checkpoints) |
 | Training resume | GPU training with a shared resume directory and attempt-aware checkpoints | [`examples/training-resume.yaml`](example-source.md#training-resume) |
 | Postgres ETL | PostgreSQL plus a Python data processing job | [`examples/postgres-etl.yaml`](example-source.md#postgres-etl) |
 | vLLM serving | vLLM with an in-job Python client | [`examples/vllm-openai.yaml`](example-source.md#vllm-openai) |
 | vLLM + uv worker | vLLM serving with a source-mounted Python worker run through `uv` | [`examples/vllm-uv-worker.yaml`](example-source.md#vllm-uv-worker) |
-| MPI hello | MPI hello world with Open MPI | [`examples/mpi-hello.yaml`](example-source.md#mpi-hello) |
+| MPI hello | small MPI workload using service-level `x-slurm.mpi` | [`examples/mpi-hello.yaml`](example-source.md#mpi-hello) |
 | Multi-stage pipeline | two-stage pipeline with file-based handoff | [`examples/multi-stage-pipeline.yaml`](example-source.md#multi-stage-pipeline) |
 | Data preprocessing | CPU-heavy NLP preprocessing pipeline | [`examples/fairseq-preprocess.yaml`](example-source.md#fairseq-preprocess) |
 

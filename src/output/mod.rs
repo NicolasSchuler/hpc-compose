@@ -1536,6 +1536,9 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
             "step geometry: {}",
             format_service_step_geometry(service)
         )?;
+        if let Some(mpi) = &service.slurm.mpi {
+            writeln!(writer, "mpi: {}", mpi.mpi_type.as_srun_value())?;
+        }
         if let Some(prepare) = &service.prepare {
             writeln!(
                 writer,

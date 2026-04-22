@@ -272,6 +272,7 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
         }
         if srun_available {
             check_pyxis_support(&mut report, &options.srun_bin);
+            check_mpi_support(&mut report, &options.srun_bin, plan);
         }
         check_haicore_mount_helpers(&mut report);
     }
@@ -360,6 +361,79 @@ fn check_pyxis_support(report: &mut Report, srun_bin: &str) {
             ),
         }),
     }
+}
+
+fn check_mpi_support(report: &mut Report, srun_bin: &str, plan: &RuntimePlan) {
+    let requested = plan
+        .ordered_services
+        .iter()
+        .filter_map(|service| {
+            service
+                .slurm
+                .mpi
+                .as_ref()
+                .map(|mpi| (service.name.as_str(), mpi.mpi_type.as_srun_value()))
+        })
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return;
+    }
+
+    let output = match Command::new(srun_bin).arg("--mpi=list").output() {
+        Ok(output) => output,
+        Err(err) => {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!("failed to query '{srun_bin} --mpi=list': {err}"),
+                remediation: Some(
+                    "Run 'srun --mpi=list' on the target cluster and confirm the requested x-slurm.mpi.type is available.".to_string(),
+                ),
+            });
+            return;
+        }
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && text.trim().is_empty() {
+        report.items.push(Item {
+            level: Level::Warn,
+            message: format!("'{srun_bin} --mpi=list' exited without listing MPI plugin types"),
+            remediation: Some(
+                "Run 'srun --mpi=list' on the target cluster and confirm the requested x-slurm.mpi.type is available.".to_string(),
+            ),
+        });
+        return;
+    }
+
+    let advertised = advertised_mpi_types(&text);
+    for (service_name, mpi_type) in requested {
+        if advertised.iter().any(|value| value == mpi_type) {
+            report.items.push(Item {
+                level: Level::Ok,
+                message: format!("srun reports MPI type '{mpi_type}' for service '{service_name}'"),
+                remediation: None,
+            });
+        } else {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!(
+                    "service '{service_name}' requests x-slurm.mpi.type='{mpi_type}', but 'srun --mpi=list' did not advertise it"
+                ),
+                remediation: Some(
+                    "Use a supported x-slurm.mpi.type for this cluster, or keep site-specific MPI launch flags in x-slurm.extra_srun_args.".to_string(),
+                ),
+            });
+        }
+    }
+}
+
+fn advertised_mpi_types(output: &str) -> Vec<String> {
+    output
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn check_cache_path_policy(report: &mut Report, plan: &RuntimePlan) {
@@ -851,8 +925,8 @@ mod tests {
     use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use crate::prepare::RuntimeService;
     use crate::spec::{
-        MetricsCollector, MetricsConfig, ReadinessSpec, ServiceFailurePolicy, ServiceSlurmConfig,
-        SlurmConfig,
+        MetricsCollector, MetricsConfig, MpiConfig, MpiType, ReadinessSpec, ServiceFailurePolicy,
+        ServiceSlurmConfig, SlurmConfig,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -939,6 +1013,95 @@ mod tests {
                 .render()
                 .contains("Pyxis support appears unavailable")
         );
+    }
+
+    #[test]
+    fn preflight_checks_requested_mpi_types() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::create_dir_all(tmpdir.path().join("src")).expect("src");
+        fs::create_dir_all(tmpdir.path().join("deps")).expect("deps");
+        let srun = tmpdir.path().join("srun");
+        let sbatch = tmpdir.path().join("sbatch");
+        let enroot = tmpdir.path().join("enroot");
+        write_fake_binary(
+            &srun,
+            "#!/bin/bash\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'usage: srun --container-image=IMAGE'; exit 0; fi\nif [[ \"${1:-}\" == \"--mpi=list\" ]]; then echo 'MPI plugin types are...'; echo 'pmix pmi2 openmpi'; exit 0; fi\nexit 0\n",
+        );
+        write_fake_binary(&sbatch, "#!/bin/bash\nexit 0\n");
+        write_fake_binary(&enroot, "#!/bin/bash\nexit 0\n");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
+            mpi_type: MpiType::Pmix,
+        });
+        let report = run(
+            &plan,
+            &Options {
+                enroot_bin: enroot.display().to_string(),
+                sbatch_bin: sbatch.display().to_string(),
+                srun_bin: srun.display().to_string(),
+                scontrol_bin: "scontrol".into(),
+                require_submit_tools: true,
+                skip_prepare: false,
+            },
+        );
+        assert!(
+            report.items.iter().any(|item| {
+                item.level == Level::Ok && item.message.contains("MPI type 'pmix'")
+            })
+        );
+
+        plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
+            mpi_type: MpiType::Pmi1,
+        });
+        let report = run(
+            &plan,
+            &Options {
+                enroot_bin: enroot.display().to_string(),
+                sbatch_bin: sbatch.display().to_string(),
+                srun_bin: srun.display().to_string(),
+                scontrol_bin: "scontrol".into(),
+                require_submit_tools: true,
+                skip_prepare: false,
+            },
+        );
+        assert!(report.items.iter().any(|item| {
+            item.level == Level::Warn && item.message.contains("did not advertise")
+        }));
+    }
+
+    #[test]
+    fn preflight_warns_when_mpi_list_query_fails() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::create_dir_all(tmpdir.path().join("src")).expect("src");
+        fs::create_dir_all(tmpdir.path().join("deps")).expect("deps");
+        let srun = tmpdir.path().join("srun");
+        let sbatch = tmpdir.path().join("sbatch");
+        let enroot = tmpdir.path().join("enroot");
+        write_fake_binary(
+            &srun,
+            "#!/bin/bash\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'usage: srun --container-image=IMAGE'; exit 0; fi\nif [[ \"${1:-}\" == \"--mpi=list\" ]]; then exit 2; fi\nexit 0\n",
+        );
+        write_fake_binary(&sbatch, "#!/bin/bash\nexit 0\n");
+        write_fake_binary(&enroot, "#!/bin/bash\nexit 0\n");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
+            mpi_type: MpiType::Pmix,
+        });
+
+        let report = run(
+            &plan,
+            &Options {
+                enroot_bin: enroot.display().to_string(),
+                sbatch_bin: sbatch.display().to_string(),
+                srun_bin: srun.display().to_string(),
+                scontrol_bin: "scontrol".into(),
+                require_submit_tools: true,
+                skip_prepare: false,
+            },
+        );
+        assert!(report.items.iter().any(|item| {
+            item.level == Level::Warn && item.message.contains("exited without listing")
+        }));
     }
 
     #[test]

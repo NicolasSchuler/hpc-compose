@@ -13,7 +13,7 @@ services:
     command:
       - /bin/sh
       - -lc
-      - mpirun --allow-run-as-root -np 4 /usr/local/bin/mpi_hello
+      - /usr/local/bin/mpi_hello
     x-enroot:
       prepare:
         commands:
@@ -36,4 +36,7 @@ services:
             mpicc /tmp/hello.c -o /usr/local/bin/mpi_hello
           - rm -rf /var/lib/apt/lists/* /tmp/hello.c
     x-slurm:
+      ntasks: 4
       cpus_per_task: 4
+      mpi:
+        type: pmix

@@ -292,6 +292,12 @@ fn ensure_local_plan_supported(plan: &RuntimePlan) -> Result<()> {
                 service.slurm.extra_srun_args.join(" ")
             );
         }
+        if service.slurm.mpi.is_some() {
+            bail!(
+                "--local does not support x-slurm.mpi; service '{}' requests MPI launch integration",
+                service.name
+            );
+        }
     }
     if plan.slurm.allocation_nodes() > 1 {
         bail!(
@@ -1775,6 +1781,20 @@ mod tests {
         let extra_args_err =
             ensure_local_plan_supported(&extra_args_plan).expect_err("extra args unsupported");
         assert!(extra_args_err.to_string().contains("extra_srun_args"));
+
+        let mpi = tmpdir.path().join("mpi.yaml");
+        fs::write(
+            &mpi,
+            format!(
+                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\n    x-slurm:\n      mpi:\n        type: pmix\nx-slurm:\n  cache_dir: {}\n",
+                local_image.display(),
+                tmpdir.path().join("cache-mpi").display()
+            ),
+        )
+        .expect("mpi compose");
+        let mpi_plan = output::load_runtime_plan(&mpi).expect("mpi plan");
+        let mpi_err = ensure_local_plan_supported(&mpi_plan).expect_err("mpi unsupported");
+        assert!(mpi_err.to_string().contains("x-slurm.mpi"));
 
         let multi_node = tmpdir.path().join("multi-node.yaml");
         fs::write(

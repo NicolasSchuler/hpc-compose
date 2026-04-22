@@ -58,6 +58,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     let metrics_enabled = plan.slurm.metrics_enabled();
     let artifacts_enabled = plan.slurm.artifacts_enabled();
     let resume_enabled = plan.slurm.resume_dir().is_some();
+    let mpi_enabled = plan
+        .ordered_services
+        .iter()
+        .any(|service| service.slurm.mpi.is_some());
     let resume_host_path = plan.slurm.resume_dir().unwrap_or("");
     let artifact_bundles = plan
         .slurm
@@ -199,6 +203,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         "NODELIST_FILE=\"$ALLOCATION_DIR/{}\"\n",
         tracked_paths::NODELIST_FILE_NAME
     ));
+    if mpi_enabled {
+        out.push_str("MPI_HOSTFILE_DIR=\"$ALLOCATION_DIR/mpi-hostfiles\"\n");
+        out.push_str("MPI_HOSTFILE_CONTAINER_DIR=\"/hpc-compose/job/allocation/mpi-hostfiles\"\n");
+    }
     out.push_str(&format!(
         "LOG_DIR=\"$JOB_TMP/{}\"\n",
         tracked_paths::LOGS_DIR_NAME
@@ -244,6 +252,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     }
     if metrics_enabled {
         out.push_str(" \"$METRICS_DIR\"");
+    }
+    if mpi_enabled {
+        out.push_str(" \"$MPI_HOSTFILE_DIR\"");
     }
     out.push_str(" \"$ENROOT_CACHE_PATH\" \"$ENROOT_DATA_PATH\" \"$ENROOT_TEMP_PATH\"\n\n");
 
@@ -517,6 +528,27 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  printf '%s\\n' \"$HPC_COMPOSE_PRIMARY_NODE\" > \"$PRIMARY_NODE_FILE\"\n");
     out.push_str("  export HPC_COMPOSE_PRIMARY_NODE HPC_COMPOSE_NODE_COUNT HPC_COMPOSE_NODELIST HPC_COMPOSE_NODELIST_FILE\n");
     out.push_str("}\n\n");
+
+    if mpi_enabled {
+        out.push_str("write_mpi_hostfile() {\n");
+        out.push_str("  local hostfile=$1\n");
+        out.push_str("  local nodelist=$2\n");
+        out.push_str("  local slots=${3:-}\n");
+        out.push_str("  local -a nodes=()\n");
+        out.push_str("  local node\n");
+        out.push_str("  mkdir -p \"$(dirname \"$hostfile\")\"\n");
+        out.push_str("  : > \"$hostfile\"\n");
+        out.push_str("  read -r -a nodes <<< \"$nodelist\"\n");
+        out.push_str("  for node in \"${nodes[@]}\"; do\n");
+        out.push_str("    [[ -z \"$node\" ]] && continue\n");
+        out.push_str("    if [[ -n \"$slots\" ]]; then\n");
+        out.push_str("      printf '%s slots=%s\\n' \"$node\" \"$slots\" >> \"$hostfile\"\n");
+        out.push_str("    else\n");
+        out.push_str("      printf '%s\\n' \"$node\" >> \"$hostfile\"\n");
+        out.push_str("    fi\n");
+        out.push_str("  done\n");
+        out.push_str("}\n\n");
+    }
 
     out.push_str("write_resume_metadata() {\n");
     out.push_str("  [[ \"$RESUME_ENABLED\" == \"1\" ]] || return 0\n");
@@ -1729,6 +1761,28 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     } else {
         out.push_str("  local service_nodelist=\"$HPC_COMPOSE_NODELIST\"\n");
     }
+    if let Some(mpi) = &service.slurm.mpi {
+        let hostfile_name = format!("{}.hostfile", service_token(&service.name));
+        let slots = mpi_hostfile_slots(service)
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "  local mpi_hostfile=\"$MPI_HOSTFILE_DIR/{}\"\n",
+            hostfile_name
+        ));
+        out.push_str(&format!(
+            "  local mpi_hostfile_container=\"$MPI_HOSTFILE_CONTAINER_DIR/{}\"\n",
+            hostfile_name
+        ));
+        out.push_str(&format!(
+            "  write_mpi_hostfile \"$mpi_hostfile\" \"$service_nodelist\" {}\n",
+            shell_quote(&slots)
+        ));
+        out.push_str(&format!(
+            "  local mpi_type={}\n",
+            shell_quote(mpi.mpi_type.as_srun_value())
+        ));
+    }
     out.push_str("  echo \"Starting service ");
     out.push_str(&service.name);
     out.push_str("\"\n");
@@ -1737,6 +1791,10 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODE_COUNT=$HPC_COMPOSE_NODE_COUNT\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODELIST=$HPC_COMPOSE_NODELIST\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODELIST_FILE=$HPC_COMPOSE_NODELIST_FILE\")\n");
+    if service.slurm.mpi.is_some() {
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_MPI_HOSTFILE=$mpi_hostfile_container\")\n");
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_MPI_TYPE=$mpi_type\")\n");
+    }
     out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
     out.push_str("    launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")\n");
     out.push_str("    launch_env+=(\"HPC_COMPOSE_ATTEMPT=$ATTEMPT\")\n");
@@ -1924,6 +1982,45 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
         "HPC_COMPOSE_ATTEMPT",
         "HPC_COMPOSE_IS_RESUME",
     ];
+    if service.slurm.mpi.is_some() {
+        env_names.extend([
+            "HPC_COMPOSE_MPI_HOSTFILE",
+            "HPC_COMPOSE_MPI_TYPE",
+            "PMI_APPNUM",
+            "PMI_CONTROL_PORT",
+            "PMI_FD",
+            "PMI_ID",
+            "PMI_JOBID",
+            "PMI_KVS",
+            "PMI_PORT",
+            "PMI_RANK",
+            "PMI_SIZE",
+            "PMI_SPAWNED",
+            "PMI_UNIVERSE_SIZE",
+            "PMI2_ID",
+            "PMI2_JOBID",
+            "PMI2_RANK",
+            "PMI2_SIZE",
+            "PMIX_DSTORE_21_BASE_PATH",
+            "PMIX_GDS_MODULE",
+            "PMIX_HOSTNAME",
+            "PMIX_MCA_gds",
+            "PMIX_NAMESPACE",
+            "PMIX_PTL_MODULE",
+            "PMIX_RANK",
+            "PMIX_SECURITY_MODE",
+            "PMIX_SERVER_URI",
+            "PMIX_SERVER_URI2",
+            "PMIX_SYSTEM_TMPDIR",
+            "SLURM_LOCALID",
+            "SLURM_NODEID",
+            "SLURM_NTASKS",
+            "SLURM_PROCID",
+            "SLURM_STEP_NUM_TASKS",
+            "SLURM_STEP_TASKS_PER_NODE",
+            "SLURM_TASKS_PER_NODE",
+        ]);
+    }
     env_names.extend(service.environment.iter().map(|(name, _)| name.as_str()));
     env_names.sort_unstable();
     env_names.dedup();
@@ -1935,6 +2032,9 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
         args.push(format!("--gres={gres}"));
     } else if let Some(gpus) = service.slurm.gpus {
         args.push(format!("--gpus={gpus}"));
+    }
+    if let Some(mpi) = &service.slurm.mpi {
+        args.push(format!("--mpi={}", mpi.mpi_type.as_srun_value()));
     }
     args.extend(service.slurm.extra_srun_args.clone());
     args
@@ -2006,6 +2106,16 @@ fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     }
 }
 
+fn mpi_hostfile_slots(service: &RuntimeService) -> Option<u32> {
+    if let Some(ntasks_per_node) = service.placement.ntasks_per_node {
+        return Some(ntasks_per_node);
+    }
+    if service.placement.nodes == 1 {
+        return service.placement.ntasks;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2017,8 +2127,8 @@ mod tests {
     use super::*;
     use crate::planner::ServicePlacement;
     use crate::spec::{
-        DependencyCondition, ReadinessSpec, ResumeConfig, ServiceDependency, ServiceFailurePolicy,
-        ServiceSlurmConfig, SlurmConfig,
+        DependencyCondition, MpiConfig, MpiType, ReadinessSpec, ResumeConfig, ServiceDependency,
+        ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
     };
 
     fn runtime_service() -> RuntimeService {
@@ -2474,6 +2584,53 @@ exit 1
         );
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn render_mpi_service_emits_srun_flag_hostfile_and_env_passthrough() {
+        let mut service = runtime_service();
+        service.name = "mpi".into();
+        service.slurm.mpi = Some(MpiConfig {
+            mpi_type: MpiType::Pmix,
+        });
+        service.placement = ServicePlacement {
+            mode: ServicePlacementMode::Distributed,
+            nodes: 2,
+            ntasks: None,
+            ntasks_per_node: Some(4),
+            pin_to_primary_node: false,
+        };
+        let plan = RuntimePlan {
+            name: "mpi-demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service.clone()],
+        };
+
+        let args = build_srun_command(&service);
+        assert!(args.contains(&"--mpi=pmix".to_string()));
+        let container_env = args
+            .iter()
+            .find(|arg| arg.starts_with("--container-env="))
+            .expect("container env");
+        assert!(container_env.contains("HPC_COMPOSE_MPI_HOSTFILE"));
+        assert!(container_env.contains("HPC_COMPOSE_MPI_TYPE"));
+        assert!(container_env.contains("PMIX_RANK"));
+        assert!(container_env.contains("PMI_RANK"));
+        assert!(container_env.contains("SLURM_PROCID"));
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("MPI_HOSTFILE_DIR=\"$ALLOCATION_DIR/mpi-hostfiles\""));
+        assert!(script.contains("write_mpi_hostfile()"));
+        assert!(script.contains("local mpi_hostfile=\"$MPI_HOSTFILE_DIR/mpi.hostfile\""));
+        assert!(script.contains("write_mpi_hostfile \"$mpi_hostfile\" \"$service_nodelist\" '4'"));
+        assert!(
+            script.contains("launch_env+=(\"HPC_COMPOSE_MPI_HOSTFILE=$mpi_hostfile_container\")")
+        );
+        assert!(script.contains("launch_env+=(\"HPC_COMPOSE_MPI_TYPE=$mpi_type\")"));
     }
 
     #[test]
