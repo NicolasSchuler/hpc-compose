@@ -334,3 +334,146 @@ fn is_var_start(ch: char) -> bool {
 fn is_var_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dotenv_loader_handles_quotes_exports_missing_and_parse_errors() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        assert!(
+            load_dotenv_vars(tmpdir.path())
+                .expect("missing dotenv")
+                .is_empty()
+        );
+
+        fs::write(
+            tmpdir.path().join(".env"),
+            "\n# comment\nexport DOUBLE=\"two words\"\nSINGLE='one word'\nPLAIN=value\nEMPTY=\n",
+        )
+        .expect("dotenv");
+        let vars = load_dotenv_vars(tmpdir.path()).expect("load dotenv");
+        assert_eq!(vars.get("DOUBLE").map(String::as_str), Some("two words"));
+        assert_eq!(vars.get("SINGLE").map(String::as_str), Some("one word"));
+        assert_eq!(vars.get("PLAIN").map(String::as_str), Some("value"));
+        assert_eq!(vars.get("EMPTY").map(String::as_str), Some(""));
+
+        fs::write(tmpdir.path().join(".env"), "BROKEN\n").expect("broken dotenv");
+        assert!(
+            load_dotenv_vars(tmpdir.path())
+                .expect_err("missing equals")
+                .to_string()
+                .contains("must use KEY=VALUE syntax")
+        );
+
+        fs::write(tmpdir.path().join(".env"), "=nope\n").expect("empty key dotenv");
+        assert!(
+            load_dotenv_vars(tmpdir.path())
+                .expect_err("empty key")
+                .to_string()
+                .contains("empty variable name")
+        );
+    }
+
+    #[test]
+    fn interpolate_string_covers_required_defaults_escapes_and_errors() {
+        let vars = BTreeMap::from([
+            ("FOO".to_string(), "value".to_string()),
+            ("EMPTY".to_string(), String::new()),
+            ("INNER".to_string(), "inner".to_string()),
+        ]);
+
+        assert_eq!(
+            interpolate_string("pre-$FOO-${FOO}-$$", &vars).expect("basic interpolation"),
+            "pre-value-value-$"
+        );
+        assert_eq!(
+            interpolate_string("${EMPTY:-fallback}", &vars).expect("colon default"),
+            "fallback"
+        );
+        assert_eq!(
+            interpolate_string("${EMPTY-fallback}", &vars).expect("dash default"),
+            ""
+        );
+        assert_eq!(
+            interpolate_string("${MISSING:-${INNER:-fallback}}", &vars).expect("nested default"),
+            "inner"
+        );
+        assert_eq!(
+            interpolate_string("literal $9 and $$FOO", &vars).expect("literal dollars"),
+            "literal $9 and $FOO"
+        );
+
+        for input in [
+            "$MISSING",
+            "${MISSING}",
+            "${}",
+            "${1BAD}",
+            "${FOO?bad}",
+            "${FOO",
+        ] {
+            assert!(
+                interpolate_string(input, &vars).is_err(),
+                "{input} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_defaulted_variables_walks_values_and_nested_defaults() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &path,
+            r#"
+"${KEY_IGNORED:-not-a-value}": mapping key is ignored
+services:
+  app:
+    image: "${IMAGE:-redis:7}"
+    command:
+      - sh
+      - -lc
+      - "echo ${OUTER:-${INNER:-fallback}}"
+    environment:
+      PRESENT: "${PRESENT:-unused}"
+      EMPTY: "${EMPTY:-empty-default}"
+      BOOL: true
+      NUMBER: 7
+"#,
+        )
+        .expect("compose");
+
+        let vars = BTreeMap::from([
+            ("PRESENT".to_string(), "set".to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ]);
+        let missing = missing_defaulted_variables(&path, &vars).expect("scan");
+        assert_eq!(
+            missing,
+            BTreeSet::from([
+                "IMAGE".to_string(),
+                "OUTER".to_string(),
+                "INNER".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn missing_defaulted_variables_reports_malformed_yaml_values() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &path,
+            "services:\n  app:\n    image: \"${BROKEN:-fallback\"\n",
+        )
+        .expect("compose");
+
+        assert!(
+            missing_defaulted_variables(&path, &BTreeMap::new())
+                .expect_err("unterminated expression")
+                .to_string()
+                .contains("unterminated variable expression")
+        );
+    }
+}

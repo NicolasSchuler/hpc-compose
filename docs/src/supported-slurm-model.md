@@ -1,6 +1,6 @@
 # Supported Slurm Model
 
-This page makes the `hpc-compose` Slurm boundary explicit. It is a tool for compiling one Compose-like application into one Slurm allocation with one or more containerized `srun` steps. It is not a general frontend for the full Slurm command surface.
+This page makes the `hpc-compose` Slurm boundary explicit. It is a tool for compiling one Compose-like application into one Slurm allocation with one or more `srun` steps. Those steps can use Pyxis/Enroot, Apptainer, Singularity, or host runtime software. It is not a general frontend for the full Slurm command surface.
 
 ## First-class support
 
@@ -11,12 +11,13 @@ These capabilities are modeled, validated, and intentionally supported by the pl
 | Allocation model | One Slurm allocation per application |
 | Submission flow | `new`, `validate`, `config`, `inspect`, `preflight`, `prepare`, `render`, `up`, `submit`, `run` |
 | Tracked job workflow | `status`, `ps`, `watch`, `stats`, `logs`, `down`, `cancel`, `artifacts`, `clean`, cache inspection/pruning |
-| Top-level Slurm fields | `job_name`, `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, `constraint`, `output`, `error`, `chdir` |
-| Service step fields | `nodes`, `placement`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, `mpi` |
+| Top-level Slurm fields | `job_name`, `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, GPU/CPU binding fields, `constraint`, `output`, `error`, `chdir` |
+| Service step fields | `nodes`, `placement`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, GPU/CPU binding fields, `mpi` |
 | Multi-node model | Single-node jobs, full-allocation distributed steps, and explicit node-index partitioning within one allocation |
-| Runtime orchestration | `depends_on`, readiness checks, service failure policies, primary-node helper placement, explicit co-location through `placement.share_with` |
+| Runtime orchestration | `depends_on`, readiness checks, one-shot completion dependencies, service failure policies, primary-node helper placement, explicit co-location through `placement.share_with` |
 | Service hooks | Per-service `prologue` and `epilogue` shell hooks on the host supervisor or inside the container |
-| Container workflow | Remote images, local `.sqsh` images, `x-enroot.prepare`, shared cache handling |
+| Runtime workflow | Pyxis/Enroot `.sqsh`, Apptainer/Singularity `.sif`, host runtime commands, `x-runtime.prepare`, shared cache handling |
+| Scratch and staging | `x-slurm.scratch`, `stage_in`, `stage_out`, per-service scratch opt-out, raw `#BB`/`#DW` burst-buffer directives |
 | Job tracking | Scheduler state via `squeue`/`sacct`, step stats via `sstat`, tracked logs, runtime state, metrics, artifacts, resume metadata |
 
 ## Raw pass-through

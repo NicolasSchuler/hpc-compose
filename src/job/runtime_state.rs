@@ -35,6 +35,8 @@ pub(super) struct ServiceRuntimeStateEntry {
     #[serde(default)]
     pub(super) healthy: Option<bool>,
     #[serde(default)]
+    pub(super) completed_successfully: Option<bool>,
+    #[serde(default)]
     pub(super) readiness_configured: Option<bool>,
     #[serde(default)]
     pub(super) failure_policy_mode: Option<String>,

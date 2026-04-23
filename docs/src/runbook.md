@@ -17,11 +17,12 @@ Read the [Execution model](execution-model.md) page first if you are still orien
 
 Make sure you have:
 
-- a login node with `enroot`, `srun`, and `sbatch` available,
+- a login node with `srun` and `sbatch` available,
+- the runtime backend you selected in `runtime.backend` (`enroot` for Pyxis, `apptainer`, `singularity`, or host modules),
 - `scontrol` available when you request `x-slurm.nodes > 1`,
-- Pyxis support in `srun` (`srun --help` should mention `--container-image`),
+- Pyxis support in `srun` when `runtime.backend: pyxis` (`srun --help` should mention `--container-image`),
 - a shared filesystem path for `x-slurm.cache_dir`,
-- any required local source trees or local `.sqsh` images in place,
+- any required local source trees or local `.sqsh` / `.sif` images in place,
 - registry credentials available if your cluster or registry requires them,
 - `curl` on the compute node when using `readiness.type: http`,
 - `nvidia-smi` on the compute node when the `gpu` metrics collector is enabled,
@@ -124,7 +125,9 @@ Use `context` whenever you want to inspect effective compose path, binaries, int
 | vLLM serving | vLLM with an in-job Python client | [`examples/vllm-openai.yaml`](example-source.md#vllm-openai) |
 | vLLM + uv worker | vLLM serving with a source-mounted Python worker run through `uv` | [`examples/vllm-uv-worker.yaml`](example-source.md#vllm-uv-worker) |
 | MPI hello | small MPI workload using service-level `x-slurm.mpi` | [`examples/mpi-hello.yaml`](example-source.md#mpi-hello) |
+| MPI PMIx v4 + host MPI | versioned PMIx launch plus host MPI bind/env configuration | [`examples/mpi-pmix-v4-host-mpi.yaml`](example-source.md#mpi-pmix-v4-host-mpi) |
 | Multi-stage pipeline | two-stage pipeline with file-based handoff | [`examples/multi-stage-pipeline.yaml`](example-source.md#multi-stage-pipeline) |
+| Pipeline DAG | one-shot preprocess -> train -> postprocess completion dependencies | [`examples/pipeline-dag.yaml`](example-source.md#pipeline-dag) |
 | Data preprocessing | CPU-heavy NLP preprocessing pipeline | [`examples/fairseq-preprocess.yaml`](example-source.md#fairseq-preprocess) |
 
 The fastest path is usually to copy the closest example and adapt it instead of starting from scratch.
@@ -162,12 +165,12 @@ Start with the nearest example and then change:
 - `volumes`
 - `environment`
 - `x-slurm` resource settings
-- `x-enroot.prepare` commands for dependencies or tooling
+- `x-runtime.prepare` commands for dependencies or tooling
 
 Recommended pattern:
 
 - Put fast-changing application code in `volumes`.
-- Put slower-changing dependency installation in `x-enroot.prepare.commands`.
+- Put slower-changing dependency installation in `x-runtime.prepare.commands`.
 - Add `readiness` to any service that other services truly depend on.
 
 ## 3. Validate the spec
@@ -254,12 +257,13 @@ hpc-compose preflight --verbose -f compose.yaml
 
 `preflight` checks:
 
-- required binaries (`enroot`, `srun`, `sbatch`),
+- required binaries for the selected backend plus `srun` and `sbatch`,
 - `scontrol` when `x-slurm.nodes > 1`,
-- Pyxis container support in `srun`,
+- Pyxis container support in `srun` when `runtime.backend: pyxis`,
+- generated cluster profile compatibility when `.hpc-compose/cluster.toml` is present,
 - cache directory policy and writability,
 - cache directory under `$HOME` warning (shared storage is safer on real clusters),
-- local mount and image paths,
+- local mount and image paths (`.sqsh` for Pyxis, `.sif` for Apptainer/Singularity),
 - registry credentials,
 - skip-prepare reuse safety when relevant,
 - `nvidia-smi` availability when the `gpu` metrics collector is enabled,
@@ -269,13 +273,25 @@ hpc-compose preflight --verbose -f compose.yaml
 - resume path does not use a node-local temporary directory (`/tmp`, `/var/tmp`),
 - HAICORE/Pyxis helper mount paths (task prolog and shared libraries) when present.
 
+Generate a cluster capability profile on the target login node when you want preflight and validate to catch partition/backend/QOS/GPU/MPI mismatches before submission:
+
+```bash
+hpc-compose doctor --cluster-report
+```
+
+This writes `.hpc-compose/cluster.toml` by default using `sinfo`, `scontrol`, `srun --mpi=list`, runtime binary probes, and shared-path environment hints.
+
 If your cluster installs these tools in non-standard locations, pass explicit paths:
 
 ```bash
-hpc-compose preflight -f compose.yaml --enroot-bin /opt/enroot/bin/enroot --srun-bin /usr/local/bin/srun --sbatch-bin /usr/local/bin/sbatch
+hpc-compose preflight -f compose.yaml \
+  --enroot-bin /opt/enroot/bin/enroot \
+  --apptainer-bin /opt/apptainer/bin/apptainer \
+  --srun-bin /usr/local/bin/srun \
+  --sbatch-bin /usr/local/bin/sbatch
 ```
 
-The same override flags (`--enroot-bin`, `--srun-bin`, `--sbatch-bin`) are available on `prepare`, `up`, and `submit`.
+The same runtime and Slurm override flags are available on `prepare`, `up`, `submit`, and `run` where relevant.
 
 Use strict mode if you want warnings to fail the command:
 
@@ -341,7 +357,7 @@ hpc-compose logs -f compose.yaml
 hpc-compose logs -f compose.yaml --service app --follow
 ```
 
-`status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created. When `services.<name>.x-slurm.failure_policy` is used, `status` includes per-service policy state (`failure_policy`, restart counters, rolling-window budget as `window=<current>/<max>@<seconds>s`, and last exit code) from tracked runtime state.
+`status` also reports the tracked top-level batch log path so early job failures are visible even when a service log was never created. When `services.<name>.x-slurm.failure_policy` is used, `status` includes per-service policy state (`failure_policy`, restart counters, rolling-window budget as `window=<current>/<max>@<seconds>s`, last exit code, and completed-successfully state) from tracked runtime state.
 
 `ps` is the stable per-service snapshot view. It reports the tracked step name, launcher PID, readiness state, derived service status (`starting`, `ready`, `running`, `exited`, `failed`, or `unknown`), restart counters, last exit code, and tracked log path. Use `ps --format json` when tooling needs those fields directly.
 
@@ -360,7 +376,7 @@ Read that line as:
 - two restart-triggering failures are still inside the current 60-second rolling window
 - one more restart-triggering failure inside that same window would exhaust `max_restarts_in_window: 3`
 
-If you need the machine-readable form, `status --format json` exposes the same policy state per service through `failure_policy_mode`, `restart_count`, `max_restarts`, `window_seconds`, `max_restarts_in_window`, `restart_failures_in_window`, and `last_exit_code`.
+If you need the machine-readable form, `status --format json` exposes the same policy state per service through `failure_policy_mode`, `restart_count`, `max_restarts`, `window_seconds`, `max_restarts_in_window`, `restart_failures_in_window`, `last_exit_code`, and `completed_successfully`.
 
 For multi-node jobs, `status` also reports tracked placement geometry (`placement_mode`, nodes, task counts, and expanded nodelist) for each service.
 
@@ -562,6 +578,8 @@ Add the required credentials before relying on private registries or heavily rat
 ### Services start in the wrong order
 
 Use `depends_on` with `condition: service_healthy` when a dependent must wait for a dependency's readiness probe. Plain list form still means `service_started`.
+
+Use `condition: service_completed_successfully` for one-shot DAG stages where the next service should start only after the previous stage exits with status `0`, such as preprocess -> train -> postprocess.
 
 When a TCP port opens before the service is fully usable, prefer HTTP or log-based readiness over TCP readiness.
 

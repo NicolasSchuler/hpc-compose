@@ -365,14 +365,18 @@ fn parse_binary_entries(entries: &[String]) -> Result<BinaryOverrides> {
         }
         match name {
             "enroot" => overrides.enroot = Some(value.to_string()),
+            "apptainer" => overrides.apptainer = Some(value.to_string()),
+            "singularity" => overrides.singularity = Some(value.to_string()),
             "sbatch" => overrides.sbatch = Some(value.to_string()),
             "srun" => overrides.srun = Some(value.to_string()),
+            "scontrol" => overrides.scontrol = Some(value.to_string()),
+            "sinfo" => overrides.sinfo = Some(value.to_string()),
             "squeue" => overrides.squeue = Some(value.to_string()),
             "sacct" => overrides.sacct = Some(value.to_string()),
             "sstat" => overrides.sstat = Some(value.to_string()),
             "scancel" => overrides.scancel = Some(value.to_string()),
             _ => bail!(
-                "invalid binary name '{name}'; supported names: enroot, sbatch, srun, squeue, sacct, sstat, scancel"
+                "invalid binary name '{name}'; supported names: enroot, apptainer, singularity, sbatch, srun, scontrol, sinfo, squeue, sacct, sstat, scancel"
             ),
         }
     }
@@ -384,11 +388,23 @@ fn format_binary_entries(overrides: &BinaryOverrides) -> String {
     if let Some(value) = &overrides.enroot {
         entries.push(format!("enroot={value}"));
     }
+    if let Some(value) = &overrides.apptainer {
+        entries.push(format!("apptainer={value}"));
+    }
+    if let Some(value) = &overrides.singularity {
+        entries.push(format!("singularity={value}"));
+    }
     if let Some(value) = &overrides.sbatch {
         entries.push(format!("sbatch={value}"));
     }
     if let Some(value) = &overrides.srun {
         entries.push(format!("srun={value}"));
+    }
+    if let Some(value) = &overrides.scontrol {
+        entries.push(format!("scontrol={value}"));
+    }
+    if let Some(value) = &overrides.sinfo {
+        entries.push(format!("sinfo={value}"));
     }
     if let Some(value) = &overrides.squeue {
         entries.push(format!("squeue={value}"));

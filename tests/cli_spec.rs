@@ -184,6 +184,7 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
 fn mpi_config_is_exposed_in_machine_readable_outputs() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
+    fs::create_dir_all(tmpdir.path().join("site-mpi")).expect("site mpi");
     let compose = write_compose(
         tmpdir.path(),
         "mpi.yaml",
@@ -202,6 +203,14 @@ services:
       ntasks_per_node: 2
       mpi:
         type: pmix
+        implementation: openmpi
+        launcher: srun
+        expected_ranks: 4
+        host_mpi:
+          bind_paths:
+            - ./site-mpi:/opt/site-mpi:ro
+          env:
+            MPI_DIR: /opt/site-mpi
 "#,
             cache_root.path().display()
         ),
@@ -223,6 +232,18 @@ services:
         config_value["services"]["worker"]["x-slurm"]["mpi"]["type"],
         Value::from("pmix")
     );
+    assert_eq!(
+        config_value["services"]["worker"]["x-slurm"]["mpi"]["implementation"],
+        Value::from("openmpi")
+    );
+    assert_eq!(
+        config_value["services"]["worker"]["x-slurm"]["mpi"]["expected_ranks"],
+        Value::from(4)
+    );
+    assert_eq!(
+        config_value["services"]["worker"]["x-slurm"]["mpi"]["host_mpi"]["env"]["MPI_DIR"],
+        Value::from("/opt/site-mpi")
+    );
 
     let inspect = run_cli(
         tmpdir.path(),
@@ -240,6 +261,83 @@ services:
         inspect_value["ordered_services"][0]["slurm"]["mpi"]["type"],
         Value::from("pmix")
     );
+    let rendered_mounts = inspect_value["ordered_services"][0]["volumes"]
+        .as_array()
+        .expect("volumes");
+    assert!(rendered_mounts.iter().any(|mount| {
+        mount
+            .as_str()
+            .unwrap_or_default()
+            .contains("site-mpi:/opt/site-mpi:ro")
+    }));
+    assert!(
+        inspect_value["ordered_services"][0]["environment"]
+            .as_array()
+            .expect("environment")
+            .iter()
+            .any(|entry| entry[0] == "MPI_DIR")
+    );
+}
+
+#[test]
+fn mpi_profile_validation_rejects_unsupported_launcher_and_rank_mismatch() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let invalid_launcher = write_compose(
+        tmpdir.path(),
+        "invalid-launcher.yaml",
+        &format!(
+            r#"
+services:
+  worker:
+    image: debian:bookworm-slim
+    command: /bin/true
+    x-slurm:
+      mpi:
+        type: pmix
+        launcher: mpirun
+x-slurm:
+  cache_dir: "{}"
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", invalid_launcher.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    assert!(stderr_text(&validate).contains("mpirun"));
+
+    let rank_mismatch = write_compose(
+        tmpdir.path(),
+        "rank-mismatch.yaml",
+        &format!(
+            r#"
+name: rank-mismatch
+x-slurm:
+  nodes: 2
+  cache_dir: "{}"
+services:
+  worker:
+    image: debian:bookworm-slim
+    command: /bin/true
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 2
+      mpi:
+        type: pmix
+        expected_ranks: 3
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", rank_mismatch.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    assert!(stderr_text(&validate).contains("expected_ranks=3"));
 }
 
 #[test]
@@ -396,12 +494,24 @@ fn schema_command_emits_checked_in_schema() {
     assert!(value["properties"]["services"].is_object());
     assert!(value["properties"]["x-slurm"].is_object());
     assert_eq!(
-        value["$defs"]["dependencyCondition"]["properties"]["condition"]["enum"][1],
-        Value::from("service_healthy")
+        value["$defs"]["dependencyCondition"]["properties"]["condition"]["enum"],
+        serde_json::json!([
+            "service_started",
+            "service_healthy",
+            "service_completed_successfully"
+        ])
     );
     assert_eq!(
-        value["$defs"]["mpi"]["properties"]["type"]["enum"],
-        serde_json::json!(["pmix", "pmi2", "pmi1", "openmpi"])
+        value["$defs"]["mpi"]["properties"]["type"]["pattern"],
+        Value::from("^[A-Za-z0-9_][A-Za-z0-9_.+-]*$")
+    );
+    assert_eq!(
+        value["$defs"]["mpi"]["properties"]["launcher"]["enum"],
+        serde_json::json!(["srun"])
+    );
+    assert_eq!(
+        value["$defs"]["mpi"]["properties"]["implementation"]["enum"][0],
+        Value::from("openmpi")
     );
 
     let checked_in = fs::read_to_string(repo_root().join("schema/hpc-compose.schema.json"))

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::planner::{ImageSource, PreparedImageSpec, registry_host_for_remote};
-use crate::prepare::{RuntimePlan, RuntimeService, base_image_path};
+use crate::prepare::{RuntimePlan, RuntimeService, base_image_path_for_backend};
 
 /// The kind of artifact tracked in the cache manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -280,9 +280,17 @@ pub fn prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePru
 pub fn referenced_artifacts(plan: &RuntimePlan) -> HashSet<PathBuf> {
     let mut referenced = HashSet::new();
     for service in &plan.ordered_services {
-        referenced.insert(service.runtime_image.clone());
+        if !matches!(service.source, ImageSource::Host)
+            && !service.runtime_image.as_os_str().is_empty()
+        {
+            referenced.insert(service.runtime_image.clone());
+        }
         if matches!(service.source, ImageSource::Remote(_)) {
-            referenced.insert(base_image_path(&plan.cache_dir, service));
+            referenced.insert(base_image_path_for_backend(
+                &plan.cache_dir,
+                service,
+                plan.runtime.backend,
+            ));
         }
     }
     referenced
@@ -339,14 +347,20 @@ fn remove_manifest_and_artifact(manifest: &CacheEntryManifest) -> Result<()> {
 fn image_source_string(source: &ImageSource) -> String {
     match source {
         ImageSource::LocalSqsh(path) => path.display().to_string(),
+        ImageSource::LocalSif(path) => path.display().to_string(),
         ImageSource::Remote(remote) => remote.clone(),
+        ImageSource::Host => "host".to_string(),
     }
 }
 
 fn looks_like_manifest_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.ends_with(".sqsh.json") || name.ends_with(".squashfs.json"))
+        .map(|name| {
+            name.ends_with(".sqsh.json")
+                || name.ends_with(".squashfs.json")
+                || name.ends_with(".sif.json")
+        })
         .unwrap_or(false)
 }
 
@@ -391,7 +405,7 @@ mod tests {
 
     use super::*;
     use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
-    use crate::prepare::RuntimeService;
+    use crate::prepare::{RuntimeService, base_image_path_for_backend};
     use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig};
 
     fn runtime_service() -> RuntimeService {
@@ -465,6 +479,7 @@ mod tests {
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().to_path_buf(),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: crate::spec::SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 runtime_image: keep.clone(),
@@ -609,12 +624,17 @@ mod tests {
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: crate::spec::SlurmConfig::default(),
             ordered_services: vec![service.clone(), local_service.clone()],
         };
         let referenced = referenced_artifacts(&plan);
         assert!(referenced.contains(&service.runtime_image));
-        assert!(referenced.contains(&base_image_path(&plan.cache_dir, &service)));
+        assert!(referenced.contains(&base_image_path_for_backend(
+            &plan.cache_dir,
+            &service,
+            plan.runtime.backend
+        )));
         assert!(referenced.contains(&local_service.runtime_image));
     }
 

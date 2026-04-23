@@ -204,8 +204,12 @@ services:
             },
             binaries: ResolvedBinaries {
                 enroot: binary("enroot"),
+                apptainer: binary("apptainer"),
+                singularity: binary("singularity"),
                 sbatch: binary("sbatch"),
                 srun: binary("srun"),
+                scontrol: binary("scontrol"),
+                sinfo: binary("sinfo"),
                 squeue: binary("squeue"),
                 sacct: binary("sacct"),
                 sstat: binary("sstat"),

@@ -49,3 +49,6 @@ services:
       ntasks_per_node: 2
       mpi:
         type: pmix
+        implementation: openmpi
+        launcher: srun
+        expected_ranks: 4

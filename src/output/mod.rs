@@ -19,10 +19,12 @@ use hpc_compose::planner::{
 };
 use hpc_compose::preflight::Report;
 use hpc_compose::prepare::{
-    ArtifactAction, PrepareSummary, RuntimePlan, RuntimeService, base_image_path,
+    ArtifactAction, PrepareSummary, RuntimePlan, RuntimeService, base_image_path_for_backend,
     build_runtime_plan,
 };
-use hpc_compose::render::{display_srun_command, execution_argv, log_file_name_for_service};
+use hpc_compose::render::{
+    display_srun_command_for_backend, execution_argv, log_file_name_for_service,
+};
 use hpc_compose::spec::{
     ComposeSpec, DependencyCondition, EffectiveComposeConfig, ServiceDependency,
     parse_slurm_time_limit,
@@ -43,6 +45,8 @@ pub(crate) struct ValidateOutput {
     pub(crate) name: String,
     pub(crate) service_count: usize,
     pub(crate) services: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) cluster_warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,7 +174,7 @@ pub(crate) fn resolve_stats_output_format(
     }
 }
 
-pub(crate) fn build_validate_output(plan: &Plan) -> ValidateOutput {
+pub(crate) fn build_validate_output(plan: &Plan, cluster_warnings: Vec<String>) -> ValidateOutput {
     ValidateOutput {
         valid: true,
         compose_file: plan.spec_path.clone(),
@@ -181,6 +185,7 @@ pub(crate) fn build_validate_output(plan: &Plan) -> ValidateOutput {
             .iter()
             .map(|service| service.name.clone())
             .collect(),
+        cluster_warnings,
     }
 }
 
@@ -599,6 +604,7 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
         if service.step_name.is_some()
             || service.launcher_pid.is_some()
             || service.healthy.is_some()
+            || service.completed_successfully.is_some()
             || service.status.is_some()
         {
             let step_name = service.step_name.as_deref().unwrap_or("unknown");
@@ -607,16 +613,22 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             let ready = service.healthy.map(yes_no).unwrap_or("unknown");
+            let completed = service
+                .completed_successfully
+                .map(yes_no)
+                .unwrap_or("unknown");
             let status = service.status.as_deref().unwrap_or("unknown");
             writeln!(
                 writer,
-                "    {}: {} {}: {} {}: {} {}: {}",
+                "    {}: {} {}: {} {}: {} {}: {} {}: {}",
                 term::styled_bold("step"),
                 step_name,
                 term::styled_bold("pid"),
                 pid,
                 term::styled_bold("ready"),
                 ready,
+                term::styled_bold("completed"),
+                completed,
                 term::styled_bold("status"),
                 term::styled_service_status(status)
             )?;
@@ -654,6 +666,10 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
                 .last_exit_code
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
+            let completed = service
+                .completed_successfully
+                .map(yes_no)
+                .unwrap_or("unknown");
             let window_state = if mode == "restart_on_failure"
                 && service.window_seconds.is_some()
                 && service.max_restarts_in_window.is_some()
@@ -668,8 +684,14 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
             };
             writeln!(
                 writer,
-                "  state service '{}': failure_policy={} restarts={}/{}{} last_exit={}",
-                service.service_name, mode, restart_count, max_restarts, window_state, last_exit
+                "  state service '{}': failure_policy={} restarts={}/{}{} last_exit={} completed={}",
+                service.service_name,
+                mode,
+                restart_count,
+                max_restarts,
+                window_state,
+                last_exit,
+                completed
             )?;
         }
         if service.placement_mode.is_some()
@@ -1203,6 +1225,9 @@ fn write_tree_node(
             let cond = match d.condition {
                 DependencyCondition::ServiceStarted => "service_started",
                 DependencyCondition::ServiceHealthy => "service_healthy",
+                DependencyCondition::ServiceCompletedSuccessfully => {
+                    "service_completed_successfully"
+                }
             };
             format!(
                 "{} [{}]",
@@ -1309,7 +1334,7 @@ fn write_plan_inspect_verbose(
         writeln!(
             writer,
             "effective srun args: {}",
-            display_srun_command(runtime).join(" ")
+            display_srun_command_for_backend(runtime, runtime_plan.runtime.backend).join(" ")
         )?;
         writeln!(
             writer,
@@ -1540,7 +1565,8 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
             source_image_display(&service.source)
         )?;
         if let ImageSource::Remote(_) = &service.source {
-            let base_path = base_image_path(&plan.cache_dir, service);
+            let base_path =
+                base_image_path_for_backend(&plan.cache_dir, service, plan.runtime.backend);
             writeln!(writer, "base cache artifact: {}", base_path.display())?;
             writeln!(
                 writer,
@@ -1608,7 +1634,8 @@ pub(crate) fn build_cache_inspect_report(
         }
 
         let base_artifact = if let ImageSource::Remote(_) = &service.source {
-            let base_path = base_image_path(&plan.cache_dir, service);
+            let base_path =
+                base_image_path_for_backend(&plan.cache_dir, service, plan.runtime.backend);
             Some(CacheArtifactInspect {
                 path: base_path.clone(),
                 artifact_present: base_path.exists(),
@@ -1624,7 +1651,7 @@ pub(crate) fn build_cache_inspect_report(
             source_image: source_image_display(&service.source),
             base_registry: match &service.source {
                 ImageSource::Remote(remote) => Some(registry_host_for_remote(remote)),
-                ImageSource::LocalSqsh(_) => None,
+                ImageSource::LocalSqsh(_) | ImageSource::LocalSif(_) | ImageSource::Host => None,
             },
             base_artifact,
             runtime_artifact: build_cache_artifact_inspect(&service.runtime_image)?,
@@ -1768,6 +1795,13 @@ fn runtime_cache_state(service: &hpc_compose::prepare::RuntimeService) -> &'stat
                     "local image missing"
                 }
             }
+            ImageSource::LocalSif(path) => {
+                if path.exists() {
+                    "local image present"
+                } else {
+                    "local image missing"
+                }
+            }
             ImageSource::Remote(_) => {
                 if service.runtime_image.exists() {
                     "cache hit"
@@ -1775,6 +1809,7 @@ fn runtime_cache_state(service: &hpc_compose::prepare::RuntimeService) -> &'stat
                     "cache miss"
                 }
             }
+            ImageSource::Host => "host runtime",
         }
     }
 }
@@ -1782,7 +1817,9 @@ fn runtime_cache_state(service: &hpc_compose::prepare::RuntimeService) -> &'stat
 fn source_image_display(source: &ImageSource) -> String {
     match source {
         ImageSource::LocalSqsh(path) => path.display().to_string(),
+        ImageSource::LocalSif(path) => path.display().to_string(),
         ImageSource::Remote(remote) => remote.clone(),
+        ImageSource::Host => "host".to_string(),
     }
 }
 
@@ -2192,6 +2229,7 @@ fn format_dependencies(dependencies: &[ServiceDependency]) -> String {
         let condition = match dependency.condition {
             DependencyCondition::ServiceStarted => "service_started",
             DependencyCondition::ServiceHealthy => "service_healthy",
+            DependencyCondition::ServiceCompletedSuccessfully => "service_completed_successfully",
         };
         formatted.push(format!("{}({condition})", dependency.name));
     }
@@ -2421,6 +2459,7 @@ services:
             launch_index: None,
             launcher_pid: None,
             healthy: None,
+            completed_successfully: None,
             readiness_configured: None,
             status: None,
             failure_policy_mode: None,
@@ -2568,6 +2607,7 @@ services:
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![
                 runtime_service(
@@ -2649,12 +2689,14 @@ services:
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service.clone()],
         };
         let local_plan = RuntimePlan {
             name: "local-demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![runtime_service(
                 ImageSource::LocalSqsh(local_sqsh.clone()),
@@ -2748,6 +2790,7 @@ services:
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service.clone()],
         };
@@ -2789,6 +2832,7 @@ services:
                 step_name: Some("hpc-compose:svc_name".into()),
                 launcher_pid: Some(4242),
                 healthy: Some(true),
+                completed_successfully: Some(false),
                 readiness_configured: Some(true),
                 status: Some("ready".into()),
                 ..sample_service_status(tmpdir.path().join(".hpc-compose/12345/logs/svc.log"))
@@ -3027,6 +3071,7 @@ services:
             project_dir: tmpdir.path().to_path_buf(),
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: hpc_compose::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![hpc_compose::planner::PlannedService {
                 name: service.name.clone(),
@@ -3414,6 +3459,8 @@ services:
         run_command(Commands::Prepare {
             file: Some(compose.clone()),
             enroot_bin: enroot.display().to_string(),
+            apptainer_bin: "apptainer".into(),
+            singularity_bin: "singularity".into(),
             keep_failed_prep: false,
             force: true,
             format: None,
@@ -3427,8 +3474,11 @@ services:
             format: None,
             json: false,
             enroot_bin: enroot.display().to_string(),
+            apptainer_bin: "apptainer".into(),
+            singularity_bin: "singularity".into(),
             sbatch_bin: sbatch_ok.display().to_string(),
             srun_bin: srun.display().to_string(),
+            scontrol_bin: "scontrol".into(),
         })
         .expect_err("strict warnings");
         assert!(err.to_string().contains("preflight reported warnings"));
@@ -3439,8 +3489,11 @@ services:
             format: None,
             json: false,
             enroot_bin: enroot.display().to_string(),
+            apptainer_bin: "apptainer".into(),
+            singularity_bin: "singularity".into(),
             sbatch_bin: sbatch_ok.display().to_string(),
             srun_bin: srun.display().to_string(),
+            scontrol_bin: "scontrol".into(),
         })
         .expect("non-strict preflight");
 
@@ -3459,6 +3512,8 @@ services:
             sbatch_bin: sbatch_fail.display().to_string(),
             srun_bin: srun.display().to_string(),
             enroot_bin: enroot.display().to_string(),
+            apptainer_bin: "apptainer".into(),
+            singularity_bin: "singularity".into(),
             squeue_bin: "squeue".into(),
             sacct_bin: "sacct".into(),
             keep_failed_prep: false,
@@ -3481,6 +3536,8 @@ services:
             sbatch_bin: sbatch_ok.display().to_string(),
             srun_bin: srun.display().to_string(),
             enroot_bin: enroot.display().to_string(),
+            apptainer_bin: "apptainer".into(),
+            singularity_bin: "singularity".into(),
             squeue_bin: "squeue".into(),
             sacct_bin: "sacct".into(),
             keep_failed_prep: false,
@@ -3501,6 +3558,8 @@ services:
             sbatch_bin: no_id_sbatch.display().to_string(),
             srun_bin: srun.display().to_string(),
             enroot_bin: enroot.display().to_string(),
+            apptainer_bin: "apptainer".into(),
+            singularity_bin: "singularity".into(),
             squeue_bin: "squeue".into(),
             sacct_bin: "sacct".into(),
             keep_failed_prep: false,
@@ -3627,6 +3686,7 @@ services:
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![runtime_service(
                 ImageSource::Remote("docker://redis:7".into()),
@@ -3699,6 +3759,7 @@ services:
                     launch_index: None,
                     launcher_pid: None,
                     healthy: None,
+                    completed_successfully: None,
                     readiness_configured: None,
                 },
             ],

@@ -36,6 +36,7 @@ hpc-compose context --format json
 | `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
 | `inspect` | View the normalized runtime plan | `--verbose` can reveal resolved secrets and final mount mappings. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later submit. |
+| `doctor --mpi-smoke` | Render or run a small MPI probe for one service | Reports requested/advertised MPI types, rank geometry, host MPI binds/env, and rendered `srun`; add `--submit` to consume a Slurm allocation. |
 | `prepare` | Import images and build prepared runtime artifacts | Use `--force` when the base image or prepare inputs changed. |
 | `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. |
 | `up` | Run the one-command submit/watch/logs workflow | Preferred normal run on a real cluster. |
@@ -48,6 +49,8 @@ hpc-compose config -f compose.yaml
 hpc-compose schema > hpc-compose.schema.json
 hpc-compose inspect --verbose -f compose.yaml
 hpc-compose preflight -f compose.yaml
+hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer --script-out mpi-smoke.sbatch
+hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer --submit
 hpc-compose prepare -f compose.yaml
 hpc-compose render -f compose.yaml --output job.sbatch
 hpc-compose up -f compose.yaml

@@ -68,6 +68,7 @@ The matrix below covers the broader set of runnable repository examples beyond t
 | [`llama-app.yaml`](example-source.md#llama-app) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
 | [`llama-uv-worker.yaml`](example-source.md#llama-uv-worker) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server plus mounted worker pattern |
 | [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) | First-class MPI launch, generated MPI hostfile, and one primary-node helper | You want a minimal multi-node MPI pattern without extra orchestration |
+| [`mpi-pmix-v4-host-mpi.yaml`](example-source.md#mpi-pmix-v4-host-mpi) | Versioned PMIx launch plus host MPI bind/env configuration | Your site requires a host MPI stack inside containers |
 | [`multi-node-partitioned.yaml`](example-source.md#multi-node-partitioned) | Disjoint node ranges, fractional node selection, and explicit co-location | You want multiple distributed roles inside one allocation |
 | [`multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) | Allocation-wide torchrun launch using the primary node as rendezvous | You want a multi-node GPU training starting point |
 | [`postgres-etl.yaml`](example-source.md#postgres-etl) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
@@ -76,6 +77,7 @@ The matrix below covers the broader set of runnable repository examples beyond t
 | [`vllm-uv-worker.yaml`](example-source.md#vllm-uv-worker) | vLLM serving plus a source-mounted Python worker executed through `uv` | You want a common LLM stack with mounted app code |
 | [`mpi-hello.yaml`](example-source.md#mpi-hello) | MPI hello world using service-level `x-slurm.mpi` | You need a small first-class MPI workload |
 | [`multi-stage-pipeline.yaml`](example-source.md#multi-stage-pipeline) | Two-stage pipeline coordinating through the shared job mount | You need file-based stage-to-stage handoff |
+| [`pipeline-dag.yaml`](example-source.md#pipeline-dag) | One-shot preprocess -> train -> postprocess DAG using successful-completion dependencies | You need stage completion, not service readiness, to gate downstream work |
 | [`fairseq-preprocess.yaml`](example-source.md#fairseq-preprocess) | CPU-heavy NLP data preprocessing with parallel workers | You need a CPU-bound data preprocessing pipeline |
 
 ## Which Example Should I Start From?

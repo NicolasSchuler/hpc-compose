@@ -15,7 +15,8 @@ use crate::planner::{
     ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement,
 };
 use crate::spec::{
-    ReadinessSpec, ServiceDependency, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
+    ReadinessSpec, RuntimeBackend, RuntimeConfig, ServiceDependency, ServiceFailurePolicy,
+    ServiceSlurmConfig, SlurmConfig,
 };
 
 /// A plan with concrete runtime image paths for every service.
@@ -24,6 +25,7 @@ use crate::spec::{
 pub struct RuntimePlan {
     pub name: String,
     pub cache_dir: PathBuf,
+    pub runtime: RuntimeConfig,
     pub slurm: SlurmConfig,
     pub ordered_services: Vec<RuntimeService>,
 }
@@ -52,6 +54,8 @@ pub struct RuntimeService {
 #[derive(Debug, Clone)]
 pub struct PrepareOptions {
     pub enroot_bin: String,
+    pub apptainer_bin: String,
+    pub singularity_bin: String,
     pub keep_failed_prep: bool,
     pub force_rebuild: bool,
 }
@@ -60,6 +64,8 @@ impl Default for PrepareOptions {
     fn default() -> Self {
         Self {
             enroot_bin: "enroot".to_string(),
+            apptainer_bin: "apptainer".to_string(),
+            singularity_bin: "singularity".to_string(),
             keep_failed_prep: false,
             force_rebuild: false,
         }
@@ -108,6 +114,7 @@ pub fn build_runtime_plan(plan: &Plan) -> RuntimePlan {
     RuntimePlan {
         name: plan.name.clone(),
         cache_dir: plan.cache_dir.clone(),
+        runtime: plan.runtime.clone(),
         slurm: plan.slurm.clone(),
         ordered_services: plan
             .ordered_services
@@ -133,6 +140,19 @@ pub fn build_runtime_plan(plan: &Plan) -> RuntimePlan {
 
 /// Imports and prepares any missing runtime artifacts for the given plan.
 pub fn prepare_runtime_plan(
+    plan: &RuntimePlan,
+    options: &PrepareOptions,
+) -> Result<PrepareSummary> {
+    match plan.runtime.backend {
+        RuntimeBackend::Pyxis => prepare_pyxis_runtime_plan(plan, options),
+        RuntimeBackend::Apptainer | RuntimeBackend::Singularity => {
+            prepare_sif_runtime_plan(plan, options)
+        }
+        RuntimeBackend::Host => prepare_host_runtime_plan(plan),
+    }
+}
+
+fn prepare_pyxis_runtime_plan(
     plan: &RuntimePlan,
     options: &PrepareOptions,
 ) -> Result<PrepareSummary> {
@@ -171,6 +191,13 @@ pub fn prepare_runtime_plan(
                     note: Some("uses local .sqsh directly".to_string()),
                 };
             }
+            ImageSource::LocalSif(path) => {
+                bail!(
+                    "service '{}' references SIF image '{}', but runtime.backend=pyxis requires Enroot-compatible images",
+                    service.name,
+                    path.display()
+                );
+            }
             ImageSource::Remote(remote) => {
                 let base_path = base_image_path(&plan.cache_dir, service);
                 let base_cache_key = base_image_cache_key(service);
@@ -208,6 +235,7 @@ pub fn prepare_runtime_plan(
                     };
                 }
             }
+            ImageSource::Host => unreachable!("host backend handled before Pyxis prepare"),
         }
 
         let Some(prepare) = &service.prepare else {
@@ -235,7 +263,170 @@ pub fn prepare_runtime_plan(
                 &service.runtime_image,
                 &service.name,
                 &service.source,
-                &prepared_image_cache_key(service, prepare),
+                &prepared_image_cache_key(service, prepare, plan.runtime.backend),
+                prepare,
+            )?;
+            result.runtime_image = ArtifactStatus {
+                path: service.runtime_image.clone(),
+                action: ArtifactAction::Built,
+                note,
+            };
+        } else {
+            touch_manifest(&service.runtime_image)?;
+            result.runtime_image = ArtifactStatus {
+                path: service.runtime_image.clone(),
+                action: ArtifactAction::Reused,
+                note: None,
+            };
+        }
+        summary.services.push(result);
+    }
+
+    Ok(summary)
+}
+
+fn prepare_host_runtime_plan(plan: &RuntimePlan) -> Result<PrepareSummary> {
+    let mut summary = PrepareSummary::default();
+    for service in &plan.ordered_services {
+        summary.services.push(ServicePrepareResult {
+            service_name: service.name.clone(),
+            base_image: None,
+            runtime_image: ArtifactStatus {
+                path: PathBuf::new(),
+                action: ArtifactAction::Present,
+                note: Some("host runtime does not use image artifacts".to_string()),
+            },
+        });
+    }
+    Ok(summary)
+}
+
+fn prepare_sif_runtime_plan(
+    plan: &RuntimePlan,
+    options: &PrepareOptions,
+) -> Result<PrepareSummary> {
+    let runtime_bin = sif_runtime_bin(plan.runtime.backend, options);
+    ensure_binary_available(
+        runtime_bin,
+        &format!(
+            "{} is required for runtime.backend={}; install it or pass the matching binary path",
+            runtime_bin,
+            plan.runtime.backend.as_str()
+        ),
+    )?;
+    create_cache_dirs(plan)?;
+    let mut summary = PrepareSummary::default();
+    let mut refreshed_base_images = HashSet::new();
+
+    for service in &plan.ordered_services {
+        let mut result = ServicePrepareResult {
+            service_name: service.name.clone(),
+            base_image: None,
+            runtime_image: ArtifactStatus {
+                path: service.runtime_image.clone(),
+                action: ArtifactAction::Present,
+                note: None,
+            },
+        };
+
+        match &service.source {
+            ImageSource::LocalSif(path) => {
+                if !path.exists() {
+                    bail!(
+                        "service '{}' references local SIF image '{}', but that file does not exist",
+                        service.name,
+                        path.display()
+                    );
+                }
+                result.runtime_image = ArtifactStatus {
+                    path: path.clone(),
+                    action: ArtifactAction::Present,
+                    note: Some("uses local .sif directly".to_string()),
+                };
+            }
+            ImageSource::Remote(remote) => {
+                let base_path =
+                    base_image_path_for_backend(&plan.cache_dir, service, plan.runtime.backend);
+                let base_cache_key = base_image_cache_key(service);
+                let needs_build = !base_path.exists()
+                    || (options.force_rebuild && !refreshed_base_images.contains(&base_path));
+                let base_action = if needs_build {
+                    ensure_parent_dir(&base_path)?;
+                    run_container_runtime(
+                        runtime_bin,
+                        [
+                            "build".to_string(),
+                            "--force".to_string(),
+                            base_path.display().to_string(),
+                            remote.clone(),
+                        ],
+                        &format!("build base SIF for service '{}'", service.name),
+                    )?;
+                    refreshed_base_images.insert(base_path.clone());
+                    ArtifactAction::Built
+                } else {
+                    ArtifactAction::Reused
+                };
+                upsert_base_manifest(&base_path, &service.name, &service.source, &base_cache_key)?;
+                result.base_image = Some(ArtifactStatus {
+                    path: base_path.clone(),
+                    action: base_action,
+                    note: None,
+                });
+                if service.prepare.is_none() {
+                    result.runtime_image = ArtifactStatus {
+                        path: base_path,
+                        action: base_action,
+                        note: Some(
+                            "base SIF cache artifact is used directly at runtime".to_string(),
+                        ),
+                    };
+                }
+            }
+            ImageSource::LocalSqsh(path) => {
+                bail!(
+                    "service '{}' references Enroot image '{}', but runtime.backend={} requires SIF images",
+                    service.name,
+                    path.display(),
+                    plan.runtime.backend.as_str()
+                );
+            }
+            ImageSource::Host => unreachable!("host backend handled before SIF prepare"),
+        }
+
+        let Some(prepare) = &service.prepare else {
+            if !matches!(service.source, ImageSource::LocalSif(_)) {
+                touch_manifest(&service.runtime_image)?;
+            }
+            summary.services.push(result);
+            continue;
+        };
+
+        let forced_by_mounts = prepare.force_rebuild;
+        let should_rebuild =
+            options.force_rebuild || forced_by_mounts || !service.runtime_image.exists();
+        if should_rebuild {
+            ensure_parent_dir(&service.runtime_image)?;
+            prepare_service_sif(
+                service,
+                prepare,
+                &plan.cache_dir,
+                plan.runtime.backend,
+                runtime_bin,
+                options,
+            )?;
+            let note = if options.force_rebuild {
+                Some("rebuilt because --force/--force-rebuild was requested".to_string())
+            } else if forced_by_mounts {
+                Some("rebuilt because prepare.mounts are present".to_string())
+            } else {
+                None
+            };
+            upsert_prepared_manifest(
+                &service.runtime_image,
+                &service.name,
+                &service.source,
+                &prepared_image_cache_key(service, prepare, plan.runtime.backend),
                 prepare,
             )?;
             result.runtime_image = ArtifactStatus {
@@ -268,6 +459,7 @@ fn prepare_service_image(
     let base_image = match &service.source {
         ImageSource::LocalSqsh(path) => path.clone(),
         ImageSource::Remote(_) => base_image_path(cache_dir, service),
+        ImageSource::LocalSif(_) | ImageSource::Host => unreachable!("validated by backend"),
     };
 
     let cleanup_result =
@@ -388,33 +580,186 @@ where
     Ok(())
 }
 
+fn prepare_service_sif(
+    service: &RuntimeService,
+    prepare: &PreparedImageSpec,
+    cache_dir: &Path,
+    backend: RuntimeBackend,
+    runtime_bin: &str,
+    options: &PrepareOptions,
+) -> Result<()> {
+    let sandbox = temporary_sandbox_path(cache_dir, service);
+    let base_image = match &service.source {
+        ImageSource::LocalSif(path) => path.clone(),
+        ImageSource::Remote(_) => base_image_path_for_backend(cache_dir, service, backend),
+        ImageSource::LocalSqsh(_) | ImageSource::Host => unreachable!("validated by backend"),
+    };
+
+    let cleanup_result =
+        run_sif_prepare_sequence(service, prepare, &sandbox, &base_image, runtime_bin);
+    match cleanup_result {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(&sandbox);
+            Ok(())
+        }
+        Err(err) => {
+            if !options.keep_failed_prep {
+                let _ = fs::remove_dir_all(&sandbox);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn run_sif_prepare_sequence(
+    service: &RuntimeService,
+    prepare: &PreparedImageSpec,
+    sandbox: &Path,
+    base_image: &Path,
+    runtime_bin: &str,
+) -> Result<()> {
+    let _ = fs::remove_dir_all(sandbox);
+    let mut build_args = vec![
+        "build".to_string(),
+        "--force".to_string(),
+        "--sandbox".to_string(),
+    ];
+    if prepare.root {
+        build_args.push("--fakeroot".to_string());
+    }
+    build_args.push(sandbox.display().to_string());
+    build_args.push(base_image.display().to_string());
+    run_container_runtime(
+        runtime_bin,
+        build_args,
+        &format!("create prepare sandbox for service '{}'", service.name),
+    )?;
+
+    for command in &prepare.commands {
+        let mut args = vec!["exec".to_string(), "--writable".to_string()];
+        if prepare.root {
+            args.push("--fakeroot".to_string());
+        }
+        for mount in &prepare.mounts {
+            args.push("--bind".to_string());
+            args.push(mount.clone());
+        }
+        for (key, value) in &prepare.env {
+            args.push("--env".to_string());
+            args.push(format!("{key}={value}"));
+        }
+        args.push(sandbox.display().to_string());
+        args.push("/bin/sh".to_string());
+        args.push("-lc".to_string());
+        args.push(command.clone());
+        run_container_runtime(
+            runtime_bin,
+            args,
+            &format!("run prepare command for service '{}'", service.name),
+        )?;
+    }
+
+    let mut export_args = vec!["build".to_string(), "--force".to_string()];
+    if prepare.root {
+        export_args.push("--fakeroot".to_string());
+    }
+    export_args.push(service.runtime_image.display().to_string());
+    export_args.push(sandbox.display().to_string());
+    run_container_runtime(
+        runtime_bin,
+        export_args,
+        &format!("export prepared SIF for service '{}'", service.name),
+    )
+}
+
+fn run_container_runtime<I>(runtime_bin: &str, args: I, context: &str) -> Result<()>
+where
+    I: IntoIterator<Item = String>,
+{
+    let args_vec = args.into_iter().collect::<Vec<_>>();
+    let output = Command::new(runtime_bin)
+        .args(&args_vec)
+        .output()
+        .context(format!(
+            "failed to execute '{}' while trying to {}",
+            runtime_bin, context
+        ))?;
+    if !output.status.success() {
+        bail!(
+            "failed to {}: {}",
+            context,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn sif_runtime_bin(backend: RuntimeBackend, options: &PrepareOptions) -> &str {
+    match backend {
+        RuntimeBackend::Apptainer => options.apptainer_bin.as_str(),
+        RuntimeBackend::Singularity => options.singularity_bin.as_str(),
+        RuntimeBackend::Pyxis | RuntimeBackend::Host => unreachable!("not a SIF backend"),
+    }
+}
+
 /// Returns the cache location used for a service's imported base image.
 #[must_use]
 pub fn base_image_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf {
-    base_image_path_from_source(cache_dir, &service.source)
+    base_image_path_from_source_for_backend(cache_dir, &service.source, RuntimeBackend::Pyxis)
+}
+
+/// Returns the cache location used for a service's imported base image under a
+/// specific runtime backend.
+#[must_use]
+pub fn base_image_path_for_backend(
+    cache_dir: &Path,
+    service: &RuntimeService,
+    backend: RuntimeBackend,
+) -> PathBuf {
+    base_image_path_from_source_for_backend(cache_dir, &service.source, backend)
 }
 
 /// Returns the cache location for a base image given its source reference.
 #[must_use]
 pub fn base_image_path_from_source(cache_dir: &Path, source: &ImageSource) -> PathBuf {
+    base_image_path_from_source_for_backend(cache_dir, source, RuntimeBackend::Pyxis)
+}
+
+fn base_image_path_from_source_for_backend(
+    cache_dir: &Path,
+    source: &ImageSource,
+    backend: RuntimeBackend,
+) -> PathBuf {
     let key = base_image_cache_key_from_source(source);
+    let extension = image_artifact_extension(source, backend);
     cache_dir.join("base").join(format!(
-        "{}-{}.sqsh",
+        "{}-{}.{}",
         short_hash(&key),
-        sanitize_name(&image_label(source))
+        sanitize_name(&image_label(source)),
+        extension
     ))
 }
 
 fn runtime_image_path(plan: &Plan, service: &PlannedService) -> PathBuf {
+    let extension = image_artifact_extension(&service.image, plan.runtime.backend);
     match (&service.image, &service.prepare) {
         (ImageSource::LocalSqsh(path), None) => path.clone(),
-        (ImageSource::Remote(_), None) => {
-            base_image_path_from_source(&plan.cache_dir, &service.image)
-        }
+        (ImageSource::LocalSif(path), None) => path.clone(),
+        (ImageSource::Host, _) => PathBuf::new(),
+        (ImageSource::Remote(_), None) => base_image_path_from_source_for_backend(
+            &plan.cache_dir,
+            &service.image,
+            plan.runtime.backend,
+        ),
         (_, Some(prepare)) => plan.cache_dir.join("prepared").join(format!(
-            "{}-{}.sqsh",
-            short_hash(&prepared_image_cache_key_from_plan(service, prepare)),
-            sanitize_name(&service.name)
+            "{}-{}.{}",
+            short_hash(&prepared_image_cache_key_from_plan(
+                service,
+                prepare,
+                plan.runtime.backend
+            )),
+            sanitize_name(&service.name),
+            extension
         )),
     }
 }
@@ -422,14 +767,18 @@ fn runtime_image_path(plan: &Plan, service: &PlannedService) -> PathBuf {
 fn prepared_image_cache_key_from_plan(
     service: &PlannedService,
     prepare: &PreparedImageSpec,
+    backend: RuntimeBackend,
 ) -> String {
     let mut parts = vec![
         "prepared".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
+        backend.as_str().to_string(),
     ];
     match &service.image {
         ImageSource::LocalSqsh(path) => parts.push(path.to_string_lossy().into_owned()),
+        ImageSource::LocalSif(path) => parts.push(path.to_string_lossy().into_owned()),
         ImageSource::Remote(remote) => parts.push(remote.clone()),
+        ImageSource::Host => parts.push("host".to_string()),
     }
     parts.extend(prepare.commands.iter().cloned());
     parts.extend(prepare.mounts.iter().cloned());
@@ -438,14 +787,21 @@ fn prepared_image_cache_key_from_plan(
     cache_key(&parts.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-fn prepared_image_cache_key(service: &RuntimeService, prepare: &PreparedImageSpec) -> String {
+fn prepared_image_cache_key(
+    service: &RuntimeService,
+    prepare: &PreparedImageSpec,
+    backend: RuntimeBackend,
+) -> String {
     let mut parts = vec![
         "prepared".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
+        backend.as_str().to_string(),
     ];
     match &service.source {
         ImageSource::LocalSqsh(path) => parts.push(path.to_string_lossy().into_owned()),
+        ImageSource::LocalSif(path) => parts.push(path.to_string_lossy().into_owned()),
         ImageSource::Remote(remote) => parts.push(remote.clone()),
+        ImageSource::Host => parts.push("host".to_string()),
     }
     parts.extend(prepare.commands.iter().cloned());
     parts.extend(prepare.mounts.iter().cloned());
@@ -461,7 +817,9 @@ fn base_image_cache_key(service: &RuntimeService) -> String {
 fn base_image_cache_key_from_source(source: &ImageSource) -> String {
     let image_key = match source {
         ImageSource::LocalSqsh(path) => path.to_string_lossy().into_owned(),
+        ImageSource::LocalSif(path) => path.to_string_lossy().into_owned(),
         ImageSource::Remote(remote) => remote.clone(),
+        ImageSource::Host => "host".to_string(),
     };
     cache_key(&["base", image_key.as_str(), env!("CARGO_PKG_VERSION")])
 }
@@ -472,6 +830,12 @@ fn temporary_rootfs_name(service: &RuntimeService) -> String {
         .unwrap_or_default()
         .as_secs();
     format!("hpc-compose-{}-{}", sanitize_name(&service.name), ts)
+}
+
+fn temporary_sandbox_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf {
+    cache_dir
+        .join("prepared")
+        .join(format!("{}.sandbox", temporary_rootfs_name(service)))
 }
 
 fn cache_key(parts: &[&str]) -> String {
@@ -507,11 +871,27 @@ fn image_label(source: &ImageSource) -> String {
             .and_then(|stem| stem.to_str())
             .unwrap_or("local-image")
             .to_string(),
+        ImageSource::LocalSif(path) => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("local-image")
+            .to_string(),
         ImageSource::Remote(remote) => remote
             .rsplit('/')
             .next()
             .unwrap_or(remote.as_str())
             .replace(':', "-"),
+        ImageSource::Host => "host".to_string(),
+    }
+}
+
+fn image_artifact_extension(source: &ImageSource, backend: RuntimeBackend) -> &'static str {
+    match source {
+        ImageSource::LocalSif(_) => "sif",
+        ImageSource::Remote(_) if backend.uses_sif() => "sif",
+        ImageSource::Remote(_) => "sqsh",
+        ImageSource::LocalSqsh(_) => "sqsh",
+        ImageSource::Host => "host",
     }
 }
 
@@ -716,6 +1096,64 @@ esac
         script
     }
 
+    fn write_fake_sif_runtime(tmpdir: &Path, log_path: &Path) -> PathBuf {
+        let script = tmpdir.join("fake-sif-runtime.sh");
+        let template = r#"#!/bin/bash
+set -euo pipefail
+echo "$@" >> __LOG_PATH__
+cmd="${1:-}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+case "$cmd" in
+  build)
+    sandbox=0
+    target=""
+    while (($#)); do
+      case "$1" in
+        --sandbox)
+          sandbox=1
+          shift
+          ;;
+        --force|--fakeroot)
+          shift
+          ;;
+        *)
+          target="$1"
+          break
+          ;;
+      esac
+    done
+    if [[ -z "$target" ]]; then
+      echo "missing build target" >&2
+      exit 64
+    fi
+    if (( sandbox )); then
+      mkdir -p "$target"
+    else
+      mkdir -p "$(dirname "$target")"
+      touch "$target"
+    fi
+    ;;
+  exec)
+    if printf '%s\n' "$@" | grep -q "fail-me"; then
+      echo "prepare failed" >&2
+      exit 41
+    fi
+    ;;
+esac
+"#;
+        let content = template.replace(
+            "__LOG_PATH__",
+            &shell_quote_for_test(&log_path.display().to_string()),
+        );
+        fs::write(&script, content).expect("write fake sif runtime");
+        let mut perms = fs::metadata(&script).expect("meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).expect("chmod");
+        script
+    }
+
     fn shell_quote_for_test(value: &str) -> String {
         let escaped = value.replace('\'', "'\"'\"'");
         format!("'{escaped}'")
@@ -730,6 +1168,7 @@ esac
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![fake_service(tmpdir.path())],
         };
@@ -737,6 +1176,7 @@ esac
             enroot_bin: fake.display().to_string(),
             keep_failed_prep: false,
             force_rebuild: false,
+            ..PrepareOptions::default()
         };
 
         let summary = prepare_runtime_plan(&plan, &options).expect("prepare");
@@ -763,6 +1203,7 @@ esac
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -770,6 +1211,7 @@ esac
             enroot_bin: fake.display().to_string(),
             keep_failed_prep: false,
             force_rebuild: false,
+            ..PrepareOptions::default()
         };
 
         prepare_runtime_plan(&plan, &options).expect("prepare once");
@@ -795,6 +1237,7 @@ esac
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -802,6 +1245,7 @@ esac
             enroot_bin: fake.display().to_string(),
             keep_failed_prep: false,
             force_rebuild: false,
+            ..PrepareOptions::default()
         };
 
         prepare_runtime_plan(&plan, &options).expect("prepare");
@@ -837,6 +1281,39 @@ esac
     }
 
     #[test]
+    fn sif_backends_use_sif_cache_paths_for_remote_images() {
+        let service = RuntimeService {
+            name: "app".into(),
+            runtime_image: PathBuf::from("/tmp/app.sif"),
+            execution: ExecutionSpec::ImageDefault,
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: ImageSource::Remote("docker://ubuntu:24.04".into()),
+        };
+
+        let cache_dir = Path::new("/shared/cache");
+        assert!(
+            base_image_path_for_backend(cache_dir, &service, RuntimeBackend::Apptainer)
+                .display()
+                .to_string()
+                .ends_with(".sif")
+        );
+        assert!(
+            base_image_path_for_backend(cache_dir, &service, RuntimeBackend::Pyxis)
+                .display()
+                .to_string()
+                .ends_with(".sqsh")
+        );
+    }
+
+    #[test]
     fn failed_prepare_cleans_up_by_default() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let log = tmpdir.path().join("enroot.log");
@@ -847,6 +1324,7 @@ esac
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -854,6 +1332,7 @@ esac
             enroot_bin: fake.display().to_string(),
             keep_failed_prep: false,
             force_rebuild: false,
+            ..PrepareOptions::default()
         };
 
         let err = prepare_runtime_plan(&plan, &options).expect_err("should fail");
@@ -873,6 +1352,7 @@ esac
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -883,6 +1363,7 @@ esac
                 enroot_bin: fake.display().to_string(),
                 keep_failed_prep: false,
                 force_rebuild: false,
+                ..PrepareOptions::default()
             },
         )
         .expect("prepare once");
@@ -895,6 +1376,7 @@ esac
                 enroot_bin: fake.display().to_string(),
                 keep_failed_prep: false,
                 force_rebuild: true,
+                ..PrepareOptions::default()
             },
         )
         .expect("prepare twice");
@@ -955,6 +1437,7 @@ esac
         let local_present = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache-local"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 name: "local-present".into(),
@@ -978,6 +1461,7 @@ esac
                 enroot_bin: fake.display().to_string(),
                 keep_failed_prep: false,
                 force_rebuild: false,
+                ..PrepareOptions::default()
             },
         )
         .expect("local present");
@@ -993,6 +1477,7 @@ esac
         let local_missing = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 name: "local".into(),
@@ -1016,6 +1501,7 @@ esac
                 enroot_bin: fake.display().to_string(),
                 keep_failed_prep: false,
                 force_rebuild: false,
+                ..PrepareOptions::default()
             },
         )
         .expect_err("local missing");
@@ -1024,6 +1510,7 @@ esac
         let remote_no_prepare = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache2"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 name: "redis".into(),
@@ -1047,6 +1534,7 @@ esac
                 enroot_bin: fake.display().to_string(),
                 keep_failed_prep: false,
                 force_rebuild: false,
+                ..PrepareOptions::default()
             },
         )
         .expect("remote no prepare");
@@ -1071,6 +1559,7 @@ esac
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 name: "local-prepared".into(),
@@ -1100,6 +1589,7 @@ esac
                 enroot_bin: fake.display().to_string(),
                 keep_failed_prep: false,
                 force_rebuild: false,
+                ..PrepareOptions::default()
             },
         )
         .expect("local prepare");
@@ -1137,6 +1627,7 @@ esac
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -1146,6 +1637,7 @@ esac
                 enroot_bin: fake.display().to_string(),
                 keep_failed_prep: true,
                 force_rebuild: false,
+                ..PrepareOptions::default()
             },
         )
         .expect_err("should fail");
@@ -1166,6 +1658,7 @@ esac
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: cache_dir.clone(),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: Vec::new(),
         };
@@ -1224,6 +1717,314 @@ esac
     }
 
     #[test]
+    fn sif_remote_base_builds_reuses_and_writes_manifest() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let log = tmpdir.path().join("sif-runtime.log");
+        let fake = write_fake_sif_runtime(tmpdir.path(), &log);
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let plan = Plan {
+            name: "demo".into(),
+            project_dir: tmpdir.path().to_path_buf(),
+            spec_path: compose,
+            cache_dir: tmpdir.path().join("cache"),
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Apptainer,
+                ..RuntimeConfig::default()
+            },
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![PlannedService {
+                name: "app".into(),
+                image: ImageSource::Remote("docker://example.com/app:1".into()),
+                execution: ExecutionSpec::ImageDefault,
+                environment: Vec::new(),
+                volumes: Vec::new(),
+                working_dir: None,
+                depends_on: Vec::new(),
+                readiness: None,
+                failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
+                slurm: ServiceSlurmConfig::default(),
+                prepare: None,
+            }],
+        };
+        let runtime_plan = build_runtime_plan(&plan);
+        let options = PrepareOptions {
+            apptainer_bin: fake.display().to_string(),
+            ..PrepareOptions::default()
+        };
+
+        let first = prepare_runtime_plan(&runtime_plan, &options).expect("first prepare");
+        assert_eq!(
+            first.services[0].base_image.as_ref().expect("base").action,
+            ArtifactAction::Built
+        );
+        assert_eq!(
+            first.services[0].runtime_image.note.as_deref(),
+            Some("base SIF cache artifact is used directly at runtime")
+        );
+        assert!(runtime_plan.ordered_services[0].runtime_image.exists());
+        let manifest = crate::cache::read_manifest(&runtime_plan.ordered_services[0].runtime_image)
+            .expect("base manifest");
+        assert_eq!(manifest.kind, crate::cache::CacheEntryKind::Base);
+        assert!(
+            fs::read_to_string(&log)
+                .expect("log")
+                .contains("docker://example.com/app:1")
+        );
+
+        fs::write(&log, "").expect("clear log");
+        let second = prepare_runtime_plan(&runtime_plan, &options).expect("second prepare");
+        assert_eq!(
+            second.services[0].base_image.as_ref().expect("base").action,
+            ArtifactAction::Reused
+        );
+        assert!(
+            !fs::read_to_string(&log)
+                .expect("log")
+                .contains("build --force")
+        );
+    }
+
+    #[test]
+    fn sif_local_images_are_validated_for_sif_backends() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let log = tmpdir.path().join("sif-runtime.log");
+        let fake = write_fake_sif_runtime(tmpdir.path(), &log);
+        let local_sif = tmpdir.path().join("local.sif");
+        fs::write(&local_sif, "sif").expect("local sif");
+        let local_sqsh = tmpdir.path().join("local.sqsh");
+        fs::write(&local_sqsh, "sqsh").expect("local sqsh");
+
+        let present = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache-present"),
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Singularity,
+                ..RuntimeConfig::default()
+            },
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![RuntimeService {
+                name: "local-sif".into(),
+                runtime_image: local_sif.clone(),
+                execution: ExecutionSpec::ImageDefault,
+                environment: Vec::new(),
+                volumes: Vec::new(),
+                working_dir: None,
+                depends_on: Vec::new(),
+                readiness: None,
+                failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
+                slurm: ServiceSlurmConfig::default(),
+                prepare: None,
+                source: ImageSource::LocalSif(local_sif.clone()),
+            }],
+        };
+        let summary = prepare_runtime_plan(
+            &present,
+            &PrepareOptions {
+                singularity_bin: fake.display().to_string(),
+                ..PrepareOptions::default()
+            },
+        )
+        .expect("local sif present");
+        assert_eq!(
+            summary.services[0].runtime_image.action,
+            ArtifactAction::Present
+        );
+        assert_eq!(
+            summary.services[0].runtime_image.note.as_deref(),
+            Some("uses local .sif directly")
+        );
+
+        let missing = RuntimePlan {
+            cache_dir: tmpdir.path().join("cache-missing"),
+            ordered_services: vec![RuntimeService {
+                name: "missing-sif".into(),
+                runtime_image: tmpdir.path().join("missing.sif"),
+                source: ImageSource::LocalSif(tmpdir.path().join("missing.sif")),
+                ..present.ordered_services[0].clone()
+            }],
+            ..present.clone()
+        };
+        let err = prepare_runtime_plan(
+            &missing,
+            &PrepareOptions {
+                singularity_bin: fake.display().to_string(),
+                ..PrepareOptions::default()
+            },
+        )
+        .expect_err("missing local sif");
+        assert!(err.to_string().contains("does not exist"));
+
+        let wrong_format = RuntimePlan {
+            cache_dir: tmpdir.path().join("cache-sqsh"),
+            ordered_services: vec![RuntimeService {
+                name: "local-sqsh".into(),
+                runtime_image: local_sqsh.clone(),
+                source: ImageSource::LocalSqsh(local_sqsh),
+                ..present.ordered_services[0].clone()
+            }],
+            ..present
+        };
+        let err = prepare_runtime_plan(
+            &wrong_format,
+            &PrepareOptions {
+                singularity_bin: fake.display().to_string(),
+                ..PrepareOptions::default()
+            },
+        )
+        .expect_err("sqsh rejected by sif backend");
+        assert!(err.to_string().contains("requires SIF images"));
+    }
+
+    #[test]
+    fn sif_prepare_sequence_uses_sandbox_flags_and_backend_cache_key() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let log = tmpdir.path().join("sif-runtime.log");
+        let fake = write_fake_sif_runtime(tmpdir.path(), &log);
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let prepare = PreparedImageSpec {
+            commands: vec!["echo setup".into()],
+            mounts: vec!["/host:/mnt".into()],
+            env: vec![("KEY".into(), "VALUE".into())],
+            root: true,
+            force_rebuild: false,
+        };
+        let plan = Plan {
+            name: "demo".into(),
+            project_dir: tmpdir.path().to_path_buf(),
+            spec_path: compose,
+            cache_dir: tmpdir.path().join("cache"),
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Apptainer,
+                ..RuntimeConfig::default()
+            },
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![PlannedService {
+                name: "prepared-sif".into(),
+                image: ImageSource::Remote("docker://example.com/prepared:1".into()),
+                execution: ExecutionSpec::ImageDefault,
+                environment: Vec::new(),
+                volumes: Vec::new(),
+                working_dir: None,
+                depends_on: Vec::new(),
+                readiness: None,
+                failure_policy: ServiceFailurePolicy::default(),
+                placement: ServicePlacement::default(),
+                slurm: ServiceSlurmConfig::default(),
+                prepare: Some(prepare.clone()),
+            }],
+        };
+        let runtime_plan = build_runtime_plan(&plan);
+        let service = &runtime_plan.ordered_services[0];
+
+        let summary = prepare_runtime_plan(
+            &runtime_plan,
+            &PrepareOptions {
+                apptainer_bin: fake.display().to_string(),
+                ..PrepareOptions::default()
+            },
+        )
+        .expect("sif prepare");
+        assert_eq!(
+            summary.services[0].runtime_image.action,
+            ArtifactAction::Built
+        );
+        assert!(service.runtime_image.exists());
+
+        let log_content = fs::read_to_string(&log).expect("log");
+        assert!(log_content.contains("build --force --sandbox --fakeroot"));
+        assert!(log_content.contains("exec --writable --fakeroot"));
+        assert!(log_content.contains("--bind /host:/mnt"));
+        assert!(log_content.contains("--env KEY=VALUE"));
+        assert!(log_content.contains(&service.runtime_image.display().to_string()));
+        assert!(
+            !fs::read_dir(runtime_plan.cache_dir.join("prepared"))
+                .expect("prepared dir")
+                .any(|entry| entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".sandbox"))
+        );
+
+        let manifest = crate::cache::read_manifest(&service.runtime_image).expect("manifest");
+        let expected_from_plan = prepared_image_cache_key_from_plan(
+            &plan.ordered_services[0],
+            &prepare,
+            RuntimeBackend::Apptainer,
+        );
+        assert_eq!(manifest.cache_key, expected_from_plan);
+        assert_eq!(
+            manifest.cache_key,
+            prepared_image_cache_key(service, &prepare, RuntimeBackend::Apptainer)
+        );
+    }
+
+    #[test]
+    fn failed_sif_prepare_cleanup_respects_keep_failed_prep() {
+        for (keep_failed_prep, should_keep_sandbox) in [(false, false), (true, true)] {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let log = tmpdir.path().join("sif-runtime.log");
+            let fake = write_fake_sif_runtime(tmpdir.path(), &log);
+            let local_sif = tmpdir.path().join("base.sif");
+            fs::write(&local_sif, "sif").expect("local sif");
+            let plan = RuntimePlan {
+                name: "demo".into(),
+                cache_dir: tmpdir.path().join("cache"),
+                runtime: RuntimeConfig {
+                    backend: RuntimeBackend::Apptainer,
+                    ..RuntimeConfig::default()
+                },
+                slurm: SlurmConfig::default(),
+                ordered_services: vec![RuntimeService {
+                    name: "bad-prepare".into(),
+                    runtime_image: tmpdir.path().join("cache/prepared/bad-prepare.sif"),
+                    execution: ExecutionSpec::ImageDefault,
+                    environment: Vec::new(),
+                    volumes: Vec::new(),
+                    working_dir: None,
+                    depends_on: Vec::new(),
+                    readiness: None,
+                    failure_policy: ServiceFailurePolicy::default(),
+                    placement: ServicePlacement::default(),
+                    slurm: ServiceSlurmConfig::default(),
+                    prepare: Some(PreparedImageSpec {
+                        commands: vec!["fail-me".into()],
+                        mounts: Vec::new(),
+                        env: Vec::new(),
+                        root: false,
+                        force_rebuild: false,
+                    }),
+                    source: ImageSource::LocalSif(local_sif),
+                }],
+            };
+            let err = prepare_runtime_plan(
+                &plan,
+                &PrepareOptions {
+                    apptainer_bin: fake.display().to_string(),
+                    keep_failed_prep,
+                    ..PrepareOptions::default()
+                },
+            )
+            .expect_err("prepare failure");
+            assert!(err.to_string().contains("run prepare command"));
+            let sandbox_left = fs::read_dir(plan.cache_dir.join("prepared"))
+                .expect("prepared dir")
+                .any(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".sandbox")
+                });
+            assert_eq!(sandbox_left, should_keep_sandbox);
+        }
+    }
+
+    #[test]
     fn runtime_path_and_command_helpers_cover_remaining_branches() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let compose = tmpdir.path().join("compose.yaml");
@@ -1233,6 +2034,7 @@ esac
             project_dir: tmpdir.path().to_path_buf(),
             spec_path: compose,
             cache_dir: tmpdir.path().join("cache"),
+            runtime: RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![
                 PlannedService {
@@ -1286,7 +2088,8 @@ esac
         assert!(
             prepared_image_cache_key_from_plan(
                 &plan.ordered_services[1],
-                plan.ordered_services[1].prepare.as_ref().expect("prepare")
+                plan.ordered_services[1].prepare.as_ref().expect("prepare"),
+                plan.runtime.backend
             )
             .len()
                 > 10
@@ -1297,7 +2100,8 @@ esac
                 runtime.ordered_services[1]
                     .prepare
                     .as_ref()
-                    .expect("prepare")
+                    .expect("prepare"),
+                plan.runtime.backend
             )
             .len()
                 > 10

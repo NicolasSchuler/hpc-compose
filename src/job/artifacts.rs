@@ -572,6 +572,213 @@ fn copy_symlink(source: &Path, _destination: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn artifact_manifest(job_id: &str) -> ArtifactManifest {
+        ArtifactManifest {
+            schema_version: ARTIFACT_MANIFEST_SCHEMA_VERSION,
+            job_id: job_id.to_string(),
+            collect_policy: "always".into(),
+            collected_at: "2026-04-05T10:00:00Z".into(),
+            job_outcome: "success".into(),
+            attempt: Some(2),
+            is_resume: Some(true),
+            resume_dir: Some(PathBuf::from("/shared/resume")),
+            declared_source_patterns: Vec::new(),
+            matched_source_paths: Vec::new(),
+            copied_relative_paths: Vec::new(),
+            warnings: Vec::new(),
+            bundles: BTreeMap::new(),
+        }
+    }
+
+    fn artifact_record(tmpdir: &Path, job_id: &str) -> SubmissionRecord {
+        let compose = tmpdir.join("compose.yaml");
+        fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+        let record = SubmissionRecord {
+            schema_version: SUBMISSION_SCHEMA_VERSION,
+            backend: SubmissionBackend::Slurm,
+            kind: SubmissionKind::Main,
+            job_id: job_id.to_string(),
+            submitted_at: 1,
+            compose_file: compose,
+            submit_dir: tmpdir.to_path_buf(),
+            script_path: tmpdir.join("job.sbatch"),
+            cache_dir: tmpdir.join("cache"),
+            batch_log: tmpdir.join(format!("slurm-{job_id}.out")),
+            service_logs: BTreeMap::new(),
+            artifact_export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+            resume_dir: None,
+            service_name: None,
+            command_override: None,
+            requested_walltime: None,
+            config_snapshot_yaml: None,
+            cached_artifacts: Vec::new(),
+        };
+        write_submission_record(&record).expect("write record");
+        record
+    }
+
+    fn write_artifact_manifest(record: &SubmissionRecord, manifest: &ArtifactManifest) {
+        let path = artifact_manifest_path_for_record(record);
+        fs::create_dir_all(path.parent().expect("manifest parent")).expect("manifest dir");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(manifest).expect("manifest json"),
+        )
+        .expect("write manifest");
+    }
+
+    #[test]
+    fn normalized_bundles_preserves_empty_and_legacy_top_level_fields() {
+        let empty = artifact_manifest("12345");
+        assert!(empty.normalized_bundles().is_empty());
+
+        let mut legacy = artifact_manifest("12345");
+        legacy.declared_source_patterns = vec!["/hpc-compose/job/metrics/**".into()];
+        legacy.matched_source_paths = vec!["/hpc-compose/job/metrics/meta.json".into()];
+        legacy.copied_relative_paths = vec!["metrics/meta.json".into()];
+        legacy.warnings = vec!["legacy warning".into()];
+
+        let bundles = legacy.normalized_bundles();
+        let default = bundles.get("default").expect("default bundle");
+        assert_eq!(
+            default.declared_source_patterns,
+            vec!["/hpc-compose/job/metrics/**".to_string()]
+        );
+        assert_eq!(
+            default.matched_source_paths,
+            vec!["/hpc-compose/job/metrics/meta.json".to_string()]
+        );
+        assert_eq!(
+            default.copied_relative_paths,
+            vec!["metrics/meta.json".to_string()]
+        );
+        assert_eq!(default.warnings, vec!["legacy warning".to_string()]);
+    }
+
+    #[test]
+    fn export_artifacts_rejects_newer_manifest_schema() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = artifact_record(tmpdir.path(), "12345");
+        let mut manifest = artifact_manifest("12345");
+        manifest.schema_version = ARTIFACT_MANIFEST_SCHEMA_VERSION + 1;
+        write_artifact_manifest(&record, &manifest);
+
+        let err = export_artifacts(
+            &record.compose_file,
+            Some("12345"),
+            &ArtifactExportOptions::default(),
+        )
+        .expect_err("newer manifest schema");
+        assert!(
+            err.to_string()
+                .contains("newer than this hpc-compose build supports")
+        );
+    }
+
+    #[test]
+    fn export_artifacts_dedupes_selected_bundle_and_reports_missing_payloads() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = artifact_record(tmpdir.path(), "12345");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(payload_dir.join("logs")).expect("logs dir");
+        fs::create_dir_all(payload_dir.join("metrics")).expect("metrics dir");
+        fs::write(payload_dir.join("logs/app.log"), "ready\n").expect("log");
+        fs::write(payload_dir.join("metrics/meta.json"), "{}\n").expect("metrics");
+
+        let mut log_paths = vec!["logs/app.log".to_string(), "logs/missing.log".to_string()];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("app.log", payload_dir.join("logs/latest"))
+                .expect("symlink");
+            log_paths.push("logs/latest".to_string());
+        }
+
+        let mut manifest = artifact_manifest("12345");
+        manifest.bundles = BTreeMap::from([
+            (
+                "default".into(),
+                ArtifactBundleManifest {
+                    declared_source_patterns: vec!["/hpc-compose/job/metrics/**".into()],
+                    matched_source_paths: vec!["/hpc-compose/job/metrics/meta.json".into()],
+                    copied_relative_paths: vec!["metrics/meta.json".into()],
+                    warnings: Vec::new(),
+                },
+            ),
+            (
+                "logs".into(),
+                ArtifactBundleManifest {
+                    declared_source_patterns: vec!["/hpc-compose/job/logs/**".into()],
+                    matched_source_paths: vec!["/hpc-compose/job/logs/app.log".into()],
+                    copied_relative_paths: log_paths,
+                    warnings: vec!["preexisting bundle warning".into()],
+                },
+            ),
+        ]);
+        write_artifact_manifest(&record, &manifest);
+
+        let report = export_artifacts(
+            &record.compose_file,
+            Some("12345"),
+            &ArtifactExportOptions {
+                selected_bundles: vec!["logs".into(), "logs".into()],
+                tarball: true,
+            },
+        )
+        .expect("export");
+
+        assert_eq!(report.selected_bundles, vec!["logs".to_string()]);
+        assert_eq!(report.bundles.len(), 1);
+        assert!(report.export_dir.join("bundles/logs/logs/app.log").exists());
+        assert!(!report.export_dir.join("metrics/meta.json").exists());
+        assert!(report.tarball_paths[0].exists());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("collected payload path"))
+        );
+        assert!(
+            report.bundles[0]
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("preexisting bundle warning"))
+        );
+
+        let provenance: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&report.bundles[0].provenance_path).expect("provenance"),
+        )
+        .expect("provenance json");
+        assert_eq!(provenance["bundle"], serde_json::json!("logs"));
+        assert_eq!(provenance["attempt"], serde_json::json!(2));
+        assert_eq!(provenance["is_resume"], serde_json::json!(true));
+
+        #[cfg(unix)]
+        assert!(report.bundles[0].files.iter().any(|entry| {
+            entry.relative_path == "logs/latest"
+                && entry.entry_type == "symlink"
+                && entry.link_target.as_deref() == Some("app.log")
+        }));
+    }
+
+    #[test]
+    fn resolve_selected_bundles_deduplicates_requested_names() {
+        let bundles = BTreeMap::from([(
+            "logs".to_string(),
+            ArtifactBundleManifest {
+                declared_source_patterns: vec!["/hpc-compose/job/logs/**".into()],
+                matched_source_paths: vec!["/hpc-compose/job/logs/app.log".into()],
+                copied_relative_paths: vec!["logs/app.log".into()],
+                warnings: Vec::new(),
+            },
+        )]);
+        let selected = resolve_selected_bundles(
+            &bundles,
+            &["logs".to_string(), "logs".to_string(), "logs".to_string()],
+        )
+        .expect("select deduped");
+        assert_eq!(selected, vec!["logs"]);
+    }
+
     #[test]
     fn resolve_export_dir_handles_absolute_and_relative() {
         let compose = Path::new("/project/compose.yaml");
@@ -741,5 +948,41 @@ mod tests {
         assert_eq!(file_entry.entry_type, "file");
         assert!(file_entry.size_bytes.is_some());
         assert!(file_entry.sha256.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_bundle_metadata_records_symlinks_and_skips_missing_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::create_dir_all(tmpdir.path().join("logs")).expect("logs dir");
+        fs::write(tmpdir.path().join("logs/app.log"), "ready\n").expect("log");
+        std::os::unix::fs::symlink("app.log", tmpdir.path().join("logs/latest")).expect("symlink");
+
+        let files = collect_bundle_metadata(
+            tmpdir.path(),
+            &[
+                "logs/latest".into(),
+                "logs/missing.log".into(),
+                "logs/app.log".into(),
+            ],
+        )
+        .expect("metadata");
+
+        assert_eq!(files.len(), 2);
+        let symlink = files
+            .iter()
+            .find(|entry| entry.relative_path == "logs/latest")
+            .expect("symlink entry");
+        assert_eq!(symlink.entry_type, "symlink");
+        assert_eq!(symlink.link_target.as_deref(), Some("app.log"));
+        assert!(symlink.sha256.is_none());
+
+        let file = files
+            .iter()
+            .find(|entry| entry.relative_path == "logs/app.log")
+            .expect("file entry");
+        assert_eq!(file.entry_type, "file");
+        assert_eq!(file.size_bytes, Some(6));
+        assert!(file.sha256.is_some());
     }
 }

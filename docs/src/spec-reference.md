@@ -8,6 +8,9 @@ This page describes the Compose subset that `hpc-compose` accepts today. Unknown
 name: demo
 version: "3.9"
 
+runtime:
+  backend: pyxis
+
 x-slurm:
   time: "00:30:00"
   cache_dir: /cluster/shared/hpc-compose-cache
@@ -24,6 +27,7 @@ services:
 | --- | --- | --- | --- |
 | `name` | string | omitted | Used as the Slurm job name when `x-slurm.job_name` is not set. |
 | `version` | string | omitted | Accepted for Compose compatibility. Ignored by the planner. |
+| `runtime` | mapping | `backend: pyxis` | Selects the service runtime backend and GPU passthrough policy. |
 | `services` | mapping | required | Must contain at least one service. |
 | `x-slurm` | mapping | omitted | Top-level Slurm settings and shared runtime defaults. |
 
@@ -58,11 +62,24 @@ These fields live under the top-level `x-slurm` block.
 | `mem` | string | omitted | Passed through to `#SBATCH --mem`. |
 | `gres` | string | omitted | Passed through to `#SBATCH --gres`. |
 | `gpus` | integer | omitted | Used only when `gres` is not set. |
+| `gpus_per_node` | integer | omitted | Passed through to `#SBATCH --gpus-per-node`. |
+| `gpus_per_task` | integer | omitted | Passed through to `#SBATCH --gpus-per-task`. |
+| `cpus_per_gpu` | integer | omitted | Passed through to `#SBATCH --cpus-per-gpu`. |
+| `mem_per_gpu` | string | omitted | Passed through to `#SBATCH --mem-per-gpu`. |
+| `gpu_bind` | string | omitted | Passed through to `#SBATCH --gpu-bind`. |
+| `cpu_bind` | string | omitted | Passed through to `#SBATCH --cpu-bind`. |
+| `mem_bind` | string | omitted | Passed through to `#SBATCH --mem-bind`. |
+| `distribution` | string | omitted | Passed through to `#SBATCH --distribution`. |
+| `hint` | string | omitted | Passed through to `#SBATCH --hint`. |
 | `constraint` | string | omitted | Passed through to `#SBATCH --constraint`. |
 | `output` | string | omitted | Passed through to `#SBATCH --output`. |
 | `error` | string | omitted | Passed through to `#SBATCH --error`. |
 | `chdir` | string | omitted | Passed through to `#SBATCH --chdir`. |
 | `cache_dir` | string | `$HOME/.cache/hpc-compose` | Must resolve to shared storage visible from the login node and the compute nodes. |
+| `scratch` | mapping | omitted | Optional scratch path mounted into services and exposed as `HPC_COMPOSE_SCRATCH_DIR`. |
+| `stage_in` | list of mappings | omitted | Copy or rsync host paths before services launch. |
+| `stage_out` | list of mappings | omitted | Copy or rsync paths during teardown, optionally by outcome. |
+| `burst_buffer` | mapping | omitted | Raw `#BB` / `#DW` directives for site-specific burst-buffer systems. |
 | `metrics` | mapping | omitted | Enables runtime metrics sampling. |
 | `artifacts` | mapping | omitted | Enables tracked artifact collection and export metadata. |
 | `resume` | mapping | omitted | Enables checkpoint-aware resume semantics with a shared host path mounted into every service. |
@@ -142,6 +159,58 @@ Rules:
   - Relative paths and environment variables are resolved against the compose file directory.
   - Paths under `/tmp`, `/var/tmp`, `/private/tmp`, and `/dev/shm` are rejected.
   - The path must be visible from both the login node and the compute nodes.
+
+## `runtime`
+
+```yaml
+runtime:
+  backend: apptainer
+  gpu: auto
+```
+
+| Field | Shape | Default | Notes |
+| --- | --- | --- | --- |
+| `backend` | `pyxis`, `apptainer`, `singularity`, or `host` | `pyxis` | Selects the runtime used inside Slurm steps. |
+| `gpu` | `auto`, `none`, or `nvidia` | `auto` | For Apptainer/Singularity, controls `--nv`; `auto` enables it when Slurm GPU resources are requested. |
+
+Backend notes:
+
+- `pyxis` uses `srun --container-*` flags and Enroot `.sqsh` artifacts.
+- `apptainer` and `singularity` build or reuse `.sif` artifacts and launch them through `apptainer exec/run` or `singularity exec/run` inside `srun`.
+- `host` runs commands directly under `srun`; services must set `command` or `entrypoint`, and image prepare blocks, service `volumes`, and `x-slurm.mpi.host_mpi.bind_paths` are not allowed because no container bind mount is applied.
+- `x-enroot.prepare` is a Pyxis/Enroot compatibility spelling. Prefer `x-runtime.prepare` for new specs, especially with Apptainer/Singularity.
+
+### `x-slurm.scratch`, `stage_in`, `stage_out`, and `burst_buffer`
+
+```yaml
+x-slurm:
+  scratch:
+    scope: shared
+    base: /scratch/$USER/jobs
+    mount: /scratch
+    cleanup: on_success
+  stage_in:
+    - from: /shared/input
+      to: /scratch/input
+      mode: rsync
+  stage_out:
+    - from: /scratch/output
+      to: /shared/results/${SLURM_JOB_ID}
+      when: always
+      mode: copy
+  burst_buffer:
+    directives:
+      - "#BB create_persistent name=data capacity=100G"
+```
+
+- `scratch.base` is a host path. `scratch.mount` is the container-visible mount point.
+- `scratch.scope` is `node_local` or `shared`; cluster profiles can warn when a shared scratch path does not look shared.
+- `scratch.cleanup` is `always`, `on_success`, or `never`.
+- `stage_in` runs before services launch; `stage_out` runs during teardown.
+- `mode` is `rsync` or `copy`; `rsync` falls back to `cp -R` when `rsync` is unavailable.
+- `stage_out.when` is `always`, `on_success`, or `on_failure`.
+- `${SLURM_JOB_ID}` is preserved in scratch and staging paths for runtime expansion.
+- `burst_buffer.directives` entries are emitted as raw batch-script directives and must start with `#BB ` or `#DW `.
 
 ### Multi-node placement rules
 
@@ -260,7 +329,7 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
-| `image` | string | required | Can be a remote image reference or a local `.sqsh` / `.squashfs` path. |
+| `image` | string | required unless `runtime.backend: host` | Can be a remote image reference, a local `.sqsh` / `.squashfs` path for Pyxis, or a local `.sif` path for Apptainer/Singularity. |
 | `command` | string or list of strings | omitted | Shell form or exec form. |
 | `entrypoint` | string or list of strings | omitted | Must use the same form as `command` when both are present. |
 | `environment` | mapping or list of `KEY=VALUE` strings | omitted | Both forms normalize to key/value pairs. |
@@ -270,7 +339,8 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 | `readiness` | mapping | omitted | Post-launch readiness gate. |
 | `healthcheck` | mapping | omitted | Compose-compatible sugar for a subset of `readiness`. Mutually exclusive with `readiness`. |
 | `x-slurm` | mapping | omitted | Per-service Slurm overrides. |
-| `x-enroot` | mapping | omitted | Per-service Enroot preparation rules. |
+| `x-runtime` | mapping | omitted | Backend-neutral image preparation rules. |
+| `x-enroot` | mapping | omitted | Pyxis/Enroot preparation compatibility alias. |
 
 ## Image rules
 
@@ -284,7 +354,8 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 
 ### Local images
 
-- Local image paths must point to `.sqsh` or `.squashfs` files.
+- Pyxis local image paths must point to `.sqsh` or `.squashfs` files.
+- Apptainer/Singularity local image paths must point to `.sif` files.
 - Relative paths are resolved against the compose file directory.
 - Paths that look like build contexts are rejected.
 
@@ -336,12 +407,14 @@ Accepted form:
 volumes:
   - ./app:/workspace
   - /shared/data:/data
+  - /shared/reference:/reference:ro
 ```
 
 Rules:
 
 - Host paths are resolved against the compose file directory.
-- Runtime mounts are passed through `srun --container-mounts=...`.
+- Runtime mounts accept `host_path:container_path` and `host_path:container_path:ro|rw`.
+- Pyxis mounts are passed through `srun --container-mounts=...`; Apptainer/Singularity mounts are passed as `--bind`.
 - Every service also gets an automatic shared mount at `/hpc-compose/job`, backed by `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}` on the host.
 - `/hpc-compose/job` is reserved and cannot be used as an explicit volume destination.
 
@@ -374,10 +447,11 @@ depends_on:
 Rules:
 
 - List form means `condition: service_started`.
-- Map form accepts `condition: service_started` and `condition: service_healthy`.
+- Map form accepts `condition: service_started`, `condition: service_healthy`, and `condition: service_completed_successfully`.
 - `service_healthy` requires the dependency service to define `readiness`.
 - `service_started` waits only for the dependency process to be launched and still alive.
 - `service_healthy` waits for the dependency readiness check to succeed.
+- `service_completed_successfully` waits for the dependency to exit with status `0` before launching the dependent service, which is useful for one-shot DAG stages such as preprocess -> train -> postprocess.
 
 ## `readiness`
 
@@ -470,6 +544,15 @@ These fields live under `services.<name>.x-slurm`.
 | `cpus_per_task` | integer | omitted | Adds `--cpus-per-task` to that service's `srun`. |
 | `gpus` | integer | omitted | Adds `--gpus` when `gres` is not set. |
 | `gres` | string | omitted | Adds `--gres` to that service's `srun`. Takes priority over `gpus`. |
+| `gpus_per_node` | integer | omitted | Adds `--gpus-per-node` to that service's `srun`. |
+| `gpus_per_task` | integer | omitted | Adds `--gpus-per-task` to that service's `srun`. |
+| `cpus_per_gpu` | integer | omitted | Adds `--cpus-per-gpu` to that service's `srun`. |
+| `mem_per_gpu` | string | omitted | Adds `--mem-per-gpu` to that service's `srun`. |
+| `gpu_bind` | string | omitted | Adds `--gpu-bind` to that service's `srun`. |
+| `cpu_bind` | string | omitted | Adds `--cpu-bind` to that service's `srun`. |
+| `mem_bind` | string | omitted | Adds `--mem-bind` to that service's `srun`. |
+| `distribution` | string | omitted | Adds `--distribution` to that service's `srun`. |
+| `hint` | string | omitted | Adds `--hint` to that service's `srun`. |
 | `time_limit` | string | omitted | Advisory per-service time limit. Validated against Slurm time formats but not passed to `srun`. `inspect` surfaces warnings when the limit exceeds allocation time or conflicts with dependencies. Accepted formats: `MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, `D-HH:MM:SS`. |
 | `extra_srun_args` | list of strings | omitted | Appended directly to the service's `srun` command. |
 | `mpi` | mapping | omitted | Adds first-class MPI launch metadata and `srun --mpi=<type>`. |
@@ -548,17 +631,30 @@ services:
       nodes: 2
       ntasks_per_node: 4
       mpi:
-        type: pmix
+        type: pmix_v4
+        implementation: openmpi
+        launcher: srun
+        expected_ranks: 8
+        host_mpi:
+          bind_paths:
+            - /opt/site/openmpi:/opt/site/openmpi:ro
+          env:
+            MPI_DIR: /opt/site/openmpi
 ```
 
 - Shape: mapping
 - Default: omitted
-- Supported `type` values: `pmix`, `pmi2`, `pmi1`, `openmpi`
+- `type` is an exact `srun --mpi=<type>` plugin token. Common values include `pmix`, `pmix_v4`, `pmi2`, `pmi1`, and `openmpi`; use `srun --mpi=list` or `hpc-compose doctor --cluster-report` on the target cluster to discover site-specific values.
 - Notes:
   - Rendered as `--mpi=<type>` on the service's `srun` command.
+  - `launcher` defaults to `srun`; v1 rejects other launchers.
+  - `implementation` is optional metadata for diagnostics. Supported values are `openmpi`, `mpich`, `intel_mpi`, `mvapich2`, `cray_mpi`, `hpe_mpi`, and `unknown`.
+  - `expected_ranks`, when set, must match the resolved Slurm task geometry.
+  - `host_mpi.bind_paths` uses `host_path:container_path[:ro|rw]` syntax, is validated like service volumes, and is automatically mounted into the service.
+  - `host_mpi.env` is injected into the service environment after normal service environment entries.
   - Cannot be combined with raw `--mpi...` entries in `extra_srun_args`.
   - MPI services receive `HPC_COMPOSE_MPI_TYPE` and `HPC_COMPOSE_MPI_HOSTFILE`.
-  - hpc-compose does not rewrite `command`; if you use `mpirun`, pass `--hostfile "$HPC_COMPOSE_MPI_HOSTFILE"` yourself.
+  - `hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer` renders a smoke probe for the service; add `--submit` to run it through Slurm. The smoke plan keeps allocation and MPI launch settings, but strips application workflow blocks such as setup, scratch staging, resume metadata, artifacts, and burst-buffer directives.
 
 ### `services.<name>.x-slurm.failure_policy`
 
@@ -645,15 +741,15 @@ Tracked state:
 
 Unknown keys under top-level `x-slurm` or per-service `x-slurm` cause hard errors.
 
-## `x-enroot.prepare`
+## `x-runtime.prepare` and `x-enroot.prepare`
 
-`x-enroot.prepare` lets a service build a prepared runtime image from its base image before submission.
+`x-runtime.prepare` lets a service build a prepared runtime image from its base image before submission. `x-enroot.prepare` remains accepted as a Pyxis-only compatibility spelling.
 
 ```yaml
 services:
   app:
     image: python:3.11-slim
-    x-enroot:
+    x-runtime:
       prepare:
         commands:
           - pip install --no-cache-dir numpy pandas
@@ -666,18 +762,20 @@ services:
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
-| `commands` | list of strings | required when `prepare` is present | Each command runs via `enroot start ... /bin/sh -lc ...`. |
+| `commands` | list of strings | required when `prepare` is present | Each command runs through the selected backend's writable prepare flow. |
 | `mounts` | list of `host_path:container_path` strings | omitted | Visible only during prepare. Relative host paths resolve against the compose file directory. |
 | `env` | mapping or list of `KEY=VALUE` strings | omitted | Passed only during prepare. Values support the same interpolation rules as `environment`. |
-| `root` | boolean | `true` | Controls whether prepare commands run with `--root`. |
+| `root` | boolean | `true` | Controls whether prepare commands request root/fakeroot behavior where the backend supports it. |
 
 Rules:
 
-- If `x-enroot.prepare` is present, `commands` cannot be empty.
+- If `x-runtime.prepare` or `x-enroot.prepare` is present, `commands` cannot be empty.
+- A service may not set both spellings.
+- `x-enroot.prepare` is rejected when `runtime.backend` is not `pyxis`.
 - If `prepare.mounts` is non-empty, the service rebuilds on every `prepare` or `submit`.
 - Remote base images are imported under `cache_dir/base`.
 - Prepared images are exported under `cache_dir/prepared`.
-- Unknown keys under `x-enroot` or `x-enroot.prepare` cause hard errors.
+- Unknown keys under `x-runtime`, `x-enroot`, or `prepare` cause hard errors.
 
 ## Unsupported Compose keys
 

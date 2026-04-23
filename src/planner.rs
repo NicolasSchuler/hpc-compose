@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{
-    CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, ServiceDependency,
-    ServiceEnrootConfig, ServiceFailureMode, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
+    CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, RuntimeBackend,
+    RuntimeConfig, ServiceDependency, ServiceFailureMode, ServiceFailurePolicy, ServiceSlurmConfig,
+    SlurmConfig,
 };
 
 const RESERVED_RUNTIME_MOUNT_DESTINATIONS: &[&str] = &["/hpc-compose/job"];
@@ -22,6 +23,7 @@ pub struct Plan {
     pub name: String,
     pub project_dir: PathBuf,
     pub spec_path: PathBuf,
+    pub runtime: RuntimeConfig,
     pub cache_dir: PathBuf,
     pub slurm: SlurmConfig,
     pub ordered_services: Vec<PlannedService>,
@@ -99,8 +101,12 @@ impl Default for ServicePlacement {
 pub enum ImageSource {
     /// A local `.sqsh` or `.squashfs` file used directly at runtime.
     LocalSqsh(PathBuf),
+    /// A local Apptainer/Singularity `.sif` file used directly at runtime.
+    LocalSif(PathBuf),
     /// A remote image reference imported through Enroot.
     Remote(String),
+    /// No container image because the service runs on the host runtime.
+    Host,
 }
 
 /// The final command form passed to the runtime container.
@@ -159,12 +165,51 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
     for (name, service) in &spec.services {
         let depends_on = service.depends_on.entries()?;
         let environment = service.environment.to_pairs()?;
+        let host_mpi_environment = service
+            .slurm
+            .mpi
+            .as_ref()
+            .and_then(|mpi| mpi.host_mpi.as_ref())
+            .map(|host_mpi| host_mpi.env.to_pairs())
+            .transpose()?
+            .unwrap_or_default();
+        let host_mpi_bind_paths = service
+            .slurm
+            .mpi
+            .as_ref()
+            .and_then(|mpi| mpi.host_mpi.as_ref())
+            .map(|host_mpi| host_mpi.bind_paths.len())
+            .unwrap_or_default();
+        if spec.runtime.backend == RuntimeBackend::Host && !service.volumes.is_empty() {
+            bail!(
+                "service '{name}' uses volumes with runtime.backend=host; host runtime does not apply container bind mounts"
+            );
+        }
+        if spec.runtime.backend == RuntimeBackend::Host && host_mpi_bind_paths > 0 {
+            bail!(
+                "service '{name}' uses x-slurm.mpi.host_mpi.bind_paths with runtime.backend=host; host runtime does not apply container bind mounts"
+            );
+        }
         let mut volumes = Vec::with_capacity(service.volumes.len());
         for mount in &service.volumes {
             let mount = normalize_mount(mount, &project_dir)?;
             ensure_runtime_mount_destination_allowed(name, &mount)?;
             volumes.push(mount);
         }
+        if let Some(host_mpi) = service
+            .slurm
+            .mpi
+            .as_ref()
+            .and_then(|mpi| mpi.host_mpi.as_ref())
+        {
+            for mount in &host_mpi.bind_paths {
+                let mount = normalize_mount(mount, &project_dir)?;
+                ensure_runtime_mount_destination_allowed(name, &mount)?;
+                volumes.push(mount);
+            }
+        }
+        let mut environment = environment;
+        environment.extend(host_mpi_environment);
         let working_dir = service.working_dir.clone();
         let execution = build_execution(
             service.entrypoint.as_ref(),
@@ -172,13 +217,36 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
             working_dir.as_deref(),
             name,
         )?;
+        if spec.runtime.backend == RuntimeBackend::Host
+            && matches!(execution, ExecutionSpec::ImageDefault)
+        {
+            bail!(
+                "service '{name}' uses runtime.backend=host without an explicit command or entrypoint"
+            );
+        }
+        if spec.runtime.backend == RuntimeBackend::Host && service.slurm.has_container_hook() {
+            bail!(
+                "service '{name}' uses a container-context x-slurm prologue/epilogue hook with runtime.backend=host"
+            );
+        }
         if matches!(execution, ExecutionSpec::ImageDefault) && service.slurm.has_container_hook() {
             bail!(
                 "service '{name}' uses a container-context x-slurm prologue/epilogue hook without an explicit command or entrypoint; define one so hpc-compose can wrap it"
             );
         }
-        let image = normalize_image(&service.image, &project_dir)?;
-        let prepare = normalize_prepare(service.enroot.clone(), &project_dir, name)?;
+        let image = normalize_image(
+            service.image.as_deref(),
+            spec.runtime.backend,
+            &project_dir,
+            name,
+        )?;
+        let prepare = normalize_prepare(
+            service.runtime.prepare.clone(),
+            service.enroot.prepare.clone(),
+            spec.runtime.backend,
+            &project_dir,
+            name,
+        )?;
         let failure_policy = service.slurm.normalized_failure_policy(name)?;
 
         temp.insert(
@@ -222,6 +290,7 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
         name,
         project_dir,
         spec_path,
+        runtime: spec.runtime,
         cache_dir,
         slurm: spec.slurm,
         ordered_services,
@@ -256,7 +325,9 @@ fn assign_service_placements(
         service.placement = placement;
     }
 
+    validate_service_placement_readiness(allocation_nodes, services)?;
     validate_service_placement_overlaps(allocation_nodes, services)?;
+    validate_mpi_expected_ranks(services)?;
 
     Ok(())
 }
@@ -425,12 +496,6 @@ fn resolve_explicit_service_placement(
 
     let nodes = u32::try_from(node_indices.len()).context("node count overflow")?;
     ensure_service_nodes_match(service, nodes)?;
-    if nodes > 1 && readiness_uses_implicit_localhost(service.readiness.as_ref()) {
-        bail!(
-            "service '{}' uses readiness that relies on localhost semantics, but services spanning multiple nodes must use sleep/log readiness or explicit non-local hosts",
-            service.name
-        );
-    }
     let full_allocation = nodes == allocation_nodes
         && exclude_indices.is_empty()
         && node_indices.iter().copied().eq(0..allocation_nodes);
@@ -498,13 +563,6 @@ fn resolve_legacy_service_placement(
         }
     };
 
-    if distributed && readiness_uses_implicit_localhost(service.readiness.as_ref()) {
-        bail!(
-            "service '{}' uses readiness that relies on localhost semantics, but services spanning multiple nodes must use sleep/log readiness or explicit non-local hosts",
-            service.name
-        );
-    }
-
     let (nodes, mode, pin_to_primary_node, node_indices, allow_overlap) = if distributed {
         (
             allocation_nodes,
@@ -563,6 +621,38 @@ fn resolve_step_tasks(
             service.slurm.ntasks_per_node,
         )
     }
+}
+
+fn validate_mpi_expected_ranks(services: &BTreeMap<String, PlannedService>) -> Result<()> {
+    for service in services.values() {
+        let Some(mpi) = &service.slurm.mpi else {
+            continue;
+        };
+        let Some(expected) = mpi.expected_ranks else {
+            continue;
+        };
+        let resolved = resolved_rank_count(&service.placement);
+        if resolved != expected {
+            bail!(
+                "service '{}' sets x-slurm.mpi.expected_ranks={}, but resolved Slurm task geometry launches {} rank(s)",
+                service.name,
+                expected,
+                resolved
+            );
+        }
+    }
+    Ok(())
+}
+
+fn resolved_rank_count(placement: &ServicePlacement) -> u32 {
+    placement
+        .ntasks
+        .or_else(|| {
+            placement
+                .ntasks_per_node
+                .map(|per_node| per_node * placement.nodes)
+        })
+        .unwrap_or(1)
 }
 
 fn ensure_service_nodes_match(service: &PlannedService, resolved_nodes: u32) -> Result<()> {
@@ -635,6 +725,25 @@ fn select_eligible_node_indices(
     Ok(nodes)
 }
 
+fn validate_service_placement_readiness(
+    allocation_nodes: u32,
+    services: &BTreeMap<String, PlannedService>,
+) -> Result<()> {
+    for service in services.values() {
+        if !readiness_uses_implicit_localhost(service.readiness.as_ref()) {
+            continue;
+        }
+        if service_allocation_indices(&service.placement, allocation_nodes) == BTreeSet::from([0]) {
+            continue;
+        }
+        bail!(
+            "service '{}' uses readiness that relies on localhost semantics, but its placement is not confined to the allocation primary node; use sleep/log readiness or explicit non-local hosts",
+            service.name
+        );
+    }
+    Ok(())
+}
+
 fn validate_service_placement_overlaps(
     allocation_nodes: u32,
     services: &BTreeMap<String, PlannedService>,
@@ -685,14 +794,30 @@ fn service_allocation_indices(
 }
 
 fn normalize_prepare(
-    cfg: ServiceEnrootConfig,
+    runtime_prepare: Option<PrepareSpec>,
+    enroot_prepare: Option<PrepareSpec>,
+    backend: RuntimeBackend,
     project_dir: &Path,
     service_name: &str,
 ) -> Result<Option<PreparedImageSpec>> {
-    let Some(prepare) = cfg.prepare else {
-        return Ok(None);
+    if backend == RuntimeBackend::Host && (runtime_prepare.is_some() || enroot_prepare.is_some()) {
+        bail!("service '{service_name}' uses image prepare with runtime.backend=host");
+    }
+    let (prepare, label) = match (runtime_prepare, enroot_prepare) {
+        (Some(prepare), None) => (prepare, "x-runtime.prepare"),
+        (None, Some(prepare)) => (prepare, "x-enroot.prepare"),
+        (None, None) => {
+            return Ok(None);
+        }
+        (Some(_), Some(_)) => unreachable!("validated earlier"),
     };
-    let prepare = build_prepare_plan(prepare, project_dir, service_name)?;
+    if backend != RuntimeBackend::Pyxis && label == "x-enroot.prepare" {
+        bail!(
+            "service '{service_name}' uses x-enroot.prepare with runtime.backend={}; use x-runtime.prepare",
+            backend.as_str()
+        );
+    }
+    let prepare = build_prepare_plan(prepare, project_dir, service_name, label)?;
     Ok(Some(prepare))
 }
 
@@ -700,11 +825,10 @@ fn build_prepare_plan(
     prepare: PrepareSpec,
     project_dir: &Path,
     service_name: &str,
+    label: &str,
 ) -> Result<PreparedImageSpec> {
     if prepare.commands.is_empty() {
-        bail!(
-            "service '{service_name}' uses x-enroot.prepare but does not define any prepare.commands"
-        );
+        bail!("service '{service_name}' uses {label} but does not define any prepare.commands");
     }
 
     let mut mounts = Vec::with_capacity(prepare.mounts.len());
@@ -719,6 +843,218 @@ fn build_prepare_plan(
         root: prepare.root,
         force_rebuild: !mounts.is_empty(),
     })
+}
+
+fn normalize_image(
+    image: Option<&str>,
+    backend: RuntimeBackend,
+    project_dir: &Path,
+    service_name: &str,
+) -> Result<ImageSource> {
+    if backend == RuntimeBackend::Host {
+        return Ok(ImageSource::Host);
+    }
+
+    let Some(image) = image else {
+        bail!("service '{service_name}' must define image unless runtime.backend=host");
+    };
+    if image.contains("://") {
+        if image.starts_with("docker://")
+            || image.starts_with("dockerd://")
+            || image.starts_with("podman://")
+        {
+            return Ok(ImageSource::Remote(image.to_string()));
+        }
+        bail!(
+            "unsupported image scheme in '{image}'; use docker://, dockerd://, podman://, a local .sqsh path, or a local .sif path"
+        );
+    }
+
+    if backend.uses_pyxis() && looks_like_local_sif(image) {
+        bail!(
+            "service '{service_name}' uses local SIF image '{image}', but runtime.backend=pyxis expects a remote image or local .sqsh/.squashfs"
+        );
+    }
+    if backend.uses_sif() && looks_like_local_sqsh(image) {
+        bail!(
+            "service '{service_name}' uses local Enroot image '{image}', but runtime.backend={} expects a remote image or local .sif",
+            backend.as_str()
+        );
+    }
+    if looks_like_local_sqsh(image) {
+        return Ok(ImageSource::LocalSqsh(resolve_path(image, project_dir)?));
+    }
+    if looks_like_local_sif(image) {
+        return Ok(ImageSource::LocalSif(resolve_path(image, project_dir)?));
+    }
+
+    if looks_like_explicit_local_path(image) {
+        bail!(
+            "local image path '{image}' must point to a .sqsh/.squashfs or .sif file; Dockerfiles and build contexts are not supported in v1"
+        );
+    }
+
+    Ok(ImageSource::Remote(format!("docker://{image}")))
+}
+
+fn looks_like_local_sif(value: &str) -> bool {
+    value.ends_with(".sif") || (looks_like_explicit_local_path(value) && value.contains(".sif"))
+}
+
+fn normalize_mount(mount: &str, project_dir: &Path) -> Result<String> {
+    let parsed = ParsedMount::parse(mount)?;
+    let host_path = resolve_path(parsed.host, project_dir)?;
+    Ok(match parsed.mode {
+        Some(mode) => format!("{}:{}:{mode}", host_path.display(), parsed.container),
+        None => format!("{}:{}", host_path.display(), parsed.container),
+    })
+}
+
+fn ensure_runtime_mount_destination_allowed(service_name: &str, mount: &str) -> Result<()> {
+    let parsed = ParsedMount::parse(mount)?;
+    if RESERVED_RUNTIME_MOUNT_DESTINATIONS.contains(&parsed.container) {
+        bail!(
+            "service '{service_name}' uses reserved runtime mount destination '{}'; that path is provided automatically for per-job shared state",
+            parsed.container
+        );
+    }
+    Ok(())
+}
+
+struct ParsedMount<'a> {
+    host: &'a str,
+    container: &'a str,
+    mode: Option<&'a str>,
+}
+
+impl<'a> ParsedMount<'a> {
+    fn parse(mount: &'a str) -> Result<Self> {
+        let parts = mount.split(':').collect::<Vec<_>>();
+        let parsed = match parts.as_slice() {
+            [host, container] => Self {
+                host,
+                container,
+                mode: None,
+            },
+            [host, container, mode @ ("ro" | "rw")] => Self {
+                host,
+                container,
+                mode: Some(mode),
+            },
+            [_, _, mode] => {
+                bail!("mount '{mount}' uses unsupported mode '{mode}'; use ro or rw")
+            }
+            _ => bail!("mount '{mount}' must use host_path:container_path[:ro|rw] syntax"),
+        };
+        if parsed.host.trim().is_empty() || parsed.container.trim().is_empty() {
+            bail!("mount '{mount}' must use non-empty host and container paths");
+        }
+        if !parsed.container.starts_with('/') {
+            bail!("mount '{mount}' container path must be absolute");
+        }
+        Ok(parsed)
+    }
+}
+
+fn resolve_cache_dir(slurm: &SlurmConfig, project_dir: &Path) -> Result<PathBuf> {
+    let raw = match slurm.cache_dir.clone() {
+        Some(cache_dir) => cache_dir,
+        None => {
+            let home = match env::var("HOME") {
+                Ok(home) => home,
+                Err(_) => "~".to_string(),
+            };
+            format!("{home}/.cache/hpc-compose")
+        }
+    };
+    resolve_path(&raw, project_dir)
+}
+
+/// Returns a user-facing issue for cache paths that violate cluster policy.
+#[must_use]
+pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
+    let banned_prefixes = [
+        Path::new("/tmp"),
+        Path::new("/var/tmp"),
+        Path::new("/private/tmp"),
+        Path::new("/dev/shm"),
+    ];
+    if banned_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
+        return Some(format!(
+            "x-slurm.cache_dir resolves to '{}', which is typically node-local and not shared; choose a shared filesystem path instead",
+            path.display()
+        ));
+    }
+    None
+}
+
+/// Extracts the registry hostname used by a remote image reference.
+#[must_use]
+pub fn registry_host_for_remote(remote: &str) -> String {
+    let without_scheme = remote.split("://").nth(1).unwrap_or(remote);
+    if let Some((host, _)) = without_scheme.split_once('#') {
+        return host.to_string();
+    }
+
+    let has_path_component = without_scheme.contains('/');
+    if !has_path_component {
+        return "registry-1.docker.io".to_string();
+    }
+
+    let first = without_scheme.split('/').next().unwrap_or(without_scheme);
+    if first == "localhost" || first.contains('.') || (first.contains(':') && has_path_component) {
+        first.to_string()
+    } else {
+        "registry-1.docker.io".to_string()
+    }
+}
+
+fn looks_like_local_sqsh(value: &str) -> bool {
+    value.ends_with(".sqsh")
+        || value.ends_with(".squashfs")
+        || (looks_like_explicit_local_path(value)
+            && (value.contains(".sqsh") || value.contains(".squashfs")))
+}
+
+fn looks_like_explicit_local_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+}
+
+fn resolve_path(value: &str, project_dir: &Path) -> Result<PathBuf> {
+    let expanded = expand_home(value);
+    let raw = PathBuf::from(expanded);
+    let path = if raw.is_absolute() {
+        raw
+    } else {
+        project_dir.join(raw)
+    };
+    Ok(crate::path_util::normalize_path(path))
+}
+
+fn expand_home(value: &str) -> String {
+    if value == "~" {
+        return match env::var("HOME") {
+            Ok(home) => home,
+            Err(_) => "~".to_string(),
+        };
+    }
+    if let Some(rest) = value.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME")
+    {
+        return format!("{home}/{rest}");
+    }
+    value.to_string()
+}
+
+fn normalize_existing_path(path: &Path) -> Result<PathBuf> {
+    path.canonicalize()
+        .context(format!("failed to canonicalize {}", path.display()))
 }
 
 fn build_execution(
@@ -832,153 +1168,6 @@ fn validate_dependency_conditions(services: &BTreeMap<String, PlannedService>) -
     Ok(())
 }
 
-fn normalize_image(image: &str, project_dir: &Path) -> Result<ImageSource> {
-    if looks_like_local_sqsh(image) {
-        return Ok(ImageSource::LocalSqsh(resolve_path(image, project_dir)?));
-    }
-
-    if image.contains("://") {
-        if image.starts_with("docker://")
-            || image.starts_with("dockerd://")
-            || image.starts_with("podman://")
-        {
-            return Ok(ImageSource::Remote(image.to_string()));
-        }
-        bail!(
-            "unsupported image scheme in '{image}'; use docker://, dockerd://, podman://, or a local .sqsh path"
-        );
-    }
-
-    if looks_like_explicit_local_path(image) {
-        bail!(
-            "local image path '{image}' must point to a .sqsh or .squashfs file; Dockerfiles and build contexts are not supported in v1"
-        );
-    }
-
-    Ok(ImageSource::Remote(format!("docker://{image}")))
-}
-
-fn resolve_cache_dir(slurm: &SlurmConfig, project_dir: &Path) -> Result<PathBuf> {
-    let raw = match slurm.cache_dir.clone() {
-        Some(cache_dir) => cache_dir,
-        None => {
-            let home = match env::var("HOME") {
-                Ok(home) => home,
-                Err(_) => "~".to_string(),
-            };
-            format!("{home}/.cache/hpc-compose")
-        }
-    };
-    resolve_path(&raw, project_dir)
-}
-
-/// Returns a user-facing issue for cache paths that violate cluster policy.
-#[must_use]
-pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
-    let banned_prefixes = [
-        Path::new("/tmp"),
-        Path::new("/var/tmp"),
-        Path::new("/private/tmp"),
-        Path::new("/dev/shm"),
-    ];
-    if banned_prefixes
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
-    {
-        return Some(format!(
-            "x-slurm.cache_dir resolves to '{}', which is typically node-local and not shared; choose a shared filesystem path instead",
-            path.display()
-        ));
-    }
-    None
-}
-
-/// Extracts the registry hostname used by a remote image reference.
-#[must_use]
-pub fn registry_host_for_remote(remote: &str) -> String {
-    let without_scheme = remote.split("://").nth(1).unwrap_or(remote);
-    if let Some((host, _)) = without_scheme.split_once('#') {
-        return host.to_string();
-    }
-
-    let has_path_component = without_scheme.contains('/');
-    if !has_path_component {
-        return "registry-1.docker.io".to_string();
-    }
-
-    let first = without_scheme.split('/').next().unwrap_or(without_scheme);
-    if first == "localhost" || first.contains('.') || (first.contains(':') && has_path_component) {
-        first.to_string()
-    } else {
-        "registry-1.docker.io".to_string()
-    }
-}
-
-fn looks_like_local_sqsh(value: &str) -> bool {
-    value.ends_with(".sqsh")
-        || value.ends_with(".squashfs")
-        || (looks_like_explicit_local_path(value)
-            && (value.contains(".sqsh") || value.contains(".squashfs")))
-}
-
-fn looks_like_explicit_local_path(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.starts_with("~/")
-}
-
-fn normalize_mount(mount: &str, project_dir: &Path) -> Result<String> {
-    let Some((host, rest)) = mount.split_once(':') else {
-        bail!("mount '{mount}' must use host_path:container_path syntax");
-    };
-    let host_path = resolve_path(host, project_dir)?;
-    Ok(format!("{}:{rest}", host_path.display()))
-}
-
-fn ensure_runtime_mount_destination_allowed(service_name: &str, mount: &str) -> Result<()> {
-    let Some((_, container_path)) = mount.rsplit_once(':') else {
-        bail!("mount '{mount}' must use host_path:container_path syntax");
-    };
-    if RESERVED_RUNTIME_MOUNT_DESTINATIONS.contains(&container_path) {
-        bail!(
-            "service '{service_name}' uses reserved runtime mount destination '{container_path}'; that path is provided automatically for per-job shared state"
-        );
-    }
-    Ok(())
-}
-
-fn resolve_path(value: &str, project_dir: &Path) -> Result<PathBuf> {
-    let expanded = expand_home(value);
-    let raw = PathBuf::from(expanded);
-    let path = if raw.is_absolute() {
-        raw
-    } else {
-        project_dir.join(raw)
-    };
-    Ok(crate::path_util::normalize_path(path))
-}
-
-fn expand_home(value: &str) -> String {
-    if value == "~" {
-        return match env::var("HOME") {
-            Ok(home) => home,
-            Err(_) => "~".to_string(),
-        };
-    }
-    if let Some(rest) = value.strip_prefix("~/")
-        && let Ok(home) = env::var("HOME")
-    {
-        return format!("{home}/{rest}");
-    }
-    value.to_string()
-}
-
-fn normalize_existing_path(path: &Path) -> Result<PathBuf> {
-    path.canonicalize()
-        .context(format!("failed to canonicalize {}", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -986,15 +1175,16 @@ mod tests {
 
     use super::*;
     use crate::spec::{
-        ComposeSpec, DependsOnConditionSpec, DependsOnSpec, EnvironmentSpec, ReadinessSpec,
-        ServiceDependency, ServiceEnrootConfig, ServiceFailureMode, ServiceFailurePolicy,
-        ServiceFailurePolicySpec, ServiceHookContext, ServiceHookSpec, ServicePlacementSpec,
+        ComposeSpec, DependsOnConditionSpec, DependsOnSpec, EnvironmentSpec, HostMpiConfig,
+        MpiConfig, MpiLauncher, MpiType, ReadinessSpec, RuntimeConfig, ServiceDependency,
+        ServiceEnrootConfig, ServiceFailureMode, ServiceFailurePolicy, ServiceFailurePolicySpec,
+        ServiceHookContext, ServiceHookSpec, ServicePlacementSpec, ServiceRuntimeConfig,
         ServiceSlurmConfig, ServiceSpec,
     };
 
     fn service(image: &str) -> ServiceSpec {
         ServiceSpec {
-            image: image.to_string(),
+            image: Some(image.to_string()),
             command: None,
             entrypoint: None,
             environment: EnvironmentSpec::None,
@@ -1004,6 +1194,7 @@ mod tests {
             readiness: None,
             healthcheck: None,
             slurm: ServiceSlurmConfig::default(),
+            runtime: ServiceRuntimeConfig::default(),
             enroot: ServiceEnrootConfig::default(),
         }
     }
@@ -1011,6 +1202,7 @@ mod tests {
     #[test]
     fn bare_images_normalize_to_docker_uri() {
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([("redis".into(), service("redis:7"))]),
@@ -1020,6 +1212,122 @@ mod tests {
             plan.ordered_services[0].image,
             ImageSource::Remote("docker://redis:7".into())
         );
+    }
+
+    #[test]
+    fn host_backend_allows_command_without_image() {
+        let spec = ComposeSpec {
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Host,
+                ..RuntimeConfig::default()
+            },
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    image: None,
+                    command: Some(CommandSpec::String("module list".into())),
+                    ..service("ignored:latest")
+                },
+            )]),
+        };
+
+        let plan = build_plan(Path::new("."), spec).expect("host plan");
+        assert_eq!(plan.ordered_services[0].image, ImageSource::Host);
+    }
+
+    #[test]
+    fn host_backend_rejects_service_volumes() {
+        let spec = ComposeSpec {
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Host,
+                ..RuntimeConfig::default()
+            },
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    image: None,
+                    command: Some(CommandSpec::String("/bin/true".into())),
+                    volumes: vec!["./app:/workspace".into()],
+                    ..service("ignored:latest")
+                },
+            )]),
+        };
+
+        let err = build_plan(Path::new("."), spec).expect_err("host volumes");
+        assert!(err.to_string().contains("volumes"));
+        assert!(err.to_string().contains("runtime.backend=host"));
+    }
+
+    #[test]
+    fn host_backend_rejects_host_mpi_bind_paths() {
+        let spec = ComposeSpec {
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Host,
+                ..RuntimeConfig::default()
+            },
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    image: None,
+                    command: Some(CommandSpec::String("/bin/true".into())),
+                    slurm: ServiceSlurmConfig {
+                        mpi: Some(MpiConfig {
+                            mpi_type: MpiType::new("pmix").expect("mpi type"),
+                            implementation: None,
+                            launcher: MpiLauncher::default(),
+                            expected_ranks: None,
+                            host_mpi: Some(HostMpiConfig {
+                                bind_paths: vec!["/opt/mpi:/opt/mpi:ro".into()],
+                                env: EnvironmentSpec::None,
+                            }),
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("ignored:latest")
+                },
+            )]),
+        };
+
+        let err = build_plan(Path::new("."), spec).expect_err("host mpi binds");
+        assert!(err.to_string().contains("host_mpi.bind_paths"));
+        assert!(err.to_string().contains("runtime.backend=host"));
+    }
+
+    #[test]
+    fn non_pyxis_backends_accept_sif_and_reject_sqsh() {
+        let project = Path::new("/tmp/project");
+        let source = normalize_image(
+            Some("./image.sif"),
+            RuntimeBackend::Apptainer,
+            project,
+            "app",
+        )
+        .expect("sif image");
+        assert!(matches!(source, ImageSource::LocalSif(path) if path.ends_with("image.sif")));
+
+        let err = normalize_image(
+            Some("./image.sqsh"),
+            RuntimeBackend::Apptainer,
+            project,
+            "app",
+        )
+        .expect_err("sqsh rejected");
+        assert!(
+            err.to_string()
+                .contains("expects a remote image or local .sif")
+        );
+    }
+
+    #[test]
+    fn read_only_volume_mode_is_preserved() {
+        let mount = normalize_mount("./data:/data:ro", Path::new("/tmp/project")).expect("mount");
+        assert_eq!(mount, "/tmp/project/data:/data:ro");
     }
 
     #[test]
@@ -1072,6 +1380,7 @@ mod tests {
             script: "echo prepare".into(),
         });
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([("app".into(), app)]),
@@ -1090,7 +1399,9 @@ mod tests {
             env: EnvironmentSpec::None,
             root: true,
         };
-        let prepare = build_prepare_plan(spec, Path::new("/tmp/project"), "svc").expect("prepare");
+        let prepare =
+            build_prepare_plan(spec, Path::new("/tmp/project"), "svc", "x-runtime.prepare")
+                .expect("prepare");
         assert!(prepare.force_rebuild);
         assert_eq!(prepare.mounts, vec!["/tmp/project/data:/data"]);
     }
@@ -1098,6 +1409,7 @@ mod tests {
     #[test]
     fn topo_sort_orders_dependencies() {
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([
@@ -1127,6 +1439,7 @@ mod tests {
     #[test]
     fn build_plan_rejects_reserved_runtime_mount_destination() {
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([(
@@ -1192,6 +1505,7 @@ mod tests {
         let mut svc = service("redis:7");
         svc.readiness = Some(ReadinessSpec::Sleep { seconds: 5 });
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([("redis".into(), svc)]),
@@ -1215,6 +1529,7 @@ mod tests {
         let err = build_plan(
             &compose,
             ComposeSpec {
+                runtime: RuntimeConfig::default(),
                 name: None,
                 slurm: SlurmConfig::default(),
                 services: BTreeMap::new(),
@@ -1226,6 +1541,7 @@ mod tests {
         let plan = build_plan(
             &compose,
             ComposeSpec {
+                runtime: RuntimeConfig::default(),
                 name: None,
                 slurm: SlurmConfig {
                     nodes: Some(2),
@@ -1253,6 +1569,7 @@ mod tests {
         std::fs::write(&compose, "services: {}\n").expect("write");
 
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig {
                 nodes: Some(2),
@@ -1295,6 +1612,7 @@ mod tests {
         let plan = build_plan(
             &compose,
             ComposeSpec {
+                runtime: RuntimeConfig::default(),
                 name: Some("demo".into()),
                 slurm: SlurmConfig {
                     nodes: Some(8),
@@ -1357,6 +1675,7 @@ mod tests {
         let plan = build_plan(
             &compose,
             ComposeSpec {
+                runtime: RuntimeConfig::default(),
                 name: Some("demo".into()),
                 slurm: SlurmConfig {
                     nodes: Some(8),
@@ -1391,6 +1710,7 @@ mod tests {
         std::fs::write(&compose, "services: {}\n").expect("write");
 
         let overlapping = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig {
                 nodes: Some(8),
@@ -1429,6 +1749,7 @@ mod tests {
         assert!(err.to_string().contains("overlap"));
 
         let allowed = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig {
                 nodes: Some(8),
@@ -1467,6 +1788,7 @@ mod tests {
         build_plan(&compose, allowed).expect("overlap allowed");
 
         let shared = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig {
                 nodes: Some(8),
@@ -1522,6 +1844,7 @@ mod tests {
         std::fs::write(&compose, "services: {}\n").expect("write");
 
         let out_of_bounds = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig {
                 nodes: Some(2),
@@ -1545,6 +1868,7 @@ mod tests {
         assert!(err.to_string().contains("only has 2 node"));
 
         let empty_after_exclude = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig {
                 nodes: Some(2),
@@ -1569,6 +1893,7 @@ mod tests {
         assert!(err.to_string().contains("empty node set"));
 
         let cycle = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig {
                 nodes: Some(2),
@@ -1615,6 +1940,7 @@ mod tests {
         std::fs::write(&compose, "services: {}\n").expect("write");
 
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig {
                 nodes: Some(2),
@@ -1638,6 +1964,87 @@ mod tests {
     }
 
     #[test]
+    fn build_plan_rejects_non_primary_placement_readiness_with_localhost_semantics() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let explicit_non_primary = ComposeSpec {
+            runtime: RuntimeConfig::default(),
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    readiness: Some(ReadinessSpec::Tcp {
+                        host: None,
+                        port: 6379,
+                        timeout_seconds: None,
+                    }),
+                    slurm: ServiceSlurmConfig {
+                        placement: Some(ServicePlacementSpec {
+                            node_range: Some("1".into()),
+                            ..ServicePlacementSpec::default()
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("redis:7")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, explicit_non_primary)
+            .expect_err("non-primary localhost readiness");
+        assert!(err.to_string().contains("localhost semantics"));
+
+        let shared_multi_node = ComposeSpec {
+            runtime: RuntimeConfig::default(),
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(4),
+                ..SlurmConfig::default()
+            },
+            services: BTreeMap::from([
+                (
+                    "ps".into(),
+                    ServiceSpec {
+                        readiness: Some(ReadinessSpec::Tcp {
+                            host: None,
+                            port: 6379,
+                            timeout_seconds: None,
+                        }),
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                share_with: Some("workers".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                ),
+                (
+                    "workers".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_range: Some("0-1".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                ),
+            ]),
+        };
+        let err = build_plan(&compose, shared_multi_node).expect_err("shared localhost readiness");
+        assert!(err.to_string().contains("localhost semantics"));
+    }
+
+    #[test]
     fn build_prepare_and_execution_cover_error_and_string_variants() {
         let err = build_prepare_plan(
             PrepareSpec {
@@ -1648,6 +2055,7 @@ mod tests {
             },
             Path::new("/tmp/project"),
             "svc",
+            "x-runtime.prepare",
         )
         .expect_err("missing commands");
         assert!(err.to_string().contains("prepare.commands"));
@@ -1661,6 +2069,7 @@ mod tests {
             },
             Path::new("/tmp/project"),
             "svc",
+            "x-runtime.prepare",
         )
         .expect("prepared");
         assert!(!prepared.force_rebuild);
@@ -1780,17 +2189,51 @@ mod tests {
         std::fs::write(&local_sqsh, "x").expect("sqsh");
 
         assert_eq!(
-            normalize_image(local_sqsh.to_str().expect("path"), tmpdir.path()).expect("local"),
+            normalize_image(
+                Some(local_sqsh.to_str().expect("path")),
+                RuntimeBackend::Pyxis,
+                tmpdir.path(),
+                "svc"
+            )
+            .expect("local"),
             ImageSource::LocalSqsh(local_sqsh.clone())
         );
         assert_eq!(
-            normalize_image("docker://redis:7", tmpdir.path()).expect("remote"),
+            normalize_image(
+                Some("docker://redis:7"),
+                RuntimeBackend::Pyxis,
+                tmpdir.path(),
+                "svc"
+            )
+            .expect("remote"),
             ImageSource::Remote("docker://redis:7".into())
         );
+        assert_eq!(
+            normalize_image(
+                Some("docker://registry.example/app.sif"),
+                RuntimeBackend::Pyxis,
+                tmpdir.path(),
+                "svc"
+            )
+            .expect("remote sif-like uri"),
+            ImageSource::Remote("docker://registry.example/app.sif".into())
+        );
 
-        let err = normalize_image("oci://redis:7", tmpdir.path()).expect_err("scheme");
+        let err = normalize_image(
+            Some("oci://redis:7"),
+            RuntimeBackend::Pyxis,
+            tmpdir.path(),
+            "svc",
+        )
+        .expect_err("scheme");
         assert!(err.to_string().contains("unsupported image scheme"));
-        let err = normalize_image("./Dockerfile", tmpdir.path()).expect_err("local path");
+        let err = normalize_image(
+            Some("./Dockerfile"),
+            RuntimeBackend::Pyxis,
+            tmpdir.path(),
+            "svc",
+        )
+        .expect_err("local path");
         assert!(
             err.to_string()
                 .contains("Dockerfiles and build contexts are not supported")
@@ -1839,6 +2282,7 @@ mod tests {
     #[test]
     fn build_plan_rejects_service_healthy_without_readiness() {
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([
@@ -1868,6 +2312,7 @@ mod tests {
     #[test]
     fn build_plan_preserves_dependency_conditions() {
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([
@@ -1926,6 +2371,7 @@ mod tests {
     #[test]
     fn build_plan_normalizes_failure_policy_defaults_and_overrides() {
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([
@@ -2028,6 +2474,7 @@ mod tests {
     #[test]
     fn build_plan_applies_partial_restart_window_overrides() {
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([
@@ -2103,6 +2550,7 @@ mod tests {
         std::fs::write(&compose, "services: {}\n").expect("write");
 
         let invalid_non_restart = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([(
@@ -2129,6 +2577,7 @@ mod tests {
         );
 
         let invalid_restart = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([(
@@ -2152,6 +2601,7 @@ mod tests {
         assert!(err.to_string().contains("max_restarts"));
 
         let invalid_window = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([(
@@ -2175,6 +2625,7 @@ mod tests {
         assert!(err.to_string().contains("window_seconds"));
 
         let invalid_window_count = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([(
@@ -2202,6 +2653,7 @@ mod tests {
     #[test]
     fn build_plan_rejects_dependencies_on_ignore_services() {
         let spec = ComposeSpec {
+            runtime: RuntimeConfig::default(),
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             services: BTreeMap::from([

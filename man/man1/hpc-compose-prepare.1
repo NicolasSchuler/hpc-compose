@@ -8,7 +8,7 @@ hpc\-compose prepare [OPTIONS]
 .fi
 .SH DESCRIPTION
 .PP
-Import base images and build prepared runtime artifacts on the submission host. This is the login\-node image preparation phase reused later by submit.
+Import base images and build prepared runtime artifacts on the submission host with the selected runtime backend. This is the login\-node image preparation phase reused later by submit.
 .SH OPTIONS
 .TP
 \fB-f\fR, \fB--file\fR \fIFILE\fR
@@ -16,6 +16,12 @@ Compose specification file to read; if omitted, use the active context compose f
 .TP
 \fB--enroot\-bin\fR \fIPATH\fR
 Path to the enroot executable. Default: enroot.
+.TP
+\fB--apptainer\-bin\fR \fIPATH\fR
+Path to the apptainer executable. Default: apptainer.
+.TP
+\fB--singularity\-bin\fR \fIPATH\fR
+Path to the singularity executable. Default: singularity.
 .TP
 \fB--keep\-failed\-prep\fR
 Keep failed preparation state on disk for later inspection.

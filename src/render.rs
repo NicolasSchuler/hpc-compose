@@ -8,8 +8,9 @@ use anyhow::Result;
 use crate::planner::{ExecutionSpec, ServicePlacementMode};
 use crate::prepare::{RuntimePlan, RuntimeService};
 use crate::spec::{
-    ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
-    ServiceFailureMode, ServiceHookContext,
+    ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec, RuntimeBackend,
+    RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchScope, ServiceFailureMode, ServiceHookContext,
+    StageMode, StageOutWhen,
 };
 use crate::tracked_paths;
 
@@ -54,11 +55,38 @@ pub fn render_local_script(plan: &RuntimePlan, job_id: &str, enroot_bin: &str) -
     Ok(out)
 }
 
+/// Runtime executable paths to bake into rendered batch scripts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderOptions {
+    /// Apptainer executable used by Apptainer-backed service steps.
+    pub apptainer_bin: String,
+    /// Singularity executable used by Singularity-backed service steps.
+    pub singularity_bin: String,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            apptainer_bin: "apptainer".to_string(),
+            singularity_bin: "singularity".to_string(),
+        }
+    }
+}
+
 /// Renders the complete `sbatch` script for a runtime plan.
 pub fn render_script(plan: &RuntimePlan) -> Result<String> {
+    render_script_with_options(plan, &RenderOptions::default())
+}
+
+/// Renders the complete `sbatch` script for a runtime plan with explicit
+/// runtime executable paths.
+pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -> Result<String> {
     let metrics_enabled = plan.slurm.metrics_enabled();
     let artifacts_enabled = plan.slurm.artifacts_enabled();
     let resume_enabled = plan.slurm.resume_dir().is_some();
+    let scratch_enabled = plan.slurm.scratch.is_some();
+    let stage_enabled = !plan.slurm.stage_in.is_empty() || !plan.slurm.stage_out.is_empty();
+    let transfer_helpers_enabled = scratch_enabled || stage_enabled;
     let mpi_enabled = plan
         .ordered_services
         .iter()
@@ -137,6 +165,33 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     } else if let Some(gpus) = plan.slurm.gpus {
         sbatch::push_directive(&mut out, "gpus", gpus);
     }
+    if let Some(gpus_per_node) = plan.slurm.gpus_per_node {
+        sbatch::push_directive(&mut out, "gpus-per-node", gpus_per_node);
+    }
+    if let Some(gpus_per_task) = plan.slurm.gpus_per_task {
+        sbatch::push_directive(&mut out, "gpus-per-task", gpus_per_task);
+    }
+    if let Some(cpus_per_gpu) = plan.slurm.cpus_per_gpu {
+        sbatch::push_directive(&mut out, "cpus-per-gpu", cpus_per_gpu);
+    }
+    if let Some(mem_per_gpu) = &plan.slurm.mem_per_gpu {
+        sbatch::push_directive(&mut out, "mem-per-gpu", mem_per_gpu);
+    }
+    if let Some(gpu_bind) = &plan.slurm.gpu_bind {
+        sbatch::push_directive(&mut out, "gpu-bind", gpu_bind);
+    }
+    if let Some(cpu_bind) = &plan.slurm.cpu_bind {
+        sbatch::push_directive(&mut out, "cpu-bind", cpu_bind);
+    }
+    if let Some(mem_bind) = &plan.slurm.mem_bind {
+        sbatch::push_directive(&mut out, "mem-bind", mem_bind);
+    }
+    if let Some(distribution) = &plan.slurm.distribution {
+        sbatch::push_directive(&mut out, "distribution", distribution);
+    }
+    if let Some(hint) = &plan.slurm.hint {
+        sbatch::push_directive(&mut out, "hint", hint);
+    }
     if let Some(constraint) = &plan.slurm.constraint {
         sbatch::push_directive(&mut out, "constraint", constraint);
     }
@@ -151,6 +206,12 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     }
     for arg in &plan.slurm.submit_args {
         sbatch::push_raw_directive(&mut out, arg);
+    }
+    if let Some(burst_buffer) = &plan.slurm.burst_buffer {
+        for directive in &burst_buffer.directives {
+            out.push_str(directive);
+            out.push('\n');
+        }
     }
     out.push_str("\nset -euo pipefail\n\n");
     out.push_str("BACKEND=\"${HPC_COMPOSE_BACKEND_OVERRIDE:-slurm}\"\n");
@@ -256,6 +317,29 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         "CACHE_ROOT={}\n",
         shell_quote(&plan.cache_dir.display().to_string())
     ));
+    if let Some(scratch) = &plan.slurm.scratch {
+        out.push_str(&format!("SCRATCH_BASE={}\n", shell_quote(&scratch.base)));
+        out.push_str(&format!(
+            "SCRATCH_CONTAINER_PATH={}\n",
+            shell_quote(&scratch.mount)
+        ));
+        out.push_str(&format!(
+            "SCRATCH_SCOPE={}\n",
+            shell_quote(match scratch.scope {
+                ScratchScope::Shared => "shared",
+                ScratchScope::NodeLocal => "node_local",
+            })
+        ));
+        out.push_str("SCRATCH_HOST_PATH=\"$SCRATCH_BASE/${SLURM_JOB_ID}\"\n");
+        out.push_str(&format!(
+            "SCRATCH_CLEANUP_POLICY={}\n",
+            shell_quote(match scratch.cleanup {
+                ScratchCleanupPolicy::Always => "always",
+                ScratchCleanupPolicy::OnSuccess => "on_success",
+                ScratchCleanupPolicy::Never => "never",
+            })
+        ));
+    }
     out.push_str("export ENROOT_CACHE_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/cache\"\n");
     out.push_str("export ENROOT_DATA_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/data\"\n");
     out.push_str("export ENROOT_TEMP_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/tmp\"\n");
@@ -279,6 +363,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("SERVICE_STEP_NAMES=()\n");
     out.push_str("SERVICE_LOG_PATHS=()\n");
     out.push_str("SERVICE_HEALTHY=()\n");
+    out.push_str("SERVICE_COMPLETED_SUCCESSFULLY=()\n");
     out.push_str("SERVICE_READINESS_CONFIGURED=()\n");
     out.push_str("SERVICE_FAILURE_POLICY_MODE=()\n");
     out.push_str("SERVICE_MAX_RESTARTS=()\n");
@@ -385,6 +470,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  append_unique_mount \"$JOB_TMP:/hpc-compose/job\"\n");
     out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
     out.push_str("    append_unique_mount \"$RESUME_HOST_PATH:$RESUME_CONTAINER_PATH\"\n");
+    out.push_str("  fi\n");
+    out.push_str("  if [[ \"${HPC_COMPOSE_SERVICE_SCRATCH_ENABLED:-0}\" == \"1\" && -n \"${SCRATCH_HOST_PATH:-}\" && -n \"${SCRATCH_CONTAINER_PATH:-}\" ]]; then\n");
+    out.push_str("    append_unique_mount \"$SCRATCH_HOST_PATH:$SCRATCH_CONTAINER_PATH\"\n");
     out.push_str("  fi\n");
     out.push_str("  if [[ -e /etc/slurm/task_prolog.hk ]]; then\n");
     out.push_str(
@@ -672,6 +760,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     if artifacts_enabled {
         render_artifact_helpers(&mut out);
     }
+    if transfer_helpers_enabled {
+        render_stage_helpers(&mut out, plan);
+    }
 
     if metrics_enabled {
         render_metrics_helpers(&mut out);
@@ -705,13 +796,14 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("      if (( first == 0 )); then\n");
     out.push_str("        printf ','\n");
     out.push_str("      fi\n");
-    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"readiness_configured\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"window_seconds\":%s,\"max_restarts_in_window\":%s,\"restart_failures_in_window\":%s,\"restart_failure_timestamps\":%s,\"last_exit_code\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s}' \\\n");
+    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"completed_successfully\":%s,\"readiness_configured\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"window_seconds\":%s,\"max_restarts_in_window\":%s,\"restart_failures_in_window\":%s,\"restart_failure_timestamps\":%s,\"last_exit_code\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s}' \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_NAMES[i]}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_STEP_NAMES[i]:-}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_LOG_PATHS[i]:-}\")\" \\\n");
     out.push_str("        \"$i\" \\\n");
     out.push_str("        \"${SERVICE_PIDS[i]:-0}\" \\\n");
     out.push_str("        \"$(if [[ \"${SERVICE_HEALTHY[i]:-0}\" == \"1\" ]]; then printf true; else printf false; fi)\" \\\n");
+    out.push_str("        \"$(if [[ \"${SERVICE_COMPLETED_SUCCESSFULLY[i]:-0}\" == \"1\" ]]; then printf true; else printf false; fi)\" \\\n");
     out.push_str("        \"$(if [[ -n \"${SERVICE_READINESS_CONFIGURED[i]:-}\" ]] && [[ \"${SERVICE_READINESS_CONFIGURED[i]}\" == \"1\" ]]; then printf true; else printf false; fi)\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_FAILURE_POLICY_MODE[i]:-fail_job}\")\" \\\n");
     out.push_str("        \"${SERVICE_RESTART_COUNT[i]:-0}\" \\\n");
@@ -738,6 +830,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("}\n\n");
 
     out.push_str("resolve_allocation_metadata\n");
+    if scratch_enabled {
+        out.push_str("init_scratch\n");
+    }
     out.push_str("update_latest_runtime_links\n");
     out.push_str("write_resume_metadata\n");
     out.push_str("write_state_file\n\n");
@@ -777,11 +872,29 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    JOB_STATUS=\"FAILED\"\n");
     out.push_str("  fi\n");
     out.push_str("  JOB_EXIT_CODE=\"$code\"\n");
+    out.push_str("  local stage_out_status=0\n");
     out.push_str("  kill_services\n");
     out.push_str("  reap_services_after_cleanup\n");
     out.push_str("  write_state_file\n");
     if artifacts_enabled {
         out.push_str("  collect_artifacts \"$code\" || true\n");
+    }
+    if stage_enabled {
+        out.push_str("  stage_out_paths \"$code\" || stage_out_status=$?\n");
+        out.push_str("  if (( stage_out_status != 0 )); then\n");
+        out.push_str("    echo \"Stage-out failed with status $stage_out_status; skipping scratch cleanup to preserve outputs\" >&2\n");
+        out.push_str("    if (( code == 0 )); then\n");
+        out.push_str("      code=$stage_out_status\n");
+        out.push_str("      JOB_STATUS=\"FAILED\"\n");
+        out.push_str("      JOB_EXIT_CODE=\"$code\"\n");
+        out.push_str("      write_state_file\n");
+        out.push_str("    fi\n");
+        out.push_str("  fi\n");
+    }
+    if scratch_enabled {
+        out.push_str("  if (( stage_out_status == 0 )); then\n");
+        out.push_str("    cleanup_scratch \"$code\" || true\n");
+        out.push_str("  fi\n");
     }
     out.push_str("  exit \"$code\"\n");
     out.push_str("}\n");
@@ -814,6 +927,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    SERVICE_STEP_NAMES[index]=\"$step_name\"\n");
     out.push_str("    SERVICE_LOG_PATHS[index]=\"$log_path\"\n");
     out.push_str("    SERVICE_HEALTHY[index]=\"0\"\n");
+    out.push_str("    SERVICE_COMPLETED_SUCCESSFULLY[index]=\"0\"\n");
     out.push_str("    SERVICE_READINESS_CONFIGURED[index]=\"$readiness_configured\"\n");
     out.push_str("    SERVICE_PLACEMENT_MODE[index]=\"$placement_mode\"\n");
     out.push_str("    SERVICE_STEP_NODES[index]=\"$step_nodes\"\n");
@@ -833,6 +947,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    SERVICE_STEP_NAMES+=(\"$step_name\")\n");
     out.push_str("    SERVICE_LOG_PATHS+=(\"$log_path\")\n");
     out.push_str("    SERVICE_HEALTHY+=(\"0\")\n");
+    out.push_str("    SERVICE_COMPLETED_SUCCESSFULLY+=(\"0\")\n");
     out.push_str("    SERVICE_READINESS_CONFIGURED+=(\"$readiness_configured\")\n");
     out.push_str("    SERVICE_FAILURE_POLICY_MODE+=(\"$failure_mode\")\n");
     out.push_str("    SERVICE_MAX_RESTARTS+=(\"$max_restarts\")\n");
@@ -1048,6 +1163,39 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  done\n");
     out.push_str("}\n\n");
 
+    out.push_str("wait_for_service_completed_successfully() {\n");
+    out.push_str("  local dependency=$1\n");
+    out.push_str("  local target=$2\n");
+    out.push_str("  local index\n");
+    out.push_str("  while true; do\n");
+    out.push_str("    index=$(service_index_for \"$dependency\") || return 1\n");
+    out.push_str("    if [[ \"${SERVICE_COMPLETED_SUCCESSFULLY[index]:-0}\" == \"1\" ]]; then\n");
+    out.push_str("      return 0\n");
+    out.push_str("    fi\n");
+    out.push_str("    local pid=${SERVICE_PIDS[index]:-}\n");
+    out.push_str("    if [[ -z \"$pid\" ]]; then\n");
+    out.push_str("      if [[ \"${SERVICE_LAST_EXIT_CODE[index]:-}\" == \"0\" ]]; then\n");
+    out.push_str("        SERVICE_COMPLETED_SUCCESSFULLY[index]=\"1\"\n");
+    out.push_str("        write_state_file\n");
+    out.push_str("        return 0\n");
+    out.push_str("      fi\n");
+    out.push_str("      echo \"Dependency '$dependency' for service '$target' did not complete successfully\" >&2\n");
+    out.push_str("      return 1\n");
+    out.push_str("    fi\n");
+    out.push_str("    local status=0\n");
+    out.push_str("    wait \"$pid\" || status=$?\n");
+    out.push_str("    handle_service_exit \"$index\" \"$status\"\n");
+    out.push_str("    local handled_status=$?\n");
+    out.push_str("    if (( handled_status != 0 )); then\n");
+    out.push_str("      echo \"Dependency '$dependency' failed with status $handled_status before service '$target' could start\" >&2\n");
+    out.push_str("      return \"$handled_status\"\n");
+    out.push_str("    fi\n");
+    out.push_str("    if [[ \"${SERVICE_COMPLETED_SUCCESSFULLY[index]:-0}\" == \"1\" ]]; then\n");
+    out.push_str("      return 0\n");
+    out.push_str("    fi\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+
     out.push_str("emit_dependency_failure_diagnostic() {\n");
     out.push_str("  local failed_service=$1\n");
     out.push_str("  local index\n");
@@ -1096,6 +1244,8 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
     out.push_str("  if (( status == 0 )); then\n");
+    out.push_str("    SERVICE_COMPLETED_SUCCESSFULLY[index]=\"1\"\n");
+    out.push_str("    write_state_file\n");
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
     out.push_str("  if [[ \"$mode\" == \"ignore\" ]]; then\n");
@@ -1197,6 +1347,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     if metrics_enabled {
         out.push_str("start_metrics_sampler\n\n");
     }
+    if stage_enabled {
+        out.push_str("stage_in_paths\n\n");
+    }
 
     for service in &plan.ordered_services {
         render_readiness_wait(&mut out, service);
@@ -1208,7 +1361,15 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
             .get(&service.name)
             .cloned()
             .unwrap_or_default();
-        render_service(&mut out, service, &dependents);
+        render_service(
+            &mut out,
+            service,
+            &dependents,
+            &plan.runtime,
+            options,
+            scratch_enabled,
+            allocation_requests_gpu(&plan.slurm),
+        );
         out.push('\n');
     }
 
@@ -1268,7 +1429,7 @@ while (($#)); do
       use_entrypoint=1
       shift
       ;;
-    --nodes=*|--ntasks=*|--ntasks-per-node=*|--cpus-per-task=*|--gpus=*|--gres=*|--exact|--overlap|--job-name=*|--nodelist=*|--output=*|--error=*|--chdir=*)
+    --nodes=*|--ntasks=*|--ntasks-per-node=*|--cpus-per-task=*|--gpus=*|--gres=*|--gpus-per-node=*|--gpus-per-task=*|--cpus-per-gpu=*|--mem-per-gpu=*|--gpu-bind=*|--cpu-bind=*|--mem-bind=*|--distribution=*|--hint=*|--exact|--overlap|--job-name=*|--nodelist=*|--output=*|--error=*|--chdir=*)
       shift
       ;;
     --)
@@ -1308,6 +1469,326 @@ if (( use_entrypoint )) && (($# == 0)); then
 fi
 exec "$enroot_bin" start "${enroot_args[@]}" "$container_image" "$@"
 "#
+}
+
+fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
+    let stage_in_from = plan
+        .slurm
+        .stage_in
+        .iter()
+        .map(|entry| entry.from.clone())
+        .collect::<Vec<_>>();
+    let stage_in_to = plan
+        .slurm
+        .stage_in
+        .iter()
+        .map(|entry| entry.to.clone())
+        .collect::<Vec<_>>();
+    let stage_in_modes = plan
+        .slurm
+        .stage_in
+        .iter()
+        .map(|entry| stage_mode_label(entry.mode).to_string())
+        .collect::<Vec<_>>();
+    let stage_out_from = plan
+        .slurm
+        .stage_out
+        .iter()
+        .map(|entry| entry.from.clone())
+        .collect::<Vec<_>>();
+    let stage_out_to = plan
+        .slurm
+        .stage_out
+        .iter()
+        .map(|entry| entry.to.clone())
+        .collect::<Vec<_>>();
+    let stage_out_modes = plan
+        .slurm
+        .stage_out
+        .iter()
+        .map(|entry| stage_mode_label(entry.mode).to_string())
+        .collect::<Vec<_>>();
+    let stage_out_when = plan
+        .slurm
+        .stage_out
+        .iter()
+        .map(|entry| stage_out_when_label(entry.when).to_string())
+        .collect::<Vec<_>>();
+
+    out.push_str(&format!(
+        "STAGE_IN_FROM={}\n",
+        bash_array_literal(&stage_in_from)
+    ));
+    out.push_str(&format!(
+        "STAGE_IN_TO={}\n",
+        bash_array_literal(&stage_in_to)
+    ));
+    out.push_str(&format!(
+        "STAGE_IN_MODES={}\n",
+        bash_array_literal(&stage_in_modes)
+    ));
+    out.push_str(&format!(
+        "STAGE_OUT_FROM={}\n",
+        bash_array_literal(&stage_out_from)
+    ));
+    out.push_str(&format!(
+        "STAGE_OUT_TO={}\n",
+        bash_array_literal(&stage_out_to)
+    ));
+    out.push_str(&format!(
+        "STAGE_OUT_MODES={}\n",
+        bash_array_literal(&stage_out_modes)
+    ));
+    out.push_str(&format!(
+        "STAGE_OUT_WHEN={}\n\n",
+        bash_array_literal(&stage_out_when)
+    ));
+
+    out.push_str("scratch_host_path_for() {\n");
+    out.push_str("  local path=$1\n");
+    out.push_str("  if [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\" ]]; then\n");
+    out.push_str("    printf '%s' \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("  elif [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\"/* ]]; then\n");
+    out.push_str(
+        "    printf '%s/%s' \"$SCRATCH_HOST_PATH\" \"${path#\"$SCRATCH_CONTAINER_PATH\"/}\"\n",
+    );
+    out.push_str("  else\n");
+    out.push_str("    printf '%s' \"$path\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("stage_copy_path() {\n");
+    out.push_str("  local from=$1\n");
+    out.push_str("  local to=$2\n");
+    out.push_str("  local mode=$3\n");
+    out.push_str("  mkdir -p \"$(dirname \"$to\")\"\n");
+    out.push_str("  if [[ \"$mode\" == \"rsync\" ]]; then\n");
+    out.push_str("    if command -v rsync >/dev/null 2>&1; then\n");
+    out.push_str("      rsync -a \"$from\" \"$to\"\n");
+    out.push_str("    else\n");
+    out.push_str("      cp -R \"$from\" \"$to\"\n");
+    out.push_str("    fi\n");
+    out.push_str("  else\n");
+    out.push_str("    cp -R \"$from\" \"$to\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("scratch_requires_node_fanout() {\n");
+    out.push_str("  [[ \"${SCRATCH_SCOPE:-}\" == \"node_local\" ]] || return 1\n");
+    out.push_str("  [[ \"${BACKEND:-slurm}\" == \"slurm\" ]] || return 1\n");
+    out.push_str("  (( ${HPC_COMPOSE_NODE_COUNT:-1} > 1 ))\n");
+    out.push_str("}\n\n");
+
+    out.push_str("run_scratch_command_on_each_node() {\n");
+    out.push_str("  local command=$1\n");
+    out.push_str("  srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash -lc \"$command\" bash \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("init_scratch() {\n");
+    out.push_str("  [[ -n \"${SCRATCH_HOST_PATH:-}\" ]] || return 0\n");
+    out.push_str("  mkdir -p \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("  if scratch_requires_node_fanout; then\n");
+    out.push_str("    run_scratch_command_on_each_node 'mkdir -p \"$1\"'\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("stage_in_paths_on_current_node() {\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!STAGE_IN_FROM[@]}\"; do\n");
+    out.push_str("    local from=${STAGE_IN_FROM[i]}\n");
+    out.push_str("    local to\n");
+    out.push_str("    to=$(scratch_host_path_for \"${STAGE_IN_TO[i]}\")\n");
+    out.push_str("    echo \"Staging in $from -> $to\"\n");
+    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_IN_MODES[i]}\"\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_stage_in_node_script() {\n");
+    out.push_str("  local script_path=\"$JOB_TMP/stage-in-node.sh\"\n");
+    out.push_str("  cat > \"$script_path\" <<'HPC_COMPOSE_STAGE_IN_NODE'\n");
+    out.push_str("#!/bin/bash\n");
+    out.push_str("set -euo pipefail\n");
+    out.push_str("SCRATCH_CONTAINER_PATH=$1\n");
+    out.push_str("SCRATCH_HOST_PATH=$2\n");
+    out.push_str(&format!(
+        "STAGE_IN_FROM={}\n",
+        bash_array_literal(&stage_in_from)
+    ));
+    out.push_str(&format!(
+        "STAGE_IN_TO={}\n",
+        bash_array_literal(&stage_in_to)
+    ));
+    out.push_str(&format!(
+        "STAGE_IN_MODES={}\n\n",
+        bash_array_literal(&stage_in_modes)
+    ));
+    out.push_str("scratch_host_path_for() {\n");
+    out.push_str("  local path=$1\n");
+    out.push_str("  if [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\" ]]; then\n");
+    out.push_str("    printf '%s' \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("  elif [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\"/* ]]; then\n");
+    out.push_str(
+        "    printf '%s/%s' \"$SCRATCH_HOST_PATH\" \"${path#\"$SCRATCH_CONTAINER_PATH\"/}\"\n",
+    );
+    out.push_str("  else\n");
+    out.push_str("    printf '%s' \"$path\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+    out.push_str("stage_copy_path() {\n");
+    out.push_str("  local from=$1\n");
+    out.push_str("  local to=$2\n");
+    out.push_str("  local mode=$3\n");
+    out.push_str("  mkdir -p \"$(dirname \"$to\")\"\n");
+    out.push_str("  if [[ \"$mode\" == \"rsync\" ]]; then\n");
+    out.push_str("    if command -v rsync >/dev/null 2>&1; then\n");
+    out.push_str("      rsync -a \"$from\" \"$to\"\n");
+    out.push_str("    else\n");
+    out.push_str("      cp -R \"$from\" \"$to\"\n");
+    out.push_str("    fi\n");
+    out.push_str("  else\n");
+    out.push_str("    cp -R \"$from\" \"$to\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+    out.push_str("stage_in_paths_on_current_node() {\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!STAGE_IN_FROM[@]}\"; do\n");
+    out.push_str("    local from=${STAGE_IN_FROM[i]}\n");
+    out.push_str("    local to\n");
+    out.push_str("    to=$(scratch_host_path_for \"${STAGE_IN_TO[i]}\")\n");
+    out.push_str("    echo \"Staging in $from -> $to\"\n");
+    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_IN_MODES[i]}\"\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+    out.push_str("stage_in_paths_on_current_node\n");
+    out.push_str("HPC_COMPOSE_STAGE_IN_NODE\n");
+    out.push_str("  chmod +x \"$script_path\"\n");
+    out.push_str("  printf '%s' \"$script_path\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("stage_in_paths() {\n");
+    out.push_str("  (( ${#STAGE_IN_FROM[@]} > 0 )) || return 0\n");
+    out.push_str("  if scratch_requires_node_fanout; then\n");
+    out.push_str("    local stage_in_node_script\n");
+    out.push_str("    stage_in_node_script=$(write_stage_in_node_script)\n");
+    out.push_str("    srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash \"$stage_in_node_script\" \"$SCRATCH_CONTAINER_PATH\" \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("  else\n");
+    out.push_str("    stage_in_paths_on_current_node\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("stage_out_paths_on_current_node() {\n");
+    out.push_str("  local exit_code=${1:-0}\n");
+    out.push_str("  local outcome=success\n");
+    out.push_str("  (( exit_code != 0 )) && outcome=failure\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!STAGE_OUT_FROM[@]}\"; do\n");
+    out.push_str("    local when=${STAGE_OUT_WHEN[i]}\n");
+    out.push_str("    if [[ \"$when\" == \"on_success\" && \"$outcome\" != \"success\" ]]; then continue; fi\n");
+    out.push_str("    if [[ \"$when\" == \"on_failure\" && \"$outcome\" != \"failure\" ]]; then continue; fi\n");
+    out.push_str("    local from\n");
+    out.push_str("    from=$(scratch_host_path_for \"${STAGE_OUT_FROM[i]}\")\n");
+    out.push_str("    local to=${STAGE_OUT_TO[i]}\n");
+    out.push_str("    echo \"Staging out $from -> $to\"\n");
+    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_OUT_MODES[i]}\"\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_stage_out_node_script() {\n");
+    out.push_str("  local script_path=\"$JOB_TMP/stage-out-node.sh\"\n");
+    out.push_str("  cat > \"$script_path\" <<'HPC_COMPOSE_STAGE_OUT_NODE'\n");
+    out.push_str("#!/bin/bash\n");
+    out.push_str("set -euo pipefail\n");
+    out.push_str("exit_code=${1:-0}\n");
+    out.push_str("SCRATCH_CONTAINER_PATH=$2\n");
+    out.push_str("SCRATCH_HOST_PATH=$3\n");
+    out.push_str(&format!(
+        "STAGE_OUT_FROM={}\n",
+        bash_array_literal(&stage_out_from)
+    ));
+    out.push_str(&format!(
+        "STAGE_OUT_TO={}\n",
+        bash_array_literal(&stage_out_to)
+    ));
+    out.push_str(&format!(
+        "STAGE_OUT_MODES={}\n",
+        bash_array_literal(&stage_out_modes)
+    ));
+    out.push_str(&format!(
+        "STAGE_OUT_WHEN={}\n\n",
+        bash_array_literal(&stage_out_when)
+    ));
+    out.push_str("scratch_host_path_for() {\n");
+    out.push_str("  local path=$1\n");
+    out.push_str("  if [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\" ]]; then\n");
+    out.push_str("    printf '%s' \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("  elif [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\"/* ]]; then\n");
+    out.push_str(
+        "    printf '%s/%s' \"$SCRATCH_HOST_PATH\" \"${path#\"$SCRATCH_CONTAINER_PATH\"/}\"\n",
+    );
+    out.push_str("  else\n");
+    out.push_str("    printf '%s' \"$path\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+    out.push_str("stage_copy_path() {\n");
+    out.push_str("  local from=$1\n");
+    out.push_str("  local to=$2\n");
+    out.push_str("  local mode=$3\n");
+    out.push_str("  mkdir -p \"$(dirname \"$to\")\"\n");
+    out.push_str("  if [[ \"$mode\" == \"rsync\" ]]; then\n");
+    out.push_str("    if command -v rsync >/dev/null 2>&1; then\n");
+    out.push_str("      rsync -a \"$from\" \"$to\"\n");
+    out.push_str("    else\n");
+    out.push_str("      cp -R \"$from\" \"$to\"\n");
+    out.push_str("    fi\n");
+    out.push_str("  else\n");
+    out.push_str("    cp -R \"$from\" \"$to\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+    out.push_str("stage_out_paths_on_current_node() {\n");
+    out.push_str("  local exit_code=${1:-0}\n");
+    out.push_str("  local outcome=success\n");
+    out.push_str("  (( exit_code != 0 )) && outcome=failure\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!STAGE_OUT_FROM[@]}\"; do\n");
+    out.push_str("    local when=${STAGE_OUT_WHEN[i]}\n");
+    out.push_str("    if [[ \"$when\" == \"on_success\" && \"$outcome\" != \"success\" ]]; then continue; fi\n");
+    out.push_str("    if [[ \"$when\" == \"on_failure\" && \"$outcome\" != \"failure\" ]]; then continue; fi\n");
+    out.push_str("    local from\n");
+    out.push_str("    from=$(scratch_host_path_for \"${STAGE_OUT_FROM[i]}\")\n");
+    out.push_str("    local to=${STAGE_OUT_TO[i]}\n");
+    out.push_str("    echo \"Staging out $from -> $to\"\n");
+    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_OUT_MODES[i]}\"\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+    out.push_str("stage_out_paths_on_current_node \"$exit_code\"\n");
+    out.push_str("HPC_COMPOSE_STAGE_OUT_NODE\n");
+    out.push_str("  chmod +x \"$script_path\"\n");
+    out.push_str("  printf '%s' \"$script_path\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("stage_out_paths() {\n");
+    out.push_str("  (( ${#STAGE_OUT_FROM[@]} > 0 )) || return 0\n");
+    out.push_str("  local exit_code=${1:-0}\n");
+    out.push_str("  if scratch_requires_node_fanout; then\n");
+    out.push_str("    local stage_out_node_script\n");
+    out.push_str("    stage_out_node_script=$(write_stage_out_node_script)\n");
+    out.push_str("    srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash \"$stage_out_node_script\" \"$exit_code\" \"$SCRATCH_CONTAINER_PATH\" \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("  else\n");
+    out.push_str("    stage_out_paths_on_current_node \"$exit_code\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("cleanup_scratch() {\n");
+    out.push_str("  local exit_code=${1:-0}\n");
+    out.push_str("  case \"$SCRATCH_CLEANUP_POLICY\" in\n");
+    out.push_str("    never) return 0 ;;\n");
+    out.push_str("    on_success) (( exit_code == 0 )) || return 0 ;;\n");
+    out.push_str("  esac\n");
+    out.push_str("  rm -rf \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("  if scratch_requires_node_fanout; then\n");
+    out.push_str("    run_scratch_command_on_each_node 'rm -rf \"$1\"'\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
 }
 
 fn render_metrics_helpers(out: &mut String) {
@@ -1856,14 +2337,22 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("}\n\n");
 }
 
-fn render_service(out: &mut String, service: &RuntimeService, dependents: &[String]) {
+fn render_service(
+    out: &mut String,
+    service: &RuntimeService,
+    dependents: &[String],
+    runtime: &crate::spec::RuntimeConfig,
+    render_options: &RenderOptions,
+    scratch_configured: bool,
+    allocation_gpu_requested: bool,
+) {
     let service_id = service_token(&service.name);
     let fn_name = format!("launch_{service_id}");
     let step_name = service_step_name(&service.name);
     let log_file_name = log_file_name_for_service(&service.name);
     let container_log_path = format!("/hpc-compose/job/logs/{log_file_name}");
     let command_args = execution_argv(&service.execution, service.working_dir.as_deref());
-    let srun_args = build_srun_command(service);
+    let srun_args = build_srun_command_for_backend(service, runtime.backend);
     let dependents_csv = dependents.join(",");
     let service_env = service
         .environment
@@ -1994,14 +2483,25 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
         ));
         out.push_str("  service_cmd=(\"/bin/sh\" \"$container_wrapper\" \"${service_cmd[@]}\")\n");
     }
-    out.push_str("  local pyxis_mounts\n");
-    out.push_str("  pyxis_mounts=$(build_pyxis_mounts \"${service_mounts[@]}\")\n");
-    out.push_str("  srun_cmd+=(--container-image=");
-    out.push_str(&shell_quote(&service.runtime_image.display().to_string()));
-    out.push_str(")\n");
-    out.push_str("  if [[ -n \"$pyxis_mounts\" ]]; then\n");
-    out.push_str("    srun_cmd+=(\"--container-mounts=$pyxis_mounts\")\n");
-    out.push_str("  fi\n");
+    out.push_str(&format!(
+        "  local scratch_enabled={}\n",
+        if scratch_configured && service_scratch_enabled(service) {
+            "1"
+        } else {
+            "0"
+        }
+    ));
+    out.push_str("  local runtime_mounts\n");
+    out.push_str("  local HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\"\n");
+    out.push_str("  runtime_mounts=$(build_pyxis_mounts \"${service_mounts[@]}\")\n");
+    if runtime.backend == RuntimeBackend::Pyxis {
+        out.push_str("  srun_cmd+=(--container-image=");
+        out.push_str(&shell_quote(&service.runtime_image.display().to_string()));
+        out.push_str(")\n");
+        out.push_str("  if [[ -n \"$runtime_mounts\" ]]; then\n");
+        out.push_str("    srun_cmd+=(\"--container-mounts=$runtime_mounts\")\n");
+        out.push_str("  fi\n");
+    }
     if let Some(indices) = &service.placement.node_indices {
         let index_args = indices.iter().map(u32::to_string).collect::<Vec<_>>();
         out.push_str(&format!(
@@ -2091,6 +2591,14 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     out.push_str(
         "  launch_env+=(\"HPC_COMPOSE_SERVICE_NODELIST_FILE=$service_nodelist_container\")\n",
     );
+    out.push_str("  if [[ \"$scratch_enabled\" == \"1\" ]]; then\n");
+    if runtime.backend == RuntimeBackend::Host {
+        out.push_str("    launch_env+=(\"HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_HOST_PATH\")\n");
+    } else {
+        out.push_str("    launch_env+=(\"HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_CONTAINER_PATH\")\n");
+    }
+    out.push_str("    launch_env+=(\"HPC_COMPOSE_SCRATCH_HOST_PATH=$SCRATCH_HOST_PATH\")\n");
+    out.push_str("  fi\n");
     if service.slurm.mpi.is_some() {
         out.push_str("  launch_env+=(\"HPC_COMPOSE_MPI_HOSTFILE=$mpi_hostfile_container\")\n");
         out.push_str("  launch_env+=(\"HPC_COMPOSE_MPI_TYPE=$mpi_type\")\n");
@@ -2119,11 +2627,19 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     out.push_str("    host_epilogue_script=\"\"\n");
     out.push_str("    ( exit \"$prologue_status\" ) &\n");
     out.push_str("    pid=$!\n");
-    out.push_str("  elif (( ${#launch_env[@]} == 0 )); then\n");
-    out.push_str("    \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >>\"$logfile\" 2>&1 &\n");
-    out.push_str("    pid=$!\n");
     out.push_str("  else\n");
-    out.push_str("    env \"${launch_env[@]}\" \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >>\"$logfile\" 2>&1 &\n");
+    render_runtime_command(
+        out,
+        service,
+        runtime,
+        render_options,
+        allocation_gpu_requested,
+    );
+    out.push_str("    if (( ${#launch_env[@]} == 0 )); then\n");
+    out.push_str("      \"${srun_cmd[@]}\" \"${runtime_cmd[@]}\" >>\"$logfile\" 2>&1 &\n");
+    out.push_str("    else\n");
+    out.push_str("      env \"${launch_env[@]}\" \"${srun_cmd[@]}\" \"${runtime_cmd[@]}\" >>\"$logfile\" 2>&1 &\n");
+    out.push_str("    fi\n");
     out.push_str("    pid=$!\n");
     out.push_str("  fi\n");
     out.push_str(&format!(
@@ -2161,6 +2677,92 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
         }
     ));
     out.push_str("}\n");
+}
+
+fn render_runtime_command(
+    out: &mut String,
+    service: &RuntimeService,
+    runtime: &crate::spec::RuntimeConfig,
+    render_options: &RenderOptions,
+    allocation_gpu_requested: bool,
+) {
+    match runtime.backend {
+        RuntimeBackend::Pyxis | RuntimeBackend::Host => {
+            out.push_str("    local -a runtime_cmd=(\"${service_cmd[@]}\")\n");
+        }
+        RuntimeBackend::Apptainer | RuntimeBackend::Singularity => {
+            let binary = match runtime.backend {
+                RuntimeBackend::Apptainer => render_options.apptainer_bin.as_str(),
+                RuntimeBackend::Singularity => render_options.singularity_bin.as_str(),
+                RuntimeBackend::Pyxis | RuntimeBackend::Host => unreachable!(),
+            };
+            let subcommand = if matches!(service.execution, ExecutionSpec::ImageDefault) {
+                "run"
+            } else {
+                "exec"
+            };
+            out.push_str(&format!(
+                "    local -a runtime_cmd=({} {})\n",
+                shell_quote(binary),
+                shell_quote(subcommand)
+            ));
+            if service_needs_nv(service, runtime, allocation_gpu_requested) {
+                out.push_str("    runtime_cmd+=(--nv)\n");
+            }
+            out.push_str("    if [[ -n \"$runtime_mounts\" ]]; then\n");
+            out.push_str("      runtime_cmd+=(--bind \"$runtime_mounts\")\n");
+            out.push_str("    fi\n");
+            out.push_str("    runtime_cmd+=(");
+            out.push_str(&shell_quote(&service.runtime_image.display().to_string()));
+            out.push_str(")\n");
+            out.push_str("    runtime_cmd+=(\"${service_cmd[@]}\")\n");
+        }
+    }
+}
+
+fn service_scratch_enabled(service: &RuntimeService) -> bool {
+    service
+        .slurm
+        .scratch
+        .as_ref()
+        .and_then(|scratch| scratch.enabled)
+        .unwrap_or(true)
+}
+
+fn allocation_requests_gpu(slurm: &crate::spec::SlurmConfig) -> bool {
+    slurm.gpus.unwrap_or(0) > 0
+        || slurm.gpus_per_node.unwrap_or(0) > 0
+        || slurm.gpus_per_task.unwrap_or(0) > 0
+        || slurm.cpus_per_gpu.unwrap_or(0) > 0
+        || slurm.mem_per_gpu.is_some()
+        || slurm
+            .gres
+            .as_deref()
+            .is_some_and(|gres| gres.contains("gpu"))
+}
+
+fn service_needs_nv(
+    service: &RuntimeService,
+    runtime: &crate::spec::RuntimeConfig,
+    allocation_gpu_requested: bool,
+) -> bool {
+    match runtime.gpu {
+        RuntimeGpuPolicy::None => false,
+        RuntimeGpuPolicy::Nvidia => true,
+        RuntimeGpuPolicy::Auto => {
+            allocation_gpu_requested
+                || service.slurm.gpus.unwrap_or(0) > 0
+                || service.slurm.gpus_per_node.unwrap_or(0) > 0
+                || service.slurm.gpus_per_task.unwrap_or(0) > 0
+                || service.slurm.cpus_per_gpu.unwrap_or(0) > 0
+                || service.slurm.mem_per_gpu.is_some()
+                || service
+                    .slurm
+                    .gres
+                    .as_deref()
+                    .is_some_and(|gres| gres.contains("gpu"))
+        }
+    }
 }
 
 fn render_readiness_wait(out: &mut String, service: &RuntimeService) {
@@ -2233,6 +2835,11 @@ fn render_dependency_waits(out: &mut String, service: &RuntimeService) {
                 shell_quote(&service.name),
                 service_token(&dependency.name)
             )),
+            DependencyCondition::ServiceCompletedSuccessfully => out.push_str(&format!(
+                "wait_for_service_completed_successfully {} {}\n",
+                shell_quote(&dependency.name),
+                shell_quote(&service.name)
+            )),
         }
     }
 }
@@ -2270,6 +2877,14 @@ pub fn execution_argv(execution: &ExecutionSpec, working_dir: Option<&str>) -> V
 
 /// Builds the `srun` command line for one runtime service.
 pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
+    build_srun_command_for_backend(service, RuntimeBackend::Pyxis)
+}
+
+/// Builds the `srun` command line for one runtime service under a backend.
+pub fn build_srun_command_for_backend(
+    service: &RuntimeService,
+    backend: RuntimeBackend,
+) -> Vec<String> {
     let mut args = vec![
         "srun".to_string(),
         format!("--nodes={}", service.placement.nodes),
@@ -2283,7 +2898,8 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
     if let Some(ntasks_per_node) = service.placement.ntasks_per_node {
         args.push(format!("--ntasks-per-node={ntasks_per_node}"));
     }
-    if matches!(service.execution, ExecutionSpec::ImageDefault) {
+    if backend == RuntimeBackend::Pyxis && matches!(service.execution, ExecutionSpec::ImageDefault)
+    {
         args.push("--container-entrypoint".to_string());
     }
     let mut env_names = vec![
@@ -2345,7 +2961,9 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
     env_names.extend(service.environment.iter().map(|(name, _)| name.as_str()));
     env_names.sort_unstable();
     env_names.dedup();
-    args.push(format!("--container-env={}", env_names.join(",")));
+    if backend == RuntimeBackend::Pyxis {
+        args.push(format!("--container-env={}", env_names.join(",")));
+    }
     if let Some(cpus) = service.slurm.cpus_per_task {
         args.push(format!("--cpus-per-task={cpus}"));
     }
@@ -2353,6 +2971,33 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
         args.push(format!("--gres={gres}"));
     } else if let Some(gpus) = service.slurm.gpus {
         args.push(format!("--gpus={gpus}"));
+    }
+    if let Some(gpus_per_node) = service.slurm.gpus_per_node {
+        args.push(format!("--gpus-per-node={gpus_per_node}"));
+    }
+    if let Some(gpus_per_task) = service.slurm.gpus_per_task {
+        args.push(format!("--gpus-per-task={gpus_per_task}"));
+    }
+    if let Some(cpus_per_gpu) = service.slurm.cpus_per_gpu {
+        args.push(format!("--cpus-per-gpu={cpus_per_gpu}"));
+    }
+    if let Some(mem_per_gpu) = &service.slurm.mem_per_gpu {
+        args.push(format!("--mem-per-gpu={mem_per_gpu}"));
+    }
+    if let Some(gpu_bind) = &service.slurm.gpu_bind {
+        args.push(format!("--gpu-bind={gpu_bind}"));
+    }
+    if let Some(cpu_bind) = &service.slurm.cpu_bind {
+        args.push(format!("--cpu-bind={cpu_bind}"));
+    }
+    if let Some(mem_bind) = &service.slurm.mem_bind {
+        args.push(format!("--mem-bind={mem_bind}"));
+    }
+    if let Some(distribution) = &service.slurm.distribution {
+        args.push(format!("--distribution={distribution}"));
+    }
+    if let Some(hint) = &service.slurm.hint {
+        args.push(format!("--hint={hint}"));
     }
     if let Some(mpi) = &service.slurm.mpi {
         args.push(format!("--mpi={}", mpi.mpi_type.as_srun_value()));
@@ -2363,7 +3008,15 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
 
 /// Builds the user-visible `srun` command line for one runtime service.
 pub fn display_srun_command(service: &RuntimeService) -> Vec<String> {
-    let mut args = build_srun_command(service);
+    display_srun_command_for_backend(service, RuntimeBackend::Pyxis)
+}
+
+/// Builds the user-visible `srun` command line under a backend.
+pub fn display_srun_command_for_backend(
+    service: &RuntimeService,
+    backend: RuntimeBackend,
+) -> Vec<String> {
+    let mut args = build_srun_command_for_backend(service, backend);
     if let Some(indices) = &service.placement.node_indices {
         args.push(format!(
             "--nodelist=<allocation-indices:{}>",
@@ -2540,6 +3193,21 @@ fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     }
 }
 
+fn stage_mode_label(mode: StageMode) -> &'static str {
+    match mode {
+        StageMode::Rsync => "rsync",
+        StageMode::Copy => "copy",
+    }
+}
+
+fn stage_out_when_label(when: StageOutWhen) -> &'static str {
+    match when {
+        StageOutWhen::Always => "always",
+        StageOutWhen::OnSuccess => "on_success",
+        StageOutWhen::OnFailure => "on_failure",
+    }
+}
+
 fn mpi_hostfile_slots(service: &RuntimeService) -> Option<u32> {
     if let Some(ntasks_per_node) = service.placement.ntasks_per_node {
         return Some(ntasks_per_node);
@@ -2561,8 +3229,10 @@ mod tests {
     use super::*;
     use crate::planner::ServicePlacement;
     use crate::spec::{
-        DependencyCondition, MpiConfig, MpiType, ReadinessSpec, ResumeConfig, ServiceDependency,
-        ServiceFailurePolicy, ServiceHookContext, ServiceHookSpec, ServiceSlurmConfig, SlurmConfig,
+        DependencyCondition, MpiConfig, MpiType, ReadinessSpec, ResumeConfig, RuntimeConfig,
+        RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceDependency,
+        ServiceFailurePolicy, ServiceHookContext, ServiceHookSpec, ServiceScratchConfig,
+        ServiceSlurmConfig, SlurmConfig, StageInConfig, StageMode, StageOutConfig, StageOutWhen,
     };
 
     fn runtime_service() -> RuntimeService {
@@ -2744,6 +3414,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 time: Some("00:10:00".into()),
                 ..SlurmConfig::default()
@@ -2776,6 +3447,7 @@ exit 1
         let plan = RuntimePlan {
             name: "http-test".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -2786,6 +3458,253 @@ exit 1
             script
                 .contains("wait_for_http \"$pid\" \"$name\" 'http://127.0.0.1:8080/health' 200 30")
         );
+    }
+
+    #[test]
+    fn render_apptainer_backend_uses_host_runtime_wrapper() {
+        let mut service = runtime_service();
+        service.runtime_image = PathBuf::from("/shared/cache/worker.sif");
+        service.source = crate::planner::ImageSource::LocalSif(service.runtime_image.clone());
+        service.volumes = vec!["/shared/data:/data:ro".into()];
+        let plan = RuntimePlan {
+            name: "apptainer-demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Apptainer,
+                gpu: RuntimeGpuPolicy::Nvidia,
+            },
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("local -a runtime_cmd=('apptainer' 'exec')"));
+        assert!(script.contains("runtime_cmd+=(--nv)"));
+        assert!(script.contains("runtime_cmd+=(--bind \"$runtime_mounts\")"));
+        assert!(script.contains("/shared/cache/worker.sif"));
+        assert!(!script.contains("--container-image="));
+        assert!(!script.contains("--container-env="));
+    }
+
+    #[test]
+    fn render_apptainer_and_singularity_honor_binary_overrides() {
+        let mut service = runtime_service();
+        service.runtime_image = PathBuf::from("/shared/cache/worker.sif");
+        service.source = crate::planner::ImageSource::LocalSif(service.runtime_image.clone());
+
+        let apptainer_plan = RuntimePlan {
+            name: "apptainer-demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Apptainer,
+                gpu: RuntimeGpuPolicy::Auto,
+            },
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service.clone()],
+        };
+        let script = render_script_with_options(
+            &apptainer_plan,
+            &RenderOptions {
+                apptainer_bin: "/opt/site/bin/apptainer".into(),
+                singularity_bin: "/opt/site/bin/singularity".into(),
+            },
+        )
+        .expect("script");
+        assert!(script.contains("local -a runtime_cmd=('/opt/site/bin/apptainer' 'exec')"));
+
+        let singularity_plan = RuntimePlan {
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Singularity,
+                gpu: RuntimeGpuPolicy::Auto,
+            },
+            ordered_services: vec![service],
+            ..apptainer_plan
+        };
+        let script = render_script_with_options(
+            &singularity_plan,
+            &RenderOptions {
+                apptainer_bin: "/opt/site/bin/apptainer".into(),
+                singularity_bin: "/opt/site/bin/singularity".into(),
+            },
+        )
+        .expect("script");
+        assert!(script.contains("local -a runtime_cmd=('/opt/site/bin/singularity' 'exec')"));
+    }
+
+    #[test]
+    fn render_scratch_staging_and_burst_buffer_directives() {
+        let plan = RuntimePlan {
+            name: "scratch-demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                scratch: Some(ScratchConfig {
+                    scope: crate::spec::ScratchScope::Shared,
+                    base: "/scratch/jobs".into(),
+                    mount: "/scratch".into(),
+                    cleanup: ScratchCleanupPolicy::OnSuccess,
+                }),
+                stage_in: vec![StageInConfig {
+                    from: "/shared/input".into(),
+                    to: "/scratch/input".into(),
+                    mode: StageMode::Rsync,
+                }],
+                stage_out: vec![StageOutConfig {
+                    from: "/scratch/output".into(),
+                    to: "/shared/output/${SLURM_JOB_ID}".into(),
+                    when: StageOutWhen::Always,
+                    mode: StageMode::Copy,
+                }],
+                burst_buffer: Some(crate::spec::BurstBufferConfig {
+                    directives: vec!["#BB create_persistent name=data capacity=100G".into()],
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![runtime_service()],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("#BB create_persistent name=data capacity=100G"));
+        assert!(script.contains("SCRATCH_HOST_PATH=\"$SCRATCH_BASE/${SLURM_JOB_ID}\""));
+        assert!(
+            script.contains("append_unique_mount \"$SCRATCH_HOST_PATH:$SCRATCH_CONTAINER_PATH\"")
+        );
+        assert!(script.contains(
+            "  local HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\"\n  runtime_mounts=$(build_pyxis_mounts \"${service_mounts[@]}\")"
+        ));
+        assert!(!script.contains(
+            "HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\" runtime_mounts=$(build_pyxis_mounts"
+        ));
+        assert!(script.contains("STAGE_IN_FROM=('/shared/input')"));
+        assert!(script.contains("STAGE_OUT_TO=('/shared/output/${SLURM_JOB_ID}')"));
+        assert!(script.contains("stage_in_paths"));
+        assert!(script.contains("stage_out_paths \"$code\" || stage_out_status=$?"));
+        assert!(script.contains("if (( stage_out_status == 0 ));"));
+        assert!(script.contains("cleanup_scratch \"$code\" || true"));
+    }
+
+    #[test]
+    fn render_scratch_without_staging_defines_cleanup_helpers() {
+        let plan = RuntimePlan {
+            name: "scratch-only".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                scratch: Some(ScratchConfig {
+                    scope: crate::spec::ScratchScope::Shared,
+                    base: "/scratch/jobs".into(),
+                    mount: "/scratch".into(),
+                    cleanup: ScratchCleanupPolicy::Always,
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![runtime_service()],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("init_scratch()"));
+        assert!(script.contains("cleanup_scratch()"));
+        assert!(script.contains("cleanup_scratch \"$code\" || true"));
+    }
+
+    #[test]
+    fn render_host_runtime_exposes_host_scratch_path_to_service_env() {
+        let mut service = runtime_service();
+        service.source = crate::planner::ImageSource::Host;
+        service.runtime_image = PathBuf::new();
+        let plan = RuntimePlan {
+            name: "host-scratch".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Host,
+                ..RuntimeConfig::default()
+            },
+            slurm: SlurmConfig {
+                scratch: Some(ScratchConfig {
+                    scope: crate::spec::ScratchScope::Shared,
+                    base: "/scratch/jobs".into(),
+                    mount: "/work".into(),
+                    cleanup: ScratchCleanupPolicy::Always,
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_HOST_PATH"));
+        assert!(!script.contains("HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_CONTAINER_PATH"));
+        assert!(script.contains("local -a runtime_cmd=(\"${service_cmd[@]}\")"));
+    }
+
+    #[test]
+    fn render_service_scratch_disabled_resolves_to_runtime_disabled_flag() {
+        let mut service = runtime_service();
+        service.slurm.scratch = Some(ServiceScratchConfig {
+            enabled: Some(false),
+        });
+        let plan = RuntimePlan {
+            name: "scratch-disabled".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                scratch: Some(ScratchConfig {
+                    scope: crate::spec::ScratchScope::Shared,
+                    base: "/scratch/jobs".into(),
+                    mount: "/scratch".into(),
+                    cleanup: ScratchCleanupPolicy::Always,
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("  local scratch_enabled=0\n"));
+        assert!(script.contains("HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\""));
+    }
+
+    #[test]
+    fn render_node_local_multi_node_scratch_initializes_every_node() {
+        let plan = RuntimePlan {
+            name: "node-local-scratch".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                scratch: Some(ScratchConfig {
+                    scope: crate::spec::ScratchScope::NodeLocal,
+                    base: "/scratch/jobs".into(),
+                    mount: "/scratch".into(),
+                    cleanup: ScratchCleanupPolicy::Always,
+                }),
+                stage_in: vec![StageInConfig {
+                    from: "/shared/input".into(),
+                    to: "/scratch/input".into(),
+                    mode: StageMode::Copy,
+                }],
+                stage_out: vec![StageOutConfig {
+                    from: "/scratch/output".into(),
+                    to: "/shared/output".into(),
+                    when: StageOutWhen::Always,
+                    mode: StageMode::Copy,
+                }],
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![runtime_service()],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("SCRATCH_SCOPE='node_local'"));
+        assert!(script.contains(
+            "srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash -lc \"$command\" bash \"$SCRATCH_HOST_PATH\""
+        ));
+        assert!(script.contains(
+            "srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash \"$stage_in_node_script\" \"$SCRATCH_CONTAINER_PATH\" \"$SCRATCH_HOST_PATH\""
+        ));
+        assert!(script.contains(
+            "srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash \"$stage_out_node_script\" \"$exit_code\" \"$SCRATCH_CONTAINER_PATH\" \"$SCRATCH_HOST_PATH\""
+        ));
     }
 
     #[test]
@@ -2816,6 +3735,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -2854,6 +3774,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 partition: Some("gpu".into()),
                 account: Some("proj".into()),
@@ -2916,6 +3837,7 @@ exit 1
         let plan = RuntimePlan {
             name: "hooks".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -3056,7 +3978,11 @@ exit 1
         let mut service = runtime_service();
         service.name = "mpi".into();
         service.slurm.mpi = Some(MpiConfig {
-            mpi_type: MpiType::Pmix,
+            mpi_type: MpiType::new("pmix").expect("mpi type"),
+            implementation: None,
+            launcher: Default::default(),
+            expected_ranks: None,
+            host_mpi: None,
         });
         service.placement = ServicePlacement {
             mode: ServicePlacementMode::Distributed,
@@ -3071,6 +3997,7 @@ exit 1
         let plan = RuntimePlan {
             name: "mpi-demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 nodes: Some(2),
                 ..SlurmConfig::default()
@@ -3137,6 +4064,7 @@ exit 1
         let plan = RuntimePlan {
             name: "multi-node".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 nodes: Some(2),
                 ntasks_per_node: Some(4),
@@ -3175,6 +4103,7 @@ exit 1
         let plan = RuntimePlan {
             name: "single-node".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 execution: ExecutionSpec::Shell("echo single-node".into()),
@@ -3218,6 +4147,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![mk_service("api.v1"), mk_service("api_v1")],
         };
@@ -3236,6 +4166,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 gpus: Some(4),
                 ..SlurmConfig::default()
@@ -3321,6 +4252,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![provider, unrelated, dependent],
         };
@@ -3343,6 +4275,83 @@ exit 1
             .expect("healthy cache");
         assert!(started_check < healthy_cache);
         assert!(script.contains("\"healthy\":"));
+    }
+
+    #[test]
+    fn render_supports_completed_dependency_and_binding_flags() {
+        let preprocess = RuntimeService {
+            name: "preprocess".into(),
+            runtime_image: PathBuf::from("/shared/cache/preprocess.sqsh"),
+            execution: ExecutionSpec::Shell("echo preprocess".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://alpine:3.20".into()),
+        };
+        let trainer = RuntimeService {
+            name: "trainer".into(),
+            runtime_image: PathBuf::from("/shared/cache/trainer.sqsh"),
+            execution: ExecutionSpec::Shell("echo trainer".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: vec![ServiceDependency {
+                name: "preprocess".into(),
+                condition: DependencyCondition::ServiceCompletedSuccessfully,
+            }],
+            readiness: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig {
+                gpus_per_task: Some(1),
+                cpus_per_gpu: Some(8),
+                gpu_bind: Some("closest".into()),
+                cpu_bind: Some("cores".into()),
+                mpi: Some(MpiConfig {
+                    mpi_type: MpiType::new("pmix_v4").expect("mpi type"),
+                    implementation: None,
+                    launcher: Default::default(),
+                    expected_ranks: None,
+                    host_mpi: None,
+                }),
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://ubuntu:24.04".into()),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                gpus_per_node: Some(4),
+                mem_per_gpu: Some("40G".into()),
+                distribution: Some("block:block".into()),
+                hint: Some("nomultithread".into()),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![preprocess, trainer],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("#SBATCH --gpus-per-node=4"));
+        assert!(script.contains("#SBATCH --mem-per-gpu=40G"));
+        assert!(script.contains("#SBATCH --distribution=block:block"));
+        assert!(script.contains("#SBATCH --hint=nomultithread"));
+        assert!(script.contains("wait_for_service_completed_successfully 'preprocess' 'trainer'"));
+        assert!(script.contains("\"completed_successfully\":"));
+        let srun = display_srun_command(&plan.ordered_services[1]).join(" ");
+        assert!(srun.contains("--gpus-per-task=1"));
+        assert!(srun.contains("--cpus-per-gpu=8"));
+        assert!(srun.contains("--gpu-bind=closest"));
+        assert!(srun.contains("--cpu-bind=cores"));
+        assert!(srun.contains("--mpi=pmix_v4"));
     }
 
     #[test]
@@ -3410,6 +4419,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![restart_service, ignore_service, dependent],
         };
@@ -3461,6 +4471,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 metrics: Some(crate::spec::MetricsConfig {
                     enabled: Some(true),
@@ -3488,6 +4499,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 artifacts: Some(crate::spec::ArtifactsConfig {
                     collect: ArtifactCollectPolicy::OnFailure,
@@ -3521,6 +4533,7 @@ exit 1
         let mut plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![runtime_service()],
         };
@@ -3549,6 +4562,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 artifacts: Some(crate::spec::ArtifactsConfig {
                     collect: ArtifactCollectPolicy::Always,
@@ -3647,6 +4661,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig {
                 resume: Some(ResumeConfig {
                     path: resume_dir.display().to_string(),
@@ -3721,6 +4736,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![provider, client],
         };
@@ -3820,6 +4836,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![service],
         };
@@ -3841,6 +4858,7 @@ exit 1
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![runtime_service()],
         };

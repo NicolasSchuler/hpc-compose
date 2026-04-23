@@ -308,6 +308,199 @@ fn completions_command_generates_output() {
 }
 
 #[test]
+fn doctor_mpi_smoke_renders_and_requires_explicit_submit() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "mpi-smoke.yaml",
+        &format!(
+            r#"
+name: mpi-smoke
+x-slurm:
+  cache_dir: "{}"
+  setup:
+    - echo real setup should not run
+  submit_args:
+    - --comment=real-smoke-side-effect
+  scratch:
+    scope: shared
+    base: /tmp/real-smoke-scratch
+    mount: /scratch
+  stage_in:
+    - from: /shared/real-input
+      to: /scratch/input
+  stage_out:
+    - from: /scratch/output
+      to: /shared/real-output
+      when: always
+      mode: copy
+  burst_buffer:
+    directives:
+      - '#BB create_persistent name=real capacity=1G'
+  artifacts:
+    export_dir: /shared/real-artifacts
+    paths:
+      - /hpc-compose/job/logs/**
+  resume:
+    path: /shared/real-resume
+services:
+  mpi:
+    image: debian:bookworm-slim
+    command: /bin/true
+    x-slurm:
+      ntasks: 2
+      mpi:
+        type: pmix_v4
+        implementation: openmpi
+        expected_ranks: 2
+        host_mpi:
+          bind_paths:
+            - /opt/site/openmpi:/opt/site/openmpi:ro
+          env:
+            MPI_HOME: /opt/site/openmpi
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let script = tmpdir.path().join("smoke.sbatch");
+    let srun = tmpdir.path().join("srun");
+    write_script(
+        &srun,
+        r#"#!/bin/bash
+if [[ "${1:-}" == "--mpi=list" ]]; then
+  echo "MPI plugin types: pmix pmix_v4 pmi2"
+  exit 0
+fi
+exit 0
+"#,
+    );
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "doctor",
+            "--mpi-smoke",
+            "-f",
+            compose.to_str().expect("path"),
+            "--script-out",
+            script.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("MPI smoke service: mpi"));
+    assert!(stdout.contains("requested MPI type: pmix_v4"));
+    assert!(stdout.contains("advertised MPI types: pmi2, pmix, pmix_v4"));
+    assert!(stdout.contains("bind: /opt/site/openmpi:/opt/site/openmpi:ro"));
+    assert!(stdout.contains("env: MPI_HOME=/opt/site/openmpi"));
+    assert!(stdout.contains("rendered srun: srun"));
+    assert!(stdout.contains("submit: skipped"));
+    let rendered = fs::read_to_string(script).expect("smoke script");
+    assert!(rendered.contains("--mpi=pmix_v4"));
+    assert!(rendered.contains("hpc-compose MPI smoke"));
+    assert!(rendered.contains("rank_variables SLURM_PROCID="));
+    assert!(rendered.contains("expected_ranks=2"));
+    assert!(!rendered.contains("real setup should not run"));
+    assert!(!rendered.contains("real-smoke-side-effect"));
+    assert!(!rendered.contains("/tmp/real-smoke-scratch"));
+    assert!(!rendered.contains("/shared/real-input"));
+    assert!(!rendered.contains("/shared/real-output"));
+    assert!(!rendered.contains("#BB create_persistent name=real capacity=1G"));
+    assert!(!rendered.contains("/shared/real-artifacts"));
+    assert!(!rendered.contains("/shared/real-resume"));
+}
+
+#[test]
+fn doctor_mpi_smoke_submit_runs_fake_slurm_probe() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "mpi-smoke-host.yaml",
+        &format!(
+            r#"
+name: mpi-smoke-host
+runtime:
+  backend: host
+x-slurm:
+  cache_dir: "{}"
+services:
+  mpi:
+    command: /bin/true
+    x-slurm:
+      ntasks: 2
+      mpi:
+        type: pmix
+        expected_ranks: 2
+"#,
+            cache_root.path().display()
+        ),
+    );
+    write_fake_scontrol(tmpdir.path());
+    let srun = tmpdir.path().join("srun");
+    write_script(
+        &srun,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun"
+  exit 0
+fi
+if [[ "${1:-}" == "--mpi=list" ]]; then
+  echo "pmix pmi2"
+  exit 0
+fi
+while [[ $# -gt 0 && "${1:-}" == --* ]]; do
+  shift
+done
+export SLURM_NTASKS=2
+export SLURM_PROCID=0
+exec "$@"
+"#,
+    );
+    let sbatch = tmpdir.path().join("sbatch");
+    write_script(
+        &sbatch,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+script_path="${{@: -1}}"
+PATH="{}:$PATH"
+export SLURM_JOB_ID=12345
+export SLURM_JOB_NODELIST=node01
+export SLURM_SUBMIT_DIR="$PWD"
+bash "$script_path"
+echo "Submitted batch job 12345"
+"#,
+            tmpdir.path().display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "doctor",
+            "--mpi-smoke",
+            "-f",
+            compose.to_str().expect("path"),
+            "--submit",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--timeout-seconds",
+            "5",
+        ],
+    );
+    assert_success(&output);
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("submit: passed"));
+    assert!(stdout.contains("hpc-compose MPI smoke rank=0 size=2 expected=2"));
+}
+
+#[test]
 fn new_and_setup_commands_support_json_output() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let scaffold_path = tmpdir.path().join("scaffold.json.yaml");

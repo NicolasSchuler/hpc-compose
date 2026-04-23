@@ -37,8 +37,9 @@ Start with the [Support Matrix](support-matrix.md) before planning a real runtim
 ## Used For
 
 - model serving plus helper services inside one allocation
-- data and ETL pipelines with startup ordering and shared job-local state
+- data and ETL pipelines that need startup ordering, successful-completion DAG stages, scratch staging, and shared job-local state
 - training jobs with checkpoint export, artifact tracking, and resume-aware reruns
+- clusters that standardize on Pyxis/Enroot, Apptainer, Singularity, or host module runtimes
 
 ## Start Here Examples
 
@@ -113,6 +114,10 @@ compose.yaml
 ```
 
 For the exact boundary, read [Execution Model](execution-model.md) and [Supported Slurm Model](supported-slurm-model.md).
+
+On a new cluster, run `hpc-compose doctor --cluster-report` from the login node to generate `.hpc-compose/cluster.toml`. `validate` and `preflight` use that profile to warn about incompatible partitions, QOS, GPU/MPI requests, runtime backend availability, and shared cache or scratch paths before submission.
+
+For MPI services, `hpc-compose doctor --mpi-smoke -f compose.yaml --service <name>` renders a small rank-count probe against the service's actual runtime path and reports requested/advertised MPI types plus host MPI binds. Add `--submit` only when you want to consume a Slurm allocation and run the smoke job.
 
 ## Comparison
 

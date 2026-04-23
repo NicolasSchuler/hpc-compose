@@ -72,12 +72,20 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Prepare {
             file,
             enroot_bin,
+            apptainer_bin,
+            singularity_bin,
             keep_failed_prep,
             force,
             format,
         } => {
-            let binary_overrides =
-                resolve_binary_overrides(options, &[("--enroot-bin", &enroot_bin)]);
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
             let context = resolve_command_context(options, file, binary_overrides)?;
             spec::prepare(context, keep_failed_prep, force, format, options.quiet)
         }
@@ -90,6 +98,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             enroot_bin,
             sbatch_bin,
             srun_bin,
+            scontrol_bin,
+            apptainer_bin,
+            singularity_bin,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
@@ -97,6 +108,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--enroot-bin", &enroot_bin),
                     ("--sbatch-bin", &sbatch_bin),
                     ("--srun-bin", &srun_bin),
+                    ("--scontrol-bin", &scontrol_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
@@ -121,9 +135,55 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             spec::config(context, format, variables)
         }
         Commands::Schema => print_schema(),
-        Commands::Doctor { format } => {
-            let binaries = resolve_command_binaries(options, BinaryOverrides::default())?;
-            doctor::doctor(format, &binaries)
+        Commands::Doctor {
+            file,
+            format,
+            cluster_report,
+            cluster_report_out,
+            mpi_smoke,
+            service,
+            submit,
+            script_out,
+            timeout_seconds,
+            sbatch_bin,
+            srun_bin,
+            scontrol_bin,
+            enroot_bin,
+            apptainer_bin,
+            singularity_bin,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--scontrol-bin", &scontrol_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
+            if mpi_smoke {
+                if cluster_report {
+                    bail!("doctor --mpi-smoke cannot be combined with --cluster-report");
+                }
+                let context = resolve_command_context(options, file, binary_overrides)?;
+                doctor::doctor_mpi_smoke(
+                    context,
+                    format,
+                    service,
+                    submit,
+                    script_out,
+                    timeout_seconds,
+                    options.quiet,
+                )
+            } else {
+                if submit || service.is_some() || script_out.is_some() {
+                    bail!("doctor --submit, --service, and --script-out require --mpi-smoke");
+                }
+                let binaries = resolve_command_binaries(options, binary_overrides)?;
+                doctor::doctor(format, &binaries, cluster_report, cluster_report_out)
+            }
         }
         Commands::Up {
             file,
@@ -131,6 +191,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             sbatch_bin,
             srun_bin,
             enroot_bin,
+            apptainer_bin,
+            singularity_bin,
             squeue_bin,
             sacct_bin,
             keep_failed_prep,
@@ -150,6 +212,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
@@ -173,6 +237,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             sbatch_bin,
             srun_bin,
             enroot_bin,
+            apptainer_bin,
+            singularity_bin,
             squeue_bin,
             sacct_bin,
             keep_failed_prep,
@@ -194,6 +260,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
@@ -330,6 +398,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             sbatch_bin,
             srun_bin,
             enroot_bin,
+            apptainer_bin,
+            singularity_bin,
             squeue_bin,
             sacct_bin,
             keep_failed_prep,
@@ -345,6 +415,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
@@ -530,6 +602,20 @@ const BINARY_OVERRIDE_ENTRIES: &[BinaryOverrideEntry] = &[
         },
     },
     BinaryOverrideEntry {
+        flag: "--apptainer-bin",
+        setter: |mut o, v| {
+            o.apptainer = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--singularity-bin",
+        setter: |mut o, v| {
+            o.singularity = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
         flag: "--sbatch-bin",
         setter: |mut o, v| {
             o.sbatch = Some(v);
@@ -540,6 +626,20 @@ const BINARY_OVERRIDE_ENTRIES: &[BinaryOverrideEntry] = &[
         flag: "--srun-bin",
         setter: |mut o, v| {
             o.srun = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--scontrol-bin",
+        setter: |mut o, v| {
+            o.scontrol = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--sinfo-bin",
+        setter: |mut o, v| {
+            o.sinfo = Some(v);
             o
         },
     },

@@ -39,6 +39,7 @@ extern crate self as hpc_compose;
 
 pub mod cache;
 pub mod cli;
+pub mod cluster;
 /// CLI command orchestration used by the binary entrypoint.
 pub mod commands;
 pub mod context;

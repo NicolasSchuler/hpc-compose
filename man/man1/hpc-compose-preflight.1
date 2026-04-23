@@ -8,7 +8,7 @@ hpc\-compose preflight [OPTIONS]
 .fi
 .SH DESCRIPTION
 .PP
-Check whether the submission host and compose specification satisfy the prerequisites for a later submit. This validates required binaries, cache path safety, local mounts, and Pyxis or Slurm availability.
+Check whether the submission host and compose specification satisfy the prerequisites for a later submit. This validates required binaries, cache path safety, local mounts, selected runtime backend availability, Slurm availability, and any discovered cluster profile.
 .SH OPTIONS
 .TP
 \fB-f\fR, \fB--file\fR \fIFILE\fR
@@ -31,6 +31,15 @@ Path to the sbatch executable. Default: sbatch.
 .TP
 \fB--srun\-bin\fR \fIPATH\fR
 Path to the srun executable. Default: srun.
+.TP
+\fB--scontrol\-bin\fR \fIPATH\fR
+Path to the scontrol executable. Default: scontrol.
+.TP
+\fB--apptainer\-bin\fR \fIPATH\fR
+Path to the apptainer executable. Default: apptainer.
+.TP
+\fB--singularity\-bin\fR \fIPATH\fR
+Path to the singularity executable. Default: singularity.
 .TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.

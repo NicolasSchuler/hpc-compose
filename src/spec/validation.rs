@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_norway::{Mapping, Value};
 
-const ROOT_ALLOWED_KEYS: &[&str] = &["name", "services", "version", "x-slurm"];
+const ROOT_ALLOWED_KEYS: &[&str] = &["name", "runtime", "services", "version", "x-slurm"];
 const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "image",
     "command",
@@ -15,6 +15,7 @@ const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "readiness",
     "healthcheck",
     "x-slurm",
+    "x-runtime",
     "x-enroot",
 ];
 
@@ -287,7 +288,7 @@ fn validate_mapping_keys(scope: &str, mapping: &Mapping, allowed: &[&str]) -> Re
         }
         let message = match key_name {
             "build" => {
-                "build is not supported in v1; use image: plus x-enroot.prepare to customize an Enroot image before submission"
+                "build is not supported in v1; use image: plus x-runtime.prepare to customize an image before submission"
             }
             "ports" => {
                 "ports are not supported; use host-network semantics and explicit readiness checks"

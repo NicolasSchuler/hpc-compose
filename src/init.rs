@@ -94,6 +94,11 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/mpi-hello.yaml"),
     },
     Template {
+        name: "mpi-pmix-v4-host-mpi",
+        description: "Versioned PMIx launch plus host MPI bind/env configuration.",
+        body: include_str!("../examples/mpi-pmix-v4-host-mpi.yaml"),
+    },
+    Template {
         name: "multi-node-mpi",
         description: "Primary-node helper plus one allocation-wide distributed MPI step.",
         body: include_str!("../examples/multi-node-mpi.yaml"),
@@ -107,6 +112,11 @@ const TEMPLATES: &[Template] = &[
         name: "multi-stage-pipeline",
         description: "Two-stage data pipeline coordinating through shared job mount.",
         body: include_str!("../examples/multi-stage-pipeline.yaml"),
+    },
+    Template {
+        name: "pipeline-dag",
+        description: "One-shot preprocess/train/postprocess DAG with completion dependencies.",
+        body: include_str!("../examples/pipeline-dag.yaml"),
     },
     Template {
         name: "fairseq-preprocess",

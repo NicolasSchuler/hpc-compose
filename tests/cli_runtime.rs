@@ -2370,6 +2370,172 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+fn submit_local_completed_dependency_runs_pipeline_in_order() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose-dag.yaml",
+        &format!(
+            r#"
+services:
+  preprocess:
+    image: {}
+    command: /bin/sh -lc "printf 'preprocess\n' >> /hpc-compose/job/order.txt"
+  train:
+    image: {}
+    command: /bin/sh -lc "printf 'train\n' >> /hpc-compose/job/order.txt"
+    depends_on:
+      preprocess:
+        condition: service_completed_successfully
+  postprocess:
+    image: {}
+    command: /bin/sh -lc "printf 'postprocess\n' >> /hpc-compose/job/order.txt"
+    depends_on:
+      train:
+        condition: service_completed_successfully
+"#,
+            local_image.display(),
+            local_image.display(),
+            local_image.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let submit_json: Value = serde_json::from_str(&stdout_text(&submit)).expect("submit json");
+    let job_id = submit_json["job_id"].as_str().expect("job id").to_string();
+    let order_path = tmpdir
+        .path()
+        .join(".hpc-compose")
+        .join(&job_id)
+        .join("order.txt");
+    let mut order = String::new();
+    for _ in 0..40 {
+        order = fs::read_to_string(&order_path).unwrap_or_default();
+        if order.contains("postprocess") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(order, "preprocess\ntrain\npostprocess\n");
+
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            &job_id,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&status);
+    let status_json: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    let services = status_json["services"].as_array().expect("services");
+    assert!(
+        services
+            .iter()
+            .all(|service| service["completed_successfully"] == Value::from(true))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn submit_local_completed_dependency_blocks_downstream_after_failure() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose-dag-failure.yaml",
+        &format!(
+            r#"
+services:
+  preprocess:
+    image: {}
+    command: /bin/sh -lc "printf 'preprocess\n' >> /hpc-compose/job/order.txt; exit 23"
+  train:
+    image: {}
+    command: /bin/sh -lc "printf 'train\n' >> /hpc-compose/job/order.txt"
+    depends_on:
+      preprocess:
+        condition: service_completed_successfully
+"#,
+            local_image.display(),
+            local_image.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let submit_json: Value = serde_json::from_str(&stdout_text(&submit)).expect("submit json");
+    let job_id = submit_json["job_id"].as_str().expect("job id").to_string();
+
+    let mut status_json = Value::Null;
+    for _ in 0..40 {
+        let status = run_cli(
+            tmpdir.path(),
+            &[
+                "status",
+                "-f",
+                compose.to_str().expect("path"),
+                "--job-id",
+                &job_id,
+                "--format",
+                "json",
+            ],
+        );
+        assert_success(&status);
+        status_json = serde_json::from_str(&stdout_text(&status)).expect("status json");
+        if status_json["scheduler"]["terminal"] == Value::from(true) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(status_json["scheduler"]["failed"], Value::from(true));
+    let order_path = tmpdir
+        .path()
+        .join(".hpc-compose")
+        .join(&job_id)
+        .join("order.txt");
+    let order = fs::read_to_string(order_path).unwrap_or_default();
+    assert_eq!(order, "preprocess\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn submit_local_cancel_terminates_supervisor() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");
@@ -2826,6 +2992,38 @@ fn artifacts_command_exports_collected_metrics_and_json() {
         )
         .expect("payload")
     );
+
+    fs::remove_file(
+        tmpdir
+            .path()
+            .join(".hpc-compose/12345/artifacts/payload/metrics/meta.json"),
+    )
+    .expect("remove payload");
+    let warning_artifacts = run_cli(
+        tmpdir.path(),
+        &[
+            "artifacts",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--job-id",
+            "12345",
+        ],
+    );
+    assert_success(&warning_artifacts);
+    let warning_value: Value =
+        serde_json::from_str(&stdout_text(&warning_artifacts)).expect("warning artifacts json");
+    assert!(
+        warning_value["warnings"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|item| item
+                .as_str()
+                .unwrap_or_default()
+                .contains("collected payload path"))
+    );
 }
 
 #[test]
@@ -2906,6 +3104,115 @@ services:
         !tmpdir
             .path()
             .join("results/12345/logs/logs/app.log")
+            .exists()
+    );
+}
+
+#[test]
+fn artifacts_command_exports_named_bundle_tarball_and_skips_default_bundle() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    fs::create_dir_all(tmpdir.path().join("app")).expect("app dir");
+    fs::write(tmpdir.path().join("app/main.py"), "print('hello')\n").expect("main.py");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose-artifacts-bundles.yaml",
+        &format!(
+            r#"
+name: demo
+x-slurm:
+  job_name: demo
+  time: "00:10:00"
+  cache_dir: {}
+  metrics:
+    interval_seconds: 1
+  artifacts:
+    collect: always
+    export_dir: ./results/${{SLURM_JOB_ID}}
+    paths:
+      - /hpc-compose/job/metrics/**
+    bundles:
+      logs:
+        paths:
+          - /hpc-compose/job/logs/**
+services:
+  app:
+    image: python:3.11-slim
+    working_dir: /workspace
+    volumes:
+      - ./app:/workspace
+    command:
+      - python
+      - main.py
+"#,
+            cache_dir.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script(tmpdir.path());
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let artifacts = run_cli(
+        tmpdir.path(),
+        &[
+            "artifacts",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--job-id",
+            "12345",
+            "--bundle",
+            "logs",
+            "--bundle",
+            "logs",
+            "--tarball",
+        ],
+    );
+    assert_success(&artifacts);
+    let value: Value = serde_json::from_str(&stdout_text(&artifacts)).expect("artifacts json");
+    assert_eq!(value["selected_bundles"], serde_json::json!(["logs"]));
+    assert!(
+        value["tarball_paths"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|path| path.as_str().unwrap_or_default().ends_with("/logs.tar.gz"))
+    );
+    assert!(
+        tmpdir
+            .path()
+            .join("results/12345/bundles/logs/logs/app.log")
+            .exists()
+    );
+    assert!(tmpdir.path().join("results/12345/logs.tar.gz").exists());
+    assert!(
+        tmpdir
+            .path()
+            .join("results/12345/_hpc-compose/bundles/logs.json")
+            .exists()
+    );
+    assert!(
+        !tmpdir
+            .path()
+            .join("results/12345/metrics/meta.json")
             .exists()
     );
 }

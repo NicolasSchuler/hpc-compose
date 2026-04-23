@@ -10,8 +10,8 @@ use super::{ColorPolicy, OutputFormat, StatsOutputFormat};
 #[command(
     author,
     version,
-    about = "Compile a compose-like spec into a single Slurm job using Enroot",
-    long_about = "Compile a compose-like specification into one Slurm batch job that launches one or more services through Enroot and Pyxis inside a single allocation. Use up for the normal run, and use config, validate, inspect, preflight, and prepare when adapting or debugging a spec.",
+    about = "Compile a compose-like spec into a single Slurm job",
+    long_about = "Compile a compose-like specification into one Slurm batch job that launches one or more services through Pyxis/Enroot, Apptainer, Singularity, or host runtime software inside a single allocation. Use up for the normal run, and use config, validate, inspect, preflight, and prepare when adapting or debugging a spec.",
     after_help = TOP_LEVEL_HELP
 )]
 pub struct Cli {
@@ -95,7 +95,7 @@ pub enum Commands {
     },
     #[command(
         about = "Prepare imported and customized runtime images",
-        long_about = "Import base images and build prepared runtime artifacts on the submission host. This is the login-node image preparation phase reused later by submit.",
+        long_about = "Import base images and build prepared runtime artifacts on the submission host with the selected runtime backend. This is the login-node image preparation phase reused later by submit.",
         after_help = PREPARE_HELP
     )]
     Prepare {
@@ -115,6 +115,20 @@ pub enum Commands {
         enroot_bin: String,
         #[arg(
             long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+        #[arg(
+            long,
             help = "Keep failed preparation state on disk for later inspection"
         )]
         keep_failed_prep: bool,
@@ -128,7 +142,7 @@ pub enum Commands {
     },
     #[command(
         about = "Check cluster prerequisites on the submission host",
-        long_about = "Check whether the submission host and compose specification satisfy the prerequisites for a later submit. This validates required binaries, cache path safety, local mounts, and Pyxis or Slurm availability.",
+        long_about = "Check whether the submission host and compose specification satisfy the prerequisites for a later submit. This validates required binaries, cache path safety, local mounts, selected runtime backend availability, Slurm availability, and any discovered cluster profile.",
         after_help = PREFLIGHT_HELP
     )]
     Preflight {
@@ -168,6 +182,27 @@ pub enum Commands {
             help = "Path to the srun executable"
         )]
         srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scontrol",
+            help = "Path to the scontrol executable"
+        )]
+        scontrol_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
     },
     #[command(
         about = "Inspect the normalized runtime plan",
@@ -220,11 +255,97 @@ pub enum Commands {
     Schema,
     #[command(
         about = "Check cluster readiness and tool availability",
-        long_about = "Run environment diagnostics without requiring a compose file. Checks Slurm, Enroot, Pyxis, GPU, and cache directory availability."
+        long_about = "Run environment diagnostics without requiring a compose file. Checks Slurm, runtime backend tools, GPU, and cache directory availability. Use --cluster-report to write a best-effort .hpc-compose/cluster.toml profile."
     )]
     Doctor {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
+        #[arg(long, help = "Generate a best-effort cluster capability profile")]
+        cluster_report: bool,
+        #[arg(
+            long = "cluster-report-out",
+            value_name = "PATH",
+            help = "Write the cluster profile to this path; use '-' to print TOML"
+        )]
+        cluster_report_out: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Render or run an MPI smoke probe for a compose service with x-slurm.mpi"
+        )]
+        mpi_smoke: bool,
+        #[arg(
+            long,
+            value_name = "SERVICE",
+            help = "MPI service to smoke-test; inferred when exactly one MPI service exists"
+        )]
+        service: Option<String>,
+        #[arg(
+            long,
+            help = "Submit the MPI smoke probe to Slurm; without this, only render/explain it"
+        )]
+        submit: bool,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered MPI smoke batch script to this path"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 300,
+            help = "Timeout for a submitted MPI smoke job"
+        )]
+        timeout_seconds: u64,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scontrol",
+            help = "Path to the scontrol executable"
+        )]
+        scontrol_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
     },
     #[command(
         about = "Submit, watch, and stream logs in one command",
@@ -266,6 +387,20 @@ pub enum Commands {
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
         #[arg(
             long,
             value_name = "PATH",
@@ -356,6 +491,20 @@ pub enum Commands {
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
         #[arg(
             long,
             value_name = "PATH",
@@ -765,6 +914,20 @@ pub enum Commands {
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
         #[arg(
             long,
             value_name = "PATH",

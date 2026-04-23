@@ -80,6 +80,14 @@ Source: `examples/mpi-hello.yaml`
 {{#include ../../examples/mpi-hello.yaml}}
 ```
 
+## MPI PMIx v4 Host MPI
+
+Source: `examples/mpi-pmix-v4-host-mpi.yaml`
+
+```yaml
+{{#include ../../examples/mpi-pmix-v4-host-mpi.yaml}}
+```
+
 ## Multi Node MPI
 
 Source: `examples/multi-node-mpi.yaml`
@@ -110,6 +118,14 @@ Source: `examples/multi-stage-pipeline.yaml`
 
 ```yaml
 {{#include ../../examples/multi-stage-pipeline.yaml}}
+```
+
+## Pipeline DAG
+
+Source: `examples/pipeline-dag.yaml`
+
+```yaml
+{{#include ../../examples/pipeline-dag.yaml}}
 ```
 
 ## Postgres ETL

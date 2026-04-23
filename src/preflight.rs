@@ -8,10 +8,11 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::cluster::ClusterProfile;
 use crate::planner::{ImageSource, cache_path_policy_issue, registry_host_for_remote};
 use crate::prepare::RuntimePlan;
 use crate::readiness_util::readiness_uses_implicit_localhost;
-use crate::spec::{MetricsCollector, ReadinessSpec};
+use crate::spec::{MetricsCollector, ReadinessSpec, RuntimeBackend};
 use crate::term;
 
 /// Severity level for one preflight item.
@@ -68,22 +69,28 @@ pub struct GroupedReport {
 #[derive(Debug, Clone)]
 pub struct Options {
     pub enroot_bin: String,
+    pub apptainer_bin: String,
+    pub singularity_bin: String,
     pub sbatch_bin: String,
     pub srun_bin: String,
     pub scontrol_bin: String,
     pub require_submit_tools: bool,
     pub skip_prepare: bool,
+    pub cluster_profile: Option<ClusterProfile>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             enroot_bin: "enroot".to_string(),
+            apptainer_bin: "apptainer".to_string(),
+            singularity_bin: "singularity".to_string(),
             sbatch_bin: "sbatch".to_string(),
             srun_bin: "srun".to_string(),
             scontrol_bin: "scontrol".to_string(),
             require_submit_tools: true,
             skip_prepare: false,
+            cluster_profile: None,
         }
     }
 }
@@ -240,12 +247,7 @@ fn is_contextual_warning(item: &Item) -> bool {
 pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
     let mut report = Report { items: Vec::new() };
 
-    check_binary(
-        &mut report,
-        &options.enroot_bin,
-        "Enroot is available",
-        "Install Enroot on the login node or pass --enroot-bin with the correct path.",
-    );
+    check_runtime_backend(&mut report, plan, options);
 
     if options.require_submit_tools {
         let srun_available = check_binary(
@@ -269,10 +271,14 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
             );
         }
         if srun_available {
-            check_pyxis_support(&mut report, &options.srun_bin);
+            if plan.runtime.backend == RuntimeBackend::Pyxis {
+                check_pyxis_support(&mut report, &options.srun_bin);
+            }
             check_mpi_support(&mut report, &options.srun_bin, plan);
         }
-        check_haicore_mount_helpers(&mut report);
+        if plan.runtime.backend == RuntimeBackend::Pyxis {
+            check_haicore_mount_helpers(&mut report);
+        }
     }
 
     check_cache_path_policy(&mut report, plan);
@@ -286,8 +292,64 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
     if options.skip_prepare {
         check_skip_prepare_readiness(&mut report, plan);
     }
+    if let Some(profile) = &options.cluster_profile {
+        check_cluster_profile(&mut report, plan, profile);
+    }
 
     report
+}
+
+fn check_runtime_backend(report: &mut Report, plan: &RuntimePlan, options: &Options) {
+    match plan.runtime.backend {
+        RuntimeBackend::Pyxis => {
+            check_binary(
+                report,
+                &options.enroot_bin,
+                "Enroot is available",
+                "Install Enroot on the login node or pass --enroot-bin with the correct path.",
+            );
+        }
+        RuntimeBackend::Apptainer => {
+            check_binary(
+                report,
+                &options.apptainer_bin,
+                "Apptainer is available",
+                "Install Apptainer on the login node or pass --apptainer-bin with the correct path.",
+            );
+        }
+        RuntimeBackend::Singularity => {
+            check_binary(
+                report,
+                &options.singularity_bin,
+                "Singularity is available",
+                "Install Singularity on the login node or pass --singularity-bin with the correct path.",
+            );
+        }
+        RuntimeBackend::Host => report.items.push(Item {
+            level: Level::Ok,
+            message: "host runtime selected; no container runtime required".to_string(),
+            remediation: None,
+        }),
+    }
+}
+
+fn check_cluster_profile(report: &mut Report, plan: &RuntimePlan, profile: &ClusterProfile) {
+    let warnings = profile.validate_runtime_plan(plan);
+    if warnings.is_empty() {
+        report.items.push(Item {
+            level: Level::Ok,
+            message: "cluster profile is compatible with this plan".to_string(),
+            remediation: None,
+        });
+        return;
+    }
+    for warning in warnings {
+        report.items.push(Item {
+            level: Level::Warn,
+            message: warning.message,
+            remediation: warning.remediation,
+        });
+    }
 }
 
 fn check_binary(report: &mut Report, binary: &str, ok_message: &str, remediation: &str) -> bool {
@@ -427,11 +489,39 @@ fn check_mpi_support(report: &mut Report, srun_bin: &str, plan: &RuntimePlan) {
 }
 
 fn advertised_mpi_types(output: &str) -> Vec<String> {
-    output
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-        .filter(|token| !token.is_empty())
+    let mut values = output
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '+')))
+        .filter(|token| mpi_advertised_token_looks_useful(token))
         .map(str::to_string)
-        .collect()
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn mpi_advertised_token_looks_useful(token: &str) -> bool {
+    if token.is_empty() || token.starts_with('-') {
+        return false;
+    }
+    let lower = token.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "mpi"
+            | "plugin"
+            | "plugins"
+            | "type"
+            | "types"
+            | "are"
+            | "available"
+            | "specific"
+            | "version"
+            | "versions"
+    ) {
+        return false;
+    }
+    token
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
 }
 
 fn check_cache_path_policy(report: &mut Report, plan: &RuntimePlan) {
@@ -535,6 +625,32 @@ fn check_local_and_mount_paths(report: &mut Report, plan: &RuntimePlan) {
                 });
             }
         }
+        if let ImageSource::LocalSif(path) = &service.source {
+            if path.exists() && path.is_file() {
+                report.items.push(Item {
+                    level: Level::Ok,
+                    message: format!(
+                        "local SIF image for service '{}' is present: {}",
+                        service.name,
+                        path.display()
+                    ),
+                    remediation: None,
+                });
+            } else {
+                report.items.push(Item {
+                    level: Level::Error,
+                    message: format!(
+                        "local SIF image for service '{}' does not exist: {}",
+                        service.name,
+                        path.display()
+                    ),
+                    remediation: Some(
+                        "Fix the image path in compose.yaml or create the .sif file before submitting."
+                            .to_string(),
+                    ),
+                });
+            }
+        }
 
         for mount in &service.volumes {
             check_mount_path(report, &service.name, mount, "runtime volume");
@@ -606,8 +722,12 @@ fn check_mount_path(report: &mut Report, service_name: &str, mount: &str, kind: 
 
 fn check_skip_prepare_readiness(report: &mut Report, plan: &RuntimePlan) {
     for service in &plan.ordered_services {
-        let requires_cached_runtime = !matches!(service.source, ImageSource::LocalSqsh(_));
-        if !requires_cached_runtime && service.prepare.is_none() {
+        if matches!(service.source, ImageSource::Host) {
+            continue;
+        }
+        let requires_cached_runtime =
+            matches!(service.source, ImageSource::Remote(_)) || service.prepare.is_some();
+        if !requires_cached_runtime {
             continue;
         }
         if service.runtime_image.exists() {
@@ -753,6 +873,9 @@ fn check_haicore_mount_helpers_with_paths(
 }
 
 fn check_registry_credentials(report: &mut Report, plan: &RuntimePlan) {
+    if plan.runtime.backend != RuntimeBackend::Pyxis {
+        return;
+    }
     let credential_path = enroot_credentials_path();
     let entries = credential_entries(credential_path.as_deref()).unwrap_or_default();
 
@@ -920,6 +1043,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
+    use crate::cluster::RuntimeAvailability;
     use crate::planner::{
         ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement, ServicePlacementMode,
     };
@@ -938,6 +1062,7 @@ mod tests {
         RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 name: "app".into(),
@@ -1006,6 +1131,7 @@ mod tests {
                 scontrol_bin: "scontrol".into(),
                 require_submit_tools: true,
                 skip_prepare: false,
+                ..Options::default()
             },
         );
         assert!(
@@ -1031,7 +1157,11 @@ mod tests {
         write_fake_binary(&enroot, "#!/bin/bash\nexit 0\n");
         let mut plan = runtime_plan(tmpdir.path());
         plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
-            mpi_type: MpiType::Pmix,
+            mpi_type: MpiType::new("pmix").expect("mpi type"),
+            implementation: None,
+            launcher: Default::default(),
+            expected_ranks: None,
+            host_mpi: None,
         });
         let report = run(
             &plan,
@@ -1042,6 +1172,7 @@ mod tests {
                 scontrol_bin: "scontrol".into(),
                 require_submit_tools: true,
                 skip_prepare: false,
+                ..Options::default()
             },
         );
         assert!(
@@ -1051,7 +1182,11 @@ mod tests {
         );
 
         plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
-            mpi_type: MpiType::Pmi1,
+            mpi_type: MpiType::new("pmi1").expect("mpi type"),
+            implementation: None,
+            launcher: Default::default(),
+            expected_ranks: None,
+            host_mpi: None,
         });
         let report = run(
             &plan,
@@ -1062,6 +1197,7 @@ mod tests {
                 scontrol_bin: "scontrol".into(),
                 require_submit_tools: true,
                 skip_prepare: false,
+                ..Options::default()
             },
         );
         assert!(report.items.iter().any(|item| {
@@ -1085,7 +1221,11 @@ mod tests {
         write_fake_binary(&enroot, "#!/bin/bash\nexit 0\n");
         let mut plan = runtime_plan(tmpdir.path());
         plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
-            mpi_type: MpiType::Pmix,
+            mpi_type: MpiType::new("pmix").expect("mpi type"),
+            implementation: None,
+            launcher: Default::default(),
+            expected_ranks: None,
+            host_mpi: None,
         });
 
         let report = run(
@@ -1097,6 +1237,7 @@ mod tests {
                 scontrol_bin: "scontrol".into(),
                 require_submit_tools: true,
                 skip_prepare: false,
+                ..Options::default()
             },
         );
         assert!(report.items.iter().any(|item| {
@@ -1165,6 +1306,59 @@ mod tests {
     }
 
     #[test]
+    fn cluster_profile_checks_are_added_to_preflight_report() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.cache_dir = tmpdir.path().join("cache");
+
+        let compatible = ClusterProfile {
+            schema_version: 1,
+            generated_at_unix: None,
+            slurm_version: None,
+            mpi_types: Vec::new(),
+            partitions: Vec::new(),
+            qos: Vec::new(),
+            gpu_models: Vec::new(),
+            runtimes: RuntimeAvailability {
+                pyxis: true,
+                enroot: true,
+                apptainer: false,
+                singularity: false,
+                host: true,
+            },
+            shared_cache_paths: vec![tmpdir.path().display().to_string()],
+        };
+        let mut report = Report { items: Vec::new() };
+        check_cluster_profile(&mut report, &plan, &compatible);
+        assert!(report.items.iter().any(|item| {
+            item.level == Level::Ok && item.message.contains("cluster profile is compatible")
+        }));
+
+        let incompatible = ClusterProfile {
+            runtimes: RuntimeAvailability {
+                pyxis: false,
+                enroot: true,
+                apptainer: false,
+                singularity: false,
+                host: true,
+            },
+            shared_cache_paths: vec!["/shared".into()],
+            ..compatible
+        };
+        let mut report = Report { items: Vec::new() };
+        check_cluster_profile(&mut report, &plan, &incompatible);
+        assert!(report.items.iter().any(|item| {
+            item.level == Level::Warn && item.message.contains("runtime.backend=pyxis")
+        }));
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| { item.level == Level::Warn && item.message.contains("cache_dir") })
+        );
+    }
+
+    #[test]
     fn check_binary_and_find_binary_cover_success_and_failure() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let fake = tmpdir.path().join("tool");
@@ -1207,6 +1401,7 @@ mod tests {
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: PathBuf::from(home).join(".cache/hpc-compose"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: runtime_plan(tmpdir.path()).ordered_services,
         };
@@ -1261,6 +1456,7 @@ mod tests {
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 name: "local".into(),
@@ -1326,6 +1522,7 @@ mod tests {
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![RuntimeService {
                 name: "local".into(),
@@ -1475,6 +1672,7 @@ mod tests {
                 scontrol_bin: tmpdir.path().join("missing-scontrol").display().to_string(),
                 require_submit_tools: true,
                 skip_prepare: false,
+                ..Options::default()
             },
         );
         let text = report.render();
@@ -1536,6 +1734,7 @@ mod tests {
         let plan = RuntimePlan {
             name: "demo".into(),
             cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
             slurm: SlurmConfig::default(),
             ordered_services: vec![
                 RuntimeService {

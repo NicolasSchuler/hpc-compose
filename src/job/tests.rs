@@ -17,6 +17,7 @@ fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
     RuntimePlan {
         name: "demo".into(),
         cache_dir: tmpdir.join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
         slurm: SlurmConfig::default(),
         ordered_services: vec![
             RuntimeService {

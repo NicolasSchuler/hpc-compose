@@ -45,6 +45,8 @@ pub struct PsServiceRow {
     #[serde(default)]
     pub healthy: Option<bool>,
     #[serde(default)]
+    pub completed_successfully: Option<bool>,
+    #[serde(default)]
     pub readiness_configured: Option<bool>,
     #[serde(default)]
     pub status: Option<String>,
@@ -268,6 +270,7 @@ pub fn build_status_snapshot(
             launcher_pid,
             healthy: runtime_state
                 .and_then(|state| launcher_pid.map(|_| state.healthy.unwrap_or(false))),
+            completed_successfully: runtime_state.and_then(|state| state.completed_successfully),
             readiness_configured: runtime_state.and_then(|state| state.readiness_configured),
             status: Some(
                 derive_service_status(&scheduler, runtime_state, record.backend).to_string(),
@@ -338,6 +341,10 @@ fn derive_service_status(
         } else {
             "running"
         };
+    }
+
+    if state.completed_successfully.unwrap_or(false) {
+        return "exited";
     }
 
     if let Some(last_exit_code) = state.last_exit_code {
@@ -779,6 +786,7 @@ mod tests {
             launch_index: Some(0),
             launcher_pid: Some(std::process::id()),
             healthy: Some(false),
+            completed_successfully: Some(false),
             readiness_configured: Some(false),
             failure_policy_mode: None,
             restart_count: Some(0),
@@ -794,6 +802,145 @@ mod tests {
             ntasks_per_node: None,
             nodelist: None,
         }
+    }
+
+    fn walltime_record(requested_walltime: Option<RequestedWalltime>) -> SubmissionRecord {
+        SubmissionRecord {
+            schema_version: SUBMISSION_SCHEMA_VERSION,
+            backend: SubmissionBackend::Slurm,
+            kind: SubmissionKind::Main,
+            job_id: "12345".into(),
+            submitted_at: 1_200,
+            compose_file: PathBuf::from("/tmp/compose.yaml"),
+            submit_dir: PathBuf::from("/tmp"),
+            script_path: PathBuf::from("/tmp/job.sbatch"),
+            cache_dir: PathBuf::from("/tmp/cache"),
+            batch_log: PathBuf::from("/tmp/slurm-12345.out"),
+            service_logs: BTreeMap::new(),
+            artifact_export_dir: None,
+            resume_dir: None,
+            service_name: None,
+            command_override: None,
+            requested_walltime,
+            config_snapshot_yaml: None,
+            cached_artifacts: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_fake_probe(tmpdir: &Path, name: &str, stdout: &str) -> PathBuf {
+        let path = tmpdir.join(name);
+        fs::write(&path, format!("#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\n")).expect("fake probe");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(&path, perms).expect("chmod");
+        path
+    }
+
+    #[test]
+    fn walltime_and_log_status_helpers_cover_edge_cases() {
+        assert_eq!(format_walltime_duration(3_661), "01:01:01");
+        assert_eq!(format_walltime_duration(90_061), "1-01:01:01");
+        assert_eq!(parse_scheduler_timestamp("not-a-timestamp"), None);
+        assert!(parse_scheduler_timestamp("2026-04-10T12:00:00Z").is_some());
+
+        let running = build_scheduler_status("RUNNING".into(), SchedulerSource::Squeue);
+        let pending = build_scheduler_status("PENDING".into(), SchedulerSource::Squeue);
+        let record = walltime_record(Some(RequestedWalltime {
+            original: "00:10:00".into(),
+            seconds: 600,
+        }));
+
+        assert!(walltime_progress(&record, &pending, None, 1_500).is_none());
+        assert!(walltime_progress(&walltime_record(None), &running, None, 1_500).is_none());
+
+        let from_record_submit =
+            walltime_progress(&record, &running, None, 1_500).expect("progress from submitted_at");
+        assert_eq!(from_record_submit.elapsed_seconds, 300);
+        assert_eq!(from_record_submit.remaining_seconds, 300);
+
+        let queue = QueueDiagnostics {
+            pending_reason: None,
+            eligible_time: None,
+            start_time: Some("1970-01-01T00:20:00Z".into()),
+        };
+        let from_queue_start = walltime_progress(&record, &running, Some(&queue), 1_500)
+            .expect("progress from queue start");
+        assert_eq!(from_queue_start.elapsed_seconds, 300);
+
+        let saturated =
+            walltime_progress(&record, &running, Some(&queue), 9_999).expect("saturated progress");
+        assert_eq!(saturated.elapsed_seconds, 600);
+        assert_eq!(saturated.remaining_seconds, 0);
+        assert_eq!(walltime_progress_percent(&saturated), 100);
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let missing = build_log_status(&tmpdir.path().join("missing.log"), 10);
+        assert!(!missing.present);
+        assert!(missing.updated_at.is_none());
+        assert!(missing.updated_age_seconds.is_none());
+
+        let log = tmpdir.path().join("app.log");
+        fs::write(&log, "ready\n").expect("log");
+        let present = build_log_status(&log, unix_timestamp_now());
+        assert!(present.present);
+        assert!(present.updated_at.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_probe_parses_fake_squeue_and_sacct_diagnostics() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let squeue = write_fake_probe(
+            tmpdir.path(),
+            "squeue",
+            "PENDING|Resources|2026-04-10T12:00:00",
+        );
+        let sacct = write_fake_probe(
+            tmpdir.path(),
+            "sacct",
+            "PENDING|2026-04-10T11:55:00|2026-04-10T12:05:00|Priority",
+        );
+
+        let squeue_probe =
+            probe_squeue_queue_diagnostics("12345", squeue.to_str().expect("squeue path"))
+                .expect("squeue probe");
+        assert_eq!(squeue_probe.state.as_deref(), Some("PENDING"));
+        assert_eq!(squeue_probe.pending_reason.as_deref(), Some("Resources"));
+        assert_eq!(
+            squeue_probe.start_time.as_deref(),
+            Some("2026-04-10T12:00:00")
+        );
+
+        let sacct_probe =
+            probe_sacct_queue_diagnostics("12345", sacct.to_str().expect("sacct path"))
+                .expect("sacct probe");
+        assert_eq!(sacct_probe.state.as_deref(), Some("PENDING"));
+        assert_eq!(sacct_probe.pending_reason.as_deref(), Some("Priority"));
+        assert_eq!(
+            sacct_probe.eligible_time.as_deref(),
+            Some("2026-04-10T11:55:00")
+        );
+
+        let (status, diagnostics) = probe_scheduler_status_with_queue_diagnostics(
+            "12345",
+            &SchedulerOptions {
+                squeue_bin: squeue.to_string_lossy().to_string(),
+                sacct_bin: sacct.to_string_lossy().to_string(),
+            },
+        );
+        assert_eq!(status.source, SchedulerSource::Squeue);
+        assert_eq!(status.state, "PENDING");
+        let diagnostics = diagnostics.expect("diagnostics");
+        assert_eq!(diagnostics.pending_reason.as_deref(), Some("Resources"));
+        assert_eq!(
+            diagnostics.eligible_time.as_deref(),
+            Some("2026-04-10T11:55:00")
+        );
+        assert_eq!(
+            diagnostics.start_time.as_deref(),
+            Some("2026-04-10T12:00:00")
+        );
     }
 
     #[test]

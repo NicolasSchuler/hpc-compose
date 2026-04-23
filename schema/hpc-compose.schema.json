@@ -14,6 +14,9 @@
     "name": {
       "type": "string"
     },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
     "services": {
       "type": "object",
       "minProperties": 1,
@@ -76,6 +79,22 @@
         { "type": "string" }
       ]
     },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["pyxis", "apptainer", "singularity", "host"],
+          "default": "pyxis"
+        },
+        "gpu": {
+          "type": "string",
+          "enum": ["auto", "none", "nvidia"],
+          "default": "auto"
+        }
+      }
+    },
     "slurm": {
       "type": "object",
       "additionalProperties": false,
@@ -92,11 +111,30 @@
         "mem": { "$ref": "#/$defs/lineSafeString" },
         "gres": { "$ref": "#/$defs/lineSafeString" },
         "gpus": { "$ref": "#/$defs/positiveInteger" },
+        "gpus_per_node": { "$ref": "#/$defs/positiveInteger" },
+        "gpus_per_task": { "$ref": "#/$defs/positiveInteger" },
+        "cpus_per_gpu": { "$ref": "#/$defs/positiveInteger" },
+        "mem_per_gpu": { "$ref": "#/$defs/lineSafeString" },
+        "gpu_bind": { "$ref": "#/$defs/lineSafeString" },
+        "cpu_bind": { "$ref": "#/$defs/lineSafeString" },
+        "mem_bind": { "$ref": "#/$defs/lineSafeString" },
+        "distribution": { "$ref": "#/$defs/lineSafeString" },
+        "hint": { "$ref": "#/$defs/lineSafeString" },
         "constraint": { "$ref": "#/$defs/lineSafeString" },
         "output": { "$ref": "#/$defs/lineSafeString" },
         "error": { "$ref": "#/$defs/lineSafeString" },
         "chdir": { "$ref": "#/$defs/lineSafeString" },
         "cache_dir": { "type": "string" },
+        "scratch": { "$ref": "#/$defs/scratch" },
+        "stage_in": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stageIn" }
+        },
+        "stage_out": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stageOut" }
+        },
+        "burst_buffer": { "$ref": "#/$defs/burstBuffer" },
         "metrics": { "$ref": "#/$defs/metrics" },
         "artifacts": { "$ref": "#/$defs/artifacts" },
         "resume": { "$ref": "#/$defs/resume" },
@@ -106,6 +144,68 @@
           "type": "array",
           "items": { "$ref": "#/$defs/lineSafeString" },
           "description": "Raw SBATCH pass-through lines. hpc-compose validates line safety but not Slurm semantics."
+        }
+      }
+    },
+    "scratch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "mount"],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": ["shared", "node_local"],
+          "default": "node_local"
+        },
+        "base": { "type": "string", "minLength": 1 },
+        "mount": { "type": "string", "minLength": 1 },
+        "cleanup": {
+          "type": "string",
+          "enum": ["always", "on_success", "never"],
+          "default": "always"
+        }
+      }
+    },
+    "stageMode": {
+      "type": "string",
+      "enum": ["rsync", "copy"],
+      "default": "rsync"
+    },
+    "stageIn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "mode": { "$ref": "#/$defs/stageMode" }
+      }
+    },
+    "stageOut": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "when": {
+          "type": "string",
+          "enum": ["always", "on_success", "on_failure"],
+          "default": "always"
+        },
+        "mode": { "$ref": "#/$defs/stageMode" }
+      }
+    },
+    "burstBuffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "directives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lineSafeString",
+            "pattern": "^#(BB|DW) "
+          }
         }
       }
     },
@@ -182,7 +282,6 @@
     "service": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["image"],
       "properties": {
         "image": { "type": "string" },
         "command": { "$ref": "#/$defs/command" },
@@ -194,6 +293,7 @@
         "readiness": { "$ref": "#/$defs/readiness" },
         "healthcheck": { "$ref": "#/$defs/healthcheck" },
         "x-slurm": { "$ref": "#/$defs/serviceSlurm" },
+        "x-runtime": { "$ref": "#/$defs/serviceRuntime" },
         "x-enroot": { "$ref": "#/$defs/serviceEnroot" }
       }
     },
@@ -217,7 +317,7 @@
       "properties": {
         "condition": {
           "type": "string",
-          "enum": ["service_started", "service_healthy"]
+          "enum": ["service_started", "service_healthy", "service_completed_successfully"]
         }
       }
     },
@@ -289,12 +389,29 @@
         "cpus_per_task": { "$ref": "#/$defs/positiveInteger" },
         "gpus": { "$ref": "#/$defs/positiveInteger" },
         "gres": { "type": "string" },
+        "gpus_per_node": { "$ref": "#/$defs/positiveInteger" },
+        "gpus_per_task": { "$ref": "#/$defs/positiveInteger" },
+        "cpus_per_gpu": { "$ref": "#/$defs/positiveInteger" },
+        "mem_per_gpu": { "$ref": "#/$defs/lineSafeString" },
+        "gpu_bind": { "$ref": "#/$defs/lineSafeString" },
+        "cpu_bind": { "$ref": "#/$defs/lineSafeString" },
+        "mem_bind": { "$ref": "#/$defs/lineSafeString" },
+        "distribution": { "$ref": "#/$defs/lineSafeString" },
+        "hint": { "$ref": "#/$defs/lineSafeString" },
         "time_limit": { "type": "string" },
         "extra_srun_args": { "$ref": "#/$defs/stringList" },
         "mpi": { "$ref": "#/$defs/mpi" },
         "failure_policy": { "$ref": "#/$defs/failurePolicy" },
         "prologue": { "$ref": "#/$defs/serviceHook" },
-        "epilogue": { "$ref": "#/$defs/serviceHook" }
+        "epilogue": { "$ref": "#/$defs/serviceHook" },
+        "scratch": { "$ref": "#/$defs/serviceScratch" }
+      }
+    },
+    "serviceScratch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
       }
     },
     "serviceHook": {
@@ -346,8 +463,26 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["pmix", "pmi2", "pmi1", "openmpi"]
-        }
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.+-]*$"
+        },
+        "implementation": {
+          "type": "string",
+          "enum": ["openmpi", "mpich", "intel_mpi", "mvapich2", "cray_mpi", "hpe_mpi", "unknown"]
+        },
+        "launcher": {
+          "type": "string",
+          "enum": ["srun"]
+        },
+        "expected_ranks": { "$ref": "#/$defs/positiveInteger" },
+        "host_mpi": { "$ref": "#/$defs/hostMpi" }
+      }
+    },
+    "hostMpi": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bind_paths": { "$ref": "#/$defs/stringList" },
+        "env": { "$ref": "#/$defs/environment" }
       }
     },
     "failurePolicy": {
@@ -365,6 +500,13 @@
       }
     },
     "serviceEnroot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prepare": { "$ref": "#/$defs/prepare" }
+      }
+    },
+    "serviceRuntime": {
       "type": "object",
       "additionalProperties": false,
       "properties": {

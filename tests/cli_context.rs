@@ -445,6 +445,104 @@ scancel = "{scancel}"
 }
 
 #[test]
+fn doctor_cluster_report_writes_profile_from_profile_binary_overrides() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let home = tmpdir.path().join("home");
+    fs::create_dir_all(&home).expect("home");
+
+    let enroot = tmpdir.path().join("enroot-custom");
+    fs::write(&enroot, "").expect("enroot marker");
+    let sbatch = tmpdir.path().join("sbatch-custom");
+    write_script(
+        &sbatch,
+        "#!/bin/bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then echo 'sbatch 24.05'; exit 0; fi\nexit 2\n",
+    );
+    let srun = tmpdir.path().join("srun-custom");
+    write_script(
+        &srun,
+        "#!/bin/bash\nset -euo pipefail\ncase \"${1:-}\" in\n  --version) echo 'srun 24.05' ;;\n  --help) echo 'usage: srun --container-image=IMAGE' ;;\n  --mpi=list) echo 'MPI plugin types are pmix,pmi2' ;;\n  *) exit 0 ;;\nesac\n",
+    );
+    let sinfo = tmpdir.path().join("sinfo-custom");
+    write_script(
+        &sinfo,
+        "#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' 'gpu*|up|01:00:00|2|64|gpu:a100:4|a100,ib'\n",
+    );
+    let scontrol = tmpdir.path().join("scontrol-custom");
+    write_script(
+        &scontrol,
+        "#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' 'PartitionName=gpu State=UP MaxTime=02:00:00 DefaultTime=00:30:00 TRES=cpu=64,gres/gpu:a100:4 AllowQos=normal DefaultQOS=normal'\n",
+    );
+
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "dev"
+
+[profiles.dev.binaries]
+enroot = "{enroot}"
+apptainer = "{missing_apptainer}"
+singularity = "{missing_singularity}"
+sbatch = "{sbatch}"
+srun = "{srun}"
+scontrol = "{scontrol}"
+sinfo = "{sinfo}"
+"#,
+            enroot = enroot.display(),
+            missing_apptainer = tmpdir.path().join("missing-apptainer").display(),
+            missing_singularity = tmpdir.path().join("missing-singularity").display(),
+            sbatch = sbatch.display(),
+            srun = srun.display(),
+            scontrol = scontrol.display(),
+            sinfo = sinfo.display(),
+        ),
+    )
+    .expect("settings");
+
+    let out_path = tmpdir.path().join("cluster.toml");
+    let output = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "--profile",
+            "dev",
+            "doctor",
+            "--cluster-report",
+            "--cluster-report-out",
+            out_path.to_str().expect("out path"),
+            "--format",
+            "json",
+        ],
+        &[("HOME", home.to_str().expect("home"))],
+    );
+    assert_success(&output);
+
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("cluster json");
+    assert_eq!(payload["wrote"], Value::from(true));
+    assert_eq!(payload["path"], Value::from(out_path.display().to_string()));
+    assert_eq!(
+        payload["profile"]["slurm_version"],
+        Value::from("sbatch 24.05")
+    );
+    assert_eq!(payload["profile"]["runtimes"]["pyxis"], Value::from(true));
+    assert_eq!(payload["profile"]["runtimes"]["enroot"], Value::from(true));
+    assert_eq!(
+        payload["profile"]["mpi_types"],
+        Value::from(vec!["pmi2", "pmix"])
+    );
+    assert_eq!(
+        payload["profile"]["partitions"][0]["name"],
+        Value::from("gpu")
+    );
+    assert_eq!(payload["profile"]["gpu_models"], Value::from(vec!["a100"]));
+
+    let written = fs::read_to_string(out_path).expect("written profile");
+    assert!(written.contains("schema_version = 1"));
+    assert!(written.contains("name = \"gpu\""));
+}
+
+#[test]
 fn context_text_reports_resume_export_and_interpolation_sources() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");

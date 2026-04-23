@@ -1,0 +1,36 @@
+name: mpi-pmix-v4-host-mpi
+
+runtime:
+  backend: pyxis
+
+x-slurm:
+  job_name: mpi-pmix-v4-host-mpi
+  time: "00:20:00"
+  nodes: 2
+  ntasks_per_node: 2
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  mpi:
+    image: debian:bookworm-slim
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "mpi_type=$$HPC_COMPOSE_MPI_TYPE"
+        echo "hostfile=$$HPC_COMPOSE_MPI_HOSTFILE"
+        cat "$$HPC_COMPOSE_MPI_HOSTFILE"
+        /opt/site/openmpi/bin/mpirun --version || true
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 2
+      mpi:
+        type: pmix_v4
+        implementation: openmpi
+        launcher: srun
+        expected_ranks: 4
+        host_mpi:
+          bind_paths:
+            - /opt/site/openmpi:/opt/site/openmpi:ro
+          env:
+            MPI_HOME: /opt/site/openmpi

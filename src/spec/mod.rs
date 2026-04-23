@@ -30,9 +30,81 @@ use validation::{
 pub struct ComposeSpec {
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     #[serde(rename = "x-slurm", default)]
     pub slurm: SlurmConfig,
     pub services: BTreeMap<String, ServiceSpec>,
+}
+
+/// Top-level runtime backend configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub backend: RuntimeBackend,
+    #[serde(default)]
+    pub gpu: RuntimeGpuPolicy,
+}
+
+/// Runtime backend used to launch each service inside a Slurm step.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeBackend {
+    /// Pyxis/Enroot through Slurm `srun --container-*` flags.
+    #[default]
+    Pyxis,
+    /// Apptainer SIF images launched through `apptainer exec/run`.
+    Apptainer,
+    /// Singularity SIF images launched through `singularity exec/run`.
+    Singularity,
+    /// Host runtime without a container image.
+    Host,
+}
+
+impl RuntimeBackend {
+    /// Returns the config spelling for this backend.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pyxis => "pyxis",
+            Self::Apptainer => "apptainer",
+            Self::Singularity => "singularity",
+            Self::Host => "host",
+        }
+    }
+
+    /// Returns true when this backend launches a container image.
+    #[must_use]
+    pub fn is_containerized(self) -> bool {
+        !matches!(self, Self::Host)
+    }
+
+    /// Returns true when this backend uses Enroot/Pyxis image artifacts.
+    #[must_use]
+    pub fn uses_pyxis(self) -> bool {
+        matches!(self, Self::Pyxis)
+    }
+
+    /// Returns true when this backend uses SIF image artifacts.
+    #[must_use]
+    pub fn uses_sif(self) -> bool {
+        matches!(self, Self::Apptainer | Self::Singularity)
+    }
+}
+
+/// GPU passthrough policy for container backends that need an explicit flag.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGpuPolicy {
+    /// Enable backend GPU passthrough when the job or service requests GPUs.
+    #[default]
+    Auto,
+    /// Do not add backend GPU passthrough flags.
+    None,
+    /// Always use NVIDIA GPU passthrough flags for supported backends.
+    Nvidia,
 }
 
 /// Top-level `x-slurm` configuration shared by all services.
@@ -65,6 +137,24 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub gpus: Option<u32>,
     #[serde(default)]
+    pub gpus_per_node: Option<u32>,
+    #[serde(default)]
+    pub gpus_per_task: Option<u32>,
+    #[serde(default)]
+    pub cpus_per_gpu: Option<u32>,
+    #[serde(default)]
+    pub mem_per_gpu: Option<String>,
+    #[serde(default)]
+    pub gpu_bind: Option<String>,
+    #[serde(default)]
+    pub cpu_bind: Option<String>,
+    #[serde(default)]
+    pub mem_bind: Option<String>,
+    #[serde(default)]
+    pub distribution: Option<String>,
+    #[serde(default)]
+    pub hint: Option<String>,
+    #[serde(default)]
     pub constraint: Option<String>,
     #[serde(default)]
     pub output: Option<String>,
@@ -74,6 +164,14 @@ pub struct SlurmConfig {
     pub chdir: Option<String>,
     #[serde(default)]
     pub cache_dir: Option<String>,
+    #[serde(default)]
+    pub scratch: Option<ScratchConfig>,
+    #[serde(default)]
+    pub stage_in: Vec<StageInConfig>,
+    #[serde(default)]
+    pub stage_out: Vec<StageOutConfig>,
+    #[serde(default)]
+    pub burst_buffer: Option<BurstBufferConfig>,
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
     #[serde(default)]
@@ -86,6 +184,100 @@ pub struct SlurmConfig {
     pub setup: Vec<String>,
     #[serde(default)]
     pub submit_args: Vec<String>,
+}
+
+/// Scratch storage scope requested for a job.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScratchScope {
+    /// Shared scratch path visible across all allocation nodes.
+    Shared,
+    /// Node-local scratch path on each allocated node.
+    #[default]
+    NodeLocal,
+}
+
+/// Scratch cleanup policy during batch teardown.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScratchCleanupPolicy {
+    /// Remove scratch on every exit path after stage-out.
+    #[default]
+    Always,
+    /// Remove scratch only when the job exits successfully.
+    OnSuccess,
+    /// Leave scratch behind for manual inspection or site cleanup.
+    Never,
+}
+
+/// Top-level scratch configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScratchConfig {
+    #[serde(default)]
+    pub scope: ScratchScope,
+    pub base: String,
+    pub mount: String,
+    #[serde(default)]
+    pub cleanup: ScratchCleanupPolicy,
+}
+
+/// File transfer implementation for stage-in and stage-out.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StageMode {
+    /// Use `rsync -a`.
+    #[default]
+    Rsync,
+    /// Use portable `cp -R`/`cp`.
+    Copy,
+}
+
+/// Stage-in path mapping run before service launch.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StageInConfig {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub mode: StageMode,
+}
+
+/// Stage-out policy for one path mapping.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StageOutWhen {
+    /// Stage out on every exit path.
+    #[default]
+    Always,
+    /// Stage out only when the job exits successfully.
+    OnSuccess,
+    /// Stage out only when the job fails.
+    OnFailure,
+}
+
+/// Stage-out path mapping run during batch teardown.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StageOutConfig {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub when: StageOutWhen,
+    #[serde(default)]
+    pub mode: StageMode,
+}
+
+/// Raw site-specific burst-buffer directives emitted into the batch script.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BurstBufferConfig {
+    #[serde(default)]
+    pub directives: Vec<String>,
 }
 
 /// Artifact collection policy applied during batch teardown.
@@ -193,7 +385,8 @@ pub struct MetricsConfig {
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceSpec {
-    pub image: String,
+    #[serde(default)]
+    pub image: Option<String>,
     #[serde(default)]
     pub command: Option<CommandSpec>,
     #[serde(default)]
@@ -212,6 +405,8 @@ pub struct ServiceSpec {
     pub healthcheck: Option<HealthcheckSpec>,
     #[serde(rename = "x-slurm", default)]
     pub slurm: ServiceSlurmConfig,
+    #[serde(rename = "x-runtime", default)]
+    pub runtime: ServiceRuntimeConfig,
     #[serde(rename = "x-enroot", default)]
     pub enroot: ServiceEnrootConfig,
 }
@@ -236,6 +431,24 @@ pub struct ServiceSlurmConfig {
     #[serde(default)]
     pub gres: Option<String>,
     #[serde(default)]
+    pub gpus_per_node: Option<u32>,
+    #[serde(default)]
+    pub gpus_per_task: Option<u32>,
+    #[serde(default)]
+    pub cpus_per_gpu: Option<u32>,
+    #[serde(default)]
+    pub mem_per_gpu: Option<String>,
+    #[serde(default)]
+    pub gpu_bind: Option<String>,
+    #[serde(default)]
+    pub cpu_bind: Option<String>,
+    #[serde(default)]
+    pub mem_bind: Option<String>,
+    #[serde(default)]
+    pub distribution: Option<String>,
+    #[serde(default)]
+    pub hint: Option<String>,
+    #[serde(default)]
     pub time_limit: Option<String>,
     #[serde(default)]
     pub extra_srun_args: Vec<String>,
@@ -247,6 +460,17 @@ pub struct ServiceSlurmConfig {
     pub prologue: Option<ServiceHookSpec>,
     #[serde(default)]
     pub epilogue: Option<ServiceHookSpec>,
+    #[serde(default)]
+    pub scratch: Option<ServiceScratchConfig>,
+}
+
+/// Per-service scratch mount override.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceScratchConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /// Where a per-service hook runs.
@@ -333,33 +557,102 @@ pub struct ServicePlacementSpec {
 pub struct MpiConfig {
     #[serde(rename = "type")]
     pub mpi_type: MpiType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<MpiImplementation>,
+    #[serde(default, skip_serializing_if = "MpiLauncher::is_default")]
+    pub launcher: MpiLauncher,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_ranks: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_mpi: Option<HostMpiConfig>,
 }
 
 /// Slurm MPI plugin type used for `srun --mpi=<type>`.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MpiType {
-    /// Slurm PMIx support.
-    Pmix,
-    /// Slurm PMI-2 support.
-    Pmi2,
-    /// Slurm PMI-1 support.
-    Pmi1,
-    /// Slurm Open MPI plugin.
-    Openmpi,
-}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MpiType(String);
 
 impl MpiType {
+    /// Builds an MPI type from an exact `srun --mpi` plugin token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is empty or not a safe single CLI token.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_mpi_type_token(&value)?;
+        Ok(Self(value))
+    }
+
     /// Returns the exact value passed to `srun --mpi`.
     #[must_use]
-    pub fn as_srun_value(self) -> &'static str {
-        match self {
-            Self::Pmix => "pmix",
-            Self::Pmi2 => "pmi2",
-            Self::Pmi1 => "pmi1",
-            Self::Openmpi => "openmpi",
-        }
+    pub fn as_srun_value(&self) -> &str {
+        self.0.as_str()
     }
+}
+
+impl Serialize for MpiType {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_srun_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for MpiType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl MpiLauncher {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// MPI implementation family used by a service image or host bind path.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MpiImplementation {
+    /// Open MPI.
+    Openmpi,
+    /// MPICH.
+    Mpich,
+    /// Intel MPI.
+    IntelMpi,
+    /// MVAPICH2.
+    Mvapich2,
+    /// Cray MPI.
+    CrayMpi,
+    /// HPE MPI.
+    HpeMpi,
+    /// Implementation is intentionally unspecified.
+    Unknown,
+}
+
+/// MPI process launcher selected for the service.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MpiLauncher {
+    /// Slurm launches ranks directly with `srun --mpi=...`.
+    #[default]
+    Srun,
+}
+
+/// Host MPI installation bindings injected into a containerized MPI service.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostMpiConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bind_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "EnvironmentSpec::is_none")]
+    pub env: EnvironmentSpec,
 }
 
 /// Per-service failure mode inside a single batch job.
@@ -434,6 +727,7 @@ impl Default for ServiceFailurePolicy {
 pub struct EffectiveComposeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    pub runtime: RuntimeConfig,
     #[serde(rename = "x-slurm")]
     pub slurm: EffectiveSlurmConfig,
     pub services: BTreeMap<String, EffectiveServiceConfig>,
@@ -468,6 +762,24 @@ pub struct EffectiveSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpus: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus_per_node: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus_per_task: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus_per_gpu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_per_gpu: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_bind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_bind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_bind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub constraint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
@@ -476,6 +788,14 @@ pub struct EffectiveSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chdir: Option<String>,
     pub cache_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scratch: Option<ScratchConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub stage_in: Vec<StageInConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub stage_out: Vec<StageOutConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub burst_buffer: Option<BurstBufferConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<EffectiveMetricsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -531,7 +851,8 @@ pub struct EffectiveEmailNotifyConfig {
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EffectiveServiceConfig {
-    pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -548,6 +869,8 @@ pub struct EffectiveServiceConfig {
     pub readiness: Option<ReadinessSpec>,
     #[serde(rename = "x-slurm")]
     pub slurm: EffectiveServiceSlurmConfig,
+    #[serde(rename = "x-runtime", skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<EffectiveServiceRuntimeConfig>,
     #[serde(rename = "x-enroot", skip_serializing_if = "Option::is_none")]
     pub enroot: Option<EffectiveServiceEnrootConfig>,
 }
@@ -578,6 +901,24 @@ pub struct EffectiveServiceSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gres: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus_per_node: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus_per_task: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus_per_gpu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_per_gpu: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_bind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_bind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_bind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub time_limit: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub extra_srun_args: Vec<String>,
@@ -587,7 +928,17 @@ pub struct EffectiveServiceSlurmConfig {
     pub prologue: Option<ServiceHookSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub epilogue: Option<ServiceHookSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scratch: Option<ServiceScratchConfig>,
     pub failure_policy: EffectiveFailurePolicyConfig,
+}
+
+/// Stable effective `x-runtime` service config.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveServiceRuntimeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepare: Option<EffectivePrepareSpec>,
 }
 
 /// Stable effective per-service failure policy.
@@ -624,6 +975,15 @@ pub struct EffectivePrepareSpec {
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub env: BTreeMap<String, String>,
     pub root: bool,
+}
+
+/// Per-service backend-neutral runtime configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceRuntimeConfig {
+    #[serde(default)]
+    pub prepare: Option<PrepareSpec>,
 }
 
 /// Per-service `x-enroot` configuration.
@@ -680,6 +1040,8 @@ pub enum DependencyCondition {
     ServiceStarted,
     /// Wait until the upstream service reports readiness.
     ServiceHealthy,
+    /// Wait until the upstream service exits successfully.
+    ServiceCompletedSuccessfully,
 }
 
 /// A normalized service dependency edge.
@@ -691,7 +1053,7 @@ pub struct ServiceDependency {
 }
 
 /// Accepted environment syntaxes for service or prepare environments.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum EnvironmentSpec {
     /// No environment variables were declared.
@@ -839,6 +1201,17 @@ impl ComposeSpec {
         self.slurm.validate()?;
         for (name, service) in &mut self.services {
             service.normalize_healthcheck()?;
+            if service.runtime.prepare.is_some() && service.enroot.prepare.is_some() {
+                bail!(
+                    "service '{name}' sets both x-runtime.prepare and x-enroot.prepare; use only x-runtime.prepare for new specs"
+                );
+            }
+            if self.runtime.backend != RuntimeBackend::Pyxis && service.enroot.prepare.is_some() {
+                bail!(
+                    "service '{name}' uses x-enroot.prepare with runtime.backend={}; use x-runtime.prepare for non-Pyxis backends",
+                    self.runtime.backend.as_str()
+                );
+            }
             service.slurm.validate(name)?;
         }
         Ok(())
@@ -891,6 +1264,21 @@ impl ComposeSpec {
                 }),
                 None => None,
             };
+            let runtime = match service.runtime.prepare.as_ref() {
+                Some(prepare) => Some(EffectiveServiceRuntimeConfig {
+                    prepare: Some(EffectivePrepareSpec {
+                        commands: prepare.commands.clone(),
+                        mounts: prepare.mounts.clone(),
+                        env: prepare
+                            .env
+                            .to_pairs()?
+                            .into_iter()
+                            .collect::<BTreeMap<_, _>>(),
+                        root: prepare.root,
+                    }),
+                }),
+                None => None,
+            };
             services.insert(
                 name.clone(),
                 EffectiveServiceConfig {
@@ -910,15 +1298,26 @@ impl ComposeSpec {
                         cpus_per_task: service.slurm.cpus_per_task,
                         gpus: service.slurm.gpus,
                         gres: service.slurm.gres.clone(),
+                        gpus_per_node: service.slurm.gpus_per_node,
+                        gpus_per_task: service.slurm.gpus_per_task,
+                        cpus_per_gpu: service.slurm.cpus_per_gpu,
+                        mem_per_gpu: service.slurm.mem_per_gpu.clone(),
+                        gpu_bind: service.slurm.gpu_bind.clone(),
+                        cpu_bind: service.slurm.cpu_bind.clone(),
+                        mem_bind: service.slurm.mem_bind.clone(),
+                        distribution: service.slurm.distribution.clone(),
+                        hint: service.slurm.hint.clone(),
                         time_limit: service.slurm.time_limit.clone(),
                         extra_srun_args: service.slurm.extra_srun_args.clone(),
                         mpi: service.slurm.mpi.clone(),
                         prologue: service.slurm.prologue.clone(),
                         epilogue: service.slurm.epilogue.clone(),
+                        scratch: service.slurm.scratch.clone(),
                         failure_policy: EffectiveFailurePolicyConfig::from_policy(
                             &normalized_policy,
                         ),
                     },
+                    runtime,
                     enroot,
                 },
             );
@@ -926,6 +1325,7 @@ impl ComposeSpec {
 
         Ok(EffectiveComposeConfig {
             name: self.name.clone(),
+            runtime: self.runtime.clone(),
             slurm: EffectiveSlurmConfig {
                 job_name: self.slurm.job_name.clone(),
                 partition: self.slurm.partition.clone(),
@@ -939,11 +1339,24 @@ impl ComposeSpec {
                 mem: self.slurm.mem.clone(),
                 gres: self.slurm.gres.clone(),
                 gpus: self.slurm.gpus,
+                gpus_per_node: self.slurm.gpus_per_node,
+                gpus_per_task: self.slurm.gpus_per_task,
+                cpus_per_gpu: self.slurm.cpus_per_gpu,
+                mem_per_gpu: self.slurm.mem_per_gpu.clone(),
+                gpu_bind: self.slurm.gpu_bind.clone(),
+                cpu_bind: self.slurm.cpu_bind.clone(),
+                mem_bind: self.slurm.mem_bind.clone(),
+                distribution: self.slurm.distribution.clone(),
+                hint: self.slurm.hint.clone(),
                 constraint: self.slurm.constraint.clone(),
                 output: self.slurm.output.clone(),
                 error: self.slurm.error.clone(),
                 chdir: self.slurm.chdir.clone(),
                 cache_dir: cache_dir.display().to_string(),
+                scratch: self.slurm.scratch.clone(),
+                stage_in: self.slurm.stage_in.clone(),
+                stage_out: self.slurm.stage_out.clone(),
+                burst_buffer: self.slurm.burst_buffer.clone(),
                 metrics: self.slurm.metrics.as_ref().map(|_| EffectiveMetricsConfig {
                     enabled: self.slurm.metrics_enabled(),
                     interval_seconds: self.slurm.metrics_interval_seconds(),
@@ -1004,9 +1417,12 @@ impl DependsOnSpec {
                     let condition = match cfg.condition.as_deref() {
                         None | Some("service_started") => DependencyCondition::ServiceStarted,
                         Some("service_healthy") => DependencyCondition::ServiceHealthy,
+                        Some("service_completed_successfully") => {
+                            DependencyCondition::ServiceCompletedSuccessfully
+                        }
                         Some(other) => {
                             bail!(
-                                "depends_on condition for service '{name}' must be 'service_started' or 'service_healthy', got '{other}'"
+                                "depends_on condition for service '{name}' must be 'service_started', 'service_healthy', or 'service_completed_successfully', got '{other}'"
                             );
                         }
                     };
@@ -1033,6 +1449,10 @@ impl DependsOnSpec {
 }
 
 impl EnvironmentSpec {
+    fn is_none(&self) -> bool {
+        matches!(self, EnvironmentSpec::None)
+    }
+
     /// Normalizes the environment declaration into key/value pairs.
     ///
     /// # Errors
@@ -1236,6 +1656,9 @@ impl SlurmConfig {
         validate_positive_u32(self.nodes, "x-slurm.nodes")?;
         validate_positive_u32(self.ntasks, "x-slurm.ntasks")?;
         validate_positive_u32(self.ntasks_per_node, "x-slurm.ntasks_per_node")?;
+        validate_positive_u32(self.gpus_per_node, "x-slurm.gpus_per_node")?;
+        validate_positive_u32(self.gpus_per_task, "x-slurm.gpus_per_task")?;
+        validate_positive_u32(self.cpus_per_gpu, "x-slurm.cpus_per_gpu")?;
         validate_sbatch_safe_string(self.job_name.as_deref(), "x-slurm.job-name")?;
         validate_sbatch_safe_string(self.partition.as_deref(), "x-slurm.partition")?;
         validate_sbatch_safe_string(self.account.as_deref(), "x-slurm.account")?;
@@ -1244,6 +1667,12 @@ impl SlurmConfig {
         validate_sbatch_safe_string(self.time.as_deref(), "x-slurm.time")?;
         validate_sbatch_safe_string(self.mem.as_deref(), "x-slurm.mem")?;
         validate_sbatch_safe_string(self.gres.as_deref(), "x-slurm.gres")?;
+        validate_sbatch_safe_string(self.mem_per_gpu.as_deref(), "x-slurm.mem_per_gpu")?;
+        validate_sbatch_safe_string(self.gpu_bind.as_deref(), "x-slurm.gpu_bind")?;
+        validate_sbatch_safe_string(self.cpu_bind.as_deref(), "x-slurm.cpu_bind")?;
+        validate_sbatch_safe_string(self.mem_bind.as_deref(), "x-slurm.mem_bind")?;
+        validate_sbatch_safe_string(self.distribution.as_deref(), "x-slurm.distribution")?;
+        validate_sbatch_safe_string(self.hint.as_deref(), "x-slurm.hint")?;
         validate_sbatch_safe_string(self.output.as_deref(), "x-slurm.output")?;
         validate_sbatch_safe_string(self.error.as_deref(), "x-slurm.error")?;
         validate_sbatch_safe_string(self.chdir.as_deref(), "x-slurm.chdir")?;
@@ -1251,6 +1680,19 @@ impl SlurmConfig {
             self.submit_args.iter().map(String::as_str),
             "x-slurm.submit_args",
         )?;
+        validate_submit_arg_conflicts(self)?;
+        if let Some(scratch) = &self.scratch {
+            scratch.validate()?;
+        }
+        for (index, entry) in self.stage_in.iter().enumerate() {
+            entry.validate(index)?;
+        }
+        for (index, entry) in self.stage_out.iter().enumerate() {
+            entry.validate(index)?;
+        }
+        if let Some(burst_buffer) = &self.burst_buffer {
+            burst_buffer.validate()?;
+        }
         if let Some(metrics) = &self.metrics
             && matches!(metrics.interval_seconds, Some(0))
         {
@@ -1312,11 +1754,26 @@ impl SlurmConfig {
         interpolate_optional_string(&mut self.time, vars)?;
         interpolate_optional_string(&mut self.mem, vars)?;
         interpolate_optional_string(&mut self.gres, vars)?;
+        interpolate_optional_string(&mut self.mem_per_gpu, vars)?;
+        interpolate_optional_string(&mut self.gpu_bind, vars)?;
+        interpolate_optional_string(&mut self.cpu_bind, vars)?;
+        interpolate_optional_string(&mut self.mem_bind, vars)?;
+        interpolate_optional_string(&mut self.distribution, vars)?;
+        interpolate_optional_string(&mut self.hint, vars)?;
         interpolate_optional_string(&mut self.constraint, vars)?;
         interpolate_optional_string(&mut self.output, vars)?;
         interpolate_optional_string(&mut self.error, vars)?;
         interpolate_optional_string(&mut self.chdir, vars)?;
         interpolate_optional_string(&mut self.cache_dir, vars)?;
+        if let Some(scratch) = &mut self.scratch {
+            scratch.interpolate(vars)?;
+        }
+        for entry in &mut self.stage_in {
+            entry.interpolate(vars)?;
+        }
+        for entry in &mut self.stage_out {
+            entry.interpolate(vars)?;
+        }
         if let Some(artifacts) = &mut self.artifacts {
             artifacts.interpolate(vars)?;
         }
@@ -1329,6 +1786,124 @@ impl SlurmConfig {
         interpolate_vec_strings(&mut self.submit_args, vars)?;
         Ok(())
     }
+}
+
+impl ScratchConfig {
+    fn validate(&self) -> Result<()> {
+        if self.base.trim().is_empty() {
+            bail!("x-slurm.scratch.base must not be empty");
+        }
+        if self.base.contains('\0') {
+            bail!("x-slurm.scratch.base must not contain null bytes");
+        }
+        if self.mount.trim().is_empty() {
+            bail!("x-slurm.scratch.mount must not be empty");
+        }
+        let mount = Path::new(self.mount.trim());
+        if !mount.is_absolute() {
+            bail!(
+                "x-slurm.scratch.mount must be an absolute container path, got '{}'",
+                self.mount
+            );
+        }
+        if self.mount.contains('\0') {
+            bail!("x-slurm.scratch.mount must not contain null bytes");
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        self.base = interpolate_string_preserving_slurm_job_id(&self.base, vars)?;
+        self.mount = interpolate_string(&self.mount, vars)?;
+        Ok(())
+    }
+}
+
+impl StageInConfig {
+    fn validate(&self, index: usize) -> Result<()> {
+        validate_stage_path(&self.from, &format!("x-slurm.stage_in[{index}].from"))?;
+        validate_stage_path(&self.to, &format!("x-slurm.stage_in[{index}].to"))?;
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        self.from = interpolate_string_preserving_slurm_job_id(&self.from, vars)?;
+        self.to = interpolate_string_preserving_slurm_job_id(&self.to, vars)?;
+        Ok(())
+    }
+}
+
+impl StageOutConfig {
+    fn validate(&self, index: usize) -> Result<()> {
+        validate_stage_path(&self.from, &format!("x-slurm.stage_out[{index}].from"))?;
+        validate_stage_path(&self.to, &format!("x-slurm.stage_out[{index}].to"))?;
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        self.from = interpolate_string_preserving_slurm_job_id(&self.from, vars)?;
+        self.to = interpolate_string_preserving_slurm_job_id(&self.to, vars)?;
+        Ok(())
+    }
+}
+
+impl BurstBufferConfig {
+    fn validate(&self) -> Result<()> {
+        for (index, directive) in self.directives.iter().enumerate() {
+            if !directive.starts_with("#BB ") && !directive.starts_with("#DW ") {
+                bail!("x-slurm.burst_buffer.directives[{index}] must start with '#BB ' or '#DW '");
+            }
+            validate_sbatch_safe_string(
+                Some(directive.as_str()),
+                &format!("x-slurm.burst_buffer.directives[{index}]"),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_stage_path(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if value.contains('\0') {
+        bail!("{field} must not contain null bytes");
+    }
+    Ok(())
+}
+
+fn validate_mount_syntax(value: &str, field: &str) -> Result<()> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [host, container] | [host, container, "ro" | "rw"] => {
+            if host.trim().is_empty() {
+                bail!("{field} host path must not be empty");
+            }
+            if container.trim().is_empty() {
+                bail!("{field} container path must not be empty");
+            }
+            let container_path = Path::new(container.trim());
+            if !container_path.is_absolute() {
+                bail!("{field} container path must be absolute");
+            }
+            if value.contains('\0') {
+                bail!("{field} must not contain null bytes");
+            }
+            Ok(())
+        }
+        [_, _, mode] => bail!("{field} uses unsupported mode '{mode}'; use ro or rw"),
+        _ => bail!("{field} must use host_path:container_path[:ro|rw] syntax"),
+    }
+}
+
+fn interpolate_string_preserving_slurm_job_id(
+    raw: &str,
+    vars: &InterpolationVars,
+) -> Result<String> {
+    const JOB_ID_SENTINEL: &str = "__HPC_COMPOSE_SLURM_JOB_ID__";
+    let mut vars_with_job_id = vars.clone();
+    vars_with_job_id.insert("SLURM_JOB_ID".to_string(), JOB_ID_SENTINEL.to_string());
+    Ok(interpolate_string(raw, &vars_with_job_id)?.replace(JOB_ID_SENTINEL, "${SLURM_JOB_ID}"))
 }
 
 impl ArtifactsConfig {
@@ -1380,7 +1955,7 @@ impl NotifyConfig {
 
 impl ServiceSpec {
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
-        self.image = interpolate_string(&self.image, vars)?;
+        interpolate_optional_string(&mut self.image, vars)?;
         if let Some(command) = &mut self.command {
             command.interpolate_if_vec(vars)?;
         }
@@ -1394,6 +1969,7 @@ impl ServiceSpec {
             healthcheck.interpolate(vars)?;
         }
         self.slurm.interpolate(vars)?;
+        self.runtime.interpolate(vars)?;
         self.enroot.interpolate(vars)?;
         Ok(())
     }
@@ -1457,6 +2033,43 @@ impl ServiceSlurmConfig {
             self.ntasks_per_node,
             &format!("service '{service_name}' x-slurm.ntasks_per_node"),
         )?;
+        validate_positive_u32(
+            self.gpus_per_node,
+            &format!("service '{service_name}' x-slurm.gpus_per_node"),
+        )?;
+        validate_positive_u32(
+            self.gpus_per_task,
+            &format!("service '{service_name}' x-slurm.gpus_per_task"),
+        )?;
+        validate_positive_u32(
+            self.cpus_per_gpu,
+            &format!("service '{service_name}' x-slurm.cpus_per_gpu"),
+        )?;
+        validate_sbatch_safe_string(
+            self.mem_per_gpu.as_deref(),
+            &format!("service '{service_name}' x-slurm.mem_per_gpu"),
+        )?;
+        validate_sbatch_safe_string(
+            self.gpu_bind.as_deref(),
+            &format!("service '{service_name}' x-slurm.gpu_bind"),
+        )?;
+        validate_sbatch_safe_string(
+            self.cpu_bind.as_deref(),
+            &format!("service '{service_name}' x-slurm.cpu_bind"),
+        )?;
+        validate_sbatch_safe_string(
+            self.mem_bind.as_deref(),
+            &format!("service '{service_name}' x-slurm.mem_bind"),
+        )?;
+        validate_sbatch_safe_string(
+            self.distribution.as_deref(),
+            &format!("service '{service_name}' x-slurm.distribution"),
+        )?;
+        validate_sbatch_safe_string(
+            self.hint.as_deref(),
+            &format!("service '{service_name}' x-slurm.hint"),
+        )?;
+        validate_extra_srun_arg_conflicts(self, service_name)?;
         if let Some(placement) = &self.placement {
             placement.validate(service_name)?;
         }
@@ -1474,6 +2087,9 @@ impl ServiceSlurmConfig {
             bail!(
                 "service '{service_name}' sets both x-slurm.mpi and x-slurm.extra_srun_args with --mpi; use one MPI source"
             );
+        }
+        if let Some(mpi) = &self.mpi {
+            mpi.validate(service_name)?;
         }
         if let Some(prologue) = &self.prologue {
             prologue.validate(&format!("service '{service_name}' x-slurm.prologue"))?;
@@ -1571,8 +2187,58 @@ impl ServiceSlurmConfig {
             placement.interpolate(vars)?;
         }
         interpolate_optional_string(&mut self.gres, vars)?;
+        interpolate_optional_string(&mut self.mem_per_gpu, vars)?;
+        interpolate_optional_string(&mut self.gpu_bind, vars)?;
+        interpolate_optional_string(&mut self.cpu_bind, vars)?;
+        interpolate_optional_string(&mut self.mem_bind, vars)?;
+        interpolate_optional_string(&mut self.distribution, vars)?;
+        interpolate_optional_string(&mut self.hint, vars)?;
         interpolate_optional_string(&mut self.time_limit, vars)?;
         interpolate_vec_strings(&mut self.extra_srun_args, vars)?;
+        if let Some(mpi) = &mut self.mpi {
+            mpi.interpolate(vars)?;
+        }
+        Ok(())
+    }
+}
+
+impl MpiConfig {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        validate_positive_u32(
+            self.expected_ranks,
+            &format!("service '{service_name}' x-slurm.mpi.expected_ranks"),
+        )?;
+        if let Some(host_mpi) = &self.host_mpi {
+            host_mpi.validate(service_name)?;
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        if let Some(host_mpi) = &mut self.host_mpi {
+            host_mpi.interpolate(vars)?;
+        }
+        Ok(())
+    }
+}
+
+impl HostMpiConfig {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        for (index, mount) in self.bind_paths.iter().enumerate() {
+            validate_mount_syntax(
+                mount,
+                &format!("service '{service_name}' x-slurm.mpi.host_mpi.bind_paths[{index}]"),
+            )?;
+        }
+        self.env.to_pairs().with_context(|| {
+            format!("service '{service_name}' x-slurm.mpi.host_mpi.env is invalid")
+        })?;
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_vec_strings(&mut self.bind_paths, vars)?;
+        self.env.interpolate_values(vars)?;
         Ok(())
     }
 }
@@ -1702,6 +2368,15 @@ impl EffectiveFailurePolicyConfig {
 }
 
 impl ServiceEnrootConfig {
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        if let Some(prepare) = &mut self.prepare {
+            prepare.interpolate(vars)?;
+        }
+        Ok(())
+    }
+}
+
+impl ServiceRuntimeConfig {
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         if let Some(prepare) = &mut self.prepare {
             prepare.interpolate(vars)?;
@@ -1861,6 +2536,116 @@ fn notify_event_mail_type(event: NotifyEvent) -> &'static str {
     }
 }
 
+fn validate_mpi_type_token(value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("x-slurm.mpi.type must not be empty");
+    }
+    if value.starts_with('-') {
+        bail!("x-slurm.mpi.type must not start with '-'");
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
+    {
+        bail!(
+            "x-slurm.mpi.type must be a safe single CLI token using letters, numbers, '_', '-', '.', or '+'"
+        );
+    }
+    Ok(())
+}
+
+const FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS: &[(&str, &str)] = &[
+    ("gpus_per_node", "--gpus-per-node"),
+    ("gpus_per_task", "--gpus-per-task"),
+    ("cpus_per_gpu", "--cpus-per-gpu"),
+    ("mem_per_gpu", "--mem-per-gpu"),
+    ("gpu_bind", "--gpu-bind"),
+    ("cpu_bind", "--cpu-bind"),
+    ("mem_bind", "--mem-bind"),
+    ("distribution", "--distribution"),
+    ("hint", "--hint"),
+];
+
+const FIRST_CLASS_SERVICE_SLURM_FLAGS: &[(&str, &str)] = &[
+    ("gpus_per_node", "--gpus-per-node"),
+    ("gpus_per_task", "--gpus-per-task"),
+    ("cpus_per_gpu", "--cpus-per-gpu"),
+    ("mem_per_gpu", "--mem-per-gpu"),
+    ("gpu_bind", "--gpu-bind"),
+    ("cpu_bind", "--cpu-bind"),
+    ("mem_bind", "--mem-bind"),
+    ("distribution", "--distribution"),
+    ("hint", "--hint"),
+];
+
+fn validate_submit_arg_conflicts(slurm: &SlurmConfig) -> Result<()> {
+    for (field, flag) in FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS {
+        if top_level_slurm_field_is_set(slurm, field)
+            && slurm
+                .submit_args
+                .iter()
+                .any(|arg| raw_arg_has_flag(arg, flag))
+        {
+            bail!("x-slurm.{field} cannot be combined with raw {flag} in x-slurm.submit_args");
+        }
+    }
+    Ok(())
+}
+
+fn validate_extra_srun_arg_conflicts(slurm: &ServiceSlurmConfig, service_name: &str) -> Result<()> {
+    for (field, flag) in FIRST_CLASS_SERVICE_SLURM_FLAGS {
+        if service_slurm_field_is_set(slurm, field)
+            && slurm
+                .extra_srun_args
+                .iter()
+                .any(|arg| raw_arg_has_flag(arg, flag))
+        {
+            bail!(
+                "service '{service_name}' x-slurm.{field} cannot be combined with raw {flag} in x-slurm.extra_srun_args"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn top_level_slurm_field_is_set(slurm: &SlurmConfig, field: &str) -> bool {
+    match field {
+        "gpus_per_node" => slurm.gpus_per_node.is_some(),
+        "gpus_per_task" => slurm.gpus_per_task.is_some(),
+        "cpus_per_gpu" => slurm.cpus_per_gpu.is_some(),
+        "mem_per_gpu" => slurm.mem_per_gpu.is_some(),
+        "gpu_bind" => slurm.gpu_bind.is_some(),
+        "cpu_bind" => slurm.cpu_bind.is_some(),
+        "mem_bind" => slurm.mem_bind.is_some(),
+        "distribution" => slurm.distribution.is_some(),
+        "hint" => slurm.hint.is_some(),
+        _ => false,
+    }
+}
+
+fn service_slurm_field_is_set(slurm: &ServiceSlurmConfig, field: &str) -> bool {
+    match field {
+        "gpus_per_node" => slurm.gpus_per_node.is_some(),
+        "gpus_per_task" => slurm.gpus_per_task.is_some(),
+        "cpus_per_gpu" => slurm.cpus_per_gpu.is_some(),
+        "mem_per_gpu" => slurm.mem_per_gpu.is_some(),
+        "gpu_bind" => slurm.gpu_bind.is_some(),
+        "cpu_bind" => slurm.cpu_bind.is_some(),
+        "mem_bind" => slurm.mem_bind.is_some(),
+        "distribution" => slurm.distribution.is_some(),
+        "hint" => slurm.hint.is_some(),
+        _ => false,
+    }
+}
+
+fn raw_arg_has_flag(arg: &str, flag: &str) -> bool {
+    let trimmed = arg.trim_start();
+    trimmed == flag
+        || trimmed
+            .strip_prefix(flag)
+            .is_some_and(|rest| rest.starts_with('=') || rest.starts_with(char::is_whitespace))
+}
+
 fn submit_args_contain_mail_settings(args: &[String]) -> bool {
     args.iter().any(|arg| {
         let trimmed = arg.trim();
@@ -1945,7 +2730,7 @@ services:
         );
         let err = ComposeSpec::load(&path).expect_err("should fail");
         assert!(err.to_string().contains("build is not supported in v1"));
-        assert!(err.to_string().contains("x-enroot.prepare"));
+        assert!(err.to_string().contains("x-runtime.prepare"));
     }
 
     #[test]
@@ -2080,15 +2865,15 @@ services:
         let deps = DependsOnSpec::Map(BTreeMap::from([(
             "redis".into(),
             DependsOnConditionSpec {
-                condition: Some("service_completed_successfully".into()),
+                condition: Some("service_ready".into()),
             },
         )]));
         let err = deps.entries().expect_err("should fail");
-        assert!(err.to_string().contains("service_healthy"));
+        assert!(err.to_string().contains("service_completed_successfully"));
     }
 
     #[test]
-    fn depends_on_map_accepts_service_started_and_healthy() {
+    fn depends_on_map_accepts_started_healthy_and_completed_successfully() {
         let deps = DependsOnSpec::Map(BTreeMap::from([
             (
                 "redis".into(),
@@ -2102,6 +2887,12 @@ services:
                     condition: Some("service_healthy".into()),
                 },
             ),
+            (
+                "preprocess".into(),
+                DependsOnConditionSpec {
+                    condition: Some("service_completed_successfully".into()),
+                },
+            ),
         ]));
         assert_eq!(
             deps.entries().expect("entries"),
@@ -2109,6 +2900,10 @@ services:
                 ServiceDependency {
                     name: "db".into(),
                     condition: DependencyCondition::ServiceHealthy,
+                },
+                ServiceDependency {
+                    name: "preprocess".into(),
+                    condition: DependencyCondition::ServiceCompletedSuccessfully,
                 },
                 ServiceDependency {
                     name: "redis".into(),
@@ -2950,7 +3745,7 @@ services:
 
         let spec = ComposeSpec::load(&path).expect("load");
         let app = spec.services.get("app").expect("app");
-        assert_eq!(app.image, "python:3.11-slim");
+        assert_eq!(app.image.as_deref(), Some("python:3.11-slim"));
         assert_eq!(app.working_dir.as_deref(), Some("/workspace"));
         assert_eq!(app.volumes, vec!["./app:/workspace".to_string()]);
         assert_eq!(
@@ -3018,7 +3813,10 @@ services:
             .environment
             .to_pairs()
             .expect("pairs");
-        assert_eq!(spec.services.get("app").expect("app").image, "redis:7");
+        assert_eq!(
+            spec.services.get("app").expect("app").image.as_deref(),
+            Some("redis:7")
+        );
         assert_eq!(
             env_pairs,
             vec![
@@ -3251,12 +4049,7 @@ services:
 
     #[test]
     fn service_mpi_config_deserializes_supported_types() {
-        for (raw, expected) in [
-            ("pmix", MpiType::Pmix),
-            ("pmi2", MpiType::Pmi2),
-            ("pmi1", MpiType::Pmi1),
-            ("openmpi", MpiType::Openmpi),
-        ] {
+        for raw in ["pmix", "pmi2", "pmi1", "openmpi", "pmix_v4"] {
             let tmpdir = tempfile::tempdir().expect("tmpdir");
             let path = write_spec(
                 tmpdir.path(),
@@ -3280,7 +4073,6 @@ services:
                 .mpi
                 .as_ref()
                 .expect("mpi");
-            assert_eq!(mpi.mpi_type, expected);
             assert_eq!(mpi.mpi_type.as_srun_value(), raw);
         }
     }
@@ -3436,7 +4228,7 @@ services:
     image: redis:7
     x-slurm:
       mpi:
-        type: mvapich
+        type: "pmix v4"
 "#,
         );
         let err = ComposeSpec::load(&invalid).expect_err("invalid mpi type");
@@ -3497,6 +4289,25 @@ services:
         };
         let err = config.validate().expect_err("line break in submit arg");
         assert!(err.to_string().contains("x-slurm.submit_args[1]"));
+    }
+
+    #[test]
+    fn slurm_binding_fields_reject_raw_flag_conflicts() {
+        let config = SlurmConfig {
+            gpus_per_node: Some(4),
+            submit_args: vec!["--gpus-per-node=8".into()],
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("top-level conflict");
+        assert!(err.to_string().contains("gpus_per_node"));
+
+        let service = ServiceSlurmConfig {
+            gpu_bind: Some("closest".into()),
+            extra_srun_args: vec!["--gpu-bind=none".into()],
+            ..ServiceSlurmConfig::default()
+        };
+        let err = service.validate("trainer").expect_err("service conflict");
+        assert!(err.to_string().contains("gpu_bind"));
     }
 
     proptest! {

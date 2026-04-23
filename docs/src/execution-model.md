@@ -1,15 +1,15 @@
 # Execution model
 
-This page explains the few runtime rules that matter most when a Compose mental model meets Slurm, Enroot, and Pyxis.
+This page explains the few runtime rules that matter most when a Compose mental model meets Slurm and HPC runtime backends.
 
 ## What runs where
 
 | Stage | Where it runs | What happens |
 | --- | --- | --- |
 | `validate`, `inspect`, `preflight` | login node or local shell | Parse the spec, resolve paths, and check prerequisites |
-| `prepare` | login node or local shell with Enroot access | Import base images and build prepared runtime artifacts |
+| `prepare` | login node or local shell with the selected runtime backend | Import base images and build prepared runtime artifacts |
 | `submit` | login node or local shell with Slurm access | Run preflight, prepare missing artifacts, render the batch script, and call `sbatch` |
-| Batch script and services | compute-node allocation | Launch the planned services through `srun` and Pyxis |
+| Batch script and services | compute-node allocation | Launch the planned services through `srun` and the selected runtime backend |
 | `status`, `ps`, `watch`, `stats`, `logs`, `artifacts` | login node or local shell | Read tracked metadata and job outputs after submission |
 
 The main consequence is simple: image preparation and validation happen before the job starts, but the containers themselves run later inside the Slurm allocation.
@@ -40,7 +40,7 @@ Use `logs` to inspect the corresponding restart messages from the batch script w
 ## Which paths must be shared
 
 - `x-slurm.cache_dir` must be visible from both the login node and the compute nodes.
-- Relative host paths in `volumes`, local image paths, and `x-enroot.prepare.mounts` resolve against the compose file directory.
+- Relative host paths in `volumes`, local image paths, and `x-runtime.prepare.mounts` resolve against the compose file directory.
 - Each submitted job writes tracked state under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}` on the host.
 - That per-job directory is mounted into every container at `/hpc-compose/job`.
 - Multi-node jobs also populate `/hpc-compose/job/allocation/{primary_node,nodes.txt}` and export allocation-wide `HPC_COMPOSE_NODE...` variables plus service-scoped `HPC_COMPOSE_SERVICE_NODE...` variables.
@@ -72,22 +72,23 @@ These paths are created at batch startup and are available inside the batch scri
 - Partitioned services should use service-scoped metadata such as `HPC_COMPOSE_SERVICE_PRIMARY_NODE`, `HPC_COMPOSE_SERVICE_NODE_COUNT`, `HPC_COMPOSE_SERVICE_NODELIST`, and `HPC_COMPOSE_SERVICE_NODELIST_FILE`.
 - `ports`, custom Docker networks, and service-name DNS are not part of the model.
 - Use `depends_on` plus `readiness` when a dependent service must wait for real availability rather than process start.
+- Use `depends_on` with `condition: service_completed_successfully` when a dependent service should wait for a one-shot stage to exit successfully.
 
 Use `127.0.0.1` only when both sides are intentionally on the same node. For multi-node distributed or partitioned runs, derive rendezvous addresses from allocation or service metadata files and environment variables instead of relying on localhost.
 
 If a service binds its TCP port before it is actually ready, prefer HTTP or log-based readiness over plain TCP readiness.
 
-## `volumes` vs `x-enroot.prepare`
+## `volumes` vs `x-runtime.prepare`
 
 | Mechanism | Use it for | When it is applied | Reuse behavior |
 | --- | --- | --- | --- |
 | `volumes` | fast-changing source code, model directories, input data, checkpoint paths | at runtime inside the allocation | reads live host content every normal run |
-| `x-enroot.prepare.commands` | slower-changing dependencies, tools, and image customization | before submission on the login node | cached until the prepared artifact changes |
+| `x-runtime.prepare.commands` | slower-changing dependencies, tools, and image customization | before submission on the login node | cached until the prepared artifact changes |
 
 Recommended default:
 
 - keep active source trees in `volumes`
-- keep slower-changing dependency installation in `x-enroot.prepare.commands`
+- keep slower-changing dependency installation in `x-runtime.prepare.commands`
 - use `prepare.mounts` only when the prepare step truly needs host files
 
 <div class="callout warning">

@@ -28,8 +28,9 @@ Compatibility starts with the [Support Matrix](docs/src/support-matrix.md): Linu
 ## Used For
 
 - model serving plus helper services inside one allocation
-- data and ETL pipelines that need startup ordering and shared job-local state
+- data and ETL pipelines that need startup ordering, successful-completion DAG stages, scratch staging, and shared job-local state
 - training runs with checkpoint export, artifact collection, and resume-aware workflows
+- clusters that standardize on Pyxis/Enroot, Apptainer, Singularity, or host module runtimes
 
 ## Start Here
 
@@ -137,6 +138,10 @@ Treat that path as a moving target rather than a pinned release install.
 Unix installs also ship section-1 manpages, and the binary can generate Bash, Zsh, and Fish completions with `hpc-compose completions <shell>`.
 
 When you scaffold or adapt a real cluster spec, choose `x-slurm.cache_dir` explicitly. It must be visible from both the submission host and the compute nodes. The shipped repository examples default to `x-slurm.cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}` so they validate out of the box, and you can override that shared path through `.env`, shell environment variables, or `hpc-compose setup`.
+
+On a new cluster, run `hpc-compose doctor --cluster-report` from the login node to generate `.hpc-compose/cluster.toml`. `validate` and `preflight` use that profile to warn about incompatible partitions, QOS, GPU/MPI requests, runtime backend availability, and shared cache or scratch paths before submission.
+
+For MPI services, `hpc-compose doctor --mpi-smoke -f compose.yaml --service <name>` renders a small rank-count probe against the service's actual runtime path and reports requested/advertised MPI types plus host MPI binds. Add `--submit` only when you want to consume a Slurm allocation and run the smoke job.
 
 ## Roadmap
 

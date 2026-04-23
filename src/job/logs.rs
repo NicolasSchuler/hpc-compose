@@ -432,4 +432,92 @@ mod tests {
         .expect("watch local");
         assert!(matches!(outcome, WatchOutcome::Completed(_)));
     }
+
+    #[test]
+    fn tail_lines_handles_missing_zero_and_short_logs() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let missing = tmpdir.path().join("missing.log");
+        assert!(tail_lines(&missing, 10).expect("missing log").is_empty());
+
+        let log = tmpdir.path().join("app.log");
+        fs::write(&log, "one\ntwo\n").expect("log");
+        assert!(tail_lines(&log, 0).expect("zero lines").is_empty());
+        assert_eq!(
+            tail_lines(&log, 10).expect("short log"),
+            vec!["one".to_string(), "two".to_string()]
+        );
+        assert_eq!(
+            tail_lines(&log, 1).expect("last line"),
+            vec!["two".to_string()]
+        );
+    }
+
+    #[test]
+    fn read_new_lines_buffers_partials_crlf_and_truncation() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let log = tmpdir.path().join("api.log");
+        fs::write(&log, "one\r\ntwo").expect("initial log");
+        let mut cursor = LogCursor {
+            service_name: "api".into(),
+            path: log.clone(),
+            offset: 0,
+            pending: String::new(),
+        };
+
+        assert_eq!(
+            read_new_lines(&mut cursor).expect("first read"),
+            vec!["one".to_string()]
+        );
+        assert_eq!(cursor.pending, "two");
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .expect("open append")
+            .write_all(b"\r\nthree\n")
+            .expect("append");
+        assert_eq!(
+            read_new_lines(&mut cursor).expect("second read"),
+            vec!["two".to_string(), "three".to_string()]
+        );
+        assert!(cursor.pending.is_empty());
+
+        fs::write(&log, "reset\n").expect("truncate log");
+        assert_eq!(
+            read_new_lines(&mut cursor).expect("truncated read"),
+            vec!["reset".to_string()]
+        );
+
+        let mut missing = LogCursor {
+            service_name: "api".into(),
+            path: tmpdir.path().join("gone.log"),
+            offset: 42,
+            pending: "partial".into(),
+        };
+        assert!(
+            read_new_lines(&mut missing)
+                .expect("missing read")
+                .is_empty()
+        );
+        assert_eq!(missing.pending, "partial");
+    }
+
+    #[test]
+    fn emit_initial_tail_interleaves_multiple_services_with_unequal_lengths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let api = tmpdir.path().join("api.log");
+        let worker = tmpdir.path().join("worker.log");
+        fs::write(&api, "api-one\napi-two\n").expect("api log");
+        fs::write(&worker, "worker-only\n").expect("worker log");
+        let selected = vec![("api".to_string(), api), ("worker".to_string(), worker)];
+
+        let mut rendered = Vec::new();
+        emit_initial_tail(&selected, 2, &mut rendered).expect("emit");
+        let rendered = String::from_utf8(rendered).expect("utf8");
+
+        assert!(rendered.contains("api-one"));
+        assert!(rendered.contains("api-two"));
+        assert!(rendered.contains("worker-only"));
+        assert!(rendered.find("api-one") < rendered.find("api-two"));
+    }
 }

@@ -97,3 +97,28 @@ fn default_submission_backend() -> SubmissionBackend {
 fn default_submission_kind() -> SubmissionKind {
     SubmissionKind::Main
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submission_record_defaults_backend_and_kind_for_legacy_metadata() {
+        let raw = r#"{
+            "schema_version": 1,
+            "job_id": "12345",
+            "submitted_at": 42,
+            "compose_file": "/tmp/compose.yaml",
+            "submit_dir": "/tmp",
+            "script_path": "/tmp/job.sbatch",
+            "cache_dir": "/tmp/cache",
+            "batch_log": "/tmp/slurm-12345.out",
+            "service_logs": {}
+        }"#;
+
+        let record: SubmissionRecord = serde_json::from_str(raw).expect("legacy record");
+        assert_eq!(record.backend, SubmissionBackend::Slurm);
+        assert_eq!(record.kind, SubmissionKind::Main);
+        assert!(record.cached_artifacts.is_empty());
+    }
+}

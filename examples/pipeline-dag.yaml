@@ -1,0 +1,41 @@
+name: pipeline-dag
+
+x-slurm:
+  job_name: pipeline-dag
+  time: "00:20:00"
+  mem: 4G
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  preprocess:
+    image: alpine:3.20
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        mkdir -p /hpc-compose/job/pipeline
+        printf 'records=3\n' > /hpc-compose/job/pipeline/prepared.txt
+
+  train:
+    image: alpine:3.20
+    depends_on:
+      preprocess:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        cat /hpc-compose/job/pipeline/prepared.txt
+        printf 'accuracy=0.91\n' > /hpc-compose/job/pipeline/model.txt
+
+  postprocess:
+    image: alpine:3.20
+    depends_on:
+      train:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        cat /hpc-compose/job/pipeline/model.txt
+        printf 'done\n' > /hpc-compose/job/pipeline/report.txt

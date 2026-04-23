@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
+use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 use hpc_compose::context::ResolvedContext;
 #[cfg(test)]
 use hpc_compose::job::build_submission_record_with_backend;
@@ -22,8 +23,12 @@ use hpc_compose::job::{
 };
 use hpc_compose::planner::{ExecutionSpec, ImageSource, ServicePlacementMode};
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
-use hpc_compose::prepare::{PrepareOptions, RuntimePlan, base_image_path, prepare_runtime_plan};
-use hpc_compose::render::{log_file_name_for_service, render_local_script, render_script};
+use hpc_compose::prepare::{
+    PrepareOptions, RuntimePlan, base_image_path_for_backend, prepare_runtime_plan,
+};
+use hpc_compose::render::{
+    RenderOptions, log_file_name_for_service, render_local_script, render_script_with_options,
+};
 use hpc_compose::spec::{ServiceFailureMode, parse_slurm_time_limit};
 
 use crate::output;
@@ -72,7 +77,11 @@ fn tracked_cached_artifacts(plan: &RuntimePlan) -> Vec<PathBuf> {
     for service in &plan.ordered_services {
         let mut candidates = vec![service.runtime_image.clone()];
         if matches!(service.source, ImageSource::Remote(_)) {
-            candidates.push(base_image_path(&plan.cache_dir, service));
+            candidates.push(base_image_path_for_backend(
+                &plan.cache_dir,
+                service,
+                plan.runtime.backend,
+            ));
         }
         for candidate in candidates {
             if candidate.starts_with(&plan.cache_dir) && seen.insert(candidate.clone()) {
@@ -225,6 +234,20 @@ fn resolve_tracked_record(
     }
 }
 
+fn load_discovered_cluster_profile(
+    context: &ResolvedContext,
+) -> Result<Option<hpc_compose::cluster::ClusterProfile>> {
+    let start = context
+        .compose_file
+        .value
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let Some(path) = discover_cluster_profile_path(start) else {
+        return Ok(None);
+    };
+    Ok(Some(load_cluster_profile(&path)?))
+}
+
 fn purge_cached_artifacts(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
     for path in paths {
@@ -278,6 +301,12 @@ fn ensure_local_host_supported() -> Result<()> {
 }
 
 fn ensure_local_plan_supported(plan: &RuntimePlan) -> Result<()> {
+    if plan.runtime.backend != hpc_compose::spec::RuntimeBackend::Pyxis {
+        bail!(
+            "--local currently supports only runtime.backend=pyxis; got runtime.backend={}",
+            plan.runtime.backend.as_str()
+        );
+    }
     for service in &plan.ordered_services {
         if service.placement.mode != ServicePlacementMode::PrimaryNode {
             bail!(
@@ -392,6 +421,7 @@ fn write_local_runtime_state_stub(
                 "launch_index": index,
                 "launcher_pid": serde_json::Value::Null,
                 "healthy": false,
+                "completed_successfully": false,
                 "readiness_configured": service.readiness.is_some(),
                 "failure_policy_mode": local_failure_policy_mode_label(service.failure_policy.mode),
                 "restart_count": 0,
@@ -598,16 +628,20 @@ pub(crate) fn submit(
     }
 
     if !no_preflight {
+        let cluster_profile = load_discovered_cluster_profile(&context)?;
         let report = progress.run_result("Running preflight checks", || {
             Ok::<_, anyhow::Error>(run_preflight(
                 &runtime_plan,
                 &PreflightOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
                     sbatch_bin: context.binaries.sbatch.value.clone(),
                     srun_bin: context.binaries.srun.value.clone(),
-                    scontrol_bin: "scontrol".to_string(),
+                    scontrol_bin: context.binaries.scontrol.value.clone(),
                     require_submit_tools: !local,
                     skip_prepare,
+                    cluster_profile,
                 },
             ))
         })?;
@@ -627,6 +661,8 @@ pub(crate) fn submit(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -642,7 +678,13 @@ pub(crate) fn submit(
         if let Some(job_id) = local_job_id.as_deref() {
             render_local_script(&runtime_plan, job_id, &context.binaries.enroot.value)
         } else {
-            render_script(&runtime_plan)
+            render_script_with_options(
+                &runtime_plan,
+                &RenderOptions {
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                },
+            )
         }
     })?;
     let script_path = script_out.unwrap_or_else(|| {
@@ -949,16 +991,20 @@ pub(crate) fn run_service(
     runtime_plan.ordered_services = vec![service];
 
     if !no_preflight {
+        let cluster_profile = load_discovered_cluster_profile(&context)?;
         let report = progress.run_result("Running preflight checks", || {
             Ok::<_, anyhow::Error>(run_preflight(
                 &runtime_plan,
                 &PreflightOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
                     sbatch_bin: context.binaries.sbatch.value.clone(),
                     srun_bin: context.binaries.srun.value.clone(),
-                    scontrol_bin: "scontrol".to_string(),
+                    scontrol_bin: context.binaries.scontrol.value.clone(),
                     require_submit_tools: true,
                     skip_prepare,
+                    cluster_profile,
                 },
             ))
         })?;
@@ -977,6 +1023,8 @@ pub(crate) fn run_service(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -988,7 +1036,15 @@ pub(crate) fn run_service(
         }
     }
 
-    let script = progress.run_result("Rendering run script", || render_script(&runtime_plan))?;
+    let script = progress.run_result("Rendering run script", || {
+        render_script_with_options(
+            &runtime_plan,
+            &RenderOptions {
+                apptainer_bin: context.binaries.apptainer.value.clone(),
+                singularity_bin: context.binaries.singularity.value.clone(),
+            },
+        )
+    })?;
     let script_path = script_out.unwrap_or_else(|| default_run_script_path(&file, &service_name));
     fs::write(&script_path, script).with_context(|| {
         format!(
@@ -1484,8 +1540,12 @@ mod tests {
             },
             binaries: ResolvedBinaries {
                 enroot: resolved_string("/definitely/missing-enroot"),
+                apptainer: resolved_string("/definitely/missing-apptainer"),
+                singularity: resolved_string("/definitely/missing-singularity"),
                 sbatch: resolved_string("/definitely/missing-sbatch"),
                 srun: resolved_string("/definitely/missing-srun"),
+                scontrol: resolved_string("/definitely/missing-scontrol"),
+                sinfo: resolved_string("/definitely/missing-sinfo"),
                 squeue: resolved_string("/definitely/missing-squeue"),
                 sacct: resolved_string("/definitely/missing-sacct"),
                 sstat: resolved_string("/definitely/missing-sstat"),
@@ -1742,6 +1802,89 @@ mod tests {
 
         let kill_err = kill_pid(u32::MAX).expect_err("unknown pid");
         assert!(kill_err.to_string().contains("failed to signal pid"));
+    }
+
+    #[test]
+    fn tracking_resolution_and_cache_purge_helpers_cover_edge_cases() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = write_local_compose(tmpdir.path());
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let context = context_for(&compose, tmpdir.path());
+        let script_path = tmpdir.path().join("job.local.sh");
+        let mut older = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-old",
+            SubmissionBackend::Local,
+        )
+        .expect("older record");
+        older.submitted_at = 100;
+        let mut newer = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-new",
+            SubmissionBackend::Local,
+        )
+        .expect("newer record");
+        newer.submitted_at = 200;
+        write_submission_record(&newer).expect("write newer");
+        write_submission_record(&older).expect("write older");
+
+        assert_eq!(
+            resolve_tracked_record(&context, None)
+                .expect("resolve latest")
+                .expect("latest")
+                .job_id,
+            "local-new"
+        );
+        assert_eq!(
+            resolve_tracked_record(&context, Some("local-old"))
+                .expect("resolve explicit")
+                .expect("explicit")
+                .job_id,
+            "local-old"
+        );
+        assert!(
+            resolve_tracked_record(&context, Some("missing"))
+                .expect("resolve missing")
+                .is_none()
+        );
+
+        let file_artifact = tmpdir.path().join("cache/file.sqsh");
+        let dir_artifact = tmpdir.path().join("cache/dir-artifact");
+        fs::create_dir_all(&dir_artifact).expect("dir artifact");
+        fs::create_dir_all(file_artifact.parent().expect("file parent")).expect("file parent");
+        fs::write(&file_artifact, "artifact").expect("file artifact");
+        fs::write(dir_artifact.join("payload"), "artifact").expect("dir payload");
+        let missing = tmpdir.path().join("cache/missing.sqsh");
+        let removed =
+            purge_cached_artifacts(&[file_artifact.clone(), dir_artifact.clone(), missing.clone()])
+                .expect("purge");
+        assert_eq!(removed, vec![file_artifact.clone(), dir_artifact.clone()]);
+        assert!(!file_artifact.exists());
+        assert!(!dir_artifact.exists());
+
+        assert!(
+            cached_artifacts_for_teardown(None)
+                .expect_err("missing record")
+                .to_string()
+                .contains("--purge-cache requires tracked submission metadata")
+        );
+        assert!(
+            cached_artifacts_for_teardown(Some(&older))
+                .expect_err("empty cached artifacts")
+                .to_string()
+                .contains("does not contain cached artifact snapshots")
+        );
+        newer.cached_artifacts = vec![missing.clone()];
+        assert_eq!(
+            cached_artifacts_for_teardown(Some(&newer)).expect("cached artifacts"),
+            vec![missing]
+        );
     }
 
     #[test]

@@ -8,11 +8,53 @@ hpc\-compose doctor [OPTIONS]
 .fi
 .SH DESCRIPTION
 .PP
-Run environment diagnostics without requiring a compose file. Checks Slurm, Enroot, Pyxis, GPU, and cache directory availability.
+Run environment diagnostics without requiring a compose file. Checks Slurm, runtime backend tools, GPU, and cache directory availability. Use \-\-cluster\-report to write a best\-effort .hpc\-compose/cluster.toml profile.
 .SH OPTIONS
+.TP
+\fB-f\fR, \fB--file\fR \fIFILE\fR
+Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.
+.TP
+\fB--cluster\-report\fR
+Generate a best\-effort cluster capability profile.
+.TP
+\fB--cluster\-report\-out\fR \fIPATH\fR
+Write the cluster profile to this path; use '\-' to print TOML.
+.TP
+\fB--mpi\-smoke\fR
+Render or run an MPI smoke probe for a compose service with x\-slurm.mpi.
+.TP
+\fB--service\fR \fISERVICE\fR
+MPI service to smoke\-test; inferred when exactly one MPI service exists.
+.TP
+\fB--submit\fR
+Submit the MPI smoke probe to Slurm; without this, only render/explain it.
+.TP
+\fB--script\-out\fR \fIOUTPUT\fR
+Write the rendered MPI smoke batch script to this path.
+.TP
+\fB--timeout\-seconds\fR \fISECONDS\fR
+Timeout for a submitted MPI smoke job. Default: 300.
+.TP
+\fB--sbatch\-bin\fR \fIPATH\fR
+Path to the sbatch executable. Default: sbatch.
+.TP
+\fB--srun\-bin\fR \fIPATH\fR
+Path to the srun executable. Default: srun.
+.TP
+\fB--scontrol\-bin\fR \fIPATH\fR
+Path to the scontrol executable. Default: scontrol.
+.TP
+\fB--enroot\-bin\fR \fIPATH\fR
+Path to the enroot executable. Default: enroot.
+.TP
+\fB--apptainer\-bin\fR \fIPATH\fR
+Path to the apptainer executable. Default: apptainer.
+.TP
+\fB--singularity\-bin\fR \fIPATH\fR
+Path to the singularity executable. Default: singularity.
 .TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.

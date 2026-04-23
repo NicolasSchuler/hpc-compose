@@ -14,8 +14,12 @@ const SETTINGS_RELATIVE_PATH: &str = ".hpc-compose/settings.toml";
 
 const DEFAULT_COMPOSE_FILE: &str = "compose.yaml";
 const DEFAULT_ENROOT_BIN: &str = "enroot";
+const DEFAULT_APPTAINER_BIN: &str = "apptainer";
+const DEFAULT_SINGULARITY_BIN: &str = "singularity";
 const DEFAULT_SBATCH_BIN: &str = "sbatch";
 const DEFAULT_SRUN_BIN: &str = "srun";
+const DEFAULT_SCONTROL_BIN: &str = "scontrol";
+const DEFAULT_SINFO_BIN: &str = "sinfo";
 const DEFAULT_SQUEUE_BIN: &str = "squeue";
 const DEFAULT_SACCT_BIN: &str = "sacct";
 const DEFAULT_SSTAT_BIN: &str = "sstat";
@@ -56,9 +60,17 @@ pub struct BinaryOverrides {
     #[serde(default)]
     pub enroot: Option<String>,
     #[serde(default)]
+    pub apptainer: Option<String>,
+    #[serde(default)]
+    pub singularity: Option<String>,
+    #[serde(default)]
     pub sbatch: Option<String>,
     #[serde(default)]
     pub srun: Option<String>,
+    #[serde(default)]
+    pub scontrol: Option<String>,
+    #[serde(default)]
+    pub sinfo: Option<String>,
     #[serde(default)]
     pub squeue: Option<String>,
     #[serde(default)]
@@ -134,8 +146,12 @@ fn default_settings_schema_version() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResolvedBinaries {
     pub enroot: ResolvedValue<String>,
+    pub apptainer: ResolvedValue<String>,
+    pub singularity: ResolvedValue<String>,
     pub sbatch: ResolvedValue<String>,
     pub srun: ResolvedValue<String>,
+    pub scontrol: ResolvedValue<String>,
+    pub sinfo: ResolvedValue<String>,
     pub squeue: ResolvedValue<String>,
     pub sacct: ResolvedValue<String>,
     pub sstat: ResolvedValue<String>,
@@ -481,6 +497,18 @@ fn resolve_binaries(
             defaults.and_then(|d| d.enroot.clone()),
             DEFAULT_ENROOT_BIN,
         ),
+        apptainer: resolve_binary(
+            cli.apptainer.clone(),
+            profile.and_then(|p| p.apptainer.clone()),
+            defaults.and_then(|d| d.apptainer.clone()),
+            DEFAULT_APPTAINER_BIN,
+        ),
+        singularity: resolve_binary(
+            cli.singularity.clone(),
+            profile.and_then(|p| p.singularity.clone()),
+            defaults.and_then(|d| d.singularity.clone()),
+            DEFAULT_SINGULARITY_BIN,
+        ),
         sbatch: resolve_binary(
             cli.sbatch.clone(),
             profile.and_then(|p| p.sbatch.clone()),
@@ -492,6 +520,18 @@ fn resolve_binaries(
             profile.and_then(|p| p.srun.clone()),
             defaults.and_then(|d| d.srun.clone()),
             DEFAULT_SRUN_BIN,
+        ),
+        scontrol: resolve_binary(
+            cli.scontrol.clone(),
+            profile.and_then(|p| p.scontrol.clone()),
+            defaults.and_then(|d| d.scontrol.clone()),
+            DEFAULT_SCONTROL_BIN,
+        ),
+        sinfo: resolve_binary(
+            cli.sinfo.clone(),
+            profile.and_then(|p| p.sinfo.clone()),
+            defaults.and_then(|d| d.sinfo.clone()),
+            DEFAULT_SINFO_BIN,
         ),
         squeue: resolve_binary(
             cli.squeue.clone(),

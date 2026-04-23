@@ -3,11 +3,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::OutputFormat;
+use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 use hpc_compose::context::{ResolvedContext, ResolvedValue, ValueSource};
 use hpc_compose::job::{jobs_dir_for, metadata_root_for};
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{PrepareOptions, build_runtime_plan, prepare_runtime_plan};
-use hpc_compose::render::render_script;
+use hpc_compose::render::{RenderOptions, render_script_with_options};
 use hpc_compose::spec::missing_defaulted_variables;
 use hpc_compose::term;
 use serde::Serialize;
@@ -24,6 +25,16 @@ pub(crate) fn validate(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
+    let runtime_plan = build_runtime_plan(&plan);
+    let cluster_warnings = load_discovered_cluster_profile(&context)?
+        .map(|profile| {
+            profile
+                .validate_runtime_plan(&runtime_plan)
+                .into_iter()
+                .map(|warning| warning.message)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if strict_env {
         let missing =
             missing_defaulted_variables(&context.compose_file.value, &context.interpolation_vars)?;
@@ -35,12 +46,20 @@ pub(crate) fn validate(
         }
     }
     match output_common::resolve_output_format(format, false) {
-        OutputFormat::Text => println!("{}", term::styled_success("spec is valid")),
+        OutputFormat::Text => {
+            println!("{}", term::styled_success("spec is valid"));
+            for warning in &cluster_warnings {
+                eprintln!("{} {warning}", term::styled_warning("WARN"));
+            }
+        }
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output_spec::build_validate_output(&plan))
-                    .context("failed to serialize validate output")?
+                serde_json::to_string_pretty(&output_spec::build_validate_output(
+                    &plan,
+                    cluster_warnings
+                ))
+                .context("failed to serialize validate output")?
             );
         }
     }
@@ -57,7 +76,13 @@ pub(crate) fn render(
         &context.interpolation_vars,
     )?;
     let runtime_plan = build_runtime_plan(&plan);
-    let script = render_script(&runtime_plan)?;
+    let script = render_script_with_options(
+        &runtime_plan,
+        &RenderOptions {
+            apptainer_bin: context.binaries.apptainer.value.clone(),
+            singularity_bin: context.binaries.singularity.value.clone(),
+        },
+    )?;
     if let Some(path) = output_path.as_ref() {
         fs::write(path, &script)
             .with_context(|| format!("failed to write rendered script to {}", path.display()))?;
@@ -105,6 +130,8 @@ pub(crate) fn prepare(
             &runtime_plan,
             &PrepareOptions {
                 enroot_bin: context.binaries.enroot.value.clone(),
+                apptainer_bin: context.binaries.apptainer.value.clone(),
+                singularity_bin: context.binaries.singularity.value.clone(),
                 keep_failed_prep,
                 force_rebuild: force,
             },
@@ -139,16 +166,20 @@ pub(crate) fn preflight(
         &context.compose_file.value,
         &context.interpolation_vars,
     )?;
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
     let report = progress.run_result("Running preflight checks", || {
         Ok::<_, anyhow::Error>(run_preflight(
             &runtime_plan,
             &PreflightOptions {
                 enroot_bin: context.binaries.enroot.value.clone(),
+                apptainer_bin: context.binaries.apptainer.value.clone(),
+                singularity_bin: context.binaries.singularity.value.clone(),
                 sbatch_bin: context.binaries.sbatch.value.clone(),
                 srun_bin: context.binaries.srun.value.clone(),
-                scontrol_bin: "scontrol".to_string(),
+                scontrol_bin: context.binaries.scontrol.value.clone(),
                 require_submit_tools: true,
                 skip_prepare: false,
+                cluster_profile,
             },
         ))
     })?;
@@ -550,6 +581,20 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
     Ok(())
 }
 
+fn load_discovered_cluster_profile(
+    context: &ResolvedContext,
+) -> Result<Option<hpc_compose::cluster::ClusterProfile>> {
+    let start = context
+        .compose_file
+        .value
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let Some(path) = discover_cluster_profile_path(start) else {
+        return Ok(None);
+    };
+    Ok(Some(load_cluster_profile(&path)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,8 +734,24 @@ services:
         };
         ResolvedBinaries {
             enroot: resolved(&enroot),
+            apptainer: ResolvedValue {
+                value: "apptainer".to_string(),
+                source: ValueSource::Builtin,
+            },
+            singularity: ResolvedValue {
+                value: "singularity".to_string(),
+                source: ValueSource::Builtin,
+            },
             sbatch: resolved(&sbatch),
             srun: resolved(&srun),
+            scontrol: ResolvedValue {
+                value: "scontrol".to_string(),
+                source: ValueSource::Builtin,
+            },
+            sinfo: ResolvedValue {
+                value: "sinfo".to_string(),
+                source: ValueSource::Builtin,
+            },
             squeue: ResolvedValue {
                 value: "squeue".to_string(),
                 source: ValueSource::Builtin,

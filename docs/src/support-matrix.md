@@ -14,7 +14,7 @@ This page separates what `hpc-compose` can build, what CI currently exercises, a
 
 | Platform | Scope | Notes |
 | --- | --- | --- |
-| Linux `x86_64` | Full CLI and runtime workflows | Requires Slurm client tools plus Enroot and Pyxis on the submission host/cluster |
+| Linux `x86_64` | Full CLI and runtime workflows | Requires Slurm client tools plus at least one supported runtime backend: Pyxis/Enroot, Apptainer, Singularity, or host software modules |
 | Linux `arm64` | Full CLI and runtime workflows | Same cluster requirements as Linux `x86_64` |
 | macOS `x86_64` | Authoring and local non-runtime commands | Suitable for project-local authoring flows such as `new`, `setup`, `context`, `validate`, `inspect`, `render`, and `completions`; not for Slurm/Enroot runtime commands |
 | macOS `arm64` | Authoring and local non-runtime commands | Same scope as macOS `x86_64` |
@@ -41,7 +41,7 @@ Current CI validates project behavior on Ubuntu. Other published builds should b
 
 Windows archives are published so users can inspect the CLI surface or experiment with non-runtime commands, but Windows is currently **release-built only**:
 
-- Slurm + Enroot + Pyxis runtime workflows are not an officially supported Windows target.
+- Slurm plus HPC runtime workflows are not an officially supported Windows target.
 - Issues that are specific to Windows runtime execution may be closed as out of scope until the support policy changes.
 
 ## Cluster assumptions for full support
@@ -49,8 +49,11 @@ Windows archives are published so users can inspect the CLI surface or experimen
 For full runtime support on Linux, the target environment should provide:
 
 - `sbatch`, `srun`, and related Slurm client tools on the submission host
-- Pyxis container support in `srun`
-- Enroot on the submission host for image import and prepare steps
+- one supported runtime path:
+  - Pyxis container support in `srun` plus Enroot on the submission host,
+  - Apptainer on the submission host and compute nodes,
+  - Singularity on the submission host and compute nodes,
+  - or module/vendor software available on the host runtime path
 - shared storage for `x-slurm.cache_dir`
 
 Use [Runbook](runbook.md) and [Execution Model](execution-model.md) before adapting a real workload to a cluster.
