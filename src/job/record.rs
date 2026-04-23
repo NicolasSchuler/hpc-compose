@@ -415,14 +415,14 @@ pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<
     if !path.exists() {
         if let Some(job_id) = job_id {
             bail!(
-                "no tracked submission metadata exists for job '{}' under {}; run 'hpc-compose submit' for {} first",
+                "no tracked submission metadata exists for job '{}' under {}; run 'hpc-compose up' for {} first",
                 job_id,
                 metadata_root_for(&compose_file).display(),
                 compose_file.display()
             );
         }
         bail!(
-            "no tracked submission metadata exists for {}; run 'hpc-compose submit' first",
+            "no tracked submission metadata exists for {}; run 'hpc-compose up' first",
             compose_file.display()
         );
     }

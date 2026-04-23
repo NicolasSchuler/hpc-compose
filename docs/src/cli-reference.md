@@ -83,12 +83,12 @@ Current constraints:
 - Linux hosts only
 - single-host specs only
 - no distributed or partitioned placement
-- no `x-slurm.extra_srun_args`
+- no `services.<name>.x-slurm.extra_srun_args`
 - no `services.<name>.x-slurm.mpi`
 - reservation-related `x-slurm.submit_args` are ignored
 - `x-slurm.error` is ignored, and local batch stderr is written into the tracked local batch log
 
-Use `--watch` to follow the tracked local launch the same way you would follow a submitted job.
+`up --local` follows the tracked local launch immediately, just like `up` does for a submitted job. With `submit --local`, add `--watch` when you want the same live follower.
 
 In local mode the batch script also exports `HPC_COMPOSE_BACKEND_OVERRIDE=local`, `HPC_COMPOSE_LOCAL_ENROOT_BIN` pointing to the resolved `enroot` binary, and `HPC_COMPOSE_LOCAL_BIN_DIR` containing a generated `srun` shim. These variables are internal to `hpc-compose` and not intended for direct use in compose specs.
 

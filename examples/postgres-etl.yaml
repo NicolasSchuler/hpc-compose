@@ -47,7 +47,7 @@ services:
         print(f'Inserted {count} rows, average value: {avg:.2f}')
         conn.close()
         "
-    x-enroot:
+    x-runtime:
       prepare:
         commands:
           - pip install --no-cache-dir psycopg2-binary

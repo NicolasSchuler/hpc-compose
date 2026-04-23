@@ -6,7 +6,7 @@
 //! 1. [`spec`] parses and validates the Compose-like input file.
 //! 2. [`planner`] normalizes that spec into a concrete runtime plan.
 //! 3. [`preflight`] checks the login-node environment.
-//! 4. [`prepare`] imports or rebuilds Enroot artifacts when needed.
+//! 4. [`prepare`] imports or rebuilds runtime artifacts when needed.
 //! 5. [`render`] generates the batch script executed by Slurm.
 //! 6. [`job`] tracks submitted jobs, logs, metrics, and exported artifacts.
 //! 7. [`cache`] records reusable image artifacts.

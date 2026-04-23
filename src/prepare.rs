@@ -255,7 +255,7 @@ fn prepare_pyxis_runtime_plan(
             let note = if options.force_rebuild {
                 Some("rebuilt because --force/--force-rebuild was requested".to_string())
             } else if forced_by_mounts {
-                Some("rebuilt because x-enroot.prepare.mounts are present".to_string())
+                Some("rebuilt because prepare.mounts are present".to_string())
             } else {
                 None
             };

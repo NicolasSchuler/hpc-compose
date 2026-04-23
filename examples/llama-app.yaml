@@ -40,7 +40,7 @@ services:
       - python
       - -m
       - main
-    x-enroot:
+    x-runtime:
       prepare:
         commands:
           - pip install --no-cache-dir openai fastapi uvicorn

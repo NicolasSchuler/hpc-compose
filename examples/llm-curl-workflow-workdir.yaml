@@ -79,7 +79,7 @@ services:
           --data @/tmp/request.json \
           "$$LLM_BASE_URL/v1/chat/completions"
         touch /hpc-compose/job/request.done
-    x-enroot:
+    x-runtime:
       prepare:
         commands:
           - apt-get update

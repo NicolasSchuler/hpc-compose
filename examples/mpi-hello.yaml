@@ -14,7 +14,7 @@ services:
       - /bin/sh
       - -lc
       - /usr/local/bin/mpi_hello
-    x-enroot:
+    x-runtime:
       prepare:
         commands:
           - apt-get update

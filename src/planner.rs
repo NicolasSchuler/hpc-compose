@@ -121,7 +121,7 @@ pub enum ExecutionSpec {
     Exec(Vec<String>),
 }
 
-/// A normalized `x-enroot.prepare` block attached to a service.
+/// A normalized image prepare block attached to a service.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct PreparedImageSpec {

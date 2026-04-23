@@ -58,7 +58,7 @@ services:
       - |
         set -eu
         UV_CACHE_DIR=/hpc-compose/job/.uv-cache uv run worker.py
-    x-enroot:
+    x-runtime:
       prepare:
         commands:
           - pip install --no-cache-dir uv

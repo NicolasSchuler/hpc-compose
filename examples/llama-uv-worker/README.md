@@ -33,5 +33,5 @@ hpc-compose prepare -f examples/llama-uv-worker.yaml
 ## Rebuild behavior
 
 - Updating `worker.py` or other mounted source usually only needs another `up`.
-- Changing the worker base image or `x-enroot.prepare.commands` is when `up --force-rebuild` or `prepare --force` helps.
+- Changing the worker base image or `x-runtime.prepare.commands` is when `up --force-rebuild` or `prepare --force` helps.
 - `UV_CACHE_DIR` is pointed at `/hpc-compose/job/.uv-cache` so each job keeps its runtime cache inside the shared job mount.

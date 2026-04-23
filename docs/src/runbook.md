@@ -186,7 +186,7 @@ Use `validate` first when you are changing:
 - `depends_on` shape,
 - `command` / `entrypoint` form,
 - path values,
-- `x-slurm` / `x-enroot` blocks.
+- `x-slurm`, `x-runtime`, or compatibility `x-enroot` blocks.
 
 If `validate` fails, fix that before doing anything more expensive.
 Use `--strict-env` when you want missing interpolation variables to fail instead of silently consuming `${VAR:-default}` or `${VAR-default}` fallbacks.
@@ -505,7 +505,7 @@ hpc-compose cache prune --age 0
 | If you changed... | Typical next step |
 | --- | --- |
 | YAML planning/runtime settings only | `hpc-compose validate -f compose.yaml`, `hpc-compose inspect --verbose -f compose.yaml`, then `hpc-compose up -f compose.yaml` |
-| The base image, `x-enroot.prepare.commands`, or prepare env | `hpc-compose up --force-rebuild -f compose.yaml` for the normal run, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
+| The base image, `x-runtime.prepare.commands`, or prepare env | `hpc-compose up --force-rebuild -f compose.yaml` for the normal run, or `hpc-compose prepare --force -f compose.yaml` when debugging prepare separately |
 | Only mounted runtime source such as app code under `volumes` | Usually just `hpc-compose up -f compose.yaml` |
 | Cache entries you no longer want and this plan does not reference | `hpc-compose cache prune --all-unused -f compose.yaml` |
 | `hpc-compose` itself | Expect cache misses on the next `prepare`, `up`, or `submit`, then optionally prune old entries |
@@ -516,7 +516,7 @@ hpc-compose cache prune --age 0
 
 Use `volumes` for source code or other files you edit frequently.
 
-### When should I use `x-enroot.prepare.commands`?
+### When should I use `x-runtime.prepare.commands`?
 
 Use prepare commands for slower-changing dependencies, tools, or image customization that you want baked into a cached runtime image.
 
@@ -541,7 +541,7 @@ Use it only when Enroot state is clearly broken or inconsistent and `hpc-compose
 
 ### Why does my service rebuild every time?
 
-If `x-enroot.prepare.mounts` is non-empty, that service intentionally rebuilds on every `prepare` / `submit`.
+If `x-runtime.prepare.mounts` is non-empty, that service intentionally rebuilds on every `prepare` / `submit`. The same rebuild rule applies to compatibility `x-enroot.prepare.mounts`.
 
 ## Troubleshooting
 
@@ -585,10 +585,10 @@ When a TCP port opens before the service is fully usable, prefer HTTP or log-bas
 
 ### Preview a submission without running sbatch
 
-Use `submit --dry-run` to run the full pipeline (preflight, prepare, render) without actually calling `sbatch`. The rendered script is written to disk so you can inspect it:
+Use `up --dry-run` to run the full pipeline (preflight, prepare, render) without actually calling `sbatch`. The rendered script is written to disk so you can inspect it. `submit --dry-run` remains available for workflows that still prefer the older command spelling.
 
 ```bash
-hpc-compose submit --dry-run -f compose.yaml
+hpc-compose up --dry-run -f compose.yaml
 ```
 
 Combine with `--skip-prepare` for a pure validation-and-render dry run.

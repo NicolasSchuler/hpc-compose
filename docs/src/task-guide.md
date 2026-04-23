@@ -20,7 +20,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 ## Migrate from Docker Compose
 
 - Read [Docker Compose Migration](docker-compose-migration.md).
-- Replace `build:` with `image:` plus `x-enroot.prepare.commands`.
+- Replace `build:` with `image:` plus `x-runtime.prepare.commands`.
 - Replace service-name networking with `127.0.0.1` or explicit allocation metadata where appropriate.
 
 ## Single-node multi-service app
@@ -46,7 +46,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 - Start from [llm-curl-workflow.yaml](example-source.md#llm-curl-workflow), [llm-curl-workflow-workdir.yaml](example-source.md#llm-curl-workflow-workdir), [llama-uv-worker.yaml](example-source.md#llama-uv-worker), or [vllm-uv-worker.yaml](example-source.md#vllm-uv-worker).
 - Use `volumes` for model directories and fast-changing code.
-- Use `x-enroot.prepare.commands` for slower-changing dependencies.
+- Use `x-runtime.prepare.commands` for slower-changing dependencies.
 
 ## Debug cluster readiness
 

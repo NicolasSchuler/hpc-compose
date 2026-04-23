@@ -394,7 +394,7 @@ Rules:
 - List items must use `KEY=VALUE` syntax.
 - `.env` from the compose file directory is loaded automatically when present.
 - Shell environment variables override `.env`; `.env` fills only missing variables.
-- `environment` and `x-enroot.prepare.env` values support `$VAR`, `${VAR}`, `${VAR:-default}`, and `${VAR-default}` interpolation.
+- `environment`, `x-runtime.prepare.env`, and compatibility `x-enroot.prepare.env` values support `$VAR`, `${VAR}`, `${VAR:-default}`, and `${VAR-default}` interpolation.
 - Missing variables without defaults are errors.
 - Use `$$` for a literal dollar sign in interpolated fields.
 - String-form shell snippets are still literal. For example, `$PATH` inside a string-form `command` is not expanded at plan time.

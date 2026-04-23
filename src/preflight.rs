@@ -481,7 +481,7 @@ fn check_mpi_support(report: &mut Report, srun_bin: &str, plan: &RuntimePlan) {
                     "service '{service_name}' requests x-slurm.mpi.type='{mpi_type}', but 'srun --mpi=list' did not advertise it"
                 ),
                 remediation: Some(
-                    "Use a supported x-slurm.mpi.type for this cluster, or keep site-specific MPI launch flags in x-slurm.extra_srun_args.".to_string(),
+                    "Use a supported services.<name>.x-slurm.mpi.type for this cluster, or keep site-specific MPI launch flags in services.<name>.x-slurm.extra_srun_args.".to_string(),
                 ),
             });
         }

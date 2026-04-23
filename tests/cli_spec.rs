@@ -90,10 +90,7 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
         &["inspect", "-f", compose.to_str().expect("path")],
     );
     assert_success(&inspect);
-    assert!(
-        stdout_text(&inspect)
-            .contains("rebuild on submit because x-enroot.prepare.mounts are present")
-    );
+    assert!(stdout_text(&inspect).contains("rebuild on submit because prepare.mounts are present"));
 
     let preflight = run_cli(
         tmpdir.path(),

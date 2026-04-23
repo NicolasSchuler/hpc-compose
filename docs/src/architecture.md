@@ -1,11 +1,13 @@
 # Architecture for Contributors
 
-The library crate still owns the core staged pipeline, but the runtime binary is no longer a single “thin CLI” file. The binary is split into command-family modules under `src/commands/` plus `src/output.rs`, while the library keeps the reusable plan, prepare, render, tracking, cache, and template logic.
+The library crate owns the core staged pipeline. The binary entrypoint delegates to command-family modules under `src/commands/`, while presentation lives under `src/output/`. Reusable planning, prepare, render, tracking, cache, context, and template logic stay in the library modules.
 
 ## Module map
 
 - `spec`: parse, interpolate, and validate the supported Compose subset
 - `planner`: normalize the parsed spec into a deterministic plan
+- `context`: resolve `.hpc-compose/settings.toml`, profiles, env files, interpolation variables, and binary overrides
+- `cluster`: generate and apply best-effort cluster capability profiles from `doctor --cluster-report`
 - `preflight`: check login-node prerequisites and cluster policy issues
 - `prepare`: import base images and rebuild prepared runtime artifacts
 - `render`: generate the final `sbatch` script and service launch commands
@@ -13,10 +15,11 @@ The library crate still owns the core staged pipeline, but the runtime binary is
 - `tracked_paths`: centralize the `.hpc-compose/` layout used by render and job tracking
 - `cache`: persist cache manifests for imported and prepared images
 - `init`: expose the shipped example templates for `hpc-compose new` plus the legacy `init` alias
+- `schema` and `manpages`: expose the checked-in JSON Schema and generated section-1 manpage flow
 - `commands/spec`: binary-only handlers for `validate`, `render`, `prepare`, `preflight`, `config`, and `inspect`
 - `commands/runtime`: binary-only handlers for `up`, `submit`, `run`, `status`, `ps`, `watch`, `stats`, `artifacts`, `logs`, `down`, `cancel`, and `clean`
 - `commands/cache`: binary-only handlers for cache inspection and pruning
-- `commands/init`: binary-only handlers for `new` / `init`, `setup`, and `completions`
+- `commands/init`: binary-only handlers for `new` / `init`, `setup`, `context`, and `completions`
 - `watch_ui`: terminal UI controller and renderer for `up`, `submit --watch`, and `watch`
 - `output`: binary-only text, JSON, CSV, and JSONL formatting helpers
 
@@ -25,11 +28,12 @@ The library crate still owns the core staged pipeline, but the runtime binary is
 1. `ComposeSpec::load` parses YAML, validates supported keys, interpolates variables, and applies semantic validation.
 2. `planner::build_plan` resolves paths, command shapes, dependencies, and prepare blocks into a normalized plan.
 3. `prepare::build_runtime_plan` computes concrete cache artifact locations.
-4. `preflight::run` checks cluster prerequisites before submission.
-5. `prepare::prepare_runtime_plan` imports or rebuilds artifacts when needed.
-6. `render::render_script` emits the batch script consumed by `sbatch`.
-7. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `stats`, `logs`, `cancel`, and artifact export.
-8. `commands/*` turns CLI variants into library calls, and `output` formats the final presentation.
+4. `context` and optional cluster profiles provide resolved paths, binaries, env, and compatibility warnings.
+5. `preflight::run` checks cluster prerequisites before submission.
+6. `prepare::prepare_runtime_plan` imports or rebuilds artifacts when needed.
+7. `render::render_script` emits the batch script consumed by `sbatch`.
+8. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `ps`, `watch`, `stats`, `logs`, `cancel`, and artifact export.
+9. `commands/*` turns CLI variants into library calls, and `output` formats the final presentation.
 
 ## Tracked Runtime Layout
 

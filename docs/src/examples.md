@@ -57,28 +57,29 @@ hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cach
 
 If the workflow you want is not listed by `--list-templates`, copy the closest repository example directly from `examples/`.
 
-## Broader Repository Example Matrix
+## Broader Example Matrix
 
-The matrix below covers the broader set of runnable repository examples beyond the four promoted starts.
+The matrix below covers the broader set of runnable examples beyond the four promoted starts. “Built-in template” means `hpc-compose new --template <name>` can scaffold it; “repository file” means copy the YAML from `examples/` directly.
 
-| Example | What it demonstrates | When to start from it |
-| --- | --- | --- |
-| [`dev-python-app.yaml`](example-source.md#dev-python-app) | Mounted source code plus `x-enroot.prepare.commands` for dependencies | You want an iterative development workflow |
-| [`llm-curl-workflow.yaml`](example-source.md#llm-curl-workflow) | Repo-local variant of the smallest concrete inference workflow | You want the same LLM stack but with models under the repository tree |
-| [`llama-app.yaml`](example-source.md#llama-app) | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
-| [`llama-uv-worker.yaml`](example-source.md#llama-uv-worker) | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server plus mounted worker pattern |
-| [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) | First-class MPI launch, generated MPI hostfile, and one primary-node helper | You want a minimal multi-node MPI pattern without extra orchestration |
-| [`mpi-pmix-v4-host-mpi.yaml`](example-source.md#mpi-pmix-v4-host-mpi) | Versioned PMIx launch plus host MPI bind/env configuration | Your site requires a host MPI stack inside containers |
-| [`multi-node-partitioned.yaml`](example-source.md#multi-node-partitioned) | Disjoint node ranges, fractional node selection, and explicit co-location | You want multiple distributed roles inside one allocation |
-| [`multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) | Allocation-wide torchrun launch using the primary node as rendezvous | You want a multi-node GPU training starting point |
-| [`postgres-etl.yaml`](example-source.md#postgres-etl) | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
-| [`restart-policy.yaml`](example-source.md#restart-policy) | Per-service `restart_on_failure` with bounded retries and a rolling-window crash-loop guard | You need transient-failure retries without letting one service spin forever |
-| [`vllm-openai.yaml`](example-source.md#vllm-openai) | vLLM serving with an in-job Python client | You want vLLM-based inference instead of llama.cpp |
-| [`vllm-uv-worker.yaml`](example-source.md#vllm-uv-worker) | vLLM serving plus a source-mounted Python worker executed through `uv` | You want a common LLM stack with mounted app code |
-| [`mpi-hello.yaml`](example-source.md#mpi-hello) | MPI hello world using service-level `x-slurm.mpi` | You need a small first-class MPI workload |
-| [`multi-stage-pipeline.yaml`](example-source.md#multi-stage-pipeline) | Two-stage pipeline coordinating through the shared job mount | You need file-based stage-to-stage handoff |
-| [`pipeline-dag.yaml`](example-source.md#pipeline-dag) | One-shot preprocess -> train -> postprocess DAG using successful-completion dependencies | You need stage completion, not service readiness, to gate downstream work |
-| [`fairseq-preprocess.yaml`](example-source.md#fairseq-preprocess) | CPU-heavy NLP data preprocessing with parallel workers | You need a CPU-bound data preprocessing pipeline |
+| Example | Availability | What it demonstrates | When to start from it |
+| --- | --- | --- | --- |
+| [`dev-python-app.yaml`](example-source.md#dev-python-app) | Built-in template | Mounted source code plus `x-runtime.prepare.commands` for dependencies | You want an iterative development workflow |
+| [`llm-curl-workflow.yaml`](example-source.md#llm-curl-workflow) | Built-in template | Repo-local variant of the smallest concrete inference workflow | You want the same LLM stack but with models under the repository tree |
+| [`llama-app.yaml`](example-source.md#llama-app) | Built-in template | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
+| [`llama-uv-worker.yaml`](example-source.md#llama-uv-worker) | Built-in template | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server plus mounted worker pattern |
+| [`multi-node-mpi.yaml`](example-source.md#multi-node-mpi) | Built-in template | First-class MPI launch, generated MPI hostfile, and one primary-node helper | You want a minimal multi-node MPI pattern without extra orchestration |
+| [`mpi-pmix-v4-host-mpi.yaml`](example-source.md#mpi-pmix-v4-host-mpi) | Built-in template | Versioned PMIx launch plus host MPI bind/env configuration | Your site requires a host MPI stack inside containers |
+| [`multi-node-partitioned.yaml`](example-source.md#multi-node-partitioned) | Repository file | Disjoint node ranges, fractional node selection, and explicit co-location | You want multiple distributed roles inside one allocation |
+| [`multi-node-torchrun.yaml`](example-source.md#multi-node-torchrun) | Built-in template | Allocation-wide torchrun launch using the primary node as rendezvous | You want a multi-node GPU training starting point |
+| [`postgres-etl.yaml`](example-source.md#postgres-etl) | Built-in template | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
+| [`restart-policy.yaml`](example-source.md#restart-policy) | Built-in template | Per-service `restart_on_failure` with bounded retries and a rolling-window crash-loop guard | You need transient-failure retries without letting one service spin forever |
+| [`training-checkpoints.yaml`](example-source.md#training-checkpoints) | Built-in template | GPU training with checkpoints exported to shared storage | You need durable checkpoint outputs but not automatic resume semantics |
+| [`vllm-openai.yaml`](example-source.md#vllm-openai) | Built-in template | vLLM serving with an in-job Python client | You want vLLM-based inference instead of llama.cpp |
+| [`vllm-uv-worker.yaml`](example-source.md#vllm-uv-worker) | Built-in template | vLLM serving plus a source-mounted Python worker executed through `uv` | You want a common LLM stack with mounted app code |
+| [`mpi-hello.yaml`](example-source.md#mpi-hello) | Built-in template | MPI hello world using service-level `x-slurm.mpi` | You need a small first-class MPI workload |
+| [`multi-stage-pipeline.yaml`](example-source.md#multi-stage-pipeline) | Built-in template | Two-stage pipeline coordinating through the shared job mount | You need file-based stage-to-stage handoff |
+| [`pipeline-dag.yaml`](example-source.md#pipeline-dag) | Built-in template | One-shot preprocess -> train -> postprocess DAG using successful-completion dependencies | You need stage completion, not service readiness, to gate downstream work |
+| [`fairseq-preprocess.yaml`](example-source.md#fairseq-preprocess) | Built-in template | CPU-heavy NLP data preprocessing with parallel workers | You need a CPU-bound data preprocessing pipeline |
 
 ## Which Example Should I Start From?
 
@@ -105,7 +106,7 @@ Companion notes for the more involved examples live alongside the example assets
 2. Override `CACHE_DIR` before running repository examples on a real cluster, or replace the default cache path in your copied file.
 3. Set `x-slurm.cache_dir` to a path visible from both the login node and the compute nodes.
 4. Replace the example `image`, `command`, `environment`, and `volumes` with your workload.
-5. Keep active source in `volumes` and keep slower-changing dependency installation in `x-enroot.prepare.commands`.
+5. Keep active source in `volumes` and keep slower-changing dependency installation in `x-runtime.prepare.commands`.
 6. Add `readiness` to services that must be reachable before dependents continue.
 7. Adjust top-level or per-service `x-slurm` settings for your cluster.
 8. Run the debugging flow before the first submit when you need to confirm planning, prerequisites, or cache behavior.

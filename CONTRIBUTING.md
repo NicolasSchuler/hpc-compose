@@ -14,7 +14,7 @@ Useful local commands:
 
 ```bash
 cargo test --locked
-cargo test --locked --test cli
+cargo test --locked --test cli_spec --test cli_runtime --test cli_cache --test cli_context --test cli_init --test cli_jobs
 cargo test --locked --test release_metadata
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
@@ -26,7 +26,7 @@ Release/distribution helpers:
 
 ```bash
 python3 scripts/update_homebrew_formula.py \
-  --version 0.1.23 \
+  --version X.Y.Z \
   --arm64-sha256 <aarch64-apple-darwin tarball sha256> \
   --x86-64-sha256 <x86_64-apple-darwin tarball sha256>
 ```
@@ -51,7 +51,7 @@ done
 ```
 
 - When adding a new example, document when to use it in `docs/src/examples.md`.
-- If the example should be available through `hpc-compose init`, add it to `src/init.rs` with a concise description.
+- If the example should be available through `hpc-compose new` (and the legacy `init` alias), add it to `src/init.rs` with a concise description.
 
 ## Pull requests
 

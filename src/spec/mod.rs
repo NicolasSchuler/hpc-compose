@@ -964,7 +964,7 @@ pub struct EffectiveServiceEnrootConfig {
     pub prepare: Option<EffectivePrepareSpec>,
 }
 
-/// Stable effective `x-enroot.prepare` config with defaults applied.
+/// Stable effective prepare config with defaults applied.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EffectivePrepareSpec {
@@ -995,7 +995,7 @@ pub struct ServiceEnrootConfig {
     pub prepare: Option<PrepareSpec>,
 }
 
-/// `x-enroot.prepare` customization for rebuilding an image on the login node.
+/// Image customization for rebuilding a runtime artifact on the login node.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2085,7 +2085,7 @@ impl ServiceSlurmConfig {
                 .any(|arg| arg.trim_start().starts_with("--mpi"))
         {
             bail!(
-                "service '{service_name}' sets both x-slurm.mpi and x-slurm.extra_srun_args with --mpi; use one MPI source"
+                "service '{service_name}' sets both x-slurm.mpi and x-slurm.extra_srun_args with --mpi; use one service-level MPI source"
             );
         }
         if let Some(mpi) = &self.mpi {
@@ -2601,7 +2601,7 @@ fn validate_extra_srun_arg_conflicts(slurm: &ServiceSlurmConfig, service_name: &
                 .any(|arg| raw_arg_has_flag(arg, flag))
         {
             bail!(
-                "service '{service_name}' x-slurm.{field} cannot be combined with raw {flag} in x-slurm.extra_srun_args"
+                "service '{service_name}' x-slurm.{field} cannot be combined with raw {flag} in service-level x-slurm.extra_srun_args"
             );
         }
     }

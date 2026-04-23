@@ -1,4 +1,4 @@
-//! Interactive and non-interactive helpers for `hpc-compose init`.
+//! Interactive and non-interactive helpers for `hpc-compose new`.
 
 use crate::term;
 
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_norway::{Mapping, Value};
 
-/// A shipped compose template exposed by `hpc-compose init`.
+/// A shipped compose template exposed by `hpc-compose new`.
 #[derive(Debug)]
 pub struct Template {
     /// Stable template identifier used on the CLI.
@@ -126,7 +126,7 @@ const TEMPLATES: &[Template] = &[
 ];
 
 #[derive(Debug, Clone)]
-/// Answers gathered by the interactive `init` flow.
+/// Answers gathered by the interactive template flow.
 pub struct InitAnswers {
     /// Selected template identifier.
     pub template_name: String,
@@ -319,7 +319,7 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
     Ok(output)
 }
 
-/// Returns the next CLI commands shown after `init` writes a compose file.
+/// Returns the next CLI commands shown after `new` writes a compose file.
 #[must_use]
 pub fn next_commands(output: &Path) -> Vec<String> {
     let path = output.display().to_string();

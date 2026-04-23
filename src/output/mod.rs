@@ -1601,7 +1601,7 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
             if prepare.force_rebuild {
                 writeln!(
                     writer,
-                    "reuse policy: rebuild on submit because x-enroot.prepare.mounts are present"
+                    "reuse policy: rebuild on submit because prepare.mounts are present"
                 )?;
             } else {
                 writeln!(
@@ -2215,7 +2215,7 @@ fn readiness_description(readiness: Option<&hpc_compose::spec::ReadinessSpec>) -
 fn rebuild_reason(service: &hpc_compose::prepare::RuntimeService) -> Option<&'static str> {
     let prepare = service.prepare.as_ref()?;
     if prepare.force_rebuild {
-        Some("x-enroot.prepare.mounts are present")
+        Some("prepare.mounts are present")
     } else if !service.runtime_image.exists() {
         Some("runtime cache artifact is missing")
     } else {
@@ -3097,7 +3097,7 @@ services:
             inspect_text
                 .contains("readiness: http http://127.0.0.1:8000/health (status 200 timeout 30s)")
         );
-        assert!(inspect_text.contains("rebuild reason: x-enroot.prepare.mounts are present"));
+        assert!(inspect_text.contains("rebuild reason: prepare.mounts are present"));
     }
 
     #[test]

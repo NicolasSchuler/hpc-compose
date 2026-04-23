@@ -43,7 +43,7 @@ hpc-compose validate -f examples/llm-curl-workflow.yaml
 hpc-compose inspect -f examples/llm-curl-workflow.yaml
 hpc-compose preflight -f examples/llm-curl-workflow.yaml
 hpc-compose prepare -f examples/llm-curl-workflow.yaml
-hpc-compose submit -f examples/llm-curl-workflow.yaml
+hpc-compose up -f examples/llm-curl-workflow.yaml
 ```
 
 If you are using the home-directory variant, replace `examples/llm-curl-workflow.yaml` with `examples/llm-curl-workflow-workdir.yaml` in the commands above.

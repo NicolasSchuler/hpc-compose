@@ -317,7 +317,7 @@ fn ensure_local_plan_supported(plan: &RuntimePlan) -> Result<()> {
         }
         if !service.slurm.extra_srun_args.is_empty() {
             bail!(
-                "--local does not support x-slurm.extra_srun_args; service '{}' sets: {}",
+                "--local does not support services.<name>.x-slurm.extra_srun_args; service '{}' sets: {}",
                 service.name,
                 service.slurm.extra_srun_args.join(" ")
             );

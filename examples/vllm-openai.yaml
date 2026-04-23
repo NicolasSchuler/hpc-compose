@@ -73,7 +73,7 @@ services:
         print(response.choices[0].message.content)
         "
         touch /hpc-compose/job/request.done
-    x-enroot:
+    x-runtime:
       prepare:
         commands:
           - pip install --no-cache-dir openai

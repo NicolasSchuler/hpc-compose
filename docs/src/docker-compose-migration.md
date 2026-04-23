@@ -13,7 +13,7 @@ This guide helps you convert an existing `docker-compose.yaml` into an `hpc-comp
 | `volumes` | `volumes` (host:container bind mounts, same syntax) |
 | `depends_on` | `depends_on` (list or map with `condition: service_started` / `service_healthy`) |
 | `working_dir` | `working_dir` (requires explicit `command` or `entrypoint`) |
-| `build` | **Not supported.** Use `image` + `x-enroot.prepare.commands` instead. |
+| `build` | **Not supported.** Use `image` + `x-runtime.prepare.commands` instead. |
 | `ports` | **Not supported.** Use host networking semantics instead. `127.0.0.1` works only when both sides run on the same node. |
 | `networks` / `network_mode` | **Not supported.** There is no Docker-style overlay network or service-name DNS layer. |
 | `restart` | **Not supported as a Compose key.** Use `services.<name>.x-slurm.failure_policy`. |
@@ -86,7 +86,7 @@ services:
       - ./app:/workspace
     working_dir: /workspace
     command: python -m main
-    x-enroot:
+    x-runtime:
       prepare:
         commands:
           - pip install --no-cache-dir redis fastapi uvicorn
@@ -94,7 +94,7 @@ services:
 
 ### Key changes
 
-1. **`build: .`** → `image: python:3.11-slim` + `x-enroot.prepare.commands` for dependencies.
+1. **`build: .`** → `image: python:3.11-slim` + `x-runtime.prepare.commands` for dependencies.
 2. **`ports`** → Removed. Services communicate via `127.0.0.1` because they run on the same node.
 3. **`REDIS_HOST: redis`** → `REDIS_HOST: 127.0.0.1`. No DNS service names; use localhost.
 4. **`healthcheck`** → `readiness` with `type: tcp`.
@@ -109,7 +109,7 @@ Docker Compose creates isolated networks where services find each other by name.
 
 ### Building images
 
-Docker Compose uses `build:` to run a `Dockerfile`. `hpc-compose` uses `x-enroot.prepare.commands` instead:
+Docker Compose uses `build:` to run a `Dockerfile`. `hpc-compose` uses `x-runtime.prepare.commands` instead:
 
 ```yaml
 # Docker Compose
@@ -121,7 +121,7 @@ app:
 # hpc-compose
 app:
   image: python:3.11-slim
-  x-enroot:
+  x-runtime:
     prepare:
       commands:
         - pip install --no-cache-dir -r /tmp/requirements.txt
@@ -129,7 +129,7 @@ app:
         - ./requirements.txt:/tmp/requirements.txt
 ```
 
-Prefer `volumes` for fast-changing source code and `x-enroot.prepare.commands` for slower-changing dependencies.
+Prefer `volumes` for fast-changing source code and `x-runtime.prepare.commands` for slower-changing dependencies. `x-enroot.prepare` remains accepted as a Pyxis/Enroot compatibility spelling, but new specs should use `x-runtime.prepare`.
 
 ### Health checks vs readiness
 
@@ -218,7 +218,7 @@ The rolling-window fields have no direct Docker Compose equivalent. They exist t
 
 | Feature | Alternative |
 | --- | --- |
-| `build` | Use `image` + `x-enroot.prepare.commands`. Mount build context files with `x-enroot.prepare.mounts` if needed. |
+| `build` | Use `image` + `x-runtime.prepare.commands`. Mount build context files with `x-runtime.prepare.mounts` if needed. |
 | `ports` | Not needed. Services share `127.0.0.1` on one node. |
 | `networks` / `network_mode` | Not needed. All services are on the same host network. |
 | `restart` | Use `services.<name>.x-slurm.failure_policy` (`fail_job`, `ignore`, `restart_on_failure`). |
@@ -229,7 +229,7 @@ The rolling-window fields have no direct Docker Compose equivalent. They exist t
 
 ## Migration checklist
 
-1. **Remove `build:`** — Replace with `image:` pointing to a base image. Move dependency installation to `x-enroot.prepare.commands`.
+1. **Remove `build:`** — Replace with `image:` pointing to a base image. Move dependency installation to `x-runtime.prepare.commands`.
 2. **Remove `ports:`** — Use host-network semantics instead of container port publishing.
 3. **Remove `networks:` / `network_mode:`** — There is no Docker-style overlay network or service-name DNS layer.
 4. **Remove Compose `restart:`** — use `services.<name>.x-slurm.failure_policy` when you need per-service restart behavior.
