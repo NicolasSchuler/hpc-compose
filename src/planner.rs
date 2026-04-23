@@ -172,6 +172,11 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
             working_dir.as_deref(),
             name,
         )?;
+        if matches!(execution, ExecutionSpec::ImageDefault) && service.slurm.has_container_hook() {
+            bail!(
+                "service '{name}' uses a container-context x-slurm prologue/epilogue hook without an explicit command or entrypoint; define one so hpc-compose can wrap it"
+            );
+        }
         let image = normalize_image(&service.image, &project_dir)?;
         let prepare = normalize_prepare(service.enroot.clone(), &project_dir, name)?;
         let failure_policy = service.slurm.normalized_failure_policy(name)?;
@@ -983,7 +988,8 @@ mod tests {
     use crate::spec::{
         ComposeSpec, DependsOnConditionSpec, DependsOnSpec, EnvironmentSpec, ReadinessSpec,
         ServiceDependency, ServiceEnrootConfig, ServiceFailureMode, ServiceFailurePolicy,
-        ServiceFailurePolicySpec, ServicePlacementSpec, ServiceSlurmConfig, ServiceSpec,
+        ServiceFailurePolicySpec, ServiceHookContext, ServiceHookSpec, ServicePlacementSpec,
+        ServiceSlurmConfig, ServiceSpec,
     };
 
     fn service(image: &str) -> ServiceSpec {
@@ -1056,6 +1062,24 @@ mod tests {
     fn working_dir_requires_explicit_command() {
         let result = build_execution(None, None, Some("/work"), "app");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn container_hooks_require_explicit_command_or_entrypoint() {
+        let mut app = service("redis:7");
+        app.slurm.prologue = Some(ServiceHookSpec {
+            context: ServiceHookContext::Container,
+            script: "echo prepare".into(),
+        });
+        let spec = ComposeSpec {
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            services: BTreeMap::from([("app".into(), app)]),
+        };
+
+        let err = build_plan(Path::new("."), spec).expect_err("image default cannot be wrapped");
+        assert!(err.to_string().contains("container-context"));
+        assert!(err.to_string().contains("command or entrypoint"));
     }
 
     #[test]

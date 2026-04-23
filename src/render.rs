@@ -8,7 +8,8 @@ use anyhow::Result;
 use crate::planner::{ExecutionSpec, ServicePlacementMode};
 use crate::prepare::{RuntimePlan, RuntimeService};
 use crate::spec::{
-    ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec, ServiceFailureMode,
+    ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
+    ServiceFailureMode, ServiceHookContext,
 };
 use crate::tracked_paths;
 
@@ -62,6 +63,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         .ordered_services
         .iter()
         .any(|service| service.slurm.mpi.is_some());
+    let hooks_enabled = plan
+        .ordered_services
+        .iter()
+        .any(|service| service.slurm.prologue.is_some() || service.slurm.epilogue.is_some());
     let resume_host_path = plan.slurm.resume_dir().unwrap_or("");
     let artifact_bundles = plan
         .slurm
@@ -215,6 +220,10 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         "LOG_DIR=\"$JOB_TMP/{}\"\n",
         tracked_paths::LOGS_DIR_NAME
     ));
+    if hooks_enabled {
+        out.push_str("HOOKS_DIR=\"$JOB_TMP/hooks\"\n");
+        out.push_str("HOOKS_CONTAINER_DIR=\"/hpc-compose/job/hooks\"\n");
+    }
     out.push_str(&format!(
         "STATE_FILE=\"$JOB_TMP/{}\"\n",
         tracked_paths::STATE_FILE_NAME
@@ -251,6 +260,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("export ENROOT_DATA_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/data\"\n");
     out.push_str("export ENROOT_TEMP_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/tmp\"\n");
     out.push_str("mkdir -p \"$LOG_DIR\" \"$ALLOCATION_DIR\" \"$SERVICE_NODELIST_DIR\"");
+    if hooks_enabled {
+        out.push_str(" \"$HOOKS_DIR\"");
+    }
     if artifacts_enabled {
         out.push_str(" \"$ARTIFACTS_DIR\"");
     }
@@ -282,9 +294,12 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("SERVICE_STEP_NTASKS=()\n");
     out.push_str("SERVICE_STEP_NTASKS_PER_NODE=()\n");
     out.push_str("SERVICE_STEP_NODELIST=()\n");
+    out.push_str("SERVICE_HOST_EPILOGUE_SCRIPTS=()\n");
+    out.push_str("SERVICE_HOST_EPILOGUE_RAN=()\n");
     out.push_str("ALLOCATION_NODES=()\n");
     out.push_str("SERVICE_LAUNCH_FNS=()\n");
     out.push_str("SERVICE_DEPENDENTS=()\n");
+    out.push_str("CLEANING_UP=0\n");
     out.push_str("WAIT_HELPER_EXITED=0\n");
     out.push_str("WAIT_HELPER_EXIT_STATUS=\"\"\n");
     out.push_str("declare -A SERVICE_INDEX_BY_NAME=()\n\n");
@@ -620,6 +635,23 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
         out.push_str("}\n\n");
     }
 
+    if hooks_enabled {
+        out.push_str("run_host_hook() {\n");
+        out.push_str("  local script_path=$1\n");
+        out.push_str("  local service_name=$2\n");
+        out.push_str("  local phase=$3\n");
+        out.push_str("  local logfile=$4\n");
+        out.push_str("  local service_exit_code=${5:-}\n");
+        out.push_str("  (\n");
+        out.push_str("    export HPC_COMPOSE_SERVICE_NAME=\"$service_name\"\n");
+        out.push_str("    export HPC_COMPOSE_HOOK_PHASE=\"$phase\"\n");
+        out.push_str("    export HPC_COMPOSE_SERVICE_LOG=\"$logfile\"\n");
+        out.push_str("    export HPC_COMPOSE_SERVICE_EXIT_CODE=\"$service_exit_code\"\n");
+        out.push_str("    bash \"$script_path\"\n");
+        out.push_str("  ) >>\"$logfile\" 2>&1\n");
+        out.push_str("}\n\n");
+    }
+
     out.push_str("write_resume_metadata() {\n");
     out.push_str("  [[ \"$RESUME_ENABLED\" == \"1\" ]] || return 0\n");
     out.push_str("  local tmp_resume=\"$RESUME_META_FILE.tmp\"\n");
@@ -719,9 +751,21 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  done\n");
     out.push_str("}\n\n");
 
+    out.push_str("reap_services_after_cleanup() {\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!SERVICE_PIDS[@]}\"; do\n");
+    out.push_str("    local pid=${SERVICE_PIDS[i]:-}\n");
+    out.push_str("    [[ -z \"$pid\" ]] && continue\n");
+    out.push_str("    local status=0\n");
+    out.push_str("    wait \"$pid\" || status=$?\n");
+    out.push_str("    handle_service_exit \"$i\" \"$status\" || true\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+
     out.push_str("cleanup() {\n");
     out.push_str("  local code=$?\n");
     out.push_str("  trap - EXIT INT TERM\n");
+    out.push_str("  CLEANING_UP=1\n");
     if metrics_enabled {
         out.push_str("  stop_metrics_sampler\n");
     }
@@ -733,9 +777,9 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    JOB_STATUS=\"FAILED\"\n");
     out.push_str("  fi\n");
     out.push_str("  JOB_EXIT_CODE=\"$code\"\n");
-    out.push_str("  write_state_file\n");
     out.push_str("  kill_services\n");
-    out.push_str("  wait || true\n");
+    out.push_str("  reap_services_after_cleanup\n");
+    out.push_str("  write_state_file\n");
     if artifacts_enabled {
         out.push_str("  collect_artifacts \"$code\" || true\n");
     }
@@ -763,6 +807,7 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local step_ntasks_per_node=${15}\n");
     out.push_str("  local step_nodelist=${16}\n");
     out.push_str("  local readiness_configured=${17}\n");
+    out.push_str("  local host_epilogue_script=${18}\n");
     out.push_str("  local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}\n");
     out.push_str("  if [[ -n \"$index\" ]]; then\n");
     out.push_str("    SERVICE_PIDS[index]=\"$pid\"\n");
@@ -775,6 +820,8 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    SERVICE_STEP_NTASKS[index]=\"$step_ntasks\"\n");
     out.push_str("    SERVICE_STEP_NTASKS_PER_NODE[index]=\"$step_ntasks_per_node\"\n");
     out.push_str("    SERVICE_STEP_NODELIST[index]=\"$step_nodelist\"\n");
+    out.push_str("    SERVICE_HOST_EPILOGUE_SCRIPTS[index]=\"$host_epilogue_script\"\n");
+    out.push_str("    SERVICE_HOST_EPILOGUE_RAN[index]=\"0\"\n");
     out.push_str("    SERVICE_LAUNCH_FNS[index]=\"$launch_fn\"\n");
     out.push_str("    if [[ -n \"$dependents_csv\" ]]; then\n");
     out.push_str("      SERVICE_DEPENDENTS[index]=\"$dependents_csv\"\n");
@@ -801,6 +848,8 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("    SERVICE_STEP_NTASKS+=(\"$step_ntasks\")\n");
     out.push_str("    SERVICE_STEP_NTASKS_PER_NODE+=(\"$step_ntasks_per_node\")\n");
     out.push_str("    SERVICE_STEP_NODELIST+=(\"$step_nodelist\")\n");
+    out.push_str("    SERVICE_HOST_EPILOGUE_SCRIPTS+=(\"$host_epilogue_script\")\n");
+    out.push_str("    SERVICE_HOST_EPILOGUE_RAN+=(\"0\")\n");
     out.push_str("    SERVICE_LAUNCH_FNS+=(\"$launch_fn\")\n");
     out.push_str("    SERVICE_DEPENDENTS+=(\"$dependents_csv\")\n");
     out.push_str("    SERVICE_INDEX_BY_NAME[\"$name\"]=$index\n");
@@ -1020,12 +1069,32 @@ pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     out.push_str("  local window_seconds=${SERVICE_WINDOW_SECONDS[index]:-0}\n");
     out.push_str("  local max_restarts_in_window=${SERVICE_MAX_RESTARTS_IN_WINDOW[index]:-0}\n");
     out.push_str("  local launch_fn=${SERVICE_LAUNCH_FNS[index]:-}\n");
+    out.push_str("  local logfile=${SERVICE_LOG_PATHS[index]:-}\n");
+    out.push_str("  local host_epilogue_script=${SERVICE_HOST_EPILOGUE_SCRIPTS[index]:-}\n");
     out.push_str("  SERVICE_PIDS[index]=''\n");
+    out.push_str("  local effective_status=$status\n");
+    out.push_str("  if [[ -n \"$host_epilogue_script\" && \"${SERVICE_HOST_EPILOGUE_RAN[index]:-0}\" != \"1\" ]]; then\n");
+    out.push_str("    SERVICE_HOST_EPILOGUE_RAN[index]=\"1\"\n");
+    out.push_str("    local epilogue_status=0\n");
+    out.push_str("    run_host_hook \"$host_epilogue_script\" \"$name\" epilogue \"$logfile\" \"$status\" || epilogue_status=$?\n");
+    out.push_str("    if (( epilogue_status != 0 )); then\n");
+    out.push_str(
+        "      echo \"Service '$name' epilogue exited with status $epilogue_status\" >&2\n",
+    );
+    out.push_str("      if (( status == 0 )); then\n");
+    out.push_str("        effective_status=$epilogue_status\n");
+    out.push_str("      fi\n");
+    out.push_str("    fi\n");
+    out.push_str("  fi\n");
+    out.push_str("  status=$effective_status\n");
     out.push_str("  SERVICE_LAST_EXIT_CODE[index]=\"$status\"\n");
     out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]]; then\n");
     out.push_str("    prune_restart_window \"$index\"\n");
     out.push_str("  fi\n");
     out.push_str("  write_state_file\n");
+    out.push_str("  if [[ \"$CLEANING_UP\" == \"1\" ]]; then\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
     out.push_str("  if (( status == 0 )); then\n");
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
@@ -1791,6 +1860,8 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
     let service_id = service_token(&service.name);
     let fn_name = format!("launch_{service_id}");
     let step_name = service_step_name(&service.name);
+    let log_file_name = log_file_name_for_service(&service.name);
+    let container_log_path = format!("/hpc-compose/job/logs/{log_file_name}");
     let command_args = execution_argv(&service.execution, service.working_dir.as_deref());
     let srun_args = build_srun_command(service);
     let dependents_csv = dependents.join(",");
@@ -1799,12 +1870,111 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>();
+    let host_prologue = service
+        .slurm
+        .prologue
+        .as_ref()
+        .filter(|hook| hook.context == ServiceHookContext::Host);
+    let host_epilogue = service
+        .slurm
+        .epilogue
+        .as_ref()
+        .filter(|hook| hook.context == ServiceHookContext::Host);
+    let container_prologue = service
+        .slurm
+        .prologue
+        .as_ref()
+        .filter(|hook| hook.context == ServiceHookContext::Container);
+    let container_epilogue = service
+        .slurm
+        .epilogue
+        .as_ref()
+        .filter(|hook| hook.context == ServiceHookContext::Container);
+    let has_container_hooks = container_prologue.is_some() || container_epilogue.is_some();
 
     out.push_str(&format!("{fn_name}() {{\n"));
     out.push_str(&format!(
-        "  local logfile=\"$LOG_DIR/{}\"\n",
-        log_file_name_for_service(&service.name)
+        "  local service_name={}\n",
+        shell_quote(&service.name)
     ));
+    out.push_str(&format!("  local logfile=\"$LOG_DIR/{log_file_name}\"\n"));
+    out.push_str("  : > \"$logfile\"\n");
+    out.push_str("  local host_prologue_script=\"\"\n");
+    out.push_str("  local host_epilogue_script=\"\"\n");
+    if let Some(hook) = host_prologue {
+        let file = hook_file_name(&service_id, "host-prologue");
+        let target = format!("\"$HOOKS_DIR/{file}\"");
+        let body = host_hook_file_body(&hook.script);
+        push_hook_file(
+            out,
+            &target,
+            &format!("HPC_COMPOSE_HOOK_{}_HOST_PROLOGUE", service_id),
+            &body,
+        );
+        out.push_str(&format!("  host_prologue_script=\"$HOOKS_DIR/{file}\"\n"));
+    }
+    if let Some(hook) = host_epilogue {
+        let file = hook_file_name(&service_id, "host-epilogue");
+        let target = format!("\"$HOOKS_DIR/{file}\"");
+        let body = host_hook_file_body(&hook.script);
+        push_hook_file(
+            out,
+            &target,
+            &format!("HPC_COMPOSE_HOOK_{}_HOST_EPILOGUE", service_id),
+            &body,
+        );
+        out.push_str(&format!("  host_epilogue_script=\"$HOOKS_DIR/{file}\"\n"));
+    }
+    if let Some(hook) = container_prologue {
+        let file = hook_file_name(&service_id, "container-prologue");
+        let target = format!("\"$HOOKS_DIR/{file}\"");
+        let body = container_hook_file_body(&hook.script);
+        push_hook_file(
+            out,
+            &target,
+            &format!("HPC_COMPOSE_HOOK_{}_CONTAINER_PROLOGUE", service_id),
+            &body,
+        );
+    }
+    if let Some(hook) = container_epilogue {
+        let file = hook_file_name(&service_id, "container-epilogue");
+        let target = format!("\"$HOOKS_DIR/{file}\"");
+        let body = container_hook_file_body(&hook.script);
+        push_hook_file(
+            out,
+            &target,
+            &format!("HPC_COMPOSE_HOOK_{}_CONTAINER_EPILOGUE", service_id),
+            &body,
+        );
+    }
+    if has_container_hooks {
+        let wrapper_file = hook_file_name(&service_id, "container-wrapper");
+        let prologue_file = container_prologue.map(|_| {
+            format!(
+                "/hpc-compose/job/hooks/{}",
+                hook_file_name(&service_id, "container-prologue")
+            )
+        });
+        let epilogue_file = container_epilogue.map(|_| {
+            format!(
+                "/hpc-compose/job/hooks/{}",
+                hook_file_name(&service_id, "container-epilogue")
+            )
+        });
+        let body = container_wrapper_body(
+            &service.name,
+            &container_log_path,
+            prologue_file.as_deref(),
+            epilogue_file.as_deref(),
+        );
+        let target = format!("\"$HOOKS_DIR/{wrapper_file}\"");
+        push_hook_file(
+            out,
+            &target,
+            &format!("HPC_COMPOSE_HOOK_{}_CONTAINER_WRAPPER", service_id),
+            &body,
+        );
+    }
     out.push_str(&format!(
         "  local -a service_mounts={}\n",
         bash_array_literal(&service.volumes)
@@ -1817,6 +1987,13 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
         "  local -a service_cmd={}\n",
         bash_array_literal(&command_args)
     ));
+    if has_container_hooks {
+        let wrapper_file = hook_file_name(&service_id, "container-wrapper");
+        out.push_str(&format!(
+            "  local container_wrapper=\"$HOOKS_CONTAINER_DIR/{wrapper_file}\"\n"
+        ));
+        out.push_str("  service_cmd=(\"/bin/sh\" \"$container_wrapper\" \"${service_cmd[@]}\")\n");
+    }
     out.push_str("  local pyxis_mounts\n");
     out.push_str("  pyxis_mounts=$(build_pyxis_mounts \"${service_mounts[@]}\")\n");
     out.push_str("  srun_cmd+=(--container-image=");
@@ -1898,14 +2075,16 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
             shell_quote(mpi.mpi_type.as_srun_value())
         ));
     }
-    out.push_str("  echo \"Starting service ");
-    out.push_str(&service.name);
-    out.push_str("\"\n");
+    out.push_str("  echo \"Starting service $service_name\"\n");
     out.push_str("  local -a launch_env=()\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_PRIMARY_NODE=$HPC_COMPOSE_PRIMARY_NODE\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODE_COUNT=$HPC_COMPOSE_NODE_COUNT\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODELIST=$HPC_COMPOSE_NODELIST\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_NODELIST_FILE=$HPC_COMPOSE_NODELIST_FILE\")\n");
+    out.push_str("  launch_env+=(\"HPC_COMPOSE_SERVICE_NAME=$service_name\")\n");
+    out.push_str(&format!(
+        "  launch_env+=(\"HPC_COMPOSE_SERVICE_LOG={container_log_path}\")\n"
+    ));
     out.push_str("  launch_env+=(\"HPC_COMPOSE_SERVICE_PRIMARY_NODE=$service_primary_node\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_SERVICE_NODE_COUNT=$service_node_count\")\n");
     out.push_str("  launch_env+=(\"HPC_COMPOSE_SERVICE_NODELIST=$service_nodelist\")\n");
@@ -1928,14 +2107,27 @@ fn render_service(out: &mut String, service: &RuntimeService, dependents: &[Stri
         ));
         out.push_str("  launch_env+=(\"${service_env[@]}\")\n");
     }
-    out.push_str("  if (( ${#launch_env[@]} == 0 )); then\n");
-    out.push_str("    \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >\"$logfile\" 2>&1 &\n");
-    out.push_str("  else\n");
-    out.push_str("    env \"${launch_env[@]}\" \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >\"$logfile\" 2>&1 &\n");
+    out.push_str("  local pid\n");
+    out.push_str("  local prologue_status=0\n");
+    out.push_str("  if [[ -n \"$host_prologue_script\" ]]; then\n");
+    out.push_str("    run_host_hook \"$host_prologue_script\" \"$service_name\" prologue \"$logfile\" \"\" || prologue_status=$?\n");
     out.push_str("  fi\n");
-    out.push_str("  local pid=$!\n");
+    out.push_str("  if (( prologue_status != 0 )); then\n");
+    out.push_str(
+        "    echo \"Service '$service_name' prologue exited with status $prologue_status\" >&2\n",
+    );
+    out.push_str("    host_epilogue_script=\"\"\n");
+    out.push_str("    ( exit \"$prologue_status\" ) &\n");
+    out.push_str("    pid=$!\n");
+    out.push_str("  elif (( ${#launch_env[@]} == 0 )); then\n");
+    out.push_str("    \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >>\"$logfile\" 2>&1 &\n");
+    out.push_str("    pid=$!\n");
+    out.push_str("  else\n");
+    out.push_str("    env \"${launch_env[@]}\" \"${srun_cmd[@]}\" \"${service_cmd[@]}\" >>\"$logfile\" 2>&1 &\n");
+    out.push_str("    pid=$!\n");
+    out.push_str("  fi\n");
     out.push_str(&format!(
-        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {} {} {} {} {} {} {} {} {} \"$host_epilogue_script\"\n",
         shell_quote(&service.name),
         shell_quote(&step_name),
         shell_quote(failure_policy_mode_label(service.failure_policy.mode)),
@@ -2099,10 +2291,14 @@ pub fn build_srun_command(service: &RuntimeService) -> Vec<String> {
         "HPC_COMPOSE_NODE_COUNT",
         "HPC_COMPOSE_NODELIST",
         "HPC_COMPOSE_NODELIST_FILE",
+        "HPC_COMPOSE_HOOK_PHASE",
         "HPC_COMPOSE_SERVICE_PRIMARY_NODE",
         "HPC_COMPOSE_SERVICE_NODE_COUNT",
         "HPC_COMPOSE_SERVICE_NODELIST",
         "HPC_COMPOSE_SERVICE_NODELIST_FILE",
+        "HPC_COMPOSE_SERVICE_NAME",
+        "HPC_COMPOSE_SERVICE_LOG",
+        "HPC_COMPOSE_SERVICE_EXIT_CODE",
         "HPC_COMPOSE_RESUME_DIR",
         "HPC_COMPOSE_ATTEMPT",
         "HPC_COMPOSE_IS_RESUME",
@@ -2237,6 +2433,97 @@ fn flag(value: bool) -> &'static str {
     if value { "1" } else { "0" }
 }
 
+fn hook_file_name(service_id: &str, suffix: &str) -> String {
+    format!("{service_id}.{suffix}.sh")
+}
+
+fn push_hook_file(out: &mut String, target_expr: &str, delimiter_base: &str, body: &str) {
+    let delimiter = heredoc_delimiter(delimiter_base, body);
+    out.push_str(&format!("  cat > {target_expr} <<'{delimiter}'\n"));
+    out.push_str(body);
+    if !body.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&delimiter);
+    out.push('\n');
+}
+
+fn heredoc_delimiter(base: &str, body: &str) -> String {
+    let mut delimiter = base.to_string();
+    let mut counter = 0;
+    while body.lines().any(|line| line == delimiter) {
+        counter += 1;
+        delimiter = format!("{base}_{counter}");
+    }
+    delimiter
+}
+
+fn host_hook_file_body(script: &str) -> String {
+    let mut body = String::from("#!/bin/bash\nset -euo pipefail\n");
+    body.push_str(script);
+    if !script.ends_with('\n') {
+        body.push('\n');
+    }
+    body
+}
+
+fn container_hook_file_body(script: &str) -> String {
+    let mut body = String::from("#!/bin/sh\nset -eu\n");
+    body.push_str(script);
+    if !script.ends_with('\n') {
+        body.push('\n');
+    }
+    body
+}
+
+fn container_wrapper_body(
+    service_name: &str,
+    container_log_path: &str,
+    prologue_script: Option<&str>,
+    epilogue_script: Option<&str>,
+) -> String {
+    let prologue_script = prologue_script.unwrap_or("");
+    let epilogue_script = epilogue_script.unwrap_or("");
+    format!(
+        r#"#!/bin/sh
+set -u
+export HPC_COMPOSE_SERVICE_NAME={}
+export HPC_COMPOSE_SERVICE_LOG={}
+if [ "$#" -eq 0 ]; then
+  echo "container hook wrapper for service '$HPC_COMPOSE_SERVICE_NAME' has no command to run" >&2
+  exit 127
+fi
+if [ -n {} ]; then
+  export HPC_COMPOSE_HOOK_PHASE=prologue
+  export HPC_COMPOSE_SERVICE_EXIT_CODE=
+  hook_status=0
+  /bin/sh {} || hook_status=$?
+  if [ "$hook_status" -ne 0 ]; then
+    exit "$hook_status"
+  fi
+fi
+service_status=0
+"$@" || service_status=$?
+if [ -n {} ]; then
+  export HPC_COMPOSE_HOOK_PHASE=epilogue
+  export HPC_COMPOSE_SERVICE_EXIT_CODE="$service_status"
+  hook_status=0
+  /bin/sh {} || hook_status=$?
+  if [ "$hook_status" -ne 0 ] && [ "$service_status" -eq 0 ]; then
+    exit "$hook_status"
+  fi
+fi
+exit "$service_status"
+"#,
+        shell_quote(service_name),
+        shell_quote(container_log_path),
+        shell_quote(prologue_script),
+        shell_quote(prologue_script),
+        shell_quote(epilogue_script),
+        shell_quote(epilogue_script),
+    )
+}
+
 fn failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
     match mode {
         ServiceFailureMode::FailJob => "fail_job",
@@ -2275,7 +2562,7 @@ mod tests {
     use crate::planner::ServicePlacement;
     use crate::spec::{
         DependencyCondition, MpiConfig, MpiType, ReadinessSpec, ResumeConfig, ServiceDependency,
-        ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
+        ServiceFailurePolicy, ServiceHookContext, ServiceHookSpec, ServiceSlurmConfig, SlurmConfig,
     };
 
     fn runtime_service() -> RuntimeService {
@@ -2612,6 +2899,36 @@ exit 1
             time_pos < strict_pos,
             "SBATCH header must precede shell commands"
         );
+    }
+
+    #[test]
+    fn render_emits_host_and_container_hook_lifecycle() {
+        let mut service = runtime_service();
+        service.name = "trainer".into();
+        service.slurm.prologue = Some(ServiceHookSpec {
+            context: ServiceHookContext::Host,
+            script: "echo host-prologue \"$HPC_COMPOSE_SERVICE_NAME\"".into(),
+        });
+        service.slurm.epilogue = Some(ServiceHookSpec {
+            context: ServiceHookContext::Container,
+            script: "echo container-epilogue \"$HPC_COMPOSE_SERVICE_EXIT_CODE\"".into(),
+        });
+        let plan = RuntimePlan {
+            name: "hooks".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("HOOKS_DIR=\"$JOB_TMP/hooks\""));
+        assert!(script.contains("trainer.host-prologue.sh"));
+        assert!(script.contains("trainer.container-epilogue.sh"));
+        assert!(script.contains("trainer.container-wrapper.sh"));
+        assert!(script.contains("run_host_hook \"$host_prologue_script\""));
+        assert!(script.contains("service_cmd=(\"/bin/sh\" \"$container_wrapper\""));
+        assert!(script.contains("HPC_COMPOSE_SERVICE_LOG=/hpc-compose/job/logs/trainer.log"));
+        assert!(script.contains(">>\"$logfile\" 2>&1 &"));
     }
 
     #[test]
@@ -3462,6 +3779,60 @@ exit 1
                 .expect("timestamps")
                 .iter()
                 .all(|value| value.as_u64().is_some())
+        );
+    }
+
+    #[test]
+    fn rendered_script_runs_host_hooks_on_each_restart_attempt() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        write_fake_runtime_srun_with_dependency_restart(tmpdir.path());
+        let service = RuntimeService {
+            name: "api".into(),
+            runtime_image: PathBuf::from("/shared/cache/api.sqsh"),
+            execution: ExecutionSpec::Shell("echo api".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            failure_policy: ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 1,
+                backoff_seconds: 1,
+                window_seconds: 60,
+                max_restarts_in_window: 1,
+            },
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig {
+                prologue: Some(ServiceHookSpec {
+                    context: ServiceHookContext::Host,
+                    script: "printf 'prologue:%s\\n' \"$HPC_COMPOSE_SERVICE_NAME\" >> \"$SLURM_SUBMIT_DIR/hooks.log\"".into(),
+                }),
+                epilogue: Some(ServiceHookSpec {
+                    context: ServiceHookContext::Host,
+                    script: "printf 'epilogue:%s\\n' \"$HPC_COMPOSE_SERVICE_EXIT_CODE\" >> \"$SLURM_SUBMIT_DIR/hooks.log\"".into(),
+                }),
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service],
+        };
+        let script = render_script(&plan).expect("script");
+        let script_path = tmpdir.path().join("hooks-restart.sbatch");
+        write_executable(&script_path, &script);
+
+        run_rendered_script(tmpdir.path(), &script_path, 0);
+
+        let hooks = fs::read_to_string(tmpdir.path().join("hooks.log")).expect("hooks log");
+        assert_eq!(
+            hooks.lines().collect::<Vec<_>>(),
+            vec!["prologue:api", "epilogue:41", "prologue:api", "epilogue:0"]
         );
     }
 

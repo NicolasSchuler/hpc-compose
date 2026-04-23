@@ -15,6 +15,7 @@ These capabilities are modeled, validated, and intentionally supported by the pl
 | Service step fields | `nodes`, `placement`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, `mpi` |
 | Multi-node model | Single-node jobs, full-allocation distributed steps, and explicit node-index partitioning within one allocation |
 | Runtime orchestration | `depends_on`, readiness checks, service failure policies, primary-node helper placement, explicit co-location through `placement.share_with` |
+| Service hooks | Per-service `prologue` and `epilogue` shell hooks on the host supervisor or inside the container |
 | Container workflow | Remote images, local `.sqsh` images, `x-enroot.prepare`, shared cache handling |
 | Job tracking | Scheduler state via `squeue`/`sacct`, step stats via `sstat`, tracked logs, runtime state, metrics, artifacts, resume metadata |
 

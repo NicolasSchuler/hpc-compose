@@ -474,6 +474,33 @@ These fields live under `services.<name>.x-slurm`.
 | `extra_srun_args` | list of strings | omitted | Appended directly to the service's `srun` command. |
 | `mpi` | mapping | omitted | Adds first-class MPI launch metadata and `srun --mpi=<type>`. |
 | `failure_policy` | mapping | omitted | Per-service failure handling (`fail_job`, `ignore`, `restart_on_failure`). |
+| `prologue` | string or mapping | omitted | Per-service shell hook run before each launch attempt. String shorthand runs on the host. |
+| `epilogue` | string or mapping | omitted | Per-service shell hook run after each service exit attempt. String shorthand runs on the host. |
+
+### `services.<name>.x-slurm.prologue` / `epilogue`
+
+```yaml
+services:
+  trainer:
+    image: trainer:latest
+    command: python train.py
+    x-slurm:
+      prologue: |
+        module load cuda/12.1
+        nvidia-smi
+      epilogue:
+        context: container
+        script: |
+          tar czf /shared/logs-${SLURM_JOB_ID}.tar.gz /hpc-compose/job/logs
+```
+
+- Shape: either a block string, or a mapping with `script` and optional `context`.
+- `context`: `host` (default) or `container`.
+- Hook scripts are emitted as trusted shell and are not Compose-interpolated, so runtime variables such as `${SLURM_JOB_ID}` are preserved.
+- Hooks run once per service launch attempt, including `restart_on_failure` retries.
+- Host hooks run in the generated batch supervisor on the allocation's primary execution context. Container hooks wrap the service command inside the container and can use `/hpc-compose/job`.
+- Hook stdout/stderr is written to the service log.
+- Container hooks require an explicit `command` or `entrypoint`; image-default services cannot be wrapped.
 
 ### `services.<name>.x-slurm.placement`
 

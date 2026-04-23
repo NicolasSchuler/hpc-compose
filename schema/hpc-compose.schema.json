@@ -292,8 +292,33 @@
         "time_limit": { "type": "string" },
         "extra_srun_args": { "$ref": "#/$defs/stringList" },
         "mpi": { "$ref": "#/$defs/mpi" },
-        "failure_policy": { "$ref": "#/$defs/failurePolicy" }
+        "failure_policy": { "$ref": "#/$defs/failurePolicy" },
+        "prologue": { "$ref": "#/$defs/serviceHook" },
+        "epilogue": { "$ref": "#/$defs/serviceHook" }
       }
+    },
+    "serviceHook": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["script"],
+          "properties": {
+            "context": {
+              "type": "string",
+              "enum": ["host", "container"]
+            },
+            "script": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
     },
     "servicePlacement": {
       "type": "object",

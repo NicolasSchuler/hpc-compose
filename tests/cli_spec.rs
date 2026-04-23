@@ -243,6 +243,97 @@ services:
 }
 
 #[test]
+fn service_hooks_are_exposed_in_machine_readable_outputs_and_render() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "hooks.yaml",
+        &format!(
+            r#"
+name: hooks-json
+x-slurm:
+  cache_dir: "{}"
+services:
+  trainer:
+    image: debian:bookworm-slim
+    command: /bin/true
+    x-slurm:
+      prologue: |
+        module load cuda/12.1
+      epilogue:
+        context: container
+        script: |
+          echo "job=${{SLURM_JOB_ID}}"
+"#,
+            cache_root.path().display()
+        ),
+    );
+
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&validate);
+
+    let config = run_cli(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&config);
+    let config_value: Value = serde_json::from_str(&stdout_text(&config)).expect("config json");
+    assert_eq!(
+        config_value["services"]["trainer"]["x-slurm"]["prologue"]["context"],
+        Value::from("host")
+    );
+    assert!(
+        config_value["services"]["trainer"]["x-slurm"]["epilogue"]["script"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("${SLURM_JOB_ID}")
+    );
+
+    let inspect = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&inspect);
+    let inspect_value: Value = serde_json::from_str(&stdout_text(&inspect)).expect("inspect json");
+    assert_eq!(
+        inspect_value["ordered_services"][0]["slurm"]["epilogue"]["context"],
+        Value::from("container")
+    );
+
+    let render = run_cli(
+        tmpdir.path(),
+        &[
+            "render",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&render);
+    let render_value: Value = serde_json::from_str(&stdout_text(&render)).expect("render json");
+    let script = render_value["script"].as_str().unwrap_or_default();
+    assert!(script.contains("trainer.host-prologue.sh"));
+    assert!(script.contains("trainer.container-wrapper.sh"));
+}
+
+#[test]
 fn validate_rejects_dependency_on_ignore_service() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_compose(

@@ -21,6 +21,7 @@ use validation::{
     parse_duration_seconds, parse_healthcheck_argv, parse_http_probe, parse_nc_probe,
     validate_artifact_bundle_name, validate_artifact_path, validate_positive_u32,
     validate_resume_path, validate_sbatch_safe_string, validate_sbatch_safe_strings,
+    validate_shell_hook_script,
 };
 
 /// Top-level compose file accepted by `hpc-compose`.
@@ -242,6 +243,66 @@ pub struct ServiceSlurmConfig {
     pub mpi: Option<MpiConfig>,
     #[serde(default)]
     pub failure_policy: Option<ServiceFailurePolicySpec>,
+    #[serde(default)]
+    pub prologue: Option<ServiceHookSpec>,
+    #[serde(default)]
+    pub epilogue: Option<ServiceHookSpec>,
+}
+
+/// Where a per-service hook runs.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceHookContext {
+    /// Run the hook in the generated batch-script supervisor on the host.
+    #[default]
+    Host,
+    /// Run the hook inside the service container.
+    Container,
+}
+
+/// Per-service prologue or epilogue hook.
+///
+/// YAML accepts either a string shorthand, which defaults to host execution, or
+/// an object with explicit `context` and `script` fields.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceHookSpec {
+    /// Execution context for this hook.
+    pub context: ServiceHookContext,
+    /// Shell script body to run for this hook.
+    pub script: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawServiceHookSpec {
+    Script(String),
+    Object(RawServiceHookObject),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServiceHookObject {
+    #[serde(default)]
+    context: ServiceHookContext,
+    script: String,
+}
+
+impl<'de> Deserialize<'de> for ServiceHookSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match RawServiceHookSpec::deserialize(deserializer)? {
+            RawServiceHookSpec::Script(script) => Ok(Self {
+                context: ServiceHookContext::Host,
+                script,
+            }),
+            RawServiceHookSpec::Object(raw) => Ok(Self {
+                context: raw.context,
+                script: raw.script,
+            }),
+        }
+    }
 }
 
 /// First-class service placement selector inside one Slurm allocation.
@@ -522,6 +583,10 @@ pub struct EffectiveServiceSlurmConfig {
     pub extra_srun_args: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mpi: Option<MpiConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prologue: Option<ServiceHookSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epilogue: Option<ServiceHookSpec>,
     pub failure_policy: EffectiveFailurePolicyConfig,
 }
 
@@ -848,6 +913,8 @@ impl ComposeSpec {
                         time_limit: service.slurm.time_limit.clone(),
                         extra_srun_args: service.slurm.extra_srun_args.clone(),
                         mpi: service.slurm.mpi.clone(),
+                        prologue: service.slurm.prologue.clone(),
+                        epilogue: service.slurm.epilogue.clone(),
                         failure_policy: EffectiveFailurePolicyConfig::from_policy(
                             &normalized_policy,
                         ),
@@ -1408,7 +1475,25 @@ impl ServiceSlurmConfig {
                 "service '{service_name}' sets both x-slurm.mpi and x-slurm.extra_srun_args with --mpi; use one MPI source"
             );
         }
+        if let Some(prologue) = &self.prologue {
+            prologue.validate(&format!("service '{service_name}' x-slurm.prologue"))?;
+        }
+        if let Some(epilogue) = &self.epilogue {
+            epilogue.validate(&format!("service '{service_name}' x-slurm.epilogue"))?;
+        }
         Ok(())
+    }
+
+    /// Returns true when either service hook requests container execution.
+    #[must_use]
+    pub fn has_container_hook(&self) -> bool {
+        self.prologue
+            .as_ref()
+            .is_some_and(ServiceHookSpec::is_container)
+            || self
+                .epilogue
+                .as_ref()
+                .is_some_and(ServiceHookSpec::is_container)
     }
 
     /// Returns the validated per-service failure policy with defaults resolved.
@@ -1489,6 +1574,24 @@ impl ServiceSlurmConfig {
         interpolate_optional_string(&mut self.time_limit, vars)?;
         interpolate_vec_strings(&mut self.extra_srun_args, vars)?;
         Ok(())
+    }
+}
+
+impl ServiceHookSpec {
+    fn validate(&self, field: &str) -> Result<()> {
+        validate_shell_hook_script(&self.script, field)
+    }
+
+    /// Returns true when this hook runs inside the service container.
+    #[must_use]
+    pub fn is_container(&self) -> bool {
+        self.context == ServiceHookContext::Container
+    }
+
+    /// Returns true when this hook runs in the batch-script supervisor.
+    #[must_use]
+    pub fn is_host(&self) -> bool {
+        self.context == ServiceHookContext::Host
     }
 }
 
@@ -1876,6 +1979,74 @@ services:
         );
         let err = ComposeSpec::load(&path).expect_err("should fail");
         assert!(err.to_string().contains("unsupported key 'mystery'"));
+    }
+
+    #[test]
+    fn service_hooks_accept_shorthand_and_explicit_context() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  trainer:
+    image: trainer:latest
+    command: python train.py
+    x-slurm:
+      prologue: |
+        module load cuda/12.1
+        nvidia-smi
+      epilogue:
+        context: container
+        script: |
+          tar czf /shared/logs-${SLURM_JOB_ID}.tar.gz /hpc-compose/job/logs
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load spec");
+        let service = spec.services.get("trainer").expect("trainer");
+        let prologue = service.slurm.prologue.as_ref().expect("prologue");
+        assert_eq!(prologue.context, ServiceHookContext::Host);
+        assert!(prologue.script.contains("module load cuda/12.1"));
+        let epilogue = service.slurm.epilogue.as_ref().expect("epilogue");
+        assert_eq!(epilogue.context, ServiceHookContext::Container);
+        assert!(epilogue.script.contains("${SLURM_JOB_ID}"));
+    }
+
+    #[test]
+    fn service_hooks_reject_empty_scripts_and_unknown_fields() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let empty = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      prologue: ""
+"#,
+        );
+        let err = ComposeSpec::load(&empty).expect_err("empty hook should fail");
+        assert!(err.to_string().contains("x-slurm.prologue"));
+        assert!(err.to_string().contains("must not be empty"));
+
+        let unknown = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      epilogue:
+        script: echo done
+        where: host
+"#,
+        );
+        let err = ComposeSpec::load(&unknown).expect_err("unknown hook field should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to deserialize spec") || message.contains("unknown field"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

@@ -46,6 +46,16 @@ pub(super) fn validate_sbatch_safe_strings<'a>(
     Ok(())
 }
 
+pub(super) fn validate_shell_hook_script(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{field}.script must not be empty");
+    }
+    if value.contains('\0') {
+        bail!("{field}.script must not contain null bytes");
+    }
+    Ok(())
+}
+
 pub(super) fn parse_healthcheck_argv(items: &[String]) -> Result<Vec<String>> {
     if items.is_empty() {
         bail!("healthcheck.test must not be empty");
