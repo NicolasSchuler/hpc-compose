@@ -1,0 +1,29 @@
+name: multi-node-horovod
+
+x-slurm:
+  job_name: multi-node-horovod
+  time: "04:00:00"
+  nodes: 2
+  gpus_per_node: 4
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  trainer:
+    image: horovod/horovod:latest
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "rank=$$SLURM_PROCID local_rank=$$SLURM_LOCALID world=$$SLURM_NTASKS"
+        python train_horovod.py
+    readiness:
+      type: sleep
+      seconds: 5
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      mpi:
+        type: pmix
+        profile: openmpi
+        expected_ranks: 8

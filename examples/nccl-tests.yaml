@@ -1,0 +1,36 @@
+name: nccl-tests
+
+x-slurm:
+  job_name: nccl-tests
+  time: "00:30:00"
+  nodes: 2
+  gpus_per_node: 4
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  all-reduce:
+    image: nvcr.io/nvidia/pytorch:24.08-py3
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "rank=$$SLURM_PROCID local_rank=$$SLURM_LOCALID world=$$SLURM_NTASKS"
+        if command -v all_reduce_perf >/dev/null 2>&1; then
+          all_reduce_perf -b 8 -e 4G -f 2 -g 1
+        elif [ -x /workspace/nccl-tests/build/all_reduce_perf ]; then
+          /workspace/nccl-tests/build/all_reduce_perf -b 8 -e 4G -f 2 -g 1
+        else
+          echo "all_reduce_perf not found; use an image with nccl-tests installed" >&2
+          exit 127
+        fi
+    readiness:
+      type: sleep
+      seconds: 2
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      mpi:
+        type: pmix
+        profile: openmpi
+        expected_ranks: 8

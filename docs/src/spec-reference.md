@@ -2,6 +2,22 @@
 
 This page describes the Compose subset that `hpc-compose` accepts today. Unknown or unsupported fields are rejected unless this page explicitly says otherwise.
 
+## How To Use This Reference
+
+This page is intentionally complete. If you are new, start with [Quickstart](quickstart.md), [Examples](examples.md), and [Runtime Backends](runtime-backends.md), then use the table below to jump into the field group you need.
+
+| Need | Section |
+| --- | --- |
+| Overall YAML shape | [Top-level shape](#top-level-shape) and [Top-level fields](#top-level-fields) |
+| Runtime backend choice | [`runtime`](#runtime) and [Runtime Backends](runtime-backends.md) |
+| Slurm allocation settings | [`x-slurm`](#x-slurm) |
+| Service command, image, env, and mounts | [Service fields](#service-fields), [Image rules](#image-rules), [`command` and `entrypoint`](#command-and-entrypoint), [`environment`](#environment), [`volumes`](#volumes) |
+| Startup ordering | [`depends_on`](#depends_on), [`readiness`](#readiness), and [`healthcheck`](#healthcheck) |
+| Multi-node placement and MPI | [Multi-node placement rules](#multi-node-placement-rules), [`services.<name>.x-slurm.placement`](#servicesnamex-slurmplacement), and [`services.<name>.x-slurm.mpi`](#servicesnamex-slurmmpi) |
+| Prepared images | [`x-runtime.prepare` and `x-enroot.prepare`](#x-runtimeprepare-and-x-enrootprepare) |
+| Metrics, artifacts, and resume | [`x-slurm.metrics`](#x-slurmmetrics), [`x-slurm.artifacts`](#x-slurmartifacts), and [`x-slurm.resume`](#x-slurmresume) |
+| Unsupported Compose features | [Unsupported Compose keys](#unsupported-compose-keys) |
+
 ## Top-level shape
 
 ```yaml
@@ -29,7 +45,50 @@ services:
 | `version` | string | omitted | Accepted for Compose compatibility. Ignored by the planner. |
 | `runtime` | mapping | `backend: pyxis` | Selects the service runtime backend and GPU passthrough policy. |
 | `services` | mapping | required | Must contain at least one service. |
+| `x-env` | mapping | omitted | Structured host-side module, Spack view, and environment setup shared by all services. |
 | `x-slurm` | mapping | omitted | Top-level Slurm settings and shared runtime defaults. |
+
+## `x-env`
+
+`x-env` is structured host-side software setup. It is available at the top level and under `services.<name>`.
+
+```yaml
+x-env:
+  modules:
+    - cuda/12.4
+    - openmpi/5
+  spack:
+    view: /shared/spack/views/ml
+  env:
+    HDF5_USE_FILE_LOCKING: "FALSE"
+
+services:
+  app:
+    image: python:3.11-slim
+    x-env:
+      modules:
+        purge: false
+        load:
+          - netcdf/4.9
+      env:
+        OMP_NUM_THREADS: "8"
+```
+
+Supported forms:
+
+- `modules: [name, ...]`
+- `modules: { purge: bool, load: [name, ...] }`
+- `spack: { view: /path/to/view }`
+- `env: { KEY: VALUE }`
+
+Rules:
+
+- Top-level `x-env` renders before `x-slurm.setup`.
+- Service-level `x-env` renders immediately before that service's `srun`.
+- `env` entries are exported on the host and forwarded into Pyxis containers.
+- Service-level `x-env.env` overrides top-level `x-env.env` when the same variable is set.
+- `spack.view` prepends `bin`, `lib`, `lib64`, and Python site-package paths only when those directories exist.
+- Modules and Spack views are host-side setup. Container filesystem visibility still requires explicit `volumes`, `x-slurm.mpi.host_mpi.bind_paths`, or other site-specific binds.
 
 ## Settings-aware command table
 
@@ -157,7 +216,7 @@ Rules:
 - Default: `$HOME/.cache/hpc-compose`
 - Notes:
   - Relative paths and environment variables are resolved against the compose file directory.
-  - Paths under `/tmp`, `/var/tmp`, `/private/tmp`, and `/dev/shm` are rejected.
+  - Paths under `/tmp`, `/var/tmp`, `/private/tmp`, and `/dev/shm` are accepted by parsing and planning, but `preflight` reports them as unsafe because they are not valid shared-cache locations for login-node prepare plus compute-node reuse.
   - The path must be visible from both the login node and the compute nodes.
 
 ## `runtime`
@@ -240,8 +299,9 @@ x-slurm:
   - Supported collectors:
     - `gpu` samples device and process telemetry through `nvidia-smi`
     - `slurm` samples job-step CPU and memory data through `sstat`
-  - In multi-node v1, `gpu` sampling remains primary-node-only; `slurm` sampling still observes the full distributed step through `sstat`.
+  - In multi-node jobs, `gpu` sampling launches one best-effort sampler task per allocated node and writes node metadata into GPU rows; legacy rows without `node` remain readable as primary-node samples.
   - Sampler files are written under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` on the host and are also visible inside containers at `/hpc-compose/job/metrics`.
+  - Diagnostics are written under `metrics/diagnostics/` when available, including `nvidia-smi topo -m`, `nvidia-smi -q`, selected fabric/GPU environment variables, and best-effort `ibstat`, `ibv_devinfo`, `ucx_info -v`, and `fi_info` output.
   - Collector failures are best-effort and do not fail the batch job.
 
 ### `x-slurm.artifacts`
@@ -312,9 +372,26 @@ Every service receives:
 
 The allocation-wide data is also written under `/hpc-compose/job/allocation/primary_node` and `/hpc-compose/job/allocation/nodes.txt`. Service-scoped node lists are written under `/hpc-compose/job/allocation/service-nodelists/`.
 
+Multi-node services also receive distributed launch helpers:
+
+- `HPC_COMPOSE_DIST_MASTER_ADDR`
+- `HPC_COMPOSE_DIST_MASTER_PORT`
+- `HPC_COMPOSE_DIST_RDZV_ENDPOINT`
+- `HPC_COMPOSE_DIST_NNODES`
+- `HPC_COMPOSE_DIST_NODE_RANK`
+- `HPC_COMPOSE_DIST_LOCAL_RANK`
+- `HPC_COMPOSE_DIST_GLOBAL_RANK`
+- `HPC_COMPOSE_DIST_NPROC_PER_NODE`
+- `HPC_COMPOSE_DIST_WORLD_SIZE`
+- `HPC_COMPOSE_DIST_HOSTFILE`
+
+`HPC_COMPOSE_DIST_NPROC_PER_NODE` is derived from a service environment override, GPU requests, `ntasks_per_node`, then `1`. The distributed hostfile is written under `/hpc-compose/job/allocation/distributed-hostfiles/`. When a discovered `.hpc-compose/cluster.toml` contains `[distributed.env]`, those profile variables are injected only for multi-node services; explicit service `environment` values win on name conflicts and are still the durable config source.
+
 Services that configure `services.<name>.x-slurm.mpi` also receive:
 
 - `HPC_COMPOSE_MPI_TYPE`
+- `HPC_COMPOSE_MPI_PROFILE` when `x-slurm.mpi.profile` is set
+- `HPC_COMPOSE_MPI_IMPLEMENTATION` when `x-slurm.mpi.implementation` is set or implied by `x-slurm.mpi.profile`
 - `HPC_COMPOSE_MPI_HOSTFILE`
 
 The MPI hostfile is written under `/hpc-compose/job/allocation/mpi-hostfiles/` and contains the service's effective node list. When `ntasks_per_node` is known, each host line includes `slots=<ntasks_per_node>`. For a single-node service with `ntasks` but no `ntasks_per_node`, the hostfile uses `slots=<ntasks>`. Otherwise it emits one node per line without slots.
@@ -338,6 +415,7 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 | `depends_on` | list or mapping | omitted | Dependency list with `service_started` or `service_healthy` conditions. |
 | `readiness` | mapping | omitted | Post-launch readiness gate. |
 | `healthcheck` | mapping | omitted | Compose-compatible sugar for a subset of `readiness`. Mutually exclusive with `readiness`. |
+| `x-env` | mapping | omitted | Structured host-side module, Spack view, and environment setup for this service. |
 | `x-slurm` | mapping | omitted | Per-service Slurm overrides. |
 | `x-runtime` | mapping | omitted | Backend-neutral image preparation rules. |
 | `x-enroot` | mapping | omitted | Pyxis/Enroot preparation compatibility alias. |
@@ -632,6 +710,7 @@ services:
       ntasks_per_node: 4
       mpi:
         type: pmix_v4
+        profile: openmpi
         implementation: openmpi
         launcher: srun
         expected_ranks: 8
@@ -647,14 +726,24 @@ services:
 - `type` is an exact `srun --mpi=<type>` plugin token. Common values include `pmix`, `pmix_v4`, `pmi2`, `pmi1`, and `openmpi`; use `srun --mpi=list` or `hpc-compose doctor --cluster-report` on the target cluster to discover site-specific values.
 - Notes:
   - Rendered as `--mpi=<type>` on the service's `srun` command.
+  - `profile` is optional compatibility metadata used for validation, cluster-profile diagnostics, and `doctor --mpi-smoke` output. Supported values are `openmpi`, `mpich`, and `intel_mpi`.
+  - `profile` does not auto-select or rewrite `type`; use the exact token that your cluster reports through `srun --mpi=list`.
   - `launcher` defaults to `srun`; v1 rejects other launchers.
   - `implementation` is optional metadata for diagnostics. Supported values are `openmpi`, `mpich`, `intel_mpi`, `mvapich2`, `cray_mpi`, `hpe_mpi`, and `unknown`.
+  - When both `profile` and `implementation` are set, they must describe the same MPI family.
   - `expected_ranks`, when set, must match the resolved Slurm task geometry.
   - `host_mpi.bind_paths` uses `host_path:container_path[:ro|rw]` syntax, is validated like service volumes, and is automatically mounted into the service.
   - `host_mpi.env` is injected into the service environment after normal service environment entries.
   - Cannot be combined with raw `--mpi...` entries in `extra_srun_args`.
   - MPI services receive `HPC_COMPOSE_MPI_TYPE` and `HPC_COMPOSE_MPI_HOSTFILE`.
+  - MPI services also receive `HPC_COMPOSE_MPI_PROFILE` when `profile` is set and `HPC_COMPOSE_MPI_IMPLEMENTATION` when `implementation` is set or implied by `profile`.
   - `hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer` renders a smoke probe for the service; add `--submit` to run it through Slurm. The smoke plan keeps allocation and MPI launch settings, but strips application workflow blocks such as setup, scratch staging, resume metadata, artifacts, and burst-buffer directives.
+
+Profile-specific compatibility checks are intentionally conservative:
+
+- `profile: openmpi` expects a PMIx-capable `type` such as `pmix` or `pmix_v*`, with `pmi2` accepted as a fallback.
+- `profile: mpich` expects `pmi2` or a PMIx-capable setup.
+- `profile: intel_mpi` expects `pmi2`; preflight and doctor warn when no `I_MPI_PMI_LIBRARY` or cluster-profile PMI2 library is visible.
 
 ### `services.<name>.x-slurm.failure_policy`
 

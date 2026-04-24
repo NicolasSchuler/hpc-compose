@@ -1,6 +1,6 @@
 # Migrating from Docker Compose
 
-This guide helps you convert an existing `docker-compose.yaml` into an `hpc-compose` spec for Slurm clusters with Enroot and Pyxis.
+This guide helps you convert an existing `docker-compose.yaml` into an `hpc-compose` spec for Slurm clusters using Pyxis/Enroot, Apptainer, Singularity, or host runtimes.
 
 ## At a glance
 

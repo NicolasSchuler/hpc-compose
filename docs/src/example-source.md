@@ -6,6 +6,8 @@ The repository examples default `x-slurm.cache_dir` to `/cluster/shared/hpc-comp
 
 ```bash
 export CACHE_DIR=/cluster/shared/hpc-compose-cache
+mkdir -p "$CACHE_DIR"
+test -w "$CACHE_DIR"
 ```
 
 ## App Redis Worker
@@ -110,6 +112,86 @@ Source: `examples/multi-node-torchrun.yaml`
 
 ```yaml
 {{#include ../../examples/multi-node-torchrun.yaml}}
+```
+
+## Multi Node Deepspeed
+
+Source: `examples/multi-node-deepspeed.yaml`
+
+```yaml
+{{#include ../../examples/multi-node-deepspeed.yaml}}
+```
+
+## Multi Node Accelerate
+
+Source: `examples/multi-node-accelerate.yaml`
+
+```yaml
+{{#include ../../examples/multi-node-accelerate.yaml}}
+```
+
+## Multi Node Horovod
+
+Source: `examples/multi-node-horovod.yaml`
+
+```yaml
+{{#include ../../examples/multi-node-horovod.yaml}}
+```
+
+## Multi Node Jax
+
+Source: `examples/multi-node-jax.yaml`
+
+```yaml
+{{#include ../../examples/multi-node-jax.yaml}}
+```
+
+## Nccl Tests
+
+Source: `examples/nccl-tests.yaml`
+
+```yaml
+{{#include ../../examples/nccl-tests.yaml}}
+```
+
+## Ray Symmetric
+
+Source: `examples/ray-symmetric.yaml`
+
+```yaml
+{{#include ../../examples/ray-symmetric.yaml}}
+```
+
+## Ray Head Workers
+
+Source: `examples/ray-head-workers.yaml`
+
+```yaml
+{{#include ../../examples/ray-head-workers.yaml}}
+```
+
+## Dask Scheduler Workers
+
+Source: `examples/dask-scheduler-workers.yaml`
+
+```yaml
+{{#include ../../examples/dask-scheduler-workers.yaml}}
+```
+
+## Spark Standalone
+
+Source: `examples/spark-standalone.yaml`
+
+```yaml
+{{#include ../../examples/spark-standalone.yaml}}
+```
+
+## Flux Nested
+
+Source: `examples/flux-nested.yaml`
+
+```yaml
+{{#include ../../examples/flux-nested.yaml}}
 ```
 
 ## Multi Stage Pipeline

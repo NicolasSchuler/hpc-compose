@@ -19,9 +19,21 @@ pub struct StatsSnapshot {
     pub notes: Vec<String>,
     pub sampler: Option<SamplerSnapshot>,
     pub steps: Vec<StepStats>,
+    pub first_failure: Option<FirstFailure>,
     pub attempt: Option<u32>,
     pub is_resume: Option<bool>,
     pub resume_dir: Option<PathBuf>,
+}
+
+/// Best-effort first service failure observed by the runtime supervisor.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FirstFailure {
+    pub service: String,
+    pub exit_code: i32,
+    pub at_unix: Option<u64>,
+    pub node: Option<String>,
+    pub rank: Option<String>,
 }
 
 /// One Slurm step metrics row as presented by `hpc-compose stats`.
@@ -68,14 +80,31 @@ pub struct CollectorStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct GpuSnapshot {
     pub sampled_at: String,
+    pub nodes: Vec<GpuNodeSummary>,
     pub gpus: Vec<GpuDeviceSample>,
     pub processes: Vec<GpuProcessSample>,
+}
+
+/// Per-node GPU summary derived from the latest sampler rows.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct GpuNodeSummary {
+    pub node: Option<String>,
+    pub gpu_count: usize,
+    pub avg_utilization_gpu: Option<f64>,
+    pub memory_used_mib: Option<u64>,
+    pub memory_total_mib: Option<u64>,
 }
 
 /// One sampled GPU device record.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GpuDeviceSample {
+    pub node: Option<String>,
+    pub rank: Option<String>,
+    pub local_rank: Option<String>,
+    pub service: Option<String>,
+    pub collector: Option<String>,
     pub index: Option<String>,
     pub uuid: Option<String>,
     pub name: Option<String>,
@@ -92,6 +121,11 @@ pub struct GpuDeviceSample {
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GpuProcessSample {
+    pub node: Option<String>,
+    pub rank: Option<String>,
+    pub local_rank: Option<String>,
+    pub service: Option<String>,
+    pub collector: Option<String>,
     pub gpu_uuid: Option<String>,
     pub pid: Option<String>,
     pub process_name: Option<String>,
@@ -149,6 +183,16 @@ pub(super) struct SamplerMetaFile {
 #[derive(Debug, Deserialize)]
 pub(super) struct GpuDeviceSampleRow {
     pub(super) sampled_at: String,
+    #[serde(default)]
+    pub(super) node: Option<String>,
+    #[serde(default)]
+    pub(super) rank: Option<String>,
+    #[serde(default)]
+    pub(super) local_rank: Option<String>,
+    #[serde(default)]
+    pub(super) service: Option<String>,
+    #[serde(default)]
+    pub(super) collector: Option<String>,
     pub(super) index: Option<String>,
     pub(super) uuid: Option<String>,
     pub(super) name: Option<String>,
@@ -164,6 +208,16 @@ pub(super) struct GpuDeviceSampleRow {
 #[derive(Debug, Deserialize)]
 pub(super) struct GpuProcessSampleRow {
     pub(super) sampled_at: String,
+    #[serde(default)]
+    pub(super) node: Option<String>,
+    #[serde(default)]
+    pub(super) rank: Option<String>,
+    #[serde(default)]
+    pub(super) local_rank: Option<String>,
+    #[serde(default)]
+    pub(super) service: Option<String>,
+    #[serde(default)]
+    pub(super) collector: Option<String>,
     pub(super) gpu_uuid: Option<String>,
     pub(super) pid: Option<String>,
     pub(super) process_name: Option<String>,
@@ -311,6 +365,9 @@ pub fn build_stats_snapshot(
         notes,
         sampler,
         steps,
+        first_failure: runtime_state
+            .as_ref()
+            .and_then(first_failure_from_runtime_state),
         attempt: runtime_state.as_ref().and_then(|state| state.attempt),
         is_resume: runtime_state.as_ref().and_then(|state| state.is_resume),
         resume_dir: runtime_state
@@ -419,8 +476,10 @@ fn load_gpu_snapshot(metrics_dir: &Path) -> Result<Option<GpuSnapshot>> {
     };
     let processes =
         load_gpu_processes_for_timestamp(&metrics_dir.join("gpu_processes.jsonl"), &sampled_at)?;
+    let nodes = summarize_gpu_nodes(&devices);
     Ok(Some(GpuSnapshot {
         sampled_at,
+        nodes,
         gpus: devices,
         processes,
     }))
@@ -447,48 +506,15 @@ fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceS
         match latest_sampled_at.as_deref() {
             None => {
                 latest_sampled_at = Some(row.sampled_at.clone());
-                devices.push(GpuDeviceSample {
-                    index: row.index,
-                    uuid: row.uuid,
-                    name: row.name,
-                    utilization_gpu: row.utilization_gpu,
-                    utilization_memory: row.utilization_memory,
-                    memory_used_mib: row.memory_used_mib,
-                    memory_total_mib: row.memory_total_mib,
-                    temperature_c: row.temperature_c,
-                    power_draw_w: row.power_draw_w,
-                    power_limit_w: row.power_limit_w,
-                });
+                devices.push(gpu_device_from_row(row));
             }
             Some(current) if row.sampled_at.as_str() > current => {
                 latest_sampled_at = Some(row.sampled_at.clone());
                 devices.clear();
-                devices.push(GpuDeviceSample {
-                    index: row.index,
-                    uuid: row.uuid,
-                    name: row.name,
-                    utilization_gpu: row.utilization_gpu,
-                    utilization_memory: row.utilization_memory,
-                    memory_used_mib: row.memory_used_mib,
-                    memory_total_mib: row.memory_total_mib,
-                    temperature_c: row.temperature_c,
-                    power_draw_w: row.power_draw_w,
-                    power_limit_w: row.power_limit_w,
-                });
+                devices.push(gpu_device_from_row(row));
             }
             Some(current) if row.sampled_at == current => {
-                devices.push(GpuDeviceSample {
-                    index: row.index,
-                    uuid: row.uuid,
-                    name: row.name,
-                    utilization_gpu: row.utilization_gpu,
-                    utilization_memory: row.utilization_memory,
-                    memory_used_mib: row.memory_used_mib,
-                    memory_total_mib: row.memory_total_mib,
-                    temperature_c: row.temperature_c,
-                    power_draw_w: row.power_draw_w,
-                    power_limit_w: row.power_limit_w,
-                });
+                devices.push(gpu_device_from_row(row));
             }
             _ => {}
         }
@@ -498,6 +524,71 @@ fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceS
         Some(sampled_at) => Ok(Some((sampled_at, devices))),
         None => Ok(None),
     }
+}
+
+fn gpu_device_from_row(row: GpuDeviceSampleRow) -> GpuDeviceSample {
+    GpuDeviceSample {
+        node: row.node,
+        rank: row.rank,
+        local_rank: row.local_rank,
+        service: row.service,
+        collector: row.collector,
+        index: row.index,
+        uuid: row.uuid,
+        name: row.name,
+        utilization_gpu: row.utilization_gpu,
+        utilization_memory: row.utilization_memory,
+        memory_used_mib: row.memory_used_mib,
+        memory_total_mib: row.memory_total_mib,
+        temperature_c: row.temperature_c,
+        power_draw_w: row.power_draw_w,
+        power_limit_w: row.power_limit_w,
+    }
+}
+
+fn summarize_gpu_nodes(devices: &[GpuDeviceSample]) -> Vec<GpuNodeSummary> {
+    let mut grouped: BTreeMap<Option<String>, Vec<&GpuDeviceSample>> = BTreeMap::new();
+    for device in devices {
+        grouped.entry(device.node.clone()).or_default().push(device);
+    }
+    grouped
+        .into_iter()
+        .map(|(node, devices)| {
+            let gpu_count = devices.len();
+            let util_values = devices
+                .iter()
+                .filter_map(|device| parse_u64_stats(device.utilization_gpu.as_deref()))
+                .collect::<Vec<_>>();
+            let avg_utilization_gpu = (!util_values.is_empty())
+                .then(|| util_values.iter().sum::<u64>() as f64 / util_values.len() as f64);
+            let memory_used_mib = sum_optional_stats(
+                devices
+                    .iter()
+                    .map(|device| device.memory_used_mib.as_deref()),
+            );
+            let memory_total_mib = sum_optional_stats(
+                devices
+                    .iter()
+                    .map(|device| device.memory_total_mib.as_deref()),
+            );
+            GpuNodeSummary {
+                node,
+                gpu_count,
+                avg_utilization_gpu,
+                memory_used_mib,
+                memory_total_mib,
+            }
+        })
+        .collect()
+}
+
+fn parse_u64_stats(value: Option<&str>) -> Option<u64> {
+    value?.trim().parse::<u64>().ok()
+}
+
+fn sum_optional_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Option<u64> {
+    let parsed = values.filter_map(parse_u64_stats).collect::<Vec<_>>();
+    (!parsed.is_empty()).then(|| parsed.iter().sum())
 }
 
 fn load_gpu_processes_for_timestamp(
@@ -524,6 +615,11 @@ fn load_gpu_processes_for_timestamp(
             continue;
         }
         processes.push(GpuProcessSample {
+            node: row.node,
+            rank: row.rank,
+            local_rank: row.local_rank,
+            service: row.service,
+            collector: row.collector,
             gpu_uuid: row.gpu_uuid,
             pid: row.pid,
             process_name: row.process_name,
@@ -728,6 +824,25 @@ fn is_numbered_step(job_id: &str, step_id: &str) -> bool {
     !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
 }
 
+fn first_failure_from_runtime_state(
+    state: &super::runtime_state::ServiceRuntimeStateFile,
+) -> Option<FirstFailure> {
+    state
+        .services
+        .iter()
+        .filter_map(|service| {
+            let exit_code = service.first_failure_exit_code?;
+            Some(FirstFailure {
+                service: service.service_name.clone(),
+                exit_code,
+                at_unix: service.first_failure_at,
+                node: service.first_failure_node.clone(),
+                rank: service.first_failure_rank.clone(),
+            })
+        })
+        .min_by_key(|failure| failure.at_unix.unwrap_or(u64::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +904,11 @@ mod tests {
         let gpu = sampler.gpu.expect("gpu snapshot");
         assert_eq!(gpu.sampled_at, "2026-04-10T10:00:00Z");
         assert_eq!(gpu.gpus.len(), 2);
+        assert_eq!(gpu.gpus[0].node, None);
+        assert_eq!(gpu.nodes.len(), 1);
+        assert_eq!(gpu.nodes[0].node, None);
+        assert_eq!(gpu.nodes[0].gpu_count, 2);
+        assert_eq!(gpu.nodes[0].avg_utilization_gpu, Some(77.5));
         assert_eq!(gpu.processes.len(), 1);
         let slurm = sampler.slurm.expect("slurm snapshot");
         assert_eq!(slurm.sampled_at, "2026-04-10T10:00:00Z");
@@ -825,6 +945,18 @@ mod tests {
         let step = step_from_slurm_sample_row(row).expect("step");
         assert_eq!(step.gpu_count.as_deref(), Some("2"));
         assert_eq!(step.gpu_mem.as_deref(), Some("8192M"));
+
+        let device = gpu_device_from_row(
+            serde_json::from_str::<GpuDeviceSampleRow>(
+                r#"{"sampled_at":"2026-04-10T10:00:00Z","node":"node01","rank":"7","local_rank":"3","service":"trainer","collector":"nvidia-smi","index":"0","memory_used_mib":"1024","memory_total_mib":"8192"}"#,
+            )
+            .expect("gpu row"),
+        );
+        assert_eq!(device.node.as_deref(), Some("node01"));
+        assert_eq!(device.rank.as_deref(), Some("7"));
+        assert_eq!(device.local_rank.as_deref(), Some("3"));
+        assert_eq!(device.service.as_deref(), Some("trainer"));
+        assert_eq!(device.collector.as_deref(), Some("nvidia-smi"));
         assert!(
             step_from_slurm_sample_row(SlurmSampleRow {
                 sampled_at: "2026-04-10T10:00:00Z".into(),

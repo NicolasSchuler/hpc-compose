@@ -1,7 +1,7 @@
-name: multi-node-torchrun
+name: multi-node-deepspeed
 
 x-slurm:
-  job_name: multi-node-torchrun
+  job_name: multi-node-deepspeed
   time: "04:00:00"
   nodes: 2
   gpus_per_node: 4
@@ -17,12 +17,14 @@ services:
         echo "master=$$HPC_COMPOSE_DIST_MASTER_ADDR"
         echo "nodes=$$HPC_COMPOSE_SERVICE_NODELIST"
         echo "node_rank=$$HPC_COMPOSE_DIST_NODE_RANK"
-        torchrun \
-          --nnodes="$$HPC_COMPOSE_DIST_NNODES" \
-          --nproc-per-node="$$HPC_COMPOSE_DIST_NPROC_PER_NODE" \
-          --node-rank="$$HPC_COMPOSE_DIST_NODE_RANK" \
-          --rdzv-backend=c10d \
-          --rdzv-endpoint="$$HPC_COMPOSE_DIST_RDZV_ENDPOINT" \
+        deepspeed \
+          --no_ssh \
+          --hostfile "$$HPC_COMPOSE_DIST_HOSTFILE" \
+          --num_nodes "$$HPC_COMPOSE_DIST_NNODES" \
+          --num_gpus "$$HPC_COMPOSE_DIST_NPROC_PER_NODE" \
+          --node_rank "$$HPC_COMPOSE_DIST_NODE_RANK" \
+          --master_addr "$$HPC_COMPOSE_DIST_MASTER_ADDR" \
+          --master_port "$$HPC_COMPOSE_DIST_MASTER_PORT" \
           train.py
     readiness:
       type: sleep

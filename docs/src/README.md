@@ -2,82 +2,28 @@
 
 <div class="hpc-compose-hero">
   <img src="logo.png" alt="hpc-compose logo">
-  <p><code>hpc-compose</code> turns a Compose-like spec into one Slurm job for multi-service HPC and research ML workflows.</p>
+  <p><code>hpc-compose</code> turns a small Compose-like YAML file into one inspectable Slurm job for multi-service HPC and research ML workflows.</p>
   <div class="hpc-compose-links">
+    <a href="support-matrix.html">Support Matrix</a>
+    <a href="installation.html">Installation</a>
     <a href="quickstart.html">Quickstart</a>
     <a href="examples.html">Examples</a>
-    <a href="support-matrix.html">Support Matrix</a>
     <a href="task-guide.html">Task Guide</a>
-    <a href="cli-reference.html">CLI Reference</a>
-    <a href="execution-model.html">Execution Model</a>
+    <a href="runtime-backends.html">Runtime Backends</a>
     <a href="runbook.html">Runbook</a>
+    <a href="troubleshooting.html">Troubleshooting</a>
+    <a href="cli-reference.html">CLI Reference</a>
     <a href="spec-reference.html">Spec Reference</a>
-    <a href="supported-slurm-model.html">Supported Slurm Model</a>
-    <a href="running-compose-style-workflows-on-slurm.html">Why Compose on Slurm</a>
-    <a href="roadmap.html">Roadmap</a>
   </div>
 </div>
 
-It is for teams who want Docker-Compose-like ergonomics on Slurm without adding Kubernetes or a custom control plane.
+Use `hpc-compose` when you want Docker Compose-style authoring on Slurm without adding Kubernetes, a long-running scheduler, or custom cluster-side services.
 
 Start with the [Support Matrix](support-matrix.md) before planning a real runtime workflow. Linux is the maintained runtime target; macOS is intended for authoring, validation, rendering, and inspection.
 
-## Why This Exists
+## Safe First Path
 
-- Multi-service Slurm jobs are awkward to author and debug with plain `sbatch` scripts alone.
-- Docker Compose is familiar, but its networking and orchestration assumptions do not map cleanly to one Slurm allocation.
-- `hpc-compose` keeps the scope narrow so you can validate, inspect, render, and submit one generated job instead of introducing a cluster-side control plane.
-
-## Who It Is For
-
-- research engineers and ML practitioners running jobs on Slurm clusters
-- HPC platform or tooling owners who support those users
-- teams that want one inspectable batch job instead of a long-running orchestrator
-
-## Used For
-
-- model serving plus helper services inside one allocation
-- data and ETL pipelines that need startup ordering, successful-completion DAG stages, scratch staging, and shared job-local state
-- training jobs with checkpoint export, artifact tracking, and resume-aware reruns
-- clusters that standardize on Pyxis/Enroot, Apptainer, Singularity, or host module runtimes
-
-## Start Here Examples
-
-These four examples form the intended adoption funnel.
-
-### 1. `minimal-batch.yaml`
-
-- Demonstrates: one service, no dependencies, no prepare step
-- Prerequisites: any machine for `validate` and `inspect`; Slurm and Enroot for `up`
-- Run: `hpc-compose up -f examples/minimal-batch.yaml`
-- Success signal: the batch log prints `Hello from Slurm!`
-
-### 2. `app-redis-worker.yaml`
-
-- Demonstrates: multi-service startup ordering, TCP readiness, and one helper service depending on another
-- Prerequisites: a normal Slurm + Enroot submission host and shared `CACHE_DIR`
-- Run: `hpc-compose up -f examples/app-redis-worker.yaml`
-- Success signal: `worker.log` shows a successful `PING` and repeated `INCR jobs` calls after Redis becomes healthy
-
-### 3. `llm-curl-workflow-workdir.yaml`
-
-- Demonstrates: one GPU-backed LLM service plus one client service inside the same job
-- Prerequisites: one visible GGUF file at `$HOME/models/model.gguf`, a GPU-capable Slurm target, and shared `CACHE_DIR`
-- Run: `hpc-compose up -f examples/llm-curl-workflow-workdir.yaml`
-- Success signal: `curl_client.log` contains a JSON response from `/v1/chat/completions`
-
-### 4. `training-resume.yaml`
-
-- Demonstrates: checkpoint export, resume-aware reruns, and attempt-aware state
-- Prerequisites: shared storage for `x-slurm.resume.path` plus shared `CACHE_DIR`
-- Run: `hpc-compose up -f examples/training-resume.yaml`
-- Success signal: `results/<job-id>/` contains exported checkpoints and later attempts continue from the previous epoch
-
-The full example matrix lives in [Examples](examples.md).
-
-## Golden Path
-
-If you are evaluating `hpc-compose` from a workstation first, use the authoring path on the promoted minimal example:
+These commands are safe from a laptop, workstation, or login node because they do not submit a job:
 
 ```bash
 hpc-compose validate -f examples/minimal-batch.yaml
@@ -87,82 +33,56 @@ hpc-compose up --dry-run --skip-prepare --no-preflight \
   -f examples/minimal-batch.yaml
 ```
 
-Success looks like:
-
-- `validate` prints `spec is valid`
-- `inspect` shows `service order: app`
-- `up --dry-run` writes a script path and skips `sbatch`
-
-Download the [asciinema-style quickstart demo cast](quickstart-demo.cast).
-
-## Execution Model at a Glance
+Expected output includes:
 
 ```text
-compose.yaml
-    |
-    +--> validate / inspect / render on the submission host
-    |
-    +--> generate one batch script
-              |
-              v
-        one Slurm allocation
-              |
-              +--> primary-node helper services
-              +--> optional allocation-wide distributed service
-              +--> optional explicitly partitioned service steps
-              +--> shared /hpc-compose/job scratch for coordination
+spec is valid
+service order: app
+dry run: skipping sbatch submission
 ```
 
-For the exact boundary, read [Execution Model](execution-model.md) and [Supported Slurm Model](supported-slurm-model.md).
+Run `hpc-compose up -f compose.yaml` only on a supported Linux Slurm submission host with the runtime backend your spec selects.
 
-On a new cluster, run `hpc-compose doctor --cluster-report` from the login node to generate `.hpc-compose/cluster.toml`. `validate` and `preflight` use that profile to warn about incompatible partitions, QOS, GPU/MPI requests, runtime backend availability, and shared cache or scratch paths before submission.
+Download the [asciinema-style quickstart demo cast](quickstart-demo.cast) if you want the same flow as a terminal recording.
 
-For MPI services, `hpc-compose doctor --mpi-smoke -f compose.yaml --service <name>` renders a small rank-count probe against the service's actual runtime path and reports requested/advertised MPI types plus host MPI binds. Add `--submit` only when you want to consume a Slurm allocation and run the smoke job.
+## Terms To Know
 
-## Comparison
+| Term | Meaning |
+| --- | --- |
+| spec | The YAML file that describes services, runtime backend, and Slurm settings. |
+| allocation | The Slurm job allocation where all planned services run. |
+| runtime backend | The mechanism used to launch services: Pyxis/Enroot, Apptainer, Singularity, or host. |
+| preflight | Checks that inspect local tools, paths, backend support, and optional cluster profiles before submit. |
+| prepare | The login-node image import/customization phase used before compute-node runtime. |
+| tracked job | Metadata under `.hpc-compose/<job-id>/` that lets `status`, `ps`, `watch`, `logs`, `stats`, and `artifacts` reconnect later. |
+| `x-slurm` | The spec section for Slurm settings and hpc-compose runtime extensions. |
 
-| Approach | Best at | Weakness for this problem |
-| --- | --- | --- |
-| Plain `sbatch` scripts | total control and site-specific tuning | multi-service coordination, validation, and repeatability remain ad hoc |
-| Docker Compose | familiar service authoring on one machine | networking, restart, and orchestration assumptions do not fit one Slurm allocation cleanly |
-| `hpc-compose` | Compose-like authoring for one inspectable Slurm job | intentionally narrow scope; not a general orchestrator or full Compose runtime |
+## What It Is For
 
-## What It Does Not Support
+- model serving plus helper services inside one Slurm allocation
+- data and ETL pipelines with startup ordering or stage-completion dependencies
+- training jobs with checkpoint export, artifact tracking, and resume-aware reruns
+- explicit multi-node launch patterns that still fit inside one allocation
 
-- Compose `build:`
+## What It Is Not
+
+`hpc-compose` is not a full Docker Compose runtime and is not a general cluster orchestrator.
+
+Unsupported Compose features include:
+
+- `build:`
 - `ports`
 - `networks` / `network_mode`
 - Compose `restart` as a Docker key
 - `deploy`
-- dynamic multi-node scheduling or automatic node bin packing
+- dynamic node bin packing
 
-## When Not To Use `hpc-compose`
-
-- You need custom container networking.
-- You need broad Docker Compose compatibility.
-- You want a long-running orchestration control plane.
-- You need dynamic cross-node scheduling instead of explicit `x-slurm.placement` node selectors.
-
-## Roadmap
-
-The near-term roadmap stays short:
-
-- [Authoring ergonomics](roadmap.md#authoring-ergonomics)
-- [Runtime visibility](roadmap.md#runtime-visibility)
-- [Cluster compatibility](roadmap.md#cluster-compatibility)
-
-## Feedback
-
-If you try `hpc-compose`, open an [adoption feedback issue](https://github.com/NicolasSchuler/hpc-compose/issues/new?template=adoption-feedback.yml) with:
-
-- cluster type
-- workload type
-- the main failure or friction point
+For exact boundaries, read [Execution Model](execution-model.md), [Supported Slurm Model](supported-slurm-model.md), and [Spec Reference](spec-reference.md).
 
 ## Read Next
 
-1. [Quickstart](quickstart.md) for the shortest install-and-run path
-2. [Examples](examples.md) for the four promoted workflows plus the broader matrix
-3. [Running Compose-Style Multi-Service Workflows on Slurm](running-compose-style-workflows-on-slurm.md) for the canonical explainer
-4. [Support Matrix](support-matrix.md) before assuming runtime support on a specific machine
-5. [Task Guide](task-guide.md) when you already know the job you want to run
+1. [Quickstart](quickstart.md) for the shortest safe path.
+2. [Examples](examples.md) to choose a starting spec.
+3. [Runtime Backends](runtime-backends.md) before changing `runtime.backend`.
+4. [Runbook](runbook.md) when adapting a real workload on a cluster.
+5. [Troubleshooting](troubleshooting.md) when the first cluster run fails.

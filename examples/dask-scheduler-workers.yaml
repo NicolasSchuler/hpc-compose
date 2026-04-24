@@ -1,0 +1,37 @@
+name: dask-scheduler-workers
+
+x-slurm:
+  job_name: dask-scheduler-workers
+  time: "02:00:00"
+  nodes: 2
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  scheduler:
+    image: ghcr.io/dask/dask:latest
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        dask scheduler --host "$$HPC_COMPOSE_SERVICE_PRIMARY_NODE" --port 8786
+    readiness:
+      type: tcp
+      host: 127.0.0.1
+      port: 8786
+      timeout_seconds: 60
+    x-slurm:
+      nodes: 1
+
+  workers:
+    image: ghcr.io/dask/dask:latest
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        dask worker "tcp://$$HPC_COMPOSE_PRIMARY_NODE:8786"
+    depends_on:
+      scheduler:
+        condition: service_healthy
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 1

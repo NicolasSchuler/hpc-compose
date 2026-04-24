@@ -102,4 +102,4 @@ Recommended default:
 - The <strong>tracked follow-up tools</strong> are <code>status</code> for scheduler/log summaries, <code>ps</code> for a stable per-service snapshot, and <code>watch</code> when you want to reconnect to the live TUI later.
 - The <strong>debugging flow</strong> is <code>validate</code>, <code>inspect</code>, <code>preflight</code>, and <code>prepare</code> run separately when you need more visibility.
 
-Read [Runbook](runbook.md) for the operational workflow, [Examples](examples.md) for starting points, and [Spec reference](spec-reference.md) for exact field behavior.
+Read [Runtime Backends](runtime-backends.md) before changing `runtime.backend`, [Runbook](runbook.md) for the operational workflow, [Examples](examples.md) for starting points, and [Spec reference](spec-reference.md) for exact field behavior.

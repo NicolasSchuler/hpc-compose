@@ -1,0 +1,21 @@
+name: flux-nested
+
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: flux-nested
+  time: "01:00:00"
+  nodes: 2
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  flux:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        flux start bash -lc 'flux run --label-io -N "$$HPC_COMPOSE_DIST_NNODES" hostname'
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 1

@@ -9,7 +9,7 @@ repository = "https://github.com/NicolasSchuler/hpc-compose"
 homepage = "https://github.com/NicolasSchuler/hpc-compose"
 documentation = "https://nicolasschuler.github.io/hpc-compose/"
 readme = "README.md"
-description = "Compose-like specs for single-allocation Slurm jobs with Enroot and Pyxis"
+description = "Compose-like specs for single-allocation Slurm jobs across HPC runtime backends"
 keywords = ["slurm", "hpc", "compose", "containers", "enroot"]
 categories = ["command-line-utilities", "config"]
 
@@ -64,7 +64,7 @@ assets = [
 ]
 
 [package.metadata.generate-rpm]
-summary = "Compose-like specs for single-allocation Slurm jobs with Enroot and Pyxis"
+summary = "Compose-like specs for single-allocation Slurm jobs across HPC runtime backends"
 assets = [
   { source = "target/release/hpc-compose", dest = "/usr/bin/hpc-compose", mode = "755" },
   { source = "README.md", dest = "/usr/share/doc/hpc-compose/README.md", mode = "644", doc = true },

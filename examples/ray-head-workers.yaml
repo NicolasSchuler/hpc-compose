@@ -1,0 +1,36 @@
+name: ray-head-workers
+
+x-slurm:
+  job_name: ray-head-workers
+  time: "02:00:00"
+  nodes: 2
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  head:
+    image: rayproject/ray:2.49.0-py310
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        ray start --head --node-ip-address="$$HPC_COMPOSE_SERVICE_PRIMARY_NODE" --port=6379 --block
+    readiness:
+      type: sleep
+      seconds: 10
+    x-slurm:
+      nodes: 1
+
+  worker:
+    image: rayproject/ray:2.49.0-py310
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        ray start --address="$$HPC_COMPOSE_PRIMARY_NODE:6379" --block
+    depends_on:
+      head:
+        condition: service_healthy
+    x-slurm:
+      nodes: 1
+      placement:
+        node_range: "1"

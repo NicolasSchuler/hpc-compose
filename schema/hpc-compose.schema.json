@@ -24,6 +24,9 @@
         "$ref": "#/$defs/service"
       }
     },
+    "x-env": {
+      "$ref": "#/$defs/softwareEnv"
+    },
     "x-slurm": {
       "$ref": "#/$defs/slurm"
     }
@@ -224,6 +227,37 @@
         }
       }
     },
+    "softwareEnv": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "modules": {
+          "oneOf": [
+            { "$ref": "#/$defs/stringList" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "purge": { "type": "boolean" },
+                "load": { "$ref": "#/$defs/stringList" }
+              }
+            }
+          ]
+        },
+        "spack": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["view"],
+          "properties": {
+            "view": { "type": "string", "minLength": 1 }
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
@@ -292,6 +326,7 @@
         "depends_on": { "$ref": "#/$defs/dependsOn" },
         "readiness": { "$ref": "#/$defs/readiness" },
         "healthcheck": { "$ref": "#/$defs/healthcheck" },
+        "x-env": { "$ref": "#/$defs/softwareEnv" },
         "x-slurm": { "$ref": "#/$defs/serviceSlurm" },
         "x-runtime": { "$ref": "#/$defs/serviceRuntime" },
         "x-enroot": { "$ref": "#/$defs/serviceEnroot" }
@@ -464,6 +499,10 @@
         "type": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.+-]*$"
+        },
+        "profile": {
+          "type": "string",
+          "enum": ["openmpi", "mpich", "intel_mpi"]
         },
         "implementation": {
           "type": "string",

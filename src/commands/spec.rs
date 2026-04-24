@@ -76,11 +76,13 @@ pub(crate) fn render(
         &context.interpolation_vars,
     )?;
     let runtime_plan = build_runtime_plan(&plan);
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
     let script = render_script_with_options(
         &runtime_plan,
         &RenderOptions {
             apptainer_bin: context.binaries.apptainer.value.clone(),
             singularity_bin: context.binaries.singularity.value.clone(),
+            cluster_profile,
         },
     )?;
     if let Some(path) = output_path.as_ref() {
@@ -220,8 +222,18 @@ pub(crate) fn inspect(
                 output_spec::print_plan_inspect_tree(&plan, &runtime_plan)
                     .context("failed to write tree output")?;
             } else if verbose {
-                output_spec::print_plan_inspect_verbose(&plan, &runtime_plan)
+                let cluster_profile = load_discovered_cluster_profile(&context)?;
+                if cluster_profile.is_some() {
+                    output_spec::print_plan_inspect_verbose_with_profile(
+                        &plan,
+                        &runtime_plan,
+                        cluster_profile.as_ref(),
+                    )
                     .context("failed to write inspect output")?;
+                } else {
+                    output_spec::print_plan_inspect_verbose(&plan, &runtime_plan)
+                        .context("failed to write inspect output")?;
+                }
             } else {
                 output_spec::print_plan_inspect(&runtime_plan)
                     .context("failed to write inspect output")?;

@@ -627,8 +627,13 @@ pub(crate) fn submit(
         warn_local_ignored_scheduler_settings(&runtime_plan);
     }
 
+    let cluster_profile = if local {
+        None
+    } else {
+        load_discovered_cluster_profile(&context)?
+    };
+
     if !no_preflight {
-        let cluster_profile = load_discovered_cluster_profile(&context)?;
         let report = progress.run_result("Running preflight checks", || {
             Ok::<_, anyhow::Error>(run_preflight(
                 &runtime_plan,
@@ -641,7 +646,7 @@ pub(crate) fn submit(
                     scontrol_bin: context.binaries.scontrol.value.clone(),
                     require_submit_tools: !local,
                     skip_prepare,
-                    cluster_profile,
+                    cluster_profile: cluster_profile.clone(),
                 },
             ))
         })?;
@@ -683,6 +688,7 @@ pub(crate) fn submit(
                 &RenderOptions {
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    cluster_profile,
                 },
             )
         }
@@ -990,8 +996,9 @@ pub(crate) fn run_service(
     runtime_plan.slurm.resume = None;
     runtime_plan.ordered_services = vec![service];
 
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+
     if !no_preflight {
-        let cluster_profile = load_discovered_cluster_profile(&context)?;
         let report = progress.run_result("Running preflight checks", || {
             Ok::<_, anyhow::Error>(run_preflight(
                 &runtime_plan,
@@ -1004,7 +1011,7 @@ pub(crate) fn run_service(
                     scontrol_bin: context.binaries.scontrol.value.clone(),
                     require_submit_tools: true,
                     skip_prepare,
-                    cluster_profile,
+                    cluster_profile: cluster_profile.clone(),
                 },
             ))
         })?;
@@ -1042,6 +1049,7 @@ pub(crate) fn run_service(
             &RenderOptions {
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
+                cluster_profile,
             },
         )
     })?;

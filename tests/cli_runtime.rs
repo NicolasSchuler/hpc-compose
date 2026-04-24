@@ -3511,7 +3511,8 @@ fn inspect_and_submit_multi_node_torchrun_example_show_distributed_geometry() {
     assert!(inspect_text.contains("allocation geometry: nodes=2"));
     assert!(inspect_text.contains("step geometry: mode=distributed nodes=2"));
     assert!(inspect_text.contains("--nodes=2"));
-    assert!(inspect_text.contains("--ntasks-per-node=4"));
+    assert!(inspect_text.contains("--ntasks-per-node=1"));
+    assert!(inspect_text.contains("HPC_COMPOSE_DIST_RDZV_ENDPOINT"));
 
     let enroot = write_fake_enroot(tmpdir.path());
     let srun_log = tmpdir.path().join("torchrun-srun.log");
@@ -3542,9 +3543,58 @@ fn inspect_and_submit_multi_node_torchrun_example_show_distributed_geometry() {
     let srun_text = fs::read_to_string(&srun_log).expect("srun log");
     assert!(srun_text.contains("--job-name=hpc-compose:trainer"));
     assert!(srun_text.contains("--nodes=2"));
-    assert!(srun_text.contains("--ntasks-per-node=4"));
+    assert!(srun_text.contains("--ntasks-per-node=1"));
     assert!(!srun_text.contains("--nodelist=node01"));
     assert!(srun_text.contains("env:node01|2|node01 node02|/hpc-compose/job/allocation/nodes.txt"));
+    assert!(srun_text.contains("dist_env:node01|"));
+    assert!(srun_text.contains("|2|4|8"));
+}
+
+#[test]
+fn inspect_distributed_ml_templates_show_launcher_geometry() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+
+    for template in [
+        "multi-node-deepspeed.yaml",
+        "multi-node-accelerate.yaml",
+        "multi-node-jax.yaml",
+    ] {
+        let compose = write_example_compose(tmpdir.path(), template, &cache_dir);
+        let inspect = run_cli(
+            tmpdir.path(),
+            &[
+                "inspect",
+                "-f",
+                compose.to_str().expect("path"),
+                "--verbose",
+            ],
+        );
+        assert_success(&inspect);
+        let inspect_text = stdout_text(&inspect);
+        assert!(inspect_text.contains("step geometry: mode=distributed nodes=2"));
+        assert!(inspect_text.contains("--ntasks-per-node=1"));
+        assert!(inspect_text.contains("HPC_COMPOSE_DIST_RDZV_ENDPOINT"));
+    }
+
+    for template in ["multi-node-horovod.yaml", "nccl-tests.yaml"] {
+        let compose = write_example_compose(tmpdir.path(), template, &cache_dir);
+        let inspect = run_cli(
+            tmpdir.path(),
+            &[
+                "inspect",
+                "-f",
+                compose.to_str().expect("path"),
+                "--verbose",
+            ],
+        );
+        assert_success(&inspect);
+        let inspect_text = stdout_text(&inspect);
+        assert!(inspect_text.contains("step geometry: mode=distributed nodes=2"));
+        assert!(inspect_text.contains("--ntasks-per-node=4"));
+        assert!(inspect_text.contains("--mpi=pmix"));
+    }
 }
 
 #[test]

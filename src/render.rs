@@ -5,16 +5,53 @@ use std::fmt::Write as _;
 
 use anyhow::Result;
 
+use crate::cluster::ClusterProfile;
 use crate::planner::{ExecutionSpec, ServicePlacementMode};
 use crate::prepare::{RuntimePlan, RuntimeService};
 use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec, RuntimeBackend,
     RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchScope, ServiceFailureMode, ServiceHookContext,
-    StageMode, StageOutWhen,
+    SlurmConfig, SoftwareEnvConfig, StageMode, StageOutWhen,
 };
 use crate::tracked_paths;
 
 mod sbatch;
+
+const DIST_ENV_NAMES: &[&str] = &[
+    "HPC_COMPOSE_DIST_MASTER_ADDR",
+    "HPC_COMPOSE_DIST_MASTER_PORT",
+    "HPC_COMPOSE_DIST_RDZV_ENDPOINT",
+    "HPC_COMPOSE_DIST_NNODES",
+    "HPC_COMPOSE_DIST_NODE_RANK",
+    "HPC_COMPOSE_DIST_LOCAL_RANK",
+    "HPC_COMPOSE_DIST_GLOBAL_RANK",
+    "HPC_COMPOSE_DIST_NPROC_PER_NODE",
+    "HPC_COMPOSE_DIST_WORLD_SIZE",
+    "HPC_COMPOSE_DIST_HOSTFILE",
+];
+
+const DIST_SLURM_RANK_ENV_NAMES: &[&str] = &[
+    "SLURM_LOCALID",
+    "SLURM_NODEID",
+    "SLURM_NTASKS",
+    "SLURM_PROCID",
+    "SLURM_STEP_NUM_TASKS",
+    "SLURM_STEP_TASKS_PER_NODE",
+    "SLURM_TASKS_PER_NODE",
+];
+
+const DEFAULT_RDZV_PORT_BASE: u16 = 29_500;
+const DEFAULT_RDZV_PORT_SPAN: u16 = 1_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DistributedRenderEnv {
+    enabled: bool,
+    nproc_per_node: u32,
+    profile_env: Vec<(String, String)>,
+    rdzv_port: Option<u16>,
+    rdzv_port_base: u16,
+    rdzv_port_span: u16,
+}
 
 /// Renders a local launcher script that reuses the normal runtime orchestration.
 pub fn render_local_script(plan: &RuntimePlan, job_id: &str, enroot_bin: &str) -> Result<String> {
@@ -62,6 +99,8 @@ pub struct RenderOptions {
     pub apptainer_bin: String,
     /// Singularity executable used by Singularity-backed service steps.
     pub singularity_bin: String,
+    /// Optional cluster profile used only for render-time distributed env wiring.
+    pub cluster_profile: Option<ClusterProfile>,
 }
 
 impl Default for RenderOptions {
@@ -69,6 +108,7 @@ impl Default for RenderOptions {
         Self {
             apptainer_bin: "apptainer".to_string(),
             singularity_bin: "singularity".to_string(),
+            cluster_profile: None,
         }
     }
 }
@@ -76,6 +116,123 @@ impl Default for RenderOptions {
 /// Renders the complete `sbatch` script for a runtime plan.
 pub fn render_script(plan: &RuntimePlan) -> Result<String> {
     render_script_with_options(plan, &RenderOptions::default())
+}
+
+/// Returns render-time distributed helper environment names for a service.
+#[must_use]
+pub fn distributed_environment_names_for_service(
+    service: &RuntimeService,
+    cluster_profile: Option<&ClusterProfile>,
+) -> Vec<String> {
+    if !distributed_helpers_enabled(service) {
+        return Vec::new();
+    }
+    let mut names = DIST_ENV_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    names.extend(
+        distributed_profile_env_for_service(cluster_profile, service)
+            .into_iter()
+            .map(|(name, _)| name),
+    );
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn distributed_render_env(
+    service: &RuntimeService,
+    slurm: &SlurmConfig,
+    cluster_profile: Option<&ClusterProfile>,
+) -> DistributedRenderEnv {
+    let enabled = distributed_helpers_enabled(service);
+    let profile = cluster_profile.map(|profile| &profile.distributed);
+    DistributedRenderEnv {
+        enabled,
+        nproc_per_node: derive_nproc_per_node(service, slurm),
+        profile_env: distributed_profile_env_for_service(cluster_profile, service),
+        rdzv_port: profile.and_then(|distributed| distributed.rdzv_port),
+        rdzv_port_base: profile
+            .and_then(|distributed| distributed.rdzv_port_base)
+            .unwrap_or(DEFAULT_RDZV_PORT_BASE),
+        rdzv_port_span: profile
+            .and_then(|distributed| distributed.rdzv_port_span)
+            .unwrap_or(DEFAULT_RDZV_PORT_SPAN),
+    }
+}
+
+fn distributed_helpers_enabled(service: &RuntimeService) -> bool {
+    service.placement.nodes > 1
+}
+
+fn distributed_profile_env_for_service(
+    cluster_profile: Option<&ClusterProfile>,
+    service: &RuntimeService,
+) -> Vec<(String, String)> {
+    if !distributed_helpers_enabled(service) {
+        return Vec::new();
+    }
+    let Some(profile) = cluster_profile else {
+        return Vec::new();
+    };
+    profile
+        .distributed
+        .env
+        .iter()
+        .filter(|(name, _)| {
+            !service
+                .environment
+                .iter()
+                .any(|(service_name, _)| service_name == *name)
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn derive_nproc_per_node(service: &RuntimeService, slurm: &SlurmConfig) -> u32 {
+    nproc_per_node_from_env(service)
+        .or(service.slurm.gpus_per_node)
+        .or(slurm.gpus_per_node)
+        .or_else(|| service.slurm.gres.as_deref().and_then(parse_gres_gpu_count))
+        .or_else(|| slurm.gres.as_deref().and_then(parse_gres_gpu_count))
+        .or_else(|| gpus_evenly_per_node(service.slurm.gpus, service.placement.nodes))
+        .or_else(|| gpus_evenly_per_node(slurm.gpus, service.placement.nodes))
+        .or(service.placement.ntasks_per_node)
+        .unwrap_or(1)
+}
+
+fn nproc_per_node_from_env(service: &RuntimeService) -> Option<u32> {
+    ["HPC_COMPOSE_DIST_NPROC_PER_NODE", "NPROC_PER_NODE"]
+        .into_iter()
+        .find_map(|key| {
+            service
+                .environment
+                .iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, value)| value.parse::<u32>().ok())
+                .filter(|value| *value > 0)
+        })
+}
+
+fn gpus_evenly_per_node(gpus: Option<u32>, nodes: u32) -> Option<u32> {
+    let gpus = gpus?;
+    (nodes > 0 && gpus > 0 && gpus % nodes == 0).then_some(gpus / nodes)
+}
+
+fn parse_gres_gpu_count(gres: &str) -> Option<u32> {
+    gres.split(',').find_map(|part| {
+        let part = part.trim();
+        if !part.to_ascii_lowercase().contains("gpu") {
+            return None;
+        }
+        let count = part
+            .split(':')
+            .next_back()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1);
+        (count > 0).then_some(count)
+    })
 }
 
 /// Renders the complete `sbatch` script for a runtime plan with explicit
@@ -91,10 +248,19 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         .ordered_services
         .iter()
         .any(|service| service.slurm.mpi.is_some());
+    let distributed_env_enabled = plan
+        .ordered_services
+        .iter()
+        .any(distributed_helpers_enabled);
     let hooks_enabled = plan
         .ordered_services
         .iter()
         .any(|service| service.slurm.prologue.is_some() || service.slurm.epilogue.is_some());
+    let software_env_enabled = !plan.slurm.software_env.is_empty()
+        || plan
+            .ordered_services
+            .iter()
+            .any(|service| !service.slurm.software_env.is_empty());
     let resume_host_path = plan.slurm.resume_dir().unwrap_or("");
     let artifact_bundles = plan
         .slurm
@@ -277,6 +443,12 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("MPI_HOSTFILE_DIR=\"$ALLOCATION_DIR/mpi-hostfiles\"\n");
         out.push_str("MPI_HOSTFILE_CONTAINER_DIR=\"/hpc-compose/job/allocation/mpi-hostfiles\"\n");
     }
+    if distributed_env_enabled {
+        out.push_str("DIST_HOSTFILE_DIR=\"$ALLOCATION_DIR/distributed-hostfiles\"\n");
+        out.push_str(
+            "DIST_HOSTFILE_CONTAINER_DIR=\"/hpc-compose/job/allocation/distributed-hostfiles\"\n",
+        );
+    }
     out.push_str(&format!(
         "LOG_DIR=\"$JOB_TMP/{}\"\n",
         tracked_paths::LOGS_DIR_NAME
@@ -289,6 +461,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         "STATE_FILE=\"$JOB_TMP/{}\"\n",
         tracked_paths::STATE_FILE_NAME
     ));
+    out.push_str("SERVICE_EXIT_MARKER_DIR=\"$JOB_TMP/service-exits\"\n");
     if artifacts_enabled {
         out.push_str(&format!(
             "ARTIFACTS_DIR=\"$JOB_TMP/{}\"\n",
@@ -312,6 +485,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("GPU_METRICS_FILE=\"$METRICS_DIR/gpu.jsonl\"\n");
         out.push_str("GPU_PROCESSES_FILE=\"$METRICS_DIR/gpu_processes.jsonl\"\n");
         out.push_str("SLURM_METRICS_FILE=\"$METRICS_DIR/slurm.jsonl\"\n");
+        out.push_str("METRICS_DIAGNOSTICS_DIR=\"$METRICS_DIR/diagnostics\"\n");
     }
     out.push_str(&format!(
         "CACHE_ROOT={}\n",
@@ -343,7 +517,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("export ENROOT_CACHE_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/cache\"\n");
     out.push_str("export ENROOT_DATA_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/data\"\n");
     out.push_str("export ENROOT_TEMP_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/tmp\"\n");
-    out.push_str("mkdir -p \"$LOG_DIR\" \"$ALLOCATION_DIR\" \"$SERVICE_NODELIST_DIR\"");
+    out.push_str("mkdir -p \"$LOG_DIR\" \"$ALLOCATION_DIR\" \"$SERVICE_NODELIST_DIR\" \"$SERVICE_EXIT_MARKER_DIR\"");
     if hooks_enabled {
         out.push_str(" \"$HOOKS_DIR\"");
     }
@@ -355,6 +529,9 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     }
     if mpi_enabled {
         out.push_str(" \"$MPI_HOSTFILE_DIR\"");
+    }
+    if distributed_env_enabled {
+        out.push_str(" \"$DIST_HOSTFILE_DIR\"");
     }
     out.push_str(" \"$ENROOT_CACHE_PATH\" \"$ENROOT_DATA_PATH\" \"$ENROOT_TEMP_PATH\"\n\n");
 
@@ -374,6 +551,10 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("SERVICE_RESTART_FAILURES_IN_WINDOW=()\n");
     out.push_str("SERVICE_RESTART_FAILURE_TIMESTAMPS=()\n");
     out.push_str("SERVICE_LAST_EXIT_CODE=()\n");
+    out.push_str("SERVICE_FIRST_FAILURE_AT=()\n");
+    out.push_str("SERVICE_FIRST_FAILURE_EXIT_CODE=()\n");
+    out.push_str("SERVICE_FIRST_FAILURE_NODE=()\n");
+    out.push_str("SERVICE_FIRST_FAILURE_RANK=()\n");
     out.push_str("SERVICE_PLACEMENT_MODE=()\n");
     out.push_str("SERVICE_STEP_NODES=()\n");
     out.push_str("SERVICE_STEP_NTASKS=()\n");
@@ -688,6 +869,24 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  printf '%s' \"${words[0]:-}\"\n");
     out.push_str("}\n\n");
 
+    if distributed_env_enabled {
+        out.push_str("hpc_compose_dist_port() {\n");
+        out.push_str("  local fixed=${1:-}\n");
+        out.push_str("  local base=${2:-29500}\n");
+        out.push_str("  local span=${3:-1000}\n");
+        out.push_str("  local offset=${4:-0}\n");
+        out.push_str("  if [[ -n \"$fixed\" ]]; then\n");
+        out.push_str("    printf '%s' \"$fixed\"\n");
+        out.push_str("    return 0\n");
+        out.push_str("  fi\n");
+        out.push_str("  local job_digits=${SLURM_JOB_ID//[^0-9]/}\n");
+        out.push_str("  if [[ -z \"$job_digits\" ]]; then\n");
+        out.push_str("    job_digits=0\n");
+        out.push_str("  fi\n");
+        out.push_str("  printf '%s' $(( base + ((job_digits + offset) % span) ))\n");
+        out.push_str("}\n\n");
+    }
+
     out.push_str("write_nodelist_file() {\n");
     out.push_str("  local path=$1\n");
     out.push_str("  local nodelist=$2\n");
@@ -702,7 +901,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  done\n");
     out.push_str("}\n\n");
 
-    if mpi_enabled {
+    if mpi_enabled || distributed_env_enabled {
         out.push_str("write_mpi_hostfile() {\n");
         out.push_str("  local hostfile=$1\n");
         out.push_str("  local nodelist=$2\n");
@@ -767,6 +966,9 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     if metrics_enabled {
         render_metrics_helpers(&mut out);
     }
+    if software_env_enabled {
+        render_software_env_helpers(&mut out);
+    }
 
     out.push_str("write_state_file() {\n");
     out.push_str("  local tmp_state=\"$STATE_FILE.tmp\"\n");
@@ -796,7 +998,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("      if (( first == 0 )); then\n");
     out.push_str("        printf ','\n");
     out.push_str("      fi\n");
-    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"completed_successfully\":%s,\"readiness_configured\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"window_seconds\":%s,\"max_restarts_in_window\":%s,\"restart_failures_in_window\":%s,\"restart_failure_timestamps\":%s,\"last_exit_code\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s}' \\\n");
+    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"completed_successfully\":%s,\"readiness_configured\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"window_seconds\":%s,\"max_restarts_in_window\":%s,\"restart_failures_in_window\":%s,\"restart_failure_timestamps\":%s,\"last_exit_code\":%s,\"first_failure_at\":%s,\"first_failure_exit_code\":%s,\"first_failure_node\":%s,\"first_failure_rank\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s}' \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_NAMES[i]}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_STEP_NAMES[i]:-}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_LOG_PATHS[i]:-}\")\" \\\n");
@@ -815,6 +1017,12 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         "        \"$(json_number_array \"${SERVICE_RESTART_FAILURE_TIMESTAMPS[i]:-}\")\" \\\n",
     );
     out.push_str("        \"$(if [[ -n \"${SERVICE_LAST_EXIT_CODE[i]:-}\" ]]; then printf '%s' \"${SERVICE_LAST_EXIT_CODE[i]}\"; else printf null; fi)\" \\\n");
+    out.push_str("        \"$(json_number_or_null \"${SERVICE_FIRST_FAILURE_AT[i]:-}\")\" \\\n");
+    out.push_str(
+        "        \"$(json_number_or_null \"${SERVICE_FIRST_FAILURE_EXIT_CODE[i]:-}\")\" \\\n",
+    );
+    out.push_str("        \"$(json_string_or_null \"${SERVICE_FIRST_FAILURE_NODE[i]:-}\")\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"${SERVICE_FIRST_FAILURE_RANK[i]:-}\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"${SERVICE_PLACEMENT_MODE[i]:-}\")\" \\\n");
     out.push_str("        \"$(json_number_or_null \"${SERVICE_STEP_NODES[i]:-}\")\" \\\n");
     out.push_str("        \"$(json_number_or_null \"${SERVICE_STEP_NTASKS[i]:-}\")\" \\\n");
@@ -958,6 +1166,10 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("    SERVICE_RESTART_FAILURES_IN_WINDOW+=(\"0\")\n");
     out.push_str("    SERVICE_RESTART_FAILURE_TIMESTAMPS+=(\"\")\n");
     out.push_str("    SERVICE_LAST_EXIT_CODE+=(\"\")\n");
+    out.push_str("    SERVICE_FIRST_FAILURE_AT+=(\"\")\n");
+    out.push_str("    SERVICE_FIRST_FAILURE_EXIT_CODE+=(\"\")\n");
+    out.push_str("    SERVICE_FIRST_FAILURE_NODE+=(\"\")\n");
+    out.push_str("    SERVICE_FIRST_FAILURE_RANK+=(\"\")\n");
     out.push_str("    SERVICE_PLACEMENT_MODE+=(\"$placement_mode\")\n");
     out.push_str("    SERVICE_STEP_NODES+=(\"$step_nodes\")\n");
     out.push_str("    SERVICE_STEP_NTASKS+=(\"$step_ntasks\")\n");
@@ -1206,6 +1418,25 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  echo \"Service '$failed_service' is required by: $formatted\" >&2\n");
     out.push_str("}\n\n");
 
+    out.push_str("write_service_exit_marker() {\n");
+    out.push_str("  local index=$1\n");
+    out.push_str("  local status=$2\n");
+    out.push_str("  local service_name=${SERVICE_NAMES[index]:-unknown}\n");
+    out.push_str("  local marker_name\n");
+    out.push_str("  marker_name=$(printf '%s' \"$service_name\" | tr -c 'A-Za-z0-9_.-' '_')\n");
+    out.push_str("  local marker=\"$SERVICE_EXIT_MARKER_DIR/${marker_name}.jsonl\"\n");
+    out.push_str("  mkdir -p \"$SERVICE_EXIT_MARKER_DIR\"\n");
+    out.push_str("  printf '{\"service\":\"%s\",\"exit_code\":%s,\"at_unix\":%s,\"node\":%s,\"rank\":%s,\"nodelist\":%s}\\n' \\\n");
+    out.push_str("    \"$(json_escape \"$service_name\")\" \\\n");
+    out.push_str("    \"$status\" \\\n");
+    out.push_str("    \"$(date +%s)\" \\\n");
+    out.push_str("    \"$(json_string_or_null \"${SERVICE_FIRST_FAILURE_NODE[index]:-}\")\" \\\n");
+    out.push_str("    \"$(json_string_or_null \"${SERVICE_FIRST_FAILURE_RANK[index]:-}\")\" \\\n");
+    out.push_str(
+        "    \"$(json_string_or_null \"${SERVICE_STEP_NODELIST[index]:-}\")\" >> \"$marker\"\n",
+    );
+    out.push_str("}\n\n");
+
     out.push_str("handle_service_exit() {\n");
     out.push_str("  local index=$1\n");
     out.push_str("  local status=$2\n");
@@ -1236,6 +1467,13 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  fi\n");
     out.push_str("  status=$effective_status\n");
     out.push_str("  SERVICE_LAST_EXIT_CODE[index]=\"$status\"\n");
+    out.push_str("  if (( status != 0 )) && [[ -z \"${SERVICE_FIRST_FAILURE_EXIT_CODE[index]:-}\" ]]; then\n");
+    out.push_str("    SERVICE_FIRST_FAILURE_AT[index]=\"$(date +%s)\"\n");
+    out.push_str("    SERVICE_FIRST_FAILURE_EXIT_CODE[index]=\"$status\"\n");
+    out.push_str("    SERVICE_FIRST_FAILURE_NODE[index]=\"$(first_word \"${SERVICE_STEP_NODELIST[index]:-}\")\"\n");
+    out.push_str("    SERVICE_FIRST_FAILURE_RANK[index]=\"\"\n");
+    out.push_str("  fi\n");
+    out.push_str("  write_service_exit_marker \"$index\" \"$status\" || true\n");
     out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]]; then\n");
     out.push_str("    prune_restart_window \"$index\"\n");
     out.push_str("  fi\n");
@@ -1337,6 +1575,10 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  done\n");
     out.push_str("}\n\n");
 
+    if !plan.slurm.software_env.is_empty() {
+        render_apply_software_env(&mut out, &plan.slurm.software_env, "");
+        out.push('\n');
+    }
     for setup in &plan.slurm.setup {
         out.push_str(setup);
         out.push('\n');
@@ -1356,7 +1598,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push('\n');
     }
 
-    for service in &plan.ordered_services {
+    for (service_index, service) in plan.ordered_services.iter().enumerate() {
         let dependents = dependents_by_service
             .get(&service.name)
             .cloned()
@@ -1364,7 +1606,10 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         render_service(
             &mut out,
             service,
+            service_index,
             &dependents,
+            &plan.slurm.software_env,
+            &plan.slurm,
             &plan.runtime,
             options,
             scratch_enabled,
@@ -1429,7 +1674,7 @@ while (($#)); do
       use_entrypoint=1
       shift
       ;;
-    --nodes=*|--ntasks=*|--ntasks-per-node=*|--cpus-per-task=*|--gpus=*|--gres=*|--gpus-per-node=*|--gpus-per-task=*|--cpus-per-gpu=*|--mem-per-gpu=*|--gpu-bind=*|--cpu-bind=*|--mem-bind=*|--distribution=*|--hint=*|--exact|--overlap|--job-name=*|--nodelist=*|--output=*|--error=*|--chdir=*)
+    --nodes=*|--ntasks=*|--ntasks-per-node=*|--cpus-per-task=*|--gpus=*|--gres=*|--gpus-per-node=*|--gpus-per-task=*|--cpus-per-gpu=*|--mem-per-gpu=*|--gpu-bind=*|--cpu-bind=*|--mem-bind=*|--distribution=*|--hint=*|--exact|--overlap|--job-name=*|--nodelist=*|--output=*|--error=*|--chdir=*|--task-prolog=*)
       shift
       ;;
     --)
@@ -1791,6 +2036,81 @@ fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
     out.push_str("}\n\n");
 }
 
+fn render_software_env_helpers(out: &mut String) {
+    out.push_str("hpc_compose_module() {\n");
+    out.push_str("  if command -v module >/dev/null 2>&1; then\n");
+    out.push_str("    module \"$@\"\n");
+    out.push_str("    return $?\n");
+    out.push_str("  fi\n");
+    out.push_str("  if [[ -f /etc/profile.d/modules.sh ]]; then\n");
+    out.push_str("    # shellcheck disable=SC1091\n");
+    out.push_str("    source /etc/profile.d/modules.sh\n");
+    out.push_str("    module \"$@\"\n");
+    out.push_str("    return $?\n");
+    out.push_str("  fi\n");
+    out.push_str(
+        "  echo \"environment modules are requested but the module command is unavailable\" >&2\n",
+    );
+    out.push_str("  return 127\n");
+    out.push_str("}\n\n");
+}
+
+fn render_apply_software_env(out: &mut String, env: &SoftwareEnvConfig, indent: &str) {
+    if env.modules.purge {
+        out.push_str(indent);
+        out.push_str("hpc_compose_module purge\n");
+    }
+    for module in &env.modules.load {
+        out.push_str(indent);
+        out.push_str("hpc_compose_module load ");
+        out.push_str(&shell_quote(module));
+        out.push('\n');
+    }
+    if let Some(spack) = &env.spack {
+        let view = shell_quote(&spack.view);
+        out.push_str(indent);
+        out.push_str(&format!(
+            "if [[ -d {view}/bin ]]; then export PATH={view}/bin:\"$PATH\"; fi\n"
+        ));
+        out.push_str(indent);
+        out.push_str(&format!("if [[ -d {view}/lib ]]; then export LD_LIBRARY_PATH={view}/lib:\"${{LD_LIBRARY_PATH:-}}\"; fi\n"));
+        out.push_str(indent);
+        out.push_str(&format!("if [[ -d {view}/lib64 ]]; then export LD_LIBRARY_PATH={view}/lib64:\"${{LD_LIBRARY_PATH:-}}\"; fi\n"));
+        out.push_str(indent);
+        out.push_str(&format!("for hpc_compose_py_site in {view}/lib/python*/site-packages {view}/lib64/python*/site-packages; do if [[ -d \"$hpc_compose_py_site\" ]]; then export PYTHONPATH=\"$hpc_compose_py_site:${{PYTHONPATH:-}}\"; fi; done\n"));
+    }
+    for (key, value) in &env.env {
+        out.push_str(indent);
+        out.push_str("export ");
+        out.push_str(key);
+        out.push('=');
+        out.push_str(&shell_quote(value));
+        out.push('\n');
+    }
+}
+
+fn software_env_export_names(
+    global: &SoftwareEnvConfig,
+    service: &SoftwareEnvConfig,
+) -> Vec<String> {
+    let mut names = global.env.keys().cloned().collect::<Vec<_>>();
+    names.extend(service.env.keys().cloned());
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn effective_software_env_pairs(
+    global: &SoftwareEnvConfig,
+    service: &SoftwareEnvConfig,
+) -> Vec<String> {
+    let mut env = global.env.clone();
+    env.extend(service.env.clone());
+    env.into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect()
+}
+
 fn render_metrics_helpers(out: &mut String) {
     out.push_str("json_bool_from_flag() {\n");
     out.push_str("  if [[ \"${1:-0}\" == \"1\" ]]; then\n");
@@ -1872,7 +2192,7 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("  write_metrics_meta\n");
     out.push_str("}\n\n");
 
-    out.push_str("sample_gpu_metrics() {\n");
+    out.push_str("sample_gpu_metrics_current_node() {\n");
     out.push_str("  [[ \"$GPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
     out.push_str("  if ! command -v nvidia-smi >/dev/null 2>&1; then\n");
     out.push_str(
@@ -1882,6 +2202,7 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("  fi\n");
     out.push_str("  local sampled_at\n");
     out.push_str("  sampled_at=$(metrics_timestamp)\n");
+    out.push_str("  local sample_node=\"${HPC_COMPOSE_GPU_SAMPLE_NODE:-${SLURMD_NODENAME:-${HOSTNAME:-}}}\"\n");
     out.push_str("  local output\n");
     out.push_str("  if ! output=$(nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>&1); then\n");
     out.push_str("    mark_gpu_collector_unavailable \"nvidia-smi GPU query failed: $(trim_whitespace \"${output//$'\\n'/; }\")\"\n");
@@ -1901,8 +2222,9 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("    local temperature=$(trim_whitespace \"$raw_temp\")\n");
     out.push_str("    local power_draw=$(trim_whitespace \"$raw_power_draw\")\n");
     out.push_str("    local power_limit=$(trim_whitespace \"$raw_power_limit\")\n");
-    out.push_str("    printf '{\"sampled_at\":\"%s\",\"index\":%s,\"uuid\":%s,\"name\":%s,\"utilization_gpu\":%s,\"utilization_memory\":%s,\"memory_used_mib\":%s,\"memory_total_mib\":%s,\"temperature_c\":%s,\"power_draw_w\":%s,\"power_limit_w\":%s}\\n' \\\n");
+    out.push_str("    printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"index\":%s,\"uuid\":%s,\"name\":%s,\"utilization_gpu\":%s,\"utilization_memory\":%s,\"memory_used_mib\":%s,\"memory_total_mib\":%s,\"temperature_c\":%s,\"power_draw_w\":%s,\"power_limit_w\":%s}\\n' \\\n");
     out.push_str("      \"$(json_escape \"$sampled_at\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$sample_node\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$index\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$uuid\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$name\")\" \\\n");
@@ -1923,8 +2245,9 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("      local pid=$(trim_whitespace \"$raw_pid\")\n");
     out.push_str("      local process_name=$(trim_whitespace \"$raw_process_name\")\n");
     out.push_str("      local used_memory=$(trim_whitespace \"$raw_used_memory\")\n");
-    out.push_str("      printf '{\"sampled_at\":\"%s\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s}\\n' \\\n");
+    out.push_str("      printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s}\\n' \\\n");
     out.push_str("        \"$(json_escape \"$sampled_at\")\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"$sample_node\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"$gpu_uuid\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"$pid\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"$process_name\")\" \\\n");
@@ -1941,6 +2264,120 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
     out.push_str("  mark_gpu_collector_success \"$sampled_at\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("write_gpu_sample_node_script() {\n");
+    out.push_str("  local script_path=\"$METRICS_DIR/gpu-sample-node.sh\"\n");
+    out.push_str("  cat > \"$script_path\" <<'HPC_COMPOSE_GPU_SAMPLE_NODE'\n");
+    out.push_str("#!/bin/bash\n");
+    out.push_str("set -euo pipefail\n");
+    out.push_str("sampled_at=$1\n");
+    out.push_str("output_root=$2\n");
+    out.push_str("node=\"${SLURMD_NODENAME:-${HOSTNAME:-}}\"\n");
+    out.push_str("if [[ -z \"$node\" ]]; then node=$(hostname); fi\n");
+    out.push_str("node_dir=\"$output_root/$node\"\n");
+    out.push_str("mkdir -p \"$node_dir\"\n");
+    out.push_str("json_escape() {\n");
+    out.push_str("  local value=$1\n");
+    out.push_str("  value=${value//\\\\/\\\\\\\\}\n");
+    out.push_str("  value=${value//\\\"/\\\\\\\"}\n");
+    out.push_str("  value=${value//$'\\n'/\\\\n}\n");
+    out.push_str("  value=${value//$'\\r'/\\\\r}\n");
+    out.push_str("  value=${value//$'\\t'/\\\\t}\n");
+    out.push_str("  printf '%s' \"$value\"\n");
+    out.push_str("}\n");
+    out.push_str("json_string_or_null() {\n");
+    out.push_str("  local value=${1-}\n");
+    out.push_str("  if [[ -z \"$value\" ]]; then printf null; else printf '\"%s\"' \"$(json_escape \"$value\")\"; fi\n");
+    out.push_str("}\n");
+    out.push_str("trim_whitespace() {\n");
+    out.push_str("  local value=${1-}\n");
+    out.push_str("  value=${value#\"${value%%[![:space:]]*}\"}\n");
+    out.push_str("  value=${value%\"${value##*[![:space:]]}\"}\n");
+    out.push_str("  printf '%s' \"$value\"\n");
+    out.push_str("}\n");
+    out.push_str("if ! command -v nvidia-smi >/dev/null 2>&1; then\n");
+    out.push_str(
+        "  printf 'nvidia-smi unavailable on %s\\n' \"$node\" > \"$node_dir/status.txt\"\n",
+    );
+    out.push_str("  exit 0\n");
+    out.push_str("fi\n");
+    out.push_str("output=\"\"\n");
+    out.push_str("if output=$(nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>&1); then\n");
+    out.push_str("  while IFS= read -r line; do\n");
+    out.push_str("    [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
+    out.push_str("    IFS=',' read -r raw_index raw_uuid raw_name raw_util_gpu raw_util_mem raw_mem_used raw_mem_total raw_temp raw_power_draw raw_power_limit <<< \"$line\"\n");
+    out.push_str("    index=$(trim_whitespace \"$raw_index\")\n");
+    out.push_str("    uuid=$(trim_whitespace \"$raw_uuid\")\n");
+    out.push_str("    name=$(trim_whitespace \"$raw_name\")\n");
+    out.push_str("    util_gpu=$(trim_whitespace \"$raw_util_gpu\")\n");
+    out.push_str("    util_mem=$(trim_whitespace \"$raw_util_mem\")\n");
+    out.push_str("    mem_used=$(trim_whitespace \"$raw_mem_used\")\n");
+    out.push_str("    mem_total=$(trim_whitespace \"$raw_mem_total\")\n");
+    out.push_str("    temperature=$(trim_whitespace \"$raw_temp\")\n");
+    out.push_str("    power_draw=$(trim_whitespace \"$raw_power_draw\")\n");
+    out.push_str("    power_limit=$(trim_whitespace \"$raw_power_limit\")\n");
+    out.push_str("    printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"index\":%s,\"uuid\":%s,\"name\":%s,\"utilization_gpu\":%s,\"utilization_memory\":%s,\"memory_used_mib\":%s,\"memory_total_mib\":%s,\"temperature_c\":%s,\"power_draw_w\":%s,\"power_limit_w\":%s}\\n' \\\n");
+    out.push_str("      \"$(json_escape \"$sampled_at\")\" \"$(json_string_or_null \"$node\")\" \"$(json_string_or_null \"$index\")\" \"$(json_string_or_null \"$uuid\")\" \"$(json_string_or_null \"$name\")\" \"$(json_string_or_null \"$util_gpu\")\" \"$(json_string_or_null \"$util_mem\")\" \"$(json_string_or_null \"$mem_used\")\" \"$(json_string_or_null \"$mem_total\")\" \"$(json_string_or_null \"$temperature\")\" \"$(json_string_or_null \"$power_draw\")\" \"$(json_string_or_null \"$power_limit\")\" >> \"$node_dir/gpu.jsonl\"\n");
+    out.push_str("  done <<< \"$output\"\n");
+    out.push_str("else\n");
+    out.push_str("  printf 'nvidia-smi GPU query failed on %s: %s\\n' \"$node\" \"$(trim_whitespace \"${output//$'\\n'/; }\")\" > \"$node_dir/status.txt\"\n");
+    out.push_str("fi\n");
+    out.push_str("process_output=\"\"\n");
+    out.push_str("if process_output=$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>&1); then\n");
+    out.push_str("  while IFS= read -r line; do\n");
+    out.push_str("    [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
+    out.push_str(
+        "    IFS=',' read -r raw_gpu_uuid raw_pid raw_process_name raw_used_memory <<< \"$line\"\n",
+    );
+    out.push_str("    gpu_uuid=$(trim_whitespace \"$raw_gpu_uuid\")\n");
+    out.push_str("    pid=$(trim_whitespace \"$raw_pid\")\n");
+    out.push_str("    process_name=$(trim_whitespace \"$raw_process_name\")\n");
+    out.push_str("    used_memory=$(trim_whitespace \"$raw_used_memory\")\n");
+    out.push_str("    printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s}\\n' \\\n");
+    out.push_str("      \"$(json_escape \"$sampled_at\")\" \"$(json_string_or_null \"$node\")\" \"$(json_string_or_null \"$gpu_uuid\")\" \"$(json_string_or_null \"$pid\")\" \"$(json_string_or_null \"$process_name\")\" \"$(json_string_or_null \"$used_memory\")\" >> \"$node_dir/gpu_processes.jsonl\"\n");
+    out.push_str("  done <<< \"$process_output\"\n");
+    out.push_str("fi\n");
+    out.push_str("HPC_COMPOSE_GPU_SAMPLE_NODE\n");
+    out.push_str("  chmod +x \"$script_path\"\n");
+    out.push_str("  printf '%s' \"$script_path\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("sample_gpu_metrics_all_nodes() {\n");
+    out.push_str("  [[ \"$GPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  local sampled_at\n");
+    out.push_str("  sampled_at=$(metrics_timestamp)\n");
+    out.push_str("  local sample_root=\"$METRICS_DIR/gpu-node-samples/$sampled_at\"\n");
+    out.push_str("  rm -rf \"$sample_root\"\n");
+    out.push_str("  mkdir -p \"$sample_root\"\n");
+    out.push_str("  local script_path\n");
+    out.push_str("  script_path=$(write_gpu_sample_node_script)\n");
+    out.push_str("  if ! srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 --exact --overlap bash \"$script_path\" \"$sampled_at\" \"$sample_root\" >/dev/null 2>&1; then\n");
+    out.push_str(
+        "    mark_gpu_collector_unavailable \"all-node nvidia-smi sampling failed through srun\"\n",
+    );
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  shopt -s nullglob\n");
+    out.push_str("  local gpu_files=(\"$sample_root\"/*/gpu.jsonl)\n");
+    out.push_str("  local proc_files=(\"$sample_root\"/*/gpu_processes.jsonl)\n");
+    out.push_str("  local status_files=(\"$sample_root\"/*/status.txt)\n");
+    out.push_str("  if (( ${#gpu_files[@]} == 0 )); then\n");
+    out.push_str("    mark_gpu_collector_unavailable \"nvidia-smi produced no GPU samples on allocation nodes\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  cat \"${gpu_files[@]}\" >> \"$GPU_METRICS_FILE\"\n");
+    out.push_str("  if (( ${#proc_files[@]} > 0 )); then cat \"${proc_files[@]}\" >> \"$GPU_PROCESSES_FILE\"; fi\n");
+    out.push_str("  if (( ${#status_files[@]} > 0 )); then GPU_COLLECTOR_NOTE=\"$(paste -sd '; ' \"${status_files[@]}\" 2>/dev/null || true)\"; fi\n");
+    out.push_str("  mark_gpu_collector_success \"$sampled_at\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("sample_gpu_metrics() {\n");
+    out.push_str("  if [[ \"${BACKEND:-slurm}\" == \"slurm\" && \"${HPC_COMPOSE_NODE_COUNT:-1}\" -gt 1 ]]; then\n");
+    out.push_str("    sample_gpu_metrics_all_nodes\n");
+    out.push_str("  else\n");
+    out.push_str("    sample_gpu_metrics_current_node\n");
+    out.push_str("  fi\n");
     out.push_str("}\n\n");
 
     out.push_str("sample_slurm_metrics() {\n");
@@ -1991,6 +2428,40 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("  mark_slurm_collector_success \"$sampled_at\"\n");
     out.push_str("}\n\n");
 
+    out.push_str("write_metrics_diagnostics_node_script() {\n");
+    out.push_str("  local script_path=\"$METRICS_DIR/diagnostics-node.sh\"\n");
+    out.push_str("  cat > \"$script_path\" <<'HPC_COMPOSE_DIAGNOSTICS_NODE'\n");
+    out.push_str("#!/bin/bash\n");
+    out.push_str("set -euo pipefail\n");
+    out.push_str("root=$1\n");
+    out.push_str("node=\"${SLURMD_NODENAME:-${HOSTNAME:-}}\"\n");
+    out.push_str("if [[ -z \"$node\" ]]; then node=$(hostname); fi\n");
+    out.push_str("dir=\"$root/nodes/$node\"\n");
+    out.push_str("mkdir -p \"$dir\"\n");
+    out.push_str("env | sort | grep -E '^(NCCL|UCX|FI|CUDA|ROCR|HIP|OMPI|PMI|PMIX|I_MPI)_' > \"$dir/env.txt\" 2>/dev/null || true\n");
+    out.push_str("if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi topo -m > \"$dir/nvidia-smi-topo.txt\" 2>&1 || true; nvidia-smi -q > \"$dir/nvidia-smi-q.txt\" 2>&1 || true; fi\n");
+    out.push_str("if command -v ibstat >/dev/null 2>&1; then ibstat > \"$dir/ibstat.txt\" 2>&1 || true; fi\n");
+    out.push_str("if command -v ibv_devinfo >/dev/null 2>&1; then ibv_devinfo > \"$dir/ibv_devinfo.txt\" 2>&1 || true; fi\n");
+    out.push_str("if command -v ucx_info >/dev/null 2>&1; then ucx_info -v > \"$dir/ucx_info.txt\" 2>&1 || true; fi\n");
+    out.push_str("if command -v fi_info >/dev/null 2>&1; then fi_info > \"$dir/fi_info.txt\" 2>&1 || true; fi\n");
+    out.push_str("HPC_COMPOSE_DIAGNOSTICS_NODE\n");
+    out.push_str("  chmod +x \"$script_path\"\n");
+    out.push_str("  printf '%s' \"$script_path\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("capture_metrics_diagnostics() {\n");
+    out.push_str("  mkdir -p \"$METRICS_DIAGNOSTICS_DIR\"\n");
+    out.push_str("  local script_path\n");
+    out.push_str("  script_path=$(write_metrics_diagnostics_node_script)\n");
+    out.push_str("  if [[ \"${BACKEND:-slurm}\" == \"slurm\" && \"${HPC_COMPOSE_NODE_COUNT:-1}\" -gt 1 ]]; then\n");
+    out.push_str("    srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 --exact --overlap bash \"$script_path\" \"$METRICS_DIAGNOSTICS_DIR\" >/dev/null 2>&1 || true\n");
+    out.push_str("  else\n");
+    out.push_str(
+        "    bash \"$script_path\" \"$METRICS_DIAGNOSTICS_DIR\" >/dev/null 2>&1 || true\n",
+    );
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
     out.push_str("sample_metrics_once() {\n");
     out.push_str("  sample_gpu_metrics\n");
     out.push_str("  sample_slurm_metrics\n");
@@ -2008,6 +2479,7 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("  : > \"$GPU_METRICS_FILE\"\n");
     out.push_str("  : > \"$GPU_PROCESSES_FILE\"\n");
     out.push_str("  : > \"$SLURM_METRICS_FILE\"\n");
+    out.push_str("  capture_metrics_diagnostics\n");
     out.push_str("  write_metrics_meta\n");
     out.push_str("  sample_metrics_once\n");
     out.push_str("  metrics_sampler_loop &\n");
@@ -2340,7 +2812,10 @@ fn render_artifact_helpers(out: &mut String) {
 fn render_service(
     out: &mut String,
     service: &RuntimeService,
+    service_index: usize,
     dependents: &[String],
+    global_software_env: &SoftwareEnvConfig,
+    slurm: &SlurmConfig,
     runtime: &crate::spec::RuntimeConfig,
     render_options: &RenderOptions,
     scratch_configured: bool,
@@ -2352,13 +2827,30 @@ fn render_service(
     let log_file_name = log_file_name_for_service(&service.name);
     let container_log_path = format!("/hpc-compose/job/logs/{log_file_name}");
     let command_args = execution_argv(&service.execution, service.working_dir.as_deref());
-    let srun_args = build_srun_command_for_backend(service, runtime.backend);
+    let distributed =
+        distributed_render_env(service, slurm, render_options.cluster_profile.as_ref());
+    let distributed_extra_container_env = distributed
+        .profile_env
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let software_env_keys =
+        software_env_export_names(global_software_env, &service.slurm.software_env);
+    let mut extra_container_env = distributed_extra_container_env;
+    extra_container_env.extend(software_env_keys.clone());
+    let srun_args = build_srun_command_for_backend_with_extra_container_env(
+        service,
+        runtime.backend,
+        &extra_container_env,
+    );
     let dependents_csv = dependents.join(",");
     let service_env = service
         .environment
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>();
+    let software_env =
+        effective_software_env_pairs(global_software_env, &service.slurm.software_env);
     let host_prologue = service
         .slurm
         .prologue
@@ -2472,6 +2964,21 @@ fn render_service(
         "  local -a srun_cmd={}\n",
         bash_array_literal(&srun_args)
     ));
+    if distributed.enabled && matches!(service.execution, ExecutionSpec::ImageDefault) {
+        let prolog_file = format!("{service_id}.dist-rank-prolog.sh");
+        let target = format!("\"$ALLOCATION_DIR/{prolog_file}\"");
+        push_hook_file(
+            out,
+            &target,
+            &format!("HPC_COMPOSE_DIST_RANK_PROLOG_{service_id}"),
+            &distributed_rank_task_prolog_body(),
+        );
+        out.push_str(&format!(
+            "  local dist_rank_task_prolog=\"$ALLOCATION_DIR/{prolog_file}\"\n"
+        ));
+        out.push_str("  chmod +x \"$dist_rank_task_prolog\"\n");
+        out.push_str("  srun_cmd+=(\"--task-prolog=$dist_rank_task_prolog\")\n");
+    }
     out.push_str(&format!(
         "  local -a service_cmd={}\n",
         bash_array_literal(&command_args)
@@ -2482,6 +2989,22 @@ fn render_service(
             "  local container_wrapper=\"$HOOKS_CONTAINER_DIR/{wrapper_file}\"\n"
         ));
         out.push_str("  service_cmd=(\"/bin/sh\" \"$container_wrapper\" \"${service_cmd[@]}\")\n");
+    }
+    if distributed.enabled && !matches!(service.execution, ExecutionSpec::ImageDefault) {
+        let wrapper_file = format!("{service_id}.dist-env.sh");
+        let target = format!("\"$ALLOCATION_DIR/{wrapper_file}\"");
+        push_hook_file(
+            out,
+            &target,
+            &format!("HPC_COMPOSE_DIST_ENV_{service_id}"),
+            &distributed_env_wrapper_body(),
+        );
+        out.push_str(&format!(
+            "  local distributed_env_wrapper=\"/hpc-compose/job/allocation/{wrapper_file}\"\n"
+        ));
+        out.push_str(
+            "  service_cmd=(\"/bin/sh\" \"$distributed_env_wrapper\" \"${service_cmd[@]}\")\n",
+        );
     }
     out.push_str(&format!(
         "  local scratch_enabled={}\n",
@@ -2553,6 +3076,37 @@ fn render_service(
         service_id
     ));
     out.push_str("  write_nodelist_file \"$service_nodelist_file\" \"$service_nodelist\"\n");
+    if distributed.enabled {
+        let dist_hostfile_name = format!("{}.hostfile", service_token(&service.name));
+        out.push_str(&format!(
+            "  local dist_nproc_per_node={}\n",
+            distributed.nproc_per_node
+        ));
+        out.push_str("  local dist_world_size=$(( service_node_count * dist_nproc_per_node ))\n");
+        out.push_str(&format!(
+            "  local dist_hostfile=\"$DIST_HOSTFILE_DIR/{}\"\n",
+            dist_hostfile_name
+        ));
+        out.push_str(&format!(
+            "  local dist_hostfile_container=\"$DIST_HOSTFILE_CONTAINER_DIR/{}\"\n",
+            dist_hostfile_name
+        ));
+        out.push_str(
+            "  write_mpi_hostfile \"$dist_hostfile\" \"$service_nodelist\" \"$dist_nproc_per_node\"\n",
+        );
+        let fixed_port = distributed
+            .rdzv_port
+            .map(|port| port.to_string())
+            .unwrap_or_default();
+        out.push_str("  local dist_master_port\n");
+        out.push_str(&format!(
+            "  dist_master_port=$(hpc_compose_dist_port {} {} {} {})\n",
+            shell_quote(&fixed_port),
+            distributed.rdzv_port_base,
+            distributed.rdzv_port_span,
+            service_index
+        ));
+    }
     if let Some(mpi) = &service.slurm.mpi {
         let hostfile_name = format!("{}.hostfile", service_token(&service.name));
         let slots = mpi_hostfile_slots(service)
@@ -2591,6 +3145,29 @@ fn render_service(
     out.push_str(
         "  launch_env+=(\"HPC_COMPOSE_SERVICE_NODELIST_FILE=$service_nodelist_container\")\n",
     );
+    if distributed.enabled {
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_DIST_MASTER_ADDR=$service_primary_node\")\n");
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_DIST_MASTER_PORT=$dist_master_port\")\n");
+        out.push_str(
+            "  launch_env+=(\"HPC_COMPOSE_DIST_RDZV_ENDPOINT=$service_primary_node:$dist_master_port\")\n",
+        );
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_DIST_NNODES=$service_node_count\")\n");
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_DIST_NPROC_PER_NODE=$dist_nproc_per_node\")\n");
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_DIST_WORLD_SIZE=$dist_world_size\")\n");
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_DIST_HOSTFILE=$dist_hostfile_container\")\n");
+        if !distributed.profile_env.is_empty() {
+            let profile_env = distributed
+                .profile_env
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>();
+            out.push_str(&format!(
+                "  local -a distributed_profile_env={}\n",
+                bash_array_literal(&profile_env)
+            ));
+            out.push_str("  launch_env+=(\"${distributed_profile_env[@]}\")\n");
+        }
+    }
     out.push_str("  if [[ \"$scratch_enabled\" == \"1\" ]]; then\n");
     if runtime.backend == RuntimeBackend::Host {
         out.push_str("    launch_env+=(\"HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_HOST_PATH\")\n");
@@ -2602,6 +3179,23 @@ fn render_service(
     if service.slurm.mpi.is_some() {
         out.push_str("  launch_env+=(\"HPC_COMPOSE_MPI_HOSTFILE=$mpi_hostfile_container\")\n");
         out.push_str("  launch_env+=(\"HPC_COMPOSE_MPI_TYPE=$mpi_type\")\n");
+        if let Some(mpi) = &service.slurm.mpi {
+            if let Some(profile) = mpi.profile {
+                out.push_str(&format!(
+                    "  launch_env+=({})\n",
+                    shell_quote(&format!("HPC_COMPOSE_MPI_PROFILE={}", profile.as_str()))
+                ));
+            }
+            if let Some(implementation) = mpi.resolved_implementation() {
+                out.push_str(&format!(
+                    "  launch_env+=({})\n",
+                    shell_quote(&format!(
+                        "HPC_COMPOSE_MPI_IMPLEMENTATION={}",
+                        implementation.as_str()
+                    ))
+                ));
+            }
+        }
     }
     out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
     out.push_str("    launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")\n");
@@ -2614,6 +3208,13 @@ fn render_service(
             bash_array_literal(&service_env)
         ));
         out.push_str("  launch_env+=(\"${service_env[@]}\")\n");
+    }
+    if !software_env.is_empty() {
+        out.push_str(&format!(
+            "  local -a software_env={}\n",
+            bash_array_literal(&software_env)
+        ));
+        out.push_str("  launch_env+=(\"${software_env[@]}\")\n");
     }
     out.push_str("  local pid\n");
     out.push_str("  local prologue_status=0\n");
@@ -2635,11 +3236,17 @@ fn render_service(
         render_options,
         allocation_gpu_requested,
     );
-    out.push_str("    if (( ${#launch_env[@]} == 0 )); then\n");
-    out.push_str("      \"${srun_cmd[@]}\" \"${runtime_cmd[@]}\" >>\"$logfile\" 2>&1 &\n");
-    out.push_str("    else\n");
-    out.push_str("      env \"${launch_env[@]}\" \"${srun_cmd[@]}\" \"${runtime_cmd[@]}\" >>\"$logfile\" 2>&1 &\n");
-    out.push_str("    fi\n");
+    out.push_str("    (\n");
+    out.push_str("      set -euo pipefail\n");
+    if !service.slurm.software_env.is_empty() {
+        render_apply_software_env(out, &service.slurm.software_env, "      ");
+    }
+    out.push_str("      if (( ${#launch_env[@]} == 0 )); then\n");
+    out.push_str("        \"${srun_cmd[@]}\" \"${runtime_cmd[@]}\" >>\"$logfile\" 2>&1\n");
+    out.push_str("      else\n");
+    out.push_str("        env \"${launch_env[@]}\" \"${srun_cmd[@]}\" \"${runtime_cmd[@]}\" >>\"$logfile\" 2>&1\n");
+    out.push_str("      fi\n");
+    out.push_str("    ) &\n");
     out.push_str("    pid=$!\n");
     out.push_str("  fi\n");
     out.push_str(&format!(
@@ -2885,6 +3492,14 @@ pub fn build_srun_command_for_backend(
     service: &RuntimeService,
     backend: RuntimeBackend,
 ) -> Vec<String> {
+    build_srun_command_for_backend_with_extra_container_env(service, backend, &[])
+}
+
+fn build_srun_command_for_backend_with_extra_container_env(
+    service: &RuntimeService,
+    backend: RuntimeBackend,
+    extra_container_env: &[String],
+) -> Vec<String> {
     let mut args = vec![
         "srun".to_string(),
         format!("--nodes={}", service.placement.nodes),
@@ -2922,6 +3537,8 @@ pub fn build_srun_command_for_backend(
     if service.slurm.mpi.is_some() {
         env_names.extend([
             "HPC_COMPOSE_MPI_HOSTFILE",
+            "HPC_COMPOSE_MPI_IMPLEMENTATION",
+            "HPC_COMPOSE_MPI_PROFILE",
             "HPC_COMPOSE_MPI_TYPE",
             "PMI_APPNUM",
             "PMI_CONTROL_PORT",
@@ -2958,7 +3575,13 @@ pub fn build_srun_command_for_backend(
             "SLURM_TASKS_PER_NODE",
         ]);
     }
+    if distributed_helpers_enabled(service) {
+        env_names.extend(DIST_ENV_NAMES.iter().copied());
+        env_names.extend(DIST_SLURM_RANK_ENV_NAMES.iter().copied());
+    }
     env_names.extend(service.environment.iter().map(|(name, _)| name.as_str()));
+    env_names.extend(service.slurm.software_env.env.keys().map(String::as_str));
+    env_names.extend(extra_container_env.iter().map(String::as_str));
     env_names.sort_unstable();
     env_names.dedup();
     if backend == RuntimeBackend::Pyxis {
@@ -3177,6 +3800,73 @@ exit "$service_status"
     )
 }
 
+fn distributed_env_wrapper_body() -> String {
+    r#"#!/bin/sh
+set -u
+if [ "$#" -eq 0 ]; then
+  echo "distributed environment wrapper has no command to run" >&2
+  exit 127
+fi
+hpc_compose_current_node() {
+  if [ -n "${SLURMD_NODENAME:-}" ]; then
+    printf '%s' "$SLURMD_NODENAME"
+  elif [ -n "${HOSTNAME:-}" ]; then
+    printf '%s' "$HOSTNAME"
+  else
+    hostname
+  fi
+}
+hpc_compose_dist_node_rank() {
+  current_node="$(hpc_compose_current_node)"
+  rank=0
+  for node in ${HPC_COMPOSE_SERVICE_NODELIST:-}; do
+    if [ "$node" = "$current_node" ]; then
+      printf '%s' "$rank"
+      return 0
+    fi
+    rank=$((rank + 1))
+  done
+  printf '%s' "${SLURM_NODEID:-0}"
+}
+export HPC_COMPOSE_DIST_NODE_RANK="${HPC_COMPOSE_DIST_NODE_RANK:-$(hpc_compose_dist_node_rank)}"
+export HPC_COMPOSE_DIST_LOCAL_RANK="${HPC_COMPOSE_DIST_LOCAL_RANK:-${SLURM_LOCALID:-0}}"
+export HPC_COMPOSE_DIST_GLOBAL_RANK="${HPC_COMPOSE_DIST_GLOBAL_RANK:-${SLURM_PROCID:-0}}"
+exec "$@"
+"#
+    .to_string()
+}
+
+fn distributed_rank_task_prolog_body() -> String {
+    r#"#!/bin/sh
+set -u
+hpc_compose_current_node() {
+  if [ -n "${SLURMD_NODENAME:-}" ]; then
+    printf '%s' "$SLURMD_NODENAME"
+  elif [ -n "${HOSTNAME:-}" ]; then
+    printf '%s' "$HOSTNAME"
+  else
+    hostname
+  fi
+}
+hpc_compose_dist_node_rank() {
+  current_node="$(hpc_compose_current_node)"
+  rank=0
+  for node in ${HPC_COMPOSE_SERVICE_NODELIST:-}; do
+    if [ "$node" = "$current_node" ]; then
+      printf '%s' "$rank"
+      return 0
+    fi
+    rank=$((rank + 1))
+  done
+  printf '%s' "${SLURM_NODEID:-0}"
+}
+printf 'export HPC_COMPOSE_DIST_NODE_RANK=%s\n' "${HPC_COMPOSE_DIST_NODE_RANK:-$(hpc_compose_dist_node_rank)}"
+printf 'export HPC_COMPOSE_DIST_LOCAL_RANK=%s\n' "${HPC_COMPOSE_DIST_LOCAL_RANK:-${SLURM_LOCALID:-0}}"
+printf 'export HPC_COMPOSE_DIST_GLOBAL_RANK=%s\n' "${HPC_COMPOSE_DIST_GLOBAL_RANK:-${SLURM_PROCID:-0}}"
+"#
+    .to_string()
+}
+
 fn failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
     match mode {
         ServiceFailureMode::FailJob => "fail_job",
@@ -3227,10 +3917,11 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::cluster::{ClusterProfile, DistributedProfile, RuntimeAvailability};
     use crate::planner::ServicePlacement;
     use crate::spec::{
-        DependencyCondition, MpiConfig, MpiType, ReadinessSpec, ResumeConfig, RuntimeConfig,
-        RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceDependency,
+        DependencyCondition, MpiConfig, MpiProfile, MpiType, ReadinessSpec, ResumeConfig,
+        RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceDependency,
         ServiceFailurePolicy, ServiceHookContext, ServiceHookSpec, ServiceScratchConfig,
         ServiceSlurmConfig, SlurmConfig, StageInConfig, StageMode, StageOutConfig, StageOutWhen,
     };
@@ -3507,6 +4198,7 @@ exit 1
             &RenderOptions {
                 apptainer_bin: "/opt/site/bin/apptainer".into(),
                 singularity_bin: "/opt/site/bin/singularity".into(),
+                cluster_profile: None,
             },
         )
         .expect("script");
@@ -3525,6 +4217,7 @@ exit 1
             &RenderOptions {
                 apptainer_bin: "/opt/site/bin/apptainer".into(),
                 singularity_bin: "/opt/site/bin/singularity".into(),
+                cluster_profile: None,
             },
         )
         .expect("script");
@@ -3850,7 +4543,8 @@ exit 1
         assert!(script.contains("run_host_hook \"$host_prologue_script\""));
         assert!(script.contains("service_cmd=(\"/bin/sh\" \"$container_wrapper\""));
         assert!(script.contains("HPC_COMPOSE_SERVICE_LOG=/hpc-compose/job/logs/trainer.log"));
-        assert!(script.contains(">>\"$logfile\" 2>&1 &"));
+        assert!(script.contains(">>\"$logfile\" 2>&1\n"));
+        assert!(script.contains("    ) &"));
     }
 
     #[test]
@@ -3979,6 +4673,7 @@ exit 1
         service.name = "mpi".into();
         service.slurm.mpi = Some(MpiConfig {
             mpi_type: MpiType::new("pmix").expect("mpi type"),
+            profile: Some(MpiProfile::Openmpi),
             implementation: None,
             launcher: Default::default(),
             expected_ranks: None,
@@ -4012,6 +4707,8 @@ exit 1
             .find(|arg| arg.starts_with("--container-env="))
             .expect("container env");
         assert!(container_env.contains("HPC_COMPOSE_MPI_HOSTFILE"));
+        assert!(container_env.contains("HPC_COMPOSE_MPI_IMPLEMENTATION"));
+        assert!(container_env.contains("HPC_COMPOSE_MPI_PROFILE"));
         assert!(container_env.contains("HPC_COMPOSE_MPI_TYPE"));
         assert!(container_env.contains("PMIX_RANK"));
         assert!(container_env.contains("PMI_RANK"));
@@ -4026,6 +4723,171 @@ exit 1
             script.contains("launch_env+=(\"HPC_COMPOSE_MPI_HOSTFILE=$mpi_hostfile_container\")")
         );
         assert!(script.contains("launch_env+=(\"HPC_COMPOSE_MPI_TYPE=$mpi_type\")"));
+        assert!(script.contains("HPC_COMPOSE_MPI_PROFILE=openmpi"));
+        assert!(script.contains("HPC_COMPOSE_MPI_IMPLEMENTATION=openmpi"));
+    }
+
+    #[test]
+    fn distributed_env_derives_nproc_from_overrides_gpu_and_tasks() {
+        let mut service = runtime_service();
+        service.placement = ServicePlacement {
+            mode: ServicePlacementMode::Distributed,
+            nodes: 2,
+            ntasks: None,
+            ntasks_per_node: Some(3),
+            pin_to_primary_node: false,
+            node_indices: None,
+            exclude_indices: Vec::new(),
+            allow_overlap: false,
+        };
+        let slurm = SlurmConfig::default();
+
+        service.slurm.gres = Some("gpu:a100:4".into());
+        assert_eq!(derive_nproc_per_node(&service, &slurm), 4);
+
+        service.slurm.gres = None;
+        service.slurm.gpus = Some(8);
+        assert_eq!(derive_nproc_per_node(&service, &slurm), 4);
+
+        service.slurm.gpus = None;
+        assert_eq!(derive_nproc_per_node(&service, &slurm), 3);
+
+        service
+            .environment
+            .push(("HPC_COMPOSE_DIST_NPROC_PER_NODE".into(), "6".into()));
+        service.slurm.gpus_per_node = Some(4);
+        assert_eq!(derive_nproc_per_node(&service, &slurm), 6);
+
+        assert_eq!(parse_gres_gpu_count("gpu:tesla:8"), Some(8));
+        assert_eq!(parse_gres_gpu_count("gres/gpu:h100:2"), Some(2));
+        assert_eq!(parse_gres_gpu_count("gpu"), Some(1));
+        assert_eq!(parse_gres_gpu_count("cpu:4"), None);
+    }
+
+    #[test]
+    fn render_distributed_service_emits_helpers_and_profile_env() {
+        let mut service = runtime_service();
+        service.name = "trainer".into();
+        service.environment = vec![("NCCL_DEBUG".into(), "INFO".into())];
+        service.placement = ServicePlacement {
+            mode: ServicePlacementMode::Distributed,
+            nodes: 2,
+            ntasks: None,
+            ntasks_per_node: Some(1),
+            pin_to_primary_node: false,
+            node_indices: None,
+            exclude_indices: Vec::new(),
+            allow_overlap: false,
+        };
+        service.slurm.gpus_per_node = Some(4);
+        let profile = ClusterProfile {
+            schema_version: 1,
+            generated_at_unix: None,
+            slurm_version: None,
+            mpi_types: Vec::new(),
+            mpi_installations: Vec::new(),
+            partitions: Vec::new(),
+            qos: Vec::new(),
+            gpu_models: Vec::new(),
+            runtimes: RuntimeAvailability::default(),
+            shared_cache_paths: Vec::new(),
+            distributed: DistributedProfile {
+                rdzv_port: None,
+                rdzv_port_base: Some(31_000),
+                rdzv_port_span: Some(17),
+                env: BTreeMap::from([
+                    ("FI_PROVIDER".into(), "efa".into()),
+                    ("NCCL_DEBUG".into(), "WARN".into()),
+                    ("UCX_TLS".into(), "rc,cuda_copy,cuda_ipc".into()),
+                ]),
+            },
+            ..ClusterProfile::default()
+        };
+        let plan = RuntimePlan {
+            name: "dist-demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service.clone()],
+        };
+
+        let script = render_script_with_options(
+            &plan,
+            &RenderOptions {
+                cluster_profile: Some(profile.clone()),
+                ..RenderOptions::default()
+            },
+        )
+        .expect("script");
+        assert!(script.contains("DIST_HOSTFILE_DIR=\"$ALLOCATION_DIR/distributed-hostfiles\""));
+        assert!(script.contains("local dist_nproc_per_node=4"));
+        assert!(script.contains("hpc_compose_dist_port '' 31000 17 0"));
+        assert!(
+            script
+                .contains("HPC_COMPOSE_DIST_RDZV_ENDPOINT=$service_primary_node:$dist_master_port")
+        );
+        assert!(script.contains(
+            "write_mpi_hostfile \"$dist_hostfile\" \"$service_nodelist\" \"$dist_nproc_per_node\""
+        ));
+        assert!(script.contains("export HPC_COMPOSE_DIST_NODE_RANK="));
+        assert!(script.contains("FI_PROVIDER=efa"));
+        assert!(script.contains("UCX_TLS=rc,cuda_copy,cuda_ipc"));
+        assert!(!script.contains("NCCL_DEBUG=WARN"));
+
+        let srun_args =
+            build_srun_command_for_backend(&service, crate::spec::RuntimeBackend::Pyxis);
+        let container_env = srun_args
+            .iter()
+            .find(|arg| arg.starts_with("--container-env="))
+            .expect("container env");
+        assert!(container_env.contains("SLURM_LOCALID"));
+        assert!(container_env.contains("SLURM_NODEID"));
+        assert!(container_env.contains("SLURM_PROCID"));
+
+        let env_names = distributed_environment_names_for_service(&service, Some(&profile));
+        assert!(env_names.contains(&"HPC_COMPOSE_DIST_WORLD_SIZE".to_string()));
+        assert!(env_names.contains(&"FI_PROVIDER".to_string()));
+        assert!(env_names.contains(&"UCX_TLS".to_string()));
+        assert!(!env_names.contains(&"NCCL_DEBUG".to_string()));
+    }
+
+    #[test]
+    fn render_image_default_distributed_service_uses_task_prolog_for_rank_helpers() {
+        let mut service = runtime_service();
+        service.name = "default-entrypoint".into();
+        service.execution = ExecutionSpec::ImageDefault;
+        service.working_dir = None;
+        service.placement = ServicePlacement {
+            mode: ServicePlacementMode::Distributed,
+            nodes: 2,
+            ntasks: None,
+            ntasks_per_node: Some(2),
+            pin_to_primary_node: false,
+            node_indices: None,
+            exclude_indices: Vec::new(),
+            allow_overlap: false,
+        };
+        let plan = RuntimePlan {
+            name: "dist-default".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("default_x2d_entrypoint.dist-rank-prolog.sh"));
+        assert!(script.contains("srun_cmd+=(\"--task-prolog=$dist_rank_task_prolog\")"));
+        assert!(script.contains("export HPC_COMPOSE_DIST_NODE_RANK="));
+        assert!(script.contains("export HPC_COMPOSE_DIST_LOCAL_RANK="));
+        assert!(script.contains("export HPC_COMPOSE_DIST_GLOBAL_RANK="));
+        assert!(script.contains("'--container-entrypoint'"));
     }
 
     #[test]
@@ -4315,6 +5177,7 @@ exit 1
                 cpu_bind: Some("cores".into()),
                 mpi: Some(MpiConfig {
                     mpi_type: MpiType::new("pmix_v4").expect("mpi type"),
+                    profile: None,
                     implementation: None,
                     launcher: Default::default(),
                     expected_ranks: None,
@@ -4492,6 +5355,63 @@ exit 1
         assert!(script.contains("stop_metrics_sampler"));
         assert!(script.contains("GPU_COLLECTOR_ENABLED=1"));
         assert!(script.contains("SLURM_COLLECTOR_ENABLED=1"));
+        assert!(script.contains("sample_gpu_metrics_all_nodes"));
+        assert!(script.contains("--ntasks-per-node=1 --exact --overlap bash \"$script_path\""));
+        assert!(script.contains("METRICS_DIAGNOSTICS_DIR=\"$METRICS_DIR/diagnostics\""));
+        assert!(script.contains("nvidia-smi topo -m"));
+    }
+
+    #[test]
+    fn render_structured_software_env_before_setup_and_service_launch() {
+        let mut service = runtime_service();
+        service.slurm.software_env = crate::spec::SoftwareEnvConfig {
+            modules: crate::spec::ModuleEnvSpec {
+                purge: false,
+                load: vec!["netcdf/4.9".into()],
+            },
+            spack: None,
+            env: BTreeMap::from([("OMP_NUM_THREADS".into(), "8".into())]),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                setup: vec!["echo setup".into()],
+                software_env: crate::spec::SoftwareEnvConfig {
+                    modules: crate::spec::ModuleEnvSpec {
+                        purge: true,
+                        load: vec!["cuda/12.4".into()],
+                    },
+                    spack: Some(crate::spec::SpackEnvSpec {
+                        view: "/shared/spack/views/ml".into(),
+                    }),
+                    env: BTreeMap::from([
+                        ("HDF5_USE_FILE_LOCKING".into(), "FALSE".into()),
+                        ("OMP_NUM_THREADS".into(), "2".into()),
+                    ]),
+                },
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        let top_level = script
+            .find("hpc_compose_module purge")
+            .expect("top-level x-env");
+        let setup = script.find("echo setup").expect("setup");
+        assert!(top_level < setup);
+        assert!(script.contains("hpc_compose_module load 'cuda/12.4'"));
+        assert!(script.contains("hpc_compose_module load 'netcdf/4.9'"));
+        assert!(script.contains("if [[ -d '/shared/spack/views/ml'/bin ]]; then export PATH='/shared/spack/views/ml'/bin:\"$PATH\"; fi"));
+        assert!(
+            script.contains(
+                "local -a software_env=('HDF5_USE_FILE_LOCKING=FALSE' 'OMP_NUM_THREADS=8')"
+            )
+        );
+        assert!(script.contains("HDF5_USE_FILE_LOCKING"));
+        assert!(script.contains("OMP_NUM_THREADS"));
     }
 
     #[test]

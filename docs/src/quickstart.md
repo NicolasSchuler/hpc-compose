@@ -1,19 +1,10 @@
 # Quickstart
 
-This is the shortest path from an empty shell to a validated spec, an inspectable batch script, and a real cluster submission.
+This is the shortest safe path from an empty shell to a validated spec, an inspectable batch script, and a first real Slurm submission.
 
-## 1. Install the CLI
+## 1. Install The CLI
 
-If the repository's [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page is still empty, build from source first:
-
-```bash
-git clone https://github.com/NicolasSchuler/hpc-compose.git
-cd hpc-compose
-cargo build --release
-./target/release/hpc-compose --help
-```
-
-Once a release tag is published, use the matching installer script from that tag:
+For normal use, install from the latest published [GitHub Release](https://github.com/NicolasSchuler/hpc-compose/releases) and pin the tag you selected:
 
 ```bash
 RELEASE_TAG=vX.Y.Z
@@ -21,17 +12,41 @@ curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEA
   | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
 ```
 
-The pinned installer selects the matching published release asset for the current Linux or macOS machine and installs `hpc-compose` into `~/.local/bin` by default. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run full cluster workflows.
+Replace `vX.Y.Z` with the published release tag shown on the release page.
 
-If you prefer native packages, published Linux releases also ship `.deb` and `.rpm` assets, and macOS users can install with `brew install NicolasSchuler/hpc-compose/hpc-compose`.
+The installer places `hpc-compose` in `~/.local/bin` by default and verifies the release checksum sidecar before installing. Release verification, manual downloads, package-manager installs, and source-checkout builds are covered in [Installation](installation.md).
 
-The installed CLI also ships Unix manpages. Use `man hpc-compose`, `man hpc-compose-up`, or `man hpc-compose-submit` as the concise command reference, and keep the longer docs for workflow guidance.
+## 2. Learn The Safe Authoring Path First
 
-When you install from a published release, verify it with the [release verification steps](installation.md#verify-a-release) before using it on a cluster or internal mirror.
+These commands do not call `sbatch`, do not import images, and do not require Slurm:
 
-## 2. Choose the smallest starting point
+```bash
+hpc-compose validate -f examples/minimal-batch.yaml
+hpc-compose inspect -f examples/minimal-batch.yaml
+hpc-compose up --dry-run --skip-prepare --no-preflight \
+  --script-out /tmp/hpc-compose-demo.sbatch \
+  -f examples/minimal-batch.yaml
+```
 
-Use the built-in starter template when you want the shortest path to your own `compose.yaml`:
+Expected output includes:
+
+```text
+spec is valid
+```
+
+```text
+service order: app
+```
+
+```text
+dry run: skipping sbatch submission
+```
+
+This is the right first path on macOS, a laptop, or any machine where you want to evaluate the authoring model before touching a real cluster. The same flow is also available as an [asciinema-style demo cast](quickstart-demo.cast), but the snippets above are the accessible reference output.
+
+## 3. Choose A Starting Spec
+
+Use the built-in starter template when you want a fresh `compose.yaml` with your application name and shared cache directory filled in:
 
 ```bash
 hpc-compose new \
@@ -43,47 +58,41 @@ hpc-compose new \
 
 Replace `<shared-cache-dir>` with a path visible from both the submission host and the compute nodes.
 
-If you want a known-good repository example instead, start with one of the four promoted examples on the [Examples](examples.md) page. The repository examples default `x-slurm.cache_dir` to `/cluster/shared/hpc-compose-cache` and honor `CACHE_DIR`, so set `CACHE_DIR` through `.env`, your shell environment, or `hpc-compose setup` before submitting them on a real cluster.
+If you want a known-good repository example instead, start with [Examples](examples.md). The examples page is the single selection guide for beginner, LLM, training, distributed, and pipeline workflows.
 
-## 3. Run the authoring golden path
+## 4. Pick And Test `CACHE_DIR`
 
-These three commands are the fastest proof that the tool understood your intent:
+Repository examples default to `/cluster/shared/hpc-compose-cache` so they validate out of the box, but real clusters usually need a site-specific shared path.
 
-```bash
-hpc-compose validate -f examples/minimal-batch.yaml
-hpc-compose inspect -f examples/minimal-batch.yaml
-hpc-compose up --dry-run --skip-prepare --no-preflight \
-  --script-out /tmp/hpc-compose-demo.sbatch \
-  -f examples/minimal-batch.yaml
-```
-
-Success looks like:
-
-- `validate` prints `spec is valid`
-- `inspect` shows `service order: app`
-- `up --dry-run` writes a launcher script and skips `sbatch`
-
-Download the [asciinema-style demo cast](quickstart-demo.cast) for the same flow.
-
-This is the right path on macOS or on any machine where you want to evaluate the authoring model before touching a real cluster.
-
-## 4. Optional: create a project-local settings file once
-
-If you want to stop repeating compose paths, env files, and binary overrides, create the project-local settings file (`.hpc-compose/settings.toml`) once in the current repo tree:
+Ask your cluster documentation or support team for a project scratch, work, or shared filesystem path, then test it:
 
 ```bash
-hpc-compose setup
-hpc-compose context
+export CACHE_DIR=/cluster/shared/hpc-compose-cache
+mkdir -p "$CACHE_DIR"
+test -w "$CACHE_DIR"
 ```
 
-Use `context` whenever you want to verify the fully resolved values and their sources before running cluster commands.
+Persist it next to your copied spec when you want the same value every time:
 
-<div class="callout warning">
-  <p><strong>Runtime commands require a Linux submission host</strong></p>
-  <p>Commands like <code>up</code>, <code>submit</code>, <code>prepare</code>, and <code>preflight</code> need Slurm and Enroot on the submission host. On macOS or a workstation without Slurm, stay on the authoring path until you move to a login node. See the <a href="support-matrix.md">Support Matrix</a> for the platform-by-platform breakdown.</p>
-</div>
+```bash
+printf 'CACHE_DIR=%s\n' "$CACHE_DIR" > .env
+```
 
-## 5. Submit on a real cluster
+Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for `x-slurm.cache_dir`. Validation may accept those strings, but `preflight` reports them as unsafe because prepare happens before runtime and compute nodes must later see the cached artifacts.
+
+## 5. Before Your First Cluster Run
+
+| Command category | Where to run it | Required tools | Notes |
+| --- | --- | --- | --- |
+| Authoring: `new`, `validate`, `inspect`, `render`, `config`, `schema` | laptop, workstation, or login node | `hpc-compose` | Safe before you have Slurm access. |
+| Prepare: `prepare` | Linux host with selected runtime backend | Pyxis needs Enroot; Apptainer needs `apptainer`; Singularity needs `singularity`; host backend needs no container runtime | Does not call `sbatch`, but needs runtime tools for image work. |
+| Cluster checks: `preflight`, `doctor --cluster-report` | Linux Slurm login node | Slurm client tools plus selected backend tools | Use `preflight --strict` when warnings should block submission. |
+| Submission: `up`, `submit`, `run` | Linux Slurm login node | `sbatch`, `srun`, scheduler tools, selected backend tools | Normal cluster execution path. |
+| Local launch: `up --local`, `submit --local` | Linux host only | Enroot and `runtime.backend: pyxis` | Single-host only; not a distributed Slurm substitute. |
+
+For Pyxis, `srun --help` should mention `--container-image`.
+
+## 6. Submit On A Real Cluster
 
 When you move to a supported Linux submission host, the normal run is:
 
@@ -91,7 +100,7 @@ When you move to a supported Linux submission host, the normal run is:
 hpc-compose up -f compose.yaml
 ```
 
-`up` is the preferred normal run. It runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to the line-oriented follower used in scripts and tests.
+`up` runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to line-oriented output.
 
 Success looks like:
 
@@ -100,35 +109,19 @@ Success looks like:
 - the watch UI or text follower shows scheduler progress
 - `status`, `ps`, and `logs` can reconnect to the tracked run later
 
-Use `up --resume-diff-only` when you want to inspect resume-related config deltas without submitting, and `up --allow-resume-changes` when you intentionally changed resume-coupled config between runs.
+## 7. If The First Cluster Run Fails
 
-## 6. First-job debugging flow
+| Symptom | Best next command | Why |
+| --- | --- | --- |
+| Missing `sbatch`, `srun`, `enroot`, `apptainer`, or `singularity` | `hpc-compose preflight -f compose.yaml` | Confirms which selected-backend tool is missing. |
+| `srun` does not advertise `--container-image` | `hpc-compose doctor --cluster-report` | Pyxis support is unavailable or not loaded on that node. |
+| Job submitted but no service log appeared | `hpc-compose status -f compose.yaml` | Shows the tracked top-level batch log path. |
+| Cache path warning or error | `hpc-compose preflight --strict -f compose.yaml` | Confirms whether `x-slurm.cache_dir` is shared and writable. |
+| Services start in the wrong order | `hpc-compose inspect --verbose -f compose.yaml` | Shows normalized dependencies and readiness gates. |
 
-Use this sequence when the first real submission fails:
+The longer symptom guide is [Troubleshooting](troubleshooting.md).
 
-```bash
-hpc-compose validate -f compose.yaml
-hpc-compose validate -f compose.yaml --strict-env
-hpc-compose inspect --verbose -f compose.yaml
-hpc-compose render --output job.sbatch -f compose.yaml
-hpc-compose preflight -f compose.yaml
-hpc-compose prepare -f compose.yaml
-```
-
-Use the debugging flow when you want to confirm:
-
-- service order
-- normalized image references
-- cache artifact paths
-- whether prepare steps will rebuild every submit
-- whether the generated job script matches what you expect to hand to Slurm
-
-<div class="callout warning">
-  <p><strong>Warning</strong></p>
-  <p><code>inspect --verbose</code> prints resolved environment values and final mount mappings. Treat its output as sensitive when the spec contains secrets.</p>
-</div>
-
-## 7. Revisit a tracked run later
+## 8. Revisit A Tracked Run Later
 
 ```bash
 hpc-compose jobs list
@@ -139,11 +132,11 @@ hpc-compose stats -f compose.yaml
 hpc-compose logs -f compose.yaml --follow
 ```
 
-Use `jobs list` first when you need to rediscover tracked runs under the current repo tree. Use `ps` for a stable per-service runtime snapshot, `watch` to reconnect to the live TUI, and `logs --follow` when you want the simplest text-only follower.
+Use `jobs list` first when you need to rediscover tracked runs under the current repo tree. Use `ps` for a stable per-service snapshot, `watch` to reconnect to the live UI, and `logs --follow` for a text-only follower.
 
-## From a source checkout
+## From A Source Checkout
 
-If you are running from a local checkout instead of an installed binary:
+If you are developing from a local checkout instead of an installed binary:
 
 ```bash
 cargo build --release
@@ -156,8 +149,8 @@ target/release/hpc-compose up --dry-run --skip-prepare --no-preflight \
 
 ## Read Next
 
-- Use [Examples](examples.md) when you want the closest known-good starting point.
-- Use [Execution Model](execution-model.md) to understand what runs where and which paths must be shared.
-- Use [Support Matrix](support-matrix.md) before adapting a real workflow to a new machine or cluster.
-- Use [Task Guide](task-guide.md) when you want a goal-oriented entry point instead of the full reference.
-- Use [Runbook](runbook.md) when adapting a real workload to a real cluster.
+- [Support Matrix](support-matrix.md)
+- [Examples](examples.md)
+- [Runtime Backends](runtime-backends.md)
+- [Runbook](runbook.md)
+- [Troubleshooting](troubleshooting.md)

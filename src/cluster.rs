@@ -1,6 +1,6 @@
 //! Best-effort cluster capability profiles and plan compatibility checks.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,12 +13,16 @@ use serde::{Deserialize, Serialize};
 use crate::context::ResolvedBinaries;
 use crate::preflight::{Item, Level, Report};
 use crate::prepare::RuntimePlan;
-use crate::spec::{RuntimeBackend, ScratchScope, parse_slurm_time_limit};
+use crate::spec::{
+    MpiImplementation, MpiProfile, RuntimeBackend, ScratchScope, parse_slurm_time_limit,
+};
 
 /// Relative location of the generated cluster profile.
 pub const CLUSTER_PROFILE_RELATIVE_PATH: &str = ".hpc-compose/cluster.toml";
 
 const CLUSTER_PROFILE_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_RDZV_PORT_BASE: u16 = 29_500;
+const DEFAULT_RDZV_PORT_SPAN: u16 = 1_000;
 
 /// Complete generated cluster profile.
 #[allow(missing_docs)]
@@ -34,6 +38,8 @@ pub struct ClusterProfile {
     #[serde(default)]
     pub mpi_types: Vec<String>,
     #[serde(default)]
+    pub mpi_installations: Vec<MpiInstallationProfile>,
+    #[serde(default)]
     pub partitions: Vec<PartitionProfile>,
     #[serde(default)]
     pub qos: Vec<String>,
@@ -43,6 +49,47 @@ pub struct ClusterProfile {
     pub runtimes: RuntimeAvailability,
     #[serde(default)]
     pub shared_cache_paths: Vec<String>,
+    #[serde(default)]
+    pub distributed: DistributedProfile,
+    #[serde(default)]
+    pub site: SiteProfile,
+    #[serde(default)]
+    pub software: SoftwareProfile,
+    #[serde(default)]
+    pub filesystems: Vec<FilesystemProfile>,
+    #[serde(default)]
+    pub gpu: GpuProfile,
+    #[serde(default)]
+    pub network: NetworkProfile,
+    #[serde(default)]
+    pub containers: ContainerPolicyProfile,
+    #[serde(default)]
+    pub slurm: SlurmPolicyProfile,
+}
+
+/// Best-effort MPI installation snapshot discovered from the login-node environment.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MpiInstallationProfile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub implementation: MpiImplementation,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub mpi_types: Vec<String>,
+    #[serde(default)]
+    pub bin_dir: Option<String>,
+    #[serde(default)]
+    pub lib_dir: Option<String>,
+    #[serde(default)]
+    pub bind_paths: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub pmi_library: Option<String>,
 }
 
 /// Per-partition capability snapshot.
@@ -88,6 +135,135 @@ pub struct RuntimeAvailability {
     pub host: bool,
 }
 
+/// Distributed ML launch defaults and fabric environment captured for a cluster.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DistributedProfile {
+    #[serde(default)]
+    pub rdzv_port: Option<u16>,
+    #[serde(default)]
+    pub rdzv_port_base: Option<u16>,
+    #[serde(default)]
+    pub rdzv_port_span: Option<u16>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// Human-maintained site metadata for support-team distributed profiles.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SiteProfile {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub support_url: Option<String>,
+    #[serde(default)]
+    pub contact: Option<String>,
+}
+
+/// Site software stacks that can be loaded through modules or path views.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SoftwareProfile {
+    #[serde(default)]
+    pub modules: Vec<SoftwareModuleProfile>,
+}
+
+/// One module or software stack advertised by a site profile.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SoftwareModuleProfile {
+    pub name: String,
+    #[serde(default)]
+    pub implementation: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// Shared filesystem or scratch hint advertised by a site profile.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FilesystemProfile {
+    pub path: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub quota_hint: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// GPU and accelerator facts that are stable enough to document for users.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GpuProfile {
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub mig_profiles: Vec<String>,
+    #[serde(default)]
+    pub cuda_driver: Option<String>,
+    #[serde(default)]
+    pub rocm_driver: Option<String>,
+}
+
+/// Network fabric hints for distributed frameworks and collectives.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkProfile {
+    #[serde(default)]
+    pub preferred_interfaces: Vec<String>,
+    #[serde(default)]
+    pub nccl_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ucx_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ofi_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ray_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub dask_env: BTreeMap<String, String>,
+}
+
+/// Container runtime and registry policy hints.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerPolicyProfile {
+    #[serde(default)]
+    pub approved_backends: Vec<String>,
+    #[serde(default)]
+    pub registry_mirrors: BTreeMap<String, String>,
+    #[serde(default)]
+    pub required_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub required_bind_paths: Vec<String>,
+}
+
+/// Slurm defaults and requirements recommended by the site profile.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SlurmPolicyProfile {
+    #[serde(default)]
+    pub defaults: BTreeMap<String, String>,
+    #[serde(default)]
+    pub required: BTreeMap<String, String>,
+}
+
 /// One cluster-profile compatibility warning.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,6 +286,31 @@ fn default_schema_version() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+impl Default for ClusterProfile {
+    fn default() -> Self {
+        Self {
+            schema_version: CLUSTER_PROFILE_SCHEMA_VERSION,
+            generated_at_unix: None,
+            slurm_version: None,
+            mpi_types: Vec::new(),
+            mpi_installations: Vec::new(),
+            partitions: Vec::new(),
+            qos: Vec::new(),
+            gpu_models: Vec::new(),
+            runtimes: RuntimeAvailability::default(),
+            shared_cache_paths: Vec::new(),
+            distributed: DistributedProfile::default(),
+            site: SiteProfile::default(),
+            software: SoftwareProfile::default(),
+            filesystems: Vec::new(),
+            gpu: GpuProfile::default(),
+            network: NetworkProfile::default(),
+            containers: ContainerPolicyProfile::default(),
+            slurm: SlurmPolicyProfile::default(),
+        }
+    }
 }
 
 impl ClusterProfile {
@@ -302,6 +503,7 @@ pub fn generate_cluster_profile(binaries: &ResolvedBinaries) -> ClusterReportGen
     let mpi_types = run_capture(&binaries.srun.value, &["--mpi=list"], &mut diagnostics)
         .map(|raw| advertised_mpi_types(&raw))
         .unwrap_or_default();
+    let mpi_installations = collect_mpi_installations(&mpi_types, binaries);
     let runtimes = RuntimeAvailability {
         pyxis: srun_has_pyxis(&binaries.srun.value),
         enroot: binary_available(&binaries.enroot.value),
@@ -318,11 +520,20 @@ pub fn generate_cluster_profile(binaries: &ResolvedBinaries) -> ClusterReportGen
             generated_at_unix: Some(unix_timestamp_now()),
             slurm_version,
             mpi_types,
+            mpi_installations,
             partitions,
             qos,
             gpu_models,
             runtimes,
             shared_cache_paths,
+            distributed: DistributedProfile::default(),
+            site: SiteProfile::default(),
+            software: SoftwareProfile::default(),
+            filesystems: Vec::new(),
+            gpu: GpuProfile::default(),
+            network: NetworkProfile::default(),
+            containers: ContainerPolicyProfile::default(),
+            slurm: SlurmPolicyProfile::default(),
         },
         diagnostics,
     }
@@ -359,6 +570,7 @@ pub fn load_cluster_profile(path: &Path) -> Result<ClusterProfile> {
             CLUSTER_PROFILE_SCHEMA_VERSION
         );
     }
+    validate_cluster_profile(&profile)?;
     Ok(profile)
 }
 
@@ -370,6 +582,7 @@ pub fn write_cluster_profile(path: &Path, profile: &ClusterProfile) -> Result<()
             profile.schema_version
         );
     }
+    validate_cluster_profile(profile)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -377,6 +590,172 @@ pub fn write_cluster_profile(path: &Path, profile: &ClusterProfile) -> Result<()
     let rendered =
         toml::to_string_pretty(profile).context("failed to serialize cluster profile")?;
     fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn validate_cluster_profile(profile: &ClusterProfile) -> Result<()> {
+    validate_distributed_profile(&profile.distributed)?;
+    validate_site_policy_profile(profile)
+}
+
+fn validate_distributed_profile(distributed: &DistributedProfile) -> Result<()> {
+    if distributed.rdzv_port == Some(0) {
+        bail!("cluster profile distributed.rdzv_port must be greater than zero");
+    }
+    if distributed.rdzv_port_base == Some(0) {
+        bail!("cluster profile distributed.rdzv_port_base must be greater than zero");
+    }
+    if distributed.rdzv_port_span == Some(0) {
+        bail!("cluster profile distributed.rdzv_port_span must be greater than zero");
+    }
+    let base = distributed.rdzv_port_base.unwrap_or(DEFAULT_RDZV_PORT_BASE);
+    let span = distributed.rdzv_port_span.unwrap_or(DEFAULT_RDZV_PORT_SPAN);
+    let end = u32::from(base) + u32::from(span) - 1;
+    if end > u32::from(u16::MAX) {
+        bail!(
+            "cluster profile distributed rendezvous port range {}..={} exceeds {}",
+            base,
+            end,
+            u16::MAX
+        );
+    }
+    for (name, value) in &distributed.env {
+        validate_cluster_env_name(name)?;
+        if value.contains('\0') || value.contains('\n') || value.contains('\r') {
+            bail!(
+                "cluster profile distributed.env.{name} must not contain line breaks or null bytes"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_cluster_env_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        bail!("cluster profile distributed.env contains an empty environment variable name");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        bail!("cluster profile distributed.env.{name} is not a safe environment variable name");
+    }
+    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        bail!("cluster profile distributed.env.{name} is not a safe environment variable name");
+    }
+    if name.starts_with("HPC_COMPOSE_") {
+        bail!("cluster profile distributed.env.{name} uses the reserved HPC_COMPOSE_ prefix");
+    }
+    Ok(())
+}
+
+fn validate_site_policy_profile(profile: &ClusterProfile) -> Result<()> {
+    validate_optional_text(profile.site.name.as_deref(), "site.name")?;
+    validate_optional_text(profile.site.description.as_deref(), "site.description")?;
+    validate_optional_text(profile.site.support_url.as_deref(), "site.support_url")?;
+    validate_optional_text(profile.site.contact.as_deref(), "site.contact")?;
+    for (index, module) in profile.software.modules.iter().enumerate() {
+        validate_required_text(&module.name, &format!("software.modules[{index}].name"))?;
+        validate_optional_text(
+            module.implementation.as_deref(),
+            &format!("software.modules[{index}].implementation"),
+        )?;
+        validate_optional_text(
+            module.version.as_deref(),
+            &format!("software.modules[{index}].version"),
+        )?;
+        validate_env_map(
+            &module.env,
+            &format!("software.modules[{index}].env"),
+            false,
+        )?;
+    }
+    for (index, filesystem) in profile.filesystems.iter().enumerate() {
+        validate_required_text(&filesystem.path, &format!("filesystems[{index}].path"))?;
+        validate_optional_text(
+            filesystem.kind.as_deref(),
+            &format!("filesystems[{index}].kind"),
+        )?;
+        validate_optional_text(
+            filesystem.quota_hint.as_deref(),
+            &format!("filesystems[{index}].quota_hint"),
+        )?;
+        validate_optional_text(
+            filesystem.description.as_deref(),
+            &format!("filesystems[{index}].description"),
+        )?;
+    }
+    validate_optional_text(profile.gpu.vendor.as_deref(), "gpu.vendor")?;
+    validate_optional_text(profile.gpu.model.as_deref(), "gpu.model")?;
+    validate_optional_text(profile.gpu.cuda_driver.as_deref(), "gpu.cuda_driver")?;
+    validate_optional_text(profile.gpu.rocm_driver.as_deref(), "gpu.rocm_driver")?;
+    validate_text_list(&profile.gpu.mig_profiles, "gpu.mig_profiles")?;
+    validate_text_list(
+        &profile.network.preferred_interfaces,
+        "network.preferred_interfaces",
+    )?;
+    validate_env_map(&profile.network.nccl_env, "network.nccl_env", false)?;
+    validate_env_map(&profile.network.ucx_env, "network.ucx_env", false)?;
+    validate_env_map(&profile.network.ofi_env, "network.ofi_env", false)?;
+    validate_env_map(&profile.network.ray_env, "network.ray_env", false)?;
+    validate_env_map(&profile.network.dask_env, "network.dask_env", false)?;
+    validate_text_list(
+        &profile.containers.approved_backends,
+        "containers.approved_backends",
+    )?;
+    validate_env_map(
+        &profile.containers.required_env,
+        "containers.required_env",
+        false,
+    )?;
+    validate_text_list(
+        &profile.containers.required_bind_paths,
+        "containers.required_bind_paths",
+    )?;
+    validate_env_map(&profile.slurm.defaults, "slurm.defaults", true)?;
+    validate_env_map(&profile.slurm.required, "slurm.required", true)?;
+    for (registry, mirror) in &profile.containers.registry_mirrors {
+        validate_required_text(registry, "containers.registry_mirrors key")?;
+        validate_required_text(mirror, &format!("containers.registry_mirrors.{registry}"))?;
+    }
+    Ok(())
+}
+
+fn validate_env_map(
+    values: &BTreeMap<String, String>,
+    label: &str,
+    allow_slurm_policy_keys: bool,
+) -> Result<()> {
+    for (name, value) in values {
+        if allow_slurm_policy_keys {
+            validate_required_text(name, &format!("{label} key"))?;
+        } else {
+            validate_cluster_env_name(name)?;
+        }
+        validate_required_text(value, &format!("{label}.{name}"))?;
+    }
+    Ok(())
+}
+
+fn validate_text_list(values: &[String], label: &str) -> Result<()> {
+    for (index, value) in values.iter().enumerate() {
+        validate_required_text(value, &format!("{label}[{index}]"))?;
+    }
+    Ok(())
+}
+
+fn validate_optional_text(value: Option<&str>, label: &str) -> Result<()> {
+    if let Some(value) = value {
+        validate_required_text(value, label)?;
+    }
+    Ok(())
+}
+
+fn validate_required_text(value: &str, label: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("cluster profile {label} must not be empty");
+    }
+    if value.contains('\0') || value.contains('\n') || value.contains('\r') {
+        bail!("cluster profile {label} must not contain line breaks or null bytes");
+    }
+    Ok(())
 }
 
 fn collect_partitions(
@@ -532,6 +911,334 @@ fn binary_available(binary: &str) -> bool {
     env::var_os("PATH")
         .map(|path| env::split_paths(&path).any(|dir| dir.join(binary).exists()))
         .unwrap_or(false)
+}
+
+fn collect_mpi_installations(
+    advertised_mpi_types: &[String],
+    binaries: &ResolvedBinaries,
+) -> Vec<MpiInstallationProfile> {
+    let mut installs = Vec::new();
+
+    for (env_key, implementation) in [
+        ("I_MPI_ROOT", MpiImplementation::IntelMpi),
+        ("EBROOTOPENMPI", MpiImplementation::Openmpi),
+        ("EBROOTMPICH", MpiImplementation::Mpich),
+    ] {
+        if let Some(root) = non_empty_env(env_key) {
+            push_mpi_installation(
+                &mut installs,
+                mpi_installation_from_root(
+                    env_key,
+                    &root,
+                    implementation,
+                    advertised_mpi_types,
+                    binaries,
+                ),
+            );
+        }
+    }
+
+    for env_key in ["MPI_HOME", "MPI_DIR"] {
+        if let Some(root) = non_empty_env(env_key) {
+            let implementation = infer_mpi_implementation_from_path(&root);
+            push_mpi_installation(
+                &mut installs,
+                mpi_installation_from_root(
+                    env_key,
+                    &root,
+                    implementation,
+                    advertised_mpi_types,
+                    binaries,
+                ),
+            );
+        }
+    }
+
+    for (binary, implementation) in [
+        ("ompi_info", MpiImplementation::Openmpi),
+        ("mpichversion", MpiImplementation::Mpich),
+        ("impi_info", MpiImplementation::IntelMpi),
+    ] {
+        if let Some(path) = binary_path_in_path(binary) {
+            push_mpi_installation(
+                &mut installs,
+                mpi_installation_from_binary(
+                    binary,
+                    &path,
+                    implementation,
+                    advertised_mpi_types,
+                    binaries,
+                ),
+            );
+        }
+    }
+
+    installs
+}
+
+fn push_mpi_installation(
+    installs: &mut Vec<MpiInstallationProfile>,
+    install: MpiInstallationProfile,
+) {
+    if installs.iter().any(|existing| {
+        existing.implementation == install.implementation
+            && existing.bin_dir == install.bin_dir
+            && existing.lib_dir == install.lib_dir
+            && existing.bind_paths == install.bind_paths
+    }) {
+        return;
+    }
+    installs.push(install);
+}
+
+fn mpi_installation_from_root(
+    source: &str,
+    root: &str,
+    implementation: MpiImplementation,
+    advertised_mpi_types: &[String],
+    binaries: &ResolvedBinaries,
+) -> MpiInstallationProfile {
+    let root_path = Path::new(root);
+    let bin_dir = root_path.join("bin");
+    let lib_dir = best_lib_dir(root_path);
+    let pmi_library = if implementation == MpiImplementation::IntelMpi {
+        find_pmi2_library(binaries)
+    } else {
+        None
+    };
+    let mut env = BTreeMap::new();
+    match implementation {
+        MpiImplementation::IntelMpi => {
+            env.insert("I_MPI_ROOT".to_string(), root.to_string());
+            if let Some(path) = &pmi_library {
+                env.insert("I_MPI_PMI_LIBRARY".to_string(), path.clone());
+            }
+        }
+        MpiImplementation::Openmpi | MpiImplementation::Mpich => {
+            env.insert("MPI_HOME".to_string(), root.to_string());
+            env.insert("MPI_DIR".to_string(), root.to_string());
+        }
+        _ => {}
+    }
+    MpiInstallationProfile {
+        name: mpi_installation_name(source, implementation, Some(root_path)),
+        implementation,
+        version: mpi_version_for_installation(implementation, Some(&bin_dir)),
+        mpi_types: compatible_mpi_types_for_implementation(implementation, advertised_mpi_types),
+        bin_dir: bin_dir.exists().then(|| bin_dir.display().to_string()),
+        lib_dir: lib_dir.as_ref().map(|path| path.display().to_string()),
+        bind_paths: vec![format!("{root}:{root}:ro")],
+        env,
+        pmi_library,
+    }
+}
+
+fn mpi_installation_from_binary(
+    source: &str,
+    binary_path: &Path,
+    implementation: MpiImplementation,
+    advertised_mpi_types: &[String],
+    binaries: &ResolvedBinaries,
+) -> MpiInstallationProfile {
+    let bin_dir = binary_path.parent().map(Path::to_path_buf);
+    let root = bin_dir
+        .as_ref()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let lib_dir = root.as_deref().and_then(best_lib_dir);
+    let pmi_library = if implementation == MpiImplementation::IntelMpi {
+        find_pmi2_library(binaries)
+    } else {
+        None
+    };
+    let mut env = BTreeMap::new();
+    if let Some(root) = root.as_ref() {
+        match implementation {
+            MpiImplementation::IntelMpi => {
+                env.insert("I_MPI_ROOT".to_string(), root.display().to_string());
+                if let Some(path) = &pmi_library {
+                    env.insert("I_MPI_PMI_LIBRARY".to_string(), path.clone());
+                }
+            }
+            MpiImplementation::Openmpi | MpiImplementation::Mpich => {
+                env.insert("MPI_HOME".to_string(), root.display().to_string());
+                env.insert("MPI_DIR".to_string(), root.display().to_string());
+            }
+            _ => {}
+        }
+    }
+    let bind_paths = root
+        .as_ref()
+        .map(|path| {
+            let root = path.display().to_string();
+            vec![format!("{root}:{root}:ro")]
+        })
+        .unwrap_or_default();
+    MpiInstallationProfile {
+        name: mpi_installation_name(source, implementation, root.as_deref()),
+        implementation,
+        version: mpi_version_for_installation(implementation, bin_dir.as_deref()),
+        mpi_types: compatible_mpi_types_for_implementation(implementation, advertised_mpi_types),
+        bin_dir: bin_dir.map(|path| path.display().to_string()),
+        lib_dir: lib_dir.map(|path| path.display().to_string()),
+        bind_paths,
+        env,
+        pmi_library,
+    }
+}
+
+fn mpi_installation_name(
+    source: &str,
+    implementation: MpiImplementation,
+    root: Option<&Path>,
+) -> String {
+    let suffix = root
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(source);
+    format!("{}:{suffix}", implementation.as_str())
+}
+
+fn compatible_mpi_types_for_implementation(
+    implementation: MpiImplementation,
+    advertised: &[String],
+) -> Vec<String> {
+    let profile = match implementation {
+        MpiImplementation::Openmpi => Some(MpiProfile::Openmpi),
+        MpiImplementation::Mpich => Some(MpiProfile::Mpich),
+        MpiImplementation::IntelMpi => Some(MpiProfile::IntelMpi),
+        _ => None,
+    };
+    advertised
+        .iter()
+        .filter(|mpi_type| {
+            profile.is_some_and(|profile| mpi_type_compatible_with_profile(profile, mpi_type))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Returns whether an `srun --mpi` token is a preferred match for an MPI profile.
+#[must_use]
+pub fn mpi_type_compatible_with_profile(profile: MpiProfile, mpi_type: &str) -> bool {
+    match profile {
+        MpiProfile::Openmpi => mpi_type == "pmi2" || mpi_type.starts_with("pmix"),
+        MpiProfile::Mpich => mpi_type == "pmi2" || mpi_type.starts_with("pmix"),
+        MpiProfile::IntelMpi => mpi_type == "pmi2",
+    }
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn infer_mpi_implementation_from_path(path: &str) -> MpiImplementation {
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("intel") || lower.contains("impi") {
+        MpiImplementation::IntelMpi
+    } else if lower.contains("openmpi") || lower.contains("ompi") {
+        MpiImplementation::Openmpi
+    } else if lower.contains("mpich") {
+        MpiImplementation::Mpich
+    } else {
+        MpiImplementation::Unknown
+    }
+}
+
+fn best_lib_dir(root: &Path) -> Option<PathBuf> {
+    [root.join("lib"), root.join("lib64")]
+        .into_iter()
+        .find(|path| path.is_dir())
+}
+
+fn binary_path_in_path(binary: &str) -> Option<PathBuf> {
+    env::var_os("PATH").and_then(|path| {
+        env::split_paths(&path)
+            .map(|dir| dir.join(binary))
+            .find(|path| path.is_file())
+    })
+}
+
+fn mpi_version_for_installation(
+    implementation: MpiImplementation,
+    bin_dir: Option<&Path>,
+) -> Option<String> {
+    let bin_dir = bin_dir?;
+    let command = match implementation {
+        MpiImplementation::Openmpi => bin_dir.join("ompi_info"),
+        MpiImplementation::Mpich => bin_dir.join("mpichversion"),
+        MpiImplementation::IntelMpi => bin_dir.join("impi_info"),
+        _ => return None,
+    };
+    if !command.is_file() {
+        return None;
+    }
+    let args = match implementation {
+        MpiImplementation::IntelMpi => vec!["-v"],
+        MpiImplementation::Mpich => Vec::new(),
+        _ => vec!["--version"],
+    };
+    run_capture_quiet(&command, &args).and_then(|raw| {
+        raw.lines()
+            .find(|line| !line.trim().is_empty())
+            .map(str::trim)
+            .map(str::to_string)
+    })
+}
+
+fn run_capture_quiet(command: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new(command).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn find_pmi2_library(binaries: &ResolvedBinaries) -> Option<String> {
+    if let Some(path) = non_empty_env("I_MPI_PMI_LIBRARY")
+        && Path::new(&path).exists()
+    {
+        return Some(path);
+    }
+    for dir in pmi_library_search_dirs(binaries) {
+        let candidate = dir.join("libpmi2.so");
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+    }
+    None
+}
+
+fn pmi_library_search_dirs(binaries: &ResolvedBinaries) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(path) = env::var_os("LD_LIBRARY_PATH") {
+        dirs.extend(env::split_paths(&path));
+    }
+    if binaries.srun.value.contains(std::path::MAIN_SEPARATOR)
+        && let Some(bin_dir) = Path::new(&binaries.srun.value).parent()
+        && let Some(root) = bin_dir.parent()
+    {
+        dirs.push(root.join("lib"));
+        dirs.push(root.join("lib/slurm"));
+        dirs.push(root.join("lib64"));
+        dirs.push(root.join("lib64/slurm"));
+    }
+    dirs.extend([
+        PathBuf::from("/usr/lib64"),
+        PathBuf::from("/usr/lib64/slurm"),
+        PathBuf::from("/usr/lib"),
+        PathBuf::from("/usr/lib/slurm"),
+        PathBuf::from("/usr/lib/x86_64-linux-gnu"),
+        PathBuf::from("/usr/lib/x86_64-linux-gnu/slurm"),
+        PathBuf::from("/usr/local/lib"),
+        PathBuf::from("/usr/local/lib64"),
+    ]);
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 fn advertised_mpi_types(output: &str) -> Vec<String> {
@@ -713,6 +1420,7 @@ fn unix_timestamp_now() -> u64 {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Mutex, OnceLock};
 
     use crate::context::{ResolvedValue, ValueSource};
     use crate::planner::{ExecutionSpec, ImageSource, ServicePlacement};
@@ -721,6 +1429,11 @@ mod tests {
         MpiConfig, MpiType, RuntimeConfig, ScratchConfig, ServiceFailurePolicy, ServiceSlurmConfig,
         SlurmConfig,
     };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn resolved_binary(path: PathBuf) -> ResolvedValue<String> {
         ResolvedValue {
@@ -785,6 +1498,7 @@ mod tests {
             toml::from_str("[runtimes]\npyxis = true\nenroot = true\n").expect("profile");
         assert_eq!(profile.schema_version, CLUSTER_PROFILE_SCHEMA_VERSION);
         assert!(profile.runtimes.host);
+        assert_eq!(profile.distributed, DistributedProfile::default());
 
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let repo = tmpdir.path().join("repo");
@@ -813,6 +1527,132 @@ mod tests {
             err.to_string()
                 .contains("refusing to write cluster profile")
         );
+    }
+
+    #[test]
+    fn cluster_profile_validates_distributed_env_and_ports() {
+        let valid: ClusterProfile = toml::from_str(
+            r#"
+[distributed]
+rdzv_port_base = 31000
+rdzv_port_span = 100
+
+[distributed.env]
+NCCL_SOCKET_IFNAME = "ib0"
+UCX_TLS = "rc,cuda_copy,cuda_ipc"
+"#,
+        )
+        .expect("valid profile");
+        validate_cluster_profile(&valid).expect("valid distributed profile");
+
+        let invalid_name: ClusterProfile = toml::from_str(
+            r#"
+[distributed.env]
+HPC_COMPOSE_DIST_MASTER_ADDR = "node01"
+"#,
+        )
+        .expect("invalid env profile parses");
+        let err = validate_cluster_profile(&invalid_name).expect_err("reserved env");
+        assert!(err.to_string().contains("reserved HPC_COMPOSE_ prefix"));
+
+        let invalid_port: ClusterProfile = toml::from_str(
+            r#"
+[distributed]
+rdzv_port_base = 65530
+rdzv_port_span = 20
+"#,
+        )
+        .expect("invalid port profile parses");
+        let err = validate_cluster_profile(&invalid_port).expect_err("port range");
+        assert!(err.to_string().contains("exceeds"));
+
+        let invalid_default_span: ClusterProfile = toml::from_str(
+            r#"
+[distributed]
+rdzv_port_base = 65000
+"#,
+        )
+        .expect("invalid default span profile parses");
+        let err = validate_cluster_profile(&invalid_default_span).expect_err("default span range");
+        assert!(err.to_string().contains("exceeds"));
+
+        let invalid_default_base: ClusterProfile = toml::from_str(
+            r#"
+[distributed]
+rdzv_port_span = 40000
+"#,
+        )
+        .expect("invalid default base profile parses");
+        let err = validate_cluster_profile(&invalid_default_base).expect_err("default base range");
+        assert!(err.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn cluster_profile_validates_site_policy_sections() {
+        let valid: ClusterProfile = toml::from_str(
+            r#"
+[site]
+name = "Example HPC"
+support_url = "https://hpc.example.edu/support"
+contact = "support@example.edu"
+
+[[software.modules]]
+name = "cuda/12.4"
+implementation = "cuda"
+version = "12.4"
+
+[software.modules.env]
+CUDA_HOME = "/opt/cuda/12.4"
+
+[[filesystems]]
+path = "/shared"
+kind = "shared"
+quota_hint = "10T project quota"
+
+[gpu]
+vendor = "nvidia"
+model = "H100"
+mig_profiles = ["1g.10gb"]
+cuda_driver = "550"
+
+[network]
+preferred_interfaces = ["ib0"]
+
+[network.nccl_env]
+NCCL_SOCKET_IFNAME = "ib0"
+
+[network.ucx_env]
+UCX_TLS = "rc,cuda_copy,cuda_ipc"
+
+[containers]
+approved_backends = ["pyxis", "apptainer"]
+required_bind_paths = ["/opt/site:/opt/site:ro"]
+
+[containers.required_env]
+SITE_ENV = "1"
+
+[containers.registry_mirrors]
+"docker.io" = "registry.example.edu/dockerhub"
+
+[slurm.defaults]
+account = "project"
+
+[slurm.required]
+partition = "gpu"
+"#,
+        )
+        .expect("valid site policy profile");
+        validate_cluster_profile(&valid).expect("valid site policy");
+
+        let invalid: ClusterProfile = toml::from_str(
+            r#"
+[[software.modules]]
+name = ""
+"#,
+        )
+        .expect("invalid profile parses");
+        let err = validate_cluster_profile(&invalid).expect_err("empty module");
+        assert!(err.to_string().contains("software.modules[0].name"));
     }
 
     #[test]
@@ -881,6 +1721,53 @@ mod tests {
                 .iter()
                 .any(|item| { item.level == Level::Ok && item.message.contains("captured") })
         );
+    }
+
+    #[test]
+    fn generate_cluster_profile_discovers_loaded_openmpi_root() {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous = env::var_os("EBROOTOPENMPI");
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mpi_root = tmpdir.path().join("openmpi");
+        fs::create_dir_all(mpi_root.join("bin")).expect("mpi bin");
+        fs::create_dir_all(mpi_root.join("lib")).expect("mpi lib");
+        write_executable(
+            &mpi_root.join("bin/ompi_info"),
+            "#!/bin/sh\nprintf 'Open MPI 5.0.0\\n'\n",
+        );
+        write_executable(
+            &tmpdir.path().join("srun"),
+            "#!/bin/sh\ncase \"${1:-}\" in\n  --version) echo 'srun 24.05.1' ;;\n  --mpi=list) echo 'MPI plugin types are pmix,pmi2' ;;\n  --help) echo 'usage: srun --container-image=IMAGE' ;;\n  *) exit 0 ;;\nesac\n",
+        );
+        write_executable(
+            &tmpdir.path().join("sbatch"),
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'sbatch 24.05.1'; fi\n",
+        );
+        write_executable(&tmpdir.path().join("sinfo"), "#!/bin/sh\nexit 0\n");
+        write_executable(&tmpdir.path().join("scontrol"), "#!/bin/sh\nexit 0\n");
+
+        unsafe {
+            env::set_var("EBROOTOPENMPI", &mpi_root);
+        }
+        let profile = generate_cluster_profile(&resolved_binaries(tmpdir.path())).profile;
+        match previous {
+            Some(value) => unsafe { env::set_var("EBROOTOPENMPI", value) },
+            None => unsafe { env::remove_var("EBROOTOPENMPI") },
+        }
+
+        let install = profile
+            .mpi_installations
+            .iter()
+            .find(|install| install.implementation == MpiImplementation::Openmpi)
+            .expect("openmpi install");
+        assert_eq!(install.version.as_deref(), Some("Open MPI 5.0.0"));
+        assert!(
+            install
+                .bind_paths
+                .iter()
+                .any(|bind| bind.contains("openmpi"))
+        );
+        assert!(install.mpi_types.contains(&"pmix".to_string()));
     }
 
     #[test]
@@ -987,6 +1874,7 @@ mod tests {
             generated_at_unix: None,
             slurm_version: None,
             mpi_types: Vec::new(),
+            mpi_installations: Vec::new(),
             partitions: vec![PartitionProfile {
                 name: "gpu".into(),
                 state: Some("UP".into()),
@@ -1006,6 +1894,8 @@ mod tests {
                 host: true,
             },
             shared_cache_paths: vec!["/shared".into()],
+            distributed: DistributedProfile::default(),
+            ..ClusterProfile::default()
         };
         let mut plan = basic_runtime_plan(PathBuf::from("/shared/cache"));
         plan.slurm = SlurmConfig {
@@ -1065,6 +1955,7 @@ mod tests {
             generated_at_unix: None,
             slurm_version: None,
             mpi_types: vec!["pmix".into()],
+            mpi_installations: Vec::new(),
             partitions: vec![PartitionProfile {
                 name: "cpu".into(),
                 state: Some("up".into()),
@@ -1082,6 +1973,8 @@ mod tests {
                 host: true,
             },
             shared_cache_paths: vec!["/shared".into()],
+            distributed: DistributedProfile::default(),
+            ..ClusterProfile::default()
         };
         let plan = RuntimePlan {
             name: "demo".into(),
@@ -1110,6 +2003,7 @@ mod tests {
                 slurm: ServiceSlurmConfig {
                     mpi: Some(MpiConfig {
                         mpi_type: MpiType::new("pmi2").expect("mpi type"),
+                        profile: None,
                         implementation: None,
                         launcher: Default::default(),
                         expected_ranks: None,

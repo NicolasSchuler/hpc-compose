@@ -1,0 +1,26 @@
+name: ray-symmetric
+
+x-slurm:
+  job_name: ray-symmetric
+  time: "02:00:00"
+  nodes: 2
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  ray:
+    image: rayproject/ray:2.49.0-py310
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        ray symmetric-run \
+          --address "$$HPC_COMPOSE_DIST_RDZV_ENDPOINT" \
+          --min-nodes "$$HPC_COMPOSE_DIST_NNODES" \
+          -- \
+          python app.py
+    readiness:
+      type: sleep
+      seconds: 10
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 1

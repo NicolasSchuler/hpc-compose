@@ -1,0 +1,52 @@
+name: spark-standalone
+
+x-slurm:
+  job_name: spark-standalone
+  time: "02:00:00"
+  nodes: 2
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  master:
+    image: apache/spark:3.5.3
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        /opt/spark/sbin/start-master.sh --host "$$HPC_COMPOSE_SERVICE_PRIMARY_NODE" --port 7077
+        tail -f /opt/spark/logs/*
+    readiness:
+      type: tcp
+      host: 127.0.0.1
+      port: 7077
+      timeout_seconds: 60
+    x-slurm:
+      nodes: 1
+
+  workers:
+    image: apache/spark:3.5.3
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        /opt/spark/sbin/start-worker.sh "spark://$$HPC_COMPOSE_PRIMARY_NODE:7077"
+        tail -f /opt/spark/logs/*
+    depends_on:
+      master:
+        condition: service_healthy
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 1
+
+  app:
+    image: apache/spark:3.5.3
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        spark-submit --master "spark://$$HPC_COMPOSE_PRIMARY_NODE:7077" app.py
+    depends_on:
+      master:
+        condition: service_healthy
+    x-slurm:
+      nodes: 1

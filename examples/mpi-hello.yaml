@@ -40,3 +40,5 @@ services:
       cpus_per_task: 4
       mpi:
         type: pmix
+        profile: openmpi
+        implementation: openmpi

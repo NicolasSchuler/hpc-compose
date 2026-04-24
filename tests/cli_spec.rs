@@ -200,6 +200,7 @@ services:
       ntasks_per_node: 2
       mpi:
         type: pmix
+        profile: openmpi
         implementation: openmpi
         launcher: srun
         expected_ranks: 4
@@ -234,6 +235,10 @@ services:
         Value::from("openmpi")
     );
     assert_eq!(
+        config_value["services"]["worker"]["x-slurm"]["mpi"]["profile"],
+        Value::from("openmpi")
+    );
+    assert_eq!(
         config_value["services"]["worker"]["x-slurm"]["mpi"]["expected_ranks"],
         Value::from(4)
     );
@@ -257,6 +262,10 @@ services:
     assert_eq!(
         inspect_value["ordered_services"][0]["slurm"]["mpi"]["type"],
         Value::from("pmix")
+    );
+    assert_eq!(
+        inspect_value["ordered_services"][0]["slurm"]["mpi"]["profile"],
+        Value::from("openmpi")
     );
     let rendered_mounts = inspect_value["ordered_services"][0]["volumes"]
         .as_array()
@@ -335,6 +344,85 @@ services:
     );
     assert_failure(&validate);
     assert!(stderr_text(&validate).contains("expected_ranks=3"));
+}
+
+#[test]
+fn mpi_profile_validation_rejects_profile_implementation_conflict() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "profile-conflict.yaml",
+        &format!(
+            r#"
+services:
+  worker:
+    image: debian:bookworm-slim
+    command: /bin/true
+    x-slurm:
+      mpi:
+        type: pmix
+        profile: openmpi
+        implementation: mpich
+x-slurm:
+  cache_dir: "{}"
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    assert!(stderr_text(&validate).contains("profile=openmpi conflicts"));
+}
+
+#[test]
+fn mpi_profiles_validate_for_openmpi_mpich_and_intel_mpi() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "profiles.yaml",
+        &format!(
+            r#"
+services:
+  open:
+    image: debian:bookworm-slim
+    command: /bin/true
+    x-slurm:
+      mpi:
+        type: pmix
+        profile: openmpi
+        implementation: openmpi
+  mpich:
+    image: debian:bookworm-slim
+    command: /bin/true
+    x-slurm:
+      mpi:
+        type: pmi2
+        profile: mpich
+        implementation: mpich
+  intel:
+    image: debian:bookworm-slim
+    command: /bin/true
+    x-slurm:
+      mpi:
+        type: pmi2
+        profile: intel_mpi
+        implementation: intel_mpi
+x-slurm:
+  cache_dir: "{}"
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&validate);
 }
 
 #[test]

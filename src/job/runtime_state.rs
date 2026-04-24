@@ -55,6 +55,14 @@ pub(super) struct ServiceRuntimeStateEntry {
     #[serde(default)]
     pub(super) last_exit_code: Option<i32>,
     #[serde(default)]
+    pub(super) first_failure_at: Option<u64>,
+    #[serde(default)]
+    pub(super) first_failure_exit_code: Option<i32>,
+    #[serde(default)]
+    pub(super) first_failure_node: Option<String>,
+    #[serde(default)]
+    pub(super) first_failure_rank: Option<String>,
+    #[serde(default)]
     pub(super) placement_mode: Option<String>,
     #[serde(default)]
     pub(super) nodes: Option<u32>,

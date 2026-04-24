@@ -1,7 +1,7 @@
-name: multi-node-torchrun
+name: multi-node-accelerate
 
 x-slurm:
-  job_name: multi-node-torchrun
+  job_name: multi-node-accelerate
   time: "04:00:00"
   nodes: 2
   gpus_per_node: 4
@@ -16,13 +16,14 @@ services:
       - |
         echo "master=$$HPC_COMPOSE_DIST_MASTER_ADDR"
         echo "nodes=$$HPC_COMPOSE_SERVICE_NODELIST"
-        echo "node_rank=$$HPC_COMPOSE_DIST_NODE_RANK"
-        torchrun \
-          --nnodes="$$HPC_COMPOSE_DIST_NNODES" \
-          --nproc-per-node="$$HPC_COMPOSE_DIST_NPROC_PER_NODE" \
-          --node-rank="$$HPC_COMPOSE_DIST_NODE_RANK" \
-          --rdzv-backend=c10d \
-          --rdzv-endpoint="$$HPC_COMPOSE_DIST_RDZV_ENDPOINT" \
+        echo "machine_rank=$$HPC_COMPOSE_DIST_NODE_RANK"
+        accelerate launch \
+          --multi_gpu \
+          --num_machines "$$HPC_COMPOSE_DIST_NNODES" \
+          --num_processes "$$HPC_COMPOSE_DIST_WORLD_SIZE" \
+          --machine_rank "$$HPC_COMPOSE_DIST_NODE_RANK" \
+          --main_process_ip "$$HPC_COMPOSE_DIST_MASTER_ADDR" \
+          --main_process_port "$$HPC_COMPOSE_DIST_MASTER_PORT" \
           train.py
     readiness:
       type: sleep

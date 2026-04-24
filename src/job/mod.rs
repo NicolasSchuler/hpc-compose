@@ -68,9 +68,9 @@ pub use scheduler::{
     walltime_progress_percent,
 };
 pub use stats::{
-    CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, SamplerSnapshot,
-    SchedulerOptions, SlurmSamplerSnapshot, StatsOptions, StatsSnapshot, StepStats,
-    build_stats_snapshot, metrics_dir_for_record,
+    CollectorStatus, FirstFailure, GpuDeviceSample, GpuNodeSummary, GpuProcessSample, GpuSnapshot,
+    SamplerSnapshot, SchedulerOptions, SlurmSamplerSnapshot, StatsOptions, StatsSnapshot,
+    StepStats, build_stats_snapshot, metrics_dir_for_record,
 };
 
 const SUBMISSION_SCHEMA_VERSION: u32 = 2;

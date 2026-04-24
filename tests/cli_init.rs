@@ -80,6 +80,11 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         "llama-uv-worker",
         "multi-node-mpi",
         "multi-node-torchrun",
+        "multi-node-deepspeed",
+        "multi-node-accelerate",
+        "multi-node-horovod",
+        "multi-node-jax",
+        "nccl-tests",
         "vllm-uv-worker",
     ] {
         let output = tmpdir.path().join(format!("{template}.yaml"));
@@ -191,6 +196,11 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(list_stdout.contains("minimal-batch"));
     assert!(list_stdout.contains("multi-node-mpi"));
     assert!(list_stdout.contains("multi-node-torchrun"));
+    assert!(list_stdout.contains("multi-node-deepspeed"));
+    assert!(list_stdout.contains("multi-node-accelerate"));
+    assert!(list_stdout.contains("multi-node-horovod"));
+    assert!(list_stdout.contains("multi-node-jax"));
+    assert!(list_stdout.contains("nccl-tests"));
 
     let describe_template = run_cli(
         tmpdir.path(),
@@ -352,6 +362,7 @@ services:
       ntasks: 2
       mpi:
         type: pmix_v4
+        profile: openmpi
         implementation: openmpi
         expected_ranks: 2
         host_mpi:
@@ -392,6 +403,8 @@ exit 0
     let stdout = stdout_text(&output);
     assert!(stdout.contains("MPI smoke service: mpi"));
     assert!(stdout.contains("requested MPI type: pmix_v4"));
+    assert!(stdout.contains("MPI profile: openmpi"));
+    assert!(stdout.contains("MPI implementation: openmpi"));
     assert!(stdout.contains("advertised MPI types: pmi2, pmix, pmix_v4"));
     assert!(stdout.contains("bind: /opt/site/openmpi:/opt/site/openmpi:ro"));
     assert!(stdout.contains("env: MPI_HOME=/opt/site/openmpi"));
@@ -400,6 +413,8 @@ exit 0
     let rendered = fs::read_to_string(script).expect("smoke script");
     assert!(rendered.contains("--mpi=pmix_v4"));
     assert!(rendered.contains("hpc-compose MPI smoke"));
+    assert!(rendered.contains("HPC_COMPOSE_MPI_PROFILE=openmpi"));
+    assert!(rendered.contains("mpi4py allreduce smoke"));
     assert!(rendered.contains("rank_variables SLURM_PROCID="));
     assert!(rendered.contains("expected_ranks=2"));
     assert!(!rendered.contains("real setup should not run"));

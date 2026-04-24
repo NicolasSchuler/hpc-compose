@@ -1,0 +1,26 @@
+name: multi-node-jax
+
+x-slurm:
+  job_name: multi-node-jax
+  time: "04:00:00"
+  nodes: 2
+  gpus_per_node: 4
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  trainer:
+    image: jaxai/jax:latest
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "coordinator=$$HPC_COMPOSE_DIST_RDZV_ENDPOINT"
+        echo "process_id=$$HPC_COMPOSE_DIST_NODE_RANK processes=$$HPC_COMPOSE_DIST_NNODES"
+        python train_jax.py
+    readiness:
+      type: sleep
+      seconds: 5
+    x-slurm:
+      nodes: 2
+      ntasks_per_node: 1
+      gpus_per_node: 4

@@ -7,6 +7,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
 use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
+use hpc_compose::cluster::ClusterProfile;
 use hpc_compose::init::{
     cache_dir_placeholder as init_cache_dir_placeholder, resolve_template, templates,
 };
@@ -23,7 +24,8 @@ use hpc_compose::prepare::{
     build_runtime_plan,
 };
 use hpc_compose::render::{
-    display_srun_command_for_backend, execution_argv, log_file_name_for_service,
+    display_srun_command_for_backend, distributed_environment_names_for_service, execution_argv,
+    log_file_name_for_service,
 };
 use hpc_compose::spec::{
     ComposeSpec, DependencyCondition, EffectiveComposeConfig, ServiceDependency,
@@ -347,7 +349,15 @@ pub(crate) fn print_plan_inspect_verbose(
     plan: &Plan,
     runtime_plan: &RuntimePlan,
 ) -> io::Result<()> {
-    write_plan_inspect_verbose(&mut io::stdout(), plan, runtime_plan)
+    write_plan_inspect_verbose(&mut io::stdout(), plan, runtime_plan, None)
+}
+
+pub(crate) fn print_plan_inspect_verbose_with_profile(
+    plan: &Plan,
+    runtime_plan: &RuntimePlan,
+    cluster_profile: Option<&ClusterProfile>,
+) -> io::Result<()> {
+    write_plan_inspect_verbose(&mut io::stdout(), plan, runtime_plan, cluster_profile)
 }
 
 pub(crate) fn print_plan_inspect(plan: &RuntimePlan) -> io::Result<()> {
@@ -820,6 +830,20 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
     for note in &snapshot.notes {
         writeln!(writer, "note: {note}")?;
     }
+    if let Some(failure) = &snapshot.first_failure {
+        writeln!(
+            writer,
+            "first failure: service={} exit={} at={} node={} rank={}",
+            failure.service,
+            failure.exit_code,
+            failure
+                .at_unix
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            failure.node.as_deref().unwrap_or("unknown"),
+            failure.rank.as_deref().unwrap_or("unknown"),
+        )?;
+    }
     if let Some(sampler) = &snapshot.sampler {
         for collector in &sampler.collectors {
             if !collector.enabled {
@@ -840,11 +864,29 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
         if let Some(gpu) = &sampler.gpu {
             writeln!(writer)?;
             writeln!(writer, "gpu snapshot: {}", gpu.sampled_at)?;
+            for node in &gpu.nodes {
+                writeln!(
+                    writer,
+                    "gpu node {}: count={}, avg util={}, mem={} / {}",
+                    display_optional_stats_value(node.node.as_deref()),
+                    node.gpu_count,
+                    node.avg_utilization_gpu
+                        .map(|value| format!("{value:.1}"))
+                        .unwrap_or_else(|| "-".to_string()),
+                    node.memory_used_mib
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    node.memory_total_mib
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                )?;
+            }
             for device in &gpu.gpus {
                 writeln!(
                     writer,
-                    "gpu {}: name={}, util={}, mem util={}, mem={} / {}, temp={}, power={} / {}",
+                    "gpu {} on {}: name={}, util={}, mem util={}, mem={} / {}, temp={}, power={} / {}",
                     display_optional_stats_value(device.index.as_deref()),
+                    display_optional_stats_value(device.node.as_deref()),
                     display_optional_stats_value(device.name.as_deref()),
                     display_optional_stats_value(device.utilization_gpu.as_deref()),
                     display_optional_stats_value(device.utilization_memory.as_deref()),
@@ -951,6 +993,7 @@ pub(crate) fn write_stats_snapshot_jsonl(
             "attempt": snapshot.attempt,
             "is_resume": snapshot.is_resume,
             "resume_dir": snapshot.resume_dir,
+            "first_failure": snapshot.first_failure,
         }),
     )?;
     for note in &snapshot.notes {
@@ -1287,6 +1330,7 @@ fn write_plan_inspect_verbose(
     writer: &mut impl Write,
     plan: &Plan,
     runtime_plan: &RuntimePlan,
+    cluster_profile: Option<&ClusterProfile>,
 ) -> io::Result<()> {
     write_plan_inspect(writer, runtime_plan)?;
     writeln!(writer)?;
@@ -1316,7 +1360,11 @@ fn write_plan_inspect_verbose(
             runtime.working_dir.as_deref().unwrap_or("<image default>")
         )?;
         writeln!(writer, "{}", format_mount_block(runtime))?;
-        writeln!(writer, "{}", format_environment_block(runtime))?;
+        writeln!(
+            writer,
+            "{}",
+            format_environment_block(runtime, cluster_profile)
+        )?;
         writeln!(
             writer,
             "depends_on: {}",
@@ -1355,11 +1403,18 @@ fn format_mount_block(runtime: &RuntimeService) -> String {
     format_debug_block("mounts", &mounts)
 }
 
-fn format_environment_block(runtime: &RuntimeService) -> String {
+fn format_environment_block(
+    runtime: &RuntimeService,
+    cluster_profile: Option<&ClusterProfile>,
+) -> String {
     let values = runtime
         .environment
         .iter()
         .map(|(name, _)| name.clone())
+        .chain(distributed_environment_names_for_service(
+            runtime,
+            cluster_profile,
+        ))
         .collect::<Vec<_>>();
     format_debug_block("environment", &values)
 }
@@ -1587,6 +1642,12 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
         )?;
         if let Some(mpi) = &service.slurm.mpi {
             writeln!(writer, "mpi: {}", mpi.mpi_type.as_srun_value())?;
+            if let Some(profile) = mpi.profile {
+                writeln!(writer, "mpi profile: {}", profile.as_str())?;
+            }
+            if let Some(implementation) = mpi.resolved_implementation() {
+                writeln!(writer, "mpi implementation: {}", implementation.as_str())?;
+            }
         }
         if let Some(prepare) = &service.prepare {
             writeln!(
@@ -2932,7 +2993,19 @@ services:
                 ],
                 gpu: Some(GpuSnapshot {
                     sampled_at: "2026-04-05T10:00:10Z".into(),
+                    nodes: vec![hpc_compose::job::GpuNodeSummary {
+                        node: Some("node01".into()),
+                        gpu_count: 1,
+                        avg_utilization_gpu: Some(87.0),
+                        memory_used_mib: Some(4096),
+                        memory_total_mib: Some(8192),
+                    }],
                     gpus: vec![GpuDeviceSample {
+                        node: Some("node01".into()),
+                        rank: None,
+                        local_rank: None,
+                        service: None,
+                        collector: Some("nvidia-smi".into()),
                         index: Some("0".into()),
                         uuid: Some("GPU-0".into()),
                         name: Some("A100".into()),
@@ -2945,6 +3018,11 @@ services:
                         power_limit_w: Some("300".into()),
                     }],
                     processes: vec![GpuProcessSample {
+                        node: Some("node01".into()),
+                        rank: None,
+                        local_rank: None,
+                        service: None,
+                        collector: Some("nvidia-smi".into()),
                         gpu_uuid: Some("GPU-0".into()),
                         pid: Some("4242".into()),
                         process_name: Some("python".into()),
@@ -2954,6 +3032,13 @@ services:
                 slurm: None,
             }),
             steps: vec![sample_step()],
+            first_failure: Some(hpc_compose::job::FirstFailure {
+                service: "trainer".into(),
+                exit_code: 42,
+                at_unix: Some(1_774_000_000),
+                node: Some("node01".into()),
+                rank: None,
+            }),
             attempt: Some(1),
             is_resume: Some(true),
             resume_dir: Some(PathBuf::from("/shared/runs/demo")),
@@ -2967,6 +3052,8 @@ services:
         assert!(stats_text.contains("resume dir: /shared/runs/demo"));
         assert!(!stats_text.contains("collector 'slurm'"));
         assert!(stats_text.contains("gpu snapshot: 2026-04-05T10:00:10Z"));
+        assert!(stats_text.contains("gpu node node01"));
+        assert!(stats_text.contains("first failure: service=trainer"));
         assert!(stats_text.contains("gpu process: pid=4242"));
         assert!(stats_text.contains("gpu count: 1"));
 
@@ -2992,6 +3079,7 @@ services:
             available: false,
             sampler: None,
             steps: Vec::new(),
+            first_failure: None,
             source: "sstat".into(),
             notes: Vec::new(),
             reason: Some("job is pending".into()),
@@ -3089,7 +3177,7 @@ services:
             }],
         };
         let mut inspect_out = Vec::new();
-        write_plan_inspect_verbose(&mut inspect_out, &plan_model, &plan).expect("inspect");
+        write_plan_inspect_verbose(&mut inspect_out, &plan_model, &plan, None).expect("inspect");
         let inspect_text = String::from_utf8(inspect_out).expect("utf8");
         assert!(inspect_text.contains("execution form: shell"));
         assert!(inspect_text.contains("depends_on: db(service_healthy)"));
@@ -3303,6 +3391,7 @@ services:
             notes: Vec::new(),
             sampler: None,
             steps: vec![sample_step()],
+            first_failure: None,
             attempt: Some(1),
             is_resume: Some(false),
             resume_dir: None,

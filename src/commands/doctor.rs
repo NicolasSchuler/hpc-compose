@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::OutputFormat;
 use hpc_compose::cluster::{
-    ClusterProfile, default_cluster_profile_path, generate_cluster_profile, write_cluster_profile,
+    ClusterProfile, MpiInstallationProfile, default_cluster_profile_path,
+    discover_cluster_profile_path, generate_cluster_profile, load_cluster_profile,
+    mpi_type_compatible_with_profile, write_cluster_profile,
 };
 use hpc_compose::context::{ResolvedBinaries, ResolvedContext};
 use hpc_compose::planner::ExecutionSpec;
@@ -19,7 +21,7 @@ use hpc_compose::render::{
     RenderOptions, display_srun_command_for_backend, log_file_name_for_service,
     render_script_with_options,
 };
-use hpc_compose::spec::{ServiceFailurePolicy, SlurmConfig};
+use hpc_compose::spec::{MpiProfile, ServiceFailurePolicy, SlurmConfig};
 
 use crate::output::{self, common as output_common};
 
@@ -78,9 +80,24 @@ pub(crate) fn doctor_mpi_smoke(
         .as_ref()
         .context("selected MPI service does not define x-slurm.mpi")?;
     let requested_mpi_type = mpi.mpi_type.as_srun_value().to_string();
+    let selected_mpi_profile = mpi.profile.map(|profile| profile.as_str().to_string());
+    let selected_implementation = mpi
+        .resolved_implementation()
+        .map(|implementation| implementation.as_str().to_string());
     let advertised_mpi_types = run_capture(&context.binaries.srun.value, &["--mpi=list"])
         .map(|raw| advertised_mpi_types(&raw))
         .unwrap_or_default();
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+    let discovered_mpi_installations = cluster_profile
+        .as_ref()
+        .map(|profile| profile.mpi_installations.clone())
+        .unwrap_or_default();
+    let profile_warnings = mpi_profile_warnings(
+        mpi.profile,
+        &requested_mpi_type,
+        &advertised_mpi_types,
+        &discovered_mpi_installations,
+    );
     let host_mpi_bind_paths = mpi
         .host_mpi
         .as_ref()
@@ -99,6 +116,7 @@ pub(crate) fn doctor_mpi_smoke(
         &RenderOptions {
             apptainer_bin: context.binaries.apptainer.value.clone(),
             singularity_bin: context.binaries.singularity.value.clone(),
+            cluster_profile,
         },
     )?;
 
@@ -147,10 +165,37 @@ pub(crate) fn doctor_mpi_smoke(
             if !quiet {
                 println!("MPI smoke service: {}", service.name);
                 println!("requested MPI type: {requested_mpi_type}");
+                println!(
+                    "MPI profile: {}",
+                    selected_mpi_profile.as_deref().unwrap_or("not set")
+                );
+                println!(
+                    "MPI implementation: {}",
+                    selected_implementation.as_deref().unwrap_or("not set")
+                );
                 if advertised_mpi_types.is_empty() {
                     println!("advertised MPI types: unavailable");
                 } else {
                     println!("advertised MPI types: {}", advertised_mpi_types.join(", "));
+                }
+                if discovered_mpi_installations.is_empty() {
+                    println!("discovered MPI installations: 0");
+                } else {
+                    println!(
+                        "discovered MPI installations: {}",
+                        discovered_mpi_installations.len()
+                    );
+                    for install in &discovered_mpi_installations {
+                        println!(
+                            "  install: {} implementation={} version={}",
+                            install.name,
+                            install.implementation.as_str(),
+                            install.version.as_deref().unwrap_or("unknown")
+                        );
+                    }
+                }
+                for warning in &profile_warnings {
+                    println!("warning: {warning}");
                 }
                 println!("expected ranks: {expected_ranks}");
                 println!("host MPI bind paths: {}", host_mpi_bind_paths.len());
@@ -182,7 +227,11 @@ pub(crate) fn doctor_mpi_smoke(
                 serde_json::to_string_pretty(&MpiSmokeJsonOutput {
                     service: service.name.clone(),
                     requested_mpi_type,
+                    selected_mpi_profile,
+                    selected_implementation,
                     advertised_mpi_types,
+                    discovered_mpi_installations,
+                    profile_warnings,
                     expected_ranks,
                     host_mpi_bind_paths,
                     host_mpi_env,
@@ -250,6 +299,65 @@ fn doctor_cluster_report(
     Ok(())
 }
 
+fn load_discovered_cluster_profile(context: &ResolvedContext) -> Result<Option<ClusterProfile>> {
+    let start = context
+        .compose_file
+        .value
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let Some(path) = discover_cluster_profile_path(start) else {
+        return Ok(None);
+    };
+    Ok(Some(load_cluster_profile(&path)?))
+}
+
+fn mpi_profile_warnings(
+    profile: Option<MpiProfile>,
+    requested_mpi_type: &str,
+    advertised_mpi_types: &[String],
+    discovered_mpi_installations: &[MpiInstallationProfile],
+) -> Vec<String> {
+    let Some(profile) = profile else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    if !mpi_type_compatible_with_profile(profile, requested_mpi_type) {
+        warnings.push(format!(
+            "profile '{}' usually expects {}, but x-slurm.mpi.type='{requested_mpi_type}' was requested",
+            profile.as_str(),
+            preferred_mpi_type_description(profile)
+        ));
+    }
+    if !advertised_mpi_types.is_empty()
+        && !advertised_mpi_types
+            .iter()
+            .any(|value| value == requested_mpi_type)
+    {
+        warnings.push(format!(
+            "requested MPI type '{requested_mpi_type}' was not advertised by srun --mpi=list"
+        ));
+    }
+    if !discovered_mpi_installations.is_empty()
+        && discovered_mpi_installations
+            .iter()
+            .all(|install| install.implementation != profile.implementation())
+    {
+        warnings.push(format!(
+            "no discovered MPI installation matches profile '{}'",
+            profile.as_str()
+        ));
+    }
+    warnings
+}
+
+fn preferred_mpi_type_description(profile: MpiProfile) -> &'static str {
+    match profile {
+        MpiProfile::Openmpi => "pmix/pmix_v* or pmi2",
+        MpiProfile::Mpich => "pmi2 or pmix/pmix_v*",
+        MpiProfile::IntelMpi => "pmi2",
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct MpiSmokeSubmitResult {
     success: bool,
@@ -304,7 +412,11 @@ impl MpiSmokeSubmitResult {
 struct MpiSmokeJsonOutput {
     service: String,
     requested_mpi_type: String,
+    selected_mpi_profile: Option<String>,
+    selected_implementation: Option<String>,
     advertised_mpi_types: Vec<String>,
+    discovered_mpi_installations: Vec<MpiInstallationProfile>,
+    profile_warnings: Vec<String>,
     expected_ranks: u32,
     host_mpi_bind_paths: Vec<String>,
     host_mpi_env: Vec<(String, String)>,
@@ -345,6 +457,9 @@ fn print_cluster_profile_summary(profile: &ClusterProfile) {
     );
     if !profile.mpi_types.is_empty() {
         println!("  mpi: {}", profile.mpi_types.join(", "));
+    }
+    if !profile.mpi_installations.is_empty() {
+        println!("  mpi installations: {}", profile.mpi_installations.len());
     }
 }
 
@@ -467,6 +582,16 @@ size="${{SLURM_NTASKS:-${{PMI_SIZE:-${{PMIX_SIZE:-${{SLURM_STEP_NUM_TASKS:-}}}}}
 echo "hpc-compose MPI smoke rank=$rank size=${{size:-unknown}} expected=$expected_ranks"
 echo "observed_rank_count=${{size:-unknown}}"
 echo "rank_variables SLURM_PROCID=${{SLURM_PROCID:-}} SLURM_LOCALID=${{SLURM_LOCALID:-}} SLURM_NODEID=${{SLURM_NODEID:-}} PMI_RANK=${{PMI_RANK:-}} PMI_SIZE=${{PMI_SIZE:-}} PMIX_RANK=${{PMIX_RANK:-}} PMIX_NAMESPACE=${{PMIX_NAMESPACE:-}}"
+for mpi_version_cmd in ompi_info mpichversion impi_info mpirun mpiexec; do
+  if command -v "$mpi_version_cmd" >/dev/null 2>&1; then
+    echo "mpi_version_command=$mpi_version_cmd"
+    case "$mpi_version_cmd" in
+      impi_info) "$mpi_version_cmd" -v || true ;;
+      *) "$mpi_version_cmd" --version || "$mpi_version_cmd" -v || true ;;
+    esac
+    break
+  fi
+done
 if [ -z "$size" ]; then
   echo "MPI smoke could not determine launched rank count from Slurm/PMI environment" >&2
   exit 17
@@ -492,6 +617,11 @@ rank = comm.Get_rank()
 print(f"mpi4py MPI_Init smoke rank={{rank}} size={{size}} expected={{expected}}", flush=True)
 if size != expected:
     sys.exit(19)
+observed = comm.allreduce(rank + 1, op=MPI.SUM)
+expected_sum = expected * (expected + 1) // 2
+print(f"mpi4py allreduce smoke observed={{observed}} expected={{expected_sum}}", flush=True)
+if observed != expected_sum:
+    sys.exit(20)
 PY
   case "$py_status" in
     0) ;;
@@ -962,6 +1092,7 @@ mod tests {
     fn mpi_config(expected_ranks: Option<u32>) -> MpiConfig {
         MpiConfig {
             mpi_type: MpiType::new("pmix").expect("mpi type"),
+            profile: None,
             implementation: None,
             launcher: MpiLauncher::default(),
             expected_ranks,
@@ -1162,6 +1293,8 @@ services:
       ntasks: 2
       mpi:
         type: pmix
+        profile: openmpi
+        implementation: openmpi
         expected_ranks: 2
         host_mpi:
           bind_paths:
@@ -1205,7 +1338,9 @@ x-slurm:
         let script = fs::read_to_string(script_out).expect("script");
         assert!(script.contains("expected_ranks=2"));
         assert!(script.contains("--mpi=pmix"));
+        assert!(script.contains("HPC_COMPOSE_MPI_PROFILE=openmpi"));
         assert!(script.contains("/opt/mpi:/opt/mpi"));
         assert!(script.contains("LD_LIBRARY_PATH"));
+        assert!(script.contains("mpi4py allreduce smoke"));
     }
 }

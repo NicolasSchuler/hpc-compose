@@ -1,21 +1,10 @@
 # Installation
 
-## Build from source today
+For normal use, install from a published GitHub Release. Build from source when you are developing the project or need to inspect a local checkout before using it on a cluster.
 
-If the repository's [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page is still empty, build from source until the first public release is published:
+## Install From A Published Release
 
-```bash
-git clone https://github.com/NicolasSchuler/hpc-compose.git
-cd hpc-compose
-cargo build --release
-./target/release/hpc-compose --help
-```
-
-This path is also the safest choice when you want to inspect or modify the checkout before using the CLI on a cluster.
-
-## Install from a published release
-
-For supported Linux and macOS targets, use a version-pinned installer so the installer script and the downloaded archive come from the same tag:
+Pick the release tag you want from the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page and pin it:
 
 ```bash
 RELEASE_TAG=vX.Y.Z
@@ -23,26 +12,7 @@ curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEA
   | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
 ```
 
-Replace `vX.Y.Z` with a tag that exists on the GitHub Releases page.
-
-By default this installs `hpc-compose` into `~/.local/bin` and verifies the published SHA-256 checksum before placing the binary. The checksum sidecars protect against download corruption or mismatched assets; use GitHub release verification and artifact attestations as the primary authenticity check.
-
-On Unix installs, the release archive also ships section-1 manpages. After installation you can use:
-
-```bash
-man hpc-compose
-man hpc-compose-submit
-```
-
-If you want shell integration immediately after install, generate completions with:
-
-```bash
-hpc-compose completions bash > ~/.local/share/bash-completion/completions/hpc-compose
-hpc-compose completions zsh > ~/.zfunc/_hpc-compose
-hpc-compose completions fish > ~/.config/fish/completions/hpc-compose.fish
-```
-
-Installer availability does not imply full runtime support. Check the [Support Matrix](support-matrix.md) before assuming that a platform can run submission, prepare, or watch workflows end to end.
+The installer downloads the matching archive for the current Linux or macOS machine, verifies the published `.sha256` sidecar, installs `hpc-compose` into `~/.local/bin` by default, and installs shipped Unix manpages when present.
 
 Useful overrides:
 
@@ -51,34 +21,25 @@ RELEASE_TAG=vX.Y.Z
 
 curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
   | env HPC_COMPOSE_INSTALL_DIR=/usr/local/bin HPC_COMPOSE_VERSION="$RELEASE_TAG" sh
-curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
-  | env HPC_COMPOSE_VERSION="$RELEASE_TAG" sh
 ```
 
-Replace `vX.Y.Z` with the release tag you want from the GitHub Releases page.
+Installer availability does not imply full runtime support. Check the [Support Matrix](support-matrix.md) before assuming a platform can run submission, prepare, or watch workflows end to end.
 
-For unreleased testing only, you can still fetch the installer script from `main`:
+## About The `main` Installer Script
+
+Fetching `install.sh` from `main` without `HPC_COMPOSE_VERSION` does **not** install unreleased `main`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
 ```
 
-Treat that path as a moving target rather than a pinned release install.
+That command runs the moving script from `main`, but the script resolves the latest published GitHub Release and downloads from `releases/download/<tag>/...`. Use the version-pinned command above for reproducible installs. Use a source checkout when you want unreleased code.
 
-Supported targets match the release workflow:
+## Manual Release Download
 
-- Linux x86_64
-- Linux arm64
-- macOS x86_64
-- macOS arm64
+Prebuilt archives are published on the release page. Pick the archive that matches your platform.
 
-Windows release archives are also published, but Windows is not part of the installer path and is not an officially supported runtime target.
-
-## Download a release build manually
-
-Prebuilt archives are published on the project's [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases).
-
-Typical flow on Linux or macOS:
+Example for Linux `x86_64`:
 
 ```bash
 RELEASE_TAG=vX.Y.Z
@@ -88,30 +49,45 @@ tar -xzf hpc-compose.tar.gz
 ./hpc-compose --help
 ```
 
-Pick the archive that matches your platform from the release page. Linux x86_64 releases use a musl target to avoid common cluster glibc mismatches.
+Linux `x86_64` releases use a musl target to avoid common cluster glibc mismatches. Unix release archives also contain `share/man/man1/`.
 
-Unix release archives also contain `share/man/man1/` so the shipped manpages can be installed alongside the binary.
+## Native Packages
 
-The repository keeps generated manpages under `man/man1`. Regenerate them from a checkout with:
+Published Linux releases may include `.deb` and `.rpm` assets:
 
 ```bash
-cargo run --features manpage-bin --bin gen-manpages
-cargo test --locked --test release_metadata
-man -l man/man1/hpc-compose.1
+RELEASE_TAG=vX.Y.Z
+
+sudo apt install "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.deb"
+sudo dnf install "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.rpm"
 ```
 
-## Verify a release
+Package availability does not change runtime support policy. Linux cluster workflows still need Slurm client tools, the selected runtime backend, and shared storage for `x-slurm.cache_dir`.
+
+## Homebrew On macOS
+
+The repository exposes a same-repo Homebrew tap:
+
+```bash
+brew install NicolasSchuler/hpc-compose/hpc-compose
+```
+
+The formula is refreshed by release automation when a Homebrew-published release is cut. Check `brew info NicolasSchuler/hpc-compose/hpc-compose` when you need to confirm the formula version before installing.
+
+macOS support is for authoring and local non-runtime commands such as `new`, `validate`, `inspect`, `render`, and `completions`; it is not a supported Slurm runtime target.
+
+## Verify A Release
 
 Use GitHub-native verification as the primary trust path for published binaries.
 
-1. Verify that the release itself has a valid GitHub attestation:
+1. Verify the release:
 
 ```bash
 RELEASE_TAG=vX.Y.Z
 gh release verify "$RELEASE_TAG" -R NicolasSchuler/hpc-compose
 ```
 
-2. Verify that a downloaded asset matches the attested release:
+2. Verify a downloaded asset:
 
 ```bash
 RELEASE_TAG=vX.Y.Z
@@ -121,7 +97,7 @@ gh release download "$RELEASE_TAG" -R NicolasSchuler/hpc-compose -p "$ASSET"
 gh release verify-asset "$RELEASE_TAG" "./$ASSET" -R NicolasSchuler/hpc-compose
 ```
 
-3. Verify the artifact attestation directly and pin it to the release workflow identity:
+3. Verify the artifact attestation directly:
 
 ```bash
 gh attestation verify "./$ASSET" \
@@ -129,39 +105,13 @@ gh attestation verify "./$ASSET" \
   --signer-workflow NicolasSchuler/hpc-compose/.github/workflows/release.yml
 ```
 
-Published releases also ship `SHA256SUMS` and per-asset `.sha256` files. Those checksums are primarily for installer compatibility, mirroring, and corruption checks. They are not the primary authenticity mechanism.
+Published releases also ship `SHA256SUMS` and per-asset `.sha256` files. Those checksums are primarily for installer compatibility, mirroring, and corruption checks; attestations are the stronger authenticity signal.
 
-## Install through a native package manager
+## Internal Mirrors And Cluster-Admin Installs
 
-GitHub Releases also attach Linux-native packages for the published Linux targets:
+For internal mirrors, preserve release filenames exactly, including:
 
-```bash
-RELEASE_TAG=vX.Y.Z
-
-sudo apt install "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.deb"
-sudo dpkg -i "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.deb"
-
-sudo dnf install "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.rpm"
-sudo rpm -i "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.rpm"
-```
-
-Pick the package that matches your machine from the release page. Package availability does not change the runtime support policy; Linux cluster workflows still require the same Slurm, Pyxis, Enroot, and shared-storage assumptions described in the [Support Matrix](support-matrix.md).
-
-## Install with Homebrew on macOS
-
-The repository also exposes a same-repo Homebrew tap:
-
-```bash
-brew install NicolasSchuler/hpc-compose/hpc-compose
-```
-
-The formula tracks the latest published release on `main`. It installs the same prebuilt macOS tarballs and their shipped manpages.
-
-## Internal mirrors and cluster-admin installs
-
-For internal mirrors, preserve the release filenames exactly, including:
-
-- the platform archives or native packages
+- platform archives or native packages
 - `SHA256SUMS`
 - each per-asset `.sha256` sidecar
 
@@ -174,9 +124,29 @@ curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEA
         HPC_COMPOSE_VERSION="$RELEASE_TAG" sh
 ```
 
-This keeps the installer version, mirrored assets, and checksum files aligned.
+`HPC_COMPOSE_VERSION` is required when `HPC_COMPOSE_BASE_URL` is set so the installer, mirrored assets, and checksum files stay aligned.
 
-## Local docs commands
+## Build From Source
+
+Use this path for development, unreleased testing, or local inspection:
+
+```bash
+git clone https://github.com/NicolasSchuler/hpc-compose.git
+cd hpc-compose
+cargo build --release
+./target/release/hpc-compose --help
+```
+
+Before using a local build on a cluster workflow, validate the binary and one example spec:
+
+```bash
+env CACHE_DIR=/cluster/shared/hpc-compose-cache \
+  target/release/hpc-compose validate -f examples/minimal-batch.yaml
+env CACHE_DIR=/cluster/shared/hpc-compose-cache \
+  target/release/hpc-compose inspect --verbose -f examples/minimal-batch.yaml
+```
+
+## Local Docs Commands
 
 The repo ships two documentation layers:
 
@@ -191,13 +161,10 @@ mdbook serve docs
 cargo doc --no-deps
 ```
 
-## Verification
-
-Before using a local build on a cluster workflow, validate the binary and one example spec:
+Regenerate checked-in manpages from a checkout with:
 
 ```bash
-env CACHE_DIR=/cluster/shared/hpc-compose-cache \
-  target/release/hpc-compose validate -f examples/minimal-batch.yaml
-env CACHE_DIR=/cluster/shared/hpc-compose-cache \
-  target/release/hpc-compose inspect --verbose -f examples/minimal-batch.yaml
+cargo run --features manpage-bin --bin gen-manpages
+cargo test --locked --test release_metadata
+man -l man/man1/hpc-compose.1
 ```

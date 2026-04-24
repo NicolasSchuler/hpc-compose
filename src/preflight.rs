@@ -8,11 +8,13 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::cluster::ClusterProfile;
-use crate::planner::{ImageSource, cache_path_policy_issue, registry_host_for_remote};
+use crate::cluster::{ClusterProfile, MpiInstallationProfile, mpi_type_compatible_with_profile};
+use crate::planner::{
+    ExecutionSpec, ImageSource, cache_path_policy_issue, registry_host_for_remote,
+};
 use crate::prepare::RuntimePlan;
 use crate::readiness_util::readiness_uses_implicit_localhost;
-use crate::spec::{MetricsCollector, ReadinessSpec, RuntimeBackend};
+use crate::spec::{MetricsCollector, MpiProfile, ReadinessSpec, RuntimeBackend};
 use crate::term;
 
 /// Severity level for one preflight item.
@@ -274,7 +276,12 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
             if plan.runtime.backend == RuntimeBackend::Pyxis {
                 check_pyxis_support(&mut report, &options.srun_bin);
             }
-            check_mpi_support(&mut report, &options.srun_bin, plan);
+            check_mpi_support(
+                &mut report,
+                &options.srun_bin,
+                plan,
+                options.cluster_profile.as_ref(),
+            );
         }
         if plan.runtime.backend == RuntimeBackend::Pyxis {
             check_haicore_mount_helpers(&mut report);
@@ -288,10 +295,12 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
     check_registry_credentials(&mut report, plan);
     check_readiness_host_tools(&mut report, plan);
     check_metrics_collectors(&mut report, plan);
+    check_software_environment(&mut report, plan);
 
     if options.skip_prepare {
         check_skip_prepare_readiness(&mut report, plan);
     }
+    check_distributed_launch_hints(&mut report, plan, options.cluster_profile.as_ref());
     if let Some(profile) = &options.cluster_profile {
         check_cluster_profile(&mut report, plan, profile);
     }
@@ -341,15 +350,171 @@ fn check_cluster_profile(report: &mut Report, plan: &RuntimePlan, profile: &Clus
             message: "cluster profile is compatible with this plan".to_string(),
             remediation: None,
         });
+    } else {
+        for warning in warnings {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: warning.message,
+                remediation: warning.remediation,
+            });
+        }
+    }
+    check_distributed_profile_context(report, plan, profile);
+    check_site_policy(report, plan, profile);
+}
+
+fn check_distributed_profile_context(
+    report: &mut Report,
+    plan: &RuntimePlan,
+    profile: &ClusterProfile,
+) {
+    if !plan
+        .ordered_services
+        .iter()
+        .any(|service| service.placement.nodes > 1)
+    {
         return;
     }
-    for warning in warnings {
+    if !profile.distributed.env.is_empty() {
         report.items.push(Item {
-            level: Level::Warn,
-            message: warning.message,
-            remediation: warning.remediation,
+            level: Level::Ok,
+            message: format!(
+                "cluster profile distributed env applies to multi-node services: {}",
+                profile
+                    .distributed
+                    .env
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            remediation: None,
         });
     }
+    if let Some(port) = profile.distributed.rdzv_port {
+        report.items.push(Item {
+            level: Level::Ok,
+            message: format!("cluster profile distributed rendezvous port is fixed at {port}"),
+            remediation: None,
+        });
+    } else if profile.distributed.rdzv_port_base.is_some()
+        || profile.distributed.rdzv_port_span.is_some()
+    {
+        let base = profile.distributed.rdzv_port_base.unwrap_or(29_500);
+        let span = profile.distributed.rdzv_port_span.unwrap_or(1_000);
+        report.items.push(Item {
+            level: Level::Ok,
+            message: format!(
+                "cluster profile distributed rendezvous ports derive from range {}..={}",
+                base,
+                u32::from(base) + u32::from(span) - 1
+            ),
+            remediation: None,
+        });
+    }
+}
+
+fn check_distributed_launch_hints(
+    report: &mut Report,
+    plan: &RuntimePlan,
+    cluster_profile: Option<&ClusterProfile>,
+) {
+    for service in &plan.ordered_services {
+        if service.placement.nodes <= 1 {
+            continue;
+        }
+        let command_text = execution_text(&service.execution);
+        if !command_text.contains("HPC_COMPOSE_DIST_RDZV_ENDPOINT")
+            && !command_text.contains("HPC_COMPOSE_DIST_MASTER_ADDR")
+            && !command_text.contains("HPC_COMPOSE_DIST_MASTER_PORT")
+            && !command_text.contains("HPC_COMPOSE_DIST_HOSTFILE")
+        {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!(
+                    "multi-node service '{}' does not reference generated distributed rendezvous env",
+                    service.name
+                ),
+                remediation: Some(
+                    "Use HPC_COMPOSE_DIST_MASTER_ADDR/PORT, HPC_COMPOSE_DIST_RDZV_ENDPOINT, or HPC_COMPOSE_DIST_HOSTFILE in the launcher command."
+                        .to_string(),
+                ),
+            });
+        }
+        if let Some(profile) = cluster_profile
+            && profile_has_fabric_recommendations(profile)
+            && !service_has_any_env_prefix(service, &["NCCL_", "UCX_", "FI_"])
+            && !profile.distributed.env.keys().any(|name| {
+                name.starts_with("NCCL_") || name.starts_with("UCX_") || name.starts_with("FI_")
+            })
+        {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!(
+                    "multi-node service '{}' has no NCCL/UCX/OFI env and cluster profile has distributed env hints",
+                    service.name
+                ),
+                remediation: Some(
+                    "Copy site fabric settings into [distributed.env] or service environment when required by the framework."
+                        .to_string(),
+                ),
+            });
+        }
+        if let (Some(gpus), Some(nproc)) = (
+            service.slurm.gpus_per_node.or(plan.slurm.gpus_per_node),
+            service_env_value(service, "HPC_COMPOSE_DIST_NPROC_PER_NODE")
+                .or_else(|| service_env_value(service, "NPROC_PER_NODE"))
+                .and_then(|value| value.parse::<u32>().ok()),
+        ) && gpus != nproc
+        {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!(
+                    "service '{}' sets nproc_per_node={nproc}, but GPU request implies {gpus} process(es) per node",
+                    service.name
+                ),
+                remediation: Some(
+                    "Align HPC_COMPOSE_DIST_NPROC_PER_NODE/NPROC_PER_NODE with x-slurm.gpus_per_node unless this launcher intentionally uses a different process count."
+                        .to_string(),
+                ),
+            });
+        }
+    }
+}
+
+fn profile_has_fabric_recommendations(profile: &ClusterProfile) -> bool {
+    profile.distributed.env.keys().any(|name| {
+        name.starts_with("NCCL_") || name.starts_with("UCX_") || name.starts_with("FI_")
+    }) || !profile.network.nccl_env.is_empty()
+        || !profile.network.ucx_env.is_empty()
+        || !profile.network.ofi_env.is_empty()
+}
+
+fn execution_text(execution: &ExecutionSpec) -> String {
+    match execution {
+        ExecutionSpec::ImageDefault => String::new(),
+        ExecutionSpec::Shell(command) => command.clone(),
+        ExecutionSpec::Exec(argv) => argv.join(" "),
+    }
+}
+
+fn service_has_any_env_prefix(service: &crate::prepare::RuntimeService, prefixes: &[&str]) -> bool {
+    service.environment.iter().any(|(name, _)| {
+        prefixes
+            .iter()
+            .any(|prefix| name.to_ascii_uppercase().starts_with(prefix))
+    })
+}
+
+fn service_env_value<'a>(
+    service: &'a crate::prepare::RuntimeService,
+    key: &str,
+) -> Option<&'a str> {
+    service
+        .environment
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_str())
 }
 
 fn check_binary(report: &mut Report, binary: &str, ok_message: &str, remediation: &str) -> bool {
@@ -423,7 +588,12 @@ fn check_pyxis_support(report: &mut Report, srun_bin: &str) {
     }
 }
 
-fn check_mpi_support(report: &mut Report, srun_bin: &str, plan: &RuntimePlan) {
+fn check_mpi_support(
+    report: &mut Report,
+    srun_bin: &str,
+    plan: &RuntimePlan,
+    cluster_profile: Option<&ClusterProfile>,
+) {
     let requested = plan
         .ordered_services
         .iter()
@@ -467,7 +637,12 @@ fn check_mpi_support(report: &mut Report, srun_bin: &str, plan: &RuntimePlan) {
     }
 
     let advertised = advertised_mpi_types(&text);
-    for (service_name, mpi_type) in requested {
+    for service in &plan.ordered_services {
+        let Some(mpi) = &service.slurm.mpi else {
+            continue;
+        };
+        let service_name = service.name.as_str();
+        let mpi_type = mpi.mpi_type.as_srun_value();
         if advertised.iter().any(|value| value == mpi_type) {
             report.items.push(Item {
                 level: Level::Ok,
@@ -485,7 +660,131 @@ fn check_mpi_support(report: &mut Report, srun_bin: &str, plan: &RuntimePlan) {
                 ),
             });
         }
+
+        if let Some(profile) = mpi.profile {
+            if mpi_type_compatible_with_profile(profile, mpi_type) {
+                report.items.push(Item {
+                    level: Level::Ok,
+                    message: format!(
+                        "service '{service_name}' MPI profile '{}' is compatible with x-slurm.mpi.type='{mpi_type}'",
+                        profile.as_str()
+                    ),
+                    remediation: None,
+                });
+            } else {
+                report.items.push(Item {
+                    level: Level::Warn,
+                    message: format!(
+                        "service '{service_name}' MPI profile '{}' usually expects {}, but x-slurm.mpi.type='{mpi_type}' was requested",
+                        profile.as_str(),
+                        preferred_mpi_type_description(profile)
+                    ),
+                    remediation: Some(profile_mpi_type_remediation(profile).to_string()),
+                });
+            }
+
+            if profile == MpiProfile::IntelMpi
+                && !service_env_has(service, "I_MPI_PMI_LIBRARY")
+                && env::var_os("I_MPI_PMI_LIBRARY").is_none()
+                && !cluster_profile_has_pmi_library(cluster_profile)
+            {
+                report.items.push(Item {
+                    level: Level::Warn,
+                    message: format!(
+                        "service '{service_name}' uses MPI profile 'intel_mpi' without I_MPI_PMI_LIBRARY and no Slurm PMI-2 library was discovered"
+                    ),
+                    remediation: Some(
+                        "Set services.<name>.x-slurm.mpi.host_mpi.env.I_MPI_PMI_LIBRARY to the cluster's libpmi2.so path.".to_string(),
+                    ),
+                });
+            }
+
+            if let Some(install) = matching_mpi_installation(cluster_profile, profile)
+                && service
+                    .slurm
+                    .mpi
+                    .as_ref()
+                    .and_then(|mpi| mpi.host_mpi.as_ref())
+                    .is_none()
+                && (!install.bind_paths.is_empty() || !install.env.is_empty())
+            {
+                report.items.push(Item {
+                    level: Level::Warn,
+                    message: format!(
+                        "service '{service_name}' selects MPI profile '{}' and cluster profile has MPI installation '{}', but host_mpi is not configured",
+                        profile.as_str(),
+                        install.name
+                    ),
+                    remediation: Some(host_mpi_remediation_snippet(install)),
+                });
+            }
+        }
     }
+}
+
+fn preferred_mpi_type_description(profile: MpiProfile) -> &'static str {
+    match profile {
+        MpiProfile::Openmpi => "pmix/pmix_v* or pmi2",
+        MpiProfile::Mpich => "pmi2 or pmix/pmix_v*",
+        MpiProfile::IntelMpi => "pmi2",
+    }
+}
+
+fn profile_mpi_type_remediation(profile: MpiProfile) -> &'static str {
+    match profile {
+        MpiProfile::Openmpi => {
+            "Use x-slurm.mpi.type=pmix, a versioned pmix_v* plugin, or pmi2 if that is what this cluster advertises."
+        }
+        MpiProfile::Mpich => {
+            "Use x-slurm.mpi.type=pmi2, or a PMIx plugin only when this MPICH stack is PMIx-capable on this cluster."
+        }
+        MpiProfile::IntelMpi => {
+            "Use x-slurm.mpi.type=pmi2 and set I_MPI_PMI_LIBRARY when the Intel MPI stack needs Slurm's PMI-2 library."
+        }
+    }
+}
+
+fn service_env_has(service: &crate::prepare::RuntimeService, key: &str) -> bool {
+    service.environment.iter().any(|(name, _)| name == key)
+}
+
+fn cluster_profile_has_pmi_library(profile: Option<&ClusterProfile>) -> bool {
+    profile.is_some_and(|profile| {
+        profile
+            .mpi_installations
+            .iter()
+            .any(|install| install.pmi_library.is_some())
+    })
+}
+
+fn matching_mpi_installation(
+    profile: Option<&ClusterProfile>,
+    mpi_profile: MpiProfile,
+) -> Option<&MpiInstallationProfile> {
+    profile.and_then(|profile| {
+        profile
+            .mpi_installations
+            .iter()
+            .find(|install| install.implementation == mpi_profile.implementation())
+    })
+}
+
+fn host_mpi_remediation_snippet(install: &MpiInstallationProfile) -> String {
+    let mut lines = vec!["Add an explicit host MPI block, for example:".to_string()];
+    lines.push("x-slurm.mpi.host_mpi:".to_string());
+    if !install.bind_paths.is_empty() {
+        lines.push("  bind_paths:".to_string());
+        for bind in &install.bind_paths {
+            lines.push(format!("    - {bind}"));
+        }
+    }
+    if !install.env.is_empty() {
+        lines.push("  env:".to_string());
+        for (key, value) in &install.env {
+            lines.push(format!("    {key}: {value}"));
+        }
+    }
+    lines.join("\n")
 }
 
 fn advertised_mpi_types(output: &str) -> Vec<String> {
@@ -786,6 +1085,177 @@ fn check_metrics_collectors(report: &mut Report, plan: &RuntimePlan) {
     }
 }
 
+fn check_software_environment(report: &mut Report, plan: &RuntimePlan) {
+    let modules_requested = plan.slurm.software_env.modules.purge
+        || !plan.slurm.software_env.modules.load.is_empty()
+        || plan.ordered_services.iter().any(|service| {
+            service.slurm.software_env.modules.purge
+                || !service.slurm.software_env.modules.load.is_empty()
+        });
+    if modules_requested {
+        if find_binary("module").is_some() || Path::new("/etc/profile.d/modules.sh").is_file() {
+            report.items.push(Item {
+                level: Level::Ok,
+                message: "structured x-env modules can load through the host module command"
+                    .to_string(),
+                remediation: None,
+            });
+        } else {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: "x-env.modules is configured but the host module command was not found".to_string(),
+                remediation: Some(
+                    "Run on a login node with Environment Modules/Lmod initialized, or keep site-specific setup in x-slurm.setup."
+                        .to_string(),
+                ),
+            });
+        }
+        if plan.runtime.backend != RuntimeBackend::Host {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: "x-env.modules is host-side; container filesystem visibility remains explicit".to_string(),
+                remediation: Some(
+                    "If loaded modules provide libraries or data needed inside the container, add explicit volumes or host_mpi.bind_paths/env as appropriate."
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
+    for (label, view) in software_spack_views(plan) {
+        let path = Path::new(&view);
+        if path.exists() {
+            report.items.push(Item {
+                level: Level::Ok,
+                message: format!("{label} Spack view is present: {}", path.display()),
+                remediation: None,
+            });
+        } else {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!("{label} Spack view is missing: {}", path.display()),
+                remediation: Some(
+                    "Create the Spack view on shared storage or update x-env.spack.view for the target cluster."
+                        .to_string(),
+                ),
+            });
+        }
+        if plan.runtime.backend != RuntimeBackend::Host {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!("{label} Spack view is host-side; container bind mounts remain explicit"),
+                remediation: Some(
+                    "Bind the Spack view into the container with service volumes if binaries or libraries must be visible inside the image."
+                        .to_string(),
+                ),
+            });
+        }
+    }
+}
+
+fn software_spack_views(plan: &RuntimePlan) -> Vec<(String, String)> {
+    let mut views = Vec::new();
+    if let Some(spack) = &plan.slurm.software_env.spack {
+        views.push(("top-level x-env".to_string(), spack.view.clone()));
+    }
+    for service in &plan.ordered_services {
+        if let Some(spack) = &service.slurm.software_env.spack {
+            views.push((
+                format!("service '{}' x-env", service.name),
+                spack.view.clone(),
+            ));
+        }
+    }
+    views
+}
+
+fn check_site_policy(report: &mut Report, plan: &RuntimePlan, profile: &ClusterProfile) {
+    if !profile.containers.approved_backends.is_empty() {
+        let backend = plan.runtime.backend.as_str();
+        if profile
+            .containers
+            .approved_backends
+            .iter()
+            .any(|known| known == backend)
+        {
+            report.items.push(Item {
+                level: Level::Ok,
+                message: format!("cluster profile approves runtime.backend={backend}"),
+                remediation: None,
+            });
+        } else {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!(
+                    "runtime.backend={backend} is not listed in cluster profile containers.approved_backends"
+                ),
+                remediation: Some(format!(
+                    "Use one of the site-approved backends: {}",
+                    profile.containers.approved_backends.join(", ")
+                )),
+            });
+        }
+    }
+
+    for (key, value) in &profile.slurm.defaults {
+        if slurm_policy_value(plan, key).is_none() {
+            report.items.push(Item {
+                level: Level::Warn,
+                message: format!(
+                    "cluster profile recommends x-slurm.{key}={value}, but the spec does not set it"
+                ),
+                remediation: Some(format!(
+                    "Add x-slurm.{key}: {value} if it applies to this job."
+                )),
+            });
+        }
+    }
+
+    for (key, expected) in &profile.slurm.required {
+        match slurm_policy_value(plan, key) {
+            Some(actual) if actual == *expected => report.items.push(Item {
+                level: Level::Ok,
+                message: format!("cluster profile required x-slurm.{key} is set to {expected}"),
+                remediation: None,
+            }),
+            Some(actual) => report.items.push(Item {
+                level: Level::Warn,
+                message: format!(
+                    "cluster profile requires x-slurm.{key}={expected}, but the spec sets {actual}"
+                ),
+                remediation: Some(format!("Set x-slurm.{key}: {expected} for this site policy.")),
+            }),
+            None => report.items.push(Item {
+                level: Level::Warn,
+                message: format!(
+                    "cluster profile requires x-slurm.{key}={expected}, but the spec does not set it"
+                ),
+                remediation: Some(format!("Add x-slurm.{key}: {expected} for this site policy.")),
+            }),
+        }
+    }
+}
+
+fn slurm_policy_value(plan: &RuntimePlan, key: &str) -> Option<String> {
+    match key {
+        "partition" => plan.slurm.partition.clone(),
+        "account" => plan.slurm.account.clone(),
+        "qos" => plan.slurm.qos.clone(),
+        "time" => plan.slurm.time.clone(),
+        "constraint" => plan.slurm.constraint.clone(),
+        "gres" => plan.slurm.gres.clone(),
+        "mem" => plan.slurm.mem.clone(),
+        "nodes" => plan.slurm.nodes.map(|value| value.to_string()),
+        "ntasks" => plan.slurm.ntasks.map(|value| value.to_string()),
+        "ntasks_per_node" => plan.slurm.ntasks_per_node.map(|value| value.to_string()),
+        "cpus_per_task" => plan.slurm.cpus_per_task.map(|value| value.to_string()),
+        "gpus" => plan.slurm.gpus.map(|value| value.to_string()),
+        "gpus_per_node" => plan.slurm.gpus_per_node.map(|value| value.to_string()),
+        "gpus_per_task" => plan.slurm.gpus_per_task.map(|value| value.to_string()),
+        _ => None,
+    }
+}
+
 fn check_readiness_host_tools(report: &mut Report, plan: &RuntimePlan) {
     let has_http_readiness = plan
         .ordered_services
@@ -1038,19 +1508,20 @@ fn credential_path_display(path: Option<&Path>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
-    use crate::cluster::RuntimeAvailability;
+    use crate::cluster::{MpiInstallationProfile, RuntimeAvailability};
     use crate::planner::{
         ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement, ServicePlacementMode,
     };
     use crate::prepare::RuntimeService;
     use crate::spec::{
-        MetricsCollector, MetricsConfig, MpiConfig, MpiType, ReadinessSpec, ServiceFailurePolicy,
-        ServiceSlurmConfig, SlurmConfig,
+        MetricsCollector, MetricsConfig, MpiConfig, MpiProfile, MpiType, ReadinessSpec,
+        ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1158,6 +1629,7 @@ mod tests {
         let mut plan = runtime_plan(tmpdir.path());
         plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
             mpi_type: MpiType::new("pmix").expect("mpi type"),
+            profile: None,
             implementation: None,
             launcher: Default::default(),
             expected_ranks: None,
@@ -1183,6 +1655,7 @@ mod tests {
 
         plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
             mpi_type: MpiType::new("pmi1").expect("mpi type"),
+            profile: None,
             implementation: None,
             launcher: Default::default(),
             expected_ranks: None,
@@ -1206,6 +1679,78 @@ mod tests {
     }
 
     #[test]
+    fn preflight_checks_mpi_profiles_and_reports_host_mpi_snippet() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::create_dir_all(tmpdir.path().join("src")).expect("src");
+        fs::create_dir_all(tmpdir.path().join("deps")).expect("deps");
+        let srun = tmpdir.path().join("srun");
+        let sbatch = tmpdir.path().join("sbatch");
+        let enroot = tmpdir.path().join("enroot");
+        write_fake_binary(
+            &srun,
+            "#!/bin/bash\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'usage: srun --container-image=IMAGE'; exit 0; fi\nif [[ \"${1:-}\" == \"--mpi=list\" ]]; then echo 'MPI plugin types are...'; echo 'pmix pmi2'; exit 0; fi\nexit 0\n",
+        );
+        write_fake_binary(&sbatch, "#!/bin/bash\nexit 0\n");
+        write_fake_binary(&enroot, "#!/bin/bash\nexit 0\n");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
+            mpi_type: MpiType::new("pmi1").expect("mpi type"),
+            profile: Some(MpiProfile::Openmpi),
+            implementation: None,
+            launcher: Default::default(),
+            expected_ranks: None,
+            host_mpi: None,
+        });
+        let cluster_profile = ClusterProfile {
+            schema_version: 1,
+            generated_at_unix: None,
+            slurm_version: None,
+            mpi_types: vec!["pmix".into(), "pmi2".into()],
+            mpi_installations: vec![MpiInstallationProfile {
+                name: "openmpi:site".into(),
+                implementation: crate::spec::MpiImplementation::Openmpi,
+                version: Some("Open MPI 5".into()),
+                mpi_types: vec!["pmix".into()],
+                bin_dir: Some("/opt/openmpi/bin".into()),
+                lib_dir: Some("/opt/openmpi/lib".into()),
+                bind_paths: vec!["/opt/openmpi:/opt/openmpi:ro".into()],
+                env: BTreeMap::from([("MPI_HOME".into(), "/opt/openmpi".into())]),
+                pmi_library: None,
+            }],
+            partitions: Vec::new(),
+            qos: Vec::new(),
+            gpu_models: Vec::new(),
+            runtimes: RuntimeAvailability {
+                pyxis: true,
+                enroot: true,
+                apptainer: false,
+                singularity: false,
+                host: true,
+            },
+            shared_cache_paths: Vec::new(),
+            distributed: crate::cluster::DistributedProfile::default(),
+            ..ClusterProfile::default()
+        };
+
+        let report = run(
+            &plan,
+            &Options {
+                enroot_bin: enroot.display().to_string(),
+                sbatch_bin: sbatch.display().to_string(),
+                srun_bin: srun.display().to_string(),
+                scontrol_bin: "scontrol".into(),
+                require_submit_tools: true,
+                skip_prepare: false,
+                cluster_profile: Some(cluster_profile),
+                ..Options::default()
+            },
+        );
+        let rendered = report.render();
+        assert!(rendered.contains("profile 'openmpi' usually expects"));
+        assert!(rendered.contains("/opt/openmpi:/opt/openmpi:ro"));
+    }
+
+    #[test]
     fn preflight_warns_when_mpi_list_query_fails() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         fs::create_dir_all(tmpdir.path().join("src")).expect("src");
@@ -1222,6 +1767,7 @@ mod tests {
         let mut plan = runtime_plan(tmpdir.path());
         plan.ordered_services[0].slurm.mpi = Some(MpiConfig {
             mpi_type: MpiType::new("pmix").expect("mpi type"),
+            profile: None,
             implementation: None,
             launcher: Default::default(),
             expected_ranks: None,
@@ -1316,6 +1862,7 @@ mod tests {
             generated_at_unix: None,
             slurm_version: None,
             mpi_types: Vec::new(),
+            mpi_installations: Vec::new(),
             partitions: Vec::new(),
             qos: Vec::new(),
             gpu_models: Vec::new(),
@@ -1327,11 +1874,38 @@ mod tests {
                 host: true,
             },
             shared_cache_paths: vec![tmpdir.path().display().to_string()],
+            distributed: crate::cluster::DistributedProfile::default(),
+            ..ClusterProfile::default()
         };
         let mut report = Report { items: Vec::new() };
         check_cluster_profile(&mut report, &plan, &compatible);
         assert!(report.items.iter().any(|item| {
             item.level == Level::Ok && item.message.contains("cluster profile is compatible")
+        }));
+
+        let mut distributed_plan = plan.clone();
+        distributed_plan.slurm.nodes = Some(2);
+        distributed_plan.ordered_services[0].placement.nodes = 2;
+        distributed_plan.ordered_services[0].placement.mode =
+            crate::planner::ServicePlacementMode::Distributed;
+        let distributed_profile = ClusterProfile {
+            distributed: crate::cluster::DistributedProfile {
+                rdzv_port: Some(31_337),
+                rdzv_port_base: None,
+                rdzv_port_span: None,
+                env: BTreeMap::from([("UCX_TLS".into(), "rc,cuda_copy,cuda_ipc".into())]),
+            },
+            ..compatible.clone()
+        };
+        let mut report = Report { items: Vec::new() };
+        check_cluster_profile(&mut report, &distributed_plan, &distributed_profile);
+        assert!(report.items.iter().any(|item| {
+            item.level == Level::Ok
+                && item.message.contains("distributed env applies")
+                && item.message.contains("UCX_TLS")
+        }));
+        assert!(report.items.iter().any(|item| {
+            item.level == Level::Ok && item.message.contains("rendezvous port is fixed")
         }));
 
         let incompatible = ClusterProfile {
@@ -1356,6 +1930,52 @@ mod tests {
                 .iter()
                 .any(|item| { item.level == Level::Warn && item.message.contains("cache_dir") })
         );
+    }
+
+    #[test]
+    fn structured_software_env_preflight_warns_for_host_side_setup() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.software_env = crate::spec::SoftwareEnvConfig {
+            modules: crate::spec::ModuleEnvSpec {
+                purge: false,
+                load: vec!["cuda/12.4".into()],
+            },
+            spack: Some(crate::spec::SpackEnvSpec {
+                view: tmpdir.path().join("missing-view").display().to_string(),
+            }),
+            env: BTreeMap::new(),
+        };
+
+        let mut report = Report { items: Vec::new() };
+        check_software_environment(&mut report, &plan);
+        let text = report.render();
+        assert!(text.contains("x-env.modules is host-side"));
+        assert!(text.contains("Spack view is missing"));
+    }
+
+    #[test]
+    fn site_policy_profile_warns_without_mutating_specs() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let plan = runtime_plan(tmpdir.path());
+        let profile = ClusterProfile {
+            containers: crate::cluster::ContainerPolicyProfile {
+                approved_backends: vec!["host".into()],
+                ..Default::default()
+            },
+            slurm: crate::cluster::SlurmPolicyProfile {
+                defaults: BTreeMap::from([("account".into(), "proj".into())]),
+                required: BTreeMap::from([("partition".into(), "gpu".into())]),
+            },
+            ..ClusterProfile::default()
+        };
+
+        let mut report = Report { items: Vec::new() };
+        check_site_policy(&mut report, &plan, &profile);
+        let text = report.render();
+        assert!(text.contains("runtime.backend=pyxis is not listed"));
+        assert!(text.contains("recommends x-slurm.account=proj"));
+        assert!(text.contains("requires x-slurm.partition=gpu"));
     }
 
     #[test]

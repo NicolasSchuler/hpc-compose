@@ -32,6 +32,8 @@ pub struct ComposeSpec {
     pub name: Option<String>,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    #[serde(rename = "x-env", default)]
+    pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm", default)]
     pub slurm: SlurmConfig,
     pub services: BTreeMap<String, ServiceSpec>,
@@ -112,6 +114,8 @@ pub enum RuntimeGpuPolicy {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlurmConfig {
+    #[serde(skip)]
+    pub software_env: SoftwareEnvConfig,
     #[serde(default)]
     pub job_name: Option<String>,
     #[serde(default)]
@@ -381,6 +385,77 @@ pub struct MetricsConfig {
     pub collectors: Vec<MetricsCollector>,
 }
 
+/// Structured host-side software environment setup for modules, Spack views,
+/// and exported environment variables.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SoftwareEnvConfig {
+    #[serde(default)]
+    pub modules: ModuleEnvSpec,
+    #[serde(default)]
+    pub spack: Option<SpackEnvSpec>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// Accepted `x-env.modules` syntaxes.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModuleEnvSpec {
+    /// Whether to run `module purge` before loading modules.
+    pub purge: bool,
+    /// Module names to load in order.
+    pub load: Vec<String>,
+}
+
+impl Default for ModuleEnvSpec {
+    fn default() -> Self {
+        Self {
+            purge: false,
+            load: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawModuleEnvSpec {
+    List(Vec<String>),
+    Object(RawModuleEnvObject),
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawModuleEnvObject {
+    #[serde(default)]
+    purge: bool,
+    #[serde(default)]
+    load: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for ModuleEnvSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match RawModuleEnvSpec::deserialize(deserializer)? {
+            RawModuleEnvSpec::List(load) => Ok(Self { purge: false, load }),
+            RawModuleEnvSpec::Object(raw) => Ok(Self {
+                purge: raw.purge,
+                load: raw.load,
+            }),
+        }
+    }
+}
+
+/// Spack environment view configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SpackEnvSpec {
+    pub view: String,
+}
+
 /// One service entry from the compose file.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize)]
@@ -403,6 +478,8 @@ pub struct ServiceSpec {
     pub readiness: Option<ReadinessSpec>,
     #[serde(default)]
     pub healthcheck: Option<HealthcheckSpec>,
+    #[serde(rename = "x-env", default)]
+    pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm", default)]
     pub slurm: ServiceSlurmConfig,
     #[serde(rename = "x-runtime", default)]
@@ -416,6 +493,8 @@ pub struct ServiceSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSlurmConfig {
+    #[serde(skip)]
+    pub software_env: SoftwareEnvConfig,
     #[serde(default)]
     pub nodes: Option<u32>,
     #[serde(default)]
@@ -558,6 +637,8 @@ pub struct MpiConfig {
     #[serde(rename = "type")]
     pub mpi_type: MpiType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<MpiProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implementation: Option<MpiImplementation>,
     #[serde(default, skip_serializing_if = "MpiLauncher::is_default")]
     pub launcher: MpiLauncher,
@@ -565,6 +646,40 @@ pub struct MpiConfig {
     pub expected_ranks: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_mpi: Option<HostMpiConfig>,
+}
+
+/// MPI compatibility profile used for validation and diagnostics.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MpiProfile {
+    /// Open MPI with Slurm PMI/PMIx launch.
+    Openmpi,
+    /// MPICH with Slurm PMI/PMIx launch.
+    Mpich,
+    /// Intel MPI with Slurm PMI-2 launch.
+    IntelMpi,
+}
+
+impl MpiProfile {
+    /// Returns the config spelling for this profile.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Openmpi => "openmpi",
+            Self::Mpich => "mpich",
+            Self::IntelMpi => "intel_mpi",
+        }
+    }
+
+    /// Returns the matching MPI implementation family for this profile.
+    #[must_use]
+    pub fn implementation(self) -> MpiImplementation {
+        match self {
+            Self::Openmpi => MpiImplementation::Openmpi,
+            Self::Mpich => MpiImplementation::Mpich,
+            Self::IntelMpi => MpiImplementation::IntelMpi,
+        }
+    }
 }
 
 /// Slurm MPI plugin type used for `srun --mpi=<type>`.
@@ -633,6 +748,28 @@ pub enum MpiImplementation {
     HpeMpi,
     /// Implementation is intentionally unspecified.
     Unknown,
+}
+
+impl Default for MpiImplementation {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl MpiImplementation {
+    /// Returns the config spelling for this MPI implementation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Openmpi => "openmpi",
+            Self::Mpich => "mpich",
+            Self::IntelMpi => "intel_mpi",
+            Self::Mvapich2 => "mvapich2",
+            Self::CrayMpi => "cray_mpi",
+            Self::HpeMpi => "hpe_mpi",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// MPI process launcher selected for the service.
@@ -728,6 +865,8 @@ pub struct EffectiveComposeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub runtime: RuntimeConfig,
+    #[serde(rename = "x-env", skip_serializing_if = "SoftwareEnvConfig::is_empty")]
+    pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm")]
     pub slurm: EffectiveSlurmConfig,
     pub services: BTreeMap<String, EffectiveServiceConfig>,
@@ -867,6 +1006,8 @@ pub struct EffectiveServiceConfig {
     pub depends_on: BTreeMap<String, EffectiveDependsOnCondition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness: Option<ReadinessSpec>,
+    #[serde(rename = "x-env", skip_serializing_if = "SoftwareEnvConfig::is_empty")]
+    pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm")]
     pub slurm: EffectiveServiceSlurmConfig,
     #[serde(rename = "x-runtime", skip_serializing_if = "Option::is_none")]
@@ -1190,6 +1331,7 @@ impl ComposeSpec {
 
     fn interpolate_with_vars(&mut self, vars: &BTreeMap<String, String>) -> Result<()> {
         interpolate_optional_string(&mut self.name, vars)?;
+        self.software_env.interpolate(vars)?;
         self.slurm.interpolate(vars)?;
         for service in self.services.values_mut() {
             service.interpolate(vars)?;
@@ -1198,6 +1340,8 @@ impl ComposeSpec {
     }
 
     fn validate(&mut self) -> Result<()> {
+        self.software_env.validate("x-env")?;
+        self.slurm.software_env = self.software_env.clone();
         self.slurm.validate()?;
         for (name, service) in &mut self.services {
             service.normalize_healthcheck()?;
@@ -1212,6 +1356,10 @@ impl ComposeSpec {
                     self.runtime.backend.as_str()
                 );
             }
+            service
+                .software_env
+                .validate(&format!("service '{name}' x-env"))?;
+            service.slurm.software_env = service.software_env.clone();
             service.slurm.validate(name)?;
         }
         Ok(())
@@ -1290,6 +1438,7 @@ impl ComposeSpec {
                     working_dir: service.working_dir.clone(),
                     depends_on,
                     readiness: service.readiness.clone(),
+                    software_env: service.software_env.clone(),
                     slurm: EffectiveServiceSlurmConfig {
                         nodes: service.slurm.nodes,
                         placement: service.slurm.placement.clone(),
@@ -1326,6 +1475,7 @@ impl ComposeSpec {
         Ok(EffectiveComposeConfig {
             name: self.name.clone(),
             runtime: self.runtime.clone(),
+            software_env: self.software_env.clone(),
             slurm: EffectiveSlurmConfig {
                 job_name: self.slurm.job_name.clone(),
                 partition: self.slurm.partition.clone(),
@@ -1499,6 +1649,72 @@ impl EnvironmentSpec {
             }
         }
     }
+}
+
+impl SoftwareEnvConfig {
+    /// Returns true when no module, Spack, or environment setup is configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.modules.purge
+            && self.modules.load.is_empty()
+            && self.spack.is_none()
+            && self.env.is_empty()
+    }
+
+    fn validate(&self, field: &str) -> Result<()> {
+        for (index, module) in self.modules.load.iter().enumerate() {
+            validate_software_env_string(module, &format!("{field}.modules[{index}]"))?;
+            if module.starts_with('-') {
+                bail!("{field}.modules[{index}] must not start with '-'");
+            }
+        }
+        if let Some(spack) = &self.spack {
+            validate_software_env_string(&spack.view, &format!("{field}.spack.view"))?;
+            if !Path::new(&spack.view).is_absolute() {
+                bail!("{field}.spack.view must be an absolute path");
+            }
+        }
+        for (name, value) in &self.env {
+            validate_safe_env_name(name, &format!("{field}.env"))?;
+            validate_software_env_string(value, &format!("{field}.env.{name}"))?;
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_vec_strings(&mut self.modules.load, vars)?;
+        if let Some(spack) = &mut self.spack {
+            spack.view = interpolate_string(&spack.view, vars)?;
+        }
+        for value in self.env.values_mut() {
+            *value = interpolate_string(value, vars)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_software_env_string(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if value.contains('\0') || value.contains('\n') || value.contains('\r') {
+        bail!("{field} must not contain line breaks or null bytes");
+    }
+    Ok(())
+}
+
+fn validate_safe_env_name(name: &str, field: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        bail!("{field} contains an empty environment variable name");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        bail!("{field}.{name} is not a safe environment variable name");
+    }
+    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        bail!("{field}.{name} is not a safe environment variable name");
+    }
+    Ok(())
 }
 
 impl CommandSpec {
@@ -1968,6 +2184,7 @@ impl ServiceSpec {
         if let Some(healthcheck) = &mut self.healthcheck {
             healthcheck.interpolate(vars)?;
         }
+        self.software_env.interpolate(vars)?;
         self.slurm.interpolate(vars)?;
         self.runtime.interpolate(vars)?;
         self.enroot.interpolate(vars)?;
@@ -2203,7 +2420,23 @@ impl ServiceSlurmConfig {
 }
 
 impl MpiConfig {
+    /// Returns the explicit implementation or the implementation implied by a profile.
+    #[must_use]
+    pub fn resolved_implementation(&self) -> Option<MpiImplementation> {
+        self.implementation
+            .or_else(|| self.profile.map(MpiProfile::implementation))
+    }
+
     fn validate(&self, service_name: &str) -> Result<()> {
+        if let (Some(profile), Some(implementation)) = (self.profile, self.implementation)
+            && profile.implementation() != implementation
+        {
+            bail!(
+                "service '{service_name}' x-slurm.mpi.profile={} conflicts with x-slurm.mpi.implementation={}",
+                profile.as_str(),
+                implementation.as_str()
+            );
+        }
         validate_positive_u32(
             self.expected_ranks,
             &format!("service '{service_name}' x-slurm.mpi.expected_ranks"),
@@ -2658,7 +2891,7 @@ fn submit_args_contain_mail_settings(args: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::env;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
@@ -2858,6 +3091,78 @@ services:
         let env = EnvironmentSpec::List(vec!["GOOD=1".into(), "BROKEN".into()]);
         let err = env.to_pairs().expect_err("should fail");
         assert!(err.to_string().contains("KEY=VALUE"));
+    }
+
+    #[test]
+    fn software_env_accepts_shorthand_object_and_effective_config_output() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let env_file = tmpdir.path().join(".env");
+        fs::write(
+            &env_file,
+            "CUDA_MODULE=cuda/12.4\nSPACK_VIEW=/shared/spack/views/ml\n",
+        )
+        .expect("env");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-env:
+  modules:
+    - ${CUDA_MODULE}
+    - openmpi/5
+  spack:
+    view: ${SPACK_VIEW}
+  env:
+    HDF5_USE_FILE_LOCKING: "FALSE"
+services:
+  app:
+    image: python:3.11-slim
+    x-env:
+      modules:
+        purge: false
+        load:
+          - netcdf/4.9
+      env:
+        HDF5_USE_FILE_LOCKING: "TRUE"
+        OMP_NUM_THREADS: "8"
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load spec");
+        assert_eq!(
+            spec.software_env.modules.load,
+            vec!["cuda/12.4", "openmpi/5"]
+        );
+        assert_eq!(
+            spec.software_env
+                .spack
+                .as_ref()
+                .map(|spack| spack.view.as_str()),
+            Some("/shared/spack/views/ml")
+        );
+        assert_eq!(spec.slurm.software_env, spec.software_env);
+        let service = spec.services.get("app").expect("app service");
+        assert_eq!(service.software_env.modules.load, vec!["netcdf/4.9"]);
+        assert_eq!(service.slurm.software_env, service.software_env);
+
+        let effective = spec
+            .effective_config(&tmpdir.path().join("cache"), &BTreeMap::new())
+            .expect("effective config");
+        assert_eq!(
+            effective
+                .software_env
+                .env
+                .get("HDF5_USE_FILE_LOCKING")
+                .map(String::as_str),
+            Some("FALSE")
+        );
+        assert_eq!(
+            effective
+                .services
+                .get("app")
+                .and_then(|service| service.software_env.env.get("OMP_NUM_THREADS"))
+                .map(String::as_str),
+            Some("8")
+        );
     }
 
     #[test]
@@ -4248,7 +4553,32 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&conflict).expect_err("mpi conflict");
-        assert!(err.to_string().contains("use one MPI source"));
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("use one service-level MPI source"),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn service_mpi_rejects_unknown_profile() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let unknown_profile = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: pmix
+        profile: vendor_mpi
+"#,
+        );
+        let err = ComposeSpec::load(&unknown_profile).expect_err("unknown mpi profile");
+        let message = format!("{err:#}");
+        assert!(message.contains("unknown variant"), "got {message}");
+        assert!(message.contains("vendor_mpi"), "got {message}");
     }
 
     #[test]

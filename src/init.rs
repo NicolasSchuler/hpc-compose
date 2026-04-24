@@ -109,6 +109,56 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/multi-node-torchrun.yaml"),
     },
     Template {
+        name: "multi-node-deepspeed",
+        description: "DeepSpeed no-SSH multi-node training using generated rendezvous env.",
+        body: include_str!("../examples/multi-node-deepspeed.yaml"),
+    },
+    Template {
+        name: "multi-node-accelerate",
+        description: "Hugging Face Accelerate multi-machine training using generated rendezvous env.",
+        body: include_str!("../examples/multi-node-accelerate.yaml"),
+    },
+    Template {
+        name: "multi-node-horovod",
+        description: "Horovod training launched through Slurm MPI instead of SSH fanout.",
+        body: include_str!("../examples/multi-node-horovod.yaml"),
+    },
+    Template {
+        name: "multi-node-jax",
+        description: "JAX distributed training with generated coordinator env.",
+        body: include_str!("../examples/multi-node-jax.yaml"),
+    },
+    Template {
+        name: "nccl-tests",
+        description: "MPI-backed NCCL all-reduce test job for GPU fabric debugging.",
+        body: include_str!("../examples/nccl-tests.yaml"),
+    },
+    Template {
+        name: "ray-symmetric",
+        description: "Ray symmetric-run across one Slurm allocation.",
+        body: include_str!("../examples/ray-symmetric.yaml"),
+    },
+    Template {
+        name: "ray-head-workers",
+        description: "Ray head plus workers inside one Slurm allocation.",
+        body: include_str!("../examples/ray-head-workers.yaml"),
+    },
+    Template {
+        name: "dask-scheduler-workers",
+        description: "Dask scheduler on the primary node plus allocation workers.",
+        body: include_str!("../examples/dask-scheduler-workers.yaml"),
+    },
+    Template {
+        name: "spark-standalone",
+        description: "Spark standalone master, workers, and app submission inside one allocation.",
+        body: include_str!("../examples/spark-standalone.yaml"),
+    },
+    Template {
+        name: "flux-nested",
+        description: "Nested Flux instance launched inside a Slurm allocation.",
+        body: include_str!("../examples/flux-nested.yaml"),
+    },
+    Template {
         name: "multi-stage-pipeline",
         description: "Two-stage data pipeline coordinating through shared job mount.",
         body: include_str!("../examples/multi-stage-pipeline.yaml"),

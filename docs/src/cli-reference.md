@@ -36,7 +36,7 @@ hpc-compose context --format json
 | `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
 | `inspect` | View the normalized runtime plan | `--verbose` can reveal resolved secrets and final mount mappings. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later submit. |
-| `doctor --mpi-smoke` | Render or run a small MPI probe for one service | Reports requested/advertised MPI types, rank geometry, host MPI binds/env, and rendered `srun`; add `--submit` to consume a Slurm allocation. |
+| `doctor --mpi-smoke` | Render or run a small MPI probe for one service | Reports requested/advertised MPI types, MPI profile metadata, discovered MPI installs, host MPI binds/env, and rendered `srun`; add `--submit` to consume a Slurm allocation. |
 | `prepare` | Import images and build prepared runtime artifacts | Use `--force` when the base image or prepare inputs changed. |
 | `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. |
 | `up` | Run the one-command submit/watch/logs workflow | Preferred normal run on a real cluster. |
@@ -62,7 +62,7 @@ hpc-compose submit --dry-run -f compose.yaml
 
 Useful workflow flags:
 
-- `--local` runs the plan on the current Linux host through Enroot instead of calling `sbatch`.
+- `--local` runs a Pyxis/Enroot plan on the current Linux host instead of calling `sbatch`.
 - `--allow-resume-changes` acknowledges an intentional change to resume-coupled config between tracked runs.
 - `--resume-diff-only` prints the resume-sensitive config diff without submitting.
 - `--script-out <PATH>` keeps a copy of the rendered batch script.
@@ -72,7 +72,7 @@ Useful workflow flags:
 
 ### `up --local` / `submit --local`
 
-`up --local` and `submit --local` launch the planned services through Enroot on the current host instead of calling `sbatch`. They are useful for local authoring and script inspection, not for distributed Slurm execution.
+`up --local` and `submit --local` launch a Pyxis/Enroot plan on the current host instead of calling `sbatch`. They are useful for local authoring and script inspection, not for distributed Slurm execution.
 
 ```bash
 hpc-compose up --local --dry-run -f compose.yaml
@@ -81,6 +81,7 @@ hpc-compose up --local --dry-run -f compose.yaml
 Current constraints:
 
 - Linux hosts only
+- `runtime.backend: pyxis` only
 - single-host specs only
 - no distributed or partitioned placement
 - no `services.<name>.x-slurm.extra_srun_args`
