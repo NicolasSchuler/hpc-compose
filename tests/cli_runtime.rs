@@ -2839,20 +2839,32 @@ services:
     }
     assert_eq!(order, "preprocess\ntrain\npostprocess\n");
 
-    let status = run_cli(
-        tmpdir.path(),
-        &[
-            "status",
-            "-f",
-            compose.to_str().expect("path"),
-            "--job-id",
-            &job_id,
-            "--format",
-            "json",
-        ],
-    );
-    assert_success(&status);
-    let status_json: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    let mut status_json = Value::Null;
+    for _ in 0..40 {
+        let status = run_cli(
+            tmpdir.path(),
+            &[
+                "status",
+                "-f",
+                compose.to_str().expect("path"),
+                "--job-id",
+                &job_id,
+                "--format",
+                "json",
+            ],
+        );
+        assert_success(&status);
+        status_json = serde_json::from_str(&stdout_text(&status)).expect("status json");
+        let all_services_completed = status_json["services"]
+            .as_array()
+            .expect("services")
+            .iter()
+            .all(|service| service["completed_successfully"].as_bool() == Some(true));
+        if all_services_completed {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
     let services = status_json["services"].as_array().expect("services");
     assert!(
         services
