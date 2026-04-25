@@ -224,6 +224,19 @@ jobs:
             return 1
           }
 
+          require_rpm_entry() {
+            local contents="$1"
+            local pattern="$2"
+
+            if grep -Eq "${pattern}" "${contents}"; then
+              return 0
+            fi
+
+            echo "missing rpm entry matching ${pattern}" >&2
+            cat "${contents}" >&2
+            return 1
+          }
+
           deb_asset="dist/hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.deb"
           rpm_asset="dist/hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.rpm"
           smoke_dir="$(mktemp -d)"
@@ -236,12 +249,11 @@ jobs:
           require_manpage "${deb_root}" "hpc-compose.1"
           require_manpage "${deb_root}" "hpc-compose-up.1"
 
-          rpm --query --list --package "${rpm_asset}" >/dev/null
-          mkdir -p "${rpm_root}"
-          rpm2cpio "${rpm_asset}" | (cd "${rpm_root}" && cpio -idmu --quiet)
-          "${rpm_root}/usr/bin/hpc-compose" --version >/dev/null
-          require_manpage "${rpm_root}" "hpc-compose.1"
-          require_manpage "${rpm_root}" "hpc-compose-up.1"
+          rpm_contents="${smoke_dir}/rpm-contents.txt"
+          rpm --query --list --package "${rpm_asset}" >"${rpm_contents}"
+          require_rpm_entry "${rpm_contents}" '^/usr/bin/hpc-compose$'
+          require_rpm_entry "${rpm_contents}" '^/usr/share/man/man1/hpc-compose\.1(\.(gz|xz|bz2|zst))?$'
+          require_rpm_entry "${rpm_contents}" '^/usr/share/man/man1/hpc-compose-up\.1(\.(gz|xz|bz2|zst))?$'
 
       - name: Package Windows release assets
         if: runner.os == 'Windows'

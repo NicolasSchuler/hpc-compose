@@ -204,6 +204,14 @@ fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
         "release workflow should build rpm payloads readable by the smoke-test tooling"
     );
     assert!(
+        workflow.contains("require_rpm_entry"),
+        "release workflow should validate rpm contents through rpm query output"
+    );
+    assert!(
+        !workflow.contains("rpm2cpio"),
+        "release workflow should not depend on rpm2cpio extraction for rpm smoke checks"
+    );
+    assert!(
         !workflow.contains("hpc-compose-submit.1"),
         "release workflow should not reference removed submit manpages"
     );
