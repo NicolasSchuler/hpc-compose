@@ -26,6 +26,12 @@ Write the cluster profile to this path; use '\-' to print TOML.
 \fB--mpi\-smoke\fR
 Render or run an MPI smoke probe for a compose service with x\-slurm.mpi.
 .TP
+\fB--fabric\-smoke\fR
+Render or run MPI and fabric smoke probes for a compose service with x\-slurm.mpi.
+.TP
+\fB--checks\fR \fICHECKS\fR
+Fabric smoke checks: auto, mpi, nccl, ucx, ofi, or a comma\-separated list.
+.TP
 \fB--service\fR \fISERVICE\fR
 MPI service to smoke\-test; inferred when exactly one MPI service exists.
 .TP

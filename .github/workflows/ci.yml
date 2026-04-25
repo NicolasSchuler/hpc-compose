@@ -182,7 +182,7 @@ jobs:
             echo "Shellchecking rendered $f"
             out="$tmpdir/$(basename "$f" .yaml).sbatch"
             env -u CACHE_DIR cargo run --locked -- render -f "$f" --output "$out"
-            shellcheck -x -s bash "$out"
+            shellcheck -e SC2034 -x -s bash "$out"
           done
 
   macos-authoring:

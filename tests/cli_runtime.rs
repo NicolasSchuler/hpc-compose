@@ -2857,7 +2857,7 @@ services:
     assert!(
         services
             .iter()
-            .all(|service| service["completed_successfully"] == Value::from(true))
+            .all(|service| service["completed_successfully"].as_bool() == Some(true))
     );
 }
 
@@ -2923,7 +2923,7 @@ services:
         );
         assert_success(&status);
         status_json = serde_json::from_str(&stdout_text(&status)).expect("status json");
-        if status_json["scheduler"]["terminal"] == Value::from(true) {
+        if status_json["scheduler"]["terminal"].as_bool() == Some(true) {
             break;
         }
         thread::sleep(Duration::from_millis(50));
