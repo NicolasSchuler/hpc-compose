@@ -444,6 +444,22 @@ echo "Submitted batch job 12345"
     path
 }
 
+pub(crate) fn write_fake_sbatch_with_log(tmpdir: &Path, log_path: &Path) -> PathBuf {
+    let path = tmpdir.join("sbatch-log");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+echo "Submitted batch job 12345"
+"#,
+            log_path.display()
+        ),
+    );
+    path
+}
+
 pub(crate) fn write_fake_sbatch_runs_script(tmpdir: &Path) -> PathBuf {
     let path = tmpdir.join("sbatch-run-script");
     write_script(
@@ -620,6 +636,27 @@ esac
     path
 }
 
+pub(crate) fn write_fake_squeue_with_argv_log(
+    tmpdir: &Path,
+    state_file: &Path,
+    log_path: &Path,
+) -> PathBuf {
+    let path = tmpdir.join("squeue-log");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+exec '{}' "$@"
+"#,
+            log_path.display(),
+            write_fake_squeue(tmpdir, state_file).display()
+        ),
+    );
+    path
+}
+
 pub(crate) fn write_fake_sacct(tmpdir: &Path, state_file: &Path) -> PathBuf {
     let path = tmpdir.join("sacct");
     write_script(
@@ -693,6 +730,27 @@ case "$content" in
 esac
 "#,
             state_file.display()
+        ),
+    );
+    path
+}
+
+pub(crate) fn write_fake_sacct_with_argv_log(
+    tmpdir: &Path,
+    state_file: &Path,
+    log_path: &Path,
+) -> PathBuf {
+    let path = tmpdir.join("sacct-log");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+exec '{}' "$@"
+"#,
+            log_path.display(),
+            write_fake_sacct(tmpdir, state_file).display()
         ),
     );
     path
@@ -799,6 +857,60 @@ echo "Submitted batch job 12345"
             gap_seconds,
             terminal_state,
             sacct_state.display()
+        ),
+    );
+    path
+}
+
+pub(crate) fn write_fake_sif_runtime(tmpdir: &Path, name: &str, log_path: &Path) -> PathBuf {
+    let path = tmpdir.join(name);
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+cmd="${{1:-}}"
+shift || true
+case "$cmd" in
+  build)
+    sandbox=0
+    positional=()
+    for arg in "$@"; do
+      case "$arg" in
+        --sandbox)
+          sandbox=1
+          ;;
+        --force|--fakeroot)
+          ;;
+        --*)
+          ;;
+        *)
+          positional+=("$arg")
+          ;;
+      esac
+    done
+    output="${{positional[0]:-}}"
+    if [[ -z "$output" ]]; then
+      echo "missing build output" >&2
+      exit 2
+    fi
+    if [[ "$sandbox" == "1" ]]; then
+      mkdir -p "$output"
+    else
+      mkdir -p "$(dirname "$output")"
+      touch "$output"
+    fi
+    ;;
+  exec|run)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+            log_path.display()
         ),
     );
     path

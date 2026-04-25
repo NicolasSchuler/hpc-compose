@@ -1,0 +1,38 @@
+name: snakemake-bridge
+
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: snakemake-bridge
+  time: "02:00:00"
+  nodes: 1
+  cpus_per_task: 8
+  mem: 16G
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/snakemake-work/**
+      - /hpc-compose/job/reports/**
+      - /hpc-compose/job/logs/**
+
+services:
+  snakemake:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        mkdir -p /hpc-compose/job/snakemake-work /hpc-compose/job/reports
+        snakemake \
+          --snakefile "$${SNAKEMAKE_FILE:-Snakefile}" \
+          --cores "$${SNAKEMAKE_CORES:-$${SLURM_CPUS_PER_TASK:-1}}" \
+          --directory "$${SNAKEMAKE_WORKDIR:-.}" \
+          --printshellcmds \
+          $${SNAKEMAKE_ARGS:-}
+    environment:
+      SNAKEMAKE_FILE: Snakefile
+      SNAKEMAKE_WORKDIR: "."
+      SNAKEMAKE_ARGS: ""
+    x-slurm:
+      ntasks: 1

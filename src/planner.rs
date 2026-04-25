@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::{MountParts, resolve_node_index_expr, split_mount_parts};
 use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{
     CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, RuntimeBackend,
@@ -123,7 +124,7 @@ pub enum ExecutionSpec {
 
 /// A normalized image prepare block attached to a service.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PreparedImageSpec {
     pub commands: Vec<String>,
     pub mounts: Vec<String>,
@@ -670,30 +671,7 @@ fn ensure_service_nodes_match(service: &PlannedService, resolved_nodes: u32) -> 
 }
 
 fn parse_node_index_expr(expr: &str, allocation_nodes: u32, label: &str) -> Result<Vec<u32>> {
-    let mut indices = BTreeSet::new();
-    for part in expr.split(',') {
-        let part = part.trim();
-        let (start, end) = match part.split_once('-') {
-            Some((start, end)) => (start.trim(), end.trim()),
-            None => (part, part),
-        };
-        let start = start
-            .parse::<u32>()
-            .with_context(|| format!("{label} contains invalid node index '{start}'"))?;
-        let end = end
-            .parse::<u32>()
-            .with_context(|| format!("{label} contains invalid node index '{end}'"))?;
-        if end >= allocation_nodes {
-            bail!(
-                "{label} references node index {end}, but the allocation only has {} node(s)",
-                allocation_nodes
-            );
-        }
-        for index in start..=end {
-            indices.insert(index);
-        }
-    }
-    Ok(indices.into_iter().collect())
+    resolve_node_index_expr(expr, allocation_nodes, label)
 }
 
 fn select_eligible_node_indices(
@@ -929,22 +907,22 @@ struct ParsedMount<'a> {
 
 impl<'a> ParsedMount<'a> {
     fn parse(mount: &'a str) -> Result<Self> {
-        let parts = mount.split(':').collect::<Vec<_>>();
-        let parsed = match parts.as_slice() {
-            [host, container] => Self {
+        let parsed = match split_mount_parts(mount) {
+            MountParts::HostContainer {
                 host,
                 container,
-                mode: None,
-            },
-            [host, container, mode @ ("ro" | "rw")] => Self {
+                mode,
+            } => Self {
                 host,
                 container,
-                mode: Some(mode),
+                mode,
             },
-            [_, _, mode] => {
+            MountParts::UnsupportedMode(mode) => {
                 bail!("mount '{mount}' uses unsupported mode '{mode}'; use ro or rw")
             }
-            _ => bail!("mount '{mount}' must use host_path:container_path[:ro|rw] syntax"),
+            MountParts::InvalidShape => {
+                bail!("mount '{mount}' must use host_path:container_path[:ro|rw] syntax")
+            }
         };
         if parsed.host.trim().is_empty() || parsed.container.trim().is_empty() {
             bail!("mount '{mount}' must use non-empty host and container paths");
@@ -1173,6 +1151,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
+    use proptest::prelude::*;
+
     use super::*;
     use crate::spec::{
         ComposeSpec, DependsOnConditionSpec, DependsOnSpec, EnvironmentSpec, HostMpiConfig,
@@ -1197,6 +1177,62 @@ mod tests {
             slurm: ServiceSlurmConfig::default(),
             runtime: ServiceRuntimeConfig::default(),
             enroot: ServiceEnrootConfig::default(),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn property_node_ranges_resolve_to_sorted_in_range_sets(
+            allocation_nodes in 1u32..32,
+            raw_start in 0u32..64,
+            raw_width in 0u32..64,
+        ) {
+            let start = raw_start % allocation_nodes;
+            let width = raw_width % (allocation_nodes - start);
+            let end = start + width;
+            let expr = if start == end {
+                start.to_string()
+            } else {
+                format!("{start}-{end}")
+            };
+            let indices = parse_node_index_expr(&expr, allocation_nodes, "placement").expect("indices");
+            prop_assert!(!indices.is_empty());
+            prop_assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+            prop_assert!(indices.iter().all(|index| *index < allocation_nodes));
+            prop_assert_eq!(indices.first().copied(), Some(start));
+            prop_assert_eq!(indices.last().copied(), Some(end));
+        }
+
+        #[test]
+        fn property_topological_order_places_dependencies_first(service_count in 1usize..8) {
+            let mut services = BTreeMap::new();
+            for index in 0..service_count {
+                let name = format!("s{index}");
+                let mut spec = service("redis:7");
+                if index > 0 {
+                    spec.depends_on = DependsOnSpec::List(vec![format!("s{}", index - 1)]);
+                }
+                services.insert(name, spec);
+            }
+            let spec = ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig::default(),
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                services,
+            };
+            let plan = build_plan(Path::new("."), spec).expect("plan");
+            let positions = plan
+                .ordered_services
+                .iter()
+                .enumerate()
+                .map(|(index, service)| (service.name.clone(), index))
+                .collect::<BTreeMap<_, _>>();
+            for index in 1..service_count {
+                let dependent = positions[&format!("s{index}")];
+                let dependency = positions[&format!("s{}", index - 1)];
+                prop_assert!(dependency < dependent);
+            }
         }
     }
 

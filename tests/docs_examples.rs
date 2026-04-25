@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use hpc_compose::cli::build_cli_command;
+use serde_json::Value;
+
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
@@ -38,6 +41,83 @@ fn examples_guide_mentions_every_repository_yaml_example() {
         assert!(
             example_source.contains(&format!("../../examples/{file}")),
             "docs/src/example-source.md should include examples/{file}"
+        );
+    }
+}
+
+fn collect_public_command_paths(
+    command: &clap::Command,
+    prefix: Vec<String>,
+    paths: &mut Vec<String>,
+) {
+    for subcommand in command.get_subcommands() {
+        if subcommand.is_hide_set() {
+            continue;
+        }
+        let mut path = prefix.clone();
+        path.push(subcommand.get_name().to_string());
+        paths.push(path.join(" "));
+        collect_public_command_paths(subcommand, path, paths);
+    }
+}
+
+#[test]
+fn cli_reference_mentions_every_public_command_path() {
+    let cli_reference =
+        fs::read_to_string(repo_root().join("docs/src/cli-reference.md")).expect("cli reference");
+    let mut command_paths = Vec::new();
+    collect_public_command_paths(&build_cli_command(), Vec::new(), &mut command_paths);
+    command_paths.sort();
+    command_paths.dedup();
+
+    for path in command_paths {
+        let command_name = path.split_whitespace().next().expect("command name");
+        assert!(
+            cli_reference.contains(&format!("`{path}`"))
+                || cli_reference.contains(&format!("hpc-compose {path}"))
+                || cli_reference.contains(&format!("`{command_name} "))
+                || cli_reference.contains(&format!("hpc-compose {command_name} ")),
+            "docs/src/cli-reference.md should mention public command path '{path}'"
+        );
+    }
+}
+
+#[test]
+fn spec_reference_mentions_top_level_schema_properties() {
+    let spec_reference =
+        fs::read_to_string(repo_root().join("docs/src/spec-reference.md")).expect("spec reference");
+    let schema: Value = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("schema/hpc-compose.schema.json"))
+            .expect("schema json"),
+    )
+    .expect("parse schema");
+    let properties = schema["properties"]
+        .as_object()
+        .expect("top-level schema properties");
+
+    for property in properties.keys() {
+        assert!(
+            spec_reference.contains(&format!("`{property}`")),
+            "docs/src/spec-reference.md should mention top-level schema property '{property}'"
+        );
+    }
+}
+
+#[test]
+fn support_matrix_reflects_ci_tested_platforms() {
+    let support_matrix =
+        fs::read_to_string(repo_root().join("docs/src/support-matrix.md")).expect("support matrix");
+    for expected in [
+        "Ubuntu 24.04 `x86_64`",
+        "macOS `x86_64`",
+        "macOS `arm64`",
+        "authoring",
+        "installer smoke",
+        "Homebrew smoke",
+    ] {
+        assert!(
+            support_matrix.contains(expected),
+            "docs/src/support-matrix.md should mention CI-tested support detail '{expected}'"
         );
     }
 }

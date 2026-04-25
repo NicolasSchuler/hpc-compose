@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -140,7 +141,7 @@ pub(crate) fn doctor_mpi_smoke(
         let (script_path, cleanup) = match wrote_script.clone() {
             Some(path) => (path, false),
             None => {
-                let path = temp_smoke_script_path();
+                let path = temp_smoke_script_path("mpi");
                 write_script(&path, &script)?;
                 (path, true)
             }
@@ -251,6 +252,239 @@ pub(crate) fn doctor_mpi_smoke(
         bail!("MPI smoke probe failed");
     }
     Ok(())
+}
+
+pub(crate) fn doctor_fabric_smoke(
+    context: ResolvedContext,
+    options: FabricSmokeOptions,
+) -> Result<()> {
+    let FabricSmokeOptions {
+        format,
+        service_name,
+        checks,
+        submit,
+        script_out,
+        timeout_seconds,
+        quiet,
+    } = options;
+    if submit && timeout_seconds == 0 {
+        bail!("doctor --fabric-smoke --timeout-seconds must be at least 1 when --submit is used");
+    }
+    let selected_checks = FabricCheckSelection::parse(checks.as_deref())?;
+    let output_format = output::resolve_output_format(format, false);
+    let plan = output_common::load_plan_with_interpolation_vars(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+    )?;
+    let runtime_plan = build_runtime_plan(&plan);
+    let service = select_mpi_service(&runtime_plan, service_name.as_deref())?;
+    let expected_ranks = mpi_expected_ranks(service);
+    let resolved_checks = selected_checks.resolve(service, &runtime_plan);
+    let smoke_plan = build_fabric_smoke_plan(
+        &runtime_plan,
+        service.name.as_str(),
+        expected_ranks,
+        &resolved_checks,
+    )?;
+    let smoke_service = smoke_plan
+        .ordered_services
+        .first()
+        .context("fabric smoke plan did not contain a service")?;
+    let mpi = service
+        .slurm
+        .mpi
+        .as_ref()
+        .context("selected fabric smoke service does not define x-slurm.mpi")?;
+    let requested_mpi_type = mpi.mpi_type.as_srun_value().to_string();
+    let selected_mpi_profile = mpi.profile.map(|profile| profile.as_str().to_string());
+    let selected_implementation = mpi
+        .resolved_implementation()
+        .map(|implementation| implementation.as_str().to_string());
+    let advertised_mpi_types = run_capture(&context.binaries.srun.value, &["--mpi=list"])
+        .map(|raw| advertised_mpi_types(&raw))
+        .unwrap_or_default();
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+    let discovered_mpi_installations = cluster_profile
+        .as_ref()
+        .map(|profile| profile.mpi_installations.clone())
+        .unwrap_or_default();
+    let profile_warnings = mpi_profile_warnings(
+        mpi.profile,
+        &requested_mpi_type,
+        &advertised_mpi_types,
+        &discovered_mpi_installations,
+    );
+    let host_mpi_bind_paths = mpi
+        .host_mpi
+        .as_ref()
+        .map(|host_mpi| host_mpi.bind_paths.clone())
+        .unwrap_or_default();
+    let host_mpi_env = mpi
+        .host_mpi
+        .as_ref()
+        .map(|host_mpi| host_mpi.env.to_pairs())
+        .transpose()?
+        .unwrap_or_default();
+    let rendered_srun =
+        display_srun_command_for_backend(smoke_service, smoke_plan.runtime.backend).join(" ");
+    let script = render_script_with_options(
+        &smoke_plan,
+        &RenderOptions {
+            apptainer_bin: context.binaries.apptainer.value.clone(),
+            singularity_bin: context.binaries.singularity.value.clone(),
+            cluster_profile,
+        },
+    )?;
+
+    let mut wrote_script = None;
+    if let Some(path) = script_out.as_ref() {
+        write_script(path, &script)?;
+        wrote_script = Some(path.clone());
+    }
+
+    let submit_result = if submit {
+        prepare_runtime_plan(
+            &smoke_plan,
+            &PrepareOptions {
+                enroot_bin: context.binaries.enroot.value.clone(),
+                apptainer_bin: context.binaries.apptainer.value.clone(),
+                singularity_bin: context.binaries.singularity.value.clone(),
+                keep_failed_prep: false,
+                force_rebuild: false,
+            },
+        )?;
+        let (script_path, cleanup) = match wrote_script.clone() {
+            Some(path) => (path, false),
+            None => {
+                let path = temp_smoke_script_path("fabric");
+                write_script(&path, &script)?;
+                (path, true)
+            }
+        };
+        let mut result = run_sbatch_wait(
+            &context.binaries.sbatch.value,
+            &script_path,
+            Duration::from_secs(timeout_seconds),
+        )?;
+        result.service_log =
+            read_smoke_service_log(&context.cwd, &result.stdout, service.name.as_str())?;
+        result.checks = result
+            .service_log
+            .as_deref()
+            .map(parse_smoke_check_records)
+            .unwrap_or_default();
+        if cleanup {
+            let _ = fs::remove_file(&script_path);
+        }
+        Some(result)
+    } else {
+        None
+    };
+
+    let planned_checks = resolved_checks
+        .checks
+        .iter()
+        .map(|check| SmokeCheckRecord {
+            name: check.name().to_string(),
+            status: SmokeCheckStatus::Skipped,
+            reason: "not submitted; render-only".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+        .collect::<Vec<_>>();
+
+    match output_format {
+        OutputFormat::Text => {
+            if !quiet {
+                println!("Fabric smoke service: {}", service.name);
+                println!("checks: {}", resolved_checks.label());
+                println!("requested MPI type: {requested_mpi_type}");
+                println!(
+                    "MPI profile: {}",
+                    selected_mpi_profile.as_deref().unwrap_or("not set")
+                );
+                println!(
+                    "MPI implementation: {}",
+                    selected_implementation.as_deref().unwrap_or("not set")
+                );
+                if advertised_mpi_types.is_empty() {
+                    println!("advertised MPI types: unavailable");
+                } else {
+                    println!("advertised MPI types: {}", advertised_mpi_types.join(", "));
+                }
+                for warning in &profile_warnings {
+                    println!("warning: {warning}");
+                }
+                println!("expected ranks: {expected_ranks}");
+                println!("host MPI bind paths: {}", host_mpi_bind_paths.len());
+                for bind_path in &host_mpi_bind_paths {
+                    println!("  bind: {bind_path}");
+                }
+                println!("host MPI env entries: {}", host_mpi_env.len());
+                for (key, value) in &host_mpi_env {
+                    println!("  env: {key}={value}");
+                }
+                println!("rendered srun: {rendered_srun}");
+                if let Some(path) = wrote_script.as_ref() {
+                    println!("script: {}", path.display());
+                }
+                if !submit {
+                    println!("submit: skipped; pass --submit to run this probe");
+                    if wrote_script.is_none() {
+                        print!("{script}");
+                    }
+                }
+                if let Some(result) = submit_result.as_ref() {
+                    print!("{}", result.render_text());
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let checks = submit_result
+                .as_ref()
+                .map(|result| result.checks.clone())
+                .unwrap_or(planned_checks);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&FabricSmokeJsonOutput {
+                    service: service.name.clone(),
+                    requested_mpi_type,
+                    selected_mpi_profile,
+                    selected_implementation,
+                    advertised_mpi_types,
+                    discovered_mpi_installations,
+                    profile_warnings,
+                    expected_ranks,
+                    host_mpi_bind_paths,
+                    host_mpi_env,
+                    rendered_srun,
+                    selected_checks: resolved_checks.label(),
+                    checks,
+                    submitted: submit,
+                    script_path: wrote_script,
+                    script: (!submit).then_some(script),
+                    result: submit_result.clone(),
+                })?
+            );
+        }
+    }
+
+    if let Some(result) = submit_result
+        && !result.success
+    {
+        bail!("fabric smoke probe failed");
+    }
+    Ok(())
+}
+
+pub(crate) struct FabricSmokeOptions {
+    pub(crate) format: Option<OutputFormat>,
+    pub(crate) service_name: Option<String>,
+    pub(crate) checks: Option<String>,
+    pub(crate) submit: bool,
+    pub(crate) script_out: Option<PathBuf>,
+    pub(crate) timeout_seconds: u64,
+    pub(crate) quiet: bool,
 }
 
 fn doctor_cluster_report(
@@ -365,6 +599,7 @@ struct MpiSmokeSubmitResult {
     stdout: String,
     stderr: String,
     service_log: Option<String>,
+    checks: Vec<SmokeCheckRecord>,
     timed_out: bool,
 }
 
@@ -404,7 +639,54 @@ impl MpiSmokeSubmitResult {
                 output.push('\n');
             }
         }
+        if !self.checks.is_empty() {
+            output.push_str("checks:\n");
+            for check in &self.checks {
+                output.push_str(&format!(
+                    "  {}: {} ({})\n",
+                    check.name,
+                    check.status.as_str(),
+                    check.reason
+                ));
+            }
+        }
         output
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct SmokeCheckRecord {
+    name: String,
+    status: SmokeCheckStatus,
+    reason: String,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SmokeCheckStatus {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+impl SmokeCheckStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    fn from_marker(value: &str) -> Option<Self> {
+        match value {
+            "passed" => Some(Self::Passed),
+            "failed" => Some(Self::Failed),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
     }
 }
 
@@ -425,6 +707,136 @@ struct MpiSmokeJsonOutput {
     script_path: Option<PathBuf>,
     script: Option<String>,
     result: Option<MpiSmokeSubmitResult>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct FabricSmokeJsonOutput {
+    service: String,
+    requested_mpi_type: String,
+    selected_mpi_profile: Option<String>,
+    selected_implementation: Option<String>,
+    advertised_mpi_types: Vec<String>,
+    discovered_mpi_installations: Vec<MpiInstallationProfile>,
+    profile_warnings: Vec<String>,
+    expected_ranks: u32,
+    host_mpi_bind_paths: Vec<String>,
+    host_mpi_env: Vec<(String, String)>,
+    rendered_srun: String,
+    selected_checks: String,
+    checks: Vec<SmokeCheckRecord>,
+    submitted: bool,
+    script_path: Option<PathBuf>,
+    script: Option<String>,
+    result: Option<MpiSmokeSubmitResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FabricCheck {
+    Mpi,
+    Nccl,
+    Ucx,
+    Ofi,
+}
+
+impl FabricCheck {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "mpi" => Ok(Self::Mpi),
+            "nccl" => Ok(Self::Nccl),
+            "ucx" => Ok(Self::Ucx),
+            "ofi" => Ok(Self::Ofi),
+            other => bail!(
+                "unknown fabric smoke check '{other}'; use auto, mpi, nccl, ucx, ofi, or a comma-separated list"
+            ),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mpi => "mpi",
+            Self::Nccl => "nccl",
+            Self::Ucx => "ucx",
+            Self::Ofi => "ofi",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FabricCheckSelection {
+    Auto,
+    Explicit(BTreeSet<FabricCheck>),
+}
+
+impl FabricCheckSelection {
+    fn parse(raw: Option<&str>) -> Result<Self> {
+        let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(Self::Auto);
+        };
+        if raw == "auto" {
+            return Ok(Self::Auto);
+        }
+        let mut checks = BTreeSet::new();
+        for item in raw.split(',') {
+            let trimmed = item.trim();
+            if trimmed.is_empty() {
+                bail!("fabric smoke checks must not contain empty entries");
+            }
+            if trimmed == "auto" {
+                bail!("fabric smoke check 'auto' cannot be combined with explicit checks");
+            }
+            checks.insert(FabricCheck::parse(trimmed)?);
+        }
+        Ok(Self::Explicit(checks))
+    }
+
+    fn resolve(&self, service: &RuntimeService, plan: &RuntimePlan) -> ResolvedFabricChecks {
+        match self {
+            Self::Auto => {
+                let mut checks = vec![FabricCheck::Mpi, FabricCheck::Ucx, FabricCheck::Ofi];
+                let nccl_required = gpu_resources_requested(service, plan);
+                if nccl_required {
+                    checks.insert(1, FabricCheck::Nccl);
+                }
+                ResolvedFabricChecks {
+                    checks,
+                    explicit_nccl: false,
+                    explicit_ucx: false,
+                    explicit_ofi: false,
+                    nccl_enabled_without_gpu: false,
+                }
+            }
+            Self::Explicit(values) => {
+                let checks = values.iter().copied().collect::<Vec<_>>();
+                ResolvedFabricChecks {
+                    checks,
+                    explicit_nccl: values.contains(&FabricCheck::Nccl),
+                    explicit_ucx: values.contains(&FabricCheck::Ucx),
+                    explicit_ofi: values.contains(&FabricCheck::Ofi),
+                    nccl_enabled_without_gpu: values.contains(&FabricCheck::Nccl)
+                        && !gpu_resources_requested(service, plan),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedFabricChecks {
+    checks: Vec<FabricCheck>,
+    explicit_nccl: bool,
+    explicit_ucx: bool,
+    explicit_ofi: bool,
+    nccl_enabled_without_gpu: bool,
+}
+
+impl ResolvedFabricChecks {
+    fn label(&self) -> String {
+        self.checks
+            .iter()
+            .map(|check| check.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn run_doctor(binaries: &ResolvedBinaries) -> Report {
@@ -503,13 +915,41 @@ fn build_mpi_smoke_plan(
     service_name: &str,
     expected_ranks: u32,
 ) -> Result<RuntimePlan> {
+    build_smoke_plan(
+        plan,
+        service_name,
+        "mpi-smoke",
+        mpi_smoke_shell(expected_ranks),
+    )
+}
+
+fn build_fabric_smoke_plan(
+    plan: &RuntimePlan,
+    service_name: &str,
+    expected_ranks: u32,
+    checks: &ResolvedFabricChecks,
+) -> Result<RuntimePlan> {
+    build_smoke_plan(
+        plan,
+        service_name,
+        "fabric-smoke",
+        fabric_smoke_shell(expected_ranks, checks),
+    )
+}
+
+fn build_smoke_plan(
+    plan: &RuntimePlan,
+    service_name: &str,
+    suffix: &str,
+    shell: String,
+) -> Result<RuntimePlan> {
     let service = plan
         .ordered_services
         .iter()
         .find(|service| service.name == service_name)
         .with_context(|| format!("service '{service_name}' was not found in the runtime plan"))?;
     let mut smoke_service = service.clone();
-    smoke_service.execution = ExecutionSpec::Shell(mpi_smoke_shell(expected_ranks));
+    smoke_service.execution = ExecutionSpec::Shell(shell);
     smoke_service.working_dir = None;
     smoke_service.depends_on = Vec::new();
     smoke_service.readiness = None;
@@ -519,7 +959,7 @@ fn build_mpi_smoke_plan(
     smoke_service.slurm.scratch = None;
 
     let smoke_slurm = SlurmConfig {
-        job_name: Some(format!("{}-mpi-smoke", plan.name)),
+        job_name: Some(format!("{}-{suffix}", plan.name)),
         partition: plan.slurm.partition.clone(),
         account: plan.slurm.account.clone(),
         qos: plan.slurm.qos.clone(),
@@ -544,7 +984,7 @@ fn build_mpi_smoke_plan(
         ..SlurmConfig::default()
     };
     Ok(RuntimePlan {
-        name: format!("{}-mpi-smoke", plan.name),
+        name: format!("{}-{suffix}", plan.name),
         cache_dir: plan.cache_dir.clone(),
         runtime: plan.runtime.clone(),
         slurm: smoke_slurm,
@@ -635,6 +1075,163 @@ fi
     )
 }
 
+fn fabric_smoke_shell(expected_ranks: u32, checks: &ResolvedFabricChecks) -> String {
+    let mut body = format!(
+        r#"expected_ranks={expected_ranks}
+record_smoke_check() {{
+  name="$1"
+  status="$2"
+  shift 2
+  reason="$*"
+  printf 'HPC_COMPOSE_SMOKE_CHECK\t%s\t%s\t%s\n' "$name" "$status" "$reason"
+}}
+run_mpi_smoke_check() {{
+  echo "hpc-compose MPI/fabric smoke"
+  rank="${{SLURM_PROCID:-${{PMI_RANK:-${{PMIX_RANK:-unknown}}}}}}"
+  size="${{SLURM_NTASKS:-${{PMI_SIZE:-${{PMIX_SIZE:-${{SLURM_STEP_NUM_TASKS:-}}}}}}}}"
+  echo "hpc-compose MPI smoke rank=$rank size=${{size:-unknown}} expected=$expected_ranks"
+  echo "observed_rank_count=${{size:-unknown}}"
+  echo "rank_variables SLURM_PROCID=${{SLURM_PROCID:-}} SLURM_LOCALID=${{SLURM_LOCALID:-}} SLURM_NODEID=${{SLURM_NODEID:-}} PMI_RANK=${{PMI_RANK:-}} PMI_SIZE=${{PMI_SIZE:-}} PMIX_RANK=${{PMIX_RANK:-}} PMIX_NAMESPACE=${{PMIX_NAMESPACE:-}}"
+  for mpi_version_cmd in ompi_info mpichversion impi_info mpirun mpiexec; do
+    if command -v "$mpi_version_cmd" >/dev/null 2>&1; then
+      echo "mpi_version_command=$mpi_version_cmd"
+      case "$mpi_version_cmd" in
+        impi_info) "$mpi_version_cmd" -v || true ;;
+        *) "$mpi_version_cmd" --version || "$mpi_version_cmd" -v || true ;;
+      esac
+      break
+    fi
+  done
+  if [ -z "$size" ]; then
+    record_smoke_check mpi failed "could not determine launched rank count from Slurm/PMI environment"
+    echo "MPI smoke could not determine launched rank count from Slurm/PMI environment" >&2
+    exit 17
+  fi
+  if [ "$size" != "$expected_ranks" ]; then
+    record_smoke_check mpi failed "expected $expected_ranks ranks but launch reports $size"
+    echo "MPI smoke expected $expected_ranks ranks but launch reports $size" >&2
+    exit 18
+  fi
+  mpi_reason="rank environment matched expected ranks"
+  if command -v python3 >/dev/null 2>&1; then
+    py_status=0
+    python3 - "$expected_ranks" <<'PY' || py_status=$?
+import sys
+expected = int(sys.argv[1])
+try:
+    from mpi4py import MPI
+except ModuleNotFoundError as exc:
+    if exc.name == "mpi4py":
+        sys.exit(77)
+    raise
+comm = MPI.COMM_WORLD
+size = comm.Get_size()
+rank = comm.Get_rank()
+print(f"mpi4py MPI_Init smoke rank={{rank}} size={{size}} expected={{expected}}", flush=True)
+if size != expected:
+    sys.exit(19)
+observed = comm.allreduce(rank + 1, op=MPI.SUM)
+expected_sum = expected * (expected + 1) // 2
+print(f"mpi4py allreduce smoke observed={{observed}} expected={{expected_sum}}", flush=True)
+if observed != expected_sum:
+    sys.exit(20)
+PY
+    case "$py_status" in
+      0) mpi_reason="rank environment and mpi4py allreduce passed" ;;
+      77) echo "WARN: mpi4py not installed; Slurm/PMI rank environment smoke passed but MPI_Init was not tested" >&2 ;;
+      *) record_smoke_check mpi failed "mpi4py MPI_Init/allreduce failed with exit $py_status"; exit "$py_status" ;;
+    esac
+  else
+    echo "WARN: python3 not found; Slurm/PMI rank environment smoke passed but MPI_Init was not tested" >&2
+  fi
+  record_smoke_check mpi passed "$mpi_reason"
+}}
+run_nccl_smoke_check() {{
+  required="$1"
+  echo "hpc-compose NCCL smoke"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi || true
+  fi
+  if command -v all_reduce_perf >/dev/null 2>&1; then
+    all_reduce_perf -b 8 -e 64M -f 2 -g 1
+    record_smoke_check nccl passed "all_reduce_perf completed"
+  elif [ "$required" = "1" ]; then
+    record_smoke_check nccl failed "all_reduce_perf not found"
+    echo "NCCL smoke requires all_reduce_perf but it was not found" >&2
+    exit 31
+  else
+    record_smoke_check nccl skipped "all_reduce_perf not found"
+  fi
+}}
+run_ucx_smoke_check() {{
+  required="$1"
+  echo "hpc-compose UCX/IB smoke"
+  found=0
+  if command -v ucx_info >/dev/null 2>&1; then
+    ucx_info -v || true
+    found=1
+  fi
+  if command -v ibstat >/dev/null 2>&1; then
+    ibstat || true
+    found=1
+  fi
+  if command -v ibv_devinfo >/dev/null 2>&1; then
+    ibv_devinfo || true
+    found=1
+  fi
+  if [ "$found" = "1" ]; then
+    record_smoke_check ucx passed "UCX or InfiniBand diagnostics completed"
+  elif [ "$required" = "1" ]; then
+    record_smoke_check ucx failed "ucx_info, ibstat, and ibv_devinfo not found"
+    echo "UCX smoke requires ucx_info, ibstat, or ibv_devinfo but none were found" >&2
+    exit 32
+  else
+    record_smoke_check ucx skipped "ucx_info, ibstat, and ibv_devinfo not found"
+  fi
+}}
+run_ofi_smoke_check() {{
+  required="$1"
+  echo "hpc-compose OFI smoke"
+  if command -v fi_info >/dev/null 2>&1; then
+    fi_info || true
+    record_smoke_check ofi passed "fi_info completed"
+  elif [ "$required" = "1" ]; then
+    record_smoke_check ofi failed "fi_info not found"
+    echo "OFI smoke requires fi_info but it was not found" >&2
+    exit 33
+  else
+    record_smoke_check ofi skipped "fi_info not found"
+  fi
+}}
+"#
+    );
+    for check in &checks.checks {
+        match check {
+            FabricCheck::Mpi => body.push_str("run_mpi_smoke_check\n"),
+            FabricCheck::Nccl => {
+                if checks.nccl_enabled_without_gpu {
+                    body.push_str(
+                        "echo \"WARN: explicit NCCL check requested without declared GPU resources\" >&2\n",
+                    );
+                }
+                body.push_str(&format!(
+                    "run_nccl_smoke_check {}\n",
+                    if checks.explicit_nccl { "1" } else { "0" }
+                ));
+            }
+            FabricCheck::Ucx => body.push_str(&format!(
+                "run_ucx_smoke_check {}\n",
+                if checks.explicit_ucx { "1" } else { "0" }
+            )),
+            FabricCheck::Ofi => body.push_str(&format!(
+                "run_ofi_smoke_check {}\n",
+                if checks.explicit_ofi { "1" } else { "0" }
+            )),
+        }
+    }
+    body
+}
+
 fn advertised_mpi_types(output: &str) -> Vec<String> {
     let mut values = output
         .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '+')))
@@ -671,6 +1268,48 @@ fn mpi_advertised_token_looks_useful(token: &str) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
 }
 
+fn gpu_resources_requested(service: &RuntimeService, plan: &RuntimePlan) -> bool {
+    service.slurm.gpus.is_some()
+        || service.slurm.gres.as_deref().is_some_and(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim_start().starts_with("gpu"))
+        })
+        || service.slurm.gpus_per_node.is_some()
+        || service.slurm.gpus_per_task.is_some()
+        || service.slurm.cpus_per_gpu.is_some()
+        || service.slurm.mem_per_gpu.is_some()
+        || plan.slurm.gpus.is_some()
+        || plan.slurm.gres.as_deref().is_some_and(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim_start().starts_with("gpu"))
+        })
+        || plan.slurm.gpus_per_node.is_some()
+        || plan.slurm.gpus_per_task.is_some()
+        || plan.slurm.cpus_per_gpu.is_some()
+        || plan.slurm.mem_per_gpu.is_some()
+}
+
+fn parse_smoke_check_records(log: &str) -> Vec<SmokeCheckRecord> {
+    log.lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("HPC_COMPOSE_SMOKE_CHECK\t")?;
+            let mut parts = rest.splitn(3, '\t');
+            let name = parts.next()?.to_string();
+            let status = SmokeCheckStatus::from_marker(parts.next()?)?;
+            let reason = parts.next().unwrap_or_default().to_string();
+            Some(SmokeCheckRecord {
+                name,
+                status,
+                reason,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        })
+        .collect()
+}
+
 fn write_script(path: &Path, script: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -679,9 +1318,9 @@ fn write_script(path: &Path, script: &str) -> Result<()> {
     fs::write(path, script).with_context(|| format!("failed to write {}", path.display()))
 }
 
-fn temp_smoke_script_path() -> PathBuf {
+fn temp_smoke_script_path(kind: &str) -> PathBuf {
     env::temp_dir().join(format!(
-        "hpc-compose-mpi-smoke-{}-{}.sbatch",
+        "hpc-compose-{kind}-smoke-{}-{}.sbatch",
         std::process::id(),
         unix_timestamp_millis()
     ))
@@ -721,6 +1360,7 @@ fn run_sbatch_wait(
                 stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                 service_log: None,
+                checks: Vec::new(),
                 timed_out: false,
             });
         }
@@ -733,6 +1373,7 @@ fn run_sbatch_wait(
                 stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                 service_log: None,
+                checks: Vec::new(),
                 timed_out: true,
             });
         }
@@ -1249,6 +1890,13 @@ mod tests {
             stdout: "out".into(),
             stderr: "err\n".into(),
             service_log: Some("rank log".into()),
+            checks: vec![SmokeCheckRecord {
+                name: "mpi".into(),
+                status: SmokeCheckStatus::Passed,
+                reason: "rank ok".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+            }],
             timed_out: true,
         }
         .render_text();
@@ -1256,6 +1904,7 @@ mod tests {
         assert!(rendered.contains("timeout: yes"));
         assert!(rendered.contains("stdout:\nout\n"));
         assert!(rendered.contains("service log:\nrank log\n"));
+        assert!(rendered.contains("mpi: passed (rank ok)"));
 
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let log_path = tmpdir
@@ -1275,6 +1924,68 @@ mod tests {
                 .expect("no id")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn fabric_check_selection_parses_deduplicates_and_rejects_unknowns() {
+        assert_eq!(
+            FabricCheckSelection::parse(None).expect("default"),
+            FabricCheckSelection::Auto
+        );
+        assert_eq!(
+            FabricCheckSelection::parse(Some("auto")).expect("auto"),
+            FabricCheckSelection::Auto
+        );
+        let explicit = FabricCheckSelection::parse(Some("nccl,mpi,nccl")).expect("explicit");
+        assert_eq!(
+            explicit,
+            FabricCheckSelection::Explicit(
+                [FabricCheck::Mpi, FabricCheck::Nccl].into_iter().collect()
+            )
+        );
+        assert!(
+            FabricCheckSelection::parse(Some("mpi,auto"))
+                .expect_err("mixed auto")
+                .to_string()
+                .contains("cannot be combined")
+        );
+        assert!(
+            FabricCheckSelection::parse(Some("bogus"))
+                .expect_err("unknown")
+                .to_string()
+                .contains("unknown fabric smoke check")
+        );
+    }
+
+    #[test]
+    fn fabric_smoke_shell_marks_explicit_and_auto_tool_handling() {
+        let mut service = runtime_service("gpu", Some(mpi_config(Some(2))));
+        service.slurm.gpus_per_node = Some(2);
+        let plan = runtime_plan(vec![service.clone()]);
+        let auto = FabricCheckSelection::Auto.resolve(&service, &plan);
+        assert_eq!(auto.label(), "mpi, nccl, ucx, ofi");
+        let shell = fabric_smoke_shell(2, &auto);
+        assert!(shell.contains("run_nccl_smoke_check 0"));
+        assert!(shell.contains("record_smoke_check nccl skipped"));
+
+        let explicit = FabricCheckSelection::parse(Some("nccl,ucx,ofi")).expect("explicit checks");
+        let resolved = explicit.resolve(&service, &plan);
+        let shell = fabric_smoke_shell(2, &resolved);
+        assert!(shell.contains("run_nccl_smoke_check 1"));
+        assert!(shell.contains("run_ucx_smoke_check 1"));
+        assert!(shell.contains("run_ofi_smoke_check 1"));
+        assert!(shell.contains("record_smoke_check nccl failed"));
+    }
+
+    #[test]
+    fn smoke_check_records_parse_from_service_log() {
+        let records = parse_smoke_check_records(
+            "x\nHPC_COMPOSE_SMOKE_CHECK\tmpi\tpassed\trank ok\nHPC_COMPOSE_SMOKE_CHECK\tnccl\tskipped\tall_reduce_perf not found\n",
+        );
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].name, "mpi");
+        assert_eq!(records[0].status, SmokeCheckStatus::Passed);
+        assert_eq!(records[1].status, SmokeCheckStatus::Skipped);
     }
 
     #[test]

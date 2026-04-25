@@ -1,0 +1,36 @@
+name: nextflow-bridge
+
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: nextflow-bridge
+  time: "02:00:00"
+  nodes: 1
+  cpus_per_task: 8
+  mem: 16G
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/nextflow-work/**
+      - /hpc-compose/job/reports/**
+      - /hpc-compose/job/logs/**
+
+services:
+  nextflow:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        mkdir -p /hpc-compose/job/nextflow-work /hpc-compose/job/reports
+        nextflow run "$${NEXTFLOW_PIPELINE:-main.nf}" \
+          -work-dir /hpc-compose/job/nextflow-work \
+          -with-report /hpc-compose/job/reports/report.html \
+          -with-trace /hpc-compose/job/reports/trace.txt \
+          $${NEXTFLOW_ARGS:-}
+    environment:
+      NEXTFLOW_PIPELINE: main.nf
+      NEXTFLOW_ARGS: ""
+    x-slurm:
+      ntasks: 1

@@ -194,6 +194,22 @@ Source: `examples/flux-nested.yaml`
 {{#include ../../examples/flux-nested.yaml}}
 ```
 
+## Nextflow Bridge
+
+Source: `examples/nextflow-bridge.yaml`
+
+```yaml
+{{#include ../../examples/nextflow-bridge.yaml}}
+```
+
+## Snakemake Bridge
+
+Source: `examples/snakemake-bridge.yaml`
+
+```yaml
+{{#include ../../examples/snakemake-bridge.yaml}}
+```
+
 ## Multi Stage Pipeline
 
 Source: `examples/multi-stage-pipeline.yaml`

@@ -59,6 +59,95 @@ fn submit_command_runs_end_to_end_with_fake_tools() {
 }
 
 #[test]
+fn up_command_submits_watches_and_propagates_terminal_state() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let sbatch = write_fake_watch_sbatch(
+        tmpdir.path(),
+        &squeue_state,
+        &sacct_state,
+        "COMPLETED",
+        "ready",
+        0,
+    );
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+
+    let up = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&up);
+    let stdout = stdout_text(&up);
+    assert!(stdout.contains("Submitted batch job 12345"));
+    assert!(stdout.contains("watching job 12345"));
+    assert!(stdout.contains("[app] ready"));
+    assert!(stdout.contains("COMPLETED"));
+    assert!(tmpdir.path().join(".hpc-compose/latest.json").exists());
+
+    fs::write(&squeue_state, "NONE\n").expect("reset squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("reset sacct state");
+    let failed_sbatch = write_fake_watch_sbatch(
+        tmpdir.path(),
+        &squeue_state,
+        &sacct_state,
+        "FAILED",
+        "boom",
+        0,
+    );
+    let failed = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            failed_sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&failed);
+    let failed_text = format!("{}{}", stdout_text(&failed), stderr_text(&failed));
+    assert!(failed_text.contains("[app] boom"));
+    assert!(failed_text.contains("FAILED"));
+}
+
+#[test]
 fn submit_skip_prepare_reuses_existing_artifact() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -100,6 +189,83 @@ fn submit_skip_prepare_reuses_existing_artifact() {
         !stdout_text(&submit).contains("BUILD") || !stdout_text(&submit).contains("service 'app'")
     );
     assert!(stdout_text(&submit).contains("Submitted batch job 12345"));
+}
+
+fn submit_sif_backend_runs_prepare_render_submit_with_fake_runtime(backend: &str) {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_dir = tmpdir.path().join("cache");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+runtime:
+  backend: {backend}
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: docker://alpine:3.19
+    command: /bin/true
+    x-runtime:
+      prepare:
+        commands:
+          - echo prepared
+"#,
+            cache_dir.display()
+        ),
+    );
+    let runtime_log = tmpdir.path().join(format!("{backend}.log"));
+    let runtime = write_fake_sif_runtime(tmpdir.path(), backend, &runtime_log);
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let script_out = tmpdir.path().join(format!("{backend}.sbatch"));
+
+    let mut args = vec![
+        "submit",
+        "-f",
+        compose.to_str().expect("path"),
+        "--no-preflight",
+        "--sbatch-bin",
+        sbatch.to_str().expect("path"),
+        "--script-out",
+        script_out.to_str().expect("path"),
+    ];
+    match backend {
+        "apptainer" => {
+            args.push("--apptainer-bin");
+            args.push(runtime.to_str().expect("path"));
+        }
+        "singularity" => {
+            args.push("--singularity-bin");
+            args.push(runtime.to_str().expect("path"));
+        }
+        _ => unreachable!("unexpected backend"),
+    }
+
+    let submit = run_cli(tmpdir.path(), &args);
+    assert_success(&submit);
+    assert!(stdout_text(&submit).contains("Submitted batch job 12345"));
+    let runtime_calls = fs::read_to_string(&runtime_log).expect("runtime log");
+    assert!(runtime_calls.contains("build --force"));
+    assert!(runtime_calls.contains("exec --writable"));
+    assert!(script_out.exists());
+    let rendered = fs::read_to_string(&script_out).expect("rendered script");
+    assert!(rendered.contains(runtime.to_str().expect("path")));
+    assert!(rendered.contains(&format!(
+        "local -a runtime_cmd=('{}' 'exec')",
+        runtime.display()
+    )));
+    assert!(tmpdir.path().join(".hpc-compose/latest.json").exists());
+}
+
+#[test]
+fn submit_apptainer_backend_runs_prepare_render_submit_with_fake_runtime() {
+    submit_sif_backend_runs_prepare_render_submit_with_fake_runtime("apptainer");
+}
+
+#[test]
+fn submit_singularity_backend_runs_prepare_render_submit_with_fake_runtime() {
+    submit_sif_backend_runs_prepare_render_submit_with_fake_runtime("singularity");
 }
 
 #[test]
@@ -589,6 +755,60 @@ fn status_and_logs_commands_use_submission_metadata() {
     );
     assert_success(&logs);
     assert!(stdout_text(&logs).contains("[app] beta"));
+}
+
+#[test]
+fn status_uses_expected_scheduler_query_arguments() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+    let record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("submit.sbatch"),
+        &plan,
+        "12345",
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue_log = tmpdir.path().join("squeue.argv");
+    let sacct_log = tmpdir.path().join("sacct.argv");
+    let squeue = write_fake_squeue_with_argv_log(tmpdir.path(), &squeue_state, &squeue_log);
+    let sacct = write_fake_sacct_with_argv_log(tmpdir.path(), &sacct_state, &sacct_log);
+
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "12345",
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status);
+
+    let squeue_argv = fs::read_to_string(squeue_log).expect("squeue argv");
+    assert!(squeue_argv.contains("12345"));
+    assert!(squeue_argv.contains("--format") || squeue_argv.contains("-o"));
+    assert!(squeue_argv.contains("%T|%r|%S") || squeue_argv.contains("%T"));
+    let sacct_argv = fs::read_to_string(sacct_log).expect("sacct argv");
+    assert!(sacct_argv.contains("12345"));
+    assert!(sacct_argv.contains("--format"));
+    assert!(sacct_argv.contains("State"));
 }
 
 #[test]
@@ -1638,6 +1858,62 @@ fn cancel_reports_missing_record_and_scancel_failure() {
 }
 
 #[test]
+fn down_command_cancels_and_removes_tracking() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let scancel_log = tmpdir.path().join("scancel.log");
+    let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    assert!(tmpdir.path().join(".hpc-compose/latest.json").exists());
+    assert!(tmpdir.path().join(".hpc-compose/jobs/12345.json").exists());
+
+    let down = run_cli(
+        tmpdir.path(),
+        &[
+            "down",
+            "-f",
+            compose.to_str().expect("path"),
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&down);
+    let payload: Value = serde_json::from_str(&stdout_text(&down)).expect("down json");
+    assert_eq!(payload["job_id"], Value::from("12345"));
+    assert_eq!(payload["cancelled"], Value::from(true));
+    assert_eq!(payload["tracking_removed"], Value::from(true));
+    assert!(
+        fs::read_to_string(scancel_log)
+            .expect("scancel log")
+            .contains("12345")
+    );
+    assert!(!tmpdir.path().join(".hpc-compose/latest.json").exists());
+    assert!(!tmpdir.path().join(".hpc-compose/jobs/12345.json").exists());
+}
+
+#[test]
 fn run_command_sanitizes_default_script_path_for_service_names() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");
@@ -1693,6 +1969,85 @@ services:
             .exists()
     );
     assert!(stdout_text(&run).contains(".hpc-compose/latest-run.json"));
+}
+
+#[test]
+fn run_command_executes_one_off_service_and_tracks_latest_run() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: demo
+services:
+  db:
+    image: {}
+    command: /bin/true
+  app:
+    image: {}
+    depends_on:
+      - db
+    command: /bin/false
+"#,
+            local_image.display(),
+            local_image.display()
+        ),
+    );
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let script_out = tmpdir.path().join("run.sbatch");
+
+    let run = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "app",
+            "--",
+            "/bin/echo",
+            "one-off",
+        ],
+    );
+    assert_success(&run);
+    let stdout = stdout_text(&run);
+    assert!(stdout.contains("Submitted batch job 12345"));
+    assert!(stdout.contains("watching job 12345"));
+    assert!(stdout.contains(".hpc-compose/latest-run.json"));
+
+    let latest_run = tmpdir.path().join(".hpc-compose/latest-run.json");
+    assert!(latest_run.exists());
+    let record: Value = serde_json::from_str(&fs::read_to_string(&latest_run).expect("latest run"))
+        .expect("latest run json");
+    assert_eq!(record["kind"], Value::from("run"));
+    assert_eq!(record["service_name"], Value::from("app"));
+    assert_eq!(
+        record["command_override"],
+        serde_json::json!(["/bin/echo", "one-off"])
+    );
+
+    let rendered = fs::read_to_string(&script_out).expect("rendered run script");
+    assert!(rendered.contains("hpc-compose:app"));
+    assert!(!rendered.contains("hpc-compose:db"));
+    assert_eq!(rendered.matches("  register_service ").count(), 1);
 }
 
 #[test]
@@ -2133,6 +2488,55 @@ fn submit_dry_run_skips_sbatch() {
     assert!(out.contains("dry run: skipping sbatch submission"));
     assert!(!out.contains("Submitted batch job"));
     assert!(script_out.exists());
+}
+
+#[test]
+fn submit_preflight_error_does_not_call_sbatch() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let missing_image = tmpdir.path().join("missing.sqsh");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            missing_image.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&submit);
+    let stderr = stderr_text(&submit);
+    assert!(stderr.contains("preflight failed"));
+    assert!(stderr.contains("local image for service 'app' does not exist"));
+    assert!(
+        !sbatch_log.exists()
+            || fs::read_to_string(&sbatch_log)
+                .expect("sbatch log")
+                .is_empty()
+    );
 }
 
 #[cfg(not(target_os = "linux"))]

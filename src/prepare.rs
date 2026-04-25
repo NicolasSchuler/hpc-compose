@@ -8,9 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::cache::{touch_manifest, upsert_base_manifest, upsert_prepared_manifest};
+use crate::domain::{artifact_cache_key, short_digest_prefix};
 use crate::planner::{
     ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement,
 };
@@ -839,16 +839,11 @@ fn temporary_sandbox_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf
 }
 
 fn cache_key(parts: &[&str]) -> String {
-    let mut hasher = Sha256::new();
-    for part in parts {
-        hasher.update(part.as_bytes());
-        hasher.update([0]);
-    }
-    hex::encode(hasher.finalize())
+    artifact_cache_key(parts)
 }
 
 fn short_hash(hash: &str) -> &str {
-    &hash[..16]
+    short_digest_prefix(hash)
 }
 
 fn sanitize_name(value: &str) -> String {
@@ -966,7 +961,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
-    use crate::planner::{ImageSource, PreparedImageSpec, ServicePlacement};
+    use crate::planner::{ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement};
     use crate::spec::{ServiceFailurePolicy, SlurmConfig};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -996,6 +991,79 @@ mod tests {
             }),
             source: ImageSource::Remote("docker://redis:7".into()),
         }
+    }
+
+    #[test]
+    fn runtime_plan_conversion_preserves_planned_service_contract() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let prepare = PreparedImageSpec {
+            commands: vec!["echo setup".into()],
+            mounts: vec!["/host/input:/input:ro".into()],
+            env: vec![("A".into(), "B".into())],
+            root: true,
+            force_rebuild: true,
+        };
+        let planned = PlannedService {
+            name: "app".into(),
+            image: ImageSource::Remote("docker://python:3.11-slim".into()),
+            execution: ExecutionSpec::Exec(vec!["python".into(), "-m".into(), "app".into()]),
+            environment: vec![("ENV".into(), "prod".into())],
+            volumes: vec!["/host/app:/app".into()],
+            working_dir: Some("/app".into()),
+            depends_on: vec![ServiceDependency {
+                name: "db".into(),
+                condition: crate::spec::DependencyCondition::ServiceStarted,
+            }],
+            readiness: Some(ReadinessSpec::Sleep { seconds: 1 }),
+            failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement {
+                nodes: 2,
+                ntasks: Some(4),
+                node_indices: Some(vec![0, 1]),
+                ..ServicePlacement::default()
+            },
+            slurm: ServiceSlurmConfig {
+                cpus_per_task: Some(2),
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: Some(prepare),
+        };
+        let plan = Plan {
+            name: "demo".into(),
+            project_dir: tmpdir.path().to_path_buf(),
+            spec_path: tmpdir.path().join("compose.yaml"),
+            runtime: RuntimeConfig::default(),
+            cache_dir: tmpdir.path().join("cache"),
+            slurm: SlurmConfig {
+                time: Some("00:10:00".into()),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![planned.clone()],
+        };
+
+        let runtime_plan = build_runtime_plan(&plan);
+        assert_eq!(runtime_plan.name, plan.name);
+        assert_eq!(runtime_plan.cache_dir, plan.cache_dir);
+        assert_eq!(runtime_plan.runtime.backend, plan.runtime.backend);
+        assert_eq!(runtime_plan.slurm.time, plan.slurm.time);
+        let runtime = runtime_plan.ordered_services.first().expect("service");
+        assert_eq!(runtime.name, planned.name);
+        assert_eq!(runtime.execution, planned.execution);
+        assert_eq!(runtime.environment, planned.environment);
+        assert_eq!(runtime.volumes, planned.volumes);
+        assert_eq!(runtime.working_dir, planned.working_dir);
+        assert_eq!(runtime.depends_on, planned.depends_on);
+        assert_eq!(runtime.readiness, planned.readiness);
+        assert_eq!(runtime.failure_policy, planned.failure_policy);
+        assert_eq!(runtime.placement, planned.placement);
+        assert_eq!(runtime.slurm.cpus_per_task, planned.slurm.cpus_per_task);
+        assert_eq!(runtime.prepare, planned.prepare);
+        assert_eq!(runtime.source, planned.image);
+        assert!(
+            runtime
+                .runtime_image
+                .starts_with(plan.cache_dir.join("prepared"))
+        );
     }
 
     fn write_fake_enroot(tmpdir: &Path, log_path: &Path) -> PathBuf {

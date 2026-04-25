@@ -1828,6 +1828,11 @@ mod tests {
                     remediation: Some("fix".into()),
                 },
                 Item {
+                    level: Level::Warn,
+                    message: "metrics collector 'gpu' requires nvidia-smi".into(),
+                    remediation: Some("Install nvidia-smi on compute nodes".into()),
+                },
+                Item {
                     level: Level::Error,
                     message: "boom".into(),
                     remediation: Some("repair".into()),
@@ -1841,10 +1846,21 @@ mod tests {
         let summary = grouped.summary;
         assert_eq!(summary.blockers, 1);
         assert_eq!(summary.actionable_warnings, 1);
-        assert_eq!(summary.contextual_warnings, 0);
+        assert_eq!(summary.contextual_warnings, 1);
         assert_eq!(summary.passed_checks, 1);
+        assert_eq!(
+            summary.blockers
+                + summary.actionable_warnings
+                + summary.contextual_warnings
+                + summary.passed_checks,
+            report.items.len()
+        );
         assert_eq!(grouped.blockers[0].message, "boom");
         assert_eq!(grouped.actionable_warnings[0].message, "warn");
+        assert_eq!(
+            grouped.contextual_warnings[0].message,
+            "metrics collector 'gpu' requires nvidia-smi"
+        );
         assert_eq!(grouped.passed_checks[0].message, "fine");
         assert!(rendered.contains("Summary:"));
         let verbose = report.render_verbose();

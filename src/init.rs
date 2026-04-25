@@ -159,6 +159,16 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/flux-nested.yaml"),
     },
     Template {
+        name: "nextflow-bridge",
+        description: "Nextflow run wrapper inside one hpc-compose Slurm allocation.",
+        body: include_str!("../examples/nextflow-bridge.yaml"),
+    },
+    Template {
+        name: "snakemake-bridge",
+        description: "Snakemake run wrapper inside one hpc-compose Slurm allocation.",
+        body: include_str!("../examples/snakemake-bridge.yaml"),
+    },
+    Template {
         name: "multi-stage-pipeline",
         description: "Two-stage data pipeline coordinating through shared job mount.",
         body: include_str!("../examples/multi-stage-pipeline.yaml"),

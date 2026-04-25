@@ -1603,18 +1603,17 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
             .get(&service.name)
             .cloned()
             .unwrap_or_default();
-        render_service(
-            &mut out,
-            service,
+        let service_context = RenderServiceContext {
             service_index,
-            &dependents,
-            &plan.slurm.software_env,
-            &plan.slurm,
-            &plan.runtime,
+            dependents: &dependents,
+            global_software_env: &plan.slurm.software_env,
+            slurm: &plan.slurm,
+            runtime: &plan.runtime,
             options,
-            scratch_enabled,
-            allocation_requests_gpu(&plan.slurm),
-        );
+            scratch_configured: scratch_enabled,
+            allocation_gpu_requested: allocation_requests_gpu(&plan.slurm),
+        };
+        render_service(&mut out, service, &service_context);
         out.push('\n');
     }
 
@@ -2809,48 +2808,51 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("}\n\n");
 }
 
-fn render_service(
-    out: &mut String,
-    service: &RuntimeService,
+struct RenderServiceContext<'a> {
     service_index: usize,
-    dependents: &[String],
-    global_software_env: &SoftwareEnvConfig,
-    slurm: &SlurmConfig,
-    runtime: &crate::spec::RuntimeConfig,
-    render_options: &RenderOptions,
+    dependents: &'a [String],
+    global_software_env: &'a SoftwareEnvConfig,
+    slurm: &'a SlurmConfig,
+    runtime: &'a crate::spec::RuntimeConfig,
+    options: &'a RenderOptions,
     scratch_configured: bool,
     allocation_gpu_requested: bool,
-) {
+}
+
+fn render_service(out: &mut String, service: &RuntimeService, context: &RenderServiceContext<'_>) {
     let service_id = service_token(&service.name);
     let fn_name = format!("launch_{service_id}");
     let step_name = service_step_name(&service.name);
     let log_file_name = log_file_name_for_service(&service.name);
     let container_log_path = format!("/hpc-compose/job/logs/{log_file_name}");
     let command_args = execution_argv(&service.execution, service.working_dir.as_deref());
-    let distributed =
-        distributed_render_env(service, slurm, render_options.cluster_profile.as_ref());
+    let distributed = distributed_render_env(
+        service,
+        context.slurm,
+        context.options.cluster_profile.as_ref(),
+    );
     let distributed_extra_container_env = distributed
         .profile_env
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
     let software_env_keys =
-        software_env_export_names(global_software_env, &service.slurm.software_env);
+        software_env_export_names(context.global_software_env, &service.slurm.software_env);
     let mut extra_container_env = distributed_extra_container_env;
     extra_container_env.extend(software_env_keys.clone());
     let srun_args = build_srun_command_for_backend_with_extra_container_env(
         service,
-        runtime.backend,
+        context.runtime.backend,
         &extra_container_env,
     );
-    let dependents_csv = dependents.join(",");
+    let dependents_csv = context.dependents.join(",");
     let service_env = service
         .environment
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>();
     let software_env =
-        effective_software_env_pairs(global_software_env, &service.slurm.software_env);
+        effective_software_env_pairs(context.global_software_env, &service.slurm.software_env);
     let host_prologue = service
         .slurm
         .prologue
@@ -3008,7 +3010,7 @@ fn render_service(
     }
     out.push_str(&format!(
         "  local scratch_enabled={}\n",
-        if scratch_configured && service_scratch_enabled(service) {
+        if context.scratch_configured && service_scratch_enabled(service) {
             "1"
         } else {
             "0"
@@ -3017,7 +3019,7 @@ fn render_service(
     out.push_str("  local runtime_mounts\n");
     out.push_str("  local HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\"\n");
     out.push_str("  runtime_mounts=$(build_pyxis_mounts \"${service_mounts[@]}\")\n");
-    if runtime.backend == RuntimeBackend::Pyxis {
+    if context.runtime.backend == RuntimeBackend::Pyxis {
         out.push_str("  srun_cmd+=(--container-image=");
         out.push_str(&shell_quote(&service.runtime_image.display().to_string()));
         out.push_str(")\n");
@@ -3104,7 +3106,7 @@ fn render_service(
             shell_quote(&fixed_port),
             distributed.rdzv_port_base,
             distributed.rdzv_port_span,
-            service_index
+            context.service_index
         ));
     }
     if let Some(mpi) = &service.slurm.mpi {
@@ -3169,7 +3171,7 @@ fn render_service(
         }
     }
     out.push_str("  if [[ \"$scratch_enabled\" == \"1\" ]]; then\n");
-    if runtime.backend == RuntimeBackend::Host {
+    if context.runtime.backend == RuntimeBackend::Host {
         out.push_str("    launch_env+=(\"HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_HOST_PATH\")\n");
     } else {
         out.push_str("    launch_env+=(\"HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_CONTAINER_PATH\")\n");
@@ -3232,9 +3234,9 @@ fn render_service(
     render_runtime_command(
         out,
         service,
-        runtime,
-        render_options,
-        allocation_gpu_requested,
+        context.runtime,
+        context.options,
+        context.allocation_gpu_requested,
     );
     out.push_str("    (\n");
     out.push_str("      set -euo pipefail\n");
@@ -3950,6 +3952,73 @@ mod tests {
         }
     }
 
+    fn assert_render_contract(plan: &RuntimePlan) {
+        let script = render_script(plan).expect("script");
+        assert_bash_syntax(&script);
+        assert_eq!(
+            script.matches("  register_service ").count(),
+            plan.ordered_services.len(),
+            "rendered script should register each planned service exactly once"
+        );
+        for array in [
+            "SERVICE_PIDS",
+            "SERVICE_NAMES",
+            "SERVICE_STEP_NAMES",
+            "SERVICE_LOG_PATHS",
+            "SERVICE_HEALTHY",
+            "SERVICE_COMPLETED_SUCCESSFULLY",
+            "SERVICE_READINESS_CONFIGURED",
+            "SERVICE_FAILURE_POLICY_MODE",
+            "SERVICE_MAX_RESTARTS",
+            "SERVICE_BACKOFF_SECONDS",
+            "SERVICE_WINDOW_SECONDS",
+            "SERVICE_MAX_RESTARTS_IN_WINDOW",
+            "SERVICE_RESTART_COUNT",
+            "SERVICE_RESTART_FAILURES_IN_WINDOW",
+            "SERVICE_RESTART_FAILURE_TIMESTAMPS",
+            "SERVICE_LAST_EXIT_CODE",
+            "SERVICE_FIRST_FAILURE_AT",
+            "SERVICE_FIRST_FAILURE_EXIT_CODE",
+            "SERVICE_FIRST_FAILURE_NODE",
+            "SERVICE_FIRST_FAILURE_RANK",
+            "SERVICE_PLACEMENT_MODE",
+            "SERVICE_STEP_NODES",
+            "SERVICE_STEP_NTASKS",
+            "SERVICE_STEP_NTASKS_PER_NODE",
+            "SERVICE_STEP_NODELIST",
+            "SERVICE_HOST_EPILOGUE_SCRIPTS",
+            "SERVICE_HOST_EPILOGUE_RAN",
+            "SERVICE_LAUNCH_FNS",
+            "SERVICE_DEPENDENTS",
+        ] {
+            assert!(
+                script.contains(&format!("{array}=()")),
+                "missing {array} initialization"
+            );
+            assert!(
+                script.contains(&format!("{array}+=(")),
+                "missing {array} append in register_service"
+            );
+        }
+    }
+
+    fn assert_bash_syntax(script: &str) {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let script_path = tmpdir.path().join("rendered.sbatch");
+        fs::write(&script_path, script).expect("write rendered script");
+        let output = Command::new("bash")
+            .arg("-n")
+            .arg(&script_path)
+            .output()
+            .expect("bash -n");
+        assert!(
+            output.status.success(),
+            "rendered script failed bash -n\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn write_executable(path: &std::path::Path, body: &str) {
         fs::write(path, body).expect("write script");
         let mut perms = fs::metadata(path).expect("meta").permissions();
@@ -4125,6 +4194,79 @@ exit 1
         assert!(script.contains("/scratch:/scratch"));
         assert!(script.contains("/usr/lib64/slurm/libslurmfull.so"));
         assert!(script.contains("/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog"));
+    }
+
+    #[test]
+    fn render_contract_holds_for_single_service_dependency_and_distributed_plans() {
+        let single = RuntimePlan {
+            name: "single".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![runtime_service()],
+        };
+        assert_render_contract(&single);
+
+        let mut provider = runtime_service();
+        provider.name = "api".into();
+        provider.readiness = Some(ReadinessSpec::Sleep { seconds: 1 });
+        let mut client = runtime_service();
+        client.name = "client".into();
+        client.depends_on = vec![ServiceDependency {
+            name: "api".into(),
+            condition: DependencyCondition::ServiceHealthy,
+        }];
+        client.readiness = None;
+        let dependency = RuntimePlan {
+            name: "dependency".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![provider, client],
+        };
+        assert_render_contract(&dependency);
+
+        let mut distributed = runtime_service();
+        distributed.name = "trainer".into();
+        distributed.placement = ServicePlacement {
+            mode: crate::planner::ServicePlacementMode::Distributed,
+            nodes: 2,
+            ntasks: Some(4),
+            ntasks_per_node: Some(2),
+            node_indices: Some(vec![0, 1]),
+            ..ServicePlacement::default()
+        };
+        distributed.slurm.mpi = Some(MpiConfig {
+            mpi_type: MpiType::new("pmix").expect("mpi type"),
+            profile: Some(MpiProfile::Openmpi),
+            implementation: None,
+            launcher: crate::spec::MpiLauncher::Srun,
+            expected_ranks: None,
+            host_mpi: None,
+        });
+        distributed.readiness = Some(ReadinessSpec::Sleep { seconds: 1 });
+        let distributed_plan = RuntimePlan {
+            name: "distributed".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                metrics: Some(crate::spec::MetricsConfig {
+                    enabled: Some(true),
+                    interval_seconds: Some(5),
+                    collectors: vec![MetricsCollector::Slurm],
+                }),
+                artifacts: Some(crate::spec::ArtifactsConfig {
+                    collect: ArtifactCollectPolicy::Always,
+                    export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                    paths: vec!["/hpc-compose/job/metrics/**".into()],
+                    bundles: BTreeMap::new(),
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![distributed],
+        };
+        assert_render_contract(&distributed_plan);
     }
 
     #[test]

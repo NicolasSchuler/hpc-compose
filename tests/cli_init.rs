@@ -85,6 +85,8 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         "multi-node-horovod",
         "multi-node-jax",
         "nccl-tests",
+        "nextflow-bridge",
+        "snakemake-bridge",
         "vllm-uv-worker",
     ] {
         let output = tmpdir.path().join(format!("{template}.yaml"));
@@ -201,6 +203,8 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(list_stdout.contains("multi-node-horovod"));
     assert!(list_stdout.contains("multi-node-jax"));
     assert!(list_stdout.contains("nccl-tests"));
+    assert!(list_stdout.contains("nextflow-bridge"));
+    assert!(list_stdout.contains("snakemake-bridge"));
 
     let describe_template = run_cli(
         tmpdir.path(),
@@ -257,6 +261,315 @@ fn help_and_template_discovery_surface_guided_workflows() {
             .unwrap_or_default()
             .contains("--cache-dir '<shared-cache-dir>'")
     );
+}
+
+#[test]
+fn doctor_fabric_smoke_renders_json_and_strips_real_workflow() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "fabric-smoke.yaml",
+        &format!(
+            r#"
+name: fabric-smoke
+runtime:
+  backend: host
+x-slurm:
+  cache_dir: "{}"
+  setup:
+    - echo real setup should not run
+  stage_in:
+    - from: /shared/real-input
+      to: /scratch/input
+  artifacts:
+    export_dir: /shared/real-artifacts
+    paths:
+      - /hpc-compose/job/logs/**
+services:
+  trainer:
+    command: echo real trainer should not run
+    x-slurm:
+      ntasks: 2
+      gpus_per_node: 2
+      mpi:
+        type: pmix
+        profile: openmpi
+        expected_ranks: 2
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let script = tmpdir.path().join("fabric.sbatch");
+    let srun = tmpdir.path().join("srun");
+    write_script(
+        &srun,
+        r#"#!/bin/bash
+if [[ "${1:-}" == "--mpi=list" ]]; then
+  echo "MPI plugin types: pmix pmi2"
+  exit 0
+fi
+exit 0
+"#,
+    );
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "doctor",
+            "--fabric-smoke",
+            "-f",
+            compose.to_str().expect("path"),
+            "--script-out",
+            script.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("fabric json");
+    assert_eq!(payload["service"], "trainer");
+    assert_eq!(payload["selected_checks"], "mpi, nccl, ucx, ofi");
+    assert!(payload["checks"].as_array().expect("checks").len() >= 4);
+    let rendered = fs::read_to_string(script).expect("fabric script");
+    assert!(rendered.contains("hpc-compose MPI/fabric smoke"));
+    assert!(rendered.contains("hpc-compose NCCL smoke"));
+    assert!(rendered.contains("hpc-compose UCX/IB smoke"));
+    assert!(rendered.contains("hpc-compose OFI smoke"));
+    assert!(rendered.contains("--mpi=pmix"));
+    assert!(!rendered.contains("real setup should not run"));
+    assert!(!rendered.contains("real trainer should not run"));
+    assert!(!rendered.contains("/shared/real-input"));
+    assert!(!rendered.contains("/shared/real-artifacts"));
+}
+
+#[test]
+fn doctor_fabric_smoke_submit_records_passed_and_skipped_checks() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "fabric-smoke-host.yaml",
+        &format!(
+            r#"
+name: fabric-smoke-host
+runtime:
+  backend: host
+x-slurm:
+  cache_dir: "{}"
+services:
+  trainer:
+    command: /bin/true
+    x-slurm:
+      ntasks: 2
+      gpus_per_node: 1
+      mpi:
+        type: pmix
+        expected_ranks: 2
+"#,
+            cache_root.path().display()
+        ),
+    );
+    write_fake_scontrol(tmpdir.path());
+    let srun = tmpdir.path().join("srun");
+    write_script(
+        &srun,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun"
+  exit 0
+fi
+if [[ "${1:-}" == "--mpi=list" ]]; then
+  echo "pmix pmi2"
+  exit 0
+fi
+output_path=""
+while [[ $# -gt 0 && "${1:-}" == --* ]]; do
+  case "$1" in
+    --output=*) output_path="${1#--output=}" ;;
+  esac
+  shift
+done
+export SLURM_NTASKS=2
+export SLURM_PROCID=0
+export SLURM_LOCALID=0
+export SLURM_NODEID=0
+PATH="$(dirname "$0"):/usr/bin:/bin"
+if [[ -n "$output_path" ]]; then
+  mkdir -p "$(dirname "$output_path")"
+  "$@" >> "$output_path" 2>&1
+else
+  exec "$@"
+fi
+"#,
+    );
+    write_script(
+        &tmpdir.path().join("all_reduce_perf"),
+        "#!/bin/bash\necho all_reduce_perf ok\n",
+    );
+    let sbatch = tmpdir.path().join("sbatch");
+    write_script(
+        &sbatch,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+script_path="${{@: -1}}"
+PATH="{}:$PATH"
+export SLURM_JOB_ID=12345
+export SLURM_JOB_NODELIST=node01
+export SLURM_SUBMIT_DIR="$PWD"
+bash "$script_path"
+echo "Submitted batch job 12345"
+"#,
+            tmpdir.path().display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "doctor",
+            "--fabric-smoke",
+            "-f",
+            compose.to_str().expect("path"),
+            "--submit",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--timeout-seconds",
+            "10",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("fabric json");
+    assert_eq!(payload["submitted"], true);
+    let checks = payload["checks"].as_array().expect("checks");
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["name"] == "mpi" && check["status"] == "passed")
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["name"] == "nccl" && check["status"] == "passed")
+    );
+    assert!(checks.iter().any(|check| check["name"] == "ucx"
+        && matches!(check["status"].as_str(), Some("passed" | "skipped"))));
+    let log = payload["result"]["service_log"]
+        .as_str()
+        .expect("service log");
+    assert!(log.contains("hpc-compose MPI smoke rank=0 size=2 expected=2"));
+    assert!(log.contains("all_reduce_perf ok"));
+}
+
+#[test]
+fn doctor_fabric_smoke_explicit_nccl_fails_when_tool_is_missing() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "fabric-smoke-fail.yaml",
+        &format!(
+            r#"
+name: fabric-smoke-fail
+runtime:
+  backend: host
+x-slurm:
+  cache_dir: "{}"
+services:
+  trainer:
+    command: /bin/true
+    x-slurm:
+      ntasks: 2
+      mpi:
+        type: pmix
+        expected_ranks: 2
+"#,
+            cache_root.path().display()
+        ),
+    );
+    write_fake_scontrol(tmpdir.path());
+    let srun = tmpdir.path().join("srun");
+    write_script(
+        &srun,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun"
+  exit 0
+fi
+if [[ "${1:-}" == "--mpi=list" ]]; then
+  echo "pmix pmi2"
+  exit 0
+fi
+output_path=""
+while [[ $# -gt 0 && "${1:-}" == --* ]]; do
+  case "$1" in
+    --output=*) output_path="${1#--output=}" ;;
+  esac
+  shift
+done
+export SLURM_NTASKS=2
+export SLURM_PROCID=0
+PATH="$(dirname "$0"):/usr/bin:/bin"
+if [[ -n "$output_path" ]]; then
+  mkdir -p "$(dirname "$output_path")"
+  "$@" >> "$output_path" 2>&1
+else
+  exec "$@"
+fi
+"#,
+    );
+    let sbatch = tmpdir.path().join("sbatch");
+    write_script(
+        &sbatch,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+script_path="${{@: -1}}"
+PATH="{}:$PATH"
+export SLURM_JOB_ID=12345
+export SLURM_JOB_NODELIST=node01
+export SLURM_SUBMIT_DIR="$PWD"
+bash "$script_path" || job_status=$?
+echo "Submitted batch job 12345"
+exit "${{job_status:-1}}"
+"#,
+            tmpdir.path().display()
+        ),
+    );
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "doctor",
+            "--fabric-smoke",
+            "-f",
+            compose.to_str().expect("path"),
+            "--checks",
+            "nccl",
+            "--submit",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--timeout-seconds",
+            "5",
+            "--format",
+            "json",
+        ],
+    );
+    assert_failure(&output);
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("\"name\": \"nccl\""));
+    assert!(stdout.contains("\"status\": \"failed\""));
+    assert!(stdout.contains("all_reduce_perf not found"));
+    assert!(stderr_text(&output).contains("fabric smoke probe failed"));
 }
 
 #[test]

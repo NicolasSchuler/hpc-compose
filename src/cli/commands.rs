@@ -282,6 +282,17 @@ pub enum Commands {
         mpi_smoke: bool,
         #[arg(
             long,
+            help = "Render or run MPI and fabric smoke probes for a compose service with x-slurm.mpi"
+        )]
+        fabric_smoke: bool,
+        #[arg(
+            long,
+            value_name = "CHECKS",
+            help = "Fabric smoke checks: auto, mpi, nccl, ucx, ofi, or a comma-separated list"
+        )]
+        checks: Option<String>,
+        #[arg(
+            long,
             value_name = "SERVICE",
             help = "MPI service to smoke-test; inferred when exactly one MPI service exists"
         )]

@@ -53,6 +53,16 @@ hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer --submit
 
 The smoke plan keeps allocation and MPI launch settings but strips application workflow blocks such as setup, scratch staging, resume metadata, artifacts, and burst-buffer directives.
 
+## Fabric Smoke Probe
+
+For distributed GPU or fabric-sensitive services, render a broader smoke probe:
+
+```bash
+hpc-compose doctor --fabric-smoke -f compose.yaml --service trainer --checks auto --script-out fabric-smoke.sbatch
+```
+
+`--checks auto` always includes the MPI rank probe, adds NCCL when the selected service requests GPU resources, and collects UCX, OFI, and InfiniBand diagnostics when the corresponding tools are available. Use an explicit list such as `--checks mpi,nccl` when a missing tool should fail the probe instead of being reported as skipped.
+
 ## Related Docs
 
 - [Runbook](runbook.md)

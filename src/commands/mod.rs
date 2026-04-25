@@ -141,6 +141,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             cluster_report,
             cluster_report_out,
             mpi_smoke,
+            fabric_smoke,
+            checks,
             service,
             submit,
             script_out,
@@ -163,9 +165,15 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--singularity-bin", &singularity_bin),
                 ],
             );
+            if mpi_smoke && fabric_smoke {
+                bail!("doctor --mpi-smoke cannot be combined with --fabric-smoke");
+            }
             if mpi_smoke {
                 if cluster_report {
                     bail!("doctor --mpi-smoke cannot be combined with --cluster-report");
+                }
+                if checks.is_some() {
+                    bail!("doctor --checks requires --fabric-smoke");
                 }
                 let context = resolve_command_context(options, file, binary_overrides)?;
                 doctor::doctor_mpi_smoke(
@@ -177,9 +185,28 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     timeout_seconds,
                     options.quiet,
                 )
+            } else if fabric_smoke {
+                if cluster_report {
+                    bail!("doctor --fabric-smoke cannot be combined with --cluster-report");
+                }
+                let context = resolve_command_context(options, file, binary_overrides)?;
+                doctor::doctor_fabric_smoke(
+                    context,
+                    doctor::FabricSmokeOptions {
+                        format,
+                        service_name: service,
+                        checks,
+                        submit,
+                        script_out,
+                        timeout_seconds,
+                        quiet: options.quiet,
+                    },
+                )
             } else {
-                if submit || service.is_some() || script_out.is_some() {
-                    bail!("doctor --submit, --service, and --script-out require --mpi-smoke");
+                if submit || service.is_some() || script_out.is_some() || checks.is_some() {
+                    bail!(
+                        "doctor --submit, --service, --script-out, and --checks require --mpi-smoke or --fabric-smoke"
+                    );
                 }
                 let binaries = resolve_command_binaries(options, binary_overrides)?;
                 doctor::doctor(format, &binaries, cluster_report, cluster_report_out)

@@ -43,6 +43,7 @@ pub mod cluster;
 /// CLI command orchestration used by the binary entrypoint.
 pub mod commands;
 pub mod context;
+pub(crate) mod domain;
 pub mod init;
 pub mod job;
 pub mod manpages;

@@ -13,6 +13,18 @@ cargo build
 Useful local commands:
 
 ```bash
+just check
+just docs-check
+just examples-check
+just release-check
+just ci
+```
+
+The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`mdbook`, `lychee`, `pa11y-ci`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov`) to be installed locally.
+
+Equivalent raw commands:
+
+```bash
 cargo test --locked
 cargo test --locked --test cli_spec --test cli_runtime --test cli_cache --test cli_context --test cli_init --test cli_jobs
 cargo test --locked --test release_metadata

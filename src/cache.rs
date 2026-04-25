@@ -629,13 +629,12 @@ mod tests {
             ordered_services: vec![service.clone(), local_service.clone()],
         };
         let referenced = referenced_artifacts(&plan);
-        assert!(referenced.contains(&service.runtime_image));
-        assert!(referenced.contains(&base_image_path_for_backend(
-            &plan.cache_dir,
-            &service,
-            plan.runtime.backend
-        )));
-        assert!(referenced.contains(&local_service.runtime_image));
+        let expected = HashSet::from([
+            service.runtime_image.clone(),
+            base_image_path_for_backend(&plan.cache_dir, &service, plan.runtime.backend),
+            local_service.runtime_image.clone(),
+        ]);
+        assert_eq!(referenced, expected);
     }
 
     #[test]

@@ -737,7 +737,7 @@ services:
   - Cannot be combined with raw `--mpi...` entries in `extra_srun_args`.
   - MPI services receive `HPC_COMPOSE_MPI_TYPE` and `HPC_COMPOSE_MPI_HOSTFILE`.
   - MPI services also receive `HPC_COMPOSE_MPI_PROFILE` when `profile` is set and `HPC_COMPOSE_MPI_IMPLEMENTATION` when `implementation` is set or implied by `profile`.
-  - `hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer` renders a smoke probe for the service; add `--submit` to run it through Slurm. The smoke plan keeps allocation and MPI launch settings, but strips application workflow blocks such as setup, scratch staging, resume metadata, artifacts, and burst-buffer directives.
+  - `hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer` renders a smoke probe for the service; add `--submit` to run it through Slurm. `hpc-compose doctor --fabric-smoke -f compose.yaml --service trainer --checks auto` extends the same pattern with NCCL, UCX, OFI, and InfiniBand diagnostics when available. Smoke plans keep allocation and MPI launch settings, but strip application workflow blocks such as setup, scratch staging, resume metadata, artifacts, and burst-buffer directives.
 
 Profile-specific compatibility checks are intentionally conservative:
 

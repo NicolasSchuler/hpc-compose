@@ -18,6 +18,7 @@ This page maps the public `hpc-compose` CLI by workflow. Use [Quickstart](quicks
 | `new` (alias: `init`) | Generate a starter compose file from a built-in template | Use `--list-templates` and `--describe-template <name>` to inspect templates before writing a file. Writing a template requires `--cache-dir`. |
 | `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, and binary overrides. |
 | `context` | Print the resolved execution context | Shows the selected profile, binaries, interpolation vars, runtime paths, and value sources. |
+| `completions` | Generate shell completion scripts | Supports Bash, Zsh, Fish, PowerShell, and Elvish through Clap's completion generator. |
 
 ```bash
 hpc-compose new --list-templates
@@ -25,6 +26,7 @@ hpc-compose new --describe-template minimal-batch
 hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
 hpc-compose setup
 hpc-compose context --format json
+hpc-compose completions zsh
 ```
 
 ## Submission and Planning
@@ -37,6 +39,7 @@ hpc-compose context --format json
 | `inspect` | View the normalized runtime plan | `--verbose` can reveal resolved secrets and final mount mappings. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later submit. |
 | `doctor --mpi-smoke` | Render or run a small MPI probe for one service | Reports requested/advertised MPI types, MPI profile metadata, discovered MPI installs, host MPI binds/env, and rendered `srun`; add `--submit` to consume a Slurm allocation. |
+| `doctor --fabric-smoke` | Render or run MPI/NCCL/UCX/OFI smoke probes for one MPI service | Use `--checks auto` or a comma-separated list such as `mpi,nccl`; render-only by default, `--submit` consumes a Slurm allocation. |
 | `prepare` | Import images and build prepared runtime artifacts | Use `--force` when the base image or prepare inputs changed. |
 | `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. |
 | `up` | Run the one-command submit/watch/logs workflow | Preferred normal run on a real cluster. |
@@ -51,6 +54,8 @@ hpc-compose inspect --verbose -f compose.yaml
 hpc-compose preflight -f compose.yaml
 hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer --script-out mpi-smoke.sbatch
 hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer --submit
+hpc-compose doctor --fabric-smoke -f compose.yaml --service trainer --checks auto --script-out fabric-smoke.sbatch
+hpc-compose doctor --fabric-smoke -f compose.yaml --service trainer --checks mpi,nccl --submit
 hpc-compose prepare -f compose.yaml
 hpc-compose render -f compose.yaml --output job.sbatch
 hpc-compose up -f compose.yaml

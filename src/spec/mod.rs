@@ -6,6 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::{MountParts, parse_node_index_ranges, split_mount_parts};
+
 mod interpolate;
 mod parse;
 mod validation;
@@ -400,21 +402,12 @@ pub struct SoftwareEnvConfig {
 }
 
 /// Accepted `x-env.modules` syntaxes.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ModuleEnvSpec {
     /// Whether to run `module purge` before loading modules.
     pub purge: bool,
     /// Module names to load in order.
     pub load: Vec<String>,
-}
-
-impl Default for ModuleEnvSpec {
-    fn default() -> Self {
-        Self {
-            purge: false,
-            load: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -731,7 +724,7 @@ impl MpiLauncher {
 }
 
 /// MPI implementation family used by a service image or host bind path.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MpiImplementation {
     /// Open MPI.
@@ -747,13 +740,8 @@ pub enum MpiImplementation {
     /// HPE MPI.
     HpeMpi,
     /// Implementation is intentionally unspecified.
+    #[default]
     Unknown,
-}
-
-impl Default for MpiImplementation {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl MpiImplementation {
@@ -2089,9 +2077,10 @@ fn validate_stage_path(value: &str, field: &str) -> Result<()> {
 }
 
 fn validate_mount_syntax(value: &str, field: &str) -> Result<()> {
-    let parts = value.split(':').collect::<Vec<_>>();
-    match parts.as_slice() {
-        [host, container] | [host, container, "ro" | "rw"] => {
+    match split_mount_parts(value) {
+        MountParts::HostContainer {
+            host, container, ..
+        } => {
             if host.trim().is_empty() {
                 bail!("{field} host path must not be empty");
             }
@@ -2107,8 +2096,12 @@ fn validate_mount_syntax(value: &str, field: &str) -> Result<()> {
             }
             Ok(())
         }
-        [_, _, mode] => bail!("{field} uses unsupported mode '{mode}'; use ro or rw"),
-        _ => bail!("{field} must use host_path:container_path[:ro|rw] syntax"),
+        MountParts::UnsupportedMode(mode) => {
+            bail!("{field} uses unsupported mode '{mode}'; use ro or rw")
+        }
+        MountParts::InvalidShape => {
+            bail!("{field} must use host_path:container_path[:ro|rw] syntax")
+        }
     }
 }
 
@@ -2559,31 +2552,7 @@ fn validate_node_index_expr(value: Option<&str>, label: &str) -> Result<()> {
     let Some(value) = value else {
         return Ok(());
     };
-    if value.trim().is_empty() {
-        bail!("{label} must not be empty");
-    }
-    for part in value.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            bail!("{label} contains an empty range segment");
-        }
-        let (start, end) = match part.split_once('-') {
-            Some((start, end)) => (start.trim(), end.trim()),
-            None => (part, part),
-        };
-        if start.is_empty() || end.is_empty() {
-            bail!("{label} contains an incomplete range '{part}'");
-        }
-        let start = start
-            .parse::<u32>()
-            .with_context(|| format!("{label} contains invalid node index '{start}'"))?;
-        let end = end
-            .parse::<u32>()
-            .with_context(|| format!("{label} contains invalid node index '{end}'"))?;
-        if end < start {
-            bail!("{label} contains descending range '{part}'");
-        }
-    }
+    parse_node_index_ranges(value, label)?;
     Ok(())
 }
 
@@ -2947,6 +2916,57 @@ services:
         let service = spec.services.get("app").expect("service");
         assert!(service.command.is_none());
         assert!(service.volumes.is_empty());
+    }
+
+    #[test]
+    fn effective_config_is_stable_across_input_service_ordering() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let first = write_spec(
+            tmpdir.path(),
+            r#"
+name: demo
+services:
+  api:
+    image: redis:7
+    environment:
+      LOG_LEVEL: info
+  worker:
+    image: python:3.11-slim
+    depends_on:
+      - api
+    command: python -m worker
+"#,
+        );
+        let second = tmpdir.path().join("compose-reordered.yaml");
+        fs::write(
+            &second,
+            r#"
+name: demo
+services:
+  worker:
+    image: python:3.11-slim
+    command: python -m worker
+    depends_on:
+      - api
+  api:
+    environment:
+      LOG_LEVEL: info
+    image: redis:7
+"#,
+        )
+        .expect("write reordered");
+
+        let first_config = ComposeSpec::load(&first)
+            .expect("first load")
+            .effective_config(&tmpdir.path().join("cache"), &BTreeMap::new())
+            .expect("first effective config");
+        let second_config = ComposeSpec::load(&second)
+            .expect("second load")
+            .effective_config(&tmpdir.path().join("cache"), &BTreeMap::new())
+            .expect("second effective config");
+        let first_json = serde_json::to_value(&first_config).expect("first json");
+        let second_json = serde_json::to_value(&second_config).expect("second json");
+        assert_eq!(first_json, second_json);
     }
 
     #[test]

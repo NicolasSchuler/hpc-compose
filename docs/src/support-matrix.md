@@ -24,8 +24,10 @@ This page separates what `hpc-compose` can build, what CI currently exercises, a
 | Platform | What is tested today |
 | --- | --- |
 | Ubuntu 24.04 `x86_64` | formatting, clippy, unit/integration tests, docs build, link checks, installer smoke tests, and coverage |
+| macOS `arm64` | authoring-focused tests, validate/render/schema smoke tests, installer smoke tests, and Homebrew smoke tests |
+| macOS `x86_64` | authoring-focused tests, validate/render/schema smoke tests, and Homebrew smoke tests |
 
-Current CI validates project behavior on Ubuntu. Other published builds should be treated as lower-confidence until corresponding CI coverage exists.
+Current CI validates full runtime-facing behavior on Ubuntu and authoring/distribution behavior on macOS. Other published builds should be treated as lower-confidence until corresponding CI coverage exists.
 
 ## Release-built
 
