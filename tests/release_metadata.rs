@@ -196,6 +196,14 @@ fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
         "native package manpage checks should allow common package-manager compression"
     );
     assert!(
+        workflow.contains("cargo generate-rpm --target"),
+        "release workflow should pass the matrix target to cargo-generate-rpm"
+    );
+    assert!(
+        workflow.contains("--payload-compress gzip"),
+        "release workflow should build rpm payloads readable by the smoke-test tooling"
+    );
+    assert!(
         !workflow.contains("hpc-compose-submit.1"),
         "release workflow should not reference removed submit manpages"
     );

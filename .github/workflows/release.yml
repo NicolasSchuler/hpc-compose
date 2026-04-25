@@ -180,8 +180,8 @@ jobs:
           deb_hash="$(shasum -a 256 "dist/${deb_asset}" | cut -d ' ' -f 1)"
           printf '%s  %s\n' "${deb_hash}" "${deb_asset}" > "dist/${deb_asset}.sha256"
 
-          cargo generate-rpm
-          rpm_src="target/generate-rpm/hpc-compose-${version}-1.${rpm_arch}.rpm"
+          cargo generate-rpm --target "${{ matrix.target }}" --payload-compress gzip
+          rpm_src="target/${{ matrix.target }}/generate-rpm/hpc-compose-${version}-1.${rpm_arch}.rpm"
           rpm_asset="hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.rpm"
           cp "${rpm_src}" "dist/${rpm_asset}"
           rpm_hash="$(shasum -a 256 "dist/${rpm_asset}" | cut -d ' ' -f 1)"
