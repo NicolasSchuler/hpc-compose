@@ -200,7 +200,7 @@ jobs:
           tar -C "${smoke_dir}" -xzf "dist/${asset}"
           "${smoke_dir}/${{ matrix.binary_name }}" --version >/dev/null
           test -f "${smoke_dir}/share/man/man1/hpc-compose.1"
-          test -f "${smoke_dir}/share/man/man1/hpc-compose-submit.1"
+          test -f "${smoke_dir}/share/man/man1/hpc-compose-up.1"
 
       - name: Smoke test Linux native assets
         if: endsWith(matrix.target, '-unknown-linux-musl')
@@ -218,14 +218,14 @@ jobs:
           dpkg-deb --extract "${deb_asset}" "${deb_root}"
           "${deb_root}/usr/bin/hpc-compose" --version >/dev/null
           test -f "${deb_root}/usr/share/man/man1/hpc-compose.1"
-          test -f "${deb_root}/usr/share/man/man1/hpc-compose-submit.1"
+          test -f "${deb_root}/usr/share/man/man1/hpc-compose-up.1"
 
           rpm --query --list --package "${rpm_asset}" >/dev/null
           mkdir -p "${rpm_root}"
           rpm2cpio "${rpm_asset}" | (cd "${rpm_root}" && cpio -idmu --quiet)
           "${rpm_root}/usr/bin/hpc-compose" --version >/dev/null
           test -f "${rpm_root}/usr/share/man/man1/hpc-compose.1"
-          test -f "${rpm_root}/usr/share/man/man1/hpc-compose-submit.1"
+          test -f "${rpm_root}/usr/share/man/man1/hpc-compose-up.1"
 
       - name: Package Windows release assets
         if: runner.os == 'Windows'

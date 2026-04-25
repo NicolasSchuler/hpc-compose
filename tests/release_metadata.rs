@@ -183,6 +183,14 @@ fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
         workflow.contains("homebrew-formula-refresh"),
         "release workflow should refresh the Homebrew formula after publishing assets"
     );
+    assert!(
+        workflow.contains("hpc-compose-up.1"),
+        "release workflow should smoke-test a current subcommand manpage"
+    );
+    assert!(
+        !workflow.contains("hpc-compose-submit.1"),
+        "release workflow should not reference removed submit manpages"
+    );
 }
 
 #[test]
