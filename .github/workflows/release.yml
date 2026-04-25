@@ -208,6 +208,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          require_manpage() {
+            local root="$1"
+            local page="$2"
+            local rel="usr/share/man/man1/${page}"
+
+            for suffix in "" ".gz" ".xz" ".bz2" ".zst"; do
+              if [ -f "${root}/${rel}${suffix}" ]; then
+                return 0
+              fi
+            done
+
+            echo "missing manpage ${rel} under ${root}" >&2
+            find "${root}/usr/share/man/man1" -maxdepth 1 -type f -print | sort >&2 || true
+            return 1
+          }
+
           deb_asset="dist/hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.deb"
           rpm_asset="dist/hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.rpm"
           smoke_dir="$(mktemp -d)"
@@ -217,15 +233,15 @@ jobs:
           dpkg-deb --contents "${deb_asset}" >/dev/null
           dpkg-deb --extract "${deb_asset}" "${deb_root}"
           "${deb_root}/usr/bin/hpc-compose" --version >/dev/null
-          test -f "${deb_root}/usr/share/man/man1/hpc-compose.1"
-          test -f "${deb_root}/usr/share/man/man1/hpc-compose-up.1"
+          require_manpage "${deb_root}" "hpc-compose.1"
+          require_manpage "${deb_root}" "hpc-compose-up.1"
 
           rpm --query --list --package "${rpm_asset}" >/dev/null
           mkdir -p "${rpm_root}"
           rpm2cpio "${rpm_asset}" | (cd "${rpm_root}" && cpio -idmu --quiet)
           "${rpm_root}/usr/bin/hpc-compose" --version >/dev/null
-          test -f "${rpm_root}/usr/share/man/man1/hpc-compose.1"
-          test -f "${rpm_root}/usr/share/man/man1/hpc-compose-up.1"
+          require_manpage "${rpm_root}" "hpc-compose.1"
+          require_manpage "${rpm_root}" "hpc-compose-up.1"
 
       - name: Package Windows release assets
         if: runner.os == 'Windows'

@@ -188,6 +188,14 @@ fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
         "release workflow should smoke-test a current subcommand manpage"
     );
     assert!(
+        workflow.contains("require_manpage"),
+        "release workflow should validate native package manpages through the helper"
+    );
+    assert!(
+        workflow.contains("\".gz\"") && workflow.contains("\".zst\""),
+        "native package manpage checks should allow common package-manager compression"
+    );
+    assert!(
         !workflow.contains("hpc-compose-submit.1"),
         "release workflow should not reference removed submit manpages"
     );
