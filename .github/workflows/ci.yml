@@ -326,7 +326,7 @@ jobs:
           sh install.sh
           "$install_dir/$binary_name" --help >/dev/null
           test -f "$install_root/share/man/man1/hpc-compose.1"
-          test -f "$install_root/share/man/man1/hpc-compose-submit.1"
+          test -f "$install_root/share/man/man1/hpc-compose-up.1"
 
           readonly_root="$PWD/.tmp/install-root-readonly"
           readonly_dir="$readonly_root/bin"

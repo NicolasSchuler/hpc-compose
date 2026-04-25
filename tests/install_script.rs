@@ -195,6 +195,11 @@ fn installer_places_binary_in_requested_directory_and_makes_it_executable() {
         "expected installed manpage at {}",
         man_root.join("hpc-compose.1").display()
     );
+    assert!(
+        man_root.join("hpc-compose-up.1").exists(),
+        "expected installed subcommand manpage at {}",
+        man_root.join("hpc-compose-up.1").display()
+    );
 }
 
 #[test]
