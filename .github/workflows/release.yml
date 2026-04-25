@@ -447,24 +447,34 @@ jobs:
           git commit -m "Update Homebrew formula for ${RELEASE_TAG}"
           git push --force origin "${branch}"
 
-          pr_number="$(gh pr list \
+          pr_body="Refresh \`Formula/hpc-compose.rb\` to point at the macOS release tarballs for ${RELEASE_TAG}."
+          pr_url="https://github.com/${GITHUB_REPOSITORY}/pull/new/${branch}"
+
+          pr_number=""
+          if ! pr_number="$(gh pr list \
             --repo "${GITHUB_REPOSITORY}" \
             --head "${branch}" \
             --base main \
             --state open \
             --json number \
-            --jq '.[0].number')"
+            --jq '.[0].number')"; then
+            echo "::warning::Unable to inspect existing Homebrew formula PRs. Branch ${branch} was pushed; open or update the PR manually at ${pr_url}."
+          fi
 
           if [ -n "${pr_number}" ]; then
-            gh pr edit "${pr_number}" \
+            if ! gh pr edit "${pr_number}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Update Homebrew formula for ${RELEASE_TAG}" \
-              --body "Refresh \`Formula/hpc-compose.rb\` to point at the macOS release tarballs for ${RELEASE_TAG}."
+              --body "${pr_body}"; then
+              echo "::warning::Unable to update Homebrew formula PR #${pr_number}. Branch ${branch} was pushed; update the PR manually at ${pr_url}."
+            fi
           else
-            gh pr create \
+            if ! gh pr create \
               --repo "${GITHUB_REPOSITORY}" \
               --base main \
               --head "${branch}" \
               --title "Update Homebrew formula for ${RELEASE_TAG}" \
-              --body "Refresh \`Formula/hpc-compose.rb\` to point at the macOS release tarballs for ${RELEASE_TAG}."
+              --body "${pr_body}"; then
+              echo "::warning::Unable to create Homebrew formula PR. Branch ${branch} was pushed; open the PR manually at ${pr_url}."
+            fi
           fi

@@ -184,6 +184,11 @@ fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
         "release workflow should refresh the Homebrew formula after publishing assets"
     );
     assert!(
+        workflow.contains("Unable to create Homebrew formula PR")
+            && workflow.contains("/pull/new/${branch}"),
+        "Homebrew formula refresh should degrade gracefully when Actions cannot create PRs"
+    );
+    assert!(
         workflow.contains("hpc-compose-up.1"),
         "release workflow should smoke-test a current subcommand manpage"
     );
