@@ -112,6 +112,105 @@ pub(crate) fn render(
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct PlanOutput {
+    valid: bool,
+    compose_file: PathBuf,
+    runtime_plan: hpc_compose::prepare::RuntimePlan,
+    cluster_warnings: Vec<String>,
+    script: Option<String>,
+}
+
+pub(crate) fn plan(
+    context: ResolvedContext,
+    strict_env: bool,
+    verbose: bool,
+    tree: bool,
+    show_script: bool,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let (plan, runtime_plan) = output_common::load_plan_and_runtime_with_interpolation_vars(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+    )?;
+    if strict_env {
+        let missing =
+            missing_defaulted_variables(&context.compose_file.value, &context.interpolation_vars)?;
+        if !missing.is_empty() {
+            bail!(
+                "strict env validation failed; missing variables consumed default fallbacks: {}",
+                missing.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+    let cluster_warnings = cluster_profile
+        .as_ref()
+        .map(|profile| {
+            profile
+                .validate_runtime_plan(&runtime_plan)
+                .into_iter()
+                .map(|warning| warning.message)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let script = if show_script {
+        Some(render_script_with_options(
+            &runtime_plan,
+            &RenderOptions {
+                apptainer_bin: context.binaries.apptainer.value.clone(),
+                singularity_bin: context.binaries.singularity.value.clone(),
+                cluster_profile: cluster_profile.clone(),
+            },
+        )?)
+    } else {
+        None
+    };
+
+    match output_common::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            println!("{}", term::styled_success("spec is valid"));
+            for warning in &cluster_warnings {
+                eprintln!("{} {warning}", term::styled_warning("WARN"));
+            }
+            if tree {
+                output_spec::print_plan_inspect_tree(&plan, &runtime_plan)
+                    .context("failed to write tree output")?;
+            } else if verbose {
+                output_spec::print_plan_inspect_verbose_with_profile(
+                    &plan,
+                    &runtime_plan,
+                    cluster_profile.as_ref(),
+                )
+                .context("failed to write plan output")?;
+            } else {
+                output_spec::print_plan_inspect(&runtime_plan)
+                    .context("failed to write plan output")?;
+            }
+            if let Some(script) = script.as_deref() {
+                println!();
+                println!("{}", term::styled_section_header("Rendered script:"));
+                print!("{script}");
+            }
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&PlanOutput {
+                    valid: true,
+                    compose_file: plan.spec_path,
+                    runtime_plan,
+                    cluster_warnings,
+                    script,
+                })
+                .context("failed to serialize plan output")?
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare(
     context: ResolvedContext,
     keep_failed_prep: bool,

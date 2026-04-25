@@ -4,45 +4,25 @@
 hpc\-compose\-doctor \- Check cluster readiness and tool availability
 .SH SYNOPSIS
 .nf
-hpc\-compose doctor [OPTIONS]
+hpc\-compose doctor [OPTIONS] [COMMAND]
 .fi
 .SH DESCRIPTION
 .PP
-Run environment diagnostics without requiring a compose file. Checks Slurm, runtime backend tools, GPU, and cache directory availability. Use \-\-cluster\-report to write a best\-effort .hpc\-compose/cluster.toml profile.
-.SH OPTIONS
+Run environment diagnostics without requiring a compose file. Checks Slurm, runtime backend tools, GPU, and cache directory availability. Use the cluster\-report, mpi\-smoke, and fabric\-smoke subcommands for targeted probes.
+.SH SUBCOMMANDS
 .TP
-\fB-f\fR, \fB--file\fR \fIFILE\fR
-Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
+\fBcluster\-report\fR
+Generate a best\-effort cluster capability profile. See hpc\-compose\-doctor\-cluster\-report(1).
+.TP
+\fBmpi\-smoke\fR
+Render or run an MPI smoke probe for one service. See hpc\-compose\-doctor\-mpi\-smoke(1).
+.TP
+\fBfabric\-smoke\fR
+Render or run MPI and fabric smoke probes for one service. See hpc\-compose\-doctor\-fabric\-smoke(1).
+.SH OPTIONS
 .TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.
-.TP
-\fB--cluster\-report\fR
-Generate a best\-effort cluster capability profile.
-.TP
-\fB--cluster\-report\-out\fR \fIPATH\fR
-Write the cluster profile to this path; use '\-' to print TOML.
-.TP
-\fB--mpi\-smoke\fR
-Render or run an MPI smoke probe for a compose service with x\-slurm.mpi.
-.TP
-\fB--fabric\-smoke\fR
-Render or run MPI and fabric smoke probes for a compose service with x\-slurm.mpi.
-.TP
-\fB--checks\fR \fICHECKS\fR
-Fabric smoke checks: auto, mpi, nccl, ucx, ofi, or a comma\-separated list.
-.TP
-\fB--service\fR \fISERVICE\fR
-MPI service to smoke\-test; inferred when exactly one MPI service exists.
-.TP
-\fB--submit\fR
-Submit the MPI smoke probe to Slurm; without this, only render/explain it.
-.TP
-\fB--script\-out\fR \fIOUTPUT\fR
-Write the rendered MPI smoke batch script to this path.
-.TP
-\fB--timeout\-seconds\fR \fISECONDS\fR
-Timeout for a submitted MPI smoke job. Default: 300.
 .TP
 \fB--sbatch\-bin\fR \fIPATH\fR
 Path to the sbatch executable. Default: sbatch.
@@ -77,7 +57,11 @@ Explicit settings file path; defaults to upward search for .hpc\-compose/setting
 \fB-h\fR, \fB--help\fR
 Print help (see a summary with '\-h').
 .SH EXAMPLES
-.PP
-No examples are documented for this command.
+.nf
+hpc\-compose doctor
+hpc\-compose doctor cluster\-report
+hpc\-compose doctor mpi\-smoke \-f compose.yaml \-\-service trainer
+hpc\-compose doctor fabric\-smoke \-f compose.yaml \-\-service trainer \-\-checks auto
+.fi
 .SH SEE ALSO
-hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-down(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-run(1), hpc\-compose\-schema(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-up(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)
+hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-debug(1), hpc\-compose\-doctor\-cluster\-report(1), hpc\-compose\-doctor\-fabric\-smoke(1), hpc\-compose\-doctor\-mpi\-smoke(1), hpc\-compose\-down(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-plan(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-run(1), hpc\-compose\-schema(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-up(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)

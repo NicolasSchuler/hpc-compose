@@ -23,14 +23,11 @@ Start with the [Support Matrix](support-matrix.md) before planning a real runtim
 
 ## Safe First Path
 
-These commands are safe from a laptop, workstation, or login node because they do not submit a job:
+These commands are safe from a laptop, workstation, or login node because `plan` is purely static:
 
 ```bash
-hpc-compose validate -f examples/minimal-batch.yaml
-hpc-compose inspect -f examples/minimal-batch.yaml
-hpc-compose up --dry-run --skip-prepare --no-preflight \
-  --script-out /tmp/hpc-compose-demo.sbatch \
-  -f examples/minimal-batch.yaml
+hpc-compose plan -f examples/minimal-batch.yaml
+hpc-compose plan --show-script -f examples/minimal-batch.yaml
 ```
 
 Expected output includes:
@@ -38,10 +35,10 @@ Expected output includes:
 ```text
 spec is valid
 service order: app
-dry run: skipping sbatch submission
+Rendered script:
 ```
 
-Run `hpc-compose up -f compose.yaml` only on a supported Linux Slurm submission host with the runtime backend your spec selects.
+Run `hpc-compose up -f compose.yaml` only on a supported Linux Slurm submission host with the runtime backend your spec selects. If it fails, start with `hpc-compose debug -f compose.yaml --preflight`.
 
 Download the [asciinema-style quickstart demo cast](quickstart-demo.cast) if you want the same flow as a terminal recording.
 
@@ -52,7 +49,7 @@ Download the [asciinema-style quickstart demo cast](quickstart-demo.cast) if you
 | spec | The YAML file that describes services, runtime backend, and Slurm settings. |
 | allocation | The Slurm job allocation where all planned services run. |
 | runtime backend | The mechanism used to launch services: Pyxis/Enroot, Apptainer, Singularity, or host. |
-| preflight | Checks that inspect local tools, paths, backend support, and optional cluster profiles before submit. |
+| preflight | Checks that inspect local tools, paths, backend support, and optional cluster profiles before a run. |
 | prepare | The login-node image import/customization phase used before compute-node runtime. |
 | tracked job | Metadata under `.hpc-compose/<job-id>/` that lets `status`, `ps`, `watch`, `logs`, `stats`, and `artifacts` reconnect later. |
 | `x-slurm` | The spec section for Slurm settings and hpc-compose runtime extensions. |

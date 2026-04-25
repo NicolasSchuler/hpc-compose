@@ -24,6 +24,11 @@ const CACHE_DIR_PLACEHOLDER: &str = "<shared-cache-dir>";
 
 const TEMPLATES: &[Template] = &[
     Template {
+        name: "minimal-batch",
+        description: "Simplest single-service batch job.",
+        body: include_str!("../examples/minimal-batch.yaml"),
+    },
+    Template {
         name: "dev-python-app",
         description: "Mounted source tree plus a small prepare step for iterative development.",
         body: include_str!("../examples/dev-python-app.yaml"),
@@ -52,11 +57,6 @@ const TEMPLATES: &[Template] = &[
         name: "llama-uv-worker",
         description: "llama.cpp serving plus a source-mounted Python worker run through uv.",
         body: include_str!("../examples/llama-uv-worker.yaml"),
-    },
-    Template {
-        name: "minimal-batch",
-        description: "Simplest single-service batch job.",
-        body: include_str!("../examples/minimal-batch.yaml"),
     },
     Template {
         name: "training-checkpoints",
@@ -206,6 +206,27 @@ pub fn templates() -> &'static [Template] {
 #[must_use]
 pub fn cache_dir_placeholder() -> &'static str {
     CACHE_DIR_PLACEHOLDER
+}
+
+/// Returns the category used by template discovery output.
+#[must_use]
+pub fn template_category(template_name: &str) -> &'static str {
+    match template_name {
+        "minimal-batch" | "dev-python-app" | "app-redis-worker" | "restart-policy" => "basics",
+        "llm-curl-workflow"
+        | "llm-curl-workflow-workdir"
+        | "llama-app"
+        | "llama-uv-worker"
+        | "vllm-openai"
+        | "vllm-uv-worker" => "llm",
+        "training-checkpoints" | "training-resume" | "fairseq-preprocess" => "training",
+        "postgres-etl"
+        | "nextflow-bridge"
+        | "snakemake-bridge"
+        | "multi-stage-pipeline"
+        | "pipeline-dag" => "workflow",
+        _ => "distributed",
+    }
 }
 
 /// Prompts on stdin/stdout for template, app name, and cache directory, using
@@ -384,9 +405,8 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
 pub fn next_commands(output: &Path) -> Vec<String> {
     let path = output.display().to_string();
     vec![
+        format!("hpc-compose plan -f {path}"),
         format!("hpc-compose up -f {path}"),
-        format!("hpc-compose validate -f {path}"),
-        format!("hpc-compose inspect -f {path}"),
     ]
 }
 
@@ -445,7 +465,7 @@ mod tests {
     #[test]
     fn templates_are_resolvable() {
         assert!(!templates().is_empty());
-        assert_eq!(templates()[0].name, "dev-python-app");
+        assert_eq!(templates()[0].name, "minimal-batch");
         for template in templates() {
             let resolved = resolve_template(template.name).expect("resolve");
             assert_eq!(resolved.name, template.name);
@@ -461,9 +481,8 @@ mod tests {
         assert_eq!(
             next_commands(Path::new("/tmp/demo.yaml")),
             vec![
+                "hpc-compose plan -f /tmp/demo.yaml",
                 "hpc-compose up -f /tmp/demo.yaml",
-                "hpc-compose validate -f /tmp/demo.yaml",
-                "hpc-compose inspect -f /tmp/demo.yaml",
             ]
         );
     }
@@ -603,8 +622,8 @@ mod tests {
         let mut defaults_output = Vec::new();
         let answers = prompt_for_init_with_io(&mut defaults_input, &mut defaults_output, None)
             .expect("defaults");
-        assert_eq!(answers.template_name, "dev-python-app");
-        assert_eq!(answers.app_name, "dev-python-app");
+        assert_eq!(answers.template_name, "minimal-batch");
+        assert_eq!(answers.app_name, "minimal-batch");
         assert_eq!(answers.cache_dir, "/shared/cache");
         assert!(
             String::from_utf8(defaults_output)
@@ -612,7 +631,7 @@ mod tests {
                 .contains("Choose a template:")
         );
 
-        let mut custom_input = Cursor::new(b"2\ncustom-app\n/custom-cache\n");
+        let mut custom_input = Cursor::new(b"3\ncustom-app\n/custom-cache\n");
         let mut custom_output = Vec::new();
         let answers =
             prompt_for_init_with_io(&mut custom_input, &mut custom_output, None).expect("custom");
@@ -638,7 +657,7 @@ mod tests {
 
     #[test]
     fn prompt_for_init_with_io_uses_supplied_cache_dir_default() {
-        let mut input = Cursor::new(b"2\ncustom-app\n\n");
+        let mut input = Cursor::new(b"3\ncustom-app\n\n");
         let mut output = Vec::new();
         let answers = prompt_for_init_with_io(
             &mut input,

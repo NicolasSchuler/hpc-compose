@@ -74,7 +74,7 @@ brew install NicolasSchuler/hpc-compose/hpc-compose
 
 The formula is refreshed by release automation when a Homebrew-published release is cut. Check `brew info NicolasSchuler/hpc-compose/hpc-compose` when you need to confirm the formula version before installing.
 
-macOS support is for authoring and local non-runtime commands such as `new`, `validate`, `inspect`, `render`, and `completions`; it is not a supported Slurm runtime target.
+macOS support is for authoring and local non-runtime commands such as `new`, `plan`, `validate`, `inspect`, `render`, and `completions`; it is not a supported Slurm runtime target.
 
 ## Verify A Release
 
@@ -143,7 +143,7 @@ Before using a local build on a cluster workflow, validate the binary and one ex
 env CACHE_DIR=/cluster/shared/hpc-compose-cache \
   target/release/hpc-compose validate -f examples/minimal-batch.yaml
 env CACHE_DIR=/cluster/shared/hpc-compose-cache \
-  target/release/hpc-compose inspect --verbose -f examples/minimal-batch.yaml
+  target/release/hpc-compose plan --verbose -f examples/minimal-batch.yaml
 ```
 
 ## Local Docs Commands

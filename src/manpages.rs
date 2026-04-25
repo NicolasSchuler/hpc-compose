@@ -22,7 +22,7 @@ const FILES_SECTION: &[(&str, &str)] = &[
     ),
     (
         "<compose-file-dir>/hpc-compose.sbatch",
-        "Default rendered batch script path written by submit when --script-out is not set.",
+        "Default rendered batch script path written by up or run when --script-out is not set.",
     ),
     (
         "${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/",
@@ -517,7 +517,9 @@ mod tests {
         assert!(names.contains(&"hpc-compose.1"));
         assert!(names.contains(&"hpc-compose-jobs.1"));
         assert!(names.contains(&"hpc-compose-jobs-list.1"));
-        assert!(names.contains(&"hpc-compose-submit.1"));
+        assert!(names.contains(&"hpc-compose-plan.1"));
+        assert!(names.contains(&"hpc-compose-debug.1"));
+        assert!(!names.contains(&"hpc-compose-submit.1"));
         assert!(names.contains(&"hpc-compose-cache-prune.1"));
     }
 
@@ -546,10 +548,10 @@ mod tests {
             );
         }
 
-        let submit = pages
+        let plan = pages
             .iter()
-            .find(|page| page.file_name == "hpc-compose-submit.1")
-            .expect("submit page");
+            .find(|page| page.file_name == "hpc-compose-plan.1")
+            .expect("plan page");
         for section in [
             ".SH NAME",
             ".SH SYNOPSIS",
@@ -559,11 +561,11 @@ mod tests {
             ".SH SEE ALSO",
         ] {
             assert!(
-                submit.contents.contains(section),
-                "missing submit section {section}"
+                plan.contents.contains(section),
+                "missing plan section {section}"
             );
         }
-        assert!(submit.contents.contains(r"\fB--watch\fR"));
+        assert!(plan.contents.contains(r"--show\-script"));
     }
 
     #[test]
@@ -594,13 +596,13 @@ mod tests {
 
         let top = dir.join("hpc-compose.1");
         fs::write(&top, "outdated").expect("stale rewrite");
-        fs::remove_file(dir.join("hpc-compose-submit.1")).expect("remove page");
+        fs::remove_file(dir.join("hpc-compose-plan.1")).expect("remove page");
         fs::write(dir.join("unexpected.1"), "extra").expect("unexpected page");
 
         let err = check_manpages(dir).expect_err("drift should fail");
         let message = err.to_string();
         assert!(message.contains("manpages are out of date"));
-        assert!(message.contains("missing: hpc-compose-submit.1"));
+        assert!(message.contains("missing: hpc-compose-plan.1"));
         assert!(message.contains("stale: hpc-compose.1"));
         assert!(message.contains("unexpected: unexpected.1"));
 

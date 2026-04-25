@@ -33,11 +33,11 @@ For a new spec on a real cluster:
 2. Run `hpc-compose setup` once if you want compose path, env files, env vars, and binary overrides stored in a project-local settings file.
 3. Run `hpc-compose context --format json` to verify resolved values and sources.
 4. Set or confirm `x-slurm.cache_dir`, then adjust cluster-specific resource settings.
-5. Run `hpc-compose validate -f compose.yaml` and `hpc-compose inspect --verbose -f compose.yaml` while adapting the file.
+5. Run `hpc-compose plan -f compose.yaml` and `hpc-compose plan --verbose -f compose.yaml` while adapting the file.
 6. Run `hpc-compose up -f compose.yaml` for the normal cluster run.
-7. If it fails, use [Troubleshooting](troubleshooting.md) and break out `preflight`, `prepare`, `render`, `status`, `ps`, `watch`, `stats`, or `logs` separately.
+7. If it fails, start with `hpc-compose debug -f compose.yaml --preflight`, then use [Troubleshooting](troubleshooting.md) and break out `preflight`, `prepare`, `render`, `status`, `ps`, `watch`, `stats`, or `logs` separately.
 
-For a minimal cluster smoke test from a checkout, set `CACHE_DIR` to shared storage and run `scripts/cluster_smoke.sh`. It validates, preflights, and renders by default; set `HPC_COMPOSE_SMOKE_SUBMIT=1` only when you want it to submit the smoke job.
+For a minimal cluster smoke test from a checkout, set `CACHE_DIR` to shared storage and run `scripts/cluster_smoke.sh`. It validates, preflights, and renders by default; set `HPC_COMPOSE_SMOKE_SUBMIT=1` only when you intentionally want it to launch the smoke job.
 
 ## Project-Local Settings
 
@@ -154,11 +154,12 @@ Use `validate` first when changing field names, dependency shape, command/entryp
 
 If `validate` fails, fix that before doing anything more expensive. Use `--strict-env` when missing interpolation variables should fail instead of consuming `${VAR:-default}` or `${VAR-default}` fallbacks.
 
-## 4. Inspect The Normalized Plan
+## 4. Plan The Run
 
 ```bash
-hpc-compose inspect -f compose.yaml
-hpc-compose inspect --verbose -f compose.yaml
+hpc-compose plan -f compose.yaml
+hpc-compose plan --verbose -f compose.yaml
+hpc-compose plan --show-script -f compose.yaml
 ```
 
 Check:
@@ -171,7 +172,7 @@ Check:
 - runtime artifact paths,
 - cache hit/miss expectations.
 
-`inspect --verbose` can print secrets from resolved environment values.
+`plan` is purely static: it parses, validates, builds the normalized runtime plan, and can print the generated script to stdout, but it does not run preflight, prepare images, call `sbatch`, or write `hpc-compose.sbatch`. `plan --verbose` can print secrets from resolved environment values.
 
 ## 5. Normal Run: Use `up`
 
@@ -187,7 +188,10 @@ Useful options:
 - `--force-rebuild` refreshes imported and prepared artifacts.
 - `--skip-prepare` reuses existing prepared artifacts.
 - `--no-preflight` skips the preflight phase.
-- `--resume-diff-only` prints resume-sensitive config diffs without submitting.
+- `--detach` submits or launches, records tracking metadata, and returns without watching.
+- `--format text|json` is accepted with `--detach` or `--dry-run`.
+- `--watch-mode auto|tui|line` selects the live output mode; `--no-tui` is a line-mode alias.
+- `--resume-diff-only` prints resume-sensitive config diffs without launching.
 - `--allow-resume-changes` confirms intentional resume-coupled config drift.
 
 `up --local` is Linux + Pyxis-only and single-host. See [Runtime Backends](runtime-backends.md#local-mode).
@@ -205,7 +209,7 @@ hpc-compose preflight -f compose.yaml --strict
 Generate a cluster capability profile on the target login node when you want validation and preflight to catch partition/backend/QOS/GPU/MPI mismatches earlier:
 
 ```bash
-hpc-compose doctor --cluster-report
+hpc-compose doctor cluster-report
 ```
 
 See [Cluster Profiles](cluster-profiles.md) for generated profile details, site policy packs, and MPI smoke probes.
@@ -258,11 +262,11 @@ Use [Cache Management](cache-management.md) for cache reuse and pruning. Use [Tr
 
 | If you changed... | Typical next step |
 | --- | --- |
-| YAML planning/runtime settings only | `validate`, `inspect --verbose`, then `up` |
+| YAML planning/runtime settings only | `plan --verbose`, then `up` |
 | Base image, `x-runtime.prepare.commands`, or prepare env | `up --force-rebuild`, or `prepare --force` when debugging separately |
 | Mounted runtime source under `volumes` | Usually just `up` |
 | Cache entries this plan no longer references | `cache prune --all-unused -f compose.yaml` |
-| `hpc-compose` itself | Expect cache misses on the next `prepare`, `up`, or `submit`, then optionally prune old entries |
+| `hpc-compose` itself | Expect cache misses on the next `prepare` or `up`, then optionally prune old entries |
 
 ## Related Docs
 

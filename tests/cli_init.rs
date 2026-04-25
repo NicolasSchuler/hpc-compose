@@ -129,11 +129,23 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let top_help_stdout = stdout_text(&top_help);
     assert!(top_help_stdout.contains("Normal run:"));
     assert!(top_help_stdout.contains("up -f compose.yaml"));
-    assert!(top_help_stdout.contains("Debugging flow:"));
+    assert!(top_help_stdout.contains("Safe plan:"));
+    assert!(top_help_stdout.contains("plan -f compose.yaml"));
+    assert!(top_help_stdout.contains("Debug failed run:"));
+    assert!(top_help_stdout.contains("debug -f compose.yaml --preflight"));
     assert!(top_help_stdout.contains("Start a new spec:"));
+    assert!(top_help_stdout.contains("Workflow groups:"));
+    assert!(top_help_stdout.contains("Plan/Run:       plan, up, run"));
+    assert!(
+        top_help_stdout
+            .contains("Observe/Debug:  debug, watch, status, logs, ps, stats, artifacts")
+    );
+    assert!(!top_help_stdout.contains("submit       "));
     assert!(
         top_help_stdout.contains("config       Render the fully interpolated effective config")
     );
+    assert!(top_help_stdout.contains("plan         Validate and preview a static execution plan"));
+    assert!(top_help_stdout.contains("debug        Diagnose the latest tracked run"));
     assert!(top_help_stdout.contains("up           Submit, watch, and stream logs in one command"));
     assert!(top_help_stdout.contains("logs         Print tracked service logs"));
     assert!(top_help_stdout.contains("ps           Show tracked per-service runtime state"));
@@ -176,17 +188,36 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(jobs_help_stdout.contains("list  List tracked jobs discovered under the repo tree"));
 
     let submit_help = run_cli(tmpdir.path(), &["submit", "--help"]);
-    assert_success(&submit_help);
-    let submit_help_stdout = stdout_text(&submit_help);
-    assert!(
-        submit_help_stdout
-            .contains("Poll tracked state and stream logs after submission or local launch")
-    );
-    assert!(
-        submit_help_stdout.contains("Run preflight, prepare, and render without calling sbatch")
-    );
-    assert!(submit_help_stdout.contains("--local"));
-    assert!(submit_help_stdout.contains("active context compose file"));
+    assert_failure(&submit_help);
+    assert!(stderr_text(&submit_help).contains("unrecognized subcommand 'submit'"));
+
+    let plan_help = run_cli(tmpdir.path(), &["plan", "--help"]);
+    assert_success(&plan_help);
+    let plan_help_stdout = stdout_text(&plan_help);
+    assert!(plan_help_stdout.contains("--show-script"));
+    assert!(plan_help_stdout.contains("without touching Slurm"));
+
+    let up_help = run_cli(tmpdir.path(), &["up", "--help"]);
+    assert_success(&up_help);
+    let up_help_stdout = stdout_text(&up_help);
+    assert!(up_help_stdout.contains("--detach"));
+    assert!(up_help_stdout.contains("--watch-mode <MODE>"));
+    assert!(up_help_stdout.contains("--no-tui"));
+
+    let debug_help = run_cli(tmpdir.path(), &["debug", "--help"]);
+    assert_success(&debug_help);
+    let debug_help_stdout = stdout_text(&debug_help);
+    assert!(debug_help_stdout.contains("--preflight"));
+    assert!(debug_help_stdout.contains("scheduler state"));
+
+    let cli_reference = include_str!("../docs/src/cli-reference.md");
+    assert!(cli_reference.contains("| `doctor cluster-report` |"));
+    assert!(cli_reference.contains("hpc-compose doctor cluster-report"));
+    let quickstart_demo = include_str!("../docs/src/quickstart-demo.cast");
+    assert!(quickstart_demo.contains("hpc-compose plan -f examples/minimal-batch.yaml"));
+    assert!(quickstart_demo.contains("hpc-compose plan --show-script"));
+    assert!(!quickstart_demo.contains("hpc-compose validate"));
+    assert!(!quickstart_demo.contains("up --dry-run --skip-prepare --no-preflight"));
 
     let preflight_help = run_cli(tmpdir.path(), &["preflight", "--help"]);
     assert_success(&preflight_help);
@@ -195,6 +226,8 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let list_templates = run_cli(tmpdir.path(), &["new", "--list-templates"]);
     assert_success(&list_templates);
     let list_stdout = stdout_text(&list_templates);
+    assert!(list_stdout.contains("basics:"));
+    assert!(list_stdout.contains("distributed:"));
     assert!(list_stdout.contains("minimal-batch"));
     assert!(list_stdout.contains("multi-node-mpi"));
     assert!(list_stdout.contains("multi-node-torchrun"));
@@ -235,7 +268,16 @@ fn help_and_template_discovery_surface_guided_workflows() {
         serde_json::from_str(&stdout_text(&list_templates_json)).expect("list json");
     assert_eq!(list_payload["cache_dir_required"], true);
     assert_eq!(list_payload["cache_dir_placeholder"], "<shared-cache-dir>");
-    assert!(list_payload["default_cache_dir"].is_null());
+    let templates = list_payload["templates"].as_array().expect("templates");
+    let minimal = templates
+        .iter()
+        .find(|template| template["name"] == "minimal-batch")
+        .expect("minimal-batch template");
+    assert_eq!(minimal["category"], "basics");
+    assert_eq!(
+        templates.first().expect("first template")["name"],
+        "minimal-batch"
+    );
 
     let describe_template_json = run_cli(
         tmpdir.path(),
@@ -261,6 +303,11 @@ fn help_and_template_discovery_surface_guided_workflows() {
             .unwrap_or_default()
             .contains("--cache-dir '<shared-cache-dir>'")
     );
+    assert_eq!(describe_payload["template"]["category"], "basics");
+
+    let new_non_tty = run_cli(tmpdir.path(), &["new"]);
+    assert_failure(&new_non_tty);
+    assert!(stderr_text(&new_non_tty).contains("needs --template and --cache-dir"));
 }
 
 #[test]
@@ -316,15 +363,15 @@ exit 0
         tmpdir.path(),
         &[
             "doctor",
-            "--fabric-smoke",
+            "--format",
+            "json",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "fabric-smoke",
             "-f",
             compose.to_str().expect("path"),
             "--script-out",
             script.to_str().expect("path"),
-            "--srun-bin",
-            srun.to_str().expect("path"),
-            "--format",
-            "json",
         ],
     );
     assert_success(&output);
@@ -342,6 +389,20 @@ exit 0
     assert!(!rendered.contains("real trainer should not run"));
     assert!(!rendered.contains("/shared/real-input"));
     assert!(!rendered.contains("/shared/real-artifacts"));
+}
+
+#[test]
+fn doctor_subcommands_inherit_parent_json_format() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cluster = run_cli(
+        tmpdir.path(),
+        &["doctor", "--format", "json", "cluster-report", "--out", "-"],
+    );
+    assert_success(&cluster);
+    let payload: Value = serde_json::from_str(&stdout_text(&cluster)).expect("cluster json");
+    assert_eq!(payload["wrote"], false);
+    assert!(payload["profile"].is_object());
+    assert!(payload["diagnostics"].is_object());
 }
 
 #[test]
@@ -431,14 +492,14 @@ echo "Submitted batch job 12345"
         tmpdir.path(),
         &[
             "doctor",
-            "--fabric-smoke",
-            "-f",
-            compose.to_str().expect("path"),
-            "--submit",
             "--sbatch-bin",
             sbatch.to_str().expect("path"),
             "--srun-bin",
             srun.to_str().expect("path"),
+            "fabric-smoke",
+            "-f",
+            compose.to_str().expect("path"),
+            "--submit",
             "--timeout-seconds",
             "10",
             "--format",
@@ -548,16 +609,16 @@ exit "${{job_status:-1}}"
         tmpdir.path(),
         &[
             "doctor",
-            "--fabric-smoke",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "fabric-smoke",
             "-f",
             compose.to_str().expect("path"),
             "--checks",
             "nccl",
             "--submit",
-            "--sbatch-bin",
-            sbatch.to_str().expect("path"),
-            "--srun-bin",
-            srun.to_str().expect("path"),
             "--timeout-seconds",
             "5",
             "--format",
@@ -703,13 +764,13 @@ exit 0
         tmpdir.path(),
         &[
             "doctor",
-            "--mpi-smoke",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "mpi-smoke",
             "-f",
             compose.to_str().expect("path"),
             "--script-out",
             script.to_str().expect("path"),
-            "--srun-bin",
-            srun.to_str().expect("path"),
         ],
     );
     assert_success(&output);
@@ -810,14 +871,14 @@ echo "Submitted batch job 12345"
         tmpdir.path(),
         &[
             "doctor",
-            "--mpi-smoke",
-            "-f",
-            compose.to_str().expect("path"),
-            "--submit",
             "--sbatch-bin",
             sbatch.to_str().expect("path"),
             "--srun-bin",
             srun.to_str().expect("path"),
+            "mpi-smoke",
+            "-f",
+            compose.to_str().expect("path"),
+            "--submit",
             "--timeout-seconds",
             "5",
         ],

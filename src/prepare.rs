@@ -158,7 +158,7 @@ fn prepare_pyxis_runtime_plan(
 ) -> Result<PrepareSummary> {
     ensure_binary_available(
         &options.enroot_bin,
-        "Enroot is required for submit; install it or pass a valid enroot binary path",
+        "Enroot is required for up/run; install it or pass a valid enroot binary path",
     )?;
     let envs = enroot_env(&plan.cache_dir);
     create_cache_dirs(plan)?;

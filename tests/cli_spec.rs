@@ -73,6 +73,67 @@ fn validate_and_render_commands_work() {
             .unwrap_or_default()
             .contains("#SBATCH --job-name=demo")
     );
+
+    let default_script = tmpdir.path().join("hpc-compose.sbatch");
+    assert!(!default_script.exists());
+    let plan = run_cli(
+        tmpdir.path(),
+        &["plan", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&plan);
+    let plan_stdout = stdout_text(&plan);
+    assert!(plan_stdout.contains("spec is valid"));
+    assert!(plan_stdout.contains("app"));
+    assert!(!default_script.exists());
+
+    let plan_tree = run_cli(
+        tmpdir.path(),
+        &["plan", "--tree", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&plan_tree);
+    assert!(stdout_text(&plan_tree).contains("app"));
+    assert!(!default_script.exists());
+
+    let plan_script = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "--show-script",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&plan_script);
+    let plan_script_stdout = stdout_text(&plan_script);
+    assert!(plan_script_stdout.contains("Rendered script:"));
+    assert!(plan_script_stdout.contains("#SBATCH --job-name=demo"));
+    assert!(!default_script.exists());
+
+    let plan_json = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "-f",
+            compose.to_str().expect("path"),
+            "--show-script",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&plan_json);
+    let plan_value: Value = serde_json::from_str(&stdout_text(&plan_json)).expect("plan json");
+    assert_eq!(plan_value["valid"], Value::from(true));
+    assert_eq!(
+        plan_value["runtime_plan"]["ordered_services"][0]["name"],
+        Value::from("app")
+    );
+    assert!(
+        plan_value["script"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("#SBATCH --job-name=demo")
+    );
+    assert!(!default_script.exists());
 }
 
 #[test]
@@ -90,7 +151,9 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
         &["inspect", "-f", compose.to_str().expect("path")],
     );
     assert_success(&inspect);
-    assert!(stdout_text(&inspect).contains("rebuild on submit because prepare.mounts are present"));
+    assert!(
+        stdout_text(&inspect).contains("rebuild on prepare because prepare.mounts are present")
+    );
 
     let preflight = run_cli(
         tmpdir.path(),

@@ -7,25 +7,24 @@ Use this page when the safe authoring path worked but the first real cluster run
 ```bash
 hpc-compose validate -f compose.yaml
 hpc-compose validate -f compose.yaml --strict-env
-hpc-compose inspect --verbose -f compose.yaml
-hpc-compose preflight -f compose.yaml
-hpc-compose render --output job.sbatch -f compose.yaml
+hpc-compose plan --verbose -f compose.yaml
+hpc-compose debug -f compose.yaml --preflight
 ```
 
-`inspect --verbose` can print resolved environment values and final mount mappings. Treat its output as sensitive when the spec contains secrets.
+`plan --verbose` can print resolved environment values and final mount mappings. Treat its output as sensitive when the spec contains secrets. `debug` is read-only unless `--preflight` is passed; with `--preflight`, it reruns prerequisite checks and includes those findings in the triage report.
 
 ## Common Symptoms
 
 | Symptom | Likely cause | Next step |
 | --- | --- | --- |
-| `required binary '...' was not found` | Selected backend or Slurm client tool is not on `PATH`. | Run `preflight`; pass `--enroot-bin`, `--apptainer-bin`, `--singularity-bin`, `--srun-bin`, or `--sbatch-bin` as needed. |
+| `required binary '...' was not found` | Selected backend or Slurm client tool is not on `PATH`. | Run `debug --preflight`; pass `--enroot-bin`, `--apptainer-bin`, `--singularity-bin`, `--srun-bin`, or `--sbatch-bin` as needed. |
 | `srun does not advertise --container-image` | Pyxis support is unavailable or not loaded. | Move to a supported login node, load the site module, or choose another backend. |
-| Cache directory warning/error | `x-slurm.cache_dir` is not shared, writable, or policy-safe. | Choose a shared project/work/scratch path and rerun `preflight --strict`. |
+| Cache directory warning/error | `x-slurm.cache_dir` is not shared, writable, or policy-safe. | Choose a shared project/work/scratch path and rerun `debug --preflight`. |
 | Missing local mount or image path | Relative paths are resolved from the compose file directory. | Check paths relative to the copied `compose.yaml`. |
 | Mounted symlink exists on the host but fails in the container | The symlink target is outside the mounted directory. | Copy the real file into the mounted directory or mount the target directory. |
 | Anonymous pull or registry warning | Registry credentials are missing or rate limits apply. | Configure credentials before relying on private or rate-limited images. |
 | Services start in the wrong order | Dependency condition or readiness is too weak. | Use `service_healthy` with `readiness`, or `service_completed_successfully` for DAG stages. |
-| No service logs exist | The batch script failed before launching a service. | Use `status` to find the tracked top-level batch log or inspect `slurm-<jobid>.out`. |
+| No service logs exist | The batch script failed before launching a service. | Use `debug` to see scheduler state, the tracked top-level batch log tail, and missing-log hints. |
 
 ## Readiness Issues
 
@@ -35,18 +34,18 @@ Use `condition: service_completed_successfully` for one-shot DAG stages where th
 
 When a TCP port opens before the service is fully usable, prefer HTTP or log-based readiness over TCP readiness.
 
-## Preview A Submission
+## Preview A Run
 
-Use `up --dry-run` to run the full pipeline without calling `sbatch`:
+Use `plan` for the static preview. It never prepares images, runs preflight, calls `sbatch`, or writes `hpc-compose.sbatch`:
+
+```bash
+hpc-compose plan --show-script -f compose.yaml
+```
+
+Use `up --dry-run` only when you intentionally want to exercise preflight, prepare, and render without calling `sbatch`:
 
 ```bash
 hpc-compose up --dry-run -f compose.yaml
-```
-
-Combine with `--skip-prepare --no-preflight` for a pure validation-and-render dry run:
-
-```bash
-hpc-compose up --dry-run --skip-prepare --no-preflight -f compose.yaml
 ```
 
 ## Clean Old Tracked Runs

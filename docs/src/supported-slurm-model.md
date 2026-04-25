@@ -9,7 +9,7 @@ These capabilities are modeled, validated, and intentionally supported by the pl
 | Area | Support |
 | --- | --- |
 | Allocation model | One Slurm allocation per application |
-| Submission flow | `new`, `validate`, `config`, `inspect`, `preflight`, `prepare`, `render`, `up`, `submit`, `run` |
+| Submission flow | `new`, `plan`, `validate`, `config`, `inspect`, `preflight`, `prepare`, `render`, `up`, `run`, `debug` |
 | Tracked job workflow | `status`, `ps`, `watch`, `stats`, `logs`, `down`, `cancel`, `artifacts`, `clean`, cache inspection/pruning |
 | Top-level Slurm fields | `job_name`, `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, GPU/CPU binding fields, `constraint`, `output`, `error`, `chdir` |
 | Service step fields | `nodes`, `placement`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, GPU/CPU binding fields, `mpi` |

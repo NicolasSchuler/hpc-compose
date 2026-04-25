@@ -62,6 +62,18 @@ Print the resume config diff and exit without preparing or submitting.
 \fB--dry\-run\fR
 Run preflight, prepare, and render without calling sbatch.
 .TP
+\fB--detach\fR
+Submit or launch and return without watching logs.
+.TP
+\fB--watch\-mode\fR \fIMODE\fR
+Watch output mode. Default: auto. Possible values: auto, tui, line.
+.TP
+\fB--no\-tui\fR
+Use line\-oriented watch output instead of the terminal UI.
+.TP
+\fB--format\fR \fIFORMAT\fR
+Output format for \-\-detach or \-\-dry\-run. Possible values: text, json.
+.TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.
 .TP
@@ -79,8 +91,10 @@ Print help (see a summary with '\-h').
 .SH EXAMPLES
 .nf
 hpc\-compose up \-f compose.yaml
+hpc\-compose up \-\-detach \-f compose.yaml
+hpc\-compose up \-\-detach \-\-format json \-f compose.yaml
 hpc\-compose up \-\-dry\-run \-f compose.yaml
-hpc\-compose up \-\-skip\-prepare \-f compose.yaml
+hpc\-compose up \-\-watch\-mode line \-f compose.yaml
 .fi
 .SH SEE ALSO
-hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-doctor(1), hpc\-compose\-down(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-run(1), hpc\-compose\-schema(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)
+hpc\-compose(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-debug(1), hpc\-compose\-doctor(1), hpc\-compose\-down(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-plan(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-run(1), hpc\-compose\-schema(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)

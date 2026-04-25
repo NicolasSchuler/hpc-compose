@@ -51,7 +51,7 @@ pub enum SubmissionBackend {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmissionKind {
-    /// A normal compose application submission from `submit` or `up`.
+    /// A normal compose application submission from `up`.
     #[default]
     Main,
     /// A one-off `run` submission scoped to one service.

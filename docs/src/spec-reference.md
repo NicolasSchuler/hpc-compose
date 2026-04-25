@@ -723,10 +723,10 @@ services:
 
 - Shape: mapping
 - Default: omitted
-- `type` is an exact `srun --mpi=<type>` plugin token. Common values include `pmix`, `pmix_v4`, `pmi2`, `pmi1`, and `openmpi`; use `srun --mpi=list` or `hpc-compose doctor --cluster-report` on the target cluster to discover site-specific values.
+- `type` is an exact `srun --mpi=<type>` plugin token. Common values include `pmix`, `pmix_v4`, `pmi2`, `pmi1`, and `openmpi`; use `srun --mpi=list` or `hpc-compose doctor cluster-report` on the target cluster to discover site-specific values.
 - Notes:
   - Rendered as `--mpi=<type>` on the service's `srun` command.
-  - `profile` is optional compatibility metadata used for validation, cluster-profile diagnostics, and `doctor --mpi-smoke` output. Supported values are `openmpi`, `mpich`, and `intel_mpi`.
+  - `profile` is optional compatibility metadata used for validation, cluster-profile diagnostics, and `doctor mpi-smoke` output. Supported values are `openmpi`, `mpich`, and `intel_mpi`.
   - `profile` does not auto-select or rewrite `type`; use the exact token that your cluster reports through `srun --mpi=list`.
   - `launcher` defaults to `srun`; v1 rejects other launchers.
   - `implementation` is optional metadata for diagnostics. Supported values are `openmpi`, `mpich`, `intel_mpi`, `mvapich2`, `cray_mpi`, `hpe_mpi`, and `unknown`.
@@ -737,7 +737,7 @@ services:
   - Cannot be combined with raw `--mpi...` entries in `extra_srun_args`.
   - MPI services receive `HPC_COMPOSE_MPI_TYPE` and `HPC_COMPOSE_MPI_HOSTFILE`.
   - MPI services also receive `HPC_COMPOSE_MPI_PROFILE` when `profile` is set and `HPC_COMPOSE_MPI_IMPLEMENTATION` when `implementation` is set or implied by `profile`.
-  - `hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer` renders a smoke probe for the service; add `--submit` to run it through Slurm. `hpc-compose doctor --fabric-smoke -f compose.yaml --service trainer --checks auto` extends the same pattern with NCCL, UCX, OFI, and InfiniBand diagnostics when available. Smoke plans keep allocation and MPI launch settings, but strip application workflow blocks such as setup, scratch staging, resume metadata, artifacts, and burst-buffer directives.
+  - `hpc-compose doctor mpi-smoke -f compose.yaml --service trainer` renders a smoke probe for the service; add `--submit` to run it through Slurm. `hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto` extends the same pattern with NCCL, UCX, OFI, and InfiniBand diagnostics when available. Smoke plans keep allocation and MPI launch settings, but strip application workflow blocks such as setup, scratch staging, resume metadata, artifacts, and burst-buffer directives.
 
 Profile-specific compatibility checks are intentionally conservative:
 
@@ -861,7 +861,7 @@ Rules:
 - If `x-runtime.prepare` or `x-enroot.prepare` is present, `commands` cannot be empty.
 - A service may not set both spellings.
 - `x-enroot.prepare` is rejected when `runtime.backend` is not `pyxis`.
-- If `prepare.mounts` is non-empty, the service rebuilds on every `prepare` or `submit`.
+- If `prepare.mounts` is non-empty, the service rebuilds on every `prepare` or `up`.
 - Remote base images are imported under `cache_dir/base`.
 - Prepared images are exported under `cache_dir/prepared`.
 - Unknown keys under `x-runtime`, `x-enroot`, or `prepare` cause hard errors.

@@ -6,9 +6,9 @@ This page explains the few runtime rules that matter most when a Compose mental 
 
 | Stage | Where it runs | What happens |
 | --- | --- | --- |
-| `validate`, `inspect`, `preflight` | login node or local shell | Parse the spec, resolve paths, and check prerequisites |
+| `plan`, `validate`, `inspect`, `preflight` | login node or local shell | Parse the spec, resolve paths, preview the runtime plan, and check prerequisites |
 | `prepare` | login node or local shell with the selected runtime backend | Import base images and build prepared runtime artifacts |
-| `submit` | login node or local shell with Slurm access | Run preflight, prepare missing artifacts, render the batch script, and call `sbatch` |
+| `up` | login node or local shell with Slurm access | Run preflight, prepare missing artifacts, render the batch script, call `sbatch`, and watch by default |
 | Batch script and services | compute-node allocation | Launch the planned services through `srun` and the selected runtime backend |
 | `status`, `ps`, `watch`, `stats`, `logs`, `artifacts` | login node or local shell | Read tracked metadata and job outputs after submission |
 

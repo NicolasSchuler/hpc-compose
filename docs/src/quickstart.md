@@ -1,6 +1,6 @@
 # Quickstart
 
-This is the shortest safe path from an empty shell to a validated spec, an inspectable batch script, and a first real Slurm submission.
+This is the shortest safe path from an empty shell to a static plan, a first real Slurm run, and one-command failure triage.
 
 ## 1. Install The CLI
 
@@ -18,14 +18,11 @@ The installer places `hpc-compose` in `~/.local/bin` by default and verifies the
 
 ## 2. Learn The Safe Authoring Path First
 
-These commands do not call `sbatch`, do not import images, and do not require Slurm:
+`plan` is the safe authoring command. It does not call `sbatch`, does not import images, and does not write a script file:
 
 ```bash
-hpc-compose validate -f examples/minimal-batch.yaml
-hpc-compose inspect -f examples/minimal-batch.yaml
-hpc-compose up --dry-run --skip-prepare --no-preflight \
-  --script-out /tmp/hpc-compose-demo.sbatch \
-  -f examples/minimal-batch.yaml
+hpc-compose plan -f examples/minimal-batch.yaml
+hpc-compose plan --show-script -f examples/minimal-batch.yaml
 ```
 
 Expected output includes:
@@ -38,11 +35,15 @@ spec is valid
 service order: app
 ```
 
-```text
-dry run: skipping sbatch submission
-```
-
 This is the right first path on macOS, a laptop, or any machine where you want to evaluate the authoring model before touching a real cluster. The same flow is also available as an [asciinema-style demo cast](quickstart-demo.cast), but the snippets above are the accessible reference output.
+
+The normal workflow to remember is:
+
+```bash
+hpc-compose plan -f examples/minimal-batch.yaml
+hpc-compose up -f compose.yaml
+hpc-compose debug -f compose.yaml --preflight
+```
 
 ## 3. Choose A Starting Spec
 
@@ -84,11 +85,11 @@ Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for `x-slurm.cache_
 
 | Command category | Where to run it | Required tools | Notes |
 | --- | --- | --- | --- |
-| Authoring: `new`, `validate`, `inspect`, `render`, `config`, `schema` | laptop, workstation, or login node | `hpc-compose` | Safe before you have Slurm access. |
+| Authoring: `new`, `plan`, `validate`, `inspect`, `render`, `config`, `schema` | laptop, workstation, or login node | `hpc-compose` | `plan` is the recommended static pre-run check. |
 | Prepare: `prepare` | Linux host with selected runtime backend | Pyxis needs Enroot; Apptainer needs `apptainer`; Singularity needs `singularity`; host backend needs no container runtime | Does not call `sbatch`, but needs runtime tools for image work. |
-| Cluster checks: `preflight`, `doctor --cluster-report` | Linux Slurm login node | Slurm client tools plus selected backend tools | Use `preflight --strict` when warnings should block submission. |
-| Submission: `up`, `submit`, `run` | Linux Slurm login node | `sbatch`, `srun`, scheduler tools, selected backend tools | Normal cluster execution path. |
-| Local launch: `up --local`, `submit --local` | Linux host only | Enroot and `runtime.backend: pyxis` | Single-host only; not a distributed Slurm substitute. |
+| Cluster checks: `preflight`, `doctor cluster-report` | Linux Slurm login node | Slurm client tools plus selected backend tools | Use `preflight --strict` when warnings should block launch. |
+| Run: `up`, `run` | Linux Slurm login node | `sbatch`, `srun`, scheduler tools, selected backend tools | `up` is the normal cluster execution path. |
+| Local launch: `up --local` | Linux host only | Enroot and `runtime.backend: pyxis` | Single-host only; not a distributed Slurm substitute. |
 
 For Pyxis, `srun --help` should mention `--container-image`.
 
@@ -100,7 +101,7 @@ When you move to a supported Linux submission host, the normal run is:
 hpc-compose up -f compose.yaml
 ```
 
-`up` runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to line-oriented output.
+`up` runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to line-oriented output. Use `hpc-compose up --detach -f compose.yaml` when you want submit-and-return behavior.
 
 Success looks like:
 
@@ -113,11 +114,11 @@ Success looks like:
 
 | Symptom | Best next command | Why |
 | --- | --- | --- |
-| Missing `sbatch`, `srun`, `enroot`, `apptainer`, or `singularity` | `hpc-compose preflight -f compose.yaml` | Confirms which selected-backend tool is missing. |
-| `srun` does not advertise `--container-image` | `hpc-compose doctor --cluster-report` | Pyxis support is unavailable or not loaded on that node. |
-| Job submitted but no service log appeared | `hpc-compose status -f compose.yaml` | Shows the tracked top-level batch log path. |
-| Cache path warning or error | `hpc-compose preflight --strict -f compose.yaml` | Confirms whether `x-slurm.cache_dir` is shared and writable. |
-| Services start in the wrong order | `hpc-compose inspect --verbose -f compose.yaml` | Shows normalized dependencies and readiness gates. |
+| Missing `sbatch`, `srun`, `enroot`, `apptainer`, or `singularity` | `hpc-compose debug -f compose.yaml --preflight` | Reruns prerequisite checks and keeps the latest tracked context in one report. |
+| `srun` does not advertise `--container-image` | `hpc-compose doctor cluster-report` | Pyxis support is unavailable or not loaded on that node. |
+| Job submitted but no service log appeared | `hpc-compose debug -f compose.yaml` | Shows scheduler state, batch log tail, service log hints, and the next command. |
+| Cache path warning or error | `hpc-compose debug -f compose.yaml --preflight` | Confirms whether `x-slurm.cache_dir` is shared and writable. |
+| Services start in the wrong order | `hpc-compose plan --verbose -f compose.yaml` | Shows normalized dependencies and readiness gates before running. |
 
 The longer symptom guide is [Troubleshooting](troubleshooting.md).
 
@@ -141,10 +142,8 @@ If you are developing from a local checkout instead of an installed binary:
 ```bash
 cargo build --release
 target/release/hpc-compose validate -f examples/minimal-batch.yaml
-target/release/hpc-compose inspect -f examples/minimal-batch.yaml
-target/release/hpc-compose up --dry-run --skip-prepare --no-preflight \
-  --script-out /tmp/hpc-compose-demo.sbatch \
-  -f examples/minimal-batch.yaml
+target/release/hpc-compose plan -f examples/minimal-batch.yaml
+target/release/hpc-compose plan --show-script -f examples/minimal-batch.yaml
 ```
 
 ## Read Next

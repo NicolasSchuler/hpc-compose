@@ -7,8 +7,8 @@ Use this page when you know what you want to do, but not yet which command or ex
 - Read [Quickstart](quickstart.md).
 - Run `hpc-compose new --list-templates` if you want to inspect the built-in starter templates before choosing one.
 - Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml`.
-- If you copy a repository example directly, override `CACHE_DIR` for your cluster before submitting it; the shipped YAML files default to `/cluster/shared/hpc-compose-cache`.
-- Run `hpc-compose validate -f compose.yaml`, `hpc-compose inspect -f compose.yaml`, and `hpc-compose up --dry-run --skip-prepare --no-preflight -f compose.yaml` before the first real submit.
+- If you copy a repository example directly, override `CACHE_DIR` for your cluster before running it; the shipped YAML files default to `/cluster/shared/hpc-compose-cache`.
+- Run `hpc-compose plan -f compose.yaml` before the first real run. Add `--show-script` when you want to inspect the generated launcher without writing a file.
 - Run `hpc-compose up -f compose.yaml` only from a supported Linux Slurm submission host.
 
 ## Remember directory/data/env settings once
@@ -55,8 +55,9 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 - Run `hpc-compose validate -f compose.yaml`.
 - Run `hpc-compose validate -f compose.yaml --strict-env` when default interpolation fallbacks should be treated as failures.
-- Run `hpc-compose inspect --verbose -f compose.yaml`.
+- Run `hpc-compose plan --verbose -f compose.yaml`.
 - Run `hpc-compose preflight -f compose.yaml`.
+- Run `hpc-compose debug -f compose.yaml --preflight` after a failed tracked run.
 - Read [Troubleshooting](troubleshooting.md).
 
 ## Cache and artifact management
@@ -78,7 +79,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 ## Automation and scripting with JSON output
 
-- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `validate`, `render`, `prepare`, `preflight`, `config`, `inspect`, `submit`, `status`, `ps`, `stats`, `artifacts`, `down`, `cancel`, `setup`, `cache`, `clean`, and `context`.
+- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `plan`, `validate`, `render`, `prepare`, `preflight`, `config`, `inspect`, `debug`, `status`, `ps`, `stats`, `artifacts`, `down`, `cancel`, `setup`, `cache`, `clean`, and `context`. For `up`, `--format json` requires `--detach` or `--dry-run`.
 - Include `context --format json` when automation needs resolved compose path, binaries, interpolation vars, and runtime path roots.
 - Use `hpc-compose stats --format jsonl` or `--format csv` when downstream tooling wants row-oriented metrics.
 - Treat `--json` as a compatibility alias on older machine-readable commands; new automation should prefer `--format json`. Streaming commands such as `logs --follow`, `watch`, and `completions` keep their native text or script output.

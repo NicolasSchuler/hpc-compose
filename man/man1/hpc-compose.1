@@ -8,7 +8,7 @@ hpc\-compose [OPTIONS] <COMMAND>
 .fi
 .SH DESCRIPTION
 .PP
-Compile a compose\-like specification into one Slurm batch job that launches one or more services through Pyxis/Enroot, Apptainer, Singularity, or host runtime software inside a single allocation. Use up for the normal run, and use config, validate, inspect, preflight, and prepare when adapting or debugging a spec.
+Compile a compose\-like specification into one Slurm batch job that launches one or more services through Pyxis/Enroot, Apptainer, Singularity, or host runtime software inside a single allocation. Use plan for static authoring, up for the normal run, and debug for one\-command triage.
 .SH SUBCOMMANDS
 .TP
 \fBvalidate\fR
@@ -32,14 +32,14 @@ Render the fully interpolated effective config. See hpc\-compose\-config(1).
 \fBschema\fR
 Print the hpc\-compose JSON Schema. See hpc\-compose\-schema(1).
 .TP
+\fBplan\fR
+Validate and preview a static execution plan. See hpc\-compose\-plan(1).
+.TP
 \fBdoctor\fR
 Check cluster readiness and tool availability. See hpc\-compose\-doctor(1).
 .TP
 \fBup\fR
 Submit, watch, and stream logs in one command. See hpc\-compose\-up(1).
-.TP
-\fBsubmit\fR
-Submit a job and optionally watch it. See hpc\-compose\-submit(1).
 .TP
 \fBstatus\fR
 Show tracked scheduler state and log locations. See hpc\-compose\-status(1).
@@ -58,6 +58,9 @@ Show tracked per\-service runtime state. See hpc\-compose\-ps(1).
 .TP
 \fBwatch\fR
 Watch a tracked job in a live terminal UI. See hpc\-compose\-watch(1).
+.TP
+\fBdebug\fR
+Diagnose the latest tracked run. See hpc\-compose\-debug(1).
 .TP
 \fBcancel\fR
 Cancel a tracked Slurm job. See hpc\-compose\-cancel(1).
@@ -113,7 +116,7 @@ Print version.
 Fallback compose specification file when \-f or \-\-file is omitted and the active context does not provide one.
 .TP
 \fB<compose\-file\-dir>/hpc\-compose.sbatch\fR
-Default rendered batch script path written by submit when \-\-script\-out is not set.
+Default rendered batch script path written by up or run when \-\-script\-out is not set.
 .TP
 \fB${SLURM_SUBMIT_DIR:\-$PWD}/.hpc\-compose/\fR
 Tracked job metadata, logs, metrics, and artifact state written after submission.
@@ -152,10 +155,12 @@ The command failed because validation, local I/O, or an external tool reported a
 .SH EXAMPLES
 .nf
 hpc\-compose up \-f compose.yaml
+hpc\-compose plan \-f compose.yaml
+hpc\-compose debug \-f compose.yaml \-\-preflight
 hpc\-compose validate \-f compose.yaml
 hpc\-compose inspect \-\-verbose \-f compose.yaml
 hpc\-compose config \-f compose.yaml
 hpc\-compose preflight \-f compose.yaml
 .fi
 .SH SEE ALSO
-hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-doctor(1), hpc\-compose\-down(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-run(1), hpc\-compose\-schema(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-submit(1), hpc\-compose\-up(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)
+hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-debug(1), hpc\-compose\-doctor(1), hpc\-compose\-down(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-plan(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-render(1), hpc\-compose\-run(1), hpc\-compose\-schema(1), hpc\-compose\-setup(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-up(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1)

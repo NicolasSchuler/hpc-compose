@@ -7,7 +7,7 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 - `spec`: parse, interpolate, and validate the supported Compose subset
 - `planner`: normalize the parsed spec into a deterministic plan
 - `context`: resolve `.hpc-compose/settings.toml`, profiles, env files, interpolation variables, and binary overrides
-- `cluster`: generate and apply best-effort cluster capability profiles from `doctor --cluster-report`
+- `cluster`: generate and apply best-effort cluster capability profiles from `doctor cluster-report`
 - `preflight`: check login-node prerequisites and cluster policy issues
 - `prepare`: import base images and rebuild prepared runtime artifacts
 - `render`: generate the final `sbatch` script and service launch commands
@@ -16,11 +16,11 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 - `cache`: persist cache manifests for imported and prepared images
 - `init`: expose the shipped example templates for `hpc-compose new` plus the legacy `init` alias
 - `schema` and `manpages`: expose the checked-in JSON Schema and generated section-1 manpage flow
-- `commands/spec`: binary-only handlers for `validate`, `render`, `prepare`, `preflight`, `config`, and `inspect`
-- `commands/runtime`: binary-only handlers for `up`, `submit`, `run`, `status`, `ps`, `watch`, `stats`, `artifacts`, `logs`, `down`, `cancel`, and `clean`
+- `commands/spec`: binary-only handlers for `plan`, `validate`, `render`, `prepare`, `preflight`, `config`, and `inspect`
+- `commands/runtime`: binary-only handlers for `up`, `debug`, `run`, `status`, `ps`, `watch`, `stats`, `artifacts`, `logs`, `down`, `cancel`, and `clean`
 - `commands/cache`: binary-only handlers for cache inspection and pruning
 - `commands/init`: binary-only handlers for `new` / `init`, `setup`, `context`, and `completions`
-- `watch_ui`: terminal UI controller and renderer for `up`, `submit --watch`, and `watch`
+- `watch_ui`: terminal UI controller and renderer for `up` and `watch`
 - `output`: binary-only text, JSON, CSV, and JSONL formatting helpers
 
 ## Execution flow

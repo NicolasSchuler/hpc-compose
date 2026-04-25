@@ -90,7 +90,8 @@ services:
         &[
             "--profile",
             "dev",
-            "submit",
+            "up",
+            "--detach",
             "--skip-prepare",
             "--no-preflight",
         ],

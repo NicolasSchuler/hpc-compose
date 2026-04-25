@@ -13,14 +13,11 @@ Use it when you want Docker Compose-style authoring on Slurm without adding Kube
 
 ## Safe First Path
 
-These commands work from a laptop, workstation, or login node because they do not submit a job:
+These commands work from a laptop, workstation, or login node because `plan` is purely static:
 
 ```bash
-hpc-compose validate -f examples/minimal-batch.yaml
-hpc-compose inspect -f examples/minimal-batch.yaml
-hpc-compose up --dry-run --skip-prepare --no-preflight \
-  --script-out /tmp/hpc-compose-demo.sbatch \
-  -f examples/minimal-batch.yaml
+hpc-compose plan -f examples/minimal-batch.yaml
+hpc-compose plan --show-script -f examples/minimal-batch.yaml
 ```
 
 Expected signals:
@@ -28,10 +25,10 @@ Expected signals:
 ```text
 spec is valid
 service order: app
-dry run: skipping sbatch submission
+Rendered script:
 ```
 
-Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slurm submission host with the runtime backend your spec selects.
+Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slurm submission host with the runtime backend your spec selects. If a run fails, start triage with `hpc-compose debug -f compose.yaml --preflight`.
 
 ## Scope
 

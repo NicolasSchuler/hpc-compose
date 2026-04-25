@@ -26,7 +26,7 @@ Use `cache inspect` to answer:
 
 - which artifact is being reused
 - whether a prepared image came from a cached manifest
-- whether a service rebuilds on every submit because prepare mounts are present
+- whether a service rebuilds on every prepare because prepare mounts are present
 
 ## Prune Cache Entries
 
@@ -52,7 +52,7 @@ hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
 
 ## After Upgrading
 
-Cache keys include the tool version, so upgrading `hpc-compose` invalidates existing cached artifacts. Expect a full rebuild on the next `prepare`, `up`, or `submit`, then optionally prune old entries:
+Cache keys include the tool version, so upgrading `hpc-compose` invalidates existing cached artifacts. Expect a full rebuild on the next `prepare` or `up`, then optionally prune old entries:
 
 ```bash
 hpc-compose cache prune --age 0

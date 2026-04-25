@@ -51,6 +51,7 @@ pub(crate) struct WatchModel {
     pub(crate) log_lines: Vec<String>,
     pub(crate) show_help: bool,
     pub(crate) filter: Option<String>,
+    pub(crate) search_buffer: String,
     pub(crate) input_mode: InputMode,
 }
 
@@ -223,6 +224,7 @@ pub(crate) fn run_watch_ui(
                 log_lines: log_buffer.lines.clone(),
                 show_help,
                 filter: filter.clone(),
+                search_buffer: search_buffer.clone(),
                 input_mode,
             },
             terminal_size(),
@@ -382,9 +384,42 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     }
     lines.push("-".repeat(width));
 
+    let mut search_lines = Vec::new();
+    if model.input_mode == InputMode::Search {
+        search_lines.push("-".repeat(width));
+        search_lines.push(fit_line(
+            &format!("{}: {}", term::styled_bold("filter"), model.search_buffer),
+            width,
+        ));
+    }
+
+    let mut help_lines = Vec::new();
+    if model.show_help {
+        help_lines.push("-".repeat(width));
+        help_lines.push(fit_line(&term::styled_bold("Keybindings:"), width));
+        help_lines.push(fit_line("  j / Down    scroll down", width));
+        help_lines.push(fit_line("  k / Up      scroll up", width));
+        help_lines.push(fit_line("  g           first service", width));
+        help_lines.push(fit_line("  G           last service", width));
+        help_lines.push(fit_line("  /           filter services", width));
+        help_lines.push(fit_line("  ?           toggle help", width));
+        help_lines.push(fit_line("  q           quit", width));
+        help_lines.push("-".repeat(width));
+    }
+
+    let footer_lines = vec![
+        "-".repeat(width),
+        fit_line("q quit  ? help  / filter  j/k move  g/G first/last", width),
+    ];
+    let help_budget = height.saturating_sub(lines.len() + search_lines.len() + footer_lines.len());
+    if help_lines.len() > help_budget {
+        help_lines.truncate(help_budget);
+    }
+
     let table_width = MIN_TABLE_WIDTH.min(width.saturating_sub(20));
     let log_width = width.saturating_sub(table_width + 3);
-    let body_height = height.saturating_sub(lines.len());
+    let body_height = height
+        .saturating_sub(lines.len() + search_lines.len() + help_lines.len() + footer_lines.len());
     let mut table_lines = Vec::with_capacity(body_height);
     table_lines.push(fit_line(
         "svc              step         pid    ready status   restarts exit",
@@ -442,7 +477,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         log_lines.push(fit_line(line, log_width));
     }
 
-    let row_count = body_height.max(1);
+    let row_count = body_height;
     for row in 0..row_count {
         let left = table_lines.get(row).map(String::as_str).unwrap_or("");
         let right = log_lines.get(row).map(String::as_str).unwrap_or("");
@@ -453,30 +488,9 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         ));
     }
 
-    if model.input_mode == InputMode::Search {
-        lines.push("-".repeat(width));
-        lines.push(fit_line(
-            &format!(
-                "{}: {}",
-                term::styled_bold("filter"),
-                model.filter.as_deref().unwrap_or("")
-            ),
-            width,
-        ));
-    }
-
-    if model.show_help {
-        lines.push("-".repeat(width));
-        lines.push(fit_line(&term::styled_bold("Keybindings:"), width));
-        lines.push(fit_line("  j / Down    scroll down", width));
-        lines.push(fit_line("  k / Up      scroll up", width));
-        lines.push(fit_line("  g           first service", width));
-        lines.push(fit_line("  G           last service", width));
-        lines.push(fit_line("  /           filter services", width));
-        lines.push(fit_line("  ?           toggle help", width));
-        lines.push(fit_line("  q           quit", width));
-        lines.push("-".repeat(width));
-    }
+    lines.extend(search_lines);
+    lines.extend(help_lines);
+    lines.extend(footer_lines);
 
     lines.join("\n")
 }
@@ -1101,6 +1115,7 @@ mod tests {
                 log_lines: vec!["booting".into(), "ready".into()],
                 show_help: false,
                 filter: None,
+                search_buffer: String::new(),
                 input_mode: InputMode::Normal,
             },
             100,
@@ -1113,6 +1128,8 @@ mod tests {
         assert!(frame.contains("api"));
         assert!(frame.contains("ready"));
         assert!(frame.contains("worker"));
+        assert!(frame.contains("q quit"));
+        assert!(frame.lines().count() <= 18);
     }
 
     #[test]
@@ -1293,6 +1310,7 @@ mod tests {
                 log_lines: vec!["tail".into()],
                 show_help: false,
                 filter: None,
+                search_buffer: String::new(),
                 input_mode: InputMode::Normal,
             },
             90,
@@ -1315,6 +1333,7 @@ mod tests {
                 log_lines: Vec::new(),
                 show_help: false,
                 filter: None,
+                search_buffer: String::new(),
                 input_mode: InputMode::Normal,
             },
             90,
@@ -1339,6 +1358,7 @@ mod tests {
                 log_lines: Vec::new(),
                 show_help: false,
                 filter: None,
+                search_buffer: String::new(),
                 input_mode: InputMode::Normal,
             },
             100,
@@ -1376,6 +1396,7 @@ exit 0
                     log_lines: vec!["line".into()],
                     show_help: false,
                     filter: None,
+                    search_buffer: String::new(),
                     input_mode: InputMode::Normal,
                 },
                 (90, 14),
@@ -1461,6 +1482,7 @@ exit 0
                 log_lines: Vec::new(),
                 show_help: true,
                 filter: None,
+                search_buffer: String::new(),
                 input_mode: InputMode::Normal,
             },
             100,
@@ -1469,6 +1491,8 @@ exit 0
         assert!(frame.contains("Keybindings:"));
         assert!(frame.contains("j / Down"));
         assert!(frame.contains("q           quit"));
+        assert!(frame.contains("q quit"));
+        assert!(frame.lines().count() <= 22);
     }
 
     #[test]
@@ -1481,12 +1505,52 @@ exit 0
                 log_lines: Vec::new(),
                 show_help: false,
                 filter: Some("api".into()),
+                search_buffer: String::new(),
                 input_mode: InputMode::Normal,
             },
             100,
             14,
         );
         assert!(frame.contains("filter: api"));
+    }
+
+    #[test]
+    fn render_watch_frame_bounds_footer_search_and_help() {
+        let search_frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: vec!["tail".into()],
+                show_help: false,
+                filter: None,
+                search_buffer: "api".into(),
+                input_mode: InputMode::Search,
+            },
+            90,
+            12,
+        );
+        assert!(search_frame.contains("filter: api"));
+        assert!(search_frame.lines().last().unwrap_or("").contains("q quit"));
+        assert!(search_frame.lines().count() <= 12);
+
+        let help_frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: vec!["tail".into()],
+                show_help: true,
+                filter: None,
+                search_buffer: String::new(),
+                input_mode: InputMode::Normal,
+            },
+            90,
+            12,
+        );
+        assert!(help_frame.contains("Keybindings:"));
+        assert!(help_frame.lines().last().unwrap_or("").contains("q quit"));
+        assert!(help_frame.lines().count() <= 12);
     }
 
     #[test]

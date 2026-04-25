@@ -180,7 +180,7 @@ pub fn export_artifacts(
     let manifest_path = artifact_manifest_path_for_record(&record);
     if !manifest_path.exists() {
         bail!(
-            "tracked artifact manifest does not exist for job {} at {}; submit the job and wait for teardown collection to finish first",
+            "tracked artifact manifest does not exist for job {} at {}; run the job and wait for teardown collection to finish first",
             record.job_id,
             manifest_path.display()
         );

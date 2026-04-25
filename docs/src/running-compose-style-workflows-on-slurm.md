@@ -45,7 +45,7 @@ Those omissions are deliberate. The point is not to emulate all of Compose on a 
 ```text
 compose-like spec
       |
-      +--> validate / inspect / render on the submission host
+      +--> plan / validate / render on the submission host
       |
       +--> one generated batch script
                 |
@@ -79,12 +79,11 @@ If you want the smallest possible first run, start with [`minimal-batch.yaml`](e
 
 ## Why the Inspectable Path Matters
 
-The authoring flow is designed to answer the practical questions before you submit:
+The authoring flow is designed to answer the practical questions before you launch:
 
 ```bash
-hpc-compose validate -f compose.yaml
-hpc-compose inspect -f compose.yaml
-hpc-compose render --output job.sbatch -f compose.yaml
+hpc-compose plan -f compose.yaml
+hpc-compose plan --show-script -f compose.yaml
 ```
 
 That lets you confirm:

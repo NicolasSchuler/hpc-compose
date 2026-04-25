@@ -30,7 +30,7 @@ hpc-compose preflight -f compose.yaml
 
 ## Local Mode
 
-`up --local` and `submit --local` are intentionally narrow:
+`up --local` is intentionally narrow:
 
 - Linux only
 - `runtime.backend: pyxis` only
@@ -58,4 +58,4 @@ Use top-level or service-level `x-env` for host modules, Spack views, and enviro
 - [Support Matrix](support-matrix.md)
 - [Execution Model](execution-model.md)
 - [Spec Reference](spec-reference.md#runtime)
-- [CLI Reference](cli-reference.md#up---submit-options)
+- [CLI Reference](cli-reference.md#up-options)

@@ -31,7 +31,8 @@ fn submit_command_runs_end_to_end_with_fake_tools() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -172,7 +173,8 @@ fn submit_skip_prepare_reuses_existing_artifact() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -221,7 +223,8 @@ services:
     let script_out = tmpdir.path().join(format!("{backend}.sbatch"));
 
     let mut args = vec![
-        "submit",
+        "up",
+        "--detach",
         "-f",
         compose.to_str().expect("path"),
         "--no-preflight",
@@ -296,7 +299,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -376,7 +380,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -449,7 +454,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -499,7 +505,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -552,7 +559,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -621,7 +629,8 @@ fn submit_succeeds_when_tracking_metadata_cannot_be_written() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--script-out",
@@ -668,7 +677,8 @@ fn status_and_logs_commands_use_submission_metadata() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -838,7 +848,8 @@ fn status_reports_pending_queue_diagnostics_in_text_and_json() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -917,7 +928,8 @@ fn submit_cancel_and_watch_conflict_support_json_output() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--format",
@@ -947,10 +959,9 @@ fn submit_cancel_and_watch_conflict_support_json_output() {
     let conflict = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
             "-f",
             compose.to_str().expect("path"),
-            "--watch",
             "--format",
             "json",
             "--skip-prepare",
@@ -960,10 +971,7 @@ fn submit_cancel_and_watch_conflict_support_json_output() {
         ],
     );
     assert_failure(&conflict);
-    assert!(
-        stderr_text(&conflict).contains("cannot be used with '--watch'")
-            || stderr_text(&conflict).contains("cannot be used with")
-    );
+    assert!(stderr_text(&conflict).contains("up --format requires --detach or --dry-run"));
 
     let cancel = run_cli(
         tmpdir.path(),
@@ -1008,7 +1016,8 @@ fn ps_command_reports_service_runtime_state_in_text_and_json() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -1123,7 +1132,8 @@ fn watch_command_falls_back_to_line_mode_on_non_tty() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -1146,6 +1156,8 @@ fn watch_command_falls_back_to_line_mode_on_non_tty() {
             "app",
             "--lines",
             "1",
+            "--watch-mode",
+            "line",
             "--squeue-bin",
             squeue.to_str().expect("path"),
             "--sacct-bin",
@@ -1183,10 +1195,9 @@ fn submit_watch_falls_back_when_ui_initialization_fails() {
     let submit = run_cli_with_env(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
             "-f",
             compose.to_str().expect("path"),
-            "--watch",
             "--enroot-bin",
             enroot.to_str().expect("path"),
             "--srun-bin",
@@ -1240,7 +1251,8 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -1335,7 +1347,8 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -1410,7 +1423,8 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -1484,7 +1498,8 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -1778,7 +1793,8 @@ fn cancel_uses_tracked_or_explicit_job_id() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -1872,7 +1888,8 @@ fn down_command_cancels_and_removes_tracking() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -2191,7 +2208,8 @@ services:
     let first_submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -2228,7 +2246,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--format",
@@ -2246,7 +2265,8 @@ services:
     let diff_only = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--format",
@@ -2279,6 +2299,198 @@ fn status_reports_missing_record_cleanly() {
 }
 
 #[test]
+fn debug_reports_missing_and_failed_tracked_runs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+
+    let missing = run_cli(
+        tmpdir.path(),
+        &[
+            "debug",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&missing);
+    let missing_payload: Value =
+        serde_json::from_str(&stdout_text(&missing)).expect("debug missing json");
+    assert_eq!(missing_payload["tracked"], Value::from(false));
+    assert!(
+        missing_payload["recommendation"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("hpc-compose plan")
+    );
+
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let log_dir = tmpdir.path().join(".hpc-compose/12345/logs");
+    fs::create_dir_all(&log_dir).expect("log dir");
+    fs::write(
+        log_dir.join(log_file_name_for_service("app")),
+        "service start\nservice boom\n",
+    )
+    .expect("service log");
+    fs::write(tmpdir.path().join("slurm-12345.out"), "batch fail\n").expect("batch log");
+
+    let squeue_state = tmpdir.path().join("debug-squeue.state");
+    let sacct_state = tmpdir.path().join("debug-sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "FAILED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+
+    let debug = run_cli(
+        tmpdir.path(),
+        &[
+            "debug",
+            "-f",
+            compose.to_str().expect("path"),
+            "--lines",
+            "1",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&debug);
+    let debug_stdout = stdout_text(&debug);
+    assert!(debug_stdout.contains("state: FAILED"));
+    assert!(debug_stdout.contains("Batch log"));
+    assert!(debug_stdout.contains("batch fail"));
+    assert!(debug_stdout.contains("Service log tails:"));
+    assert!(debug_stdout.contains("service boom"));
+    assert!(debug_stdout.contains("hpc-compose debug"));
+    assert!(debug_stdout.contains("--preflight"));
+}
+
+#[test]
+fn debug_preflight_includes_findings_and_fails_on_preflight_error() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let missing_image = tmpdir.path().join("missing.sqsh");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            missing_image.display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "debug",
+            "--preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_failure(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("debug json");
+    assert_eq!(payload["tracked"], Value::from(false));
+    assert!(payload["preflight"].is_object());
+    assert!(stderr_text(&output).contains("preflight failed"));
+}
+
+#[test]
+fn debug_job_id_uses_resolved_record_compose_file() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let nested = tmpdir.path().join("nested");
+    fs::create_dir_all(&nested).expect("nested dir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(&nested, &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let squeue_state = tmpdir.path().join("debug-resolved-squeue.state");
+    let sacct_state = tmpdir.path().join("debug-resolved-sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+
+    let debug = run_cli(
+        tmpdir.path(),
+        &[
+            "debug",
+            "--job-id",
+            "12345",
+            "--preflight",
+            "--format",
+            "json",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&debug);
+    let payload: Value = serde_json::from_str(&stdout_text(&debug)).expect("debug json");
+    assert_eq!(payload["tracked"], Value::from(true));
+    assert_eq!(
+        payload["compose_file"],
+        Value::from(compose.display().to_string())
+    );
+    assert_eq!(payload["job_id"], Value::from("12345"));
+    assert!(payload["preflight"].is_object());
+}
+
+#[test]
 fn submit_watch_covers_completed_and_failed_states() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -2303,10 +2515,11 @@ fn submit_watch_covers_completed_and_failed_states() {
     let success = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
             "-f",
             compose.to_str().expect("path"),
-            "--watch",
+            "--watch-mode",
+            "line",
             "--enroot-bin",
             enroot.to_str().expect("path"),
             "--srun-bin",
@@ -2342,10 +2555,11 @@ fn submit_watch_covers_completed_and_failed_states() {
     let failure = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
             "-f",
             compose.to_str().expect("path"),
-            "--watch",
+            "--watch-mode",
+            "line",
             "--enroot-bin",
             enroot.to_str().expect("path"),
             "--srun-bin",
@@ -2378,12 +2592,13 @@ fn submit_watch_skips_when_job_id_is_not_trackable() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
             "--no-preflight",
-            "--watch",
+            "--watch-mode",
+            "line",
             "--sbatch-bin",
             sbatch.to_str().expect("path"),
         ],
@@ -2407,7 +2622,8 @@ fn logs_follow_streams_appended_lines() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -2469,7 +2685,8 @@ fn submit_dry_run_skips_sbatch() {
     let output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--dry-run",
             "-f",
             compose.to_str().expect("path"),
@@ -2515,7 +2732,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -2557,7 +2775,8 @@ fn submit_local_rejects_non_linux_hosts() {
     let output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -2589,7 +2808,8 @@ fn submit_local_dry_run_renders_local_launcher() {
     let output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--dry-run",
             "--skip-prepare",
@@ -2656,7 +2876,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -2809,7 +3030,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -2903,7 +3125,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -2974,7 +3197,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -3108,7 +3332,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -3152,7 +3377,8 @@ fn submit_local_rejects_multi_node_distributed_and_extra_srun_args() {
     let multi_node_output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -3183,7 +3409,8 @@ services:
     let distributed_output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -3215,7 +3442,8 @@ services:
     let partitioned_output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -3245,7 +3473,8 @@ services:
     let extra_srun_output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -3275,7 +3504,8 @@ services:
     let mpi_output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--local",
             "--skip-prepare",
             "--no-preflight",
@@ -3298,7 +3528,8 @@ fn submit_reports_script_write_errors_before_submission() {
     let output = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -3326,7 +3557,8 @@ fn artifacts_command_exports_collected_metrics_and_json() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -3485,7 +3717,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -3572,7 +3805,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -3646,7 +3880,8 @@ fn artifact_collection_policy_skips_when_job_outcome_does_not_match() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -3707,7 +3942,8 @@ fn submit_multi_node_mpi_example_pins_helper_and_tracks_allocation_metadata() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--no-preflight",
             "-f",
             compose.to_str().expect("path"),
@@ -3846,7 +4082,8 @@ services:
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--no-preflight",
             "-f",
             compose.to_str().expect("path"),
@@ -3942,7 +4179,8 @@ fn inspect_and_submit_multi_node_torchrun_example_show_distributed_geometry() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "--no-preflight",
             "-f",
             compose.to_str().expect("path"),
@@ -4027,7 +4265,8 @@ fn clean_command_removes_old_job_directories() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",
@@ -4182,7 +4421,8 @@ fn clean_all_preserves_latest_tracked_submission() {
     let first_submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -4202,7 +4442,8 @@ fn clean_all_preserves_latest_tracked_submission() {
     let second_submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -4257,7 +4498,8 @@ fn clean_dry_run_does_not_remove_state_and_reports_json_contract() {
     let submit = run_cli(
         tmpdir.path(),
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",
@@ -4334,7 +4576,8 @@ fn clean_uses_recorded_submit_dir_for_runtime_cleanup() {
     let submit = run_cli(
         &submit_root,
         &[
-            "submit",
+            "up",
+            "--detach",
             "-f",
             compose.to_str().expect("path"),
             "--skip-prepare",

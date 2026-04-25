@@ -9,7 +9,8 @@ use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
 use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
 use hpc_compose::cluster::ClusterProfile;
 use hpc_compose::init::{
-    cache_dir_placeholder as init_cache_dir_placeholder, resolve_template, templates,
+    cache_dir_placeholder as init_cache_dir_placeholder, resolve_template, template_category,
+    templates,
 };
 use hpc_compose::job::{
     ArtifactExportReport, CleanupReport, JobInventoryScan, PsSnapshot, StatsSnapshot,
@@ -120,6 +121,7 @@ pub(crate) struct CancelOutput {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct TemplateInfoOutput {
     pub(crate) name: String,
+    pub(crate) category: String,
     pub(crate) description: String,
 }
 
@@ -1234,7 +1236,7 @@ fn write_tree_node(
 
     let state_colored = match state {
         "cache hit" | "local image present" => term::styled_success_raw(state),
-        "rebuild on submit" | "cache miss" | "local image missing" => {
+        "rebuild on prepare" | "cache miss" | "local image missing" => {
             term::styled_warning_raw(state)
         }
         _ => state.to_string(),
@@ -1662,7 +1664,7 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
             if prepare.force_rebuild {
                 writeln!(
                     writer,
-                    "reuse policy: rebuild on submit because prepare.mounts are present"
+                    "reuse policy: rebuild on prepare because prepare.mounts are present"
                 )?;
             } else {
                 writeln!(
@@ -1720,7 +1722,8 @@ pub(crate) fn build_cache_inspect_report(
             note: service.prepare.as_ref().and_then(|prepare| {
                 if prepare.force_rebuild {
                     Some(
-                        "this service rebuilds on submit because prepare.mounts are present".into(),
+                        "this service rebuilds on prepare because prepare.mounts are present"
+                            .into(),
                     )
                 } else {
                     None
@@ -1841,7 +1844,7 @@ fn write_cache_artifact_block(
 fn runtime_cache_state(service: &hpc_compose::prepare::RuntimeService) -> &'static str {
     if let Some(prepare) = &service.prepare {
         if prepare.force_rebuild {
-            "rebuild on submit"
+            "rebuild on prepare"
         } else if service.runtime_image.exists() {
             "cache hit"
         } else {
@@ -1939,18 +1942,30 @@ pub(crate) fn template_infos() -> Vec<TemplateInfoOutput> {
         .iter()
         .map(|template| TemplateInfoOutput {
             name: template.name.to_string(),
+            category: template_category(template.name).to_string(),
             description: template.description.to_string(),
         })
         .collect()
 }
 
 pub(crate) fn print_template_list() {
-    for template in templates() {
-        println!(
-            "{}\t{}",
-            term::styled_bold(template.name),
-            term::styled_dim(template.description)
-        );
+    for category in ["basics", "llm", "training", "distributed", "workflow"] {
+        let grouped = templates()
+            .iter()
+            .filter(|template| template_category(template.name) == category)
+            .collect::<Vec<_>>();
+        if grouped.is_empty() {
+            continue;
+        }
+        println!("{}:", term::styled_section_header(category));
+        for template in grouped {
+            println!(
+                "  {}\t{}",
+                term::styled_bold(template.name),
+                term::styled_dim(template.description)
+            );
+        }
+        println!();
     }
 }
 
@@ -1959,6 +1974,7 @@ pub(crate) fn build_template_description(template_name: &str) -> Result<Template
     Ok(TemplateDescriptionOutput {
         template: TemplateInfoOutput {
             name: template.name.to_string(),
+            category: template_category(template.name).to_string(),
             description: template.description.to_string(),
         },
         cache_dir_required: true,
@@ -2316,7 +2332,7 @@ mod tests {
     use super::*;
     use crate::commands::run_command;
     use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
-    use hpc_compose::cli::{CacheCommands, Commands};
+    use hpc_compose::cli::{CacheCommands, Commands, WatchMode};
     use hpc_compose::job::{
         ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
         CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, JobInventoryEntry,
@@ -2612,7 +2628,7 @@ services:
         );
         assert_eq!(
             runtime_cache_state(&with_forced_prepare),
-            "rebuild on submit"
+            "rebuild on prepare"
         );
 
         let with_cached_prepare = runtime_service(
@@ -3595,7 +3611,7 @@ services:
         })
         .expect("inspect");
 
-        let err = run_command(Commands::Submit {
+        let err = run_command(Commands::Up {
             file: Some(compose.clone()),
             script_out: None,
             sbatch_bin: sbatch_fail.display().to_string(),
@@ -3609,17 +3625,19 @@ services:
             skip_prepare: true,
             force_rebuild: false,
             no_preflight: true,
-            watch: false,
             local: false,
             allow_resume_changes: false,
             resume_diff_only: false,
             dry_run: false,
+            detach: true,
+            watch_mode: WatchMode::Auto,
+            no_tui: false,
             format: None,
         })
         .expect_err("sbatch fail");
         assert!(err.to_string().contains("sbatch failed"));
 
-        run_command(Commands::Submit {
+        run_command(Commands::Up {
             file: Some(compose.clone()),
             script_out: Some(tmpdir.path().join("submit.sbatch")),
             sbatch_bin: sbatch_ok.display().to_string(),
@@ -3633,15 +3651,17 @@ services:
             skip_prepare: true,
             force_rebuild: false,
             no_preflight: false,
-            watch: false,
             local: false,
             allow_resume_changes: false,
             resume_diff_only: false,
             dry_run: false,
+            detach: true,
+            watch_mode: WatchMode::Auto,
+            no_tui: false,
             format: None,
         })
         .expect("submit");
-        run_command(Commands::Submit {
+        run_command(Commands::Up {
             file: Some(compose.clone()),
             script_out: Some(tmpdir.path().join("submit-no-id.sbatch")),
             sbatch_bin: no_id_sbatch.display().to_string(),
@@ -3655,11 +3675,13 @@ services:
             skip_prepare: true,
             force_rebuild: false,
             no_preflight: true,
-            watch: false,
             local: false,
             allow_resume_changes: false,
             resume_diff_only: false,
             dry_run: false,
+            detach: true,
+            watch_mode: WatchMode::Auto,
+            no_tui: false,
             format: None,
         })
         .expect("submit without id");

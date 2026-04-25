@@ -5,10 +5,10 @@ Cluster profiles let `validate` and `preflight` compare a spec against site-spec
 Generate a best-effort profile on the target login node:
 
 ```bash
-hpc-compose doctor --cluster-report
+hpc-compose doctor cluster-report
 ```
 
-This writes `.hpc-compose/cluster.toml` by default. Use `--cluster-report-out -` to print TOML instead.
+This writes `.hpc-compose/cluster.toml` by default. Use `--out -` to print TOML instead.
 
 ## What Gets Discovered
 
@@ -42,13 +42,13 @@ Policy sections warn and suggest snippets. They do not silently add modules, bin
 For MPI services, render a small rank-count probe against the service's real runtime path:
 
 ```bash
-hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer --script-out mpi-smoke.sbatch
+hpc-compose doctor mpi-smoke -f compose.yaml --service trainer --script-out mpi-smoke.sbatch
 ```
 
 Submit it only when you intentionally want to consume a Slurm allocation:
 
 ```bash
-hpc-compose doctor --mpi-smoke -f compose.yaml --service trainer --submit
+hpc-compose doctor mpi-smoke -f compose.yaml --service trainer --submit
 ```
 
 The smoke plan keeps allocation and MPI launch settings but strips application workflow blocks such as setup, scratch staging, resume metadata, artifacts, and burst-buffer directives.
@@ -58,7 +58,7 @@ The smoke plan keeps allocation and MPI launch settings but strips application w
 For distributed GPU or fabric-sensitive services, render a broader smoke probe:
 
 ```bash
-hpc-compose doctor --fabric-smoke -f compose.yaml --service trainer --checks auto --script-out fabric-smoke.sbatch
+hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto --script-out fabric-smoke.sbatch
 ```
 
 `--checks auto` always includes the MPI rank probe, adds NCCL when the selected service requests GPU resources, and collects UCX, OFI, and InfiniBand diagnostics when the corresponding tools are available. Use an explicit list such as `--checks mpi,nccl` when a missing tool should fail the probe instead of being reported as skipped.

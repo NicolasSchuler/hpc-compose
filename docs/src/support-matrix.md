@@ -16,7 +16,7 @@ This page separates what `hpc-compose` can build, what CI currently exercises, a
 | --- | --- | --- |
 | Linux `x86_64` | Full CLI and runtime workflows | Requires Slurm client tools plus at least one supported runtime backend: Pyxis/Enroot, Apptainer, Singularity, or host software modules |
 | Linux `arm64` | Full CLI and runtime workflows | Same cluster requirements as Linux `x86_64` |
-| macOS `x86_64` | Authoring and local non-runtime commands | Suitable for project-local authoring flows such as `new`, `setup`, `context`, `validate`, `inspect`, `render`, and `completions`; not for Slurm/Enroot runtime commands |
+| macOS `x86_64` | Authoring and local non-runtime commands | Suitable for project-local authoring flows such as `new`, `setup`, `context`, `plan`, `validate`, `inspect`, `render`, and `completions`; not for Slurm/Enroot runtime commands |
 | macOS `arm64` | Authoring and local non-runtime commands | Same scope as macOS `x86_64` |
 
 ## CI-tested

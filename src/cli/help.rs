@@ -4,15 +4,21 @@ pub(super) const TOP_LEVEL_HELP: &str = "\
 Normal run:
   hpc-compose up -f compose.yaml
 
-Debugging flow:
-  hpc-compose validate -f compose.yaml
-  hpc-compose inspect --verbose -f compose.yaml
-  hpc-compose preflight -f compose.yaml
-  hpc-compose prepare -f compose.yaml
-  hpc-compose config -f compose.yaml
+Safe plan:
+  hpc-compose plan -f compose.yaml
+
+Debug failed run:
+  hpc-compose debug -f compose.yaml --preflight
 
 Start a new spec:
-  hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml";
+  hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+
+Workflow groups:
+  Start:          new, setup, context
+  Plan/Run:       plan, up, run
+  Observe/Debug:  debug, watch, status, logs, ps, stats, artifacts
+  Maintain:       cache, jobs, clean, down, cancel
+  Advanced:       validate, inspect, config, render, prepare, preflight, doctor, schema, completions";
 
 pub(super) const VALIDATE_HELP: &str = "\
 Examples:
@@ -54,19 +60,20 @@ Examples:
   hpc-compose schema
   hpc-compose schema > hpc-compose.schema.json";
 
+pub(super) const PLAN_HELP: &str = "\
+Examples:
+  hpc-compose plan -f compose.yaml
+  hpc-compose plan --verbose -f compose.yaml
+  hpc-compose plan --show-script -f compose.yaml
+  hpc-compose plan -f compose.yaml --format json";
+
 pub(super) const UP_HELP: &str = "\
 Examples:
   hpc-compose up -f compose.yaml
+  hpc-compose up --detach -f compose.yaml
+  hpc-compose up --detach --format json -f compose.yaml
   hpc-compose up --dry-run -f compose.yaml
-  hpc-compose up --skip-prepare -f compose.yaml";
-
-pub(super) const SUBMIT_HELP: &str = "\
-Examples:
-  hpc-compose submit --watch -f compose.yaml
-  hpc-compose submit --dry-run -f compose.yaml
-  hpc-compose submit --local --dry-run -f compose.yaml
-  hpc-compose submit --skip-prepare -f compose.yaml
-  hpc-compose submit --resume-diff-only -f compose.yaml";
+  hpc-compose up --watch-mode line -f compose.yaml";
 
 pub(super) const STATUS_HELP: &str = "\
 Examples:
@@ -101,7 +108,15 @@ pub(super) const WATCH_HELP: &str = "\
 Examples:
   hpc-compose watch -f compose.yaml
   hpc-compose watch -f compose.yaml --service app
-  hpc-compose watch -f compose.yaml --job-id 12345 --lines 200";
+  hpc-compose watch -f compose.yaml --job-id 12345 --lines 200
+  hpc-compose watch -f compose.yaml --watch-mode line";
+
+pub(super) const DEBUG_HELP: &str = "\
+Examples:
+  hpc-compose debug -f compose.yaml
+  hpc-compose debug -f compose.yaml --preflight
+  hpc-compose debug -f compose.yaml --service app --lines 200
+  hpc-compose debug -f compose.yaml --format json";
 
 pub(super) const CANCEL_HELP: &str = "\
 Examples:
@@ -183,6 +198,8 @@ Examples:
 
 const TOP_LEVEL_EXAMPLES: &[&str] = &[
     "hpc-compose up -f compose.yaml",
+    "hpc-compose plan -f compose.yaml",
+    "hpc-compose debug -f compose.yaml --preflight",
     "hpc-compose validate -f compose.yaml",
     "hpc-compose inspect --verbose -f compose.yaml",
     "hpc-compose config -f compose.yaml",
@@ -229,18 +246,19 @@ const SCHEMA_EXAMPLES: &[&str] = &[
     "hpc-compose schema > hpc-compose.schema.json",
 ];
 
-const UP_EXAMPLES: &[&str] = &[
-    "hpc-compose up -f compose.yaml",
-    "hpc-compose up --dry-run -f compose.yaml",
-    "hpc-compose up --skip-prepare -f compose.yaml",
+const PLAN_EXAMPLES: &[&str] = &[
+    "hpc-compose plan -f compose.yaml",
+    "hpc-compose plan --verbose -f compose.yaml",
+    "hpc-compose plan --show-script -f compose.yaml",
+    "hpc-compose plan -f compose.yaml --format json",
 ];
 
-const SUBMIT_EXAMPLES: &[&str] = &[
-    "hpc-compose submit --watch -f compose.yaml",
-    "hpc-compose submit --dry-run -f compose.yaml",
-    "hpc-compose submit --local --dry-run -f compose.yaml",
-    "hpc-compose submit --skip-prepare -f compose.yaml",
-    "hpc-compose submit --resume-diff-only -f compose.yaml",
+const UP_EXAMPLES: &[&str] = &[
+    "hpc-compose up -f compose.yaml",
+    "hpc-compose up --detach -f compose.yaml",
+    "hpc-compose up --detach --format json -f compose.yaml",
+    "hpc-compose up --dry-run -f compose.yaml",
+    "hpc-compose up --watch-mode line -f compose.yaml",
 ];
 
 const STATUS_EXAMPLES: &[&str] = &[
@@ -276,6 +294,14 @@ const WATCH_EXAMPLES: &[&str] = &[
     "hpc-compose watch -f compose.yaml",
     "hpc-compose watch -f compose.yaml --service app",
     "hpc-compose watch -f compose.yaml --job-id 12345 --lines 200",
+    "hpc-compose watch -f compose.yaml --watch-mode line",
+];
+
+const DEBUG_EXAMPLES: &[&str] = &[
+    "hpc-compose debug -f compose.yaml",
+    "hpc-compose debug -f compose.yaml --preflight",
+    "hpc-compose debug -f compose.yaml --service app --lines 200",
+    "hpc-compose debug -f compose.yaml --format json",
 ];
 
 const CANCEL_EXAMPLES: &[&str] = &[
@@ -356,6 +382,13 @@ const COMPLETIONS_EXAMPLES: &[&str] = &[
     "hpc-compose completions fish > ~/.config/fish/completions/hpc-compose.fish",
 ];
 
+const DOCTOR_EXAMPLES: &[&str] = &[
+    "hpc-compose doctor",
+    "hpc-compose doctor cluster-report",
+    "hpc-compose doctor mpi-smoke -f compose.yaml --service trainer",
+    "hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto",
+];
+
 #[must_use]
 pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
     match path {
@@ -367,14 +400,19 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["inspect"] => INSPECT_EXAMPLES,
         ["config"] => CONFIG_EXAMPLES,
         ["schema"] => SCHEMA_EXAMPLES,
+        ["doctor"] => DOCTOR_EXAMPLES,
+        ["doctor", "cluster-report"] => DOCTOR_EXAMPLES,
+        ["doctor", "mpi-smoke"] => DOCTOR_EXAMPLES,
+        ["doctor", "fabric-smoke"] => DOCTOR_EXAMPLES,
+        ["plan"] => PLAN_EXAMPLES,
         ["up"] => UP_EXAMPLES,
-        ["submit"] => SUBMIT_EXAMPLES,
         ["status"] => STATUS_EXAMPLES,
         ["stats"] => STATS_EXAMPLES,
         ["artifacts"] => ARTIFACTS_EXAMPLES,
         ["logs"] => LOGS_EXAMPLES,
         ["ps"] => PS_EXAMPLES,
         ["watch"] => WATCH_EXAMPLES,
+        ["debug"] => DEBUG_EXAMPLES,
         ["cancel"] => CANCEL_EXAMPLES,
         ["down"] => DOWN_EXAMPLES,
         ["run"] => RUN_EXAMPLES,

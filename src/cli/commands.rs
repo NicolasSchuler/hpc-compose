@@ -4,14 +4,14 @@ use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
 use super::help::*;
-use super::{ColorPolicy, OutputFormat, StatsOutputFormat};
+use super::{ColorPolicy, OutputFormat, StatsOutputFormat, WatchMode};
 
 #[derive(Debug, Parser)]
 #[command(
     author,
     version,
     about = "Compile a compose-like spec into a single Slurm job",
-    long_about = "Compile a compose-like specification into one Slurm batch job that launches one or more services through Pyxis/Enroot, Apptainer, Singularity, or host runtime software inside a single allocation. Use up for the normal run, and use config, validate, inspect, preflight, and prepare when adapting or debugging a spec.",
+    long_about = "Compile a compose-like specification into one Slurm batch job that launches one or more services through Pyxis/Enroot, Apptainer, Singularity, or host runtime software inside a single allocation. Use plan for static authoring, up for the normal run, and debug for one-command triage.",
     after_help = TOP_LEVEL_HELP
 )]
 pub struct Cli {
@@ -50,6 +50,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     #[command(
+        display_order = 400,
         about = "Validate a compose spec without submitting a job",
         long_about = "Parse, normalize, and validate the compose specification without touching cluster state or submitting a Slurm job.",
         after_help = VALIDATE_HELP
@@ -71,6 +72,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 430,
         about = "Render the generated sbatch script",
         long_about = "Render the sbatch script produced from the normalized plan. Use this to inspect generated SBATCH directives, srun invocations, mounts, and environment forwarding without submitting the job.",
         after_help = RENDER_HELP
@@ -94,8 +96,9 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 440,
         about = "Prepare imported and customized runtime images",
-        long_about = "Import base images and build prepared runtime artifacts on the submission host with the selected runtime backend. This is the login-node image preparation phase reused later by submit.",
+        long_about = "Import base images and build prepared runtime artifacts on the submission host with the selected runtime backend. This is the login-node image preparation phase reused later by up and run.",
         after_help = PREPARE_HELP
     )]
     Prepare {
@@ -141,8 +144,9 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 450,
         about = "Check cluster prerequisites on the submission host",
-        long_about = "Check whether the submission host and compose specification satisfy the prerequisites for a later submit. This validates required binaries, cache path safety, local mounts, selected runtime backend availability, Slurm availability, and any discovered cluster profile.",
+        long_about = "Check whether the submission host and compose specification satisfy the prerequisites for a later run. This validates required binaries, cache path safety, local mounts, selected runtime backend availability, Slurm availability, and any discovered cluster profile.",
         after_help = PREFLIGHT_HELP
     )]
     Preflight {
@@ -205,6 +209,7 @@ pub enum Commands {
         singularity_bin: String,
     },
     #[command(
+        display_order = 410,
         about = "Inspect the normalized runtime plan",
         long_about = "Show the normalized runtime plan derived from the compose specification. Use verbose mode when you need cache, mount, or resolved environment details.",
         after_help = INSPECT_HELP
@@ -230,8 +235,9 @@ pub enum Commands {
         json: bool,
     },
     #[command(
+        display_order = 420,
         about = "Render the fully interpolated effective config",
-        long_about = "Print the normalized effective compose config after interpolation, healthcheck normalization, and default application. Use this to inspect what submit and inspect actually receive.",
+        long_about = "Print the normalized effective compose config after interpolation, healthcheck normalization, and default application. Use this to inspect what plan, up, and inspect receive.",
         after_help = CONFIG_HELP
     )]
     Config {
@@ -248,16 +254,19 @@ pub enum Commands {
         variables: bool,
     },
     #[command(
+        display_order = 470,
         about = "Print the hpc-compose JSON Schema",
         long_about = "Print the checked-in JSON Schema for compose authoring tools. Rust validation remains the semantic source of truth.",
         after_help = SCHEMA_HELP
     )]
     Schema,
     #[command(
-        about = "Check cluster readiness and tool availability",
-        long_about = "Run environment diagnostics without requiring a compose file. Checks Slurm, runtime backend tools, GPU, and cache directory availability. Use --cluster-report to write a best-effort .hpc-compose/cluster.toml profile."
+        display_order = 100,
+        about = "Validate and preview a static execution plan",
+        long_about = "Run the safe static authoring path: validate the compose file, build the normalized runtime plan, and optionally print the generated launcher script without touching Slurm, preparing images, or writing script files.",
+        after_help = PLAN_HELP
     )]
-    Doctor {
+    Plan {
         #[arg(
             short = 'f',
             long,
@@ -265,54 +274,102 @@ pub enum Commands {
             help = FILE_ARG_HELP
         )]
         file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Fail when ${VAR:-default} or ${VAR-default} fallbacks are used because VAR is missing"
+        )]
+        strict_env: bool,
+        #[arg(
+            long,
+            help = "Include resolved environment values and final mount mappings"
+        )]
+        verbose: bool,
+        #[arg(long, help = "Show services as a dependency tree")]
+        tree: bool,
+        #[arg(
+            long,
+            help = "Print the rendered launcher script to stdout after the plan"
+        )]
+        show_script: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
-        #[arg(long, help = "Generate a best-effort cluster capability profile")]
+    },
+    #[command(
+        display_order = 460,
+        about = "Check cluster readiness and tool availability",
+        long_about = "Run environment diagnostics without requiring a compose file. Checks Slurm, runtime backend tools, GPU, and cache directory availability. Use the cluster-report, mpi-smoke, and fabric-smoke subcommands for targeted probes."
+    )]
+    Doctor {
+        #[command(subcommand)]
+        command: Option<DoctorCommands>,
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP,
+            hide = true
+        )]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            help = "Generate a best-effort cluster capability profile",
+            hide = true
+        )]
         cluster_report: bool,
         #[arg(
             long = "cluster-report-out",
             value_name = "PATH",
-            help = "Write the cluster profile to this path; use '-' to print TOML"
+            help = "Write the cluster profile to this path; use '-' to print TOML",
+            hide = true
         )]
         cluster_report_out: Option<PathBuf>,
         #[arg(
             long,
-            help = "Render or run an MPI smoke probe for a compose service with x-slurm.mpi"
+            help = "Render or run an MPI smoke probe for a compose service with x-slurm.mpi",
+            hide = true
         )]
         mpi_smoke: bool,
         #[arg(
             long,
-            help = "Render or run MPI and fabric smoke probes for a compose service with x-slurm.mpi"
+            help = "Render or run MPI and fabric smoke probes for a compose service with x-slurm.mpi",
+            hide = true
         )]
         fabric_smoke: bool,
         #[arg(
             long,
             value_name = "CHECKS",
-            help = "Fabric smoke checks: auto, mpi, nccl, ucx, ofi, or a comma-separated list"
+            help = "Fabric smoke checks: auto, mpi, nccl, ucx, ofi, or a comma-separated list",
+            hide = true
         )]
         checks: Option<String>,
         #[arg(
             long,
             value_name = "SERVICE",
-            help = "MPI service to smoke-test; inferred when exactly one MPI service exists"
+            help = "MPI service to smoke-test; inferred when exactly one MPI service exists",
+            hide = true
         )]
         service: Option<String>,
         #[arg(
             long,
-            help = "Submit the MPI smoke probe to Slurm; without this, only render/explain it"
+            help = "Submit the MPI smoke probe to Slurm; without this, only render/explain it",
+            hide = true
         )]
         submit: bool,
         #[arg(
             long,
             value_name = "OUTPUT",
-            help = "Write the rendered MPI smoke batch script to this path"
+            help = "Write the rendered MPI smoke batch script to this path",
+            hide = true
         )]
         script_out: Option<PathBuf>,
         #[arg(
             long,
             value_name = "SECONDS",
             default_value_t = 300,
-            help = "Timeout for a submitted MPI smoke job"
+            help = "Timeout for a submitted MPI smoke job",
+            hide = true
         )]
         timeout_seconds: u64,
         #[arg(
@@ -359,6 +416,7 @@ pub enum Commands {
         singularity_bin: String,
     },
     #[command(
+        display_order = 110,
         about = "Submit, watch, and stream logs in one command",
         long_about = "Run the normal end-to-end workflow: optional preflight, image preparation, script rendering, sbatch submission or local launch, and immediate live watching with log streaming and exit-code propagation.",
         after_help = UP_HELP
@@ -461,125 +519,31 @@ pub enum Commands {
             help = "Run preflight, prepare, and render without calling sbatch"
         )]
         dry_run: bool,
-    },
-    #[command(
-        about = "Submit a job and optionally watch it",
-        long_about = "Run the end-to-end submission flow: optional preflight, image preparation, script rendering, sbatch submission, and optional live watching of tracked state and logs.",
-        after_help = SUBMIT_HELP
-    )]
-    Submit {
-        #[arg(
-            short = 'f',
-            long,
-            value_name = "FILE",
-            help = FILE_ARG_HELP
-        )]
-        file: Option<PathBuf>,
+        #[arg(long, help = "Submit or launch and return without watching logs")]
+        detach: bool,
         #[arg(
             long,
-            value_name = "OUTPUT",
-            help = "Write the rendered launcher script to this path before submission or local launch"
+            value_enum,
+            value_name = "MODE",
+            default_value = "auto",
+            help = "Watch output mode"
         )]
-        script_out: Option<PathBuf>,
+        watch_mode: WatchMode,
         #[arg(
             long,
-            value_name = "PATH",
-            default_value = "sbatch",
-            help = "Path to the sbatch executable"
+            help = "Use line-oriented watch output instead of the terminal UI"
         )]
-        sbatch_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "srun",
-            help = "Path to the srun executable"
-        )]
-        srun_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "enroot",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "squeue",
-            help = "Path to the squeue executable"
-        )]
-        squeue_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "sacct",
-            help = "Path to the sacct executable"
-        )]
-        sacct_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(
-            long,
-            help = "Refresh imported and prepared artifacts before submission"
-        )]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before submission")]
-        no_preflight: bool,
-        #[arg(
-            long,
-            help = "Poll tracked state and stream logs after submission or local launch"
-        )]
-        watch: bool,
-        #[arg(
-            long,
-            help = "Launch the plan locally with Enroot instead of submitting it to Slurm",
-            conflicts_with_all = ["sbatch_bin", "srun_bin", "squeue_bin", "sacct_bin"]
-        )]
-        local: bool,
-        #[arg(
-            long,
-            help = "Allow submission even when resume config drift is detected"
-        )]
-        allow_resume_changes: bool,
-        #[arg(
-            long,
-            help = "Print the resume config diff and exit without preparing or submitting"
-        )]
-        resume_diff_only: bool,
-        #[arg(
-            long,
-            help = "Run preflight, prepare, and render without calling sbatch"
-        )]
-        dry_run: bool,
+        no_tui: bool,
         #[arg(
             long,
             value_enum,
             value_name = "FORMAT",
-            help = "Output format for non-watch submits",
-            conflicts_with = "watch"
+            help = "Output format for --detach or --dry-run"
         )]
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 220,
         about = "Show tracked scheduler state and log locations",
         long_about = "Read tracked submission metadata and query the scheduler to show current batch state, runtime paths, log locations, and placement details.",
         after_help = STATUS_HELP
@@ -618,6 +582,7 @@ pub enum Commands {
         sacct_bin: String,
     },
     #[command(
+        display_order = 250,
         about = "Show tracked runtime metrics and step stats",
         long_about = "Read tracked metrics and Slurm step statistics for a submitted job. Prefer machine-readable formats when integrating with dashboards or experiment tooling.",
         after_help = STATS_HELP
@@ -663,6 +628,7 @@ pub enum Commands {
         sacct_bin: String,
     },
     #[command(
+        display_order = 260,
         about = "Export tracked artifact bundles after a run",
         long_about = "Export tracked artifact bundles collected under the tracked job directory into the configured export directory.",
         after_help = ARTIFACTS_HELP
@@ -695,8 +661,9 @@ pub enum Commands {
         tarball: bool,
     },
     #[command(
+        display_order = 230,
         about = "Print tracked service logs",
-        long_about = "Print tracked service logs from a previous submit. Follow mode tails appended log data as it appears.",
+        long_about = "Print tracked service logs from a previous run. Follow mode tails appended log data as it appears.",
         after_help = LOGS_HELP
     )]
     Logs {
@@ -730,6 +697,7 @@ pub enum Commands {
         lines: usize,
     },
     #[command(
+        display_order = 240,
         about = "Show tracked per-service runtime state",
         long_about = "Read tracked runtime state, log metadata, and scheduler state for each service in a submitted job. This is the compose-style per-service process view.",
         after_help = PS_HELP
@@ -766,6 +734,7 @@ pub enum Commands {
         sacct_bin: String,
     },
     #[command(
+        display_order = 210,
         about = "Watch a tracked job in a live terminal UI",
         long_about = "Open a live watch view for a tracked job. On TTYs this uses the alternate-screen watch UI; otherwise it falls back to line-oriented scheduler and log streaming.",
         after_help = WATCH_HELP
@@ -811,8 +780,116 @@ pub enum Commands {
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "MODE",
+            default_value = "auto",
+            help = "Watch output mode"
+        )]
+        watch_mode: WatchMode,
+        #[arg(
+            long,
+            help = "Use line-oriented watch output instead of the terminal UI"
+        )]
+        no_tui: bool,
     },
     #[command(
+        display_order = 200,
+        about = "Diagnose the latest tracked run",
+        long_about = "Collect tracked scheduler state, service state, batch and service log tails, and a recommended next command. Add --preflight to rerun cluster prerequisite checks.",
+        after_help = DEBUG_HELP
+    )]
+    Debug {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to diagnose instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "SERVICE",
+            help = "Service whose log tail should be emphasized"
+        )]
+        service: Option<String>,
+        #[arg(
+            long,
+            value_name = "LINES",
+            default_value_t = 100,
+            help = "Number of trailing log lines to include"
+        )]
+        lines: usize,
+        #[arg(long, help = "Rerun preflight and include its findings")]
+        preflight: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scontrol",
+            help = "Path to the scontrol executable"
+        )]
+        scontrol_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+    },
+    #[command(
+        display_order = 340,
         about = "Cancel a tracked Slurm job",
         long_about = "Cancel a tracked Slurm job by explicit job id or by the latest submission recorded for the compose file.",
         after_help = CANCEL_HELP
@@ -844,6 +921,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 330,
         about = "Cancel a tracked job and clean tracked state",
         long_about = "Cancel a tracked Slurm job by compose context or job id, remove tracked metadata and runtime state for that job, and optionally purge its tracked cached image artifacts.",
         after_help = DOWN_HELP
@@ -875,6 +953,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 120,
         about = "Run a one-off command in one service environment",
         long_about = "Submit a fresh one-off job using one service's image, environment, mounts, working directory, and prepare rules, then stream logs and propagate the final exit state.",
         after_help = RUN_HELP
@@ -969,6 +1048,7 @@ pub enum Commands {
         no_preflight: bool,
     },
     #[command(
+        display_order = 10,
         about = "Write a starter compose file from a built-in template",
         long_about = "Write a starter compose specification from a built-in template, or list and describe the available templates without writing a file. Writing a template requires an explicit shared cache directory.",
         after_help = NEW_HELP,
@@ -1020,6 +1100,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 300,
         about = "Inspect and prune cached image artifacts",
         long_about = "Inspect reusable imported and prepared image artifacts stored under the cache directory, or prune entries that are no longer needed.",
         after_help = CACHE_HELP
@@ -1029,6 +1110,7 @@ pub enum Commands {
         command: CacheCommands,
     },
     #[command(
+        display_order = 310,
         about = "List tracked jobs under the current repo tree",
         long_about = "Scan the current repository tree for tracked hpc-compose submissions and list the recorded jobs without querying the scheduler.",
         after_help = JOBS_HELP
@@ -1038,6 +1120,7 @@ pub enum Commands {
         command: JobsCommands,
     },
     #[command(
+        display_order = 320,
         about = "Remove old tracked job directories",
         long_about = "Preview or remove tracked job metadata and runtime directories for the active compose context while keeping recent tracking data available.",
         after_help = CLEAN_HELP
@@ -1077,6 +1160,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 30,
         about = "Print resolved project-local settings context",
         long_about = "Print the effective project-local settings, selected profile, binaries, interpolation variables, and derived runtime paths for the active invocation context.",
         after_help = CONTEXT_HELP
@@ -1086,6 +1170,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 20,
         about = "Create or update the project-local settings file",
         long_about = "Create or update .hpc-compose/settings.toml with profile defaults, environment files, explicit environment variables, and binary overrides.",
         after_help = SETUP_HELP
@@ -1132,6 +1217,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 480,
         about = "Generate shell completions",
         long_about = "Generate shell completion scripts for the supported shells.",
         after_help = COMPLETIONS_HELP
@@ -1143,6 +1229,89 @@ pub enum Commands {
             help = "Shell to generate completions for"
         )]
         shell: Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DoctorCommands {
+    #[command(about = "Generate a best-effort cluster capability profile")]
+    ClusterReport {
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long = "out",
+            value_name = "PATH",
+            help = "Write the cluster profile to this path; use '-' to print TOML"
+        )]
+        out: Option<PathBuf>,
+    },
+    #[command(about = "Render or run an MPI smoke probe for one service")]
+    MpiSmoke {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "SERVICE",
+            help = "MPI service to smoke-test; inferred when exactly one MPI service exists"
+        )]
+        service: Option<String>,
+        #[arg(
+            long,
+            help = "Submit the MPI smoke probe to Slurm; without this, only render/explain it"
+        )]
+        submit: bool,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered MPI smoke batch script to this path"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 300,
+            help = "Timeout for a submitted MPI smoke job"
+        )]
+        timeout_seconds: u64,
+    },
+    #[command(about = "Render or run MPI and fabric smoke probes for one service")]
+    FabricSmoke {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "SERVICE",
+            help = "MPI service to smoke-test; inferred when exactly one MPI service exists"
+        )]
+        service: Option<String>,
+        #[arg(
+            long,
+            value_name = "CHECKS",
+            help = "Fabric smoke checks: auto, mpi, nccl, ucx, ofi, or a comma-separated list"
+        )]
+        checks: Option<String>,
+        #[arg(
+            long,
+            help = "Submit the fabric smoke probe to Slurm; without this, only render/explain it"
+        )]
+        submit: bool,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered fabric smoke batch script to this path"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 300,
+            help = "Timeout for a submitted fabric smoke job"
+        )]
+        timeout_seconds: u64,
     },
 }
 

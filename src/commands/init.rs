@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -63,9 +63,19 @@ pub(crate) fn new_command(
         }
         return Ok(());
     }
+    let non_interactive_no_args =
+        template.is_none() && name.is_none() && cache_dir.is_none() && !io::stdin().is_terminal();
     let prompt_cache_dir = cache_dir.clone();
     let answers = output_init::resolve_init_answers(template, name, cache_dir, || {
         prompt_for_init_with_cache_dir_default(prompt_cache_dir.as_deref())
+    })
+    .or_else(|err| {
+        if non_interactive_no_args && err.to_string().contains("Cache dir cannot be empty") {
+            bail!(
+                "hpc-compose new needs --template and --cache-dir in non-interactive terminals; run `hpc-compose new --list-templates` or `hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml`"
+            );
+        }
+        Err(err)
     })?;
     let rendered = render_template(
         &answers.template_name,

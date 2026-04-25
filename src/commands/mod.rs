@@ -4,7 +4,9 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use hpc_compose::cli::{CacheCommands, Cli, Commands, JobsCommands};
+use hpc_compose::cli::{
+    CacheCommands, Cli, Commands, DoctorCommands, JobsCommands, OutputFormat, WatchMode,
+};
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
 };
@@ -135,7 +137,19 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             spec::config(context, format, variables)
         }
         Commands::Schema => print_schema(),
+        Commands::Plan {
+            file,
+            strict_env,
+            verbose,
+            tree,
+            show_script,
+            format,
+        } => {
+            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            spec::plan(context, strict_env, verbose, tree, show_script, format)
+        }
         Commands::Doctor {
+            command,
             file,
             format,
             cluster_report,
@@ -165,6 +179,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--singularity-bin", &singularity_bin),
                 ],
             );
+            if let Some(command) = command {
+                return run_doctor_subcommand(command, options, binary_overrides, format);
+            }
             if mpi_smoke && fabric_smoke {
                 bail!("doctor --mpi-smoke cannot be combined with --fabric-smoke");
             }
@@ -230,7 +247,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             allow_resume_changes,
             resume_diff_only,
             dry_run,
+            detach,
+            watch_mode,
+            no_tui,
+            format,
         } => {
+            if format.is_some() && !detach && !dry_run {
+                bail!("up --format requires --detach or --dry-run");
+            }
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
@@ -244,6 +268,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
+            let watch_mode = resolve_watch_mode(watch_mode, no_tui)?;
             runtime::up(
                 context,
                 script_out,
@@ -255,55 +280,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 allow_resume_changes,
                 resume_diff_only,
                 dry_run,
-                options.quiet,
-            )
-        }
-        Commands::Submit {
-            file,
-            script_out,
-            sbatch_bin,
-            srun_bin,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
-            squeue_bin,
-            sacct_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
-            watch,
-            local,
-            allow_resume_changes,
-            resume_diff_only,
-            dry_run,
-            format,
-        } => {
-            let binary_overrides = resolve_binary_overrides(
-                options,
-                &[
-                    ("--enroot-bin", &enroot_bin),
-                    ("--sbatch-bin", &sbatch_bin),
-                    ("--srun-bin", &srun_bin),
-                    ("--squeue-bin", &squeue_bin),
-                    ("--sacct-bin", &sacct_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
-                ],
-            );
-            let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::submit(
-                context,
-                script_out,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
-                watch,
-                local,
-                allow_resume_changes,
-                resume_diff_only,
-                dry_run,
+                detach,
+                watch_mode,
                 format,
                 options.quiet,
             )
@@ -385,13 +363,56 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             lines,
             squeue_bin,
             sacct_bin,
+            watch_mode,
+            no_tui,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::watch(context, job_id, service, lines)
+            let watch_mode = resolve_watch_mode(watch_mode, no_tui)?;
+            runtime::watch(context, job_id, service, lines, watch_mode)
+        }
+        Commands::Debug {
+            file,
+            job_id,
+            service,
+            lines,
+            preflight,
+            format,
+            squeue_bin,
+            sacct_bin,
+            enroot_bin,
+            sbatch_bin,
+            srun_bin,
+            scontrol_bin,
+            apptainer_bin,
+            singularity_bin,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                    ("--scontrol-bin", &scontrol_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::debug(
+                context,
+                job_id,
+                service,
+                lines,
+                preflight,
+                format,
+                options.quiet,
+            )
         }
         Commands::Cancel {
             file,
@@ -560,6 +581,78 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
         ),
         Commands::Completions { shell } => init::completions(shell),
+    }
+}
+
+fn resolve_watch_mode(watch_mode: WatchMode, no_tui: bool) -> Result<WatchMode> {
+    if no_tui {
+        if watch_mode != WatchMode::Auto {
+            bail!("--no-tui cannot be combined with --watch-mode");
+        }
+        Ok(WatchMode::Line)
+    } else {
+        Ok(watch_mode)
+    }
+}
+
+fn run_doctor_subcommand(
+    command: DoctorCommands,
+    options: &GlobalCommandOptions,
+    binary_overrides: BinaryOverrides,
+    parent_format: Option<OutputFormat>,
+) -> Result<()> {
+    match command {
+        DoctorCommands::ClusterReport { format, out } => {
+            let binaries = resolve_command_binaries(options, binary_overrides)?;
+            doctor::doctor(
+                Some(format.or(parent_format).unwrap_or(OutputFormat::Text)),
+                &binaries,
+                true,
+                out,
+            )
+        }
+        DoctorCommands::MpiSmoke {
+            file,
+            format,
+            service,
+            submit,
+            script_out,
+            timeout_seconds,
+        } => {
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            doctor::doctor_mpi_smoke(
+                context,
+                format.or(parent_format),
+                service,
+                submit,
+                script_out,
+                timeout_seconds,
+                options.quiet,
+            )
+        }
+        DoctorCommands::FabricSmoke {
+            file,
+            format,
+            service,
+            checks,
+            submit,
+            script_out,
+            timeout_seconds,
+        } => {
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            doctor::doctor_fabric_smoke(
+                context,
+                doctor::FabricSmokeOptions {
+                    format: format.or(parent_format),
+                    service_name: service,
+                    checks,
+                    submit,
+                    script_out,
+                    timeout_seconds,
+                    quiet: options.quiet,
+                },
+            )
+        }
     }
 }
 
