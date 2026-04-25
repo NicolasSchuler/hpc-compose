@@ -65,6 +65,7 @@ jobs:
           shopt -s globstar nullglob
           lychee --no-progress \
             --fallback-extensions md \
+            --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' \
             --exclude-path 'target/mdbook/404\.html$' \
             README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md docs/src/**/*.md target/mdbook/**/*.html
 

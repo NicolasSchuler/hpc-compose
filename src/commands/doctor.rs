@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -1338,18 +1338,7 @@ fn run_sbatch_wait(
     script_path: &Path,
     timeout: Duration,
 ) -> Result<MpiSmokeSubmitResult> {
-    let mut child = Command::new(sbatch_bin)
-        .arg("--wait")
-        .arg(script_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to run '{sbatch_bin} --wait {}'",
-                script_path.display()
-            )
-        })?;
+    let mut child = spawn_sbatch_wait(sbatch_bin, script_path)?;
     let start = Instant::now();
     loop {
         if child.try_wait()?.is_some() {
@@ -1379,6 +1368,32 @@ fn run_sbatch_wait(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn spawn_sbatch_wait(sbatch_bin: &str, script_path: &Path) -> Result<Child> {
+    for attempt in 0..5 {
+        match Command::new(sbatch_bin)
+            .arg("--wait")
+            .arg(script_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(err) if err.raw_os_error() == Some(26) && attempt < 4 => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to run '{sbatch_bin} --wait {}'",
+                        script_path.display()
+                    )
+                });
+            }
+        }
+    }
+    unreachable!("spawn loop returns on success or final error")
 }
 
 fn read_smoke_service_log(

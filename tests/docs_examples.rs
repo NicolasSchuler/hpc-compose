@@ -121,3 +121,14 @@ fn support_matrix_reflects_ci_tested_platforms() {
         );
     }
 }
+
+#[test]
+fn ci_docs_link_check_excludes_generated_edit_urls() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    assert!(
+        workflow
+            .contains("--exclude '^https://github\\.com/NicolasSchuler/hpc-compose/edit/main/'"),
+        "lychee should ignore mdBook edit links because GitHub can transiently reject them"
+    );
+}
