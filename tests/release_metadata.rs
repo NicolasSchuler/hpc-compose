@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use toml::Value;
 
@@ -26,6 +26,28 @@ fn cargo_package_string(key: &str) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("Cargo package {key} should be a string"))
         .to_string()
+}
+
+fn workflow_files() -> Vec<PathBuf> {
+    let mut files = fs::read_dir(repo_root().join(".github/workflows"))
+        .expect("read workflows directory")
+        .map(|entry| entry.expect("workflow entry").path())
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("yml" | "yaml")
+            )
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+fn is_sha_pinned_action_reference(reference: &str) -> bool {
+    let Some((_, revision)) = reference.rsplit_once('@') else {
+        return false;
+    };
+    revision.len() == 40 && revision.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn has_deb_asset(assets: &[Value], source: &str, dest: &str, mode: &str) -> bool {
@@ -242,4 +264,88 @@ fn release_template_mentions_verification_commands() {
         template.contains("SHA256SUMS"),
         "release template should mention the aggregate checksum manifest"
     );
+}
+
+#[test]
+fn workflow_action_references_are_sha_pinned() {
+    for path in workflow_files() {
+        let workflow = fs::read_to_string(&path).expect("read workflow");
+        for (line_index, line) in workflow.lines().enumerate() {
+            let trimmed = line.trim();
+            if let Some(reference) = trimmed.strip_prefix("uses: ") {
+                assert!(
+                    is_sha_pinned_action_reference(reference),
+                    "{}:{} should pin GitHub Actions by full commit SHA, found '{}'",
+                    path.display(),
+                    line_index + 1,
+                    reference
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ci_docs_qa_tools_are_version_pinned() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    assert!(
+        workflow.contains("LYCHEE_VERSION: \"0.23.0\"")
+            && workflow.contains("cargo install lychee --locked --version"),
+        "CI should pin lychee so docs link checks remain reproducible"
+    );
+    assert!(
+        workflow.contains("PA11Y_CI_VERSION: \"4.0.1\"")
+            && workflow.contains("pa11y-ci@${PA11Y_CI_VERSION}"),
+        "CI should pin pa11y-ci so accessibility checks remain reproducible"
+    );
+}
+
+#[test]
+fn ci_runs_actionlint_and_uses_explicit_rust_cache_keys() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    assert!(
+        workflow.contains("ACTIONLINT_VERSION: \"1.7.12\"")
+            && workflow.contains("workflow-lint:")
+            && workflow.contains("sha256sum -c -")
+            && workflow.contains("actionlint -color"),
+        "CI should install verified actionlint and lint GitHub workflows"
+    );
+
+    let setup_count = workflow
+        .matches("actions-rust-lang/setup-rust-toolchain@")
+        .count();
+    let cache_key_count = workflow.matches("cache-key: ${{ github.job }}").count();
+    assert!(
+        setup_count > 0,
+        "CI should use actions-rust-lang/setup-rust-toolchain"
+    );
+    assert_eq!(
+        cache_key_count, setup_count,
+        "every Rust toolchain setup step in CI should define an explicit cache key"
+    );
+}
+
+#[test]
+fn justfile_exposes_bootstrap_and_workflow_lint_recipes() {
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("read justfile");
+    for expected in [
+        "MDBOOK_VERSION := \"0.5.2\"",
+        "LYCHEE_VERSION := \"0.23.0\"",
+        "PA11Y_CI_VERSION := \"4.0.1\"",
+        "ACTIONLINT_VERSION := \"1.7.12\"",
+        "bootstrap-docs-tools:",
+        "cargo install mdbook --locked --version",
+        "cargo install lychee --locked --version",
+        "pa11y-ci@{{PA11Y_CI_VERSION}}",
+        "workflow-check:",
+        "actionlint -color",
+        "check: workflow-check",
+    ] {
+        assert!(
+            justfile.contains(expected),
+            "justfile should contain local QA tooling detail '{expected}'"
+        );
+    }
 }

@@ -9,6 +9,8 @@ This page maps the public `hpc-compose` CLI by workflow. Use [Quickstart](quicks
 | `--profile <NAME>` | Select a profile from the project-local settings file | Applies to every command. |
 | `--settings-file <PATH>` | Use an explicit settings file | Bypasses upward discovery of `.hpc-compose/settings.toml`. |
 | `-f`, `--file <FILE>` | Select the compose file on compose-aware commands | When omitted, `hpc-compose` uses the active context compose file or falls back to `compose.yaml`. |
+| `--color auto|always|never` | Control ANSI color output | Use `--color never` for logs, CI captures, or assistive tooling that should receive plain text. |
+| `--quiet` | Suppress non-essential progress labels | Useful when a wrapper only needs command output and errors. |
 | `--format json` | Machine-readable output | Preferred on non-streaming commands. `--json` remains available only as a compatibility alias on older machine-readable commands. |
 
 ## Authoring and Setup
@@ -104,6 +106,18 @@ Current constraints:
 `up --local` follows the tracked local launch immediately, just like `up` does for a submitted job. Add `--detach` when you want to launch and return.
 
 In local mode the batch script also exports `HPC_COMPOSE_BACKEND_OVERRIDE=local`, `HPC_COMPOSE_LOCAL_ENROOT_BIN` pointing to the resolved `enroot` binary, and `HPC_COMPOSE_LOCAL_BIN_DIR` containing a generated `srun` shim. These variables are internal to `hpc-compose` and not intended for direct use in compose specs.
+
+## Accessible and Automation-Friendly Output
+
+Use plain or structured output when terminal styling, progress labels, or alternate-screen interfaces make automation or assistive tooling harder:
+
+```bash
+hpc-compose --color never plan -f compose.yaml
+hpc-compose --quiet validate -f compose.yaml
+hpc-compose watch -f compose.yaml --watch-mode line
+hpc-compose logs -f compose.yaml --service app --follow
+hpc-compose status -f compose.yaml --format json
+```
 
 ## Tracked Runtime
 

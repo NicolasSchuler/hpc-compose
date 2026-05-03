@@ -28,6 +28,23 @@ hpc-compose stats -f compose.yaml
 
 Use `--format json` on non-streaming commands when automation needs stable fields. `stats` also supports `--format csv` and `--format jsonl`.
 
+## Watch UI
+
+On an interactive terminal, `watch` and the default `up` follow mode open a live view with service state on the left and the selected service log on the right. The UI automatically switches to a compact single-column view on narrow or short terminals.
+
+Keybindings:
+
+| Key | Action |
+| --- | --- |
+| `j`, `Down`, `Tab` | Move to the next service. |
+| `k`, `Up` | Move to the previous service. |
+| `g` / `G` | Jump to the first or last service. |
+| `/` | Filter services by name; press `Enter` to apply or `Esc` to cancel. |
+| `?` | Toggle in-UI help. |
+| `q` | Leave the watch view without cancelling the job. |
+
+Use `--watch-mode line` or `--no-tui` when you are recording output, using a screen reader, running in CI, or working in a terminal where alternate-screen UIs are inconvenient.
+
 ## Logs
 
 Runtime logs live under:

@@ -330,10 +330,14 @@ pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: 
 }
 
 pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize) -> String {
-    let width = width.max(80);
-    let height = height.max(12);
+    let width = width.max(1);
+    let height = height.max(1);
     let effective = filtered_services(&model.snapshot.services, model.filter.as_deref());
     let selected = effective.get(model.selected_index);
+    if width < 80 || height < 12 {
+        return render_compact_watch_frame(model, &effective, selected.copied(), width, height);
+    }
+
     let scheduler = format!(
         "{} ({})",
         term::styled_scheduler_state(&model.snapshot.scheduler.state),
@@ -387,10 +391,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     let mut search_lines = Vec::new();
     if model.input_mode == InputMode::Search {
         search_lines.push("-".repeat(width));
-        search_lines.push(fit_line(
-            &format!("{}: {}", term::styled_bold("filter"), model.search_buffer),
-            width,
-        ));
+        search_lines.push(fit_line(&format!("filter: {}", model.search_buffer), width));
     }
 
     let mut help_lines = Vec::new();
@@ -478,11 +479,12 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     }
 
     let row_count = body_height;
+    let separator = pane_separator();
     for row in 0..row_count {
         let left = table_lines.get(row).map(String::as_str).unwrap_or("");
         let right = log_lines.get(row).map(String::as_str).unwrap_or("");
         lines.push(format!(
-            "{} │ {}",
+            "{} {separator} {}",
             pad_line(left, table_width),
             pad_line(right, log_width)
         ));
@@ -493,6 +495,111 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     lines.extend(footer_lines);
 
     lines.join("\n")
+}
+
+fn render_compact_watch_frame(
+    model: &WatchModel,
+    effective: &[&PsServiceRow],
+    selected: Option<&PsServiceRow>,
+    width: usize,
+    height: usize,
+) -> String {
+    let scheduler = format!(
+        "{} ({})",
+        term::styled_scheduler_state(&model.snapshot.scheduler.state),
+        hpc_compose::job::scheduler_source_label(model.snapshot.scheduler.source)
+    );
+    let selected_name = selected
+        .map(|service| service.service_name.as_str())
+        .unwrap_or("<none>");
+    let mut lines = Vec::new();
+
+    push_fit_line(
+        &mut lines,
+        width,
+        height,
+        &format!(
+            "{} | job {}",
+            term::styled_bold("hpc-compose watch"),
+            model.snapshot.record.job_id
+        ),
+    );
+    push_fit_line(
+        &mut lines,
+        width,
+        height,
+        &format!(
+            "scheduler: {} | services: {} | selected: {}",
+            scheduler,
+            effective.len(),
+            selected_name
+        ),
+    );
+    if let Some(progress) = &model.walltime_progress {
+        push_fit_line(
+            &mut lines,
+            width,
+            height,
+            &render_walltime_bar(progress, width),
+        );
+    }
+    if let Some(filter) = model.filter.as_deref() {
+        push_fit_line(&mut lines, width, height, &format!("filter: {filter}"));
+    }
+    if model.input_mode == InputMode::Search {
+        push_fit_line(
+            &mut lines,
+            width,
+            height,
+            &format!("filter input: {}", model.search_buffer),
+        );
+    }
+    if model.show_help {
+        push_fit_line(&mut lines, width, height, "? help | / filter | q quit");
+    }
+
+    push_fit_line(&mut lines, width, height, "services:");
+    for (index, service) in effective.iter().enumerate() {
+        let marker = if index == model.selected_index {
+            ">"
+        } else {
+            " "
+        };
+        let status = service.status.as_deref().unwrap_or("unknown");
+        let ready = service.healthy.map(yes_no_short).unwrap_or("-");
+        push_fit_line(
+            &mut lines,
+            width,
+            height,
+            &format!(
+                "{marker} {} {} ready={ready}",
+                service.service_name,
+                term::styled_service_status(status)
+            ),
+        );
+    }
+
+    push_fit_line(&mut lines, width, height, &format!("logs: {selected_name}"));
+    for line in &model.log_lines {
+        push_fit_line(&mut lines, width, height, line);
+    }
+    push_fit_line(&mut lines, width, height, "q quit  ? help  / filter");
+
+    lines.join("\n")
+}
+
+fn push_fit_line(lines: &mut Vec<String>, width: usize, height: usize, value: &str) {
+    if lines.len() < height {
+        lines.push(fit_line(value, width));
+    }
+}
+
+fn pane_separator() -> &'static str {
+    if term::unicode_allowed_raw() {
+        "\u{2502}"
+    } else {
+        "|"
+    }
 }
 
 fn render_model(model: &WatchModel, (width, height): (usize, usize)) -> Result<()> {
@@ -1133,6 +1240,35 @@ mod tests {
     }
 
     #[test]
+    fn render_watch_frame_normal_snapshot_stays_stable() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: vec!["booting".into(), "ready".into()],
+                show_help: false,
+                filter: None,
+                search_buffer: String::new(),
+                input_mode: InputMode::Normal,
+            },
+            100,
+            18,
+        );
+        let lines = canonical_frame_lines(&frame);
+
+        assert_snapshot_line(&lines, 0, "hpc-compose watch | job 12345");
+        assert_snapshot_line(
+            &lines,
+            1,
+            "scheduler: RUNNING (squeue) | services: 2 | selected: api",
+        );
+        assert!(lines[4].contains("api"));
+        assert!(lines[4].contains("booting"));
+        assert!(lines.last().unwrap_or(&String::new()).contains("q quit"));
+    }
+
+    #[test]
     fn env_and_terminal_helpers_cover_force_and_fallback_paths() {
         assert!(force_watch_ui_from_value(Some(OsStr::new("1"))));
         assert!(!force_watch_ui_from_value(Some(OsStr::new("0"))));
@@ -1199,6 +1335,41 @@ mod tests {
         let padded = pad_line("\x1b[32mabc\x1b[39m", 5);
         assert_eq!(visible_width(&padded), 5);
         assert!(padded.ends_with("  "));
+    }
+
+    fn strip_ansi_for_snapshot(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut out = String::new();
+        let mut index = 0;
+        while index < value.len() {
+            if let Some(len) = ansi_escape_len(bytes, index) {
+                index += len;
+                continue;
+            }
+            let ch = value[index..]
+                .chars()
+                .next()
+                .expect("strip_ansi_for_snapshot walked a valid UTF-8 boundary");
+            out.push(ch);
+            index += ch.len_utf8();
+        }
+        out
+    }
+
+    fn canonical_frame_lines(frame: &str) -> Vec<String> {
+        strip_ansi_for_snapshot(frame)
+            .replace('\u{2502}', "|")
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .collect()
+    }
+
+    fn assert_snapshot_line(lines: &[String], index: usize, expected: &str) {
+        assert_eq!(
+            lines.get(index).map(String::as_str),
+            Some(expected),
+            "unexpected snapshot line {index}"
+        );
     }
 
     #[test]
@@ -1496,6 +1667,34 @@ exit 0
     }
 
     #[test]
+    fn render_watch_frame_help_snapshot_stays_stable() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: Vec::new(),
+                show_help: true,
+                filter: None,
+                search_buffer: String::new(),
+                input_mode: InputMode::Normal,
+            },
+            100,
+            22,
+        );
+        let lines = canonical_frame_lines(&frame);
+
+        assert!(lines.iter().any(|line| line == "Keybindings:"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "  /           filter services")
+        );
+        assert!(lines.iter().any(|line| line == "  q           quit"));
+        assert!(lines.last().unwrap_or(&String::new()).contains("q quit"));
+    }
+
+    #[test]
     fn render_watch_frame_shows_filter_indicator() {
         let frame = render_watch_frame(
             &WatchModel {
@@ -1512,6 +1711,34 @@ exit 0
             14,
         );
         assert!(frame.contains("filter: api"));
+    }
+
+    #[test]
+    fn render_watch_frame_filtered_snapshot_stays_stable() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: Vec::new(),
+                show_help: false,
+                filter: Some("api".into()),
+                search_buffer: String::new(),
+                input_mode: InputMode::Normal,
+            },
+            100,
+            14,
+        );
+        let lines = canonical_frame_lines(&frame);
+
+        assert_snapshot_line(&lines, 0, "hpc-compose watch | job 12345 | filter: api");
+        assert_snapshot_line(
+            &lines,
+            1,
+            "scheduler: RUNNING (squeue) | services: 1 | selected: api",
+        );
+        assert!(lines.iter().any(|line| line.contains("> api")));
+        assert!(!lines.iter().any(|line| line.contains("worker")));
     }
 
     #[test]
@@ -1551,6 +1778,87 @@ exit 0
         assert!(help_frame.contains("Keybindings:"));
         assert!(help_frame.lines().last().unwrap_or("").contains("q quit"));
         assert!(help_frame.lines().count() <= 12);
+    }
+
+    #[test]
+    fn render_watch_frame_respects_narrow_terminal_dimensions() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: Some(WalltimeProgress {
+                    original: "00:10:00".into(),
+                    elapsed_seconds: 300,
+                    total_seconds: 600,
+                    remaining_seconds: 300,
+                }),
+                log_lines: vec![
+                    "a deliberately long log line that must not wrap the terminal".into(),
+                    "ready".into(),
+                ],
+                show_help: true,
+                filter: Some("api".into()),
+                search_buffer: "api".into(),
+                input_mode: InputMode::Search,
+            },
+            48,
+            9,
+        );
+
+        let lines = frame.lines().collect::<Vec<_>>();
+        assert!(lines.len() <= 9);
+        assert!(lines.iter().all(|line| visible_width(line) <= 48));
+        assert!(frame.contains("hpc-compose watch"));
+        assert!(frame.contains("scheduler:"));
+    }
+
+    #[test]
+    fn render_watch_frame_compact_snapshot_stays_stable() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: vec!["tail".into()],
+                show_help: true,
+                filter: Some("api".into()),
+                search_buffer: "api".into(),
+                input_mode: InputMode::Search,
+            },
+            48,
+            9,
+        );
+        let lines = canonical_frame_lines(&frame);
+
+        assert_snapshot_line(&lines, 0, "hpc-compose watch | job 12345");
+        assert_snapshot_line(&lines, 2, "filter: api");
+        assert_snapshot_line(&lines, 3, "filter input: api");
+        assert_snapshot_line(&lines, 4, "? help | / filter | q quit");
+        assert_snapshot_line(&lines, 6, "> api ready ready=yes");
+        assert_eq!(lines.len(), 9);
+    }
+
+    #[test]
+    fn render_watch_frame_handles_tiny_terminal_without_overflow() {
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: vec!["tail".into()],
+                show_help: false,
+                filter: None,
+                search_buffer: String::new(),
+                input_mode: InputMode::Normal,
+            },
+            12,
+            3,
+        );
+
+        let lines = frame.lines().collect::<Vec<_>>();
+        assert!(lines.len() <= 3);
+        assert!(lines.iter().all(|line| visible_width(line) <= 12));
+        assert!(frame.contains("hpc-compose"));
     }
 
     #[test]

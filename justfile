@@ -1,5 +1,10 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+MDBOOK_VERSION := "0.5.2"
+LYCHEE_VERSION := "0.23.0"
+PA11Y_CI_VERSION := "4.0.1"
+ACTIONLINT_VERSION := "1.7.12"
+
 _require-tools *tools:
     @missing=0; for tool in {{tools}}; do if ! command -v "$tool" >/dev/null 2>&1; then echo "missing required tool: $tool" >&2; missing=1; fi; done; exit "$missing"
 
@@ -7,7 +12,15 @@ _require-cargo-subcommands:
     @cargo deny --version >/dev/null 2>&1 || { echo "missing required cargo subcommand: cargo-deny" >&2; exit 1; }
     @cargo llvm-cov --version >/dev/null 2>&1 || { echo "missing required cargo subcommand: cargo-llvm-cov" >&2; exit 1; }
 
-check:
+bootstrap-docs-tools: (_require-tools "cargo" "npm")
+    cargo install mdbook --locked --version "{{MDBOOK_VERSION}}"
+    cargo install lychee --locked --version "{{LYCHEE_VERSION}}"
+    npm install --global "pa11y-ci@{{PA11Y_CI_VERSION}}"
+
+workflow-check: (_require-tools "actionlint")
+    actionlint -color
+
+check: workflow-check
     cargo fmt --all -- --check
     cargo clippy --all-targets --locked -- -D warnings
     cargo test --locked

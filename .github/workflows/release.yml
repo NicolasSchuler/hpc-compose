@@ -241,7 +241,6 @@ jobs:
           rpm_asset="dist/hpc-compose-${RELEASE_TAG}-${{ matrix.target }}.rpm"
           smoke_dir="$(mktemp -d)"
           deb_root="${smoke_dir}/deb-root"
-          rpm_root="${smoke_dir}/rpm-root"
 
           dpkg-deb --contents "${deb_asset}" >/dev/null
           dpkg-deb --extract "${deb_asset}" "${deb_root}"

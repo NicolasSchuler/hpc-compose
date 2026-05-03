@@ -61,6 +61,17 @@ fn collect_public_command_paths(
     }
 }
 
+fn collect_global_long_flags(command: &clap::Command) -> Vec<String> {
+    let mut flags = command
+        .get_arguments()
+        .filter(|arg| arg.is_global_set() && !arg.is_hide_set())
+        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+        .collect::<Vec<_>>();
+    flags.sort();
+    flags.dedup();
+    flags
+}
+
 #[test]
 fn cli_reference_mentions_every_public_command_path() {
     let cli_reference =
@@ -78,6 +89,60 @@ fn cli_reference_mentions_every_public_command_path() {
                 || cli_reference.contains(&format!("`{command_name} "))
                 || cli_reference.contains(&format!("hpc-compose {command_name} ")),
             "docs/src/cli-reference.md should mention public command path '{path}'"
+        );
+    }
+}
+
+#[test]
+fn cli_reference_mentions_every_public_global_flag() {
+    let cli_reference =
+        fs::read_to_string(repo_root().join("docs/src/cli-reference.md")).expect("cli reference");
+    for flag in collect_global_long_flags(&build_cli_command()) {
+        assert!(
+            cli_reference.contains(&format!("`{flag}"))
+                || cli_reference.contains(&format!("`{flag} ")),
+            "docs/src/cli-reference.md should mention public global flag '{flag}'"
+        );
+    }
+}
+
+#[test]
+fn cli_reference_documents_accessibility_and_automation_flags() {
+    let cli_reference =
+        fs::read_to_string(repo_root().join("docs/src/cli-reference.md")).expect("cli reference");
+    for expected in [
+        "`--color auto|always|never`",
+        "`--color never`",
+        "`--quiet`",
+        "`--watch-mode auto|tui|line`",
+        "`--no-tui`",
+        "Accessible and Automation-Friendly Output",
+        "hpc-compose logs -f compose.yaml --service app --follow",
+        "hpc-compose status -f compose.yaml --format json",
+    ] {
+        assert!(
+            cli_reference.contains(expected),
+            "docs/src/cli-reference.md should mention CLI accessibility/automation detail '{expected}'"
+        );
+    }
+}
+
+#[test]
+fn contributing_documents_local_quality_gates_and_bootstrap() {
+    let contributing =
+        fs::read_to_string(repo_root().join("CONTRIBUTING.md")).expect("contributing docs");
+    for expected in [
+        "just bootstrap-docs-tools",
+        "`actionlint`",
+        "| Fast Rust and workflow check | `just check` |",
+        "| Documentation | `just docs-check` |",
+        "| Examples and shell output | `just examples-check` |",
+        "| Release metadata and coverage | `just release-check` |",
+        "| Full local CI mirror | `just ci` |",
+    ] {
+        assert!(
+            contributing.contains(expected),
+            "CONTRIBUTING.md should mention local quality gate detail '{expected}'"
         );
     }
 }
@@ -131,4 +196,25 @@ fn ci_docs_link_check_excludes_generated_edit_urls() {
             .contains("--exclude '^https://github\\.com/NicolasSchuler/hpc-compose/edit/main/'"),
         "lychee should ignore mdBook edit links because GitHub can transiently reject them"
     );
+}
+
+#[test]
+fn runtime_observability_documents_watch_ui_controls_and_line_mode() {
+    let runtime_observability =
+        fs::read_to_string(repo_root().join("docs/src/runtime-observability.md"))
+            .expect("runtime observability docs");
+    for expected in [
+        "Keybindings:",
+        "`j`, `Down`, `Tab`",
+        "`/`",
+        "`q`",
+        "--watch-mode line",
+        "--no-tui",
+        "screen reader",
+    ] {
+        assert!(
+            runtime_observability.contains(expected),
+            "runtime observability docs should mention watch UI detail '{expected}'"
+        );
+    }
 }

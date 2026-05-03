@@ -15,8 +15,34 @@ concurrency:
 
 env:
   MDBOOK_VERSION: "0.5.2"
+  LYCHEE_VERSION: "0.23.0"
+  PA11Y_CI_VERSION: "4.0.1"
+  ACTIONLINT_VERSION: "1.7.12"
 
 jobs:
+  workflow-lint:
+    name: Workflow Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Install actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          checksums="actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          base_url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          curl -fsSLO "${base_url}/${archive}"
+          curl -fsSLO "${base_url}/${checksums}"
+          grep " ${archive}$" "${checksums}" | sha256sum -c -
+          tar -xzf "${archive}"
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+
+      - name: Run actionlint
+        run: actionlint -color
+
   docs:
     name: Docs
     runs-on: ubuntu-24.04
@@ -30,6 +56,7 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
@@ -44,8 +71,8 @@ jobs:
 
       - name: Install docs QA tools
         run: |
-          cargo install lychee --locked
-          npm install --global pa11y-ci
+          cargo install lychee --locked --version "${LYCHEE_VERSION}"
+          npm install --global "pa11y-ci@${PA11Y_CI_VERSION}"
 
       - name: Build mdBook docs
         run: mdbook build docs
@@ -97,6 +124,7 @@ jobs:
           toolchain: stable
           components: rustfmt
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -114,6 +142,7 @@ jobs:
           toolchain: stable
           components: clippy
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Run clippy
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -130,6 +159,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Run test suite
         run: cargo test --locked
@@ -164,6 +194,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Install shellcheck
         run: |
@@ -202,6 +233,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Run authoring-focused tests
         run: cargo test --locked --test cli_context --test cli_init --test cli_spec --test public_api --test release_metadata
@@ -227,6 +259,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -250,6 +283,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Install Linux musl toolchain
         if: runner.os == 'Linux'
@@ -369,6 +403,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Package checkout artifact for formula smoke test
         shell: bash
@@ -452,6 +487,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@ddc7029b5ba1e37640598eb3580cdbefa9662f46

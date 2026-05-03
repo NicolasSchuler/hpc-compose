@@ -140,6 +140,10 @@ fn help_and_template_discovery_surface_guided_workflows() {
         top_help_stdout
             .contains("Observe/Debug:  debug, watch, status, logs, ps, stats, artifacts")
     );
+    assert!(top_help_stdout.contains("--color <WHEN>"));
+    assert!(top_help_stdout.contains("--quiet"));
+    assert!(top_help_stdout.contains("--profile <NAME>"));
+    assert!(top_help_stdout.contains("--settings-file <PATH>"));
     assert!(!top_help_stdout.contains("submit       "));
     assert!(
         top_help_stdout.contains("config       Render the fully interpolated effective config")
@@ -195,6 +199,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert_success(&plan_help);
     let plan_help_stdout = stdout_text(&plan_help);
     assert!(plan_help_stdout.contains("--show-script"));
+    assert!(plan_help_stdout.contains("--format <FORMAT>"));
     assert!(plan_help_stdout.contains("without touching Slurm"));
 
     let up_help = run_cli(tmpdir.path(), &["up", "--help"]);

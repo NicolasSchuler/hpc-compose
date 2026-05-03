@@ -13,6 +13,7 @@ cargo build
 Useful local commands:
 
 ```bash
+just bootstrap-docs-tools
 just check
 just docs-check
 just examples-check
@@ -20,11 +21,22 @@ just release-check
 just ci
 ```
 
-The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`mdbook`, `lychee`, `pa11y-ci`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov`) to be installed locally.
+The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`actionlint`, `mdbook`, `lychee`, `pa11y-ci`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov`) to be installed locally. `just bootstrap-docs-tools` installs the pinned docs tools (`mdbook`, `lychee`, and `pa11y-ci`); install `actionlint`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov` through your platform package manager or Cargo as appropriate.
+
+Quality gates:
+
+| Gate | Command | Use it for |
+| --- | --- | --- |
+| Fast Rust and workflow check | `just check` | GitHub workflow linting, formatting, Clippy, and Rust tests. |
+| Documentation | `just docs-check` | mdBook, rustdoc warnings, manpage drift, links, and accessibility. |
+| Examples and shell output | `just examples-check` | Shipped spec validation and shellcheck for rendered batch scripts. |
+| Release metadata and coverage | `just release-check` | Release metadata, dependency policy, and coverage thresholds. |
+| Full local CI mirror | `just ci` | All local gates above. |
 
 Equivalent raw commands:
 
 ```bash
+actionlint -color
 cargo test --locked
 cargo test --locked --test cli_spec --test cli_runtime --test cli_cache --test cli_context --test cli_init --test cli_jobs
 cargo test --locked --test release_metadata
