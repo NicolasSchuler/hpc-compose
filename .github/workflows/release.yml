@@ -284,7 +284,7 @@ jobs:
           & (Join-Path $smokeDir "${{ matrix.binary_name }}") --version | Out-Null
 
       - name: Attest release assets
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-path: dist/*
 
