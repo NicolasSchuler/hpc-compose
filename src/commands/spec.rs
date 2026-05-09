@@ -9,7 +9,7 @@ use hpc_compose::job::{jobs_dir_for, metadata_root_for};
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{PrepareOptions, build_runtime_plan, prepare_runtime_plan};
 use hpc_compose::render::{RenderOptions, render_script_with_options};
-use hpc_compose::spec::missing_defaulted_variables;
+use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
 use serde::Serialize;
 
@@ -285,7 +285,11 @@ pub(crate) fn preflight(
         ))
     })?;
     match output_format {
-        OutputFormat::Text if !quiet => output_spec::print_report(&report, verbose),
+        OutputFormat::Text
+            if !quiet || report.has_errors() || (strict && report.has_warnings()) =>
+        {
+            output_spec::print_report(&report, verbose)
+        }
         OutputFormat::Text => {}
         OutputFormat::Json => {
             println!(
@@ -353,6 +357,7 @@ pub(crate) fn config(
     context: ResolvedContext,
     format: Option<OutputFormat>,
     variables: bool,
+    show_values: bool,
 ) -> Result<()> {
     let config = output_common::load_effective_config_with_interpolation_vars(
         &context.compose_file.value,
@@ -360,22 +365,22 @@ pub(crate) fn config(
     )?;
     let output_format = output_common::resolve_output_format(format, false);
     if variables {
+        let referenced =
+            referenced_variables(&context.compose_file.value, &context.interpolation_vars)?;
+        let (vars, sources) = scoped_interpolation_vars(
+            &context.interpolation_vars,
+            &context.interpolation_var_sources,
+            &referenced,
+            show_values,
+        );
         match output_format {
-            OutputFormat::Text => output_spec::print_interpolation_vars(
-                &context.interpolation_vars,
-                &context.interpolation_var_sources,
-            ),
+            OutputFormat::Text => output_spec::print_interpolation_vars(&vars, &sources),
             OutputFormat::Json => {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output_spec::InterpolationVarsOutput {
-                        variables: context
-                            .interpolation_vars
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect(),
-                        sources: context
-                            .interpolation_var_sources
+                        variables: vars,
+                        sources: sources
                             .iter()
                             .map(|(k, v)| (k.clone(), format!("{v:?}").to_lowercase()))
                             .collect(),
@@ -428,7 +433,11 @@ struct ContextOutput {
     runtime_paths: ContextRuntimePaths,
 }
 
-pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) -> Result<()> {
+pub(crate) fn context(
+    context: ResolvedContext,
+    format: Option<OutputFormat>,
+    show_values: bool,
+) -> Result<()> {
     let compose_dir = context
         .compose_file
         .value
@@ -488,6 +497,14 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
             source: ValueSource::Builtin,
         },
     };
+    let referenced = referenced_variables(&context.compose_file.value, &context.interpolation_vars)
+        .unwrap_or_default();
+    let (interpolation_vars, interpolation_var_sources) = scoped_interpolation_vars(
+        &context.interpolation_vars,
+        &context.interpolation_var_sources,
+        &referenced,
+        show_values,
+    );
     let output = ContextOutput {
         cwd: context.cwd,
         settings_path: context.settings_path,
@@ -495,8 +512,8 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
         selected_profile: context.selected_profile,
         compose_file: context.compose_file,
         binaries: context.binaries,
-        interpolation_vars: context.interpolation_vars,
-        interpolation_var_sources: context.interpolation_var_sources,
+        interpolation_vars,
+        interpolation_var_sources,
         compose_load_error,
         runtime_paths,
     };
@@ -690,6 +707,53 @@ pub(crate) fn context(context: ResolvedContext, format: Option<OutputFormat>) ->
         }
     }
     Ok(())
+}
+
+fn scoped_interpolation_vars(
+    vars: &std::collections::BTreeMap<String, String>,
+    sources: &std::collections::BTreeMap<String, ValueSource>,
+    referenced: &std::collections::BTreeSet<String>,
+    show_values: bool,
+) -> (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, ValueSource>,
+) {
+    let mut scoped_vars = std::collections::BTreeMap::new();
+    let mut scoped_sources = std::collections::BTreeMap::new();
+    for key in referenced {
+        let Some(value) = vars.get(key) else {
+            continue;
+        };
+        let source = sources.get(key).copied().unwrap_or(ValueSource::Builtin);
+        let value = if show_values || !looks_sensitive_env_name(key) {
+            value.clone()
+        } else {
+            "<redacted>".to_string()
+        };
+        scoped_vars.insert(key.clone(), value);
+        scoped_sources.insert(key.clone(), source);
+    }
+    (scoped_vars, scoped_sources)
+}
+
+fn looks_sensitive_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    [
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "API_KEY",
+        "ACCESS_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+        "AUTH",
+        "COOKIE",
+        "SESSION",
+        "BEARER",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle))
 }
 
 fn load_discovered_cluster_profile(
@@ -944,8 +1008,8 @@ services:
             false,
         )
         .expect("inspect json");
-        context(resolved_context.clone(), Some(OutputFormat::Json)).expect("context json");
-        context(resolved_context, None).expect("context text");
+        context(resolved_context.clone(), Some(OutputFormat::Json), false).expect("context json");
+        context(resolved_context, None, false).expect("context text");
     }
 
     #[test]
@@ -953,8 +1017,8 @@ services:
         let tmpdir = tempdir_in_repo();
         let missing = tmpdir.path().join("missing.yaml");
         let resolved_context = context_for(&missing, tmpdir.path());
-        context(resolved_context.clone(), Some(OutputFormat::Json)).expect("context json");
-        context(resolved_context, None).expect("context text");
+        context(resolved_context.clone(), Some(OutputFormat::Json), false).expect("context json");
+        context(resolved_context, None, false).expect("context text");
     }
 
     #[test]
@@ -999,7 +1063,7 @@ services:
         context_with_vars
             .interpolation_var_sources
             .insert("EXTRA_VAR".into(), ValueSource::Profile);
-        context(context_with_vars, None).expect("context text with optional fields");
+        context(context_with_vars, None, false).expect("context text with optional fields");
     }
 
     #[test]

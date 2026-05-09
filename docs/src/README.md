@@ -1,34 +1,36 @@
 # hpc-compose
 
 <div class="hpc-compose-hero">
-  <img src="logo.png" alt="hpc-compose logo">
-  <p><code>hpc-compose</code> turns a small Compose-like YAML file into one inspectable Slurm job for multi-service HPC and research ML workflows.</p>
-  <div class="hpc-compose-links">
-    <a href="support-matrix.html">Support Matrix</a>
-    <a href="installation.html">Installation</a>
-    <a href="quickstart.html">Quickstart</a>
-    <a href="examples.html">Examples</a>
-    <a href="task-guide.html">Task Guide</a>
-    <a href="runtime-backends.html">Runtime Backends</a>
-    <a href="runbook.html">Runbook</a>
-    <a href="troubleshooting.html">Troubleshooting</a>
-    <a href="cli-reference.html">CLI Reference</a>
-    <a href="spec-reference.html">Spec Reference</a>
+  <div class="hpc-compose-hero-copy">
+    <img class="hpc-compose-hero-mark" src="logo.png" alt="" aria-hidden="true">
+    <p class="hpc-compose-tagline">Compose-style multi-service workflows, compiled into one inspectable Slurm job.</p>
+    <p><code>hpc-compose</code> gives research and HPC teams a small YAML authoring model for services, startup order, readiness checks, runtime backends, logs, artifacts, and follow-up commands.</p>
+    <nav class="hpc-compose-actions" aria-label="Start using hpc-compose">
+      <a class="primary" href="quickstart.html">Quickstart</a>
+      <a href="examples.html">Examples</a>
+      <a href="support-matrix.html">Support Matrix</a>
+    </nav>
+  </div>
+  <div class="hpc-compose-proof" aria-label="Static plan preview">
+    <pre><code>services:&#10;  app:&#10;    image: python:3.12-slim&#10;    command: python train.py&#10;&#10;$ hpc-compose plan --show-script -f compose.yaml&#10;spec is valid&#10;service order: app&#10;&#35;SBATCH --job-name=my-app</code></pre>
   </div>
 </div>
 
-Use `hpc-compose` when you want Docker Compose-style authoring on Slurm without adding Kubernetes, a long-running scheduler, or custom cluster-side services.
+Use `hpc-compose` when you want Docker Compose-style authoring on Slurm without adding Kubernetes, a long-running control plane, or custom cluster-side services.
 
 Start with the [Support Matrix](support-matrix.md) before planning a real runtime workflow. Linux is the maintained runtime target; macOS is intended for authoring, validation, rendering, and inspection.
 
 ## Safe First Path
 
-These commands are safe from a laptop, workstation, or login node because `plan` is purely static:
+These commands are safe from a laptop, workstation, or login node because `new` writes a local starter spec and `plan` is purely static:
 
 ```bash
-hpc-compose plan -f examples/minimal-batch.yaml
-hpc-compose plan --show-script -f examples/minimal-batch.yaml
+hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+hpc-compose plan -f compose.yaml
+hpc-compose plan --show-script -f compose.yaml
 ```
+
+Replace `<shared-cache-dir>` with a path visible from both the Slurm submission host and compute nodes. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
 
 Expected output includes:
 
@@ -83,3 +85,10 @@ For exact boundaries, read [Execution Model](execution-model.md), [Supported Slu
 3. [Runtime Backends](runtime-backends.md) before changing `runtime.backend`.
 4. [Runbook](runbook.md) when adapting a real workload on a cluster.
 5. [Troubleshooting](troubleshooting.md) when the first cluster run fails.
+
+## Reference
+
+- [Installation](installation.md)
+- [Task Guide](task-guide.md)
+- [CLI Reference](cli-reference.md)
+- [Spec Reference](spec-reference.md)

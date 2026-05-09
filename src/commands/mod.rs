@@ -132,9 +132,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             file,
             format,
             variables,
+            show_values,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
-            spec::config(context, format, variables)
+            spec::config(context, format, variables, show_values)
         }
         Commands::Schema => print_schema(),
         Commands::Plan {
@@ -555,9 +556,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             runtime::clean(context, age, all, dry_run, disk_usage, format)
         }
-        Commands::Context { format } => {
+        Commands::Context {
+            format,
+            show_values,
+        } => {
             let context = resolve_command_context(options, None, BinaryOverrides::default())?;
-            spec::context(context, format)
+            spec::context(context, format, show_values)
         }
         Commands::Setup {
             profile_name,

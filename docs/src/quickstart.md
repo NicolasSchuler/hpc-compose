@@ -2,6 +2,8 @@
 
 This is the shortest safe path from an empty shell to a static plan, a first real Slurm run, and one-command failure triage.
 
+If Slurm terms such as `sbatch`, `srun`, allocation, job step, Pyxis, or Enroot are unfamiliar, read [Slurm And Container Basics](slurm-container-basics.md) before the first real cluster run.
+
 ## 1. Install The CLI
 
 For normal use, install from the latest published [GitHub Release](https://github.com/NicolasSchuler/hpc-compose/releases) and pin the tag you selected:
@@ -16,13 +18,32 @@ Replace `vX.Y.Z` with the published release tag shown on the release page.
 
 The installer places `hpc-compose` in `~/.local/bin` by default and verifies the release checksum sidecar before installing. Release verification, manual downloads, package-manager installs, and source-checkout builds are covered in [Installation](installation.md).
 
+If your shell does not find the command immediately, add the default install directory to your `PATH`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+hpc-compose --version
+```
+
 ## 2. Learn The Safe Authoring Path First
 
 `plan` is the safe authoring command. It does not call `sbatch`, does not import images, and does not write a script file:
 
+Create a starter spec first:
+
 ```bash
-hpc-compose plan -f examples/minimal-batch.yaml
-hpc-compose plan --show-script -f examples/minimal-batch.yaml
+hpc-compose new \
+  --template minimal-batch \
+  --name my-app \
+  --cache-dir '<shared-cache-dir>' \
+  --output compose.yaml
+```
+
+Then inspect the static plan:
+
+```bash
+hpc-compose plan -f compose.yaml
+hpc-compose plan --show-script -f compose.yaml
 ```
 
 Expected output includes:
@@ -40,14 +61,14 @@ This is the right first path on macOS, a laptop, or any machine where you want t
 The normal workflow to remember is:
 
 ```bash
-hpc-compose plan -f examples/minimal-batch.yaml
+hpc-compose plan -f compose.yaml
 hpc-compose up -f compose.yaml
 hpc-compose debug -f compose.yaml --preflight
 ```
 
 ## 3. Choose A Starting Spec
 
-Use the built-in starter template when you want a fresh `compose.yaml` with your application name and shared cache directory filled in:
+Use the built-in starter templates when you want a fresh `compose.yaml` with your application name and shared cache directory filled in:
 
 ```bash
 hpc-compose new \
@@ -59,7 +80,13 @@ hpc-compose new \
 
 Replace `<shared-cache-dir>` with a path visible from both the submission host and the compute nodes.
 
-If you want a known-good repository example instead, start with [Examples](examples.md). The examples page is the single selection guide for beginner, LLM, training, distributed, and pipeline workflows.
+From a source checkout, you can also inspect a known-good repository example:
+
+```bash
+hpc-compose plan -f examples/minimal-batch.yaml
+```
+
+The [Examples](examples.md) page is the single selection guide for beginner, LLM, training, distributed, and pipeline workflows.
 
 ## 4. Pick And Test `CACHE_DIR`
 
@@ -149,6 +176,7 @@ target/release/hpc-compose plan --show-script -f examples/minimal-batch.yaml
 ## Read Next
 
 - [Support Matrix](support-matrix.md)
+- [Slurm And Container Basics](slurm-container-basics.md)
 - [Examples](examples.md)
 - [Runtime Backends](runtime-backends.md)
 - [Runbook](runbook.md)

@@ -224,41 +224,44 @@ pub fn export_artifacts(
 
         let mut bundle_warnings = bundle_manifest.warnings.clone();
         let mut bundle_exported_paths = Vec::new();
-        for relative_path in &bundle_manifest.copied_relative_paths {
-            let source = payload_dir.join(relative_path);
+        let copied_relative_paths = bundle_manifest
+            .copied_relative_paths
+            .iter()
+            .map(|relative_path| validate_manifest_relative_path(relative_path))
+            .collect::<Result<Vec<_>>>()?;
+        for relative in &copied_relative_paths {
+            let source = payload_dir.join(relative);
             if !source.exists() {
                 let warning = format!(
                     "collected payload path '{}' is missing under {}",
-                    relative_path,
+                    relative.display(),
                     payload_dir.display()
                 );
                 warnings.push(warning.clone());
                 bundle_warnings.push(warning);
                 continue;
             }
-            let destination = bundle_export_dir.join(relative_path);
-            copy_path_recursive(&source, &destination).context(format!(
-                "failed to export artifact '{}' to {}",
-                source.display(),
-                destination.display()
-            ))?;
+            validate_payload_source(&payload_dir, &source)?;
+            let destination = bundle_export_dir.join(relative);
+            copy_path_recursive_within(&source, &destination, &bundle_export_dir).context(
+                format!(
+                    "failed to export artifact '{}' to {}",
+                    source.display(),
+                    destination.display()
+                ),
+            )?;
             exported_paths.push(destination.clone());
             bundle_exported_paths.push(destination);
         }
 
-        let files =
-            collect_bundle_metadata(&bundle_export_dir, &bundle_manifest.copied_relative_paths)?;
+        let files = collect_bundle_metadata(&bundle_export_dir, &copied_relative_paths)?;
         let provenance_path = export_dir
             .join("_hpc-compose")
             .join("bundles")
             .join(format!("{bundle_name}.json"));
         let tarball_path = if options.tarball {
             let tarball = export_dir.join(format!("{bundle_name}.tar.gz"));
-            write_bundle_tarball(
-                &tarball,
-                &bundle_export_dir,
-                &bundle_manifest.copied_relative_paths,
-            )?;
+            write_bundle_tarball(&tarball, &bundle_export_dir, &copied_relative_paths)?;
             tarball_paths.push(tarball.clone());
             Some(tarball)
         } else {
@@ -340,6 +343,60 @@ fn bundle_export_dir(export_dir: &Path, bundle_name: &str) -> PathBuf {
     }
 }
 
+fn validate_manifest_relative_path(relative_path: &str) -> Result<PathBuf> {
+    if relative_path.trim().is_empty() {
+        bail!("artifact manifest copied_relative_paths entries must not be empty");
+    }
+    if relative_path.contains('\0') {
+        bail!("artifact manifest path '{relative_path}' must not contain null bytes");
+    }
+    let path = PathBuf::from(relative_path);
+    if path.is_absolute() {
+        bail!("artifact manifest path '{relative_path}' must be relative");
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir
+            | std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                bail!("artifact manifest path '{relative_path}' must stay within the payload root")
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        bail!("artifact manifest copied_relative_paths entries must not be empty");
+    }
+    Ok(normalized)
+}
+
+fn validate_payload_source(payload_dir: &Path, source: &Path) -> Result<()> {
+    let payload_root = payload_dir
+        .canonicalize()
+        .context(format!("failed to canonicalize {}", payload_dir.display()))?;
+    let metadata = fs::symlink_metadata(source)
+        .context(format!("failed to read metadata for {}", source.display()))?;
+    let path_to_check = if metadata.file_type().is_symlink() {
+        source.parent().unwrap_or(payload_dir)
+    } else {
+        source
+    };
+    let canonical = path_to_check.canonicalize().context(format!(
+        "failed to canonicalize {}",
+        path_to_check.display()
+    ))?;
+    if !canonical.starts_with(&payload_root) {
+        bail!(
+            "artifact manifest path '{}' escapes payload root {}",
+            source.display(),
+            payload_dir.display()
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_export_dir(compose_file: &Path, template: &str, job_id: &str) -> PathBuf {
     let rendered = template.replace("${SLURM_JOB_ID}", job_id);
     let candidate = PathBuf::from(rendered);
@@ -356,12 +413,11 @@ pub(crate) fn resolve_export_dir(compose_file: &Path, template: &str, job_id: &s
 
 fn collect_bundle_metadata(
     bundle_root: &Path,
-    copied_relative_paths: &[String],
+    copied_relative_paths: &[PathBuf],
 ) -> Result<Vec<ArtifactEntryMetadata>> {
     let mut files = Vec::new();
-    for relative_path in copied_relative_paths {
-        let relative = PathBuf::from(relative_path);
-        let path = bundle_root.join(&relative);
+    for relative in copied_relative_paths {
+        let path = bundle_root.join(relative);
         if !path.exists() && fs::symlink_metadata(&path).is_err() {
             continue;
         }
@@ -445,7 +501,7 @@ fn hash_file(path: &Path) -> Result<String> {
 fn write_bundle_tarball(
     tarball_path: &Path,
     bundle_root: &Path,
-    copied_relative_paths: &[String],
+    copied_relative_paths: &[PathBuf],
 ) -> Result<()> {
     if let Some(parent) = tarball_path.parent() {
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
@@ -454,13 +510,12 @@ fn write_bundle_tarball(
         .context(format!("failed to create {}", tarball_path.display()))?;
     let encoder = GzEncoder::new(file, Compression::default());
     let mut builder = Builder::new(encoder);
-    for relative_path in copied_relative_paths {
-        let relative = PathBuf::from(relative_path);
-        let source = bundle_root.join(&relative);
+    for relative in copied_relative_paths {
+        let source = bundle_root.join(relative);
         if !source.exists() && fs::symlink_metadata(&source).is_err() {
             continue;
         }
-        append_path_to_tar(&mut builder, &source, &relative)?;
+        append_path_to_tar(&mut builder, &source, relative)?;
     }
     builder
         .finish()
@@ -504,6 +559,7 @@ fn append_path_to_tar<W: Write>(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)
         .context(format!("failed to read metadata for {}", source.display()))?;
@@ -529,6 +585,106 @@ pub(crate) fn copy_path_recursive(source: &Path, destination: &Path) -> Result<(
         source.display(),
         destination.display()
     ))?;
+    Ok(())
+}
+
+fn copy_path_recursive_within(
+    source: &Path,
+    destination: &Path,
+    destination_root: &Path,
+) -> Result<()> {
+    prepare_destination_parent(destination_root, destination)?;
+    let metadata = fs::symlink_metadata(source)
+        .context(format!("failed to read metadata for {}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        remove_existing_destination(destination)?;
+        return copy_symlink(source, destination);
+    }
+
+    if metadata.is_dir() {
+        remove_existing_file_or_symlink(destination)?;
+        fs::create_dir_all(destination)
+            .context(format!("failed to create {}", destination.display()))?;
+        for entry in fs::read_dir(source).context(format!("failed to read {}", source.display()))? {
+            let entry = entry?;
+            copy_path_recursive_within(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                destination_root,
+            )?;
+        }
+        return Ok(());
+    }
+
+    remove_existing_destination(destination)?;
+    fs::copy(source, destination).context(format!(
+        "failed to copy {} to {}",
+        source.display(),
+        destination.display()
+    ))?;
+    Ok(())
+}
+
+fn prepare_destination_parent(destination_root: &Path, destination: &Path) -> Result<()> {
+    if !destination.starts_with(destination_root) {
+        bail!(
+            "artifact export destination {} must stay within {}",
+            destination.display(),
+            destination_root.display()
+        );
+    }
+    let parent = destination.parent().context(format!(
+        "destination {} has no parent",
+        destination.display()
+    ))?;
+    let canonical_root = fs::canonicalize(destination_root).context(format!(
+        "failed to canonicalize {}",
+        destination_root.display()
+    ))?;
+    let nearest_existing = nearest_existing_ancestor(parent)?;
+    let canonical_existing = fs::canonicalize(&nearest_existing).context(format!(
+        "failed to canonicalize {}",
+        nearest_existing.display()
+    ))?;
+    if !canonical_existing.starts_with(&canonical_root) {
+        bail!(
+            "artifact export destination parent {} resolves outside {}",
+            nearest_existing.display(),
+            destination_root.display()
+        );
+    }
+    fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
+    let canonical_parent =
+        fs::canonicalize(parent).context(format!("failed to canonicalize {}", parent.display()))?;
+    if !canonical_parent.starts_with(canonical_root) {
+        bail!(
+            "artifact export destination parent {} resolves outside {}",
+            parent.display(),
+            destination_root.display()
+        );
+    }
+    Ok(())
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut current = path;
+    loop {
+        if fs::symlink_metadata(current).is_ok() {
+            return Ok(current.to_path_buf());
+        }
+        current = current
+            .parent()
+            .context(format!("no existing ancestor for {}", path.display()))?;
+    }
+}
+
+fn remove_existing_file_or_symlink(path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path).context(format!("failed to remove {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -758,6 +914,75 @@ mod tests {
                 && entry.entry_type == "symlink"
                 && entry.link_target.as_deref() == Some("app.log")
         }));
+    }
+
+    #[test]
+    fn export_artifacts_rejects_manifest_paths_that_escape_payload_root() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = artifact_record(tmpdir.path(), "12345");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(&payload_dir).expect("payload dir");
+        fs::write(tmpdir.path().join("outside.txt"), "outside").expect("outside");
+
+        let mut manifest = artifact_manifest("12345");
+        manifest.bundles = BTreeMap::from([(
+            "default".into(),
+            ArtifactBundleManifest {
+                declared_source_patterns: Vec::new(),
+                matched_source_paths: Vec::new(),
+                copied_relative_paths: vec!["../outside.txt".into()],
+                warnings: Vec::new(),
+            },
+        )]);
+        write_artifact_manifest(&record, &manifest);
+
+        let err = export_artifacts(
+            &record.compose_file,
+            Some("12345"),
+            &ArtifactExportOptions::default(),
+        )
+        .expect_err("manifest path traversal");
+        assert!(
+            err.to_string()
+                .contains("must stay within the payload root")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_artifacts_rejects_destination_parent_symlink_escape() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = artifact_record(tmpdir.path(), "12345");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(payload_dir.join("logs")).expect("payload logs");
+        fs::write(payload_dir.join("logs/app.log"), "inside").expect("payload log");
+
+        let outside = tmpdir.path().join("outside");
+        fs::create_dir_all(&outside).expect("outside");
+        let export_logs = tmpdir.path().join("results/12345/logs");
+        fs::create_dir_all(export_logs.parent().expect("export parent")).expect("export parent");
+        std::os::unix::fs::symlink(&outside, &export_logs).expect("destination symlink");
+
+        let mut manifest = artifact_manifest("12345");
+        manifest.bundles = BTreeMap::from([(
+            "default".into(),
+            ArtifactBundleManifest {
+                declared_source_patterns: Vec::new(),
+                matched_source_paths: Vec::new(),
+                copied_relative_paths: vec!["logs/app.log".into()],
+                warnings: Vec::new(),
+            },
+        )]);
+        write_artifact_manifest(&record, &manifest);
+
+        let err = export_artifacts(
+            &record.compose_file,
+            Some("12345"),
+            &ArtifactExportOptions::default(),
+        )
+        .expect_err("destination symlink escape");
+        assert!(format!("{err:#}").contains("resolves outside"));
+        assert!(!outside.join("app.log").exists());
     }
 
     #[test]

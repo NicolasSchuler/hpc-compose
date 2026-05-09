@@ -238,6 +238,109 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
     );
     assert_failure(&strict);
     assert!(stderr_text(&strict).contains("preflight reported warnings"));
+
+    let missing_image = tmpdir.path().join("missing.sqsh");
+    let missing_compose = write_compose(
+        tmpdir.path(),
+        "missing-image.yaml",
+        &format!(
+            r#"
+name: missing-image
+x-slurm:
+  cache_dir: "{}"
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            cache_dir.display(),
+            missing_image.display()
+        ),
+    );
+    let quiet = run_cli(
+        tmpdir.path(),
+        &[
+            "--quiet",
+            "preflight",
+            "-f",
+            missing_compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&quiet);
+    let quiet_stderr = stderr_text(&quiet);
+    assert!(quiet_stderr.contains("Summary:"));
+    assert!(quiet_stderr.contains("preflight failed"));
+}
+
+#[test]
+fn config_variables_scopes_and_redacts_sensitive_values() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+name: config-vars
+x-slurm:
+  cache_dir: ${CACHE_DIR}
+services:
+  app:
+    image: redis:7
+    command: /bin/sh -lc "printf '%s' ${API_TOKEN}"
+"#,
+    );
+    let cache_dir = cache_root.path().display().to_string();
+    let output = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--variables",
+            "--format",
+            "json",
+        ],
+        &[
+            ("CACHE_DIR", cache_dir.as_str()),
+            ("API_TOKEN", "super-secret-token"),
+            ("UNUSED_SECRET", "should-not-appear"),
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("variables json");
+    assert_eq!(payload["variables"]["CACHE_DIR"], Value::from(cache_dir));
+    assert_eq!(payload["variables"]["API_TOKEN"], Value::from("<redacted>"));
+    assert!(payload["variables"].get("UNUSED_SECRET").is_none());
+    assert_eq!(payload["sources"]["API_TOKEN"], Value::from("processenv"));
+
+    let output = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--variables",
+            "--show-values",
+            "--format",
+            "json",
+        ],
+        &[
+            ("CACHE_DIR", cache_root.path().to_str().expect("cache path")),
+            ("API_TOKEN", "super-secret-token"),
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("variables json");
+    assert_eq!(
+        payload["variables"]["API_TOKEN"],
+        Value::from("super-secret-token")
+    );
 }
 
 #[test]

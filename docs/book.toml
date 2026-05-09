@@ -3,7 +3,7 @@ authors = ["Nicolas Schuler"]
 language = "en"
 src = "src"
 title = "hpc-compose"
-description = "User and contributor documentation for hpc-compose"
+description = "Compose-style multi-service workflows compiled into one inspectable Slurm job"
 
 [build]
 build-dir = "../target/mdbook"

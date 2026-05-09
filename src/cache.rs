@@ -224,8 +224,11 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
             }
             let raw =
                 fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
-            let manifest: CacheEntryManifest = serde_json::from_str(&raw)
+            let mut manifest: CacheEntryManifest = serde_json::from_str(&raw)
                 .context(format!("failed to parse {}", path.display()))?;
+            manifest.artifact_path = artifact_path_from_manifest_path(&path)
+                .display()
+                .to_string();
             manifests.push(manifest);
         }
     }
@@ -364,6 +367,15 @@ fn looks_like_manifest_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let artifact_filename = filename.strip_suffix(".json").unwrap_or(filename);
+    path.with_file_name(artifact_filename)
+}
+
 fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = manifest_path_for(artifact);
@@ -490,6 +502,41 @@ mod tests {
         assert_eq!(result.removed, vec![drop.clone()]);
         assert!(keep.exists());
         assert!(!drop.exists());
+    }
+
+    #[test]
+    fn scan_cache_derives_artifact_path_from_manifest_location() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let artifact = tmpdir.path().join("safe.sqsh");
+        let outside = tmpdir.path().join("outside.sqsh");
+        fs::write(&artifact, "safe").expect("artifact");
+        fs::write(&outside, "outside").expect("outside");
+        let manifest = CacheEntryManifest {
+            kind: CacheEntryKind::Prepared,
+            artifact_path: outside.display().to_string(),
+            service_names: vec!["svc".into()],
+            cache_key: "safe-key".into(),
+            source_image: "docker://redis:7".into(),
+            registry: Some("registry-1.docker.io".into()),
+            prepare_commands: Vec::new(),
+            prepare_env: Vec::new(),
+            prepare_root: Some(true),
+            prepare_mounts: Vec::new(),
+            force_rebuild_due_to_mounts: false,
+            created_at: 1,
+            last_used_at: 1,
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        fs::write(
+            manifest_path_for(&artifact),
+            serde_json::to_vec_pretty(&manifest).expect("manifest"),
+        )
+        .expect("write manifest");
+
+        let pruned = prune_by_age(tmpdir.path(), 0).expect("prune");
+        assert_eq!(pruned.removed, vec![artifact.clone()]);
+        assert!(!artifact.exists());
+        assert!(outside.exists());
     }
 
     #[test]

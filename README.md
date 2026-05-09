@@ -13,12 +13,15 @@ Use it when you want Docker Compose-style authoring on Slurm without adding Kube
 
 ## Safe First Path
 
-These commands work from a laptop, workstation, or login node because `plan` is purely static:
+These commands work from a laptop, workstation, or login node because `new` writes a local starter spec and `plan` is purely static:
 
 ```bash
-hpc-compose plan -f examples/minimal-batch.yaml
-hpc-compose plan --show-script -f examples/minimal-batch.yaml
+hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+hpc-compose plan -f compose.yaml
+hpc-compose plan --show-script -f compose.yaml
 ```
+
+Replace `<shared-cache-dir>` with a path visible from both the Slurm submission host and compute nodes. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
 
 Expected signals:
 
@@ -99,7 +102,7 @@ If you use `hpc-compose` in research, please cite the software. GitHub also expo
 @software{schuler_hpc_compose_2026,
   author = {Schuler, Nicolas},
   title = {hpc-compose},
-  version = {0.1.34},
+  version = {0.1.35},
   year = {2026},
   publisher = {Karlsruhe Institute of Technology (KIT)},
   url = {https://github.com/NicolasSchuler/hpc-compose}

@@ -15,6 +15,7 @@
 
 # Understand
 
+- [Slurm And Container Basics](slurm-container-basics.md)
 - [Execution Model](execution-model.md)
 - [Supported Slurm Model](supported-slurm-model.md)
 - [Runtime Backends](runtime-backends.md)
@@ -25,6 +26,7 @@
 - [Runbook](runbook.md)
 - [Troubleshooting](troubleshooting.md)
 - [Cluster Profiles](cluster-profiles.md)
+- [HAICORE Guide](haicore-guide.md)
 - [Runtime Observability](runtime-observability.md)
 - [Cache Management](cache-management.md)
 - [Artifacts and Resume](artifacts-and-resume.md)

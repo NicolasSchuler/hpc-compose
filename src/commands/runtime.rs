@@ -16,7 +16,7 @@ use hpc_compose::job::{
     SubmissionBackend, SubmissionKind, SubmissionRecord, SubmissionRecordBuildOptions,
     build_cleanup_report, build_ps_snapshot, build_stats_snapshot, build_status_snapshot,
     build_submission_record_with_backend_and_options, build_submission_record_with_options,
-    export_artifacts, find_submission_record_in_repo, latest_record_path_for,
+    export_artifacts, find_submission_record_in_repo, jobs_dir_for, latest_record_path_for,
     latest_run_record_path_for, load_submission_record, print_logs, remove_submission_record,
     run_cleanup_report, runtime_job_root_for_record, scan_job_inventory, scan_job_records,
     state_path_for_record, watch_submission, write_submission_record,
@@ -217,12 +217,15 @@ fn resolve_tracked_record(
 ) -> Result<Option<SubmissionRecord>> {
     match job_id {
         Some(job_id) => {
-            if let Ok(record) = load_submission_record(&context.compose_file.value, Some(job_id)) {
-                return Ok(Some(record));
+            let direct_record_path =
+                jobs_dir_for(&context.compose_file.value).join(format!("{job_id}.json"));
+            if direct_record_path.exists() {
+                return load_submission_record(&context.compose_file.value, Some(job_id)).map(Some);
             }
             match find_submission_record_in_repo(&context.cwd, job_id) {
                 Ok(record) => Ok(Some(record)),
-                Err(_) => Ok(None),
+                Err(err) if is_missing_tracked_record_error(&err) => Ok(None),
+                Err(err) => Err(err),
             }
         }
         None => {
@@ -242,6 +245,11 @@ fn resolve_tracked_record(
             }
         }
     }
+}
+
+fn is_missing_tracked_record_error(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .contains("no tracked submission metadata exists")
 }
 
 fn load_discovered_cluster_profile(
@@ -661,7 +669,7 @@ pub(crate) fn launch(
                 },
             ))
         })?;
-        if !quiet {
+        if !quiet || report.has_errors() {
             output::print_report(&report, false);
         }
         if report.has_errors() {
@@ -1032,7 +1040,7 @@ pub(crate) fn run_service(
                 },
             ))
         })?;
-        if !quiet {
+        if !quiet || report.has_errors() {
             output::print_report(&report, false);
         }
         if report.has_errors() {
@@ -1145,8 +1153,19 @@ pub(crate) fn status(
     format: Option<OutputFormat>,
     json: bool,
 ) -> Result<()> {
+    let record = match job_id.as_deref() {
+        Some(_) => resolve_tracked_record(&context, job_id.as_deref())?,
+        None => None,
+    };
+    if job_id.is_some() && record.is_none() {
+        bail!("{}", tracked_job_hint(job_id.as_deref()));
+    }
+    let compose_file = record
+        .as_ref()
+        .map(|record| record.compose_file.as_path())
+        .unwrap_or(context.compose_file.value.as_path());
     let snapshot = build_status_snapshot(
-        &context.compose_file.value,
+        compose_file,
         job_id.as_deref(),
         &SchedulerOptions {
             squeue_bin: context.binaries.squeue.value,
@@ -1174,8 +1193,16 @@ pub(crate) fn stats(
     json: bool,
     format: Option<StatsOutputFormat>,
 ) -> Result<()> {
+    let record = match job_id.as_deref() {
+        Some(_) => resolve_tracked_record(&context, job_id.as_deref())?,
+        None => None,
+    };
+    let compose_file = record
+        .as_ref()
+        .map(|record| record.compose_file.as_path())
+        .unwrap_or(context.compose_file.value.as_path());
     let snapshot = build_stats_snapshot(
-        &context.compose_file.value,
+        compose_file,
         job_id.as_deref(),
         &StatsOptions {
             scheduler: SchedulerOptions {
@@ -1245,7 +1272,8 @@ pub(crate) fn logs(
     follow: bool,
     lines: usize,
 ) -> Result<()> {
-    let record = load_submission_record(&context.compose_file.value, job_id.as_deref())?;
+    let record = resolve_tracked_record(&context, job_id.as_deref())?
+        .with_context(|| tracked_job_hint(job_id.as_deref()))?;
     print_logs(&record, service.as_deref(), lines, follow)
 }
 
@@ -1254,8 +1282,19 @@ pub(crate) fn ps(
     job_id: Option<String>,
     format: Option<OutputFormat>,
 ) -> Result<()> {
+    let record = match job_id.as_deref() {
+        Some(_) => resolve_tracked_record(&context, job_id.as_deref())?,
+        None => None,
+    };
+    if job_id.is_some() && record.is_none() {
+        bail!("{}", tracked_job_hint(job_id.as_deref()));
+    }
+    let compose_file = record
+        .as_ref()
+        .map(|record| record.compose_file.as_path())
+        .unwrap_or(context.compose_file.value.as_path());
     let snapshot = build_ps_snapshot(
-        &context.compose_file.value,
+        compose_file,
         job_id.as_deref(),
         &SchedulerOptions {
             squeue_bin: context.binaries.squeue.value,
@@ -1283,7 +1322,8 @@ pub(crate) fn watch(
     lines: usize,
     watch_mode: WatchMode,
 ) -> Result<()> {
-    let record = load_submission_record(&context.compose_file.value, job_id.as_deref())?;
+    let record = resolve_tracked_record(&context, job_id.as_deref())?
+        .with_context(|| tracked_job_hint(job_id.as_deref()))?;
     output::finish_watch(
         &record.job_id,
         watch_with_fallback(
@@ -1297,6 +1337,15 @@ pub(crate) fn watch(
             watch_mode,
         )?,
     )
+}
+
+fn tracked_job_hint(job_id: Option<&str>) -> String {
+    match job_id {
+        Some(job_id) => format!(
+            "tracked job '{job_id}' was not found from this repository; run `hpc-compose jobs list` to inspect known tracked jobs"
+        ),
+        None => "no tracked job was found for the active compose file; run `hpc-compose jobs list` to inspect known tracked jobs".to_string(),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1381,7 +1430,7 @@ pub(crate) fn debug(
             },
         );
         preflight_failed = report.has_errors();
-        if output_format == OutputFormat::Text && !quiet {
+        if output_format == OutputFormat::Text && (!quiet || report.has_errors()) {
             output::print_report(&report, true);
         }
         preflight_json = Some(
@@ -1961,11 +2010,7 @@ mod tests {
             false,
         )
         .expect_err("status should require tracked metadata");
-        assert!(
-            status_err
-                .to_string()
-                .contains("no tracked submission metadata exists")
-        );
+        assert!(status_err.to_string().contains("tracked job '12345'"));
 
         let stats_err = stats(
             context.clone(),

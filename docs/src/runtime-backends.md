@@ -2,6 +2,8 @@
 
 `runtime.backend` selects how each service is launched inside the Slurm step. The default is `pyxis`.
 
+For a beginner explanation of Slurm steps, Pyxis, Enroot, and shared runtime caches, start with [Slurm And Container Basics](slurm-container-basics.md).
+
 ```yaml
 runtime:
   backend: pyxis
@@ -56,6 +58,7 @@ Use top-level or service-level `x-env` for host modules, Spack views, and enviro
 ## Related Docs
 
 - [Support Matrix](support-matrix.md)
+- [Slurm And Container Basics](slurm-container-basics.md)
 - [Execution Model](execution-model.md)
 - [Spec Reference](spec-reference.md#runtime)
 - [CLI Reference](cli-reference.md#up-options)

@@ -184,6 +184,90 @@ services:
 }
 
 #[test]
+fn context_json_scopes_and_redacts_interpolation_vars_by_default() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("local image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "profile-compose.yaml",
+        &format!(
+            r#"
+name: scoped-vars
+x-slurm:
+  cache_dir: ${{CACHE_DIR}}
+services:
+  app:
+    image: {}
+    command: /bin/sh -lc "printf '%s' '${{API_TOKEN}}'"
+"#,
+            local_image.display()
+        ),
+    );
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "dev"
+
+[profiles.dev]
+compose_file = "{}"
+
+[profiles.dev.env]
+CACHE_DIR = "{}"
+API_TOKEN = "super-secret-token"
+UNUSED_SECRET = "should-not-appear"
+"#,
+            compose.file_name().and_then(|v| v.to_str()).expect("name"),
+            cache_dir.display(),
+        ),
+    )
+    .expect("settings");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &["--profile", "dev", "context", "--format", "json"],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("context json");
+    assert_eq!(
+        payload["interpolation_vars"]["CACHE_DIR"],
+        Value::from(cache_dir.display().to_string())
+    );
+    assert_eq!(
+        payload["interpolation_vars"]["API_TOKEN"],
+        Value::from("<redacted>")
+    );
+    assert!(payload["interpolation_vars"].get("UNUSED_SECRET").is_none());
+    assert_eq!(
+        payload["interpolation_var_sources"]["API_TOKEN"],
+        Value::from("profile")
+    );
+
+    let unredacted = run_cli(
+        tmpdir.path(),
+        &[
+            "--profile",
+            "dev",
+            "context",
+            "--show-values",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&unredacted);
+    let payload: Value = serde_json::from_str(&stdout_text(&unredacted)).expect("context json");
+    assert_eq!(
+        payload["interpolation_vars"]["API_TOKEN"],
+        Value::from("super-secret-token")
+    );
+}
+
+#[test]
 fn context_json_reports_builtin_cache_dir_source_when_unset() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let root = fs::canonicalize(tmpdir.path()).expect("canonical root");

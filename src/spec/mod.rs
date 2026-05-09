@@ -12,7 +12,7 @@ mod interpolate;
 mod parse;
 mod validation;
 
-pub use interpolate::missing_defaulted_variables;
+pub use interpolate::{missing_defaulted_variables, referenced_variables};
 
 use interpolate::{
     InterpolationVars, interpolate_optional_string, interpolate_string, interpolate_vec_strings,
@@ -1345,10 +1345,15 @@ impl ComposeSpec {
                 );
             }
             service
+                .environment
+                .validate_names(&format!("service '{name}' environment"))?;
+            service
                 .software_env
                 .validate(&format!("service '{name}' x-env"))?;
             service.slurm.software_env = service.software_env.clone();
             service.slurm.validate(name)?;
+            service.runtime.validate(name)?;
+            service.enroot.validate(name)?;
         }
         Ok(())
     }
@@ -1615,6 +1620,16 @@ impl EnvironmentSpec {
                 Ok(pairs)
             }
         }
+    }
+
+    fn validate_names(&self, field: &str) -> Result<()> {
+        for (name, _) in self
+            .to_pairs()
+            .with_context(|| format!("{field} is invalid"))?
+        {
+            validate_safe_env_name(&name, field)?;
+        }
+        Ok(())
     }
 
     fn interpolate_values(&mut self, vars: &InterpolationVars) -> Result<()> {
@@ -2456,9 +2471,9 @@ impl HostMpiConfig {
                 &format!("service '{service_name}' x-slurm.mpi.host_mpi.bind_paths[{index}]"),
             )?;
         }
-        self.env.to_pairs().with_context(|| {
-            format!("service '{service_name}' x-slurm.mpi.host_mpi.env is invalid")
-        })?;
+        self.env.validate_names(&format!(
+            "service '{service_name}' x-slurm.mpi.host_mpi.env"
+        ))?;
         Ok(())
     }
 
@@ -2570,6 +2585,13 @@ impl EffectiveFailurePolicyConfig {
 }
 
 impl ServiceEnrootConfig {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        if let Some(prepare) = &self.prepare {
+            prepare.validate(&format!("service '{service_name}' x-enroot.prepare"))?;
+        }
+        Ok(())
+    }
+
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         if let Some(prepare) = &mut self.prepare {
             prepare.interpolate(vars)?;
@@ -2579,6 +2601,13 @@ impl ServiceEnrootConfig {
 }
 
 impl ServiceRuntimeConfig {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        if let Some(prepare) = &self.prepare {
+            prepare.validate(&format!("service '{service_name}' x-runtime.prepare"))?;
+        }
+        Ok(())
+    }
+
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         if let Some(prepare) = &mut self.prepare {
             prepare.interpolate(vars)?;
@@ -2588,6 +2617,10 @@ impl ServiceRuntimeConfig {
 }
 
 impl PrepareSpec {
+    fn validate(&self, field: &str) -> Result<()> {
+        self.env.validate_names(&format!("{field}.env"))
+    }
+
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         interpolate_vec_strings(&mut self.mounts, vars)?;
         self.env.interpolate_values(vars)?;
@@ -3111,6 +3144,70 @@ services:
         let env = EnvironmentSpec::List(vec!["GOOD=1".into(), "BROKEN".into()]);
         let err = env.to_pairs().expect_err("should fail");
         assert!(err.to_string().contains("KEY=VALUE"));
+    }
+
+    #[test]
+    fn service_environment_rejects_unsafe_variable_names() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      BAD-NAME: value
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("service 'app' environment.BAD-NAME")
+        );
+    }
+
+    #[test]
+    fn prepare_environment_rejects_unsafe_variable_names() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-runtime:
+      prepare:
+        env:
+          BAD-NAME: value
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("service 'app' x-runtime.prepare.env.BAD-NAME")
+        );
+    }
+
+    #[test]
+    fn legacy_enroot_prepare_environment_rejects_unsafe_variable_names() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-enroot:
+      prepare:
+        env:
+          BAD-NAME: value
+"#,
+        );
+        let err = ComposeSpec::load(&path).expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("service 'app' x-enroot.prepare.env.BAD-NAME")
+        );
     }
 
     #[test]
@@ -4272,6 +4369,54 @@ services:
         )
         .expect("scan");
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn referenced_variable_scanner_tracks_only_scalar_values() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: ${IMAGE:-redis:7}
+    environment:
+      "${IGNORED_KEY:-key}": fixed
+      TOKEN: "${API_TOKEN}"
+      FALLBACK: "${A:-${B:-fallback}}"
+      ESCAPED: "$${IGNORED_ESCAPED:-literal}"
+    # ${IGNORED_COMMENT:-comment}
+"#,
+        );
+
+        let referenced = referenced_variables(&path, &BTreeMap::new()).expect("scan");
+        assert_eq!(
+            referenced,
+            BTreeSet::from([
+                "A".to_string(),
+                "API_TOKEN".to_string(),
+                "B".to_string(),
+                "IMAGE".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn referenced_variable_scanner_ignores_unused_default_branch() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: "${IMAGE:-${FALLBACK_IMAGE:-redis:7}}"
+"#,
+        );
+
+        let referenced =
+            referenced_variables(&path, &BTreeMap::from([("IMAGE".into(), "redis:7".into())]))
+                .expect("scan");
+        assert_eq!(referenced, BTreeSet::from(["IMAGE".to_string()]));
     }
 
     #[test]

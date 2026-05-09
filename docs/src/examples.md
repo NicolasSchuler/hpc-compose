@@ -10,9 +10,12 @@ There are two starting points:
 Before launching anything, run the safe authoring path first:
 
 ```bash
-hpc-compose plan -f examples/minimal-batch.yaml
-hpc-compose plan --show-script -f examples/minimal-batch.yaml
+hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+hpc-compose plan -f compose.yaml
+hpc-compose plan --show-script -f compose.yaml
 ```
+
+If you are reading from a source checkout, you can run the same static checks directly against `examples/minimal-batch.yaml`.
 
 Repository examples default `x-slurm.cache_dir` to `/cluster/shared/hpc-compose-cache` so they validate directly. Before running one on a real cluster, set `CACHE_DIR` to a shared path visible from both the submission host and the compute nodes, or place the same assignment in `.env` next to the copied spec:
 

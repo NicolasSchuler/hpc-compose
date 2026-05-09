@@ -2,6 +2,8 @@
 
 Cluster profiles let `validate` and `preflight` compare a spec against site-specific Slurm, runtime, MPI, storage, and policy hints.
 
+For HAICORE-specific resource, workspace, and container notes, see [HAICORE Guide](haicore-guide.md).
+
 Generate a best-effort profile on the target login node:
 
 ```bash
@@ -66,6 +68,7 @@ hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto 
 ## Related Docs
 
 - [Runbook](runbook.md)
+- [HAICORE Guide](haicore-guide.md)
 - [Runtime Backends](runtime-backends.md)
 - [Troubleshooting](troubleshooting.md)
 - [Spec Reference](spec-reference.md#servicesnamex-slurmmpi)

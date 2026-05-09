@@ -2,6 +2,8 @@
 
 Use this page when the safe authoring path worked but the first real cluster run failed.
 
+For background on Slurm allocations, `sbatch`, `srun`, Pyxis, and Enroot, see [Slurm And Container Basics](slurm-container-basics.md). For HAICORE-specific storage and runtime checks, see [HAICORE Guide](haicore-guide.md).
+
 ## First Triage
 
 ```bash
@@ -61,6 +63,8 @@ hpc-compose clean -f compose.yaml --age 7
 ## Related Docs
 
 - [Quickstart](quickstart.md#7-if-the-first-cluster-run-fails)
+- [Slurm And Container Basics](slurm-container-basics.md)
+- [HAICORE Guide](haicore-guide.md)
 - [Runbook](runbook.md)
 - [Cluster Profiles](cluster-profiles.md)
 - [Runtime Observability](runtime-observability.md)

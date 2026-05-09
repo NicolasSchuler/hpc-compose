@@ -14,6 +14,14 @@ curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEA
 
 The installer downloads the matching archive for the current Linux or macOS machine, verifies the published `.sha256` sidecar, installs `hpc-compose` into `~/.local/bin` by default, and installs shipped Unix manpages when present.
 
+After installation, make sure the install directory is on your shell `PATH` and verify the binary:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+command -v hpc-compose
+hpc-compose --version
+```
+
 Useful overrides:
 
 ```bash
@@ -50,6 +58,8 @@ tar -xzf hpc-compose.tar.gz
 ```
 
 Linux `x86_64` releases use a musl target to avoid common cluster glibc mismatches. Unix release archives also contain `share/man/man1/`.
+
+Windows release archives are zip-only for inspection and checksum parity. The installer script and end-to-end Slurm runtime workflows target Unix-like systems; use Windows primarily through WSL or a remote Linux/macOS authoring environment.
 
 ## Native Packages
 
@@ -164,7 +174,7 @@ cargo doc --no-deps
 Regenerate checked-in manpages from a checkout with:
 
 ```bash
-cargo run --features manpage-bin --bin gen-manpages
+cargo run --locked --features manpage-bin --bin gen-manpages
 cargo test --locked --test release_metadata
 man -l man/man1/hpc-compose.1
 ```

@@ -28,6 +28,7 @@ hpc-compose new --describe-template minimal-batch
 hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
 hpc-compose setup
 hpc-compose context --format json
+hpc-compose context --show-values --format json
 hpc-compose completions zsh
 ```
 
@@ -37,7 +38,7 @@ hpc-compose completions zsh
 | --- | --- | --- |
 | `plan` | Validate and preview the static runtime plan | Recommended before every first run. `--show-script` prints the generated launcher to stdout without writing a file. |
 | `validate` | Check YAML shape and field validation | Add `--strict-env` when interpolation fallbacks should fail. |
-| `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. |
+| `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. `config --variables` reports only interpolation variables referenced by the compose file and redacts sensitive-looking names unless `--show-values` is passed. |
 | `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
 | `inspect` | View the normalized runtime plan | `--verbose` can reveal resolved secrets and final mount mappings. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. |
@@ -54,6 +55,7 @@ hpc-compose plan -f compose.yaml
 hpc-compose plan --show-script -f compose.yaml
 hpc-compose validate -f compose.yaml
 hpc-compose config -f compose.yaml
+hpc-compose config -f compose.yaml --variables
 hpc-compose schema > hpc-compose.schema.json
 hpc-compose inspect --verbose -f compose.yaml
 hpc-compose preflight -f compose.yaml
@@ -118,6 +120,8 @@ hpc-compose watch -f compose.yaml --watch-mode line
 hpc-compose logs -f compose.yaml --service app --follow
 hpc-compose status -f compose.yaml --format json
 ```
+
+`context` and `config --variables` intentionally scope interpolation variables to names referenced by the compose file. Values whose names look secret-bearing, such as `TOKEN`, `PASSWORD`, `SECRET`, `API_KEY`, or `PRIVATE_KEY`, are shown as `<redacted>` by default; add `--show-values` only in trusted local diagnostics.
 
 ## Tracked Runtime
 

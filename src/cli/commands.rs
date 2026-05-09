@@ -252,6 +252,12 @@ pub enum Commands {
         format: Option<OutputFormat>,
         #[arg(long, help = "Show resolved interpolation variables and their sources")]
         variables: bool,
+        #[arg(
+            long,
+            requires = "variables",
+            help = "Show sensitive-looking interpolation values instead of redacting them"
+        )]
+        show_values: bool,
     },
     #[command(
         display_order = 470,
@@ -1168,6 +1174,11 @@ pub enum Commands {
     Context {
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
+        #[arg(
+            long,
+            help = "Show sensitive-looking interpolation values instead of redacting them"
+        )]
+        show_values: bool,
     },
     #[command(
         display_order = 20,

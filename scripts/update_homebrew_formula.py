@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 TEMPLATE = """class HpcCompose < Formula
-  desc "Compose-like specs for single-allocation Slurm jobs with Enroot and Pyxis"
+  desc "Compose-like specs for single-allocation Slurm jobs across HPC runtime backends"
   homepage "https://github.com/NicolasSchuler/hpc-compose"
   license "MIT"
   version "{version}"

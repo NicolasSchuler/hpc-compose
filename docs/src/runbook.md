@@ -2,6 +2,8 @@
 
 This runbook is the normal real-cluster flow for adapting a `hpc-compose` spec on a supported Linux Slurm submission host.
 
+If you are new to Slurm, read [Slurm And Container Basics](slurm-container-basics.md) first. If you are adapting to HAICORE@KIT, read [HAICORE Guide](haicore-guide.md) alongside this runbook.
+
 Commands below assume `hpc-compose` is on your `PATH`. If you are running from a local checkout, replace `hpc-compose` with `target/release/hpc-compose`.
 
 Compose-aware commands accept `-f` / `--file`. When omitted, `hpc-compose` uses the active context compose file from `.hpc-compose/settings.toml`, then falls back to `compose.yaml` in the current directory. Global context flags are available everywhere:
@@ -9,7 +11,7 @@ Compose-aware commands accept `-f` / `--file`. When omitted, `hpc-compose` uses 
 - `--profile <NAME>` selects a profile from `.hpc-compose/settings.toml`.
 - `--settings-file <PATH>` uses an explicit settings file instead of upward auto-discovery.
 
-Read [Execution Model](execution-model.md), [Runtime Backends](runtime-backends.md), and [Support Matrix](support-matrix.md) before adapting a workflow to a new cluster.
+Read [Slurm And Container Basics](slurm-container-basics.md), [Execution Model](execution-model.md), [Runtime Backends](runtime-backends.md), and [Support Matrix](support-matrix.md) before adapting a workflow to a new cluster.
 
 ## Before You Start
 

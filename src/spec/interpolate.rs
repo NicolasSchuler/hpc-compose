@@ -35,6 +35,132 @@ pub fn missing_defaulted_variables(
     Ok(missing)
 }
 
+/// Returns interpolation variable names referenced by YAML scalar values in a
+/// compose spec.
+///
+/// # Errors
+///
+/// Returns an error when the spec cannot be read, parsed, or contains malformed
+/// interpolation syntax.
+pub fn referenced_variables(
+    path: &Path,
+    vars: &BTreeMap<String, String>,
+) -> Result<BTreeSet<String>> {
+    let raw =
+        fs::read_to_string(path).context(format!("failed to read spec at {}", path.display()))?;
+    let value: Value = serde_norway::from_str(&raw)
+        .context(format!("failed to parse YAML at {}", path.display()))?;
+    let mut referenced = BTreeSet::new();
+    collect_referenced_variables_from_value(&value, vars, &mut referenced)?;
+    Ok(referenced)
+}
+
+fn collect_referenced_variables_from_value(
+    value: &Value,
+    vars: &BTreeMap<String, String>,
+    out: &mut BTreeSet<String>,
+) -> Result<()> {
+    match value {
+        Value::String(current) => collect_referenced_variables_in_string(current, vars, out),
+        Value::Sequence(items) => {
+            for item in items {
+                collect_referenced_variables_from_value(item, vars, out)?;
+            }
+            Ok(())
+        }
+        Value::Mapping(entries) => {
+            for value in entries.values() {
+                collect_referenced_variables_from_value(value, vars, out)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn collect_referenced_variables_in_string(
+    input: &str,
+    vars: &BTreeMap<String, String>,
+    out: &mut BTreeSet<String>,
+) -> Result<()> {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '$' {
+            index += 1;
+            continue;
+        }
+        if matches!(chars.get(index + 1), Some('$')) {
+            index += 2;
+            continue;
+        }
+        if matches!(chars.get(index + 1), Some('{')) {
+            let start = index;
+            index += 2;
+            let (expr, next_index) = read_braced_expression(&chars, index, input, start)?;
+            index = next_index;
+            collect_referenced_from_braced_expr(&expr, vars, out, input, start)?;
+            continue;
+        }
+
+        index += 1;
+        if !matches!(chars.get(index), Some(ch) if is_var_start(*ch)) {
+            continue;
+        }
+        let mut name = String::new();
+        while let Some(ch) = chars.get(index) {
+            if is_var_char(*ch) {
+                name.push(*ch);
+                index += 1;
+            } else {
+                break;
+            }
+        }
+        out.insert(name);
+    }
+    Ok(())
+}
+
+fn collect_referenced_from_braced_expr(
+    expr: &str,
+    vars: &BTreeMap<String, String>,
+    out: &mut BTreeSet<String>,
+    input: &str,
+    start: usize,
+) -> Result<()> {
+    let mut chars = expr.chars();
+    let Some(first) = chars.next() else {
+        bail!("invalid variable expression in '{}'", &input[start..]);
+    };
+    if !is_var_start(first) {
+        bail!("invalid variable expression in '{}'", &input[start..]);
+    }
+    let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
+    let name = &expr[..name_len];
+    let suffix = &expr[name_len..];
+    out.insert(name.to_string());
+
+    match suffix {
+        "" => {}
+        _ if suffix.starts_with(":-") => {
+            let default_used = match vars.get(name) {
+                Some(value) => value.is_empty(),
+                None => true,
+            };
+            if default_used {
+                collect_referenced_variables_in_string(&suffix[2..], vars, out)?;
+            }
+        }
+        _ if suffix.starts_with('-') => {
+            if !vars.contains_key(name) {
+                collect_referenced_variables_in_string(&suffix[1..], vars, out)?;
+            }
+        }
+        _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
+    }
+    Ok(())
+}
+
 fn collect_missing_defaulted_variables_from_value(
     value: &Value,
     vars: &BTreeMap<String, String>,
