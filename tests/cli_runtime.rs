@@ -3264,7 +3264,9 @@ services:
                 terminal = Some(payload);
                 break;
             }
-        } else if stderr_text(&status).contains("no tracked submission metadata exists") {
+        } else if stderr_text(&status).contains("tracked job")
+            && stderr_text(&status).contains("was not found")
+        {
             missing_tracking = true;
             break;
         } else {
