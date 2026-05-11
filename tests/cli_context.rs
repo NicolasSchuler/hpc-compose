@@ -303,6 +303,152 @@ services:
 }
 
 #[test]
+fn context_json_reports_profile_and_defaults_cache_sources() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let root = fs::canonicalize(tmpdir.path()).expect("root");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("local image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "profile-compose.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "dev"
+
+[defaults.cache]
+dir = "defaults-cache"
+
+[profiles.dev]
+compose_file = "{}"
+
+[profiles.dev.cache]
+dir = "profile-cache"
+"#,
+            compose.file_name().and_then(|v| v.to_str()).expect("name"),
+        ),
+    )
+    .expect("settings");
+
+    let profile = run_cli(
+        tmpdir.path(),
+        &["--profile", "dev", "context", "--format", "json"],
+    );
+    assert_success(&profile);
+    let payload: Value = serde_json::from_str(&stdout_text(&profile)).expect("profile json");
+    assert_eq!(
+        payload["runtime_paths"]["cache_dir"]["source"],
+        Value::from("profile")
+    );
+    assert_eq!(
+        payload["runtime_paths"]["cache_dir"]["value"],
+        Value::from(root.join("profile-cache").display().to_string())
+    );
+
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "dev"
+
+[defaults.cache]
+dir = "defaults-cache"
+
+[profiles.dev]
+compose_file = "{}"
+"#,
+            compose.file_name().and_then(|v| v.to_str()).expect("name"),
+        ),
+    )
+    .expect("settings");
+    let defaults = run_cli(
+        tmpdir.path(),
+        &["--profile", "dev", "context", "--format", "json"],
+    );
+    assert_success(&defaults);
+    let payload: Value = serde_json::from_str(&stdout_text(&defaults)).expect("defaults json");
+    assert_eq!(
+        payload["runtime_paths"]["cache_dir"]["source"],
+        Value::from("defaults")
+    );
+    assert_eq!(
+        payload["runtime_paths"]["cache_dir"]["value"],
+        Value::from(root.join("defaults-cache").display().to_string())
+    );
+}
+
+#[test]
+fn preflight_applies_settings_cache_path_policy() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("local image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "profile-compose.yaml",
+        &format!(
+            r#"
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "dev"
+
+[profiles.dev]
+compose_file = "{}"
+
+[profiles.dev.cache]
+dir = "/tmp/hpc-compose-settings-cache"
+"#,
+            compose.file_name().and_then(|v| v.to_str()).expect("name"),
+        ),
+    )
+    .expect("settings");
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--profile",
+            "dev",
+            "preflight",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("not shared"));
+}
+
+#[test]
 fn context_json_reports_nested_submit_dir_separately_from_compose_dir() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let nested = tmpdir.path().join("nested/workdir");

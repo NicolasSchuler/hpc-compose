@@ -81,6 +81,64 @@ pub struct BinaryOverrides {
     pub scancel: Option<String>,
 }
 
+/// Cache path defaults in settings.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CacheSettings {
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+/// Reusable Slurm resource defaults in settings.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceProfile {
+    #[serde(default)]
+    pub partition: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub qos: Option<String>,
+    #[serde(default)]
+    pub time: Option<String>,
+    #[serde(default)]
+    pub nodes: Option<u32>,
+    #[serde(default)]
+    pub ntasks: Option<u32>,
+    #[serde(default)]
+    pub ntasks_per_node: Option<u32>,
+    #[serde(default)]
+    pub cpus_per_task: Option<u32>,
+    #[serde(default)]
+    pub mem: Option<String>,
+    #[serde(default)]
+    pub gres: Option<String>,
+    #[serde(default)]
+    pub gpus: Option<u32>,
+    #[serde(default)]
+    pub gpus_per_node: Option<u32>,
+    #[serde(default)]
+    pub gpus_per_task: Option<u32>,
+    #[serde(default)]
+    pub cpus_per_gpu: Option<u32>,
+    #[serde(default)]
+    pub mem_per_gpu: Option<String>,
+    #[serde(default)]
+    pub gpu_bind: Option<String>,
+    #[serde(default)]
+    pub cpu_bind: Option<String>,
+    #[serde(default)]
+    pub mem_bind: Option<String>,
+    #[serde(default)]
+    pub distribution: Option<String>,
+    #[serde(default)]
+    pub hint: Option<String>,
+    #[serde(default)]
+    pub constraint: Option<String>,
+}
+
 /// Shared defaults in settings.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +152,8 @@ pub struct SettingsDefaults {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub binaries: BinaryOverrides,
+    #[serde(default)]
+    pub cache: CacheSettings,
 }
 
 /// One named profile in settings.
@@ -109,6 +169,8 @@ pub struct SettingsProfile {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub binaries: BinaryOverrides,
+    #[serde(default)]
+    pub cache: CacheSettings,
 }
 
 /// `.hpc-compose/settings.toml` root schema.
@@ -124,6 +186,8 @@ pub struct Settings {
     pub defaults: SettingsDefaults,
     #[serde(default)]
     pub profiles: BTreeMap<String, SettingsProfile>,
+    #[serde(default)]
+    pub resource_profiles: BTreeMap<String, ResourceProfile>,
 }
 
 impl Default for Settings {
@@ -133,6 +197,7 @@ impl Default for Settings {
             default_profile: None,
             defaults: SettingsDefaults::default(),
             profiles: BTreeMap::new(),
+            resource_profiles: BTreeMap::new(),
         }
     }
 }
@@ -167,6 +232,8 @@ pub struct ResolvedContext {
     pub settings_base_dir: Option<PathBuf>,
     pub selected_profile: Option<String>,
     pub compose_file: ResolvedValue<PathBuf>,
+    pub cache_dir: ResolvedValue<PathBuf>,
+    pub resource_profiles: BTreeMap<String, ResourceProfile>,
     pub binaries: ResolvedBinaries,
     pub interpolation_vars: BTreeMap<String, String>,
     pub interpolation_var_sources: BTreeMap<String, ValueSource>,
@@ -344,6 +411,11 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         profile_cfg.map(|profile| &profile.binaries),
         defaults_cfg.map(|defaults| &defaults.binaries),
     );
+    let cache_dir = resolve_cache_dir_default(
+        profile_cfg.and_then(|profile| profile.cache.dir.as_deref()),
+        defaults_cfg.and_then(|defaults| defaults.cache.dir.as_deref()),
+        &settings_base,
+    );
 
     let mut interpolation_vars = BTreeMap::new();
     let mut interpolation_var_sources = BTreeMap::new();
@@ -395,6 +467,11 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         settings_base_dir: resolved_settings_base_dir,
         selected_profile,
         compose_file,
+        cache_dir,
+        resource_profiles: settings
+            .as_ref()
+            .map(|settings| settings.resource_profiles.clone())
+            .unwrap_or_default(),
         binaries,
         interpolation_vars,
         interpolation_var_sources,
@@ -590,6 +667,36 @@ fn resolve_binary(
     }
 }
 
+fn resolve_cache_dir_default(
+    profile_value: Option<&str>,
+    defaults_value: Option<&str>,
+    settings_base: &Path,
+) -> ResolvedValue<PathBuf> {
+    if let Some(path) = profile_value {
+        return ResolvedValue {
+            value: resolve_string_path(path, settings_base),
+            source: ValueSource::Profile,
+        };
+    }
+    if let Some(path) = defaults_value {
+        return ResolvedValue {
+            value: resolve_string_path(path, settings_base),
+            source: ValueSource::Defaults,
+        };
+    }
+    ResolvedValue {
+        value: default_cache_dir(),
+        source: ValueSource::Builtin,
+    }
+}
+
+fn default_cache_dir() -> PathBuf {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".cache/hpc-compose")
+}
+
 fn load_compose_dotenv(
     compose_file: &Path,
     vars: &mut BTreeMap<String, String>,
@@ -716,6 +823,7 @@ mod tests {
             .env
             .insert("A".into(), "defaults-map".into());
         settings.defaults.binaries.srun = Some("/defaults/srun".into());
+        settings.defaults.cache.dir = Some("defaults-cache".into());
 
         let mut profile = SettingsProfile {
             compose_file: Some("compose-profile.yaml".into()),
@@ -724,6 +832,7 @@ mod tests {
         };
         profile.env.insert("A".into(), "profile-map".into());
         profile.binaries.srun = Some("/profile/srun".into());
+        profile.cache.dir = Some("profile-cache".into());
         settings.profiles.insert("dev".into(), profile);
         settings
     }
@@ -779,6 +888,8 @@ mod tests {
         assert_eq!(resolved.compose_file.source, ValueSource::Profile);
         assert_eq!(resolved.binaries.srun.value, "/profile/srun");
         assert_eq!(resolved.binaries.srun.source, ValueSource::Profile);
+        assert_eq!(resolved.cache_dir.value, repo.join("profile-cache"));
+        assert_eq!(resolved.cache_dir.source, ValueSource::Profile);
         assert_eq!(
             resolved.interpolation_vars.get("A").map(String::as_str),
             Some("profile-map")
@@ -822,6 +933,53 @@ mod tests {
         assert!(resolved.compose_file.value.ends_with("compose-cli.yaml"));
         assert_eq!(resolved.binaries.srun.value, "/cli/srun");
         assert_eq!(resolved.binaries.srun.source, ValueSource::Cli);
+    }
+
+    #[test]
+    fn resolve_cache_settings_use_defaults_tilde_and_builtin_fallback() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".hpc-compose")).expect("mkdir");
+        let mut settings = settings_fixture();
+        settings.profiles.get_mut("dev").expect("dev").cache.dir = None;
+        settings.defaults.cache.dir = Some("~/hpc-compose-cache".into());
+        fs::write(
+            repo.join(".hpc-compose/settings.toml"),
+            toml::to_string_pretty(&settings).expect("settings"),
+        )
+        .expect("write");
+        fs::write(repo.join(".env.defaults"), "A=defaults-file\n").expect("write defaults env");
+        fs::write(repo.join(".env.profile"), "A=profile-file\n").expect("write profile env");
+        fs::write(
+            repo.join("compose-profile.yaml"),
+            "services:\n  app:\n    image: redis:7\n",
+        )
+        .expect("compose");
+
+        let resolved = resolve(&ResolveRequest {
+            cwd: repo.clone(),
+            ..ResolveRequest::default()
+        })
+        .expect("resolve");
+        assert_eq!(resolved.cache_dir.source, ValueSource::Defaults);
+        assert!(resolved.cache_dir.value.ends_with("hpc-compose-cache"));
+
+        let no_settings = tmp.path().join("no-settings");
+        fs::create_dir_all(&no_settings).expect("no settings dir");
+        fs::write(
+            no_settings.join("compose.yaml"),
+            "services:\n  app:\n    image: redis:7\n",
+        )
+        .expect("compose");
+        let fallback = resolve(&ResolveRequest {
+            cwd: no_settings,
+            settings_file: None,
+            compose_file_override: Some(PathBuf::from("compose.yaml")),
+            ..ResolveRequest::default()
+        })
+        .expect("fallback");
+        assert_eq!(fallback.cache_dir.source, ValueSource::Builtin);
+        assert!(fallback.cache_dir.value.ends_with(".cache/hpc-compose"));
     }
 
     #[test]

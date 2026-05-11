@@ -17,16 +17,18 @@ This page maps the public `hpc-compose` CLI by workflow. Use [Quickstart](quicks
 
 | Command | Use it for | Notes |
 | --- | --- | --- |
-| `new` (alias: `init`) | Generate a starter compose file from a built-in template | Use `--list-templates` and `--describe-template <name>` to inspect templates before writing a file. Writing a template requires `--cache-dir`. |
-| `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, and binary overrides. |
+| `new` (alias: `init`) | Generate a starter compose file from a built-in template | Use `--list-templates` and `--describe-template <name>` to inspect templates before writing a file. `--cache-dir` is optional and writes an explicit `x-slurm.cache_dir`. |
+| `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, binary overrides, and an optional profile cache default. |
 | `context` | Print the resolved execution context | Shows the selected profile, binaries, interpolation vars, runtime paths, and value sources. |
 | `completions` | Generate shell completion scripts | Supports Bash, Zsh, Fish, PowerShell, and Elvish through Clap's completion generator. |
 
 ```bash
 hpc-compose new --list-templates
 hpc-compose new --describe-template minimal-batch
+hpc-compose new --template minimal-batch --name my-app --output compose.yaml
 hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
 hpc-compose setup
+hpc-compose setup --profile-name dev --cache-dir '<shared-cache-dir>' --default-profile dev --non-interactive
 hpc-compose context --format json
 hpc-compose context --show-values --format json
 hpc-compose completions zsh
@@ -48,7 +50,8 @@ hpc-compose completions zsh
 | `prepare` | Import images and build prepared runtime artifacts | Use `--force` when the base image or prepare inputs changed. |
 | `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. |
 | `up` | Run the one-command launch/watch/logs workflow | Preferred normal run on a real cluster. |
-| `run` | Launch one service in a fresh one-off allocation | Ignores `depends_on` and follows logs until the one-off command finishes. |
+| `run` | Launch a one-off command | Service mode uses an existing compose service. Image mode uses `--image IMAGE -- CMD` and builds an ephemeral one-service plan. |
+| `shell` | Open an interactive Pyxis shell | Thin wrapper around `srun --pty --container-image=<image> bash -l`. |
 
 ```bash
 hpc-compose plan -f compose.yaml
@@ -69,6 +72,8 @@ hpc-compose render -f compose.yaml --output job.sbatch
 hpc-compose up -f compose.yaml
 hpc-compose up --detach --format json -f compose.yaml
 hpc-compose run app -- python -m smoke_test
+hpc-compose run --image docker://python:3.12 --resources cpu-small -- python -V
+hpc-compose shell --image docker://ubuntu:24.04
 ```
 
 ### `up` Options
@@ -85,6 +90,8 @@ Useful workflow flags:
 - `--force-rebuild` refreshes imported and prepared artifacts before launch.
 - `--skip-prepare` skips image import and prepare reuse checks.
 - `--keep-failed-prep` leaves the failed Enroot rootfs behind for inspection.
+- Array jobs (`x-slurm.array`) require `--detach` because live watch/log fan-out is not array-aware yet.
+- Scheduler dependencies from `x-slurm.after_job` and `x-slurm.dependency` are passed as `sbatch --dependency=...`.
 
 ### `up --local`
 
@@ -102,12 +109,33 @@ Current constraints:
 - no distributed or partitioned placement
 - no `services.<name>.x-slurm.extra_srun_args`
 - no `services.<name>.x-slurm.mpi`
+- no `x-slurm.array`
+- no scheduler dependencies from `x-slurm.after_job` or `x-slurm.dependency`
 - reservation-related `x-slurm.submit_args` are ignored
 - `x-slurm.error` is ignored, and local batch stderr is written into the tracked local batch log
 
 `up --local` follows the tracked local launch immediately, just like `up` does for a submitted job. Add `--detach` when you want to launch and return.
 
 In local mode the batch script also exports `HPC_COMPOSE_BACKEND_OVERRIDE=local`, `HPC_COMPOSE_LOCAL_ENROOT_BIN` pointing to the resolved `enroot` binary, and `HPC_COMPOSE_LOCAL_BIN_DIR` containing a generated `srun` shim. These variables are internal to `hpc-compose` and not intended for direct use in compose specs.
+
+### `run` and `shell`
+
+`run` has two forms:
+
+```bash
+hpc-compose run [-f compose.yaml] SERVICE -- CMD [ARGS...]
+hpc-compose run --image IMAGE [--resources NAME] [--time T] [--mem M] [--cpus-per-task N] [--gpus N] [--partition P] [--env K=V] [--local] -- CMD [ARGS...]
+```
+
+Service mode reuses the named service's image, environment, mounts, working directory, and prepare rules, clears `depends_on`, and submits a fresh tracked run job. Image mode creates an ephemeral one-service plan from CLI flags, then follows the normal render/prepare/submit path. `--resources` refers to `[resource_profiles.<name>]` in settings; it is not the global `--profile` selector.
+
+`shell` is intentionally thinner:
+
+```bash
+hpc-compose shell --image IMAGE [--resources NAME] [--time T] [--mem M] [--cpus-per-task N] [--gpus N] [--partition P] [--env K=V]
+```
+
+It calls `srun --pty` directly with Pyxis `--container-image` and defaults to `bash -l`. It does not render an sbatch script or create tracked job metadata.
 
 ## Accessible and Automation-Friendly Output
 

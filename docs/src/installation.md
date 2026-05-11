@@ -72,7 +72,7 @@ sudo apt install "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.deb"
 sudo dnf install "./hpc-compose-${RELEASE_TAG}-x86_64-unknown-linux-musl.rpm"
 ```
 
-Package availability does not change runtime support policy. Linux cluster workflows still need Slurm client tools, the selected runtime backend, and shared storage for `x-slurm.cache_dir`.
+Package availability does not change runtime support policy. Linux cluster workflows still need Slurm client tools, the selected runtime backend, and shared storage for the resolved cache directory.
 
 ## Homebrew On macOS
 

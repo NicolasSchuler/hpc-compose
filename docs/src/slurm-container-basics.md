@@ -73,7 +73,6 @@ x-slurm:
   time: "00:10:00"
   cpus_per_task: 2
   mem: 4G
-  cache_dir: <shared-cache-dir>
 
 services:
   app:
@@ -158,14 +157,21 @@ Other supported runtime paths are covered in [Runtime Backends](runtime-backends
 
 ## Why Shared Storage Matters
 
-`hpc-compose prepare` can run before the Slurm job starts, but services run later on compute nodes. That means the runtime cache must be visible from both places:
+`hpc-compose prepare` can run before the Slurm job starts, but services run later on compute nodes. That means the resolved runtime cache must be visible from both places. You can set it in project settings:
+
+```toml
+[profiles.dev.cache]
+dir = "/cluster/shared/hpc-compose-cache"
+```
+
+Or directly in a spec:
 
 ```yaml
 x-slurm:
   cache_dir: /cluster/shared/hpc-compose-cache
 ```
 
-Use a project, work, scratch, or workspace path that your site documents as shared. Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for `x-slurm.cache_dir`.
+Use a project, work, scratch, or workspace path that your site documents as shared. Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for the resolved cache directory.
 
 The same rule applies to host paths mounted through `volumes`: the compute node must be able to read the path when the service starts.
 
@@ -188,7 +194,7 @@ Inside a container, `cat /etc/os-release` should describe the container image. O
 | --- | --- | --- |
 | `plan` looks fine but `up` fails immediately | Static validation is not the same as cluster readiness. | Run `hpc-compose debug -f compose.yaml --preflight` on the login node. |
 | `srun` does not accept `--container-image` | Pyxis is not available or not loaded in Slurm. | Read [Runtime Backends](runtime-backends.md) and use the site-supported backend. |
-| Cache warnings mention local paths | The cache path is not shared between login and compute nodes. | Move `x-slurm.cache_dir` to shared storage. |
+| Cache warnings mention local paths | The cache path is not shared between login and compute nodes. | Configure `x-slurm.cache_dir` or `setup --cache-dir` with shared storage. |
 | A GPU job waits longer than expected | The request may be larger than available idle resources. | Check site queue policy and start with the smallest useful request. |
 | More CPUs were requested but only one process appears | `cpus_per_task` adds threads per task; it does not create more tasks. | Use `ntasks` for more processes/ranks, and make the application use them. |
 | Docker Compose `ports` or service DNS do not work | This is one Slurm allocation, not a Docker Compose network. | Use host networking and Slurm/hpc-compose allocation metadata instead. |

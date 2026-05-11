@@ -2,7 +2,7 @@
 
 This appendix embeds the runnable repository example YAML files directly from `examples/`.
 
-The repository examples default `x-slurm.cache_dir` to `/cluster/shared/hpc-compose-cache` so they validate directly. Before running one on a real cluster, set `CACHE_DIR` to a shared path visible from both the submission host and the compute nodes, or place the same assignment in `.env` next to the copied spec:
+Some repository examples keep an explicit `${CACHE_DIR:-/cluster/shared/hpc-compose-cache}` for portability, while starter examples rely on the settings/builtin cache default. Before running on a real cluster, configure a shared path visible from both the submission host and the compute nodes:
 
 ```bash
 export CACHE_DIR=/cluster/shared/hpc-compose-cache

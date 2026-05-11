@@ -1,6 +1,6 @@
 # Cache Management
 
-`x-slurm.cache_dir` stores imported and prepared runtime artifacts. It must be visible from both the submission host and compute nodes.
+The resolved cache directory stores imported and prepared runtime artifacts. It comes from explicit `x-slurm.cache_dir`, then profile/default settings, then `$HOME/.cache/hpc-compose`. For real cluster runs, it must be visible from both the submission host and compute nodes.
 
 ## Choose A Cache Path
 
@@ -10,6 +10,12 @@ Use a project scratch, work, or shared filesystem path:
 export CACHE_DIR=/cluster/shared/hpc-compose-cache
 mkdir -p "$CACHE_DIR"
 test -w "$CACHE_DIR"
+```
+
+You can record that path in project settings instead of every compose file:
+
+```bash
+hpc-compose setup --profile-name dev --cache-dir "$CACHE_DIR" --default-profile dev --non-interactive
 ```
 
 Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm`. Validation may accept those strings, but `preflight` reports them as unsafe because compute nodes must reuse artifacts prepared before submission.
@@ -60,6 +66,6 @@ hpc-compose cache prune --age 0
 
 ## Related Docs
 
-- [Quickstart](quickstart.md#4-pick-and-test-cache_dir)
+- [Quickstart](quickstart.md#4-pick-and-test-a-cache-directory)
 - [Runbook](runbook.md)
 - [CLI Reference](cli-reference.md#cache-maintenance)

@@ -63,10 +63,13 @@ pub(crate) fn doctor_mpi_smoke(
         bail!("doctor --mpi-smoke --timeout-seconds must be at least 1 when --submit is used");
     }
     let output_format = output::resolve_output_format(format, false);
-    let plan = output_common::load_plan_with_interpolation_vars(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-    )?;
+    let plan =
+        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let runtime_plan = build_runtime_plan(&plan);
     let service = select_mpi_service(&runtime_plan, service_name.as_deref())?;
     let expected_ranks = mpi_expected_ranks(service);
@@ -272,10 +275,13 @@ pub(crate) fn doctor_fabric_smoke(
     }
     let selected_checks = FabricCheckSelection::parse(checks.as_deref())?;
     let output_format = output::resolve_output_format(format, false);
-    let plan = output_common::load_plan_with_interpolation_vars(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-    )?;
+    let plan =
+        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let runtime_plan = build_runtime_plan(&plan);
     let service = select_mpi_service(&runtime_plan, service_name.as_deref())?;
     let expected_ranks = mpi_expected_ranks(service);
@@ -2046,6 +2052,11 @@ x-slurm:
             settings_base_dir: None,
             selected_profile: None,
             compose_file: resolved_path(&compose),
+            cache_dir: ResolvedValue {
+                value: tmpdir.path().join(".cache/hpc-compose"),
+                source: ValueSource::Builtin,
+            },
+            resource_profiles: BTreeMap::new(),
             binaries: binaries_with_srun(&srun),
             interpolation_vars: BTreeMap::new(),
             interpolation_var_sources: BTreeMap::new(),

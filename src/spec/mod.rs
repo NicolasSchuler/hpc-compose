@@ -23,7 +23,7 @@ use validation::{
     parse_duration_seconds, parse_healthcheck_argv, parse_http_probe, parse_nc_probe,
     validate_artifact_bundle_name, validate_artifact_path, validate_positive_u32,
     validate_resume_path, validate_sbatch_safe_string, validate_sbatch_safe_strings,
-    validate_shell_hook_script,
+    validate_shell_hook_script, validate_slurm_array_spec, validate_slurm_job_id,
 };
 
 /// Top-level compose file accepted by `hpc-compose`.
@@ -119,6 +119,8 @@ pub struct SlurmConfig {
     #[serde(skip)]
     pub software_env: SoftwareEnvConfig,
     #[serde(default)]
+    pub resources: Option<String>,
+    #[serde(default)]
     pub job_name: Option<String>,
     #[serde(default)]
     pub partition: Option<String>,
@@ -169,6 +171,12 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub chdir: Option<String>,
     #[serde(default)]
+    pub array: Option<String>,
+    #[serde(default)]
+    pub after_job: Option<JobDependencySpec>,
+    #[serde(default)]
+    pub dependency: Option<JobDependencyMode>,
+    #[serde(default)]
     pub cache_dir: Option<String>,
     #[serde(default)]
     pub scratch: Option<ScratchConfig>,
@@ -190,6 +198,108 @@ pub struct SlurmConfig {
     pub setup: Vec<String>,
     #[serde(default)]
     pub submit_args: Vec<String>,
+}
+
+/// Accepted `x-slurm.after_job` syntaxes.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum JobDependencySpec {
+    /// Shorthand job id form, equivalent to `afterany:<id>`.
+    Id(String),
+    /// Mapping form with an explicit condition.
+    Mapping(JobDependency),
+}
+
+impl JobDependencySpec {
+    /// Returns the normalized dependency id.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Id(id) => id,
+            Self::Mapping(dependency) => dependency.id.as_str(),
+        }
+    }
+
+    /// Returns the normalized dependency condition.
+    #[must_use]
+    pub fn condition(&self) -> JobDependencyCondition {
+        match self {
+            Self::Id(_) => JobDependencyCondition::AfterAny,
+            Self::Mapping(dependency) => dependency.condition.unwrap_or_default(),
+        }
+    }
+
+    fn validate(&self, field: &str) -> Result<()> {
+        validate_slurm_job_id(self.id(), field)
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        match self {
+            Self::Id(id) => {
+                *id = interpolate_string(id, vars)?;
+                Ok(())
+            }
+            Self::Mapping(dependency) => {
+                dependency.id = interpolate_string(&dependency.id, vars)?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Slurm job dependency mapping form.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct JobDependency {
+    pub id: String,
+    #[serde(default)]
+    pub condition: Option<JobDependencyCondition>,
+}
+
+/// Slurm job dependency condition for id-based dependencies.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum JobDependencyCondition {
+    /// Start after the target job terminates in any state.
+    #[default]
+    #[serde(rename = "afterany")]
+    AfterAny,
+    /// Start after the target job succeeds.
+    #[serde(rename = "afterok")]
+    AfterOk,
+    /// Start after the target job fails.
+    #[serde(rename = "afternotok")]
+    AfterNotOk,
+}
+
+impl JobDependencyCondition {
+    /// Returns the Slurm CLI token.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AfterAny => "afterany",
+            Self::AfterOk => "afterok",
+            Self::AfterNotOk => "afternotok",
+        }
+    }
+}
+
+/// Slurm dependency mode that does not require an explicit job id.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobDependencyMode {
+    /// Slurm singleton dependency.
+    Singleton,
+}
+
+impl JobDependencyMode {
+    /// Returns the Slurm CLI token.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Singleton => "singleton",
+        }
+    }
 }
 
 /// Scratch storage scope requested for a job.
@@ -459,6 +569,8 @@ pub struct ServiceSpec {
     pub command: Option<CommandSpec>,
     #[serde(default)]
     pub entrypoint: Option<CommandSpec>,
+    #[serde(default)]
+    pub script: Option<String>,
     #[serde(default)]
     pub environment: EnvironmentSpec,
     #[serde(default)]
@@ -865,6 +977,8 @@ pub struct EffectiveComposeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EffectiveSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub job_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partition: Option<String>,
@@ -914,6 +1028,12 @@ pub struct EffectiveSlurmConfig {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chdir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub array: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_job: Option<EffectiveJobDependency>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency: Option<JobDependencyMode>,
     pub cache_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scratch: Option<ScratchConfig>,
@@ -935,6 +1055,14 @@ pub struct EffectiveSlurmConfig {
     pub setup: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub submit_args: Vec<String>,
+}
+
+/// Stable effective representation of an id-based Slurm dependency.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveJobDependency {
+    pub id: String,
+    pub condition: JobDependencyCondition,
 }
 
 /// Stable effective metrics config with defaults applied.
@@ -1332,6 +1460,7 @@ impl ComposeSpec {
         self.slurm.software_env = self.software_env.clone();
         self.slurm.validate()?;
         for (name, service) in &mut self.services {
+            service.normalize_script_and_command(name)?;
             service.normalize_healthcheck()?;
             if service.runtime.prepare.is_some() && service.enroot.prepare.is_some() {
                 bail!(
@@ -1470,6 +1599,7 @@ impl ComposeSpec {
             runtime: self.runtime.clone(),
             software_env: self.software_env.clone(),
             slurm: EffectiveSlurmConfig {
+                resources: self.slurm.resources.clone(),
                 job_name: self.slurm.job_name.clone(),
                 partition: self.slurm.partition.clone(),
                 account: self.slurm.account.clone(),
@@ -1495,6 +1625,16 @@ impl ComposeSpec {
                 output: self.slurm.output.clone(),
                 error: self.slurm.error.clone(),
                 chdir: self.slurm.chdir.clone(),
+                array: self.slurm.array.clone(),
+                after_job: self
+                    .slurm
+                    .after_job
+                    .as_ref()
+                    .map(|dependency| EffectiveJobDependency {
+                        id: dependency.id().to_string(),
+                        condition: dependency.condition(),
+                    }),
+                dependency: self.slurm.dependency,
                 cache_dir: cache_dir.display().to_string(),
                 scratch: self.slurm.scratch.clone(),
                 stage_in: self.slurm.stage_in.clone(),
@@ -1865,6 +2005,29 @@ impl SlurmConfig {
         )
     }
 
+    /// Returns the normalized Slurm dependency CLI value, if configured.
+    #[must_use]
+    pub fn dependency_cli_value(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(dependency) = &self.after_job {
+            parts.push(format!(
+                "{}:{}",
+                dependency.condition().as_str(),
+                dependency.id()
+            ));
+        }
+        if let Some(dependency) = self.dependency {
+            parts.push(dependency.as_str().to_string());
+        }
+        (!parts.is_empty()).then(|| parts.join(","))
+    }
+
+    /// Returns whether this config uses a scheduler-level dependency.
+    #[must_use]
+    pub fn has_scheduler_dependency(&self) -> bool {
+        self.after_job.is_some() || self.dependency.is_some()
+    }
+
     /// Validates semantic rules that serde alone cannot express.
     ///
     /// # Errors
@@ -1872,6 +2035,14 @@ impl SlurmConfig {
     /// Returns an error when allocation, metrics, artifact, or resume settings
     /// violate `hpc-compose`'s supported Slurm model.
     pub fn validate(&self) -> Result<()> {
+        validate_sbatch_safe_string(self.resources.as_deref(), "x-slurm.resources")?;
+        if self
+            .resources
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("x-slurm.resources must not be empty");
+        }
         validate_positive_u32(self.nodes, "x-slurm.nodes")?;
         validate_positive_u32(self.ntasks, "x-slurm.ntasks")?;
         validate_positive_u32(self.ntasks_per_node, "x-slurm.ntasks_per_node")?;
@@ -1895,6 +2066,10 @@ impl SlurmConfig {
         validate_sbatch_safe_string(self.output.as_deref(), "x-slurm.output")?;
         validate_sbatch_safe_string(self.error.as_deref(), "x-slurm.error")?;
         validate_sbatch_safe_string(self.chdir.as_deref(), "x-slurm.chdir")?;
+        validate_slurm_array_spec(self.array.as_deref(), "x-slurm.array")?;
+        if let Some(after_job) = &self.after_job {
+            after_job.validate("x-slurm.after_job")?;
+        }
         validate_sbatch_safe_strings(
             self.submit_args.iter().map(String::as_str),
             "x-slurm.submit_args",
@@ -1966,6 +2141,7 @@ impl SlurmConfig {
     }
 
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_optional_string(&mut self.resources, vars)?;
         interpolate_optional_string(&mut self.job_name, vars)?;
         interpolate_optional_string(&mut self.partition, vars)?;
         interpolate_optional_string(&mut self.account, vars)?;
@@ -1983,6 +2159,10 @@ impl SlurmConfig {
         interpolate_optional_string(&mut self.output, vars)?;
         interpolate_optional_string(&mut self.error, vars)?;
         interpolate_optional_string(&mut self.chdir, vars)?;
+        interpolate_optional_string(&mut self.array, vars)?;
+        if let Some(after_job) = &mut self.after_job {
+            after_job.interpolate(vars)?;
+        }
         interpolate_optional_string(&mut self.cache_dir, vars)?;
         if let Some(scratch) = &mut self.scratch {
             scratch.interpolate(vars)?;
@@ -2199,6 +2379,45 @@ impl ServiceSpec {
         Ok(())
     }
 
+    fn normalize_script_and_command(&mut self, name: &str) -> Result<()> {
+        if let Some(script) = self.script.take() {
+            if self.command.is_some() {
+                bail!("service '{name}' sets both script and command; use only one");
+            }
+            if self.entrypoint.is_some() {
+                bail!("service '{name}' sets both script and entrypoint; use only one");
+            }
+            validate_service_script(&script, &format!("service '{name}' script"))?;
+            self.command = Some(CommandSpec::Vec(vec![
+                "/bin/sh".into(),
+                "-lc".into(),
+                script,
+            ]));
+        }
+
+        let Some(CommandSpec::String(command)) = self.command.as_ref() else {
+            return Ok(());
+        };
+        if !command.contains('\n') {
+            return Ok(());
+        }
+        let command = match self.entrypoint.take() {
+            None => command.clone(),
+            Some(CommandSpec::String(entrypoint)) => format!("{entrypoint} {command}"),
+            Some(CommandSpec::Vec(_)) => {
+                bail!(
+                    "service '{name}' mixes array-form entrypoint with multi-line string command; use script or an explicit command list instead"
+                );
+            }
+        };
+        self.command = Some(CommandSpec::Vec(vec![
+            "/bin/sh".into(),
+            "-lc".into(),
+            command,
+        ]));
+        Ok(())
+    }
+
     fn normalize_healthcheck(&mut self) -> Result<()> {
         if self.readiness.is_some() && self.healthcheck.is_some() {
             bail!("readiness and healthcheck are mutually exclusive; use only one");
@@ -2237,6 +2456,16 @@ impl ServiceSpec {
         self.readiness = Some(test.to_readiness(timeout_seconds)?);
         Ok(())
     }
+}
+
+fn validate_service_script(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if value.contains('\0') {
+        bail!("{field} must not contain null bytes");
+    }
+    Ok(())
 }
 
 impl ServiceSlurmConfig {
@@ -2790,6 +3019,10 @@ fn validate_mpi_type_token(value: &str) -> Result<()> {
 }
 
 const FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS: &[(&str, &str)] = &[
+    ("array", "--array"),
+    ("array", "-a"),
+    ("after_job", "--dependency"),
+    ("dependency", "--dependency"),
     ("gpus_per_node", "--gpus-per-node"),
     ("gpus_per_task", "--gpus-per-task"),
     ("cpus_per_gpu", "--cpus-per-gpu"),
@@ -2854,6 +3087,9 @@ fn top_level_slurm_field_is_set(slurm: &SlurmConfig, field: &str) -> bool {
         "mem_bind" => slurm.mem_bind.is_some(),
         "distribution" => slurm.distribution.is_some(),
         "hint" => slurm.hint.is_some(),
+        "array" => slurm.array.is_some(),
+        "after_job" => slurm.after_job.is_some(),
+        "dependency" => slurm.dependency.is_some(),
         _ => false,
     }
 }
@@ -3279,6 +3515,204 @@ services:
                 .and_then(|service| service.software_env.env.get("OMP_NUM_THREADS"))
                 .map(String::as_str),
             Some("8")
+        );
+    }
+
+    #[test]
+    fn steps_alias_script_modules_and_command_normalization_work() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+modules:
+  - cuda/${CUDA_VERSION}
+steps:
+  single:
+    image: redis:7
+    command: echo ${TOKEN}
+  multi:
+    image: redis:7
+    command: |
+      echo ${TOKEN}
+      python train.py
+  multi_entry:
+    image: redis:7
+    entrypoint: bash -lc
+    command: |
+      echo ${TOKEN}
+      python train.py
+  list:
+    image: redis:7
+    command:
+      - echo
+      - ${TOKEN}
+  scripted:
+    image: redis:7
+    script: |
+      echo ${TOKEN}
+      python train.py
+    modules:
+      - netcdf/${NETCDF_VERSION}
+"#,
+        );
+        let vars = BTreeMap::from([
+            ("CUDA_VERSION".to_string(), "12.4".to_string()),
+            ("NETCDF_VERSION".to_string(), "4.9".to_string()),
+            ("TOKEN".to_string(), "expanded".to_string()),
+        ]);
+        let spec = ComposeSpec::load_with_interpolation_vars(&path, &vars).expect("load spec");
+        assert!(spec.services.contains_key("single"));
+        assert_eq!(spec.software_env.modules.load, vec!["cuda/12.4"]);
+        assert_eq!(
+            spec.services
+                .get("single")
+                .and_then(|service| service.command.as_ref())
+                .and_then(CommandSpec::as_string),
+            Some("echo ${TOKEN}")
+        );
+        assert_eq!(
+            spec.services
+                .get("multi")
+                .and_then(|service| service.command.as_ref())
+                .and_then(CommandSpec::as_vec),
+            Some(
+                &[
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "echo ${TOKEN}\npython train.py\n".to_string()
+                ][..]
+            )
+        );
+        let multi_entry = spec.services.get("multi_entry").expect("multi_entry");
+        assert!(multi_entry.entrypoint.is_none());
+        assert_eq!(
+            multi_entry.command.as_ref().and_then(CommandSpec::as_vec),
+            Some(
+                &[
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "bash -lc echo ${TOKEN}\npython train.py\n".to_string()
+                ][..]
+            )
+        );
+        assert_eq!(
+            spec.services
+                .get("list")
+                .and_then(|service| service.command.as_ref())
+                .and_then(CommandSpec::as_vec),
+            Some(&["echo".to_string(), "expanded".to_string()][..])
+        );
+        let scripted = spec.services.get("scripted").expect("scripted");
+        assert_eq!(
+            scripted.command.as_ref().and_then(CommandSpec::as_vec),
+            Some(
+                &[
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "echo ${TOKEN}\npython train.py\n".to_string()
+                ][..]
+            )
+        );
+        assert_eq!(scripted.software_env.modules.load, vec!["netcdf/4.9"]);
+    }
+
+    #[test]
+    fn new_foundation_alias_conflicts_are_rejected() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let both_services = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+steps:
+  other:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&both_services).expect_err("services and steps");
+        assert!(
+            err.to_string()
+                .contains("both top-level 'services' and 'steps'")
+        );
+
+        let script_command = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    command: echo hi
+    script: echo hi
+"#,
+        );
+        let err = ComposeSpec::load(&script_command).expect_err("script command conflict");
+        assert!(err.to_string().contains("both script and command"));
+
+        let script_entrypoint = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    entrypoint: /bin/sh
+    script: echo hi
+"#,
+        );
+        let err = ComposeSpec::load(&script_entrypoint).expect_err("script entrypoint conflict");
+        assert!(err.to_string().contains("both script and entrypoint"));
+
+        let empty_script = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    script: "   "
+"#,
+        );
+        let err = ComposeSpec::load(&empty_script).expect_err("empty script");
+        assert!(err.to_string().contains("script must not be empty"));
+        let err = validate_service_script("bad\0script", "service 'app' script").expect_err("nul");
+        assert!(err.to_string().contains("null bytes"));
+
+        let root_modules_conflict = write_spec(
+            tmpdir.path(),
+            r#"
+modules:
+  - cuda/12
+x-env:
+  modules:
+    - openmpi/5
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&root_modules_conflict).expect_err("root modules conflict");
+        assert!(
+            err.to_string()
+                .contains("root sets both 'modules' and 'x-env.modules'")
+        );
+
+        let service_modules_conflict = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    modules:
+      - cuda/12
+    x-env:
+      modules:
+        - openmpi/5
+"#,
+        );
+        let err =
+            ComposeSpec::load(&service_modules_conflict).expect_err("service modules conflict");
+        assert!(
+            err.to_string()
+                .contains("service 'app' sets both 'modules' and 'x-env.modules'")
         );
     }
 
@@ -4014,7 +4448,10 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&non_mapping_services).expect_err("services mapping");
-        assert!(err.to_string().contains("'services' must be a mapping"));
+        assert!(
+            err.to_string()
+                .contains("'services'/'steps' must be a mapping")
+        );
 
         let non_mapping_service = write_spec(
             tmpdir.path(),
@@ -4803,6 +5240,121 @@ services:
         };
         let err = service.validate("trainer").expect_err("service conflict");
         assert!(err.to_string().contains("gpu_bind"));
+
+        let config = SlurmConfig {
+            array: Some("0-3".into()),
+            submit_args: vec!["--array=0-9".into()],
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("array conflict");
+        assert!(err.to_string().contains("array"));
+
+        let config = SlurmConfig {
+            after_job: Some(JobDependencySpec::Id("12345".into())),
+            submit_args: vec!["--dependency=afterok:999".into()],
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("dependency conflict");
+        assert!(err.to_string().contains("after_job"));
+    }
+
+    #[test]
+    fn slurm_array_spec_validation_accepts_supported_forms() {
+        for array in ["0", "1-10", "1-10:2", "0,3,8-12", "0-99%10"] {
+            let config = SlurmConfig {
+                array: Some(array.to_string()),
+                ..SlurmConfig::default()
+            };
+            config
+                .validate()
+                .unwrap_or_else(|err| panic!("{array} should validate: {err:#}"));
+        }
+    }
+
+    #[test]
+    fn slurm_array_spec_validation_rejects_malformed_forms() {
+        for array in [
+            "", "1 2", "1\0", "1-", "-1", "1-10:0", "0-9%0", "9-1", "1,,2",
+        ] {
+            let config = SlurmConfig {
+                array: Some(array.to_string()),
+                ..SlurmConfig::default()
+            };
+            assert!(
+                config.validate().is_err(),
+                "{array:?} should fail validation"
+            );
+        }
+    }
+
+    #[test]
+    fn slurm_dependency_parses_shorthand_mapping_and_singleton() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let shorthand = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  after_job: "12345"
+services:
+  app:
+    image: alpine
+"#,
+        );
+        let spec = ComposeSpec::load(&shorthand).expect("shorthand");
+        assert_eq!(
+            spec.slurm.dependency_cli_value().as_deref(),
+            Some("afterany:12345")
+        );
+
+        let mapping = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  after_job:
+    id: "12345_7"
+    condition: afterok
+  dependency: singleton
+services:
+  app:
+    image: alpine
+"#,
+        );
+        let spec = ComposeSpec::load(&mapping).expect("mapping");
+        assert_eq!(
+            spec.slurm.dependency_cli_value().as_deref(),
+            Some("afterok:12345_7,singleton")
+        );
+    }
+
+    #[test]
+    fn slurm_dependency_rejects_bad_conditions_and_job_ids() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let bad_condition = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  after_job:
+    id: "12345"
+    condition: after
+services:
+  app:
+    image: alpine
+"#,
+        );
+        assert!(ComposeSpec::load(&bad_condition).is_err());
+
+        let bad_id = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  after_job: "abc"
+services:
+  app:
+    image: alpine
+"#,
+        );
+        let err = ComposeSpec::load(&bad_id).expect_err("bad id");
+        assert!(err.to_string().contains("x-slurm.after_job"));
     }
 
     proptest! {
@@ -4811,7 +5363,10 @@ services:
         #[test]
         fn property_rejects_unsupported_root_keys(
             key in key_strategy().prop_filter("unsupported root key", |key| {
-                !matches!(key.as_str(), "name" | "services" | "version" | "x-slurm")
+                !matches!(
+                    key.as_str(),
+                    "name" | "modules" | "runtime" | "services" | "steps" | "version" | "x-env" | "x-slurm"
+                )
             })
         ) {
             let tmpdir = tempfile::tempdir().expect("tmpdir");
@@ -4834,13 +5389,17 @@ services:
                     "image"
                         | "command"
                         | "entrypoint"
+                        | "script"
                         | "environment"
+                        | "modules"
                         | "volumes"
                         | "working_dir"
                         | "depends_on"
                         | "readiness"
                         | "healthcheck"
+                        | "x-env"
                         | "x-slurm"
+                        | "x-runtime"
                         | "x-enroot"
                 )
             })

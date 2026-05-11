@@ -6,8 +6,8 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 - Read [Quickstart](quickstart.md).
 - Run `hpc-compose new --list-templates` if you want to inspect the built-in starter templates before choosing one.
-- Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml`.
-- If you copy a repository example directly, override `CACHE_DIR` for your cluster before running it; the shipped YAML files default to `/cluster/shared/hpc-compose-cache`.
+- Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --output compose.yaml`.
+- Before running on a cluster, configure a shared cache with `hpc-compose setup --cache-dir '<shared-cache-dir>'` or explicit `x-slurm.cache_dir`. If you copy a repository example that uses `CACHE_DIR`, override it for your cluster before running.
 - Run `hpc-compose plan -f compose.yaml` before the first real run. Add `--show-script` when you want to inspect the generated launcher without writing a file.
 - Run `hpc-compose up -f compose.yaml` only from a supported Linux Slurm submission host.
 

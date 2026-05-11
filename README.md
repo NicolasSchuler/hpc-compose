@@ -16,12 +16,12 @@ Use it when you want Docker Compose-style authoring on Slurm without adding Kube
 These commands work from a laptop, workstation, or login node because `new` writes a local starter spec and `plan` is purely static:
 
 ```bash
-hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+hpc-compose new --template minimal-batch --name my-app --output compose.yaml
 hpc-compose plan -f compose.yaml
 hpc-compose plan --show-script -f compose.yaml
 ```
 
-Replace `<shared-cache-dir>` with a path visible from both the Slurm submission host and compute nodes. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
+For real cluster runs, configure a cache path visible from both the Slurm submission host and compute nodes, either in `x-slurm.cache_dir`, `hpc-compose setup --cache-dir`, or `[defaults.cache]` / `[profiles.<name>.cache]` settings. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
 
 Expected signals:
 
@@ -40,7 +40,9 @@ Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slur
 - one Slurm allocation per application
 - one generated batch script you can inspect
 - service startup ordering and readiness gates inside that allocation
+- Slurm-native arrays, submit-time dependencies, and reusable resource profiles
 - Pyxis/Enroot, Apptainer, Singularity, or host runtime backends
+- one-off `run --image ... -- <cmd>` jobs and direct `shell --image ...` sessions
 - tracked logs, state, metrics, artifacts, cache entries, and follow-up commands
 
 It does not aim to be a full Docker Compose runtime. Unsupported Compose features include `build:`, `ports`, custom Docker networks, `deploy`, and dynamic scheduler-style placement across arbitrary nodes.
@@ -102,7 +104,7 @@ If you use `hpc-compose` in research, please cite the software. GitHub also expo
 @software{schuler_hpc_compose_2026,
   author = {Schuler, Nicolas},
   title = {hpc-compose},
-  version = {0.1.35},
+  version = {0.1.36},
   year = {2026},
   publisher = {Karlsruhe Institute of Technology (KIT)},
   url = {https://github.com/NicolasSchuler/hpc-compose}

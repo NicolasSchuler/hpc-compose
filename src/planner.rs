@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::context::ResourceProfile;
 use crate::domain::{MountParts, resolve_node_index_expr, split_mount_parts};
 use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{
@@ -28,6 +29,19 @@ pub struct Plan {
     pub cache_dir: PathBuf,
     pub slurm: SlurmConfig,
     pub ordered_services: Vec<PlannedService>,
+}
+
+/// Optional inputs used while building a normalized plan.
+#[derive(Debug, Clone, Default)]
+pub struct PlanOptions {
+    /// Cache directory to use when the compose spec omits `x-slurm.cache_dir`.
+    pub cache_dir_default: Option<PathBuf>,
+    /// Settings-defined Slurm resource profiles addressable through `x-slurm.resources`.
+    pub resource_profiles: BTreeMap<String, ResourceProfile>,
+    /// Project directory to use when the spec path is synthetic.
+    pub project_dir_override: Option<PathBuf>,
+    /// Allow planning against a synthetic spec path that does not exist on disk.
+    pub allow_missing_spec_path: bool,
 }
 
 /// A normalized service entry inside a [`Plan`].
@@ -141,12 +155,39 @@ pub struct PreparedImageSpec {
 /// violates semantic validation rules, or service dependencies and placement
 /// cannot be resolved into one supported Slurm allocation plan.
 pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
+    build_plan_with_options(spec_path, spec, PlanOptions::default())
+}
+
+/// Builds a normalized plan with explicit planning options.
+///
+/// # Errors
+///
+/// Returns an error when the compose file path cannot be normalized, the spec
+/// violates semantic validation rules, or service dependencies and placement
+/// cannot be resolved into one supported Slurm allocation plan.
+pub fn build_plan_with_options(
+    spec_path: &Path,
+    mut spec: ComposeSpec,
+    options: PlanOptions,
+) -> Result<Plan> {
+    apply_resource_profile_defaults(&mut spec.slurm, &options.resource_profiles)?;
     spec.slurm.validate()?;
-    let spec_path = normalize_existing_path(spec_path)?;
-    let project_dir = spec_path
-        .parent()
-        .context("compose file must have a parent directory")?
-        .to_path_buf();
+    let spec_path = if options.allow_missing_spec_path {
+        crate::path_util::absolute_path(
+            spec_path,
+            options
+                .project_dir_override
+                .as_deref()
+                .unwrap_or_else(|| Path::new(".")),
+        )
+    } else {
+        normalize_existing_path(spec_path)?
+    };
+    let project_dir = options
+        .project_dir_override
+        .clone()
+        .or_else(|| spec_path.parent().map(Path::to_path_buf))
+        .context("compose file must have a parent directory")?;
 
     let name = if let Some(job_name) = spec.slurm.job_name.clone() {
         job_name
@@ -160,7 +201,11 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
         bail!("spec must define at least one service");
     }
 
-    let cache_dir = resolve_cache_dir(&spec.slurm, &project_dir)?;
+    let cache_dir = resolve_cache_dir(
+        &spec.slurm,
+        &project_dir,
+        options.cache_dir_default.as_deref(),
+    )?;
 
     let mut temp = BTreeMap::new();
     for (name, service) in &spec.services {
@@ -296,6 +341,59 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
         slurm: spec.slurm,
         ordered_services,
     })
+}
+
+/// Applies resource-profile defaults to a Slurm config.
+///
+/// # Errors
+///
+/// Returns an error when the spec references a profile that settings did not
+/// define.
+pub fn apply_resource_profile_defaults(
+    slurm: &mut SlurmConfig,
+    profiles: &BTreeMap<String, ResourceProfile>,
+) -> Result<()> {
+    let Some(name) = slurm.resources.clone() else {
+        return Ok(());
+    };
+    let profile = profiles.get(&name).with_context(|| {
+        format!("x-slurm.resources references undefined resource profile '{name}'")
+    })?;
+
+    apply_string_default(&mut slurm.partition, &profile.partition);
+    apply_string_default(&mut slurm.account, &profile.account);
+    apply_string_default(&mut slurm.qos, &profile.qos);
+    apply_string_default(&mut slurm.time, &profile.time);
+    apply_copy_default(&mut slurm.nodes, profile.nodes);
+    apply_copy_default(&mut slurm.ntasks, profile.ntasks);
+    apply_copy_default(&mut slurm.ntasks_per_node, profile.ntasks_per_node);
+    apply_copy_default(&mut slurm.cpus_per_task, profile.cpus_per_task);
+    apply_string_default(&mut slurm.mem, &profile.mem);
+    apply_string_default(&mut slurm.gres, &profile.gres);
+    apply_copy_default(&mut slurm.gpus, profile.gpus);
+    apply_copy_default(&mut slurm.gpus_per_node, profile.gpus_per_node);
+    apply_copy_default(&mut slurm.gpus_per_task, profile.gpus_per_task);
+    apply_copy_default(&mut slurm.cpus_per_gpu, profile.cpus_per_gpu);
+    apply_string_default(&mut slurm.mem_per_gpu, &profile.mem_per_gpu);
+    apply_string_default(&mut slurm.gpu_bind, &profile.gpu_bind);
+    apply_string_default(&mut slurm.cpu_bind, &profile.cpu_bind);
+    apply_string_default(&mut slurm.mem_bind, &profile.mem_bind);
+    apply_string_default(&mut slurm.distribution, &profile.distribution);
+    apply_string_default(&mut slurm.hint, &profile.hint);
+    apply_string_default(&mut slurm.constraint, &profile.constraint);
+    Ok(())
+}
+
+fn apply_string_default(target: &mut Option<String>, default: &Option<String>) {
+    if target.is_none() {
+        *target = default.clone();
+    }
+}
+
+fn apply_copy_default<T: Copy>(target: &mut Option<T>, default: Option<T>) {
+    if target.is_none() {
+        *target = default;
+    }
 }
 
 fn assign_service_placements(
@@ -934,10 +1032,17 @@ impl<'a> ParsedMount<'a> {
     }
 }
 
-fn resolve_cache_dir(slurm: &SlurmConfig, project_dir: &Path) -> Result<PathBuf> {
+fn resolve_cache_dir(
+    slurm: &SlurmConfig,
+    project_dir: &Path,
+    default_cache_dir: Option<&Path>,
+) -> Result<PathBuf> {
     let raw = match slurm.cache_dir.clone() {
         Some(cache_dir) => cache_dir,
         None => {
+            if let Some(cache_dir) = default_cache_dir {
+                return Ok(crate::path_util::normalize_path(cache_dir.to_path_buf()));
+            }
             let home = match env::var("HOME") {
                 Ok(home) => home,
                 Err(_) => "~".to_string(),
@@ -1167,6 +1272,7 @@ mod tests {
             image: Some(image.to_string()),
             command: None,
             entrypoint: None,
+            script: None,
             environment: EnvironmentSpec::None,
             volumes: Vec::new(),
             working_dir: None,
@@ -1178,6 +1284,51 @@ mod tests {
             runtime: ServiceRuntimeConfig::default(),
             enroot: ServiceEnrootConfig::default(),
         }
+    }
+
+    #[test]
+    fn resource_profile_defaults_preserve_explicit_slurm_values() {
+        let mut services = BTreeMap::new();
+        services.insert("app".to_string(), service("alpine:latest"));
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "gpu-small".to_string(),
+            ResourceProfile {
+                partition: Some("gpu".to_string()),
+                mem: Some("16G".to_string()),
+                gpus: Some(1),
+                cpus_per_task: Some(4),
+                ..ResourceProfile::default()
+            },
+        );
+
+        let spec = ComposeSpec {
+            name: Some("profile-demo".to_string()),
+            runtime: RuntimeConfig::default(),
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            slurm: SlurmConfig {
+                resources: Some("gpu-small".to_string()),
+                mem: Some("32G".to_string()),
+                ..SlurmConfig::default()
+            },
+            services,
+        };
+
+        let plan = build_plan_with_options(
+            Path::new("."),
+            spec,
+            PlanOptions {
+                resource_profiles: profiles,
+                ..PlanOptions::default()
+            },
+        )
+        .expect("plan");
+
+        assert_eq!(plan.slurm.partition.as_deref(), Some("gpu"));
+        assert_eq!(plan.slurm.gpus, Some(1));
+        assert_eq!(plan.slurm.cpus_per_task, Some(4));
+        assert_eq!(plan.slurm.mem.as_deref(), Some("32G"));
     }
 
     proptest! {
@@ -2317,8 +2468,17 @@ mod tests {
         let compose = tmpdir.path().join("compose.yaml");
         std::fs::write(&compose, "services: {}\n").expect("write");
 
-        let resolved = resolve_cache_dir(&SlurmConfig::default(), tmpdir.path()).expect("cache");
+        let resolved =
+            resolve_cache_dir(&SlurmConfig::default(), tmpdir.path(), None).expect("cache");
         assert!(resolved.ends_with(".cache/hpc-compose"));
+
+        let settings_default = resolve_cache_dir(
+            &SlurmConfig::default(),
+            tmpdir.path(),
+            Some(Path::new("/shared/settings-cache")),
+        )
+        .expect("settings cache");
+        assert_eq!(settings_default, Path::new("/shared/settings-cache"));
 
         let explicit = resolve_cache_dir(
             &SlurmConfig {
@@ -2326,6 +2486,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             tmpdir.path(),
+            Some(Path::new("/shared/settings-cache")),
         )
         .expect("explicit");
         assert_eq!(explicit, tmpdir.path().join("cache"));

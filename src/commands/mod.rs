@@ -441,8 +441,16 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         }
         Commands::Run {
             file,
-            service,
-            cmd,
+            args,
+            image,
+            resources,
+            time,
+            mem,
+            cpus_per_task,
+            gpus,
+            partition,
+            env,
+            local,
             script_out,
             sbatch_bin,
             srun_bin,
@@ -468,17 +476,97 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--singularity-bin", &singularity_bin),
                 ],
             );
-            let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::run_service(
+            if let Some(image) = image {
+                if file.is_some() {
+                    bail!("run --image cannot be combined with -f/--file or service mode");
+                }
+                ensure_run_image_mode_uses_separator(options)?;
+                let context = resolve_command_context(options, None, binary_overrides)?;
+                runtime::run_ephemeral(
+                    context,
+                    image,
+                    args,
+                    runtime::ResourceCliOptions {
+                        resources,
+                        time,
+                        mem,
+                        cpus_per_task,
+                        gpus,
+                        partition,
+                        env,
+                    },
+                    script_out,
+                    keep_failed_prep,
+                    skip_prepare,
+                    force_rebuild,
+                    no_preflight,
+                    local,
+                    options.quiet,
+                )
+            } else {
+                if resources.is_some()
+                    || time.is_some()
+                    || mem.is_some()
+                    || cpus_per_task.is_some()
+                    || gpus.is_some()
+                    || partition.is_some()
+                    || !env.is_empty()
+                    || local
+                {
+                    bail!(
+                        "run resource flags, --env, and --local require --image; service mode uses the compose spec"
+                    );
+                }
+                let mut args = args.into_iter();
+                let service = args
+                    .next()
+                    .context("run service mode requires SERVICE -- CMD")?;
+                let mut cmd = args.collect::<Vec<_>>();
+                if cmd.first().is_some_and(|arg| arg == "--") {
+                    cmd.remove(0);
+                }
+                if cmd.is_empty() {
+                    bail!("run service mode requires a command after the service name");
+                }
+                let context = resolve_command_context(options, file, binary_overrides)?;
+                runtime::run_service(
+                    context,
+                    service,
+                    cmd,
+                    script_out,
+                    keep_failed_prep,
+                    skip_prepare,
+                    force_rebuild,
+                    no_preflight,
+                    options.quiet,
+                )
+            }
+        }
+        Commands::Shell {
+            image,
+            resources,
+            time,
+            mem,
+            cpus_per_task,
+            gpus,
+            partition,
+            env,
+            srun_bin,
+        } => {
+            let binary_overrides = resolve_binary_overrides(options, &[("--srun-bin", &srun_bin)]);
+            let context = resolve_command_context(options, None, binary_overrides)?;
+            runtime::shell(
                 context,
-                service,
-                cmd,
-                script_out,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
-                options.quiet,
+                image,
+                runtime::ResourceCliOptions {
+                    resources,
+                    time,
+                    mem,
+                    cpus_per_task,
+                    gpus,
+                    partition,
+                    env,
+                },
             )
         }
         Commands::New {
@@ -501,7 +589,17 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
         ),
         Commands::Cache { command } => match command {
-            CacheCommands::List { cache_dir, format } => cache::list(cache_dir, format),
+            CacheCommands::List { cache_dir, format } => {
+                let cache_dir = match cache_dir {
+                    Some(path) => Some(path),
+                    None => {
+                        let context =
+                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        Some(context.cache_dir.value)
+                    }
+                };
+                cache::list(cache_dir, format)
+            }
             CacheCommands::Inspect {
                 file,
                 service,
@@ -569,6 +667,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             env_files,
             env,
             binaries,
+            cache_dir,
             default_profile,
             non_interactive,
             format,
@@ -580,6 +679,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             env_files,
             env,
             binaries,
+            cache_dir,
             default_profile,
             non_interactive,
             format,
@@ -597,6 +697,69 @@ fn resolve_watch_mode(watch_mode: WatchMode, no_tui: bool) -> Result<WatchMode> 
     } else {
         Ok(watch_mode)
     }
+}
+
+fn ensure_run_image_mode_uses_separator(options: &GlobalCommandOptions) -> Result<()> {
+    if options.assume_explicit_values {
+        return Ok(());
+    }
+    let Some(run_index) = options
+        .raw_args
+        .iter()
+        .position(|arg| arg.to_str() == Some("run"))
+    else {
+        return Ok(());
+    };
+    let mut skip_next = false;
+    let mut saw_separator = false;
+    for arg in options.raw_args.iter().skip(run_index + 1) {
+        let Some(value) = arg.to_str() else {
+            continue;
+        };
+        if value == "--" {
+            saw_separator = true;
+            break;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if run_flag_takes_value(value) {
+            skip_next = !value.contains('=');
+            continue;
+        }
+        if value.starts_with('-') {
+            continue;
+        }
+        bail!("run --image mode requires the command after -- and cannot include a service name");
+    }
+    if !saw_separator {
+        bail!("run --image mode requires the command after --");
+    }
+    Ok(())
+}
+
+fn run_flag_takes_value(value: &str) -> bool {
+    matches!(
+        value.split_once('=').map_or(value, |(flag, _)| flag),
+        "-f" | "--file"
+            | "--image"
+            | "--resources"
+            | "--time"
+            | "--mem"
+            | "--cpus-per-task"
+            | "--gpus"
+            | "--partition"
+            | "--env"
+            | "--script-out"
+            | "--sbatch-bin"
+            | "--srun-bin"
+            | "--enroot-bin"
+            | "--apptainer-bin"
+            | "--singularity-bin"
+            | "--squeue-bin"
+            | "--sacct-bin"
+    )
 }
 
 fn run_doctor_subcommand(

@@ -21,7 +21,7 @@ Make sure you have:
 - the runtime backend selected by `runtime.backend`,
 - `scontrol` when `x-slurm.nodes > 1`,
 - Pyxis support in `srun` when `runtime.backend: pyxis` (`srun --help` should mention `--container-image`),
-- shared storage for `x-slurm.cache_dir`,
+- shared storage for the resolved cache directory,
 - local source trees or local `.sqsh` / `.sif` images in place,
 - registry credentials when your cluster or registry requires them.
 
@@ -31,10 +31,10 @@ Backend-specific requirements are listed in [Runtime Backends](runtime-backends.
 
 For a new spec on a real cluster:
 
-1. Choose a starter from [Examples](examples.md), or run `hpc-compose new --template <name> --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml`.
+1. Choose a starter from [Examples](examples.md), or run `hpc-compose new --template <name> --name my-app --output compose.yaml`.
 2. Run `hpc-compose setup` once if you want compose path, env files, env vars, and binary overrides stored in a project-local settings file.
 3. Run `hpc-compose context --format json` to verify resolved values and sources.
-4. Set or confirm `x-slurm.cache_dir`, then adjust cluster-specific resource settings.
+4. Set or confirm the resolved cache directory, then adjust cluster-specific resource settings.
 5. Run `hpc-compose plan -f compose.yaml` and `hpc-compose plan --verbose -f compose.yaml` while adapting the file.
 6. Run `hpc-compose up -f compose.yaml` for the normal cluster run.
 7. If it fails, start with `hpc-compose debug -f compose.yaml --preflight`, then use [Troubleshooting](troubleshooting.md) and break out `preflight`, `prepare`, `render`, `status`, `ps`, `watch`, `stats`, or `logs` separately.
@@ -56,7 +56,7 @@ hpc-compose --profile dev context --format json
 Non-interactive setup is available for scripting:
 
 ```bash
-hpc-compose setup --profile-name dev --compose-file compose.yaml --env-file .env --env-file .env.dev --env 'CACHE_DIR=<shared-cache-dir>' --default-profile dev --non-interactive
+hpc-compose setup --profile-name dev --compose-file compose.yaml --env-file .env --env-file .env.dev --cache-dir '<shared-cache-dir>' --default-profile dev --non-interactive
 ```
 
 Settings file shape:
@@ -72,6 +72,9 @@ env_files = [".env"]
 [defaults.env]
 CACHE_DIR = "/cluster/shared/hpc-compose-cache"
 
+[defaults.cache]
+dir = "/cluster/shared/hpc-compose-cache"
+
 [profiles.dev]
 compose_file = "compose.yaml"
 env_files = [".env", ".env.dev"]
@@ -79,6 +82,21 @@ env_files = [".env", ".env.dev"]
 [profiles.dev.env]
 RESUME_DIR = "/shared/$USER/runs/my-run"
 MODEL_DIR = "$HOME/models"
+
+[profiles.dev.cache]
+dir = "/cluster/shared/dev-hpc-compose-cache"
+
+[resource_profiles.cpu-small]
+time = "00:30:00"
+cpus_per_task = 4
+mem = "16G"
+
+[resource_profiles.gpu-small]
+partition = "gpu"
+time = "01:00:00"
+gpus = 1
+cpus_per_task = 8
+mem = "32G"
 ```
 
 Resolution precedence is fixed:
@@ -89,6 +107,8 @@ Resolution precedence is fixed:
 4. built-in CLI defaults
 
 Use `context` whenever you want to inspect effective compose path, binaries, interpolation variables, runtime paths, and per-field sources.
+
+Resource profiles are referenced from YAML with `x-slurm.resources: gpu-small`. They are Slurm resource defaults, not the same thing as the global `--profile` setting selector, and explicit `x-slurm` values in the spec override profile defaults.
 
 ## Choose A Starting Example
 
@@ -102,9 +122,16 @@ The maintained selection guide is [Examples](examples.md). It includes:
 
 Keep `docs/src/examples.md` as the single source of example selection truth. The embedded YAML source appendix is [Example Source](example-source.md).
 
-## 1. Choose `x-slurm.cache_dir` Early
+## 1. Choose A Cache Directory Early
 
-Set `x-slurm.cache_dir` to a path visible from both the login node and compute nodes:
+Set the cache default to a path visible from both the login node and compute nodes:
+
+```toml
+[profiles.dev.cache]
+dir = "/cluster/shared/hpc-compose-cache"
+```
+
+Or set `x-slurm.cache_dir` directly in the spec when the cache path should travel with that file:
 
 ```yaml
 x-slurm:
@@ -122,7 +149,7 @@ test -w "$CACHE_DIR"
 Rules:
 
 - Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm`.
-- If `cache_dir` is unset, the default is `$HOME/.cache/hpc-compose`.
+- If `cache_dir` is unset in the spec, resolution checks profile cache settings, then defaults cache settings, then `$HOME/.cache/hpc-compose`.
 - The default may work on some clusters, but a shared project/work/scratch path is safer.
 - Validation can accept unsafe local paths; `preflight` reports them as policy errors.
 
@@ -197,6 +224,8 @@ Useful options:
 - `--allow-resume-changes` confirms intentional resume-coupled config drift.
 
 `up --local` is Linux + Pyxis-only and single-host. See [Runtime Backends](runtime-backends.md#local-mode).
+
+Array jobs should be submitted with `up --detach`; use `SLURM_ARRAY_TASK_ID` in the service command and output patterns such as `%A_%a` for task-specific logs. Scheduler dependencies declared with `x-slurm.after_job` or `x-slurm.dependency` are passed to `sbatch --dependency=...` at submit time. Arrays and scheduler dependencies are not supported by `up --local`.
 
 ## 6. Run Preflight When Debugging Cluster Readiness
 

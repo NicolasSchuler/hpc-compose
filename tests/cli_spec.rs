@@ -137,6 +137,94 @@ fn validate_and_render_commands_work() {
 }
 
 #[test]
+fn render_emits_array_directive_and_forwards_array_environment() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  array: 0-9%2
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let script_path = tmpdir.path().join("array.sbatch");
+
+    let render = run_cli(
+        tmpdir.path(),
+        &[
+            "render",
+            "-f",
+            compose.to_str().expect("path"),
+            "--output",
+            script_path.to_str().expect("path"),
+        ],
+    );
+    assert_success(&render);
+    let script = fs::read_to_string(&script_path).expect("script");
+    assert!(script.contains("#SBATCH --array=0-9%2"));
+    assert!(script.contains("SLURM_ARRAY_TASK_ID"));
+    assert!(script.contains("SLURM_ARRAY_JOB_ID"));
+}
+
+#[test]
+fn render_applies_settings_resource_profile_defaults() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        r#"
+version = 1
+
+[resource_profiles.gpu-small]
+partition = "gpu"
+mem = "16G"
+gpus = 1
+cpus_per_task = 4
+"#,
+    )
+    .expect("settings");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  resources: gpu-small
+  mem: 32G
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+
+    let render = run_cli(
+        tmpdir.path(),
+        &["render", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&render);
+    let script = stdout_text(&render);
+    assert!(script.contains("#SBATCH --partition=gpu"));
+    assert!(script.contains("#SBATCH --gpus=1"));
+    assert!(script.contains("#SBATCH --cpus-per-task=4"));
+    assert!(script.contains("#SBATCH --mem=32G"));
+    assert!(!script.contains("#SBATCH --mem=16G"));
+}
+
+#[test]
 fn inspect_and_preflight_commands_cover_dev_workflow() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -730,6 +818,140 @@ services:
 }
 
 #[test]
+fn spec_foundation_aliases_and_normalizations_surface_in_outputs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "foundation.yaml",
+        r#"
+modules:
+  - cuda/${CUDA_VERSION}
+steps:
+  single:
+    image: redis:7
+    command: echo ${TOKEN}
+  multi:
+    image: redis:7
+    command: |
+      echo ${TOKEN}
+      python train.py
+  list:
+    image: redis:7
+    command:
+      - echo
+      - ${TOKEN}
+  scripted:
+    image: redis:7
+    script: |
+      echo ${TOKEN}
+      python train.py
+    modules:
+      - netcdf/${NETCDF_VERSION}
+  explicit:
+    image: redis:7
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo ${TOKEN}
+        python train.py
+"#,
+    );
+
+    let env = [
+        ("CUDA_VERSION", "12.4"),
+        ("NETCDF_VERSION", "4.9"),
+        ("TOKEN", "expanded"),
+    ];
+    let validate = run_cli_with_env(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+        &env,
+    );
+    assert_success(&validate);
+
+    let plan = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "plan",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+        &env,
+    );
+    assert_success(&plan);
+    let plan_value: Value = serde_json::from_str(&stdout_text(&plan)).expect("plan json");
+    assert_eq!(plan_value["valid"], Value::from(true));
+
+    let config = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+        &env,
+    );
+    assert_success(&config);
+    let config_value: Value = serde_json::from_str(&stdout_text(&config)).expect("config json");
+    assert_eq!(
+        config_value["x-env"]["modules"]["load"],
+        serde_json::json!(["cuda/12.4"])
+    );
+    assert_eq!(
+        config_value["services"]["single"]["command"],
+        Value::from("echo ${TOKEN}")
+    );
+    assert_eq!(
+        config_value["services"]["list"]["command"],
+        serde_json::json!(["echo", "expanded"])
+    );
+    assert_eq!(
+        config_value["services"]["multi"]["command"],
+        serde_json::json!(["/bin/sh", "-lc", "echo ${TOKEN}\npython train.py\n"])
+    );
+    assert_eq!(
+        config_value["services"]["scripted"]["command"][0],
+        config_value["services"]["explicit"]["command"][0]
+    );
+    assert_eq!(
+        config_value["services"]["scripted"]["command"][1],
+        config_value["services"]["explicit"]["command"][1]
+    );
+    assert_eq!(
+        config_value["services"]["scripted"]["x-env"]["modules"]["load"],
+        serde_json::json!(["netcdf/4.9"])
+    );
+}
+
+#[test]
+fn services_and_steps_together_fail_clearly() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "both.yaml",
+        r#"
+services:
+  app:
+    image: redis:7
+steps:
+  other:
+    image: redis:7
+"#,
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    assert!(stderr_text(&validate).contains("both top-level 'services' and 'steps'"));
+}
+
+#[test]
 fn schema_command_emits_checked_in_schema() {
     let output = run_cli(&repo_root(), &["schema"]);
     assert_success(&output);
@@ -743,7 +965,11 @@ fn schema_command_emits_checked_in_schema() {
     );
     assert_eq!(value["additionalProperties"], Value::from(false));
     assert!(value["properties"]["services"].is_object());
+    assert!(value["properties"]["steps"].is_object());
+    assert!(value["properties"]["modules"].is_object());
     assert!(value["properties"]["x-slurm"].is_object());
+    assert!(value["$defs"]["service"]["properties"]["script"].is_object());
+    assert!(value["$defs"]["service"]["properties"]["modules"].is_object());
     assert_eq!(
         value["$defs"]["dependencyCondition"]["properties"]["condition"]["enum"],
         serde_json::json!([

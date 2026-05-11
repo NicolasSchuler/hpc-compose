@@ -961,7 +961,7 @@ pub enum Commands {
     #[command(
         display_order = 120,
         about = "Run a one-off command in one service environment",
-        long_about = "Submit a fresh one-off job using one service's image, environment, mounts, working directory, and prepare rules, then stream logs and propagate the final exit state.",
+        long_about = "Submit a fresh one-off job using either one service's image, environment, mounts, working directory, and prepare rules, or an ephemeral image supplied with --image. Service mode uses: hpc-compose run [-f compose.yaml] SERVICE -- CMD. Image mode uses: hpc-compose run --image IMAGE [resources] -- CMD.",
         after_help = RUN_HELP
     )]
     Run {
@@ -972,17 +972,68 @@ pub enum Commands {
             help = FILE_ARG_HELP
         )]
         file: Option<PathBuf>,
-        #[arg(value_name = "SERVICE", help = "Service to run")]
-        service: String,
         #[arg(
-            value_name = "CMD",
+            value_name = "ARGS",
             required = true,
             num_args = 1..,
             trailing_var_arg = true,
             allow_hyphen_values = true,
-            help = "Command argv to execute inside the service environment"
+            help = "Service plus command in service mode, or command argv in --image mode"
         )]
-        cmd: Vec<String>,
+        args: Vec<String>,
+        #[arg(
+            long,
+            value_name = "IMAGE",
+            help = "Container image for ephemeral image mode"
+        )]
+        image: Option<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Settings resource profile to apply in ephemeral image mode"
+        )]
+        resources: Option<String>,
+        #[arg(
+            long,
+            value_name = "TIME",
+            help = "Slurm time limit for ephemeral image mode"
+        )]
+        time: Option<String>,
+        #[arg(
+            long,
+            value_name = "MEM",
+            help = "Slurm memory request for ephemeral image mode"
+        )]
+        mem: Option<String>,
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Slurm CPUs per task for ephemeral image mode"
+        )]
+        cpus_per_task: Option<u32>,
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Slurm GPU count for ephemeral image mode"
+        )]
+        gpus: Option<u32>,
+        #[arg(
+            long,
+            value_name = "PARTITION",
+            help = "Slurm partition for ephemeral image mode"
+        )]
+        partition: Option<String>,
+        #[arg(
+            long = "env",
+            value_name = "KEY=VALUE",
+            help = "Environment variable to pass into the ephemeral container"
+        )]
+        env: Vec<String>,
+        #[arg(
+            long,
+            help = "Run the ephemeral image locally through the local Pyxis-compatible launcher"
+        )]
+        local: bool,
         #[arg(
             long,
             value_name = "OUTPUT",
@@ -1054,9 +1105,49 @@ pub enum Commands {
         no_preflight: bool,
     },
     #[command(
+        display_order = 125,
+        about = "Open an interactive shell in a Slurm container",
+        long_about = "Launch a thin direct srun --pty wrapper around a Pyxis container image. Defaults to bash -l inside the container.",
+        after_help = SHELL_HELP
+    )]
+    Shell {
+        #[arg(
+            long,
+            value_name = "IMAGE",
+            required = true,
+            help = "Container image to run interactively"
+        )]
+        image: String,
+        #[arg(long, value_name = "NAME", help = "Settings resource profile to apply")]
+        resources: Option<String>,
+        #[arg(long, value_name = "TIME", help = "Slurm time limit")]
+        time: Option<String>,
+        #[arg(long, value_name = "MEM", help = "Slurm memory request")]
+        mem: Option<String>,
+        #[arg(long, value_name = "N", help = "Slurm CPUs per task")]
+        cpus_per_task: Option<u32>,
+        #[arg(long, value_name = "N", help = "Slurm GPU count")]
+        gpus: Option<u32>,
+        #[arg(long, value_name = "PARTITION", help = "Slurm partition")]
+        partition: Option<String>,
+        #[arg(
+            long = "env",
+            value_name = "KEY=VALUE",
+            help = "Environment variable to pass into the interactive container"
+        )]
+        env: Vec<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+    },
+    #[command(
         display_order = 10,
         about = "Write a starter compose file from a built-in template",
-        long_about = "Write a starter compose specification from a built-in template, or list and describe the available templates without writing a file. Writing a template requires an explicit shared cache directory.",
+        long_about = "Write a starter compose specification from a built-in template, or list and describe the available templates without writing a file. Use --cache-dir when the generated spec should pin an explicit shared cache directory.",
         after_help = NEW_HELP,
         name = "new",
         alias = "init"
@@ -1090,7 +1181,7 @@ pub enum Commands {
         #[arg(
             long,
             value_name = "CACHE_DIR",
-            help = "Shared cache directory written into the generated spec; required when writing a template"
+            help = "Optional shared cache directory written into the generated spec"
         )]
         cache_dir: Option<String>,
         #[arg(
@@ -1213,6 +1304,12 @@ pub enum Commands {
             help = "Binary override such as srun=/opt/slurm/bin/srun"
         )]
         binaries: Vec<String>,
+        #[arg(
+            long = "cache-dir",
+            value_name = "PATH",
+            help = "Cache directory default written under the selected profile"
+        )]
+        cache_dir: Option<String>,
         #[arg(
             long,
             value_name = "PROFILE",

@@ -227,6 +227,77 @@ compose_file = "missing-compose.yaml"
 }
 
 #[test]
+fn cache_list_uses_profile_cache_dir_when_omitted() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    fs::create_dir_all(tmpdir.path().join("app")).expect("app dir");
+    fs::write(tmpdir.path().join("app/main.py"), "print('hello')\n").expect("main.py");
+    write_compose(
+        tmpdir.path(),
+        "profile-compose.yaml",
+        r#"
+name: demo
+x-slurm:
+  job_name: demo
+  time: "00:10:00"
+services:
+  app:
+    image: python:3.11-slim
+    working_dir: /workspace
+    volumes:
+      - ./app:/workspace
+    command:
+      - python
+      - -m
+      - main
+    x-enroot:
+      prepare:
+        commands:
+          - pip install --no-cache-dir click
+"#,
+    );
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "dev"
+
+[profiles.dev]
+compose_file = "profile-compose.yaml"
+
+[profiles.dev.cache]
+dir = "{}"
+"#,
+            cache_dir.display()
+        ),
+    )
+    .expect("settings");
+
+    let enroot = write_fake_enroot(tmpdir.path());
+    let prepare = run_cli(
+        tmpdir.path(),
+        &[
+            "--profile",
+            "dev",
+            "prepare",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+        ],
+    );
+    assert_success(&prepare);
+
+    let list = run_cli(tmpdir.path(), &["--profile", "dev", "cache", "list"]);
+    assert_success(&list);
+    let list_stdout = stdout_text(&list);
+    assert!(list_stdout.contains(&format!("cache dir: {}", cache_dir.display())));
+    assert!(list_stdout.contains("prepared"));
+    assert!(list_stdout.contains("base"));
+}
+
+#[test]
 fn cache_prune_argument_validation_and_all_unused_path_work() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();

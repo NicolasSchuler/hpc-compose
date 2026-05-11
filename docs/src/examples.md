@@ -10,14 +10,14 @@ There are two starting points:
 Before launching anything, run the safe authoring path first:
 
 ```bash
-hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+hpc-compose new --template minimal-batch --name my-app --output compose.yaml
 hpc-compose plan -f compose.yaml
 hpc-compose plan --show-script -f compose.yaml
 ```
 
 If you are reading from a source checkout, you can run the same static checks directly against `examples/minimal-batch.yaml`.
 
-Repository examples default `x-slurm.cache_dir` to `/cluster/shared/hpc-compose-cache` so they validate directly. Before running one on a real cluster, set `CACHE_DIR` to a shared path visible from both the submission host and the compute nodes, or place the same assignment in `.env` next to the copied spec:
+Some repository examples keep an explicit `${CACHE_DIR:-/cluster/shared/hpc-compose-cache}` for portability, while starter examples rely on the settings/builtin cache default. Before running on a real cluster, configure a shared path visible from both the submission host and the compute nodes:
 
 ```bash
 export CACHE_DIR=/cluster/shared/hpc-compose-cache
@@ -72,11 +72,12 @@ Use this ordering when you are new to the project:
 
 ## Built-In Starter Templates
 
-Use built-in templates when you want `hpc-compose` to write a fresh `compose.yaml` with your application name and cache directory filled in for you.
+Use built-in templates when you want `hpc-compose` to write a fresh `compose.yaml` with your application name filled in for you.
 
 ```bash
 hpc-compose new --list-templates
 hpc-compose new --describe-template minimal-batch
+hpc-compose new --template minimal-batch --name my-app --output compose.yaml
 hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
 ```
 
@@ -142,9 +143,9 @@ Companion notes for the more involved examples live alongside the example assets
 
 ## Adaptation Checklist
 
-1. Copy the closest repository example to your own `compose.yaml`, or run `hpc-compose new --template <name> --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml` when a matching built-in template exists.
-2. Override `CACHE_DIR` before running repository examples on a real cluster, or replace the default cache path in your copied file.
-3. Set `x-slurm.cache_dir` to a path visible from both the login node and the compute nodes.
+1. Copy the closest repository example to your own `compose.yaml`, or run `hpc-compose new --template <name> --name my-app --output compose.yaml` when a matching built-in template exists.
+2. Configure a cache path visible from both the login node and compute nodes through `hpc-compose setup --cache-dir`, `x-slurm.cache_dir`, or `[defaults.cache]` / `[profiles.<name>.cache]`.
+3. Override `CACHE_DIR` before running repository examples that use `${CACHE_DIR:-...}`, or replace the default cache path in your copied file.
 4. Replace the example `image`, `command`, `environment`, and `volumes` with your workload.
 5. Keep active source in `volumes` and keep slower-changing dependency installation in `x-runtime.prepare.commands`.
 6. Add `readiness` to services that must be reachable before dependents continue.

@@ -35,7 +35,6 @@ Create a starter spec first:
 hpc-compose new \
   --template minimal-batch \
   --name my-app \
-  --cache-dir '<shared-cache-dir>' \
   --output compose.yaml
 ```
 
@@ -68,17 +67,16 @@ hpc-compose debug -f compose.yaml --preflight
 
 ## 3. Choose A Starting Spec
 
-Use the built-in starter templates when you want a fresh `compose.yaml` with your application name and shared cache directory filled in:
+Use the built-in starter templates when you want a fresh `compose.yaml` with your application name filled in:
 
 ```bash
 hpc-compose new \
   --template minimal-batch \
   --name my-app \
-  --cache-dir '<shared-cache-dir>' \
   --output compose.yaml
 ```
 
-Replace `<shared-cache-dir>` with a path visible from both the submission host and the compute nodes.
+Add `--cache-dir '<shared-cache-dir>'` when you want the generated file to include an explicit `x-slurm.cache_dir`. Otherwise the plan uses the active settings cache default or `$HOME/.cache/hpc-compose`.
 
 From a source checkout, you can also inspect a known-good repository example:
 
@@ -88,9 +86,9 @@ hpc-compose plan -f examples/minimal-batch.yaml
 
 The [Examples](examples.md) page is the single selection guide for beginner, LLM, training, distributed, and pipeline workflows.
 
-## 4. Pick And Test `CACHE_DIR`
+## 4. Pick And Test A Cache Directory
 
-Repository examples default to `/cluster/shared/hpc-compose-cache` so they validate out of the box, but real clusters usually need a site-specific shared path.
+`cache_dir` is optional in the spec, but real clusters usually need a site-specific shared path because image preparation happens before the job starts and compute nodes must later see those artifacts.
 
 Ask your cluster documentation or support team for a project scratch, work, or shared filesystem path, then test it:
 
@@ -100,7 +98,13 @@ mkdir -p "$CACHE_DIR"
 test -w "$CACHE_DIR"
 ```
 
-Persist it next to your copied spec when you want the same value every time:
+Persist it in project settings when you want the same value every time:
+
+```bash
+hpc-compose setup --profile-name dev --cache-dir "$CACHE_DIR" --default-profile dev --non-interactive
+```
+
+Or keep using an environment-backed explicit spec value and persist it next to your copied spec:
 
 ```bash
 printf 'CACHE_DIR=%s\n' "$CACHE_DIR" > .env

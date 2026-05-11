@@ -185,15 +185,15 @@ const TEMPLATES: &[Template] = &[
     },
 ];
 
-#[derive(Debug, Clone)]
 /// Answers gathered by the interactive template flow.
+#[derive(Debug, Clone)]
 pub struct InitAnswers {
     /// Selected template identifier.
     pub template_name: String,
     /// Application name inserted into the rendered template.
     pub app_name: String,
-    /// Cache directory inserted into `x-slurm.cache_dir`.
-    pub cache_dir: String,
+    /// Cache directory inserted into `x-slurm.cache_dir`, when explicitly requested.
+    pub cache_dir: Option<String>,
 }
 
 /// Returns the built-in compose templates bundled with the binary.
@@ -304,13 +304,8 @@ fn prompt_for_init_with_io(
 
     let app_name = prompt(input, output, "Application name", template.name)?;
     let cache_dir = match default_cache_dir.filter(|value| !value.trim().is_empty()) {
-        Some(default) => prompt(input, output, "Cache dir", default)?,
-        None => prompt_required(
-            input,
-            output,
-            "Cache dir",
-            "choose a path visible from both the login node and the compute nodes",
-        )?,
+        Some(default) => Some(prompt(input, output, "Cache dir", default)?),
+        None => optional_prompt(input, output, "Cache dir")?,
     };
 
     Ok(InitAnswers {
@@ -338,6 +333,21 @@ fn prompt_for_init_with_io(
 /// Returns an error when the template name is unknown or the bundled template
 /// cannot be parsed and rewritten as YAML.
 pub fn render_template(template_name: &str, app_name: &str, cache_dir: &str) -> Result<String> {
+    render_template_with_optional_cache_dir(template_name, app_name, Some(cache_dir))
+}
+
+/// Renders a shipped template, omitting `x-slurm.cache_dir` when no cache
+/// directory is supplied.
+///
+/// # Errors
+///
+/// Returns an error when the template name is unknown or the bundled template
+/// cannot be parsed and rewritten as YAML.
+pub fn render_template_with_optional_cache_dir(
+    template_name: &str,
+    app_name: &str,
+    cache_dir: Option<&str>,
+) -> Result<String> {
     let template = resolve_template(template_name)?;
     render_template_body(template.body, template.name, app_name, cache_dir)
 }
@@ -346,7 +356,7 @@ fn render_template_body(
     body: &str,
     template_name: &str,
     app_name: &str,
-    cache_dir: &str,
+    cache_dir: Option<&str>,
 ) -> Result<String> {
     let mut value: Value = serde_norway::from_str(body)
         .context(format!("failed to parse template {template_name}"))?;
@@ -370,10 +380,12 @@ fn render_template_body(
         Value::String("job_name".to_string()),
         Value::String(app_name.to_string()),
     );
-    slurm.insert(
-        Value::String("cache_dir".to_string()),
-        Value::String(cache_dir.to_string()),
-    );
+    let cache_dir_key = Value::String("cache_dir".to_string());
+    if let Some(cache_dir) = cache_dir {
+        slurm.insert(cache_dir_key, Value::String(cache_dir.to_string()));
+    } else {
+        slurm.remove(&cache_dir_key);
+    }
 
     serde_norway::to_string(&value).context("failed to serialize initialized template")
 }
@@ -436,6 +448,7 @@ fn prompt(
     }
 }
 
+#[cfg(test)]
 fn prompt_required(
     input: &mut impl BufRead,
     output: &mut impl Write,
@@ -453,6 +466,25 @@ fn prompt_required(
         bail!("{label} cannot be empty; {guidance}");
     }
     Ok(trimmed.to_string())
+}
+
+fn optional_prompt(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    label: &str,
+) -> Result<Option<String>> {
+    write!(output, "{} (optional): ", term::styled_bold(label)).ok();
+    output.flush().ok();
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .context("failed to read interactive input")?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -547,7 +579,7 @@ mod tests {
             "services:\n  app:\n    image: redis:7\n",
             "inline",
             "custom-app",
-            "/cache/path",
+            Some("/cache/path"),
         )
         .expect("render");
         let value: Value = serde_norway::from_str(&rendered).expect("yaml");
@@ -566,7 +598,7 @@ mod tests {
 
     #[test]
     fn render_template_body_reports_invalid_shapes() {
-        let err = render_template_body("[]\n", "inline", "custom-app", "/cache/path")
+        let err = render_template_body("[]\n", "inline", "custom-app", Some("/cache/path"))
             .expect_err("non mapping root");
         assert!(err.to_string().contains("template root must be a mapping"));
 
@@ -574,7 +606,7 @@ mod tests {
             "x-slurm: nope\nservices:\n  app:\n    image: redis:7\n",
             "inline",
             "custom-app",
-            "/cache/path",
+            Some("/cache/path"),
         )
         .expect_err("invalid x-slurm");
         assert!(
@@ -618,13 +650,13 @@ mod tests {
 
     #[test]
     fn prompt_for_init_with_io_covers_defaults_custom_values_and_validation() {
-        let mut defaults_input = Cursor::new(b"\n\n/shared/cache\n");
+        let mut defaults_input = Cursor::new(b"\n\n\n");
         let mut defaults_output = Vec::new();
         let answers = prompt_for_init_with_io(&mut defaults_input, &mut defaults_output, None)
             .expect("defaults");
         assert_eq!(answers.template_name, "minimal-batch");
         assert_eq!(answers.app_name, "minimal-batch");
-        assert_eq!(answers.cache_dir, "/shared/cache");
+        assert_eq!(answers.cache_dir, None);
         assert!(
             String::from_utf8(defaults_output)
                 .expect("utf8")
@@ -637,7 +669,7 @@ mod tests {
             prompt_for_init_with_io(&mut custom_input, &mut custom_output, None).expect("custom");
         assert_eq!(answers.template_name, "app-redis-worker");
         assert_eq!(answers.app_name, "custom-app");
-        assert_eq!(answers.cache_dir, "/custom-cache");
+        assert_eq!(answers.cache_dir, Some("/custom-cache".to_string()));
 
         let mut invalid_input = Cursor::new(b"99\n");
         let mut invalid_output = Vec::new();
@@ -650,9 +682,10 @@ mod tests {
 
         let mut blank_cache_input = Cursor::new(b"\n\n\n");
         let mut blank_cache_output = Vec::new();
-        let err = prompt_for_init_with_io(&mut blank_cache_input, &mut blank_cache_output, None)
-            .expect_err("blank cache dir");
-        assert!(err.to_string().contains("Cache dir cannot be empty"));
+        let answers =
+            prompt_for_init_with_io(&mut blank_cache_input, &mut blank_cache_output, None)
+                .expect("blank cache dir is optional");
+        assert_eq!(answers.cache_dir, None);
     }
 
     #[test]
@@ -667,7 +700,10 @@ mod tests {
         .expect("answers");
         assert_eq!(answers.template_name, "app-redis-worker");
         assert_eq!(answers.app_name, "custom-app");
-        assert_eq!(answers.cache_dir, "/cluster/shared/custom-cache");
+        assert_eq!(
+            answers.cache_dir,
+            Some("/cluster/shared/custom-cache".to_string())
+        );
         let output_str = String::from_utf8(output).expect("utf8");
         assert!(output_str.contains("Cache dir"));
         assert!(output_str.contains("/cluster/shared/custom-cache"));

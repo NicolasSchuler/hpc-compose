@@ -29,7 +29,6 @@ runtime:
 
 x-slurm:
   time: "00:30:00"
-  cache_dir: /cluster/shared/hpc-compose-cache
 
 services:
   app:
@@ -45,6 +44,8 @@ services:
 | `version` | string | omitted | Accepted for Compose compatibility. Ignored by the planner. |
 | `runtime` | mapping | `backend: pyxis` | Selects the service runtime backend and GPU passthrough policy. |
 | `services` | mapping | required | Must contain at least one service. |
+| `steps` | mapping | alias for `services` | Use either `services` or `steps`, not both. |
+| `modules` | list of strings | omitted | List-only shorthand for top-level `x-env.modules.load`; cannot be combined with `x-env.modules`. |
 | `x-env` | mapping | omitted | Structured host-side module, Spack view, and environment setup shared by all services. |
 | `x-slurm` | mapping | omitted | Top-level Slurm settings and shared runtime defaults. |
 
@@ -87,6 +88,7 @@ Rules:
 - Service-level `x-env` renders immediately before that service's `srun`.
 - `env` entries are exported on the host and forwarded into Pyxis containers.
 - Service-level `x-env.env` overrides top-level `x-env.env` when the same variable is set.
+- Top-level `modules: [...]` and service-level `modules: [...]` are shorthand for the matching `x-env.modules.load` list. The shorthand is list-only and cannot be combined with `x-env.modules` at the same scope.
 - `spack.view` prepends `bin`, `lib`, `lib64`, and Python site-package paths only when those directories exist.
 - Modules and Spack views are host-side setup. Container filesystem visibility still requires explicit `volumes`, `x-slurm.mpi.host_mpi.bind_paths`, or other site-specific binds.
 
@@ -98,7 +100,7 @@ Use these commands and global flags when you want the project-local settings fil
 | --- | --- | --- |
 | `--profile <NAME>` | Select the profile from settings | Global flag; applies to every subcommand. |
 | `--settings-file <PATH>` | Use an explicit settings file | Global flag; bypasses upward auto-discovery of `.hpc-compose/settings.toml`. |
-| `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, and `--default-profile`. |
+| `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, `--cache-dir`, and `--default-profile`. |
 | `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, referenced interpolation vars, runtime paths, and value sources; supports `--format json`. Sensitive-looking interpolation values are redacted unless `--show-values` is passed. |
 | `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
 | `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
@@ -109,6 +111,7 @@ These fields live under the top-level `x-slurm` block.
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
+| `resources` | string | omitted | Name of a `[resource_profiles.<name>]` entry in `.hpc-compose/settings.toml`. Profile values are defaults only; explicit `x-slurm` fields win. |
 | `job_name` | string | `name` when present | Rendered as `#SBATCH --job-name`. |
 | `partition` | string | omitted | Passed through to `#SBATCH --partition`. |
 | `account` | string | omitted | Passed through to `#SBATCH --account`. |
@@ -134,7 +137,10 @@ These fields live under the top-level `x-slurm` block.
 | `output` | string | omitted | Passed through to `#SBATCH --output`. |
 | `error` | string | omitted | Passed through to `#SBATCH --error`. |
 | `chdir` | string | omitted | Passed through to `#SBATCH --chdir`. |
-| `cache_dir` | string | `$HOME/.cache/hpc-compose` | Must resolve to shared storage visible from the login node and the compute nodes. |
+| `array` | string | omitted | Slurm array spec such as `0`, `1-10`, `1-10:2`, `0,3,8-12`, or `0-99%10`. Rendered as `#SBATCH --array`. |
+| `after_job` | string or mapping | omitted | Scheduler dependency on a prior job id. String shorthand means `afterany:<id>`; mapping supports `{ id, condition }`. |
+| `dependency` | string | omitted | Currently supports `singleton`, combined with `after_job` when both are set. |
+| `cache_dir` | string | settings profile, settings defaults, then `$HOME/.cache/hpc-compose` | Must resolve to shared storage visible from the login node and the compute nodes. |
 | `scratch` | mapping | omitted | Optional scratch path mounted into services and exposed as `HPC_COMPOSE_SCRATCH_DIR`. |
 | `stage_in` | list of mappings | omitted | Copy or rsync host paths before services launch. |
 | `stage_out` | list of mappings | omitted | Copy or rsync paths during teardown, optionally by outcome. |
@@ -145,6 +151,63 @@ These fields live under the top-level `x-slurm` block.
 | `notify` | mapping | omitted | First-class Slurm email notification settings. |
 | `setup` | list of strings | omitted | Raw shell lines inserted into the generated batch script before service launches. |
 | `submit_args` | list of strings | omitted | Extra raw Slurm arguments appended as `#SBATCH ...` lines. |
+
+### Resource profiles
+
+Resource profiles are reusable settings defaults, distinct from the global `--profile` setting selector. Define them in `.hpc-compose/settings.toml`:
+
+```toml
+[resource_profiles.gpu-small]
+partition = "gpu"
+time = "01:00:00"
+gpus = 1
+cpus_per_task = 8
+mem = "32G"
+```
+
+Reference one from the spec:
+
+```yaml
+x-slurm:
+  resources: gpu-small
+  mem: 64G
+```
+
+The profile fills only omitted resource fields. In the example above, `partition`, `time`, `gpus`, and `cpus_per_task` come from the profile, while the explicit `mem: 64G` wins. Profiles intentionally exclude behavior such as `job_name`, `cache_dir`, arrays, dependencies, `submit_args`, setup hooks, scratch/staging, artifacts, resume, notify, and metrics.
+
+Allowed profile fields are: `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, `gpus_per_node`, `gpus_per_task`, `cpus_per_gpu`, `mem_per_gpu`, `gpu_bind`, `cpu_bind`, `mem_bind`, `distribution`, `hint`, and `constraint`.
+
+### `x-slurm.array`
+
+```yaml
+x-slurm:
+  array: 0-99%10
+  output: logs/%A_%a.out
+services:
+  worker:
+    image: python:3.12-slim
+    command: python worker.py
+```
+
+`array` accepts Slurm list, range, step, and concurrency forms such as `0`, `1-10`, `1-10:2`, `0,3,8-12`, and `0-99%10`. Values with spaces, null bytes, malformed ranges, negative numbers, zero step, or zero concurrency are rejected.
+
+Array jobs currently require `hpc-compose up --detach`; live watch/log fan-out for per-task array elements is future work. `--local` rejects array specs. Slurm provides `SLURM_ARRAY_JOB_ID`, `SLURM_ARRAY_TASK_ID`, `SLURM_ARRAY_TASK_COUNT`, `SLURM_ARRAY_TASK_MAX`, `SLURM_ARRAY_TASK_MIN`, and `SLURM_ARRAY_TASK_STEP`; for Pyxis jobs, `hpc-compose` forwards these names into the container when `x-slurm.array` is set. Prefer output patterns such as `%A_%a` so task logs do not overwrite each other.
+
+### `x-slurm.after_job` and `x-slurm.dependency`
+
+```yaml
+x-slurm:
+  after_job:
+    id: "12345"
+    condition: afterok
+  dependency: singleton
+```
+
+`after_job: "12345"` is shorthand for `afterany:12345`. Mapping form accepts `id` plus `condition`, where `condition` is `afterany`, `afterok`, or `afternotok`. Job ids must be numeric Slurm ids such as `12345`, or array elements such as `12345_7`.
+
+`dependency: singleton` is separate because Slurm's singleton dependency does not take a job id. When both fields are set, `hpc-compose` submits one command-line dependency string such as `--dependency=afterok:12345,singleton`.
+
+Dependencies are passed to `sbatch` as CLI arguments, not rendered as `#SBATCH` lines, because dependency job ids are commonly dynamic. `--local` rejects scheduler dependencies.
 
 ### `x-slurm.setup`
 
@@ -178,6 +241,7 @@ x-slurm:
   - Each entry is emitted as `#SBATCH {arg}`.
   - Entries are rejected if they contain line breaks or null bytes.
   - Entries are not validated against Slurm option syntax.
+  - First-class fields reject conflicting raw entries for the same option. Use `x-slurm.array`, `x-slurm.after_job`, or `x-slurm.dependency` instead of raw `--array` or `--dependency`.
 
 ### `x-slurm.notify`
 
@@ -213,11 +277,22 @@ Rules:
 ### `x-slurm.cache_dir`
 
 - Shape: string
-- Default: `$HOME/.cache/hpc-compose`
+- Default precedence: explicit `x-slurm.cache_dir`, then `[profiles.<name>.cache].dir`, then `[defaults.cache].dir`, then `$HOME/.cache/hpc-compose`.
 - Notes:
   - Relative paths and environment variables are resolved against the compose file directory.
+  - Settings cache paths are resolved against the settings base directory.
   - Paths under `/tmp`, `/var/tmp`, `/private/tmp`, and `/dev/shm` are accepted by parsing and planning, but `preflight` reports them as unsafe because they are not valid shared-cache locations for login-node prepare plus compute-node reuse.
   - The path must be visible from both the login node and the compute nodes.
+
+Settings example:
+
+```toml
+[defaults.cache]
+dir = "/cluster/shared/hpc-compose-cache"
+
+[profiles.dev.cache]
+dir = "/cluster/shared/dev-hpc-compose-cache"
+```
 
 ## `runtime`
 
@@ -409,7 +484,9 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 | `image` | string | required unless `runtime.backend: host` | Can be a remote image reference, a local `.sqsh` / `.squashfs` path for Pyxis, or a local `.sif` path for Apptainer/Singularity. |
 | `command` | string or list of strings | omitted | Shell form or exec form. |
 | `entrypoint` | string or list of strings | omitted | Must use the same form as `command` when both are present. |
+| `script` | string | omitted | Multi-line shell script sugar for `command: ["/bin/sh", "-lc", script]`; mutually exclusive with `command` and `entrypoint`. |
 | `environment` | mapping or list of `KEY=VALUE` strings | omitted | Both forms normalize to key/value pairs. |
+| `modules` | list of strings | omitted | List-only shorthand for service `x-env.modules.load`; cannot be combined with service `x-env.modules`. |
 | `volumes` | list of `host_path:container_path` strings | omitted | Runtime bind mounts. Host paths resolve against the compose file directory. |
 | `working_dir` | string | omitted | Valid only when the service also has an explicit `command` or `entrypoint`. |
 | `depends_on` | list or mapping | omitted | Dependency list with `service_started` or `service_healthy` conditions. |
@@ -437,7 +514,7 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 - Relative paths are resolved against the compose file directory.
 - Paths that look like build contexts are rejected.
 
-## `command` and `entrypoint`
+## `command`, `entrypoint`, and `script`
 
 Both fields accept either:
 
@@ -450,6 +527,10 @@ Rules:
 - Mixed string/array combinations are rejected.
 - If neither field is present, the image default entrypoint and command are used.
 - If `working_dir` is set, at least one of `command` or `entrypoint` must also be set.
+- A multi-line string-form `command` is automatically normalized to `["/bin/sh", "-lc", command]` so YAML block scalars run as one shell script.
+- Single-line string-form `command` remains shell form.
+- `script` is a convenience field for multi-line shell snippets and normalizes to `command: ["/bin/sh", "-lc", script]`.
+- `script` cannot be combined with `command` or `entrypoint`.
 
 ## `environment`
 

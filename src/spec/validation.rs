@@ -3,12 +3,16 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_norway::{Mapping, Value};
 
-const ROOT_ALLOWED_KEYS: &[&str] = &["name", "runtime", "services", "version", "x-env", "x-slurm"];
+const ROOT_ALLOWED_KEYS: &[&str] = &[
+    "name", "modules", "runtime", "services", "steps", "version", "x-env", "x-slurm",
+];
 const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "image",
     "command",
     "entrypoint",
+    "script",
     "environment",
+    "modules",
     "volumes",
     "working_dir",
     "depends_on",
@@ -46,6 +50,115 @@ pub(super) fn validate_sbatch_safe_strings<'a>(
         validate_sbatch_safe_string(Some(value), &format!("{field}[{index}]"))?;
     }
     Ok(())
+}
+
+pub(super) fn validate_slurm_array_spec(value: Option<&str>, field: &str) -> Result<()> {
+    let Some(value) = value else { return Ok(()) };
+    if value.is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if value.contains('\0') {
+        bail!("{field} must not contain null bytes");
+    }
+    if value.chars().any(char::is_whitespace) {
+        bail!("{field} must not contain whitespace");
+    }
+
+    let mut parts = value.split('%');
+    let indexes = parts.next().unwrap_or_default();
+    let concurrency = parts.next();
+    if parts.next().is_some() {
+        bail!("{field} must contain at most one '%' concurrency limit");
+    }
+    if let Some(limit) = concurrency {
+        validate_positive_decimal(limit, &format!("{field} concurrency limit"))?;
+    }
+    if indexes.is_empty() {
+        bail!("{field} must include at least one array index");
+    }
+    for item in indexes.split(',') {
+        validate_slurm_array_item(item, field)?;
+    }
+    Ok(())
+}
+
+fn validate_slurm_array_item(item: &str, field: &str) -> Result<()> {
+    if item.is_empty() {
+        bail!("{field} must not contain empty array index items");
+    }
+    let mut step_parts = item.split(':');
+    let range = step_parts.next().unwrap_or_default();
+    let step = step_parts.next();
+    if step_parts.next().is_some() {
+        bail!("{field} array index item '{item}' contains more than one step separator");
+    }
+    if let Some(step) = step {
+        validate_positive_decimal(step, &format!("{field} step"))?;
+    }
+
+    let mut range_parts = range.split('-');
+    let start = range_parts.next().unwrap_or_default();
+    let end = range_parts.next();
+    if range_parts.next().is_some() {
+        bail!("{field} array index item '{item}' contains more than one range separator");
+    }
+    let start = validate_non_negative_decimal(start, &format!("{field} range start"))?;
+    match end {
+        Some(raw_end) => {
+            let end = validate_non_negative_decimal(raw_end, &format!("{field} range end"))?;
+            if end < start {
+                bail!("{field} range end must be greater than or equal to the start");
+            }
+        }
+        None if step.is_some() => {
+            bail!("{field} step syntax requires a range such as N-M:S");
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+pub(super) fn validate_slurm_job_id(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{field}.id must not be empty");
+    }
+    if value.contains('\0') {
+        bail!("{field}.id must not contain null bytes");
+    }
+    if value.chars().any(char::is_whitespace) {
+        bail!("{field}.id must not contain whitespace");
+    }
+    let mut parts = value.split('_');
+    let job_id = parts.next().unwrap_or_default();
+    let task_id = parts.next();
+    if parts.next().is_some() {
+        bail!("{field}.id must be a Slurm job id like 12345 or array task id like 12345_7");
+    }
+    let job_id = validate_non_negative_decimal(job_id, &format!("{field}.id job id"))?;
+    if job_id == 0 {
+        bail!("{field}.id job id must be greater than 0");
+    }
+    if let Some(task_id) = task_id {
+        validate_non_negative_decimal(task_id, &format!("{field}.id array task id"))?;
+    }
+    Ok(())
+}
+
+fn validate_non_negative_decimal(value: &str, field: &str) -> Result<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("{field} must be a non-negative integer");
+    }
+    value
+        .parse::<u64>()
+        .with_context(|| format!("{field} must be a valid non-negative integer"))
+}
+
+fn validate_positive_decimal(value: &str, field: &str) -> Result<u64> {
+    let parsed = validate_non_negative_decimal(value, field)?;
+    if parsed == 0 {
+        bail!("{field} must be greater than 0");
+    }
+    Ok(parsed)
 }
 
 pub(super) fn validate_shell_hook_script(value: &str, field: &str) -> Result<()> {
@@ -257,11 +370,19 @@ pub(super) fn validate_root(value: &Value) -> Result<()> {
         bail!("top-level YAML document must be a mapping");
     };
     validate_mapping_keys("root", root, ROOT_ALLOWED_KEYS)?;
-    let Some(services) = root.get(Value::String("services".into())) else {
-        bail!("spec must contain a top-level 'services' mapping");
+    validate_modules_alias_conflict("root", root)?;
+    let services_key = Value::String("services".into());
+    let steps_key = Value::String("steps".into());
+    let services = root.get(&services_key);
+    let steps = root.get(&steps_key);
+    if services.is_some() && steps.is_some() {
+        bail!("spec must not define both top-level 'services' and 'steps'; use only one");
+    }
+    let Some(services) = services.or(steps) else {
+        bail!("spec must contain a top-level 'services' or 'steps' mapping");
     };
     let Some(service_map) = services.as_mapping() else {
-        bail!("'services' must be a mapping");
+        bail!("'services'/'steps' must be a mapping");
     };
     for (name, service) in service_map {
         let Some(service_name) = name.as_str() else {
@@ -275,6 +396,38 @@ pub(super) fn validate_root(value: &Value) -> Result<()> {
             service_mapping,
             SERVICE_ALLOWED_KEYS,
         )?;
+        validate_modules_alias_conflict(&format!("service '{service_name}'"), service_mapping)?;
+        validate_script_conflicts(service_name, service_mapping)?;
+    }
+    Ok(())
+}
+
+fn validate_modules_alias_conflict(scope: &str, mapping: &Mapping) -> Result<()> {
+    let modules_key = Value::String("modules".into());
+    let x_env_key = Value::String("x-env".into());
+    let Some(x_env) = mapping.get(&x_env_key) else {
+        return Ok(());
+    };
+    let Some(x_env_mapping) = x_env.as_mapping() else {
+        return Ok(());
+    };
+    if mapping.contains_key(&modules_key)
+        && x_env_mapping.contains_key(Value::String("modules".into()))
+    {
+        bail!("{scope} sets both 'modules' and 'x-env.modules'; use only one spelling");
+    }
+    Ok(())
+}
+
+fn validate_script_conflicts(service_name: &str, mapping: &Mapping) -> Result<()> {
+    if !mapping.contains_key(Value::String("script".into())) {
+        return Ok(());
+    }
+    if mapping.contains_key(Value::String("command".into())) {
+        bail!("service '{service_name}' sets both script and command; use only one");
+    }
+    if mapping.contains_key(Value::String("entrypoint".into())) {
+        bail!("service '{service_name}' sets both script and entrypoint; use only one");
     }
     Ok(())
 }

@@ -21,10 +21,13 @@ pub(crate) fn validate(
     strict_env: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let plan = output_common::load_plan_with_interpolation_vars(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-    )?;
+    let plan =
+        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let runtime_plan = build_runtime_plan(&plan);
     let cluster_warnings = load_discovered_cluster_profile(&context)?
         .map(|profile| {
@@ -71,10 +74,13 @@ pub(crate) fn render(
     output_path: Option<PathBuf>,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let plan = output_common::load_plan_with_interpolation_vars(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-    )?;
+    let plan =
+        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let runtime_plan = build_runtime_plan(&plan);
     let cluster_profile = load_discovered_cluster_profile(&context)?;
     let script = render_script_with_options(
@@ -129,10 +135,13 @@ pub(crate) fn plan(
     show_script: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let (plan, runtime_plan) = output_common::load_plan_and_runtime_with_interpolation_vars(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-    )?;
+    let (plan, runtime_plan) =
+        output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     if strict_env {
         let missing =
             missing_defaulted_variables(&context.compose_file.value, &context.interpolation_vars)?;
@@ -220,9 +229,11 @@ pub(crate) fn prepare(
 ) -> Result<()> {
     let output_format = output_common::resolve_output_format(format, false);
     let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
-    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
+    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
     )?;
     let prepare_progress =
         PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
@@ -263,9 +274,11 @@ pub(crate) fn preflight(
 ) -> Result<()> {
     let output_format = output_common::resolve_output_format(format, json);
     let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
-    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
+    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
     )?;
     let cluster_profile = load_discovered_cluster_profile(&context)?;
     let report = progress.run_result("Running preflight checks", || {
@@ -315,10 +328,13 @@ pub(crate) fn inspect(
     format: Option<OutputFormat>,
     json: bool,
 ) -> Result<()> {
-    let (plan, runtime_plan) = output_common::load_plan_and_runtime_with_interpolation_vars(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-    )?;
+    let (plan, runtime_plan) =
+        output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     match output_common::resolve_output_format(format, json) {
         OutputFormat::Text => {
             if tree {
@@ -359,9 +375,11 @@ pub(crate) fn config(
     variables: bool,
     show_values: bool,
 ) -> Result<()> {
-    let config = output_common::load_effective_config_with_interpolation_vars(
+    let config = output_common::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
     )?;
     let output_format = output_common::resolve_output_format(format, false);
     if variables {
@@ -446,9 +464,11 @@ pub(crate) fn context(
         .to_path_buf();
     let current_submit_dir = context.cwd.clone();
     let (cache_dir, resume_dir, artifact_export_dir, compose_load_error) =
-        match output_common::load_plan_and_runtime_with_interpolation_vars(
+        match output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
         ) {
             Ok((plan, runtime_plan)) => (
                 Some(ResolvedValue {
@@ -456,7 +476,7 @@ pub(crate) fn context(
                     source: if plan.slurm.cache_dir.is_some() {
                         ValueSource::Compose
                     } else {
-                        ValueSource::Builtin
+                        context.cache_dir.source
                     },
                 }),
                 runtime_plan.slurm.resume_dir().map(|value| ResolvedValue {
@@ -956,6 +976,11 @@ services:
                 value: compose.to_path_buf(),
                 source: ValueSource::Cli,
             },
+            cache_dir: ResolvedValue {
+                value: root.join(".cache/hpc-compose"),
+                source: ValueSource::Builtin,
+            },
+            resource_profiles: BTreeMap::new(),
             binaries: binaries(root),
             interpolation_vars: BTreeMap::new(),
             interpolation_var_sources: BTreeMap::new(),

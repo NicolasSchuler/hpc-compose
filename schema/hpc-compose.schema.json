@@ -5,7 +5,26 @@
   "description": "Compose-like specification accepted by hpc-compose. Rust validation remains the semantic source of truth.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["services"],
+  "oneOf": [
+    {
+      "required": ["services"],
+      "not": { "required": ["steps"] }
+    },
+    {
+      "required": ["steps"],
+      "not": { "required": ["services"] }
+    }
+  ],
+  "allOf": [
+    {
+      "not": {
+        "required": ["modules", "x-env"],
+        "properties": {
+          "x-env": { "required": ["modules"] }
+        }
+      }
+    }
+  ],
   "properties": {
     "version": {
       "type": ["string", "number"],
@@ -17,12 +36,24 @@
     "runtime": {
       "$ref": "#/$defs/runtime"
     },
+    "modules": {
+      "$ref": "#/$defs/stringList",
+      "description": "List-only shorthand for top-level x-env.modules.load."
+    },
     "services": {
       "type": "object",
       "minProperties": 1,
       "additionalProperties": {
         "$ref": "#/$defs/service"
       }
+    },
+    "steps": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/service"
+      },
+      "description": "Alias for services."
     },
     "x-env": {
       "$ref": "#/$defs/softwareEnv"
@@ -54,6 +85,41 @@
           { "pattern": "\\u0000" }
         ]
       }
+    },
+    "arraySpec": {
+      "type": "string",
+      "minLength": 1,
+      "allOf": [
+        { "$ref": "#/$defs/lineSafeString" },
+        { "not": { "pattern": "\\s" } },
+        {
+          "pattern": "^([0-9]+(-[0-9]+(:[1-9][0-9]*)?)?)(,([0-9]+(-[0-9]+(:[1-9][0-9]*)?)?))*(%[1-9][0-9]*)?$"
+        }
+      ],
+      "description": "Slurm array index spec such as 0, 1-10, 1-10:2, 0,3,8-12, or 0-99%10."
+    },
+    "jobDependency": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(_[0-9]+)?$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(_[0-9]+)?$"
+            },
+            "condition": {
+              "type": "string",
+              "enum": ["afterany", "afterok", "afternotok"]
+            }
+          }
+        }
+      ]
     },
     "command": {
       "oneOf": [
@@ -102,6 +168,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "resources": { "$ref": "#/$defs/lineSafeString" },
         "job_name": { "$ref": "#/$defs/lineSafeString" },
         "partition": { "$ref": "#/$defs/lineSafeString" },
         "account": { "$ref": "#/$defs/lineSafeString" },
@@ -127,6 +194,12 @@
         "output": { "$ref": "#/$defs/lineSafeString" },
         "error": { "$ref": "#/$defs/lineSafeString" },
         "chdir": { "$ref": "#/$defs/lineSafeString" },
+        "array": { "$ref": "#/$defs/arraySpec" },
+        "after_job": { "$ref": "#/$defs/jobDependency" },
+        "dependency": {
+          "type": "string",
+          "enum": ["singleton"]
+        },
         "cache_dir": { "type": "string" },
         "scratch": { "$ref": "#/$defs/scratch" },
         "stage_in": {
@@ -316,11 +389,36 @@
     "service": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": ["script", "command"]
+          }
+        },
+        {
+          "not": {
+            "required": ["script", "entrypoint"]
+          }
+        },
+        {
+          "not": {
+            "required": ["modules", "x-env"],
+            "properties": {
+              "x-env": { "required": ["modules"] }
+            }
+          }
+        }
+      ],
       "properties": {
         "image": { "type": "string" },
         "command": { "$ref": "#/$defs/command" },
         "entrypoint": { "$ref": "#/$defs/command" },
+        "script": { "type": "string", "minLength": 1 },
         "environment": { "$ref": "#/$defs/environment" },
+        "modules": {
+          "$ref": "#/$defs/stringList",
+          "description": "List-only shorthand for service x-env.modules.load."
+        },
         "volumes": { "$ref": "#/$defs/stringList" },
         "working_dir": { "type": "string" },
         "depends_on": { "$ref": "#/$defs/dependsOn" },

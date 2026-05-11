@@ -46,9 +46,11 @@ pub(crate) fn inspect(
     service: Option<String>,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
+    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
     )?;
     let report = output_cache::build_cache_inspect_report(&runtime_plan, service.as_deref())?;
     match output_common::resolve_output_format(format, false) {
@@ -85,10 +87,13 @@ pub(crate) fn prune(
         }
     } else {
         debug_assert!(all_unused);
-        let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
-            &context.compose_file.value,
-            &context.interpolation_vars,
-        )?;
+        let runtime_plan =
+            output_common::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+                &context.compose_file.value,
+                &context.interpolation_vars,
+                Some(&context.cache_dir.value),
+                &context.resource_profiles,
+            )?;
         let target = cache_dir.unwrap_or_else(|| runtime_plan.cache_dir.clone());
         let result = prune_all_unused(&target, &runtime_plan)?;
         output_cache::CachePruneReport {
@@ -115,11 +120,13 @@ pub(crate) fn prune(
 
 fn active_cache_dir(context: &ResolvedContext) -> Result<PathBuf> {
     if context.compose_file.source == ValueSource::Builtin && !context.compose_file.value.exists() {
-        return Ok(output_common::default_cache_dir());
+        return Ok(context.cache_dir.value.clone());
     }
-    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars(
+    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
     )?;
     Ok(runtime_plan.cache_dir)
 }
@@ -202,6 +209,14 @@ services:
                 value: compose.to_path_buf(),
                 source: ValueSource::Cli,
             },
+            cache_dir: ResolvedValue {
+                value: compose
+                    .parent()
+                    .expect("compose dir")
+                    .join(".cache/hpc-compose"),
+                source: ValueSource::Builtin,
+            },
+            resource_profiles: BTreeMap::new(),
             binaries: ResolvedBinaries {
                 enroot: binary("enroot"),
                 apptainer: binary("apptainer"),

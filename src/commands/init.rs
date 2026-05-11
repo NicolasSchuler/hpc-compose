@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -14,7 +14,8 @@ use hpc_compose::context::{
 };
 use hpc_compose::init::{
     cache_dir_placeholder as init_cache_dir_placeholder, next_commands,
-    prompt_for_init_with_cache_dir_default, render_template, write_initialized_template,
+    prompt_for_init_with_cache_dir_default, render_template_with_optional_cache_dir,
+    write_initialized_template,
 };
 use hpc_compose::term;
 
@@ -39,7 +40,7 @@ pub(crate) fn new_command(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "templates": output_init::template_infos(),
-                        "cache_dir_required": true,
+                        "cache_dir_required": false,
                         "cache_dir_placeholder": init_cache_dir_placeholder(),
                     }))
                     .context("failed to serialize template list output")?
@@ -63,24 +64,14 @@ pub(crate) fn new_command(
         }
         return Ok(());
     }
-    let non_interactive_no_args =
-        template.is_none() && name.is_none() && cache_dir.is_none() && !io::stdin().is_terminal();
     let prompt_cache_dir = cache_dir.clone();
     let answers = output_init::resolve_init_answers(template, name, cache_dir, || {
         prompt_for_init_with_cache_dir_default(prompt_cache_dir.as_deref())
-    })
-    .or_else(|err| {
-        if non_interactive_no_args && err.to_string().contains("Cache dir cannot be empty") {
-            bail!(
-                "hpc-compose new needs --template and --cache-dir in non-interactive terminals; run `hpc-compose new --list-templates` or `hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml`"
-            );
-        }
-        Err(err)
     })?;
-    let rendered = render_template(
+    let rendered = render_template_with_optional_cache_dir(
         &answers.template_name,
         &answers.app_name,
-        &answers.cache_dir,
+        answers.cache_dir.as_deref(),
     )?;
     let path = write_initialized_template(&output_path, &rendered, force)?;
     let next_commands = next_commands(&path);
@@ -117,6 +108,7 @@ pub(crate) fn setup(
     env_files: Vec<String>,
     env_entries: Vec<String>,
     binary_entries: Vec<String>,
+    cache_dir: Option<String>,
     default_profile: Option<String>,
     non_interactive: bool,
     format: Option<OutputFormat>,
@@ -252,6 +244,25 @@ pub(crate) fn setup(
         )?))?
     };
 
+    let cache_dir_value = if non_interactive {
+        cache_dir.or_else(|| {
+            existing_profile
+                .as_ref()
+                .and_then(|profile| profile.cache.dir.clone())
+        })
+    } else {
+        let default = cache_dir
+            .clone()
+            .or_else(|| {
+                existing_profile
+                    .as_ref()
+                    .and_then(|profile| profile.cache.dir.clone())
+            })
+            .unwrap_or_default();
+        let value = prompt(&mut stdin, &mut stdout, "Cache dir", &default)?;
+        optional_nonempty(value)?
+    };
+
     let selected_default_profile = if non_interactive {
         default_profile
             .or_else(|| settings.default_profile.clone())
@@ -272,6 +283,7 @@ pub(crate) fn setup(
     profile.env_files = env_files_value;
     profile.env = env_value;
     profile.binaries = binaries_value;
+    profile.cache.dir = cache_dir_value;
     let setup_output = output_init::SetupOutput {
         settings_path: settings_path.clone(),
         profile: selected_profile.clone(),
@@ -280,6 +292,7 @@ pub(crate) fn setup(
         env_files: profile.env_files.clone(),
         env: profile.env.clone(),
         binaries: profile.binaries.clone(),
+        cache_dir: profile.cache.dir.clone(),
     };
     settings.default_profile = Some(selected_default_profile.clone());
     settings.version = 1;
@@ -360,6 +373,17 @@ fn parse_env_entries(entries: &[String]) -> Result<std::collections::BTreeMap<St
         out.insert(key.to_string(), value.to_string());
     }
     Ok(out)
+}
+
+fn optional_nonempty(value: String) -> Result<Option<String>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed != value {
+        bail!("cache dir must not have leading or trailing whitespace");
+    }
+    Ok(Some(value))
 }
 
 fn parse_binary_entries(entries: &[String]) -> Result<BinaryOverrides> {
@@ -539,6 +563,7 @@ mod tests {
             ],
             vec!["CACHE_DIR=/shared/cache".to_string()],
             vec!["srun=/opt/slurm/bin/srun".to_string()],
+            None,
             Some("dev".to_string()),
             true,
             None,
@@ -570,6 +595,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
             None,
             true,
             None,
@@ -705,6 +731,7 @@ mod tests {
             vec![".env".to_string()],
             vec!["CACHE_DIR=/shared/cache-json".to_string()],
             vec!["squeue=/opt/slurm/bin/squeue".to_string()],
+            None,
             Some("json".to_string()),
             true,
             Some(OutputFormat::Json),

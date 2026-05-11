@@ -25,12 +25,12 @@ Start with the [Support Matrix](support-matrix.md) before planning a real runtim
 These commands are safe from a laptop, workstation, or login node because `new` writes a local starter spec and `plan` is purely static:
 
 ```bash
-hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+hpc-compose new --template minimal-batch --name my-app --output compose.yaml
 hpc-compose plan -f compose.yaml
 hpc-compose plan --show-script -f compose.yaml
 ```
 
-Replace `<shared-cache-dir>` with a path visible from both the Slurm submission host and compute nodes. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
+For real cluster runs, configure a cache path visible from both the Slurm submission host and compute nodes, either in `x-slurm.cache_dir`, `hpc-compose setup --cache-dir`, or `[defaults.cache]` / `[profiles.<name>.cache]` settings. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
 
 Expected output includes:
 

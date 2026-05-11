@@ -370,6 +370,9 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     if let Some(chdir) = &plan.slurm.chdir {
         sbatch::push_directive(&mut out, "chdir", chdir);
     }
+    if let Some(array) = &plan.slurm.array {
+        sbatch::push_directive(&mut out, "array", array);
+    }
     for arg in &plan.slurm.submit_args {
         sbatch::push_raw_directive(&mut out, arg);
     }
@@ -2840,6 +2843,20 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
         software_env_export_names(context.global_software_env, &service.slurm.software_env);
     let mut extra_container_env = distributed_extra_container_env;
     extra_container_env.extend(software_env_keys.clone());
+    if context.slurm.array.is_some() {
+        extra_container_env.extend(
+            [
+                "SLURM_ARRAY_JOB_ID",
+                "SLURM_ARRAY_TASK_ID",
+                "SLURM_ARRAY_TASK_COUNT",
+                "SLURM_ARRAY_TASK_MAX",
+                "SLURM_ARRAY_TASK_MIN",
+                "SLURM_ARRAY_TASK_STEP",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
     let srun_args = build_srun_command_for_backend_with_extra_container_env(
         service,
         context.runtime.backend,

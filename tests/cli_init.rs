@@ -252,10 +252,10 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let describe_stdout = stdout_text(&describe_template);
     assert!(describe_stdout.contains("template: multi-node-mpi"));
     assert!(describe_stdout.contains("allocation-wide"));
-    assert!(describe_stdout.contains("cache dir: required"));
+    assert!(describe_stdout.contains("cache dir: optional"));
     assert!(describe_stdout.contains("placeholder: <shared-cache-dir>"));
     assert!(describe_stdout.contains("hpc-compose new --template multi-node-mpi"));
-    assert!(describe_stdout.contains("--cache-dir '<shared-cache-dir>'"));
+    assert!(!describe_stdout.contains("--cache-dir '<shared-cache-dir>'"));
 
     let init_alias = run_cli(
         tmpdir.path(),
@@ -271,7 +271,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert_success(&list_templates_json);
     let list_payload: Value =
         serde_json::from_str(&stdout_text(&list_templates_json)).expect("list json");
-    assert_eq!(list_payload["cache_dir_required"], true);
+    assert_eq!(list_payload["cache_dir_required"], false);
     assert_eq!(list_payload["cache_dir_placeholder"], "<shared-cache-dir>");
     let templates = list_payload["templates"].as_array().expect("templates");
     let minimal = templates
@@ -297,7 +297,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert_success(&describe_template_json);
     let describe_payload: Value =
         serde_json::from_str(&stdout_text(&describe_template_json)).expect("describe json");
-    assert_eq!(describe_payload["cache_dir_required"], true);
+    assert_eq!(describe_payload["cache_dir_required"], false);
     assert_eq!(
         describe_payload["cache_dir_placeholder"],
         "<shared-cache-dir>"
@@ -306,13 +306,18 @@ fn help_and_template_discovery_surface_guided_workflows() {
         describe_payload["command"]
             .as_str()
             .unwrap_or_default()
-            .contains("--cache-dir '<shared-cache-dir>'")
+            .contains(
+                "hpc-compose new --template minimal-batch --name my-app --output compose.yaml"
+            )
     );
     assert_eq!(describe_payload["template"]["category"], "basics");
 
     let new_non_tty = run_cli(tmpdir.path(), &["new"]);
-    assert_failure(&new_non_tty);
-    assert!(stderr_text(&new_non_tty).contains("needs --template and --cache-dir"));
+    assert_success(&new_non_tty);
+    let new_stdout = stdout_text(&new_non_tty);
+    assert!(new_stdout.contains("Cache dir (optional)"));
+    let generated = fs::read_to_string(tmpdir.path().join("compose.yaml")).expect("compose");
+    assert!(!generated.contains("cache_dir:"));
 }
 
 #[test]
@@ -942,6 +947,8 @@ fn new_and_setup_commands_support_json_output() {
             "CACHE_DIR=/shared/cache",
             "--binary",
             "srun=/opt/slurm/bin/srun",
+            "--cache-dir",
+            "/shared/setup-cache",
             "--default-profile",
             "dev",
             "--non-interactive",
@@ -957,11 +964,13 @@ fn new_and_setup_commands_support_json_output() {
     assert_eq!(setup["env_files"][0], ".env");
     assert_eq!(setup["env"]["CACHE_DIR"], "/shared/cache");
     assert_eq!(setup["binaries"]["srun"], "/opt/slurm/bin/srun");
+    assert_eq!(setup["cache_dir"], "/shared/setup-cache");
 }
 
 #[test]
-fn new_requires_cache_dir_when_writing_a_template() {
+fn new_allows_omitted_cache_dir_when_writing_a_template() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output_path = tmpdir.path().join("missing-cache.yaml");
     let output = run_cli(
         tmpdir.path(),
         &[
@@ -970,10 +979,14 @@ fn new_requires_cache_dir_when_writing_a_template() {
             "minimal-batch",
             "--name",
             "missing-cache",
+            "--output",
+            output_path.to_str().expect("path"),
         ],
     );
-    assert_failure(&output);
-    assert!(stderr_text(&output).contains("--cache-dir is required"));
+    assert_success(&output);
+    let rendered = fs::read_to_string(output_path).expect("rendered");
+    assert!(rendered.contains("name: missing-cache"));
+    assert!(!rendered.contains("cache_dir:"));
 }
 
 #[test]
@@ -982,7 +995,7 @@ fn setup_interactive_accepts_prompted_env_files_vars_and_binaries() {
     let setup = run_cli_with_stdin(
         tmpdir.path(),
         &["setup"],
-        "research\nstack.yaml\n.env,.env.local\nA=1,B=two\nenroot=/usr/local/bin/enroot,sbatch=/usr/local/bin/sbatch\nresearch\n",
+        "research\nstack.yaml\n.env,.env.local\nA=1,B=two\nenroot=/usr/local/bin/enroot,sbatch=/usr/local/bin/sbatch\n/shared/cache\nresearch\n",
     );
     assert_success(&setup);
     let stdout = stdout_text(&setup);
@@ -991,6 +1004,7 @@ fn setup_interactive_accepts_prompted_env_files_vars_and_binaries() {
     assert!(stdout.contains("Profile env files (comma-separated) []:"));
     assert!(stdout.contains("Profile env vars KEY=VALUE (comma-separated) []:"));
     assert!(stdout.contains("Profile binaries NAME=PATH (comma-separated) []:"));
+    assert!(stdout.contains("Cache dir []:"));
     assert!(stdout.contains("Default profile [research]:"));
 
     let settings_path = tmpdir.path().join(".hpc-compose/settings.toml");
@@ -1003,4 +1017,5 @@ fn setup_interactive_accepts_prompted_env_files_vars_and_binaries() {
     assert!(settings.contains("B = \"two\""));
     assert!(settings.contains("enroot = \"/usr/local/bin/enroot\""));
     assert!(settings.contains("sbatch = \"/usr/local/bin/sbatch\""));
+    assert!(settings.contains("dir = \"/shared/cache\""));
 }

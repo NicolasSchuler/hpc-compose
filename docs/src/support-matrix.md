@@ -56,6 +56,6 @@ For full runtime support on Linux, the target environment should provide:
   - Apptainer on the submission host and compute nodes,
   - Singularity on the submission host and compute nodes,
   - or module/vendor software available on the host runtime path
-- shared storage for `x-slurm.cache_dir`
+- shared storage for the resolved cache directory
 
 Use [Runtime Backends](runtime-backends.md), [Runbook](runbook.md), and [Execution Model](execution-model.md) before adapting a real workload to a cluster.

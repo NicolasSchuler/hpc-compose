@@ -99,7 +99,7 @@ services:
 3. **`REDIS_HOST: redis`** → `REDIS_HOST: 127.0.0.1`. No DNS service names; use localhost.
 4. **`healthcheck`** → `readiness` with `type: tcp`.
 5. **Added `x-slurm`** block for Slurm resource allocation (time, memory, CPUs).
-6. **Added `x-slurm.cache_dir`** for shared image storage.
+6. **Configured a shared cache** for image storage, either through `x-slurm.cache_dir` as shown or project settings.
 
 ## Key differences
 
@@ -237,7 +237,7 @@ The rolling-window fields have no direct Docker Compose equivalent. They exist t
 6. **Replace service hostnames** — Change any service-name references (e.g. `redis`, `postgres`) to `127.0.0.1` for same-node helpers, or to explicit allocation metadata for distributed runs.
 7. **Replace `healthcheck:`** — Convert to `readiness:` with `type: tcp`, `type: log`, or `type: sleep`.
 8. **Add `x-slurm:`** — Set `time`, `mem`, `cpus_per_task`, and optionally `gpus`, `partition`, `account`.
-9. **Set `cache_dir`** — Point `x-slurm.cache_dir` to shared storage visible from login and compute nodes.
+9. **Set cache storage** — Point `x-slurm.cache_dir` or `setup --cache-dir` to shared storage visible from login and compute nodes.
 10. **Validate** — Run `hpc-compose validate -f compose.yaml` to check the converted spec.
 11. **Inspect** — Run `hpc-compose inspect --verbose -f compose.yaml` to confirm the planner understood your intent.
 

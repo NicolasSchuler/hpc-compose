@@ -2041,6 +2041,7 @@ services:
             "app",
             "--",
             "/bin/echo",
+            "--",
             "one-off",
         ],
     );
@@ -2058,13 +2059,283 @@ services:
     assert_eq!(record["service_name"], Value::from("app"));
     assert_eq!(
         record["command_override"],
-        serde_json::json!(["/bin/echo", "one-off"])
+        serde_json::json!(["/bin/echo", "--", "one-off"])
     );
 
     let rendered = fs::read_to_string(&script_out).expect("rendered run script");
     assert!(rendered.contains("hpc-compose:app"));
     assert!(!rendered.contains("hpc-compose:db"));
     assert_eq!(rendered.matches("  register_service ").count(), 1);
+}
+
+#[test]
+fn up_command_passes_job_dependencies_on_sbatch_cli() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  after_job:
+    id: "12345"
+    condition: afterok
+  dependency: singleton
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
+    let script_out = tmpdir.path().join("dependency.sbatch");
+
+    let up = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&up);
+    let sbatch_args = fs::read_to_string(&sbatch_log).expect("sbatch log");
+    assert!(sbatch_args.contains("--dependency=afterok:12345,singleton"));
+    let script = fs::read_to_string(&script_out).expect("script");
+    assert!(!script.contains("#SBATCH --dependency"));
+}
+
+#[test]
+fn local_submit_rejects_scheduler_arrays_and_dependencies() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let array_compose = write_compose(
+        tmpdir.path(),
+        "array.yaml",
+        &format!(
+            r#"
+x-slurm:
+  array: 0-3
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let array = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            array_compose.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&array);
+    assert!(stderr_text(&array).contains("--local does not support x-slurm.array"));
+
+    let dependency_compose = write_compose(
+        tmpdir.path(),
+        "dependency.yaml",
+        &format!(
+            r#"
+x-slurm:
+  after_job: "12345"
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let dependency = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            dependency_compose.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&dependency);
+    assert!(stderr_text(&dependency).contains("--local does not support Slurm job dependencies"));
+}
+
+#[test]
+fn array_submit_requires_detached_mode() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  array: 0-3
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let sbatch = write_fake_sbatch(tmpdir.path());
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("x-slurm.array requires --detach"));
+}
+
+#[test]
+fn run_image_mode_submits_ephemeral_one_service_plan() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let script_out = tmpdir.path().join("ephemeral.sbatch");
+
+    let run = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--mem",
+            "2G",
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "--",
+            "/bin/echo",
+            "--",
+            "hello",
+        ],
+    );
+    assert_success(&run);
+    let stdout = stdout_text(&run);
+    assert!(stdout.contains("Submitted batch job 12345"));
+    assert!(stdout.contains(".hpc-compose/latest-run.json"));
+    let script = fs::read_to_string(&script_out).expect("script");
+    assert!(script.contains("#SBATCH --mem=2G"));
+    assert!(script.contains("hpc-compose:run"));
+    assert!(script.contains("'/bin/echo'"));
+    assert!(script.contains("'--'"));
+}
+
+#[test]
+fn run_image_mode_rejects_service_like_mixed_form() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--image",
+            local_image.to_str().expect("path"),
+            "app",
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("cannot include a"));
+    assert!(stderr.contains("service name"));
+}
+
+#[test]
+fn shell_command_invokes_srun_pty_with_image_resources_and_env() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let srun_log = tmpdir.path().join("srun.log");
+    let srun = tmpdir.path().join("srun-shell");
+    write_script(
+        &srun,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf 'args:%s\n' "$*" >> '{}'
+printf 'env:%s\n' "${{FOO:-}}" >> '{}'
+exit 0
+"#,
+            srun_log.display(),
+            srun_log.display()
+        ),
+    );
+
+    let shell = run_cli(
+        tmpdir.path(),
+        &[
+            "shell",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--gpus",
+            "1",
+            "--env",
+            "FOO=bar",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+        ],
+    );
+    assert_success(&shell);
+    let log = fs::read_to_string(&srun_log).expect("srun log");
+    assert!(log.contains("--pty"));
+    assert!(log.contains(&format!("--container-image={}", local_image.display())));
+    assert!(log.contains("--gpus=1"));
+    assert!(log.contains("--container-env=FOO"));
+    assert!(log.contains("bash -l"));
+    assert!(log.contains("env:bar"));
 }
 
 #[test]

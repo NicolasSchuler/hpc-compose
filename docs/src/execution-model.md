@@ -39,7 +39,7 @@ Use `logs` to inspect the corresponding restart messages from the batch script w
 
 ## Which paths must be shared
 
-- `x-slurm.cache_dir` must be visible from both the login node and the compute nodes.
+- The resolved cache directory must be visible from both the login node and the compute nodes. It may come from `x-slurm.cache_dir`, project settings, or the builtin `$HOME/.cache/hpc-compose` fallback.
 - Relative host paths in `volumes`, local image paths, and `x-runtime.prepare.mounts` resolve against the compose file directory.
 - Each submitted job writes tracked state under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}` on the host.
 - That per-job directory is mounted into every container at `/hpc-compose/job`.
@@ -49,7 +49,7 @@ Use `/hpc-compose/job` for small shared state inside the allocation, such as rea
 
 ### Enroot runtime paths
 
-The generated batch script sets three Enroot runtime paths scoped per job under the configured cache directory:
+The generated batch script sets three Enroot runtime paths scoped per job under the resolved cache directory:
 
 | Variable | Value | Purpose |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ These paths are created at batch startup and are available inside the batch scri
 
 <div class="callout warning">
   <p><strong>Warning</strong></p>
-  <p>Do not put <code>x-slurm.cache_dir</code> under <code>/tmp</code>, <code>/var/tmp</code>, <code>/private/tmp</code>, or <code>/dev/shm</code>. Those paths are not safe for login-node prepare plus compute-node reuse.</p>
+  <p>Do not put the resolved cache directory under <code>/tmp</code>, <code>/var/tmp</code>, <code>/private/tmp</code>, or <code>/dev/shm</code>. Those paths are not safe for login-node prepare plus compute-node reuse.</p>
 </div>
 
 ## Networking inside the allocation

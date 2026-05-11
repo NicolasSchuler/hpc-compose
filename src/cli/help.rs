@@ -11,7 +11,7 @@ Debug failed run:
   hpc-compose debug -f compose.yaml --preflight
 
 Start a new spec:
-  hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+  hpc-compose new --template minimal-batch --name my-app --output compose.yaml
 
 Workflow groups:
   Start:          new, setup, context
@@ -133,12 +133,19 @@ pub(super) const RUN_HELP: &str = "\
 Examples:
   hpc-compose run -f compose.yaml app -- python -m pytest
   hpc-compose run -f compose.yaml app -- bash
-  hpc-compose run -f compose.yaml worker -- python worker.py --once";
+  hpc-compose run --image docker://python:3.12 -- python -V";
+
+pub(super) const SHELL_HELP: &str = "\
+Examples:
+  hpc-compose shell --image docker://ubuntu:24.04
+  hpc-compose shell --image docker://nvidia/cuda:12.4.1-base-ubuntu22.04 --gpus 1
+  hpc-compose shell --image docker://python:3.12 --resources cpu-small";
 
 pub(super) const NEW_HELP: &str = "\
 Examples:
   hpc-compose new --list-templates
   hpc-compose new --describe-template minimal-batch
+  hpc-compose new --template minimal-batch --name my-app --output compose.yaml
   hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml";
 
 pub(super) const CACHE_HELP: &str = "\
@@ -188,6 +195,7 @@ pub(super) const SETUP_HELP: &str = "\
 Examples:
   hpc-compose setup
   hpc-compose setup --profile-name dev --compose-file compose.yaml --default-profile dev --non-interactive
+  hpc-compose setup --profile-name dev --cache-dir '<shared-cache-dir>' --default-profile dev --non-interactive
   hpc-compose setup --env 'CACHE_DIR=<shared-cache-dir>' --binary srun=/opt/slurm/bin/srun --non-interactive";
 
 pub(super) const COMPLETIONS_HELP: &str = "\
@@ -318,12 +326,19 @@ const DOWN_EXAMPLES: &[&str] = &[
 const RUN_EXAMPLES: &[&str] = &[
     "hpc-compose run -f compose.yaml app -- python -m pytest",
     "hpc-compose run -f compose.yaml app -- bash",
-    "hpc-compose run -f compose.yaml worker -- python worker.py --once",
+    "hpc-compose run --image docker://python:3.12 -- python -V",
+];
+
+const SHELL_EXAMPLES: &[&str] = &[
+    "hpc-compose shell --image docker://ubuntu:24.04",
+    "hpc-compose shell --image docker://nvidia/cuda:12.4.1-base-ubuntu22.04 --gpus 1",
+    "hpc-compose shell --image docker://python:3.12 --resources cpu-small",
 ];
 
 const NEW_EXAMPLES: &[&str] = &[
     "hpc-compose new --list-templates",
     "hpc-compose new --describe-template minimal-batch",
+    "hpc-compose new --template minimal-batch --name my-app --output compose.yaml",
     "hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml",
 ];
 
@@ -373,6 +388,7 @@ const CONTEXT_EXAMPLES: &[&str] = &[
 const SETUP_EXAMPLES: &[&str] = &[
     "hpc-compose setup",
     "hpc-compose setup --profile-name dev --compose-file compose.yaml --default-profile dev --non-interactive",
+    "hpc-compose setup --profile-name dev --cache-dir '<shared-cache-dir>' --default-profile dev --non-interactive",
     "hpc-compose setup --env 'CACHE_DIR=<shared-cache-dir>' --binary srun=/opt/slurm/bin/srun --non-interactive",
 ];
 
@@ -416,6 +432,7 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["cancel"] => CANCEL_EXAMPLES,
         ["down"] => DOWN_EXAMPLES,
         ["run"] => RUN_EXAMPLES,
+        ["shell"] => SHELL_EXAMPLES,
         ["new"] => NEW_EXAMPLES,
         ["cache"] => CACHE_EXAMPLES,
         ["cache", "list"] => CACHE_LIST_EXAMPLES,

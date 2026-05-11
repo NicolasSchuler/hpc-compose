@@ -21,7 +21,7 @@ hpc-compose debug -f compose.yaml --preflight
 | --- | --- | --- |
 | `required binary '...' was not found` | Selected backend or Slurm client tool is not on `PATH`. | Run `debug --preflight`; pass `--enroot-bin`, `--apptainer-bin`, `--singularity-bin`, `--srun-bin`, or `--sbatch-bin` as needed. |
 | `srun does not advertise --container-image` | Pyxis support is unavailable or not loaded. | Move to a supported login node, load the site module, or choose another backend. |
-| Cache directory warning/error | `x-slurm.cache_dir` is not shared, writable, or policy-safe. | Choose a shared project/work/scratch path and rerun `debug --preflight`. |
+| Cache directory warning/error | The resolved cache directory is not shared, writable, or policy-safe. | Choose a shared project/work/scratch path through `x-slurm.cache_dir` or `setup --cache-dir`, then rerun `debug --preflight`. |
 | Missing local mount or image path | Relative paths are resolved from the compose file directory. | Check paths relative to the copied `compose.yaml`. |
 | Mounted symlink exists on the host but fails in the container | The symlink target is outside the mounted directory. | Copy the real file into the mounted directory or mount the target directory. |
 | Anonymous pull or registry warning | Registry credentials are missing or rate limits apply. | Configure credentials before relying on private or rate-limited images. |

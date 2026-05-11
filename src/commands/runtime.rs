@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -21,15 +22,23 @@ use hpc_compose::job::{
     run_cleanup_report, runtime_job_root_for_record, scan_job_inventory, scan_job_records,
     state_path_for_record, watch_submission, write_submission_record,
 };
-use hpc_compose::planner::{ExecutionSpec, ImageSource, ServicePlacementMode};
+use hpc_compose::planner::{
+    ExecutionSpec, ImageSource, PlanOptions, ServicePlacementMode, apply_resource_profile_defaults,
+    build_plan_with_options,
+};
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{
-    PrepareOptions, RuntimePlan, base_image_path_for_backend, prepare_runtime_plan,
+    PrepareOptions, RuntimePlan, base_image_path_for_backend, build_runtime_plan,
+    prepare_runtime_plan,
 };
 use hpc_compose::render::{
     RenderOptions, log_file_name_for_service, render_local_script, render_script_with_options,
 };
-use hpc_compose::spec::{ServiceFailureMode, parse_slurm_time_limit};
+use hpc_compose::spec::{
+    CommandSpec, ComposeSpec, DependsOnSpec, EnvironmentSpec, RuntimeConfig, ServiceEnrootConfig,
+    ServiceFailureMode, ServiceRuntimeConfig, ServiceSlurmConfig, ServiceSpec, SlurmConfig,
+    SoftwareEnvConfig, parse_slurm_time_limit,
+};
 use serde::Serialize;
 
 use crate::output;
@@ -81,6 +90,26 @@ fn default_run_script_path(compose_file: &Path, service_name: &str) -> PathBuf {
     parent.join(format!("hpc-compose-run-{service_token}.sbatch"))
 }
 
+fn default_ephemeral_run_script_path(cwd: &Path, local: bool) -> PathBuf {
+    if local {
+        cwd.join("hpc-compose-run.local.sh")
+    } else {
+        cwd.join("hpc-compose-run.sbatch")
+    }
+}
+
+/// Shared resource flags accepted by ephemeral `run --image` and `shell`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ResourceCliOptions {
+    pub resources: Option<String>,
+    pub time: Option<String>,
+    pub mem: Option<String>,
+    pub cpus_per_task: Option<u32>,
+    pub gpus: Option<u32>,
+    pub partition: Option<String>,
+    pub env: Vec<String>,
+}
+
 fn tracked_cached_artifacts(plan: &RuntimePlan) -> Vec<PathBuf> {
     let mut seen = std::collections::BTreeSet::new();
     let mut artifacts = Vec::new();
@@ -109,6 +138,196 @@ fn requested_walltime(plan: &RuntimePlan) -> Option<RequestedWalltime> {
         original: raw.to_string(),
         seconds,
     })
+}
+
+fn sbatch_cli_args(plan: &RuntimePlan) -> Vec<String> {
+    plan.slurm
+        .dependency_cli_value()
+        .map(|dependency| vec![format!("--dependency={dependency}")])
+        .unwrap_or_default()
+}
+
+fn ensure_batch_submission_supported(plan: &RuntimePlan, watch: bool, local: bool) -> Result<()> {
+    if local && plan.slurm.array.is_some() {
+        bail!("--local does not support x-slurm.array");
+    }
+    if local && plan.slurm.has_scheduler_dependency() {
+        bail!("--local does not support Slurm job dependencies");
+    }
+    if watch && plan.slurm.array.is_some() {
+        bail!(
+            "x-slurm.array requires --detach because live watch/log fan-out is not array-aware yet"
+        );
+    }
+    Ok(())
+}
+
+fn parse_env_entries(entries: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for entry in entries {
+        let Some((key, value)) = entry.split_once('=') else {
+            bail!("--env entries must use KEY=VALUE syntax");
+        };
+        validate_cli_env_name(key)?;
+        if value.contains('\0') {
+            bail!("--env {key}=... must not contain null bytes");
+        }
+        out.insert(key.to_string(), value.to_string());
+    }
+    Ok(out)
+}
+
+fn validate_cli_env_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        bail!("--env contains an empty environment variable name");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        bail!("--env {name}=... is not a safe environment variable name");
+    }
+    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        bail!("--env {name}=... is not a safe environment variable name");
+    }
+    Ok(())
+}
+
+fn slurm_from_resource_options(
+    job_name: &str,
+    options: &ResourceCliOptions,
+) -> Result<SlurmConfig> {
+    if matches!(options.cpus_per_task, Some(0)) {
+        bail!("--cpus-per-task must be greater than zero");
+    }
+    if matches!(options.gpus, Some(0)) {
+        bail!("--gpus must be greater than zero");
+    }
+    Ok(SlurmConfig {
+        job_name: Some(job_name.to_string()),
+        resources: options.resources.clone(),
+        time: options.time.clone(),
+        mem: options.mem.clone(),
+        cpus_per_task: options.cpus_per_task,
+        gpus: options.gpus,
+        partition: options.partition.clone(),
+        ..SlurmConfig::default()
+    })
+}
+
+fn build_ephemeral_runtime_plan(
+    context: &ResolvedContext,
+    image: String,
+    command: Vec<String>,
+    options: &ResourceCliOptions,
+) -> Result<RuntimePlan> {
+    let environment = EnvironmentSpec::Map(parse_env_entries(&options.env)?);
+    let mut services = BTreeMap::new();
+    services.insert(
+        "run".to_string(),
+        ServiceSpec {
+            image: Some(image),
+            command: Some(CommandSpec::Vec(command)),
+            entrypoint: None,
+            script: None,
+            environment,
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: DependsOnSpec::None,
+            readiness: None,
+            healthcheck: None,
+            software_env: SoftwareEnvConfig::default(),
+            slurm: ServiceSlurmConfig::default(),
+            runtime: ServiceRuntimeConfig::default(),
+            enroot: ServiceEnrootConfig::default(),
+        },
+    );
+    let spec = ComposeSpec {
+        name: Some("hpc-compose-run".to_string()),
+        runtime: RuntimeConfig::default(),
+        software_env: SoftwareEnvConfig::default(),
+        slurm: slurm_from_resource_options("hpc-compose-run", options)?,
+        services,
+    };
+    let synthetic_path = context.cwd.join("hpc-compose-run.yaml");
+    let plan = build_plan_with_options(
+        &synthetic_path,
+        spec,
+        PlanOptions {
+            cache_dir_default: Some(context.cache_dir.value.clone()),
+            resource_profiles: context.resource_profiles.clone(),
+            project_dir_override: Some(context.cwd.clone()),
+            allow_missing_spec_path: true,
+        },
+    )?;
+    Ok(build_runtime_plan(&plan))
+}
+
+fn push_slurm_srun_options(args: &mut Vec<String>, slurm: &SlurmConfig) {
+    args.push(format!(
+        "--job-name={}",
+        slurm.job_name.as_deref().unwrap_or("hpc-compose-shell")
+    ));
+    if let Some(nodes) = slurm.nodes {
+        args.push(format!("--nodes={nodes}"));
+    }
+    if let Some(ntasks) = slurm.ntasks.or(Some(1)) {
+        args.push(format!("--ntasks={ntasks}"));
+    }
+    if let Some(ntasks_per_node) = slurm.ntasks_per_node {
+        args.push(format!("--ntasks-per-node={ntasks_per_node}"));
+    }
+    if let Some(partition) = &slurm.partition {
+        args.push(format!("--partition={partition}"));
+    }
+    if let Some(account) = &slurm.account {
+        args.push(format!("--account={account}"));
+    }
+    if let Some(qos) = &slurm.qos {
+        args.push(format!("--qos={qos}"));
+    }
+    if let Some(time) = &slurm.time {
+        args.push(format!("--time={time}"));
+    }
+    if let Some(cpus) = slurm.cpus_per_task {
+        args.push(format!("--cpus-per-task={cpus}"));
+    }
+    if let Some(mem) = &slurm.mem {
+        args.push(format!("--mem={mem}"));
+    }
+    if let Some(gres) = &slurm.gres {
+        args.push(format!("--gres={gres}"));
+    } else if let Some(gpus) = slurm.gpus {
+        args.push(format!("--gpus={gpus}"));
+    }
+    if let Some(gpus_per_node) = slurm.gpus_per_node {
+        args.push(format!("--gpus-per-node={gpus_per_node}"));
+    }
+    if let Some(gpus_per_task) = slurm.gpus_per_task {
+        args.push(format!("--gpus-per-task={gpus_per_task}"));
+    }
+    if let Some(cpus_per_gpu) = slurm.cpus_per_gpu {
+        args.push(format!("--cpus-per-gpu={cpus_per_gpu}"));
+    }
+    if let Some(mem_per_gpu) = &slurm.mem_per_gpu {
+        args.push(format!("--mem-per-gpu={mem_per_gpu}"));
+    }
+    if let Some(gpu_bind) = &slurm.gpu_bind {
+        args.push(format!("--gpu-bind={gpu_bind}"));
+    }
+    if let Some(cpu_bind) = &slurm.cpu_bind {
+        args.push(format!("--cpu-bind={cpu_bind}"));
+    }
+    if let Some(mem_bind) = &slurm.mem_bind {
+        args.push(format!("--mem-bind={mem_bind}"));
+    }
+    if let Some(distribution) = &slurm.distribution {
+        args.push(format!("--distribution={distribution}"));
+    }
+    if let Some(hint) = &slurm.hint {
+        args.push(format!("--hint={hint}"));
+    }
+    if let Some(constraint) = &slurm.constraint {
+        args.push(format!("--constraint={constraint}"));
+    }
 }
 
 fn diff_lines(previous: &str, current: &str) -> Option<String> {
@@ -306,6 +525,7 @@ fn generate_local_job_id() -> String {
 }
 
 fn ensure_local_submit_supported(plan: &RuntimePlan) -> Result<()> {
+    ensure_batch_submission_supported(plan, false, true)?;
     ensure_local_host_supported()?;
     ensure_local_plan_supported(plan)
 }
@@ -606,12 +826,20 @@ pub(crate) fn launch(
 ) -> Result<()> {
     let file = context.compose_file.value.clone();
     let effective_config =
-        output::load_effective_config_with_interpolation_vars(&file, &context.interpolation_vars)?;
+        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+            &file,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
-    let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-    )?;
+    let runtime_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let output_format = output::resolve_output_format(format, false);
     let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
@@ -639,6 +867,12 @@ pub(crate) fn launch(
         output_format,
     )? {
         return Ok(());
+    }
+
+    if !dry_run {
+        ensure_batch_submission_supported(&runtime_plan, watch, local)?;
+    } else if local {
+        ensure_batch_submission_supported(&runtime_plan, false, true)?;
     }
 
     if local {
@@ -838,6 +1072,7 @@ pub(crate) fn launch(
 
     let output_result = progress.run_result("Submitting job to Slurm", || {
         Command::new(&context.binaries.sbatch.value)
+            .args(sbatch_cli_args(&runtime_plan))
             .arg(&script_path)
             .output()
             .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))
@@ -998,10 +1233,13 @@ pub(crate) fn run_service(
 ) -> Result<()> {
     let file = context.compose_file.value.clone();
     let progress = ProgressReporter::new(!quiet);
-    let mut runtime_plan = output::load_runtime_plan_with_interpolation_vars(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-    )?;
+    let mut runtime_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let Some(mut service) = runtime_plan
         .ordered_services
@@ -1020,6 +1258,8 @@ pub(crate) fn run_service(
     runtime_plan.name = format!("{}-{}-run", runtime_plan.name, service_name);
     runtime_plan.slurm.resume = None;
     runtime_plan.ordered_services = vec![service];
+
+    ensure_batch_submission_supported(&runtime_plan, true, false)?;
 
     let cluster_profile = load_discovered_cluster_profile(&context)?;
 
@@ -1088,6 +1328,7 @@ pub(crate) fn run_service(
 
     let output_result = progress.run_result("Submitting run job to Slurm", || {
         Command::new(&context.binaries.sbatch.value)
+            .args(sbatch_cli_args(&runtime_plan))
             .arg(&script_path)
             .output()
             .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))
@@ -1145,6 +1386,277 @@ pub(crate) fn run_service(
             WatchMode::Auto,
         )?,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_ephemeral(
+    context: ResolvedContext,
+    image: String,
+    command: Vec<String>,
+    resource_options: ResourceCliOptions,
+    script_out: Option<PathBuf>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    local: bool,
+    quiet: bool,
+) -> Result<()> {
+    if image.trim().is_empty() {
+        bail!("run --image requires a non-empty image");
+    }
+    if command.is_empty() {
+        bail!("run --image requires a command after --");
+    }
+    let file = context.cwd.join("hpc-compose-run.yaml");
+    let progress = ProgressReporter::new(!quiet);
+    let runtime_plan =
+        build_ephemeral_runtime_plan(&context, image, command.clone(), &resource_options)?;
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+
+    if local {
+        ensure_local_submit_supported(&runtime_plan)?;
+        warn_local_ignored_scheduler_settings(&runtime_plan);
+    } else {
+        ensure_batch_submission_supported(&runtime_plan, true, false)?;
+    }
+
+    let cluster_profile = if local {
+        None
+    } else {
+        load_discovered_cluster_profile(&context)?
+    };
+
+    if !no_preflight {
+        let report = progress.run_result("Running preflight checks", || {
+            Ok::<_, anyhow::Error>(run_preflight(
+                &runtime_plan,
+                &PreflightOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    sbatch_bin: context.binaries.sbatch.value.clone(),
+                    srun_bin: context.binaries.srun.value.clone(),
+                    scontrol_bin: context.binaries.scontrol.value.clone(),
+                    require_submit_tools: !local,
+                    skip_prepare,
+                    cluster_profile: cluster_profile.clone(),
+                },
+            ))
+        })?;
+        if !quiet || report.has_errors() {
+            output::print_report(&report, false);
+        }
+        if report.has_errors() {
+            bail!("preflight failed; fix the reported errors before running");
+        }
+    }
+
+    if !skip_prepare {
+        let prepare_progress = PrepareProgress::new(&runtime_plan, !quiet);
+        let summary = progress.run_result("Preparing runtime artifacts", || {
+            prepare_runtime_plan(
+                &runtime_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    keep_failed_prep,
+                    force_rebuild,
+                },
+            )
+        })?;
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet {
+            output::print_prepare_summary(&summary);
+        }
+    }
+
+    let local_job_id = local.then(generate_local_job_id);
+    let script = progress.run_result("Rendering run script", || {
+        if let Some(job_id) = local_job_id.as_deref() {
+            render_local_script(&runtime_plan, job_id, &context.binaries.enroot.value)
+        } else {
+            render_script_with_options(
+                &runtime_plan,
+                &RenderOptions {
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    cluster_profile,
+                },
+            )
+        }
+    })?;
+    let script_path =
+        script_out.unwrap_or_else(|| default_ephemeral_run_script_path(&context.cwd, local));
+    fs::write(&script_path, script).with_context(|| {
+        format!(
+            "failed to write rendered script to {}",
+            script_path.display()
+        )
+    })?;
+
+    let record_options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::Run,
+        service_name: Some("run".to_string()),
+        command_override: Some(command),
+        requested_walltime: requested_walltime(&runtime_plan),
+        config_snapshot_yaml: None,
+        cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+    };
+
+    if local {
+        let record = build_submission_record_with_backend_and_options(
+            &file,
+            &submit_dir,
+            &script_path,
+            &runtime_plan,
+            local_job_id
+                .as_deref()
+                .context("missing synthetic local job id")?,
+            SubmissionBackend::Local,
+            &record_options,
+        )?;
+        write_submission_record(&record)
+            .context("failed to persist tracking metadata for local launch")?;
+        let supervisor_pid =
+            match spawn_local_supervisor(&submit_dir, &script_path, &record.batch_log) {
+                Ok(pid) => pid,
+                Err(err) => {
+                    rollback_local_tracking(&record, None);
+                    return Err(err);
+                }
+            };
+        if let Err(err) = write_local_runtime_state_stub(&record, &runtime_plan, supervisor_pid) {
+            rollback_local_tracking(&record, Some(supervisor_pid));
+            return Err(err);
+        }
+        print_local_launch_details(&record, &runtime_plan, &script_path);
+        output::print_submit_summary_box(
+            &runtime_plan,
+            &record.job_id,
+            &script_path,
+            Some(&latest_record_path(&record)),
+        );
+        return output::finish_watch(
+            &record.job_id,
+            watch_with_fallback(
+                &record,
+                &SchedulerOptions {
+                    squeue_bin: context.binaries.squeue.value.clone(),
+                    sacct_bin: context.binaries.sacct.value.clone(),
+                },
+                Some("run"),
+                100,
+                WatchMode::Auto,
+            )?,
+        );
+    }
+
+    let output_result = progress.run_result("Submitting run job to Slurm", || {
+        Command::new(&context.binaries.sbatch.value)
+            .args(sbatch_cli_args(&runtime_plan))
+            .arg(&script_path)
+            .output()
+            .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))
+    })?;
+    if !output_result.status.success() {
+        bail!(
+            "sbatch failed: {}",
+            String::from_utf8_lossy(&output_result.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output_result.stdout);
+    print!("{stdout}");
+    output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
+
+    let Some(job_id) = output::extract_job_id(stdout.trim()) else {
+        println!(
+            "note: sbatch output did not include a numeric Slurm job id, so this run is not trackable"
+        );
+        return Ok(());
+    };
+
+    let record = build_submission_record_with_options(
+        &file,
+        &submit_dir,
+        &script_path,
+        &runtime_plan,
+        job_id,
+        &record_options,
+    )?;
+    write_submission_record(&record)?;
+    output::print_submit_summary_box(
+        &runtime_plan,
+        &record.job_id,
+        &script_path,
+        Some(&latest_record_path(&record)),
+    );
+    output::finish_watch(
+        &record.job_id,
+        watch_with_fallback(
+            &record,
+            &SchedulerOptions {
+                squeue_bin: context.binaries.squeue.value.clone(),
+                sacct_bin: context.binaries.sacct.value.clone(),
+            },
+            Some("run"),
+            100,
+            WatchMode::Auto,
+        )?,
+    )
+}
+
+pub(crate) fn shell(
+    context: ResolvedContext,
+    image: String,
+    resource_options: ResourceCliOptions,
+) -> Result<()> {
+    if image.trim().is_empty() {
+        bail!("shell --image requires a non-empty image");
+    }
+    let env_map = parse_env_entries(&resource_options.env)?;
+    let mut slurm = slurm_from_resource_options("hpc-compose-shell", &resource_options)?;
+    apply_resource_profile_defaults(&mut slurm, &context.resource_profiles)?;
+    slurm.validate()?;
+    ensure_batch_submission_supported(
+        &RuntimePlan {
+            name: "hpc-compose-shell".to_string(),
+            cache_dir: context.cache_dir.value.clone(),
+            runtime: RuntimeConfig::default(),
+            slurm: slurm.clone(),
+            ordered_services: Vec::new(),
+        },
+        false,
+        false,
+    )?;
+
+    let mut args = Vec::new();
+    push_slurm_srun_options(&mut args, &slurm);
+    args.push("--pty".to_string());
+    args.push(format!("--container-image={image}"));
+    if !env_map.is_empty() {
+        args.push(format!(
+            "--container-env={}",
+            env_map.keys().cloned().collect::<Vec<_>>().join(",")
+        ));
+    }
+    args.push("bash".to_string());
+    args.push("-l".to_string());
+
+    let mut command = Command::new(&context.binaries.srun.value);
+    command.args(&args);
+    for (key, value) in env_map {
+        command.env(key, value);
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("failed to execute '{}'", context.binaries.srun.value))?;
+    if !status.success() {
+        bail!("srun failed with status {status}");
+    }
+    Ok(())
 }
 
 pub(crate) fn status(
@@ -1410,10 +1922,13 @@ pub(crate) fn debug(
             Some(preflight_context) => preflight_context,
             None => &context,
         };
-        let runtime_plan = output::load_runtime_plan_with_interpolation_vars(
-            &preflight_context.compose_file.value,
-            &preflight_context.interpolation_vars,
-        )?;
+        let runtime_plan =
+            output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+                &preflight_context.compose_file.value,
+                &preflight_context.interpolation_vars,
+                Some(&preflight_context.cache_dir.value),
+                &preflight_context.resource_profiles,
+            )?;
         let cluster_profile = load_discovered_cluster_profile(preflight_context)?;
         let report = run_preflight(
             &runtime_plan,
@@ -1943,6 +2458,11 @@ mod tests {
                 value: compose.to_path_buf(),
                 source: ValueSource::Cli,
             },
+            cache_dir: ResolvedValue {
+                value: cwd.join(".cache/hpc-compose"),
+                source: ValueSource::Builtin,
+            },
+            resource_profiles: BTreeMap::new(),
             binaries: ResolvedBinaries {
                 enroot: resolved_string("/definitely/missing-enroot"),
                 apptainer: resolved_string("/definitely/missing-apptainer"),
