@@ -144,10 +144,19 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             verbose,
             tree,
             show_script,
+            explain,
             format,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
-            spec::plan(context, strict_env, verbose, tree, show_script, format)
+            spec::plan(
+                context,
+                strict_env,
+                verbose,
+                tree,
+                show_script,
+                explain,
+                format,
+            )
         }
         Commands::Doctor {
             command,
@@ -250,6 +259,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             dry_run,
             detach,
             watch_mode,
+            hold_on_exit,
             no_tui,
             format,
         } => {
@@ -283,6 +293,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 dry_run,
                 detach,
                 watch_mode,
+                hold_on_exit,
                 format,
                 options.quiet,
             )
@@ -365,6 +376,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             squeue_bin,
             sacct_bin,
             watch_mode,
+            hold_on_exit,
             no_tui,
         } => {
             let binary_overrides = resolve_binary_overrides(
@@ -373,7 +385,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
             let watch_mode = resolve_watch_mode(watch_mode, no_tui)?;
-            runtime::watch(context, job_id, service, lines, watch_mode)
+            runtime::watch(context, job_id, service, lines, watch_mode, hold_on_exit)
         }
         Commands::Debug {
             file,

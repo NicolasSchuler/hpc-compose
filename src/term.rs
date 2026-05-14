@@ -127,6 +127,14 @@ pub(crate) fn styled_state_fail_stderr() -> String {
     }
 }
 
+pub(crate) fn styled_state_checked_stderr() -> String {
+    if stderr_colors_enabled() {
+        "checked".cyan().bold().to_string()
+    } else {
+        "checked".to_string()
+    }
+}
+
 pub(crate) fn styled_scheduler_state(state: &str) -> String {
     if !colors_enabled() {
         return state.to_string();

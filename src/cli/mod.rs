@@ -32,6 +32,13 @@ pub enum WatchMode {
     Line,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum HoldOnExit {
+    Never,
+    Failure,
+    Always,
+}
+
 /// Parses process arguments into the top-level CLI struct.
 pub fn parse_cli() -> Cli {
     Cli::parse()

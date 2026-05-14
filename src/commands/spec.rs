@@ -6,8 +6,9 @@ use hpc_compose::cli::OutputFormat;
 use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 use hpc_compose::context::{ResolvedContext, ResolvedValue, ValueSource};
 use hpc_compose::job::{jobs_dir_for, metadata_root_for};
+use hpc_compose::planner::ImageSource;
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
-use hpc_compose::prepare::{PrepareOptions, build_runtime_plan, prepare_runtime_plan};
+use hpc_compose::prepare::{PrepareOptions, RuntimePlan, build_runtime_plan, prepare_runtime_plan};
 use hpc_compose::render::{RenderOptions, render_script_with_options};
 use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
@@ -124,7 +125,14 @@ struct PlanOutput {
     compose_file: PathBuf,
     runtime_plan: hpc_compose::prepare::RuntimePlan,
     cluster_warnings: Vec<String>,
+    explanations: Vec<PlanHint>,
     script: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PlanHint {
+    level: &'static str,
+    message: String,
 }
 
 pub(crate) fn plan(
@@ -133,6 +141,7 @@ pub(crate) fn plan(
     verbose: bool,
     tree: bool,
     show_script: bool,
+    explain: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let (plan, runtime_plan) =
@@ -176,6 +185,7 @@ pub(crate) fn plan(
     } else {
         None
     };
+    let explanations = build_plan_hints(&runtime_plan, &cluster_warnings);
 
     match output_common::resolve_output_format(format, false) {
         OutputFormat::Text => {
@@ -202,6 +212,9 @@ pub(crate) fn plan(
                 println!("{}", term::styled_section_header("Rendered script:"));
                 print!("{script}");
             }
+            if explain {
+                print_plan_hints(&explanations);
+            }
         }
         OutputFormat::Json => {
             println!(
@@ -211,6 +224,7 @@ pub(crate) fn plan(
                     compose_file: plan.spec_path,
                     runtime_plan,
                     cluster_warnings,
+                    explanations,
                     script,
                 })
                 .context("failed to serialize plan output")?
@@ -218,6 +232,98 @@ pub(crate) fn plan(
         }
     }
     Ok(())
+}
+
+fn build_plan_hints(runtime_plan: &RuntimePlan, cluster_warnings: &[String]) -> Vec<PlanHint> {
+    let mut hints = Vec::new();
+    for warning in cluster_warnings {
+        hints.push(PlanHint {
+            level: "warn",
+            message: format!("cluster profile warning: {warning}"),
+        });
+    }
+    if cache_looks_home_local(&runtime_plan.cache_dir) {
+        hints.push(PlanHint {
+            level: "warn",
+            message: format!(
+                "cache directory '{}' appears to be under HOME; use shared storage if compute nodes cannot see this path",
+                runtime_plan.cache_dir.display()
+            ),
+        });
+    }
+    if runtime_plan.slurm.resume_dir().is_some() {
+        hints.push(PlanHint {
+            level: "info",
+            message: "resume is configured; hpc-compose will compare the effective config with the previous tracked submission".to_string(),
+        });
+    }
+    if runtime_plan.slurm.artifacts.is_some() {
+        hints.push(PlanHint {
+            level: "info",
+            message: "artifact collection is configured; use `hpc-compose artifacts` after the run to export bundles".to_string(),
+        });
+    }
+    for service in &runtime_plan.ordered_services {
+        if matches!(service.source, ImageSource::Remote(_)) && !service.runtime_image.exists() {
+            hints.push(PlanHint {
+                level: "info",
+                message: format!(
+                    "service '{}' will import or prepare a missing runtime artifact during prepare",
+                    service.name
+                ),
+            });
+        }
+        if service
+            .prepare
+            .as_ref()
+            .is_some_and(|prepare| prepare.force_rebuild)
+        {
+            hints.push(PlanHint {
+                level: "info",
+                message: format!(
+                    "service '{}' rebuilds on prepare because prepare.mounts are present",
+                    service.name
+                ),
+            });
+        }
+        if matches!(&service.source, ImageSource::Remote(image) if image.contains("docker.io") || !image.contains('/'))
+        {
+            hints.push(PlanHint {
+                level: "info",
+                message: format!(
+                    "service '{}' pulls from Docker Hub; anonymous pulls may be rate-limited",
+                    service.name
+                ),
+            });
+        }
+    }
+    hints.push(PlanHint {
+        level: "next",
+        message: "next command: hpc-compose up -f <compose.yaml>".to_string(),
+    });
+    hints
+}
+
+fn cache_looks_home_local(path: &std::path::Path) -> bool {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .is_some_and(|home| path.starts_with(home))
+}
+
+fn print_plan_hints(hints: &[PlanHint]) {
+    if hints.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", term::styled_section_header("Plan hints:"));
+    for hint in hints {
+        let label = match hint.level {
+            "warn" => term::styled_warning("warn"),
+            "next" => term::styled_success("next"),
+            _ => term::styled_dim(hint.level),
+        };
+        println!("- {label}: {}", hint.message);
+    }
 }
 
 pub(crate) fn prepare(
@@ -281,22 +387,26 @@ pub(crate) fn preflight(
         &context.resource_profiles,
     )?;
     let cluster_profile = load_discovered_cluster_profile(&context)?;
-    let report = progress.run_result("Running preflight checks", || {
-        Ok::<_, anyhow::Error>(run_preflight(
-            &runtime_plan,
-            &PreflightOptions {
-                enroot_bin: context.binaries.enroot.value.clone(),
-                apptainer_bin: context.binaries.apptainer.value.clone(),
-                singularity_bin: context.binaries.singularity.value.clone(),
-                sbatch_bin: context.binaries.sbatch.value.clone(),
-                srun_bin: context.binaries.srun.value.clone(),
-                scontrol_bin: context.binaries.scontrol.value.clone(),
-                require_submit_tools: true,
-                skip_prepare: false,
-                cluster_profile,
-            },
-        ))
-    })?;
+    let report = progress.run_checked_result(
+        "Running preflight checks",
+        || {
+            Ok::<_, anyhow::Error>(run_preflight(
+                &runtime_plan,
+                &PreflightOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    sbatch_bin: context.binaries.sbatch.value.clone(),
+                    srun_bin: context.binaries.srun.value.clone(),
+                    scontrol_bin: context.binaries.scontrol.value.clone(),
+                    require_submit_tools: true,
+                    skip_prepare: false,
+                    cluster_profile,
+                },
+            ))
+        },
+        |report| report.has_errors(),
+    )?;
     match output_format {
         OutputFormat::Text
             if !quiet || report.has_errors() || (strict && report.has_warnings()) =>

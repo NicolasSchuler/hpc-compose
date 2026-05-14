@@ -38,7 +38,7 @@ hpc-compose completions zsh
 
 | Command | Use it for | Notes |
 | --- | --- | --- |
-| `plan` | Validate and preview the static runtime plan | Recommended before every first run. `--show-script` prints the generated launcher to stdout without writing a file. |
+| `plan` | Validate and preview the static runtime plan | Recommended before every first run. `--show-script` prints the generated launcher to stdout without writing a file; `--explain` adds actionable cache, resume, preflight, and next-command hints. |
 | `validate` | Check YAML shape and field validation | Add `--strict-env` when interpolation fallbacks should fail. |
 | `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. `config --variables` reports only interpolation variables referenced by the compose file and redacts sensitive-looking names unless `--show-values` is passed. |
 | `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
@@ -55,6 +55,7 @@ hpc-compose completions zsh
 
 ```bash
 hpc-compose plan -f compose.yaml
+hpc-compose plan --explain -f compose.yaml
 hpc-compose plan --show-script -f compose.yaml
 hpc-compose validate -f compose.yaml
 hpc-compose config -f compose.yaml
@@ -70,6 +71,7 @@ hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks mpi,n
 hpc-compose prepare -f compose.yaml
 hpc-compose render -f compose.yaml --output job.sbatch
 hpc-compose up -f compose.yaml
+hpc-compose up --hold-on-exit always -f compose.yaml
 hpc-compose up --detach --format json -f compose.yaml
 hpc-compose run app -- python -m smoke_test
 hpc-compose run --image docker://python:3.12 --resources cpu-small -- python -V
@@ -84,6 +86,7 @@ Useful workflow flags:
 - `--detach` submits or launches and returns after tracking metadata is written.
 - `--format text|json` is accepted with `--detach` or `--dry-run`.
 - `--watch-mode auto|tui|line` selects the live output mode; `--no-tui` is a line-mode alias.
+- `--hold-on-exit never|failure|always` controls whether the TUI stays open after the job reaches a terminal scheduler state.
 - `--allow-resume-changes` acknowledges an intentional change to resume-coupled config between tracked runs.
 - `--resume-diff-only` prints the resume-sensitive config diff without submitting.
 - `--script-out <PATH>` keeps a copy of the rendered batch script.
@@ -174,6 +177,7 @@ hpc-compose jobs list
 hpc-compose status -f compose.yaml --format json
 hpc-compose ps -f compose.yaml
 hpc-compose watch -f compose.yaml --watch-mode line
+hpc-compose watch -f compose.yaml --hold-on-exit always
 hpc-compose logs -f compose.yaml --service app --follow
 hpc-compose stats -f compose.yaml --format jsonl
 hpc-compose artifacts -f compose.yaml --bundle checkpoints --tarball

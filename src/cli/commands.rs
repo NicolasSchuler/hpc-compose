@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
 use super::help::*;
-use super::{ColorPolicy, OutputFormat, StatsOutputFormat, WatchMode};
+use super::{ColorPolicy, HoldOnExit, OutputFormat, StatsOutputFormat, WatchMode};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -297,6 +297,8 @@ pub enum Commands {
             help = "Print the rendered launcher script to stdout after the plan"
         )]
         show_script: bool,
+        #[arg(long, help = "Show cache, runtime, and next-step planning hints")]
+        explain: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -535,6 +537,14 @@ pub enum Commands {
             help = "Watch output mode"
         )]
         watch_mode: WatchMode,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "WHEN",
+            default_value = "failure",
+            help = "Keep the watch UI open after terminal states"
+        )]
+        hold_on_exit: HoldOnExit,
         #[arg(
             long,
             help = "Use line-oriented watch output instead of the terminal UI"
@@ -794,6 +804,14 @@ pub enum Commands {
             help = "Watch output mode"
         )]
         watch_mode: WatchMode,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "WHEN",
+            default_value = "failure",
+            help = "Keep the watch UI open after terminal states"
+        )]
+        hold_on_exit: HoldOnExit,
         #[arg(
             long,
             help = "Use line-oriented watch output instead of the terminal UI"

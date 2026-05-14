@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use hpc_compose::cli::{OutputFormat, StatsOutputFormat, WatchMode};
+use hpc_compose::cli::{HoldOnExit, OutputFormat, StatsOutputFormat, WatchMode};
 use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};
 #[cfg(test)]
@@ -51,17 +51,18 @@ fn watch_with_fallback(
     service: Option<&str>,
     lines: usize,
     mode: WatchMode,
+    hold_on_exit: HoldOnExit,
 ) -> Result<hpc_compose::job::WatchOutcome> {
     match mode {
         WatchMode::Line => return watch_submission(record, service, options, lines),
         WatchMode::Tui => {
-            return watch_ui::run_watch_ui(record, options, service, lines)
+            return watch_ui::run_watch_ui(record, options, service, lines, hold_on_exit)
                 .context("watch UI requested with --watch-mode tui but could not be started");
         }
         WatchMode::Auto => {}
     }
     if watch_ui::can_use_watch_ui() {
-        match watch_ui::run_watch_ui(record, options, service, lines) {
+        match watch_ui::run_watch_ui(record, options, service, lines, hold_on_exit) {
             Ok(outcome) => return Ok(outcome),
             Err(err) => {
                 let _ = writeln!(
@@ -822,6 +823,7 @@ pub(crate) fn launch(
     dry_run: bool,
     format: Option<OutputFormat>,
     watch_mode: WatchMode,
+    hold_on_exit: HoldOnExit,
     quiet: bool,
 ) -> Result<()> {
     let file = context.compose_file.value.clone();
@@ -887,22 +889,26 @@ pub(crate) fn launch(
     };
 
     if !no_preflight {
-        let report = progress.run_result("Running preflight checks", || {
-            Ok::<_, anyhow::Error>(run_preflight(
-                &runtime_plan,
-                &PreflightOptions {
-                    enroot_bin: context.binaries.enroot.value.clone(),
-                    apptainer_bin: context.binaries.apptainer.value.clone(),
-                    singularity_bin: context.binaries.singularity.value.clone(),
-                    sbatch_bin: context.binaries.sbatch.value.clone(),
-                    srun_bin: context.binaries.srun.value.clone(),
-                    scontrol_bin: context.binaries.scontrol.value.clone(),
-                    require_submit_tools: !local,
-                    skip_prepare,
-                    cluster_profile: cluster_profile.clone(),
-                },
-            ))
-        })?;
+        let report = progress.run_checked_result(
+            "Running preflight checks",
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &runtime_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: !local,
+                        skip_prepare,
+                        cluster_profile: cluster_profile.clone(),
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
         if !quiet || report.has_errors() {
             output::print_report(&report, false);
         }
@@ -1054,7 +1060,7 @@ pub(crate) fn launch(
 
         if watch {
             output::finish_watch(
-                &record.job_id,
+                &record,
                 watch_with_fallback(
                     &record,
                     &SchedulerOptions {
@@ -1064,6 +1070,7 @@ pub(crate) fn launch(
                     None,
                     100,
                     watch_mode,
+                    hold_on_exit,
                 )?,
             )?;
         }
@@ -1168,7 +1175,7 @@ pub(crate) fn launch(
             return Ok(());
         };
         output::finish_watch(
-            &record.job_id,
+            record,
             watch_with_fallback(
                 record,
                 &SchedulerOptions {
@@ -1178,6 +1185,7 @@ pub(crate) fn launch(
                 None,
                 100,
                 watch_mode,
+                hold_on_exit,
             )?,
         )?;
     }
@@ -1198,6 +1206,7 @@ pub(crate) fn up(
     dry_run: bool,
     detach: bool,
     watch_mode: WatchMode,
+    hold_on_exit: HoldOnExit,
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
@@ -1215,6 +1224,7 @@ pub(crate) fn up(
         dry_run,
         format.or(Some(OutputFormat::Text)),
         watch_mode,
+        hold_on_exit,
         quiet,
     )
 }
@@ -1264,22 +1274,26 @@ pub(crate) fn run_service(
     let cluster_profile = load_discovered_cluster_profile(&context)?;
 
     if !no_preflight {
-        let report = progress.run_result("Running preflight checks", || {
-            Ok::<_, anyhow::Error>(run_preflight(
-                &runtime_plan,
-                &PreflightOptions {
-                    enroot_bin: context.binaries.enroot.value.clone(),
-                    apptainer_bin: context.binaries.apptainer.value.clone(),
-                    singularity_bin: context.binaries.singularity.value.clone(),
-                    sbatch_bin: context.binaries.sbatch.value.clone(),
-                    srun_bin: context.binaries.srun.value.clone(),
-                    scontrol_bin: context.binaries.scontrol.value.clone(),
-                    require_submit_tools: true,
-                    skip_prepare,
-                    cluster_profile: cluster_profile.clone(),
-                },
-            ))
-        })?;
+        let report = progress.run_checked_result(
+            "Running preflight checks",
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &runtime_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: true,
+                        skip_prepare,
+                        cluster_profile: cluster_profile.clone(),
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
         if !quiet || report.has_errors() {
             output::print_report(&report, false);
         }
@@ -1374,7 +1388,7 @@ pub(crate) fn run_service(
         Some(&latest_record_path(&record)),
     );
     output::finish_watch(
-        &record.job_id,
+        &record,
         watch_with_fallback(
             &record,
             &SchedulerOptions {
@@ -1384,6 +1398,7 @@ pub(crate) fn run_service(
             Some(&service_name),
             100,
             WatchMode::Auto,
+            HoldOnExit::Failure,
         )?,
     )
 }
@@ -1428,22 +1443,26 @@ pub(crate) fn run_ephemeral(
     };
 
     if !no_preflight {
-        let report = progress.run_result("Running preflight checks", || {
-            Ok::<_, anyhow::Error>(run_preflight(
-                &runtime_plan,
-                &PreflightOptions {
-                    enroot_bin: context.binaries.enroot.value.clone(),
-                    apptainer_bin: context.binaries.apptainer.value.clone(),
-                    singularity_bin: context.binaries.singularity.value.clone(),
-                    sbatch_bin: context.binaries.sbatch.value.clone(),
-                    srun_bin: context.binaries.srun.value.clone(),
-                    scontrol_bin: context.binaries.scontrol.value.clone(),
-                    require_submit_tools: !local,
-                    skip_prepare,
-                    cluster_profile: cluster_profile.clone(),
-                },
-            ))
-        })?;
+        let report = progress.run_checked_result(
+            "Running preflight checks",
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &runtime_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: !local,
+                        skip_prepare,
+                        cluster_profile: cluster_profile.clone(),
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
         if !quiet || report.has_errors() {
             output::print_report(&report, false);
         }
@@ -1539,7 +1558,7 @@ pub(crate) fn run_ephemeral(
             Some(&latest_record_path(&record)),
         );
         return output::finish_watch(
-            &record.job_id,
+            &record,
             watch_with_fallback(
                 &record,
                 &SchedulerOptions {
@@ -1549,6 +1568,7 @@ pub(crate) fn run_ephemeral(
                 Some("run"),
                 100,
                 WatchMode::Auto,
+                HoldOnExit::Failure,
             )?,
         );
     }
@@ -1594,7 +1614,7 @@ pub(crate) fn run_ephemeral(
         Some(&latest_record_path(&record)),
     );
     output::finish_watch(
-        &record.job_id,
+        &record,
         watch_with_fallback(
             &record,
             &SchedulerOptions {
@@ -1604,6 +1624,7 @@ pub(crate) fn run_ephemeral(
             Some("run"),
             100,
             WatchMode::Auto,
+            HoldOnExit::Failure,
         )?,
     )
 }
@@ -1833,11 +1854,12 @@ pub(crate) fn watch(
     service: Option<String>,
     lines: usize,
     watch_mode: WatchMode,
+    hold_on_exit: HoldOnExit,
 ) -> Result<()> {
     let record = resolve_tracked_record(&context, job_id.as_deref())?
         .with_context(|| tracked_job_hint(job_id.as_deref()))?;
     output::finish_watch(
-        &record.job_id,
+        &record,
         watch_with_fallback(
             &record,
             &SchedulerOptions {
@@ -1847,6 +1869,7 @@ pub(crate) fn watch(
             service.as_deref(),
             lines,
             watch_mode,
+            hold_on_exit,
         )?,
     )
 }
@@ -1870,10 +1893,20 @@ struct DebugLogTail {
 }
 
 #[derive(Debug, Serialize)]
+struct DebugSummary {
+    scheduler_state: Option<String>,
+    failed_service: Option<String>,
+    exit_code: Option<i64>,
+    log_path: Option<PathBuf>,
+    next_command: String,
+}
+
+#[derive(Debug, Serialize)]
 struct DebugReport {
     tracked: bool,
     compose_file: PathBuf,
     job_id: Option<String>,
+    summary: DebugSummary,
     status: Option<hpc_compose::job::StatusSnapshot>,
     ps: Option<hpc_compose::job::PsSnapshot>,
     batch_log: Option<DebugLogTail>,
@@ -1959,6 +1992,13 @@ pub(crate) fn debug(
             tracked: false,
             compose_file: context.compose_file.value.clone(),
             job_id,
+            summary: DebugSummary {
+                scheduler_state: None,
+                failed_service: None,
+                exit_code: None,
+                log_path: None,
+                next_command: format!("hpc-compose up -f {}", context.compose_file.value.display()),
+            },
             status: None,
             ps: None,
             batch_log: None,
@@ -2033,10 +2073,17 @@ pub(crate) fn debug(
         });
     }
     let recommendation = debug_recommendation(&debug_compose_file, &status_snapshot);
+    let summary = build_debug_summary(
+        &debug_compose_file,
+        &record.job_id,
+        &status_snapshot,
+        &recommendation,
+    );
     let report = DebugReport {
         tracked: true,
         compose_file: debug_compose_file,
         job_id: Some(record.job_id.clone()),
+        summary,
         status: Some(status_snapshot),
         ps: Some(ps_snapshot),
         batch_log: Some(batch_log),
@@ -2081,6 +2128,38 @@ fn resolved_binary_overrides(context: &ResolvedContext) -> BinaryOverrides {
     }
 }
 
+fn build_debug_summary(
+    compose_file: &Path,
+    job_id: &str,
+    status: &hpc_compose::job::StatusSnapshot,
+    recommendation: &str,
+) -> DebugSummary {
+    let failed = status.services.iter().find(|service| {
+        service.status.as_deref() == Some("failed")
+            || service.last_exit_code.is_some_and(|code| code != 0)
+    });
+    DebugSummary {
+        scheduler_state: Some(status.scheduler.state.clone()),
+        failed_service: failed.map(|service| service.service_name.clone()),
+        exit_code: failed.and_then(|service| service.last_exit_code.map(i64::from)),
+        log_path: failed.map(|service| service.path.clone()).or_else(|| {
+            status
+                .batch_log
+                .present
+                .then(|| status.batch_log.path.clone())
+        }),
+        next_command: if status.scheduler.failed {
+            format!(
+                "hpc-compose debug -f {} --job-id {} --preflight",
+                compose_file.display(),
+                job_id
+            )
+        } else {
+            recommendation.to_string()
+        },
+    }
+}
+
 fn emit_debug_report(report: &DebugReport, output_format: OutputFormat) -> Result<()> {
     match output_format {
         OutputFormat::Json => {
@@ -2099,12 +2178,14 @@ fn emit_debug_report(report: &DebugReport, output_format: OutputFormat) -> Resul
             );
             if !report.tracked {
                 println!("tracked job: none");
+                print_debug_summary(&report.summary);
                 for note in &report.notes {
                     println!("note: {note}");
                 }
                 println!("recommendation: {}", report.recommendation);
                 return Ok(());
             }
+            print_debug_summary(&report.summary);
             if let Some(status) = report.status.as_ref() {
                 output::print_status_snapshot(status)
                     .context("failed to write debug status output")?;
@@ -2136,6 +2217,26 @@ fn emit_debug_report(report: &DebugReport, output_format: OutputFormat) -> Resul
         }
     }
     Ok(())
+}
+
+fn print_debug_summary(summary: &DebugSummary) {
+    println!(
+        "{}",
+        hpc_compose::term::styled_section_header("Debug summary:")
+    );
+    if let Some(state) = summary.scheduler_state.as_deref() {
+        println!("  scheduler state: {state}");
+    }
+    if let Some(service) = summary.failed_service.as_deref() {
+        println!("  failed service: {service}");
+    }
+    if let Some(exit_code) = summary.exit_code {
+        println!("  exit code: {exit_code}");
+    }
+    if let Some(path) = summary.log_path.as_ref() {
+        println!("  relevant log: {}", path.display());
+    }
+    println!("  next command: {}", summary.next_command);
 }
 
 fn print_debug_log_tail(label: &str, log: &DebugLogTail) {
@@ -2502,6 +2603,7 @@ mod tests {
             true,
             None,
             WatchMode::Auto,
+            HoldOnExit::Failure,
             false,
         )
         .expect("submit dry run");
@@ -2519,6 +2621,7 @@ mod tests {
             true,
             Some(OutputFormat::Json),
             WatchMode::Auto,
+            HoldOnExit::Failure,
             false,
         )
         .expect("submit dry run json");
@@ -2604,6 +2707,7 @@ mod tests {
             false,
             None,
             WatchMode::Auto,
+            HoldOnExit::Failure,
             false,
         )
         .expect_err("sbatch failure");
@@ -2939,6 +3043,7 @@ mod tests {
             None,
             5,
             WatchMode::Auto,
+            HoldOnExit::Failure,
         )
         .expect("watch");
         assert!(matches!(
@@ -3111,6 +3216,7 @@ mod tests {
             Some("api".into()),
             10,
             WatchMode::Line,
+            HoldOnExit::Failure,
         )
         .expect("watch");
         cancel(

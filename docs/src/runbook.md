@@ -201,7 +201,7 @@ Check:
 - runtime artifact paths,
 - cache hit/miss expectations.
 
-`plan` is purely static: it parses, validates, builds the normalized runtime plan, and can print the generated script to stdout, but it does not run preflight, prepare images, call `sbatch`, or write `hpc-compose.sbatch`. `plan --verbose` can print secrets from resolved environment values.
+`plan` is purely static: it parses, validates, builds the normalized runtime plan, and can print the generated script to stdout, but it does not run preflight, prepare images, call `sbatch`, or write `hpc-compose.sbatch`. Add `--explain` for planner hints about cache paths, missing artifacts, resume/artifact settings, and the next command. `plan --verbose` can print secrets from resolved environment values.
 
 ## 5. Normal Run: Use `up`
 
@@ -220,6 +220,7 @@ Useful options:
 - `--detach` submits or launches, records tracking metadata, and returns without watching.
 - `--format text|json` is accepted with `--detach` or `--dry-run`.
 - `--watch-mode auto|tui|line` selects the live output mode; `--no-tui` is a line-mode alias.
+- `--hold-on-exit never|failure|always` controls whether the TUI stays open after the job reaches a terminal scheduler state.
 - `--resume-diff-only` prints resume-sensitive config diffs without launching.
 - `--allow-resume-changes` confirms intentional resume-coupled config drift.
 

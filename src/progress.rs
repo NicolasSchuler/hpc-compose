@@ -47,6 +47,29 @@ impl ProgressReporter {
             }
         }
     }
+
+    pub(crate) fn run_checked_result<T, E>(
+        self,
+        message: impl Into<String>,
+        operation: impl FnOnce() -> Result<T, E>,
+        is_failure: impl FnOnce(&T) -> bool,
+    ) -> Result<T, E> {
+        let step = self.start(message);
+        match operation() {
+            Ok(value) => {
+                if is_failure(&value) {
+                    step.fail();
+                } else {
+                    step.checked();
+                }
+                Ok(value)
+            }
+            Err(err) => {
+                step.fail();
+                Err(err)
+            }
+        }
+    }
 }
 
 fn progress_mode(enabled: bool, stderr_is_terminal: bool) -> ProgressMode {
@@ -104,6 +127,10 @@ impl ProgressStep {
         self.complete(false);
     }
 
+    pub(crate) fn checked(mut self) {
+        self.complete_checked();
+    }
+
     fn complete(&mut self, success: bool) {
         if self.finished {
             return;
@@ -125,6 +152,28 @@ impl ProgressStep {
             }
         }
 
+        self.finished = true;
+    }
+
+    fn complete_checked(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        if let Some(pb) = self.pb.take() {
+            pb.finish_and_clear();
+        }
+
+        let elapsed = format_elapsed(self.started_at.elapsed());
+        match self.mode {
+            ProgressMode::Hidden => {}
+            ProgressMode::Plain | ProgressMode::Spinner => {
+                let state = term::styled_state_checked_stderr();
+                let mut stderr = io::stderr();
+                let _ = writeln!(stderr, "[{state}] {} ({elapsed})", self.message);
+                let _ = stderr.flush();
+            }
+        }
         self.finished = true;
     }
 }

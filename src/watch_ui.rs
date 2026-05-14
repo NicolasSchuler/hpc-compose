@@ -4,34 +4,43 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+use crossterm::cursor::MoveTo;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{self, Clear, ClearType};
+use hpc_compose::cli::HoldOnExit;
 use hpc_compose::job::{
-    PsServiceRow, PsSnapshot, SchedulerOptions, SubmissionRecord, WalltimeProgress, WatchOutcome,
-    build_ps_snapshot, format_walltime_summary, walltime_progress, walltime_progress_percent,
+    PsServiceRow, PsSnapshot, SchedulerOptions, StatsOptions, StatsSnapshot, SubmissionRecord,
+    WalltimeProgress, WatchOutcome, build_ps_snapshot, build_stats_snapshot,
+    format_walltime_summary, walltime_progress, walltime_progress_percent,
 };
 
 const DATA_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_WIDTH: usize = 120;
 const DEFAULT_HEIGHT: usize = 30;
-const MIN_TABLE_WIDTH: usize = 54;
+const MIN_TABLE_WIDTH: usize = 58;
 const FORCE_WATCH_UI_ENV: &str = "HPC_COMPOSE_FORCE_WATCH_UI";
-
-#[cfg(test)]
-static TEST_STTY_BIN: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
-    std::sync::OnceLock::new();
+const METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatchKey {
     Up,
     Down,
+    PageUp,
+    PageDown,
     First,
     Last,
+    End,
     Tab,
+    TogglePause,
+    ToggleAllLogs,
+    DebugHint,
+    LogsHint,
+    StatsHint,
     Quit,
     Help,
     Search,
@@ -43,12 +52,28 @@ pub(crate) enum InputMode {
     Search,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogViewMode {
+    Selected,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WatchHoldState {
+    pub(crate) failed: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WatchModel {
     pub(crate) snapshot: PsSnapshot,
     pub(crate) selected_index: usize,
     pub(crate) walltime_progress: Option<WalltimeProgress>,
     pub(crate) log_lines: Vec<String>,
+    pub(crate) follow_logs: bool,
+    pub(crate) log_scroll: usize,
+    pub(crate) log_view_mode: LogViewMode,
+    pub(crate) hold_state: Option<WatchHoldState>,
+    pub(crate) metrics_line: Option<String>,
     pub(crate) show_help: bool,
     pub(crate) filter: Option<String>,
     pub(crate) search_buffer: String,
@@ -66,45 +91,46 @@ struct SelectedLogBuffer {
 }
 
 #[derive(Debug)]
-struct TerminalGuard {
-    saved_mode: String,
-}
+struct TerminalGuard;
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
-        let saved_mode = String::from_utf8(
-            new_stty_command()
-                .arg("-g")
-                .output()
-                .context("failed to execute 'stty -g'")?
-                .stdout,
-        )
-        .context("failed to parse terminal mode from stty")?
-        .trim()
-        .to_string();
-        if saved_mode.is_empty() {
-            bail!("failed to read terminal mode from stty");
+        #[cfg(test)]
+        {
+            Ok(Self)
         }
-        let status = new_stty_command()
-            .args(["-echo", "-icanon", "min", "0", "time", "0"])
-            .status()
-            .context("failed to execute 'stty' while entering watch UI")?;
-        if !status.success() {
-            bail!("stty failed while entering watch UI");
+
+        #[cfg(not(test))]
+        {
+            terminal::enable_raw_mode().context("failed to enable terminal raw mode")?;
+            let mut stdout = io::stdout();
+            execute!(
+                stdout,
+                crossterm::terminal::EnterAlternateScreen,
+                crossterm::cursor::Hide
+            )
+            .context("failed to enter alternate-screen watch UI")?;
+            stdout
+                .flush()
+                .context("failed to flush alternate-screen entry")?;
+            Ok(Self)
         }
-        print!("\x1b[?1049h\x1b[?25l");
-        io::stdout()
-            .flush()
-            .context("failed to flush alternate-screen entry")?;
-        Ok(Self { saved_mode })
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = new_stty_command().arg(&self.saved_mode).status();
-        let _ = write!(io::stdout(), "\x1b[?25h\x1b[?1049l");
-        let _ = io::stdout().flush();
+        #[cfg(not(test))]
+        {
+            let mut stdout = io::stdout();
+            let _ = execute!(
+                stdout,
+                crossterm::cursor::Show,
+                crossterm::terminal::LeaveAlternateScreen
+            );
+            let _ = terminal::disable_raw_mode();
+            let _ = stdout.flush();
+        }
     }
 }
 
@@ -169,11 +195,31 @@ pub(crate) fn run_watch_ui(
     options: &SchedulerOptions,
     initial_service: Option<&str>,
     lines: usize,
+    hold_on_exit: HoldOnExit,
 ) -> Result<WatchOutcome> {
-    let _guard = TerminalGuard::enter()?;
-    let mut input = io::stdin().lock();
-    let mut pending_input = Vec::new();
+    let guard = TerminalGuard::enter()?;
+    let result = run_watch_ui_loop(record, options, initial_service, lines, hold_on_exit);
+    drop(guard);
+    let result = result?;
+    if let Some(command) = result.command_hint {
+        println!("next command: {command}");
+    }
+    Ok(result.outcome)
+}
 
+#[derive(Debug)]
+struct WatchLoopResult {
+    outcome: WatchOutcome,
+    command_hint: Option<String>,
+}
+
+fn run_watch_ui_loop(
+    record: &SubmissionRecord,
+    options: &SchedulerOptions,
+    initial_service: Option<&str>,
+    lines: usize,
+    hold_on_exit: HoldOnExit,
+) -> Result<WatchLoopResult> {
     let mut snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), options)?;
     let mut selected_index = initial_selected_index(&snapshot, initial_service)?;
     let (_, height) = terminal_size();
@@ -182,11 +228,20 @@ pub(crate) fn run_watch_ui(
         lines,
         log_capacity(height),
     );
+    let mut all_log_lines = build_all_log_lines(&snapshot, lines, log_capacity(height));
     let mut last_refresh = Instant::now();
+    let mut last_metrics_refresh = Instant::now()
+        .checked_sub(METRICS_REFRESH_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    let mut metrics_line = None;
     let mut show_help = false;
     let mut filter: Option<String> = None;
     let mut input_mode = InputMode::Normal;
     let mut search_buffer = String::new();
+    let mut follow_logs = true;
+    let mut log_scroll = 0usize;
+    let mut log_view_mode = LogViewMode::Selected;
+    let mut terminal_outcome: Option<WatchOutcome> = None;
 
     loop {
         if last_refresh.elapsed() >= DATA_REFRESH_INTERVAL {
@@ -206,8 +261,16 @@ pub(crate) fn run_watch_ui(
                 lines,
                 log_capacity(height),
             );
-            log_buffer.refresh()?;
+            if follow_logs {
+                log_buffer.refresh()?;
+                all_log_lines = build_all_log_lines(&snapshot, lines, log_capacity(height));
+                log_scroll = 0;
+            }
             last_refresh = Instant::now();
+        }
+        if last_metrics_refresh.elapsed() >= METRICS_REFRESH_INTERVAL {
+            metrics_line = load_watch_metrics_line(record, options);
+            last_metrics_refresh = Instant::now();
         }
         let walltime_progress = walltime_progress(
             &snapshot.record,
@@ -215,13 +278,58 @@ pub(crate) fn run_watch_ui(
             snapshot.queue_diagnostics.as_ref(),
             current_unix_timestamp(),
         );
+        let current_outcome = terminal_outcome.clone().or_else(|| {
+            snapshot.scheduler.terminal.then(|| {
+                if snapshot.scheduler.failed {
+                    WatchOutcome::Failed(snapshot.scheduler.clone())
+                } else {
+                    WatchOutcome::Completed(snapshot.scheduler.clone())
+                }
+            })
+        });
+
+        if terminal_outcome.is_none()
+            && let Some(outcome) = current_outcome.clone()
+        {
+            if matches!(outcome, WatchOutcome::Failed(_))
+                && let Some(failed_index) = first_failed_service_index(&snapshot.services)
+            {
+                filter = None;
+                selected_index = failed_index;
+                log_buffer.reseed_if_needed(
+                    snapshot.services.get(selected_index),
+                    lines,
+                    log_capacity(terminal_size().1),
+                );
+            }
+            if should_hold_on_exit(hold_on_exit, &outcome) {
+                terminal_outcome = Some(outcome);
+            } else {
+                return Ok(WatchLoopResult {
+                    outcome,
+                    command_hint: None,
+                });
+            }
+        }
+
+        let displayed_log_lines = match log_view_mode {
+            LogViewMode::Selected => log_buffer.lines.clone(),
+            LogViewMode::All => all_log_lines.clone(),
+        };
 
         render_model(
             &WatchModel {
                 snapshot: snapshot.clone(),
                 selected_index,
                 walltime_progress,
-                log_lines: log_buffer.lines.clone(),
+                log_lines: displayed_log_lines,
+                follow_logs,
+                log_scroll,
+                log_view_mode,
+                hold_state: terminal_outcome.as_ref().map(|outcome| WatchHoldState {
+                    failed: matches!(outcome, WatchOutcome::Failed(_)),
+                }),
+                metrics_line: metrics_line.clone(),
                 show_help,
                 filter: filter.clone(),
                 search_buffer: search_buffer.clone(),
@@ -230,25 +338,20 @@ pub(crate) fn run_watch_ui(
             terminal_size(),
         )?;
 
-        if snapshot.scheduler.terminal {
-            return Ok(if snapshot.scheduler.failed {
-                WatchOutcome::Failed(snapshot.scheduler.clone())
-            } else {
-                WatchOutcome::Completed(snapshot.scheduler.clone())
-            });
-        }
-
-        let mut bytes = [0_u8; 64];
-        let read = input
-            .read(&mut bytes)
-            .context("failed to read watch UI input")?;
-        if read > 0 && input_mode == InputMode::Search {
-            pending_input.extend_from_slice(&bytes[..read]);
-            for key in parse_search_keys(&mut pending_input) {
+        if let Some(event) = read_watch_event(INPUT_POLL_INTERVAL)? {
+            if input_mode == InputMode::Search {
+                let key = match event {
+                    WatchInput::Search(key) => key,
+                    WatchInput::Normal(WatchKey::Quit) => SearchKey::Cancel,
+                    _ => continue,
+                };
                 match key {
                     SearchKey::Char(ch) => search_buffer.push(ch),
                     SearchKey::Backspace => {
                         search_buffer.pop();
+                    }
+                    SearchKey::Clear => {
+                        search_buffer.clear();
                     }
                     SearchKey::Submit => {
                         filter = if search_buffer.is_empty() {
@@ -264,13 +367,16 @@ pub(crate) fn run_watch_ui(
                         input_mode = InputMode::Normal;
                     }
                 }
-            }
-        } else if read > 0 {
-            pending_input.extend_from_slice(&bytes[..read]);
-            for key in parse_keys(&mut pending_input) {
+            } else if let WatchInput::Normal(key) = event {
+                let held_outcome = terminal_outcome.clone();
                 match key {
                     WatchKey::Quit => {
-                        return Ok(WatchOutcome::Interrupted(snapshot.scheduler.clone()));
+                        return Ok(WatchLoopResult {
+                            outcome: held_outcome.unwrap_or_else(|| {
+                                WatchOutcome::Interrupted(snapshot.scheduler.clone())
+                            }),
+                            command_hint: None,
+                        });
                     }
                     WatchKey::Help => {
                         show_help = !show_help;
@@ -278,6 +384,46 @@ pub(crate) fn run_watch_ui(
                     WatchKey::Search => {
                         input_mode = InputMode::Search;
                         search_buffer = filter.clone().unwrap_or_default();
+                    }
+                    WatchKey::TogglePause => {
+                        follow_logs = !follow_logs;
+                        if follow_logs {
+                            log_scroll = 0;
+                        }
+                    }
+                    WatchKey::ToggleAllLogs => {
+                        log_view_mode = match log_view_mode {
+                            LogViewMode::Selected => LogViewMode::All,
+                            LogViewMode::All => LogViewMode::Selected,
+                        };
+                        log_scroll = 0;
+                    }
+                    WatchKey::PageUp => {
+                        follow_logs = false;
+                        log_scroll = log_scroll.saturating_add(10);
+                    }
+                    WatchKey::PageDown => {
+                        log_scroll = log_scroll.saturating_sub(10);
+                        follow_logs = log_scroll == 0;
+                    }
+                    WatchKey::End => {
+                        follow_logs = true;
+                        log_scroll = 0;
+                    }
+                    WatchKey::DebugHint | WatchKey::LogsHint | WatchKey::StatsHint
+                        if held_outcome.is_some() =>
+                    {
+                        let command = command_hint_for_key(
+                            key,
+                            record,
+                            filtered_services(&snapshot.services, filter.as_deref())
+                                .get(selected_index)
+                                .map(|row| row.service_name.as_str()),
+                        );
+                        return Ok(WatchLoopResult {
+                            outcome: held_outcome.expect("held outcome checked above"),
+                            command_hint: Some(command),
+                        });
                     }
                     other => {
                         let effective = filtered_services(&snapshot.services, filter.as_deref());
@@ -295,12 +441,11 @@ pub(crate) fn run_watch_ui(
                             lines,
                             log_capacity(height),
                         );
+                        log_scroll = 0;
                     }
                 }
             }
         }
-
-        thread::sleep(INPUT_POLL_INTERVAL);
     }
 }
 
@@ -325,7 +470,65 @@ pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: 
         WatchKey::Down | WatchKey::Tab => (selected_index + 1).min(service_count - 1),
         WatchKey::First => 0,
         WatchKey::Last => service_count - 1,
-        WatchKey::Quit | WatchKey::Help | WatchKey::Search => selected_index,
+        WatchKey::PageUp
+        | WatchKey::PageDown
+        | WatchKey::End
+        | WatchKey::TogglePause
+        | WatchKey::ToggleAllLogs
+        | WatchKey::DebugHint
+        | WatchKey::LogsHint
+        | WatchKey::StatsHint
+        | WatchKey::Quit
+        | WatchKey::Help
+        | WatchKey::Search => selected_index,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchInput {
+    Normal(WatchKey),
+    Search(SearchKey),
+}
+
+fn read_watch_event(timeout: Duration) -> Result<Option<WatchInput>> {
+    if !event::poll(timeout).context("failed to poll watch UI input")? {
+        return Ok(None);
+    }
+    match event::read().context("failed to read watch UI input")? {
+        Event::Key(key) => Ok(map_key_event(key)),
+        _ => Ok(None),
+    }
+}
+
+fn map_key_event(key: KeyEvent) -> Option<WatchInput> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('u')) {
+        return Some(WatchInput::Search(SearchKey::Clear));
+    }
+
+    match key.code {
+        KeyCode::Char('q') => Some(WatchInput::Normal(WatchKey::Quit)),
+        KeyCode::Char('j') | KeyCode::Down => Some(WatchInput::Normal(WatchKey::Down)),
+        KeyCode::Char('k') | KeyCode::Up => Some(WatchInput::Normal(WatchKey::Up)),
+        KeyCode::Char('g') => Some(WatchInput::Normal(WatchKey::First)),
+        KeyCode::Char('G') => Some(WatchInput::Normal(WatchKey::Last)),
+        KeyCode::Tab => Some(WatchInput::Normal(WatchKey::Tab)),
+        KeyCode::PageUp => Some(WatchInput::Normal(WatchKey::PageUp)),
+        KeyCode::PageDown => Some(WatchInput::Normal(WatchKey::PageDown)),
+        KeyCode::End => Some(WatchInput::Normal(WatchKey::End)),
+        KeyCode::Char(' ') => Some(WatchInput::Normal(WatchKey::TogglePause)),
+        KeyCode::Char('a') => Some(WatchInput::Normal(WatchKey::ToggleAllLogs)),
+        KeyCode::Char('d') => Some(WatchInput::Normal(WatchKey::DebugHint)),
+        KeyCode::Char('l') => Some(WatchInput::Normal(WatchKey::LogsHint)),
+        KeyCode::Char('s') => Some(WatchInput::Normal(WatchKey::StatsHint)),
+        KeyCode::Char('?') => Some(WatchInput::Normal(WatchKey::Help)),
+        KeyCode::Char('/') => Some(WatchInput::Normal(WatchKey::Search)),
+        KeyCode::Enter => Some(WatchInput::Search(SearchKey::Submit)),
+        KeyCode::Esc => Some(WatchInput::Search(SearchKey::Cancel)),
+        KeyCode::Backspace => Some(WatchInput::Search(SearchKey::Backspace)),
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(WatchInput::Search(SearchKey::Char(ch)))
+        }
+        _ => None,
     }
 }
 
@@ -356,25 +559,35 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     let mut lines = vec![
         fit_line(
             &format!(
-                "{} | job {}{}",
+                "{} | {} | job {}{}{}",
                 term::styled_bold("hpc-compose watch"),
+                scheduler,
                 model.snapshot.record.job_id,
-                filter_indicator
+                filter_indicator,
+                hold_indicator(model.hold_state)
             ),
             width,
         ),
         fit_line(
             &format!(
-                "scheduler: {} | services: {} | selected: {}",
-                scheduler,
+                "services: {} | selected: {} | logs: {} {}",
                 effective.len(),
-                selected_name
+                selected_name,
+                log_view_label(model.log_view_mode),
+                if model.follow_logs {
+                    "FOLLOW"
+                } else {
+                    "PAUSED"
+                }
             ),
             width,
         ),
     ];
     if let Some(progress) = &model.walltime_progress {
         lines.push(fit_line(&render_walltime_bar(progress, width), width));
+    }
+    if let Some(metrics) = model.metrics_line.as_deref() {
+        lines.push(fit_line(metrics, width));
     }
     if let Some(detail) = model.snapshot.scheduler.detail.as_deref() {
         lines.push(fit_line(&format!("note: {detail}"), width));
@@ -398,83 +611,127 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     if model.show_help {
         help_lines.push("-".repeat(width));
         help_lines.push(fit_line(&term::styled_bold("Keybindings:"), width));
-        help_lines.push(fit_line("  j / Down    scroll down", width));
-        help_lines.push(fit_line("  k / Up      scroll up", width));
+        help_lines.push(fit_line("  j / Down    next service", width));
+        help_lines.push(fit_line("  k / Up      previous service", width));
         help_lines.push(fit_line("  g           first service", width));
         help_lines.push(fit_line("  G           last service", width));
         help_lines.push(fit_line("  /           filter services", width));
+        help_lines.push(fit_line("  Space       pause or follow log tail", width));
+        help_lines.push(fit_line("  PgUp/PgDn   scroll log tail", width));
+        help_lines.push(fit_line("  End         return to live log tail", width));
+        help_lines.push(fit_line("  a           toggle selected/all logs", width));
+        help_lines.push(fit_line(
+            "  d/l/s       debug/logs/stats command after final state",
+            width,
+        ));
         help_lines.push(fit_line("  ?           toggle help", width));
         help_lines.push(fit_line("  q           quit", width));
         help_lines.push("-".repeat(width));
     }
 
-    let footer_lines = vec![
-        "-".repeat(width),
-        fit_line("q quit  ? help  / filter  j/k move  g/G first/last", width),
-    ];
+    let footer = if model.input_mode == InputMode::Search {
+        "Enter apply  Esc cancel  Ctrl-U clear  Backspace delete"
+    } else if model.hold_state.is_some() {
+        "q exit  d debug  l logs  s stats  ? help"
+    } else {
+        "q quit  ? help  / filter  Space pause  a all  PgUp/PgDn scroll  End follow"
+    };
+    let footer_lines = vec!["-".repeat(width), fit_line(footer, width)];
     let help_budget = height.saturating_sub(lines.len() + search_lines.len() + footer_lines.len());
     if help_lines.len() > help_budget {
         help_lines.truncate(help_budget);
     }
 
-    let table_width = MIN_TABLE_WIDTH.min(width.saturating_sub(20));
+    let table_width = MIN_TABLE_WIDTH.min(width.saturating_sub(24));
     let log_width = width.saturating_sub(table_width + 3);
     let body_height = height
         .saturating_sub(lines.len() + search_lines.len() + help_lines.len() + footer_lines.len());
     let mut table_lines = Vec::with_capacity(body_height);
     table_lines.push(fit_line(
-        "svc              step         pid    ready status   restarts exit",
+        "svc              step         pid    ready state restarts exit",
         table_width,
     ));
-    for (index, service) in effective.iter().enumerate() {
-        let marker = if index == model.selected_index {
-            term::styled_success(">")
-        } else {
-            " ".to_string()
-        };
-        let step = service.step_name.as_deref().unwrap_or("-");
-        let pid = service
-            .launcher_pid
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let ready = service.healthy.map(yes_no_short).unwrap_or("-");
-        let status = service.status.as_deref().unwrap_or("unknown");
-        let status_raw = truncate_cell(status, 8);
-        let status_styled = term::styled_service_status(&status_raw);
-        let status_col = format!(
-            "{:<width$}",
-            status_styled,
-            width = 8 + status_styled.len() - status_raw.len()
-        );
-        let restarts = service
-            .restart_count
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let exit = service
-            .last_exit_code
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        table_lines.push(fit_line(
-            &format!(
-                "{marker} {:<16} {:<12} {:<6} {:<5} {} {:<8} {:<4}",
-                truncate_cell(&service.service_name, 16),
-                truncate_cell(step, 12),
-                pid,
-                ready,
-                status_col,
-                truncate_cell(&restarts, 8),
-                exit
-            ),
-            table_width,
-        ));
+    if effective.is_empty() {
+        table_lines.push(fit_line("  no services match filter", table_width));
+    } else {
+        for (index, service) in effective.iter().enumerate() {
+            let marker = if index == model.selected_index {
+                term::styled_success(">")
+            } else {
+                " ".to_string()
+            };
+            let step = service.step_name.as_deref().unwrap_or("-");
+            let pid = service
+                .launcher_pid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let ready = service.healthy.map(yes_no_short).unwrap_or("-");
+            let state_raw = service_state_label(service);
+            let state_styled = styled_state_marker(state_raw);
+            let state_col = format!(
+                "{:<width$}",
+                state_styled,
+                width = 5 + state_styled.len() - state_raw.len()
+            );
+            let restarts = restart_summary(service);
+            let exit = service
+                .last_exit_code
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            table_lines.push(fit_line(
+                &format!(
+                    "{marker} {:<16} {:<12} {:<6} {:<5} {} {:<8} {:<4}",
+                    truncate_cell(&service.service_name, 16),
+                    truncate_cell(step, 12),
+                    pid,
+                    ready,
+                    state_col,
+                    truncate_cell(&restarts, 8),
+                    exit
+                ),
+                table_width,
+            ));
+        }
     }
 
     let mut log_lines = Vec::with_capacity(body_height);
+    let log_title = match model.log_view_mode {
+        LogViewMode::Selected => selected_name.to_string(),
+        LogViewMode::All => "all services".to_string(),
+    };
+    let scroll_note = if !model.follow_logs && model.log_scroll > 0 {
+        format!(" scroll +{}", model.log_scroll)
+    } else {
+        String::new()
+    };
     log_lines.push(fit_line(
-        &format!("{}: {}", term::styled_bold("logs"), selected_name),
+        &format!(
+            "{}: {} {}{}",
+            term::styled_bold("logs"),
+            log_title,
+            if model.follow_logs {
+                "FOLLOW"
+            } else {
+                "PAUSED"
+            },
+            scroll_note
+        ),
         log_width,
     ));
-    for line in &model.log_lines {
+    if let Some(path_line) = log_path_line(model.log_view_mode, selected.copied()) {
+        log_lines.push(fit_line(&term::styled_dim(&path_line), log_width));
+    }
+    let visible_log_lines = visible_log_lines(
+        &model.log_lines,
+        body_height.saturating_sub(log_lines.len()),
+        model.follow_logs,
+        model.log_scroll,
+    );
+    if visible_log_lines.is_empty() {
+        let empty = empty_log_message(model.log_view_mode, selected.copied());
+        log_lines.push(fit_line(&term::styled_dim(empty), log_width));
+    }
+    for line in visible_log_lines {
         log_lines.push(fit_line(line, log_width));
     }
 
@@ -529,7 +786,7 @@ fn render_compact_watch_frame(
         width,
         height,
         &format!(
-            "scheduler: {} | services: {} | selected: {}",
+            "{} | services: {} | selected: {}",
             scheduler,
             effective.len(),
             selected_name
@@ -541,6 +798,21 @@ fn render_compact_watch_frame(
             width,
             height,
             &render_walltime_bar(progress, width),
+        );
+    }
+    if let Some(metrics) = model.metrics_line.as_deref() {
+        push_fit_line(&mut lines, width, height, metrics);
+    }
+    if let Some(hold) = model.hold_state {
+        push_fit_line(
+            &mut lines,
+            width,
+            height,
+            if hold.failed {
+                "final state: failed; q exit, d debug, l logs, s stats"
+            } else {
+                "final state: completed; q exit, d debug, l logs, s stats"
+            },
         );
     }
     if let Some(filter) = model.filter.as_deref() {
@@ -555,35 +827,82 @@ fn render_compact_watch_frame(
         );
     }
     if model.show_help {
-        push_fit_line(&mut lines, width, height, "? help | / filter | q quit");
-    }
-
-    push_fit_line(&mut lines, width, height, "services:");
-    for (index, service) in effective.iter().enumerate() {
-        let marker = if index == model.selected_index {
-            ">"
-        } else {
-            " "
-        };
-        let status = service.status.as_deref().unwrap_or("unknown");
-        let ready = service.healthy.map(yes_no_short).unwrap_or("-");
         push_fit_line(
             &mut lines,
             width,
             height,
-            &format!(
-                "{marker} {} {} ready={ready}",
-                service.service_name,
-                term::styled_service_status(status)
-            ),
+            "? help | / filter | Space pause | q quit",
         );
     }
 
-    push_fit_line(&mut lines, width, height, &format!("logs: {selected_name}"));
-    for line in &model.log_lines {
+    push_fit_line(&mut lines, width, height, "services:");
+    if effective.is_empty() {
+        push_fit_line(&mut lines, width, height, "  no services match filter");
+    } else {
+        for (index, service) in effective.iter().enumerate() {
+            let marker = if index == model.selected_index {
+                ">"
+            } else {
+                " "
+            };
+            let ready = service.healthy.map(yes_no_short).unwrap_or("-");
+            push_fit_line(
+                &mut lines,
+                width,
+                height,
+                &format!(
+                    "{marker} {} {} ready={ready}",
+                    service.service_name,
+                    styled_state_marker(service_state_label(service))
+                ),
+            );
+        }
+    }
+
+    push_fit_line(
+        &mut lines,
+        width,
+        height,
+        &format!(
+            "logs: {} {}",
+            if model.log_view_mode == LogViewMode::All {
+                "all services"
+            } else {
+                selected_name
+            },
+            if model.follow_logs {
+                "FOLLOW"
+            } else {
+                "PAUSED"
+            }
+        ),
+    );
+    if model.log_lines.is_empty() {
+        push_fit_line(
+            &mut lines,
+            width,
+            height,
+            &term::styled_dim(empty_log_message(model.log_view_mode, selected)),
+        );
+    }
+    for line in visible_log_lines(
+        &model.log_lines,
+        height.saturating_sub(lines.len() + 1),
+        model.follow_logs,
+        model.log_scroll,
+    ) {
         push_fit_line(&mut lines, width, height, line);
     }
-    push_fit_line(&mut lines, width, height, "q quit  ? help  / filter");
+    push_fit_line(
+        &mut lines,
+        width,
+        height,
+        if model.hold_state.is_some() {
+            "q exit  d debug  l logs  s stats"
+        } else {
+            "q quit  ? help  / filter  Space pause"
+        },
+    );
 
     lines.join("\n")
 }
@@ -591,6 +910,220 @@ fn render_compact_watch_frame(
 fn push_fit_line(lines: &mut Vec<String>, width: usize, height: usize, value: &str) {
     if lines.len() < height {
         lines.push(fit_line(value, width));
+    }
+}
+
+fn hold_indicator(hold: Option<WatchHoldState>) -> String {
+    match hold {
+        Some(WatchHoldState { failed: true }) => {
+            format!(" | {}", term::styled_error("held: failed"))
+        }
+        Some(WatchHoldState { failed: false }) => {
+            format!(" | {}", term::styled_success("held: completed"))
+        }
+        None => String::new(),
+    }
+}
+
+fn log_view_label(mode: LogViewMode) -> &'static str {
+    match mode {
+        LogViewMode::Selected => "selected",
+        LogViewMode::All => "all",
+    }
+}
+
+fn service_state_label(service: &PsServiceRow) -> &'static str {
+    if service_matches_failure(service) {
+        return "FAIL";
+    }
+    match service.status.as_deref() {
+        Some("ready") => "OK",
+        Some("running") => "RUN",
+        Some("starting") => "WAIT",
+        Some("exited") => {
+            if service.completed_successfully == Some(true) {
+                "DONE"
+            } else {
+                "EXIT"
+            }
+        }
+        Some("failed") => "FAIL",
+        Some("unknown") | None => "UNK",
+        Some(_) => "STATE",
+    }
+}
+
+fn styled_state_marker(value: &str) -> String {
+    match value {
+        "OK" | "RUN" | "DONE" => term::styled_success(value),
+        "WAIT" => term::styled_warning(value),
+        "FAIL" | "EXIT" => term::styled_error(value),
+        "UNK" => term::styled_dim(value),
+        _ => value.to_string(),
+    }
+}
+
+fn restart_summary(service: &PsServiceRow) -> String {
+    match (service.restart_count, service.max_restarts) {
+        (Some(count), Some(max)) => format!("{count}/{max}"),
+        (Some(count), None) => count.to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+fn log_path_line(mode: LogViewMode, selected: Option<&PsServiceRow>) -> Option<String> {
+    match mode {
+        LogViewMode::All => Some("path: all tracked service logs".to_string()),
+        LogViewMode::Selected => {
+            selected.map(|service| format!("path: {}", service.path.display()))
+        }
+    }
+}
+
+fn empty_log_message(mode: LogViewMode, selected: Option<&PsServiceRow>) -> &'static str {
+    match mode {
+        LogViewMode::All => "<no service log lines yet>",
+        LogViewMode::Selected => match selected {
+            Some(service) if !service.present => "<log file missing>",
+            Some(_) => "<no log lines yet>",
+            None => "<no service selected>",
+        },
+    }
+}
+
+fn visible_log_lines(
+    lines: &[String],
+    capacity: usize,
+    follow: bool,
+    scroll_from_bottom: usize,
+) -> &[String] {
+    if capacity == 0 || lines.is_empty() {
+        return &[];
+    }
+    let end = if follow {
+        lines.len()
+    } else {
+        lines.len().saturating_sub(scroll_from_bottom)
+    };
+    let start = end.saturating_sub(capacity);
+    &lines[start..end]
+}
+
+fn build_all_log_lines(snapshot: &PsSnapshot, lines: usize, capacity: usize) -> Vec<String> {
+    let mut collected = Vec::new();
+    for service in &snapshot.services {
+        let prefix = format!("[{}]", service.service_name);
+        for line in tail_lines(&service.path, lines).unwrap_or_default() {
+            collected.push(format!("{prefix} {line}"));
+        }
+    }
+    capped_lines(collected, capacity.max(1))
+}
+
+fn service_matches_failure(service: &PsServiceRow) -> bool {
+    service.status.as_deref() == Some("failed")
+        || service.last_exit_code.is_some_and(|code| code != 0)
+        || service.completed_successfully == Some(false)
+            && service
+                .status
+                .as_deref()
+                .is_some_and(|status| status == "exited")
+}
+
+fn first_failed_service_index(services: &[PsServiceRow]) -> Option<usize> {
+    services.iter().position(service_matches_failure)
+}
+
+fn should_hold_on_exit(policy: HoldOnExit, outcome: &WatchOutcome) -> bool {
+    match policy {
+        HoldOnExit::Never => false,
+        HoldOnExit::Failure => matches!(outcome, WatchOutcome::Failed(_)),
+        HoldOnExit::Always => matches!(
+            outcome,
+            WatchOutcome::Completed(_) | WatchOutcome::Failed(_)
+        ),
+    }
+}
+
+fn load_watch_metrics_line(
+    record: &SubmissionRecord,
+    scheduler: &SchedulerOptions,
+) -> Option<String> {
+    let snapshot = build_stats_snapshot(
+        &record.compose_file,
+        Some(&record.job_id),
+        &StatsOptions {
+            scheduler: scheduler.clone(),
+            sstat_bin: "sstat".to_string(),
+        },
+    )
+    .ok()?;
+    format_watch_metrics_line(&snapshot)
+}
+
+fn format_watch_metrics_line(snapshot: &StatsSnapshot) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(failure) = &snapshot.first_failure {
+        parts.push(format!(
+            "first failure: {} exit={}",
+            failure.service, failure.exit_code
+        ));
+    }
+    if let Some(gpu) = snapshot
+        .sampler
+        .as_ref()
+        .and_then(|sampler| sampler.gpu.as_ref())
+        && let Some(node) = gpu.nodes.first()
+    {
+        let util = node
+            .avg_utilization_gpu
+            .map(|value| format!("{value:.0}%"))
+            .unwrap_or_else(|| "-".to_string());
+        let mem = match (node.memory_used_mib, node.memory_total_mib) {
+            (Some(used), Some(total)) => format!("{used}/{total} MiB"),
+            _ => "-".to_string(),
+        };
+        parts.push(format!("gpu: {} util={} mem={}", node.gpu_count, util, mem));
+    }
+    if snapshot.available {
+        parts.push(format!("stats: {}", snapshot.source));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" | "))
+    }
+}
+
+fn command_hint_for_key(
+    key: WatchKey,
+    record: &SubmissionRecord,
+    selected_service: Option<&str>,
+) -> String {
+    let compose = shell_quote(&record.compose_file.display().to_string());
+    let job = shell_quote(&record.job_id);
+    match key {
+        WatchKey::DebugHint => format!("hpc-compose debug -f {compose} --job-id {job}"),
+        WatchKey::LogsHint => match selected_service {
+            Some(service) => format!(
+                "hpc-compose logs -f {compose} --job-id {job} --service {} --lines 200",
+                shell_quote(service)
+            ),
+            None => format!("hpc-compose logs -f {compose} --job-id {job} --lines 200"),
+        },
+        WatchKey::StatsHint => format!("hpc-compose stats -f {compose} --job-id {job}"),
+        _ => String::new(),
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -604,10 +1137,11 @@ fn pane_separator() -> &'static str {
 
 fn render_model(model: &WatchModel, (width, height): (usize, usize)) -> Result<()> {
     let frame = render_watch_frame(model, width, height);
-    print!("\x1b[2J\x1b[H{frame}");
-    io::stdout()
-        .flush()
-        .context("failed to flush watch UI frame")
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))
+        .context("failed to clear watch UI frame")?;
+    write!(stdout, "{frame}").context("failed to write watch UI frame")?;
+    stdout.flush().context("failed to flush watch UI frame")
 }
 
 fn initial_selected_index(snapshot: &PsSnapshot, initial_service: Option<&str>) -> Result<usize> {
@@ -660,10 +1194,12 @@ fn filtered_services<'a>(
 enum SearchKey {
     Char(char),
     Backspace,
+    Clear,
     Submit,
     Cancel,
 }
 
+#[cfg(test)]
 fn parse_search_keys(buffer: &mut Vec<u8>) -> Vec<SearchKey> {
     let mut keys = Vec::new();
     let mut index = 0;
@@ -675,6 +1211,10 @@ fn parse_search_keys(buffer: &mut Vec<u8>) -> Vec<SearchKey> {
             }
             b'\n' | b'\r' => {
                 keys.push(SearchKey::Submit);
+                index += 1;
+            }
+            0x15 => {
+                keys.push(SearchKey::Clear);
                 index += 1;
             }
             0x1b => {
@@ -755,23 +1295,12 @@ fn render_walltime_bar(progress: &WalltimeProgress, width: usize) -> String {
 }
 
 fn terminal_size() -> (usize, usize) {
-    if let Ok(output) = new_stty_command().arg("size").output()
-        && output.status.success()
-        && let Some(size) = parse_stty_size(&output.stdout)
-    {
-        return size;
+    if let Ok((cols, rows)) = terminal::size() {
+        return (usize::from(cols), usize::from(rows));
     }
     let columns = std::env::var("COLUMNS").ok();
     let rows = std::env::var("LINES").ok();
     fallback_terminal_size(columns.as_deref(), rows.as_deref())
-}
-
-fn parse_stty_size(output: &[u8]) -> Option<(usize, usize)> {
-    let raw = String::from_utf8_lossy(output);
-    let mut parts = raw.split_whitespace();
-    let rows = parts.next()?.parse::<usize>().ok()?;
-    let cols = parts.next()?.parse::<usize>().ok()?;
-    Some((cols, rows))
 }
 
 fn fallback_terminal_size(columns: Option<&str>, rows: Option<&str>) -> (usize, usize) {
@@ -787,20 +1316,7 @@ fn parse_terminal_env_size(value: Option<&str>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn new_stty_command() -> Command {
-    #[cfg(test)]
-    if let Some(path) = TEST_STTY_BIN
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .expect("stty override lock")
-        .clone()
-    {
-        return Command::new(path);
-    }
-
-    Command::new("stty")
-}
-
+#[cfg(test)]
 fn parse_keys(buffer: &mut Vec<u8>) -> Vec<WatchKey> {
     let mut keys = Vec::new();
     let mut index = 0;
@@ -830,6 +1346,26 @@ fn parse_keys(buffer: &mut Vec<u8>) -> Vec<WatchKey> {
                 keys.push(WatchKey::Tab);
                 index += 1;
             }
+            b' ' => {
+                keys.push(WatchKey::TogglePause);
+                index += 1;
+            }
+            b'a' => {
+                keys.push(WatchKey::ToggleAllLogs);
+                index += 1;
+            }
+            b'd' => {
+                keys.push(WatchKey::DebugHint);
+                index += 1;
+            }
+            b'l' => {
+                keys.push(WatchKey::LogsHint);
+                index += 1;
+            }
+            b's' => {
+                keys.push(WatchKey::StatsHint);
+                index += 1;
+            }
             b'?' => {
                 keys.push(WatchKey::Help);
                 index += 1;
@@ -851,6 +1387,37 @@ fn parse_keys(buffer: &mut Vec<u8>) -> Vec<WatchKey> {
                 && buffer[index + 2] == b'B' =>
             {
                 keys.push(WatchKey::Down);
+                index += 3;
+            }
+            0x1b if buffer.len().saturating_sub(index) >= 4
+                && buffer[index + 1] == b'['
+                && buffer[index + 2] == b'5'
+                && buffer[index + 3] == b'~' =>
+            {
+                keys.push(WatchKey::PageUp);
+                index += 4;
+            }
+            0x1b if buffer.len().saturating_sub(index) >= 4
+                && buffer[index + 1] == b'['
+                && buffer[index + 2] == b'6'
+                && buffer[index + 3] == b'~' =>
+            {
+                keys.push(WatchKey::PageDown);
+                index += 4;
+            }
+            0x1b if buffer.len().saturating_sub(index) >= 4
+                && buffer[index + 1] == b'['
+                && buffer[index + 2] == b'F'
+                && buffer[index + 3] == b'~' =>
+            {
+                keys.push(WatchKey::End);
+                index += 4;
+            }
+            0x1b if buffer.len().saturating_sub(index) >= 3
+                && buffer[index + 1] == b'['
+                && buffer[index + 2] == b'F' =>
+            {
+                keys.push(WatchKey::End);
                 index += 3;
             }
             _ => {
@@ -1040,34 +1607,6 @@ mod tests {
         write_submission_record,
     };
 
-    fn with_test_stty<T>(script_body: &str, action: impl FnOnce() -> T) -> T {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let script_path = tmpdir.path().join("fake-stty.sh");
-        fs::write(&script_path, script_body).expect("write fake stty");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).expect("chmod");
-        }
-
-        {
-            let mut slot = TEST_STTY_BIN
-                .get_or_init(|| std::sync::Mutex::new(None))
-                .lock()
-                .expect("stty override lock");
-            *slot = Some(script_path.clone());
-        }
-        let result = action();
-        let mut slot = TEST_STTY_BIN
-            .get_or_init(|| std::sync::Mutex::new(None))
-            .lock()
-            .expect("stty override lock");
-        *slot = None;
-        result
-    }
-
     fn sample_snapshot() -> PsSnapshot {
         PsSnapshot {
             record: SubmissionRecord {
@@ -1168,6 +1707,24 @@ mod tests {
         }
     }
 
+    fn sample_watch_model() -> WatchModel {
+        WatchModel {
+            snapshot: sample_snapshot(),
+            selected_index: 0,
+            walltime_progress: None,
+            log_lines: Vec::new(),
+            follow_logs: true,
+            log_scroll: 0,
+            log_view_mode: LogViewMode::Selected,
+            hold_state: None,
+            metrics_line: None,
+            show_help: false,
+            filter: None,
+            search_buffer: String::new(),
+            input_mode: InputMode::Normal,
+        }
+    }
+
     #[test]
     fn watch_key_navigation_clamps_to_bounds() {
         assert_eq!(apply_watch_key(0, 2, WatchKey::Up), 0);
@@ -1224,6 +1781,7 @@ mod tests {
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             100,
             18,
@@ -1251,20 +1809,25 @@ mod tests {
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             100,
             18,
         );
         let lines = canonical_frame_lines(&frame);
 
-        assert_snapshot_line(&lines, 0, "hpc-compose watch | job 12345");
+        assert_snapshot_line(
+            &lines,
+            0,
+            "hpc-compose watch | RUNNING (squeue) | job 12345",
+        );
         assert_snapshot_line(
             &lines,
             1,
-            "scheduler: RUNNING (squeue) | services: 2 | selected: api",
+            "services: 2 | selected: api | logs: selected FOLLOW",
         );
         assert!(lines[4].contains("api"));
-        assert!(lines[4].contains("booting"));
+        assert!(lines[5].contains("booting"));
         assert!(lines.last().unwrap_or(&String::new()).contains("q quit"));
     }
 
@@ -1277,10 +1840,6 @@ mod tests {
         assert!(watch_ui_available(true, false, false));
         assert!(watch_ui_available(false, true, true));
         assert!(!watch_ui_available(false, true, false));
-
-        assert_eq!(parse_stty_size(b"33 101\n"), Some((101, 33)));
-        assert_eq!(parse_stty_size(b"bad"), None);
-        assert_eq!(parse_stty_size(b"33 no"), None);
 
         assert_eq!(fallback_terminal_size(Some("101"), Some("33")), (101, 33));
         assert_eq!(
@@ -1483,6 +2042,7 @@ mod tests {
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             90,
             14,
@@ -1506,6 +2066,7 @@ mod tests {
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             90,
             14,
@@ -1531,6 +2092,7 @@ mod tests {
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             100,
             14,
@@ -1541,94 +2103,80 @@ mod tests {
 
     #[test]
     fn terminal_guard_and_run_watch_ui_cover_interactive_paths() {
-        let script = r#"#!/bin/sh
-if [ "$1" = "-g" ]; then
-  printf 'saved-mode\n'
-  exit 0
-fi
-if [ "$1" = "size" ]; then
-  printf '33 101\n'
-  exit 0
-fi
-exit 0
-"#;
+        let guard = TerminalGuard::enter().expect("enter terminal guard");
+        drop(guard);
 
-        with_test_stty(script, || {
-            assert_eq!(terminal_size(), (101, 33));
+        render_model(
+            &WatchModel {
+                snapshot: sample_snapshot(),
+                selected_index: 0,
+                walltime_progress: None,
+                log_lines: vec!["line".into()],
+                show_help: false,
+                filter: None,
+                search_buffer: String::new(),
+                input_mode: InputMode::Normal,
+                ..sample_watch_model()
+            },
+            (90, 14),
+        )
+        .expect("render model");
 
-            let guard = TerminalGuard::enter().expect("enter terminal guard");
-            drop(guard);
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let local_image = tmpdir.path().join("local.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &compose,
+            format!(
+                "name: demo\nservices:\n  api:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n",
+                local_image.display(),
+                tmpdir.path().join("cache").display()
+            ),
+        )
+        .expect("compose");
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let script_path = tmpdir.path().join("job.local.sh");
+        let record = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-watch-ui-123",
+            SubmissionBackend::Local,
+        )
+        .expect("record");
+        write_submission_record(&record).expect("write record");
 
-            render_model(
-                &WatchModel {
-                    snapshot: sample_snapshot(),
-                    selected_index: 0,
-                    walltime_progress: None,
-                    log_lines: vec!["line".into()],
-                    show_help: false,
-                    filter: None,
-                    search_buffer: String::new(),
-                    input_mode: InputMode::Normal,
-                },
-                (90, 14),
-            )
-            .expect("render model");
+        let state_path = state_path_for_record(&record);
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("state dir");
+        }
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "backend": SubmissionBackend::Local,
+                "job_status": "COMPLETED",
+                "job_exit_code": 0,
+                "supervisor_pid": serde_json::Value::Null,
+                "services": []
+            }))
+            .expect("state json"),
+        )
+        .expect("write state");
 
-            let tmpdir = tempfile::tempdir().expect("tmpdir");
-            let local_image = tmpdir.path().join("local.sqsh");
-            fs::write(&local_image, "sqsh").expect("local image");
-            let compose = tmpdir.path().join("compose.yaml");
-            fs::write(
-                &compose,
-                format!(
-                    "name: demo\nservices:\n  api:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n",
-                    local_image.display(),
-                    tmpdir.path().join("cache").display()
-                ),
-            )
-            .expect("compose");
-            let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
-            let script_path = tmpdir.path().join("job.local.sh");
-            let record = build_submission_record_with_backend(
-                &compose,
-                tmpdir.path(),
-                &script_path,
-                &runtime_plan,
-                "local-watch-ui-123",
-                SubmissionBackend::Local,
-            )
-            .expect("record");
-            write_submission_record(&record).expect("write record");
-
-            let state_path = state_path_for_record(&record);
-            if let Some(parent) = state_path.parent() {
-                fs::create_dir_all(parent).expect("state dir");
-            }
-            fs::write(
-                &state_path,
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "backend": SubmissionBackend::Local,
-                    "job_status": "COMPLETED",
-                    "job_exit_code": 0,
-                    "supervisor_pid": serde_json::Value::Null,
-                    "services": []
-                }))
-                .expect("state json"),
-            )
-            .expect("write state");
-
-            let outcome = run_watch_ui(
-                &record,
-                &SchedulerOptions {
-                    squeue_bin: "/definitely/missing-squeue".into(),
-                    sacct_bin: "/definitely/missing-sacct".into(),
-                },
-                None,
-                5,
-            )
-            .expect("run watch ui");
-            assert!(matches!(outcome, WatchOutcome::Completed(_)));
-        });
+        let outcome = run_watch_ui(
+            &record,
+            &SchedulerOptions {
+                squeue_bin: "/definitely/missing-squeue".into(),
+                sacct_bin: "/definitely/missing-sacct".into(),
+            },
+            None,
+            5,
+            HoldOnExit::Never,
+        )
+        .expect("run watch ui");
+        assert!(matches!(outcome, WatchOutcome::Completed(_)));
     }
 
     #[test]
@@ -1655,6 +2203,7 @@ exit 0
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             100,
             22,
@@ -1678,6 +2227,7 @@ exit 0
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             100,
             22,
@@ -1706,6 +2256,7 @@ exit 0
                 filter: Some("api".into()),
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             100,
             14,
@@ -1725,17 +2276,22 @@ exit 0
                 filter: Some("api".into()),
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             100,
             14,
         );
         let lines = canonical_frame_lines(&frame);
 
-        assert_snapshot_line(&lines, 0, "hpc-compose watch | job 12345 | filter: api");
+        assert_snapshot_line(
+            &lines,
+            0,
+            "hpc-compose watch | RUNNING (squeue) | job 12345 | filter: api",
+        );
         assert_snapshot_line(
             &lines,
             1,
-            "scheduler: RUNNING (squeue) | services: 1 | selected: api",
+            "services: 1 | selected: api | logs: selected FOLLOW",
         );
         assert!(lines.iter().any(|line| line.contains("> api")));
         assert!(!lines.iter().any(|line| line.contains("worker")));
@@ -1753,12 +2309,19 @@ exit 0
                 filter: None,
                 search_buffer: "api".into(),
                 input_mode: InputMode::Search,
+                ..sample_watch_model()
             },
             90,
             12,
         );
         assert!(search_frame.contains("filter: api"));
-        assert!(search_frame.lines().last().unwrap_or("").contains("q quit"));
+        assert!(
+            search_frame
+                .lines()
+                .last()
+                .unwrap_or("")
+                .contains("Enter apply")
+        );
         assert!(search_frame.lines().count() <= 12);
 
         let help_frame = render_watch_frame(
@@ -1771,6 +2334,7 @@ exit 0
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             90,
             12,
@@ -1800,6 +2364,7 @@ exit 0
                 filter: Some("api".into()),
                 search_buffer: "api".into(),
                 input_mode: InputMode::Search,
+                ..sample_watch_model()
             },
             48,
             9,
@@ -1809,7 +2374,7 @@ exit 0
         assert!(lines.len() <= 9);
         assert!(lines.iter().all(|line| visible_width(line) <= 48));
         assert!(frame.contains("hpc-compose watch"));
-        assert!(frame.contains("scheduler:"));
+        assert!(frame.contains("RUNNING"));
     }
 
     #[test]
@@ -1824,6 +2389,7 @@ exit 0
                 filter: Some("api".into()),
                 search_buffer: "api".into(),
                 input_mode: InputMode::Search,
+                ..sample_watch_model()
             },
             48,
             9,
@@ -1833,8 +2399,8 @@ exit 0
         assert_snapshot_line(&lines, 0, "hpc-compose watch | job 12345");
         assert_snapshot_line(&lines, 2, "filter: api");
         assert_snapshot_line(&lines, 3, "filter input: api");
-        assert_snapshot_line(&lines, 4, "? help | / filter | q quit");
-        assert_snapshot_line(&lines, 6, "> api ready ready=yes");
+        assert_snapshot_line(&lines, 4, "? help | / filter | Space pause | q quit");
+        assert_snapshot_line(&lines, 6, "> api OK ready=yes");
         assert_eq!(lines.len(), 9);
     }
 
@@ -1850,6 +2416,7 @@ exit 0
                 filter: None,
                 search_buffer: String::new(),
                 input_mode: InputMode::Normal,
+                ..sample_watch_model()
             },
             12,
             3,

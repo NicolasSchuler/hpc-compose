@@ -132,7 +132,7 @@ When you move to a supported Linux submission host, the normal run is:
 hpc-compose up -f compose.yaml
 ```
 
-`up` runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to line-oriented output. Use `hpc-compose up --detach -f compose.yaml` when you want submit-and-return behavior.
+`up` runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to line-oriented output. The watch UI holds the final screen on failures by default; use `--hold-on-exit never|failure|always` to tune that behavior. Use `hpc-compose up --detach -f compose.yaml` when you want submit-and-return behavior.
 
 Success looks like:
 
@@ -149,7 +149,7 @@ Success looks like:
 | `srun` does not advertise `--container-image` | `hpc-compose doctor cluster-report` | Pyxis support is unavailable or not loaded on that node. |
 | Job submitted but no service log appeared | `hpc-compose debug -f compose.yaml` | Shows scheduler state, batch log tail, service log hints, and the next command. |
 | Cache path warning or error | `hpc-compose debug -f compose.yaml --preflight` | Confirms whether `x-slurm.cache_dir` is shared and writable. |
-| Services start in the wrong order | `hpc-compose plan --verbose -f compose.yaml` | Shows normalized dependencies and readiness gates before running. |
+| Services start in the wrong order | `hpc-compose plan --explain --verbose -f compose.yaml` | Shows normalized dependencies, readiness gates, and planner hints before running. |
 
 The longer symptom guide is [Troubleshooting](troubleshooting.md).
 

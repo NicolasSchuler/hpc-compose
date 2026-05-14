@@ -14,6 +14,7 @@ That directory lets follow-up commands reconnect without resubmitting.
 hpc-compose status -f compose.yaml
 hpc-compose ps -f compose.yaml
 hpc-compose watch -f compose.yaml
+hpc-compose watch -f compose.yaml --hold-on-exit always
 hpc-compose logs -f compose.yaml --follow
 hpc-compose stats -f compose.yaml
 ```
@@ -30,7 +31,7 @@ Use `--format json` on non-streaming commands when automation needs stable field
 
 ## Watch UI
 
-On an interactive terminal, `watch` and the default `up` follow mode open a live view with service state on the left and the selected service log on the right. The UI automatically switches to a compact single-column view on narrow or short terminals.
+On an interactive terminal, `watch` and the default `up` follow mode open a live view with service state on the left and log output on the right. The UI automatically switches to a compact single-column view on narrow or short terminals. It keeps a detailed status view while the job runs and, by default, holds the final screen on failures so the failing service, final scheduler state, and next diagnostic commands stay visible.
 
 Keybindings:
 
@@ -40,10 +41,16 @@ Keybindings:
 | `k`, `Up` | Move to the previous service. |
 | `g` / `G` | Jump to the first or last service. |
 | `/` | Filter services by name; press `Enter` to apply or `Esc` to cancel. |
+| `Space` | Pause or resume log following. |
+| `PgUp` / `PgDn` | Scroll the visible log pane while paused. |
+| `End` | Return to live-follow mode at the newest log lines. |
+| `a` | Toggle between the selected service log and all tracked service logs. |
 | `?` | Toggle in-UI help. |
 | `q` | Leave the watch view without cancelling the job. |
 
-Use `--watch-mode line` or `--no-tui` when you are recording output, using a screen reader, running in CI, or working in a terminal where alternate-screen UIs are inconvenient.
+Use `--hold-on-exit never|failure|always` on `up` or `watch` to control whether the final TUI stays open after a terminal scheduler state. When the view is held, press `d`, `l`, or `s` to print the exact `debug`, `logs`, or `stats` command after leaving the alternate screen.
+
+Use `--watch-mode line` or `--no-tui` when you are recording output, using a screen reader, running in CI, or working in a terminal where alternate-screen UIs are inconvenient. Line mode preserves detailed scheduler and log updates without alternate-screen control codes.
 
 ## Logs
 

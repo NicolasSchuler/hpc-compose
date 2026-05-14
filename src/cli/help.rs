@@ -64,6 +64,7 @@ pub(super) const PLAN_HELP: &str = "\
 Examples:
   hpc-compose plan -f compose.yaml
   hpc-compose plan --verbose -f compose.yaml
+  hpc-compose plan --explain -f compose.yaml
   hpc-compose plan --show-script -f compose.yaml
   hpc-compose plan -f compose.yaml --format json";
 
@@ -73,7 +74,8 @@ Examples:
   hpc-compose up --detach -f compose.yaml
   hpc-compose up --detach --format json -f compose.yaml
   hpc-compose up --dry-run -f compose.yaml
-  hpc-compose up --watch-mode line -f compose.yaml";
+  hpc-compose up --watch-mode line -f compose.yaml
+  hpc-compose up --hold-on-exit always -f compose.yaml";
 
 pub(super) const STATUS_HELP: &str = "\
 Examples:
@@ -109,7 +111,8 @@ Examples:
   hpc-compose watch -f compose.yaml
   hpc-compose watch -f compose.yaml --service app
   hpc-compose watch -f compose.yaml --job-id 12345 --lines 200
-  hpc-compose watch -f compose.yaml --watch-mode line";
+  hpc-compose watch -f compose.yaml --watch-mode line
+  hpc-compose watch -f compose.yaml --hold-on-exit always";
 
 pub(super) const DEBUG_HELP: &str = "\
 Examples:
@@ -257,6 +260,7 @@ const SCHEMA_EXAMPLES: &[&str] = &[
 const PLAN_EXAMPLES: &[&str] = &[
     "hpc-compose plan -f compose.yaml",
     "hpc-compose plan --verbose -f compose.yaml",
+    "hpc-compose plan --explain -f compose.yaml",
     "hpc-compose plan --show-script -f compose.yaml",
     "hpc-compose plan -f compose.yaml --format json",
 ];
@@ -267,6 +271,7 @@ const UP_EXAMPLES: &[&str] = &[
     "hpc-compose up --detach --format json -f compose.yaml",
     "hpc-compose up --dry-run -f compose.yaml",
     "hpc-compose up --watch-mode line -f compose.yaml",
+    "hpc-compose up --hold-on-exit always -f compose.yaml",
 ];
 
 const STATUS_EXAMPLES: &[&str] = &[
@@ -303,6 +308,7 @@ const WATCH_EXAMPLES: &[&str] = &[
     "hpc-compose watch -f compose.yaml --service app",
     "hpc-compose watch -f compose.yaml --job-id 12345 --lines 200",
     "hpc-compose watch -f compose.yaml --watch-mode line",
+    "hpc-compose watch -f compose.yaml --hold-on-exit always",
 ];
 
 const DEBUG_EXAMPLES: &[&str] = &[

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1470,8 +1471,11 @@ fn write_plan_inspect_verbose(
         )?;
         writeln!(
             writer,
-            "effective srun args: {}",
-            display_srun_command_for_backend(runtime, runtime_plan.runtime.backend).join(" ")
+            "{}",
+            format_command_block(
+                "effective srun args",
+                &display_srun_command_for_backend(runtime, runtime_plan.runtime.backend),
+            )
         )?;
         writeln!(
             writer,
@@ -1518,6 +1522,30 @@ fn format_debug_block(label: &str, values: &[String]) -> String {
         lines.push(format!("  - {value}"));
     }
     lines.join("\n")
+}
+
+fn format_command_block(label: &str, argv: &[String]) -> String {
+    if argv.is_empty() {
+        return format!("{label}: <none>");
+    }
+    if argv.len() == 1 {
+        return format!("{label}: {}", argv[0]);
+    }
+    let mut lines = vec![format!("  {}", shell_quote_arg(&argv[0]))];
+    for arg in &argv[1..] {
+        lines.push(format!("    {}", shell_quote_arg(arg)));
+    }
+    format!("{label}:\n{}", lines.join(" \\\n"))
+}
+
+fn shell_quote_arg(value: &str) -> String {
+    if value.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '=' | ',')
+    }) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn format_allocation_geometry(plan: &RuntimePlan) -> String {
@@ -2299,7 +2327,11 @@ pub(crate) fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn finish_watch(job_id: &str, outcome: WatchOutcome) -> Result<()> {
+pub(crate) fn finish_watch(
+    record: &hpc_compose::job::SubmissionRecord,
+    outcome: WatchOutcome,
+) -> Result<()> {
+    print_watch_final_summary(record, &outcome);
     match outcome {
         WatchOutcome::Completed(_) => Ok(()),
         WatchOutcome::Interrupted(_) => Ok(()),
@@ -2307,24 +2339,99 @@ pub(crate) fn finish_watch(job_id: &str, outcome: WatchOutcome) -> Result<()> {
             if let Some(detail) = status.detail {
                 bail!(
                     "job {} could not be tracked to a terminal scheduler state ({}): {}",
-                    job_id,
+                    record.job_id,
                     status.state,
                     detail
                 );
             }
             bail!(
                 "job {} could not be tracked to a terminal scheduler state ({})",
-                job_id,
+                record.job_id,
                 status.state
             );
         }
         WatchOutcome::Failed(status) => {
             bail!(
                 "job {} finished in scheduler state {}",
-                job_id,
+                record.job_id,
                 status.state
             )
         }
+    }
+}
+
+fn print_watch_final_summary(record: &hpc_compose::job::SubmissionRecord, outcome: &WatchOutcome) {
+    let (label, state) = match outcome {
+        WatchOutcome::Completed(status)
+        | WatchOutcome::Failed(status)
+        | WatchOutcome::Unknown(status)
+        | WatchOutcome::Interrupted(status) => {
+            (watch_outcome_label(outcome), status.state.as_str())
+        }
+    };
+    println!();
+    println!("{}", term::styled_section_header("Watch summary:"));
+    println!("  job id: {}", record.job_id);
+    println!("  final state: {state} ({label})");
+    if let Some(service) = failed_service_hint(record) {
+        println!("  failed service: {service}");
+    }
+    println!(
+        "  debug: hpc-compose debug -f {} --job-id {}",
+        shell_quote(&record.compose_file.display().to_string()),
+        shell_quote(&record.job_id)
+    );
+    println!(
+        "  logs:  hpc-compose logs -f {} --job-id {} --lines 200",
+        shell_quote(&record.compose_file.display().to_string()),
+        shell_quote(&record.job_id)
+    );
+    println!(
+        "  stats: hpc-compose stats -f {} --job-id {}",
+        shell_quote(&record.compose_file.display().to_string()),
+        shell_quote(&record.job_id)
+    );
+}
+
+fn watch_outcome_label(outcome: &WatchOutcome) -> &'static str {
+    match outcome {
+        WatchOutcome::Completed(_) => "completed",
+        WatchOutcome::Failed(_) => "failed",
+        WatchOutcome::Unknown(_) => "unknown",
+        WatchOutcome::Interrupted(_) => "interrupted",
+    }
+}
+
+fn failed_service_hint(record: &hpc_compose::job::SubmissionRecord) -> Option<String> {
+    let state_path = hpc_compose::job::state_path_for_record(record);
+    let raw = fs::read_to_string(state_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let services = value.get("services")?.as_array()?;
+    for service in services {
+        let name = service.get("service_name")?.as_str()?;
+        let failed_status = service
+            .get("status")
+            .and_then(|value| value.as_str())
+            .is_some_and(|status| status == "failed");
+        let failed_exit = service
+            .get("last_exit_code")
+            .and_then(|value| value.as_i64())
+            .is_some_and(|code| code != 0);
+        if failed_status || failed_exit {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -2416,7 +2523,7 @@ mod tests {
     use super::*;
     use crate::commands::run_command;
     use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
-    use hpc_compose::cli::{CacheCommands, Commands, WatchMode};
+    use hpc_compose::cli::{CacheCommands, Commands, HoldOnExit, WatchMode};
     use hpc_compose::job::{
         ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
         CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, JobInventoryEntry,
@@ -2457,6 +2564,24 @@ mod tests {
         let mut perms = fs::metadata(path).expect("meta").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut output = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for code in chars.by_ref() {
+                    if code.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            output.push(ch);
+        }
+        output
     }
 
     fn write_fake_enroot(tmpdir: &Path) -> PathBuf {
@@ -2664,8 +2789,13 @@ services:
 
     #[test]
     fn finish_watch_requires_a_terminal_scheduler_result() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache = safe_cache_dir();
+        let compose = write_valid_compose(tmpdir.path(), cache.path());
+        let plan = load_runtime_plan(&compose).expect("runtime plan");
+        let record = submission_record(tmpdir.path(), &plan, "12345");
         finish_watch(
-            "12345",
+            &record,
             WatchOutcome::Completed(hpc_compose::job::SchedulerStatus {
                 state: "COMPLETED".into(),
                 source: hpc_compose::job::SchedulerSource::Sacct,
@@ -2677,7 +2807,7 @@ services:
         .expect("completed watch");
 
         let err = finish_watch(
-            "12345",
+            &record,
             WatchOutcome::Unknown(hpc_compose::job::SchedulerStatus {
                 state: "unknown".into(),
                 source: hpc_compose::job::SchedulerSource::LocalOnly,
@@ -3005,21 +3135,22 @@ services:
         let mut status_out = Vec::new();
         write_status_snapshot(&mut status_out, &status).expect("status");
         let status_text = String::from_utf8(status_out).expect("utf8");
-        assert!(status_text.contains("Scheduler:"));
-        assert!(status_text.contains("  state: COMPLETED (sacct)"));
-        assert!(status_text.contains("  note: finished"));
-        assert!(status_text.contains("  eligible time: 2026-04-06T10:00:00"));
-        assert!(status_text.contains("  start time: 2026-04-06T10:05:00"));
-        assert!(status_text.contains("Runtime:"));
-        assert!(status_text.contains("  attempt: 1"));
-        assert!(status_text.contains("  is resume: yes"));
-        assert!(status_text.contains("  resume dir: /shared/runs/demo"));
-        assert!(status_text.contains("updated: 1m ago"));
-        assert!(status_text.contains("updated: unknown"));
-        assert!(status_text.contains(
+        let status_plain = strip_ansi(&status_text);
+        assert!(status_plain.contains("Scheduler:"));
+        assert!(status_plain.contains("  state: COMPLETED (sacct)"));
+        assert!(status_plain.contains("  note: finished"));
+        assert!(status_plain.contains("  eligible time: 2026-04-06T10:00:00"));
+        assert!(status_plain.contains("  start time: 2026-04-06T10:05:00"));
+        assert!(status_plain.contains("Runtime:"));
+        assert!(status_plain.contains("  attempt: 1"));
+        assert!(status_plain.contains("  is resume: yes"));
+        assert!(status_plain.contains("  resume dir: /shared/runs/demo"));
+        assert!(status_plain.contains("updated: 1m ago"));
+        assert!(status_plain.contains("updated: unknown"));
+        assert!(status_plain.contains(
             "  state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 window=1/3@60s last_exit=0"
         ));
-        assert!(status_text.contains(
+        assert!(status_plain.contains(
             "  placement service 'svc/name': mode=distributed nodes=2 ntasks=4 ntasks_per_node=2 nodelist=node01 node02"
         ));
 
@@ -3050,13 +3181,14 @@ services:
         let mut waiting_out = Vec::new();
         write_status_snapshot(&mut waiting_out, &waiting).expect("waiting");
         let waiting_text = String::from_utf8(waiting_out).expect("utf8");
-        assert!(waiting_text.contains("  state: WAITING_FOR_ACCOUNTING (local-only)"));
-        assert!(waiting_text.contains(
+        let waiting_plain = strip_ansi(&waiting_text);
+        assert!(waiting_plain.contains("  state: WAITING_FOR_ACCOUNTING (local-only)"));
+        assert!(waiting_plain.contains(
             "  note: job just disappeared from squeue and has not appeared in sacct yet"
         ));
-        assert!(!waiting_text.contains("pending reason:"));
-        assert!(!waiting_text.contains("eligible time:"));
-        assert!(!waiting_text.contains("start time:"));
+        assert!(!waiting_plain.contains("pending reason:"));
+        assert!(!waiting_plain.contains("eligible time:"));
+        assert!(!waiting_plain.contains("start time:"));
 
         let stats = StatsSnapshot {
             job_id: "12345".into(),
@@ -3247,12 +3379,13 @@ services:
         let mut report_out = Vec::new();
         write_artifact_export_report(&mut report_out, &report).expect("artifacts");
         let report_text = String::from_utf8(report_out).expect("utf8");
-        assert!(report_text.contains("collect policy: always"));
-        assert!(report_text.contains("attempt: 1"));
-        assert!(report_text.contains("is resume: yes"));
-        assert!(report_text.contains("resume dir: /shared/runs/demo"));
-        assert!(report_text.contains("warning: missing optional path"));
-        assert!(report_text.contains("exported: "));
+        let report_plain = strip_ansi(&report_text);
+        assert!(report_plain.contains("collect policy: always"));
+        assert!(report_plain.contains("attempt: 1"));
+        assert!(report_plain.contains("is resume: yes"));
+        assert!(report_plain.contains("resume dir: /shared/runs/demo"));
+        assert!(report_plain.contains("warning: missing optional path"));
+        assert!(report_plain.contains("exported: "));
 
         let plan_model = hpc_compose::planner::Plan {
             spec_path: tmpdir.path().join("compose.yaml"),
@@ -3715,6 +3848,7 @@ services:
             dry_run: false,
             detach: true,
             watch_mode: WatchMode::Auto,
+            hold_on_exit: HoldOnExit::Failure,
             no_tui: false,
             format: None,
         })
@@ -3741,6 +3875,7 @@ services:
             dry_run: false,
             detach: true,
             watch_mode: WatchMode::Auto,
+            hold_on_exit: HoldOnExit::Failure,
             no_tui: false,
             format: None,
         })
@@ -3765,6 +3900,7 @@ services:
             dry_run: false,
             detach: true,
             watch_mode: WatchMode::Auto,
+            hold_on_exit: HoldOnExit::Failure,
             no_tui: false,
             format: None,
         })
