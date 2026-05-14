@@ -1,16 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use toml::Value;
+use toml::{Table, Value};
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn cargo_manifest() -> Value {
+fn cargo_manifest() -> Table {
     fs::read_to_string(repo_root().join("Cargo.toml"))
         .expect("read Cargo.toml")
-        .parse::<Value>()
+        .parse::<Table>()
         .expect("parse Cargo.toml")
 }
 
