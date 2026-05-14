@@ -514,7 +514,7 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 - Relative paths are resolved against the compose file directory.
 - Paths that look like build contexts are rejected.
 
-## `command`, `entrypoint`, and `script`
+## `command`, `entrypoint`, and `script` { #command-and-entrypoint }
 
 Both fields accept either:
 

@@ -1584,31 +1584,16 @@ mod tests {
     #[test]
     fn preflight_detects_pyxis_missing() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
-        fs::create_dir_all(tmpdir.path().join("src")).expect("src");
-        fs::create_dir_all(tmpdir.path().join("deps")).expect("deps");
         let srun = tmpdir.path().join("srun");
-        let sbatch = tmpdir.path().join("sbatch");
-        let enroot = tmpdir.path().join("enroot");
         write_fake_binary(&srun, "#!/bin/bash\necho no-pyxis\n");
-        write_fake_binary(&sbatch, "#!/bin/bash\nexit 0\n");
-        write_fake_binary(&enroot, "#!/bin/bash\nexit 0\n");
-        let plan = runtime_plan(tmpdir.path());
-        let report = run(
-            &plan,
-            &Options {
-                enroot_bin: enroot.display().to_string(),
-                sbatch_bin: sbatch.display().to_string(),
-                srun_bin: srun.display().to_string(),
-                scontrol_bin: "scontrol".into(),
-                require_submit_tools: true,
-                skip_prepare: false,
-                ..Options::default()
-            },
-        );
+
+        let mut report = Report { items: Vec::new() };
+        check_pyxis_support(&mut report, srun.to_str().expect("path"));
         assert!(
-            report
-                .render()
-                .contains("Pyxis support appears unavailable")
+            report.items.iter().any(|item| item.level == Level::Error
+                && item.message.contains("Pyxis support appears unavailable")),
+            "expected missing Pyxis support finding, got {:#?}",
+            report.items
         );
     }
 
