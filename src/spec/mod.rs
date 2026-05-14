@@ -2046,6 +2046,8 @@ impl SlurmConfig {
         validate_positive_u32(self.nodes, "x-slurm.nodes")?;
         validate_positive_u32(self.ntasks, "x-slurm.ntasks")?;
         validate_positive_u32(self.ntasks_per_node, "x-slurm.ntasks_per_node")?;
+        validate_positive_u32(self.cpus_per_task, "x-slurm.cpus_per_task")?;
+        validate_positive_u32(self.gpus, "x-slurm.gpus")?;
         validate_positive_u32(self.gpus_per_node, "x-slurm.gpus_per_node")?;
         validate_positive_u32(self.gpus_per_task, "x-slurm.gpus_per_task")?;
         validate_positive_u32(self.cpus_per_gpu, "x-slurm.cpus_per_gpu")?;
@@ -2327,11 +2329,7 @@ impl ArtifactsConfig {
 
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
         if let Some(export_dir) = &mut self.export_dir {
-            let mut vars_with_job_id = vars.clone();
-            const JOB_ID_SENTINEL: &str = "__HPC_COMPOSE_SLURM_JOB_ID__";
-            vars_with_job_id.insert("SLURM_JOB_ID".to_string(), JOB_ID_SENTINEL.to_string());
-            *export_dir = interpolate_string(export_dir, &vars_with_job_id)?
-                .replace(JOB_ID_SENTINEL, "${SLURM_JOB_ID}");
+            *export_dir = interpolate_string_preserving_slurm_job_id(export_dir, vars)?;
         }
         interpolate_vec_strings(&mut self.paths, vars)?;
         for bundle in self.bundles.values_mut() {
@@ -2487,6 +2485,11 @@ impl ServiceSlurmConfig {
             self.ntasks_per_node,
             &format!("service '{service_name}' x-slurm.ntasks_per_node"),
         )?;
+        validate_positive_u32(
+            self.cpus_per_task,
+            &format!("service '{service_name}' x-slurm.cpus_per_task"),
+        )?;
+        validate_positive_u32(self.gpus, &format!("service '{service_name}' x-slurm.gpus"))?;
         validate_positive_u32(
             self.gpus_per_node,
             &format!("service '{service_name}' x-slurm.gpus_per_node"),
@@ -3851,7 +3854,7 @@ services:
             r#"
 x-slurm:
   artifacts:
-    export_dir: ./results
+    export_dir: ./results/${SLURM_JOB_ID}
     paths:
       - /hpc-compose/job/metrics/**
       - /hpc-compose/job/checkpoints/*.pt
@@ -3867,7 +3870,10 @@ services:
             ArtifactCollectPolicy::Always
         );
         let artifacts = spec.slurm.artifacts.expect("artifacts");
-        assert_eq!(artifacts.export_dir.as_deref(), Some("./results"));
+        assert_eq!(
+            artifacts.export_dir.as_deref(),
+            Some("./results/${SLURM_JOB_ID}")
+        );
         assert_eq!(artifacts.paths.len(), 2);
     }
 
@@ -5221,6 +5227,64 @@ services:
         };
         let err = config.validate().expect_err("line break in submit arg");
         assert!(err.to_string().contains("x-slurm.submit_args[1]"));
+    }
+
+    #[test]
+    fn slurm_resource_counts_must_be_positive() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        for (name, body, needle) in [
+            (
+                "top-level-cpus-per-task",
+                r#"
+x-slurm:
+  cpus_per_task: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.cpus_per_task",
+            ),
+            (
+                "top-level-gpus",
+                r#"
+x-slurm:
+  gpus: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.gpus",
+            ),
+            (
+                "service-cpus-per-task",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      cpus_per_task: 0
+"#,
+                "service 'app' x-slurm.cpus_per_task",
+            ),
+            (
+                "service-gpus",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      gpus: 0
+"#,
+                "service 'app' x-slurm.gpus",
+            ),
+        ] {
+            let path = write_spec(tmpdir.path(), body);
+            let err = ComposeSpec::load(&path).unwrap_err();
+            assert!(
+                err.to_string().contains(needle),
+                "{name}: expected error containing '{needle}', got {err}"
+            );
+        }
     }
 
     #[test]

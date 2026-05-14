@@ -117,16 +117,16 @@ These fields live under the top-level `x-slurm` block.
 | `account` | string | omitted | Passed through to `#SBATCH --account`. |
 | `qos` | string | omitted | Passed through to `#SBATCH --qos`. |
 | `time` | string | omitted | Passed through to `#SBATCH --time`. |
-| `nodes` | integer | omitted | Slurm allocation node count. Defaults to `1` when omitted. |
-| `ntasks` | integer | omitted | Passed through to `#SBATCH --ntasks`. |
-| `ntasks_per_node` | integer | omitted | Passed through to `#SBATCH --ntasks-per-node`. |
-| `cpus_per_task` | integer | omitted | Top-level Slurm CPU request. |
+| `nodes` | positive integer | omitted | Slurm allocation node count. Defaults to `1` when omitted. |
+| `ntasks` | positive integer | omitted | Passed through to `#SBATCH --ntasks`. |
+| `ntasks_per_node` | positive integer | omitted | Passed through to `#SBATCH --ntasks-per-node`. |
+| `cpus_per_task` | positive integer | omitted | Top-level Slurm CPU request. |
 | `mem` | string | omitted | Passed through to `#SBATCH --mem`. |
 | `gres` | string | omitted | Passed through to `#SBATCH --gres`. |
-| `gpus` | integer | omitted | Used only when `gres` is not set. |
-| `gpus_per_node` | integer | omitted | Passed through to `#SBATCH --gpus-per-node`. |
-| `gpus_per_task` | integer | omitted | Passed through to `#SBATCH --gpus-per-task`. |
-| `cpus_per_gpu` | integer | omitted | Passed through to `#SBATCH --cpus-per-gpu`. |
+| `gpus` | positive integer | omitted | Used only when `gres` is not set. |
+| `gpus_per_node` | positive integer | omitted | Passed through to `#SBATCH --gpus-per-node`. |
+| `gpus_per_task` | positive integer | omitted | Passed through to `#SBATCH --gpus-per-task`. |
+| `cpus_per_gpu` | positive integer | omitted | Passed through to `#SBATCH --cpus-per-gpu`. |
 | `mem_per_gpu` | string | omitted | Passed through to `#SBATCH --mem-per-gpu`. |
 | `gpu_bind` | string | omitted | Passed through to `#SBATCH --gpu-bind`. |
 | `cpu_bind` | string | omitted | Passed through to `#SBATCH --cpu-bind`. |
@@ -696,16 +696,16 @@ These fields live under `services.<name>.x-slurm`.
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
-| `nodes` | integer | omitted | Legacy shorthand: `1` for a helper step, or the full top-level allocation node count for a full-allocation distributed service. Partial multi-node counts require `placement.node_count`. |
+| `nodes` | positive integer | omitted | Legacy shorthand: `1` for a helper step, or the full top-level allocation node count for a full-allocation distributed service. Partial multi-node counts require `placement.node_count`. |
 | `placement` | mapping | omitted | Explicit node-index placement inside the allocation. |
-| `ntasks` | integer | omitted | Adds `--ntasks` to that service's `srun`. |
-| `ntasks_per_node` | integer | omitted | Adds `--ntasks-per-node` to that service's `srun`. |
-| `cpus_per_task` | integer | omitted | Adds `--cpus-per-task` to that service's `srun`. |
-| `gpus` | integer | omitted | Adds `--gpus` when `gres` is not set. |
+| `ntasks` | positive integer | omitted | Adds `--ntasks` to that service's `srun`. |
+| `ntasks_per_node` | positive integer | omitted | Adds `--ntasks-per-node` to that service's `srun`. |
+| `cpus_per_task` | positive integer | omitted | Adds `--cpus-per-task` to that service's `srun`. |
+| `gpus` | positive integer | omitted | Adds `--gpus` when `gres` is not set. |
 | `gres` | string | omitted | Adds `--gres` to that service's `srun`. Takes priority over `gpus`. |
-| `gpus_per_node` | integer | omitted | Adds `--gpus-per-node` to that service's `srun`. |
-| `gpus_per_task` | integer | omitted | Adds `--gpus-per-task` to that service's `srun`. |
-| `cpus_per_gpu` | integer | omitted | Adds `--cpus-per-gpu` to that service's `srun`. |
+| `gpus_per_node` | positive integer | omitted | Adds `--gpus-per-node` to that service's `srun`. |
+| `gpus_per_task` | positive integer | omitted | Adds `--gpus-per-task` to that service's `srun`. |
+| `cpus_per_gpu` | positive integer | omitted | Adds `--cpus-per-gpu` to that service's `srun`. |
 | `mem_per_gpu` | string | omitted | Adds `--mem-per-gpu` to that service's `srun`. |
 | `gpu_bind` | string | omitted | Adds `--gpu-bind` to that service's `srun`. |
 | `cpu_bind` | string | omitted | Adds `--cpu-bind` to that service's `srun`. |
