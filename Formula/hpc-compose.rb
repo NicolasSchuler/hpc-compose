@@ -2,16 +2,16 @@ class HpcCompose < Formula
   desc "Compose-like specs for single-allocation Slurm jobs across HPC runtime backends"
   homepage "https://github.com/NicolasSchuler/hpc-compose"
   license "MIT"
-  version "0.1.23"
+  version "0.1.38"
 
   on_arm do
-    url "https://github.com/NicolasSchuler/hpc-compose/releases/download/v0.1.23/hpc-compose-v0.1.23-aarch64-apple-darwin.tar.gz"
-    sha256 "c91a16e6a87edf11b43a12778f6d2387ea7822a050fef70e3a90e0b103627132"
+    url "https://github.com/NicolasSchuler/hpc-compose/releases/download/v0.1.38/hpc-compose-v0.1.38-aarch64-apple-darwin.tar.gz"
+    sha256 "3f871176f3fe399216dddef057484d50b6383e0d53f84783329e655395e638b6"
   end
 
   on_intel do
-    url "https://github.com/NicolasSchuler/hpc-compose/releases/download/v0.1.23/hpc-compose-v0.1.23-x86_64-apple-darwin.tar.gz"
-    sha256 "3bb06faba75e9d6471ce324349281bf716ae44163ccc15fa82c7a9c751792379"
+    url "https://github.com/NicolasSchuler/hpc-compose/releases/download/v0.1.38/hpc-compose-v0.1.38-x86_64-apple-darwin.tar.gz"
+    sha256 "91faaffc9a73d2f874417936e2f52c36e2d6bf512d5ceb2c893aca5c66c56173"
   end
 
   def install
