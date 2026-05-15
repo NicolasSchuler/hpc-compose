@@ -716,7 +716,22 @@ fn remove_path_if_present(path: &Path) -> Result<()> {
 
     let file_type = metadata.file_type();
     if file_type.is_dir() && !file_type.is_symlink() {
-        fs::remove_dir_all(path).context(format!("failed to remove {}", path.display()))?;
+        let mut attempts = 0;
+        loop {
+            match fs::remove_dir_all(path) {
+                Ok(()) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::DirectoryNotEmpty && attempts < 20 =>
+                {
+                    attempts += 1;
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => {
+                    return Err(err).context(format!("failed to remove {}", path.display()));
+                }
+            }
+        }
     } else {
         fs::remove_file(path).context(format!("failed to remove {}", path.display()))?;
     }

@@ -1666,7 +1666,7 @@ name = ""
         fs::write(&enroot, "").expect("enroot marker");
         write_executable(
             &tmpdir.path().join("sbatch"),
-            "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo 'slurm 24.05.1' >&2; exit 0; fi\nexit 2\n",
+            "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo 'slurm 24.05.1'; exit 0; fi\nexit 2\n",
         );
         write_executable(
             &tmpdir.path().join("srun"),
