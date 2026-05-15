@@ -343,7 +343,6 @@ services:
 #[test]
 fn lint_reports_opinionated_findings_and_allow_warnings_controls_exit() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    fs::create_dir_all(tmpdir.path().join("shared")).expect("shared");
     let compose = write_compose(
         tmpdir.path(),
         "compose.yaml",
@@ -361,7 +360,7 @@ services:
   sidecar:
     image: redis:7
     volumes:
-      - ./shared:/shared
+      - /shared/hpc-compose-lint:/shared
     x-slurm:
       failure_policy:
         mode: ignore
@@ -374,9 +373,19 @@ services:
     );
     assert_failure(&lint);
     let stdout = stdout_text(&lint);
-    assert!(stdout.contains("HPC001"));
-    assert!(stdout.contains("HPC002"));
-    assert!(stdout.contains("HPC003"));
+    let stderr = stderr_text(&lint);
+    assert!(
+        stdout.contains("HPC001"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("HPC002"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("HPC003"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(stderr_text(&lint).contains("lint found"));
 
     let lint_json = run_cli(

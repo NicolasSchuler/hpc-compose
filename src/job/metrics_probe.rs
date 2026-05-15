@@ -333,12 +333,12 @@ mod linux_perf {
     const PERF_ATTR_EXCLUDE_HV: u64 = 1 << 6;
     const PERF_FLAG_FD_CLOEXEC: libc::c_ulong = 1 << 3;
     const PERF_IOC_FLAG_GROUP: libc::c_ulong = 1;
-    const PERF_EVENT_IOC_ENABLE: libc::c_ulong = ioctl_none(b'$', 0);
-    const PERF_EVENT_IOC_DISABLE: libc::c_ulong = ioctl_none(b'$', 1);
-    const PERF_EVENT_IOC_RESET: libc::c_ulong = ioctl_none(b'$', 3);
+    const PERF_EVENT_IOC_ENABLE: libc::Ioctl = ioctl_none(b'$', 0);
+    const PERF_EVENT_IOC_DISABLE: libc::Ioctl = ioctl_none(b'$', 1);
+    const PERF_EVENT_IOC_RESET: libc::Ioctl = ioctl_none(b'$', 3);
 
-    const fn ioctl_none(kind: u8, nr: u8) -> libc::c_ulong {
-        ((kind as libc::c_ulong) << 8) | nr as libc::c_ulong
+    const fn ioctl_none(kind: u8, nr: u8) -> libc::Ioctl {
+        (((kind as u64) << 8) | nr as u64) as libc::Ioctl
     }
 
     #[repr(C)]
@@ -380,7 +380,9 @@ mod linux_perf {
                 read_format: PERF_FORMAT_GROUP
                     | PERF_FORMAT_TOTAL_TIME_ENABLED
                     | PERF_FORMAT_TOTAL_TIME_RUNNING,
-                flags: (disabled as u64) | PERF_ATTR_EXCLUDE_KERNEL | PERF_ATTR_EXCLUDE_HV,
+                flags: if disabled { PERF_ATTR_DISABLED } else { 0 }
+                    | PERF_ATTR_EXCLUDE_KERNEL
+                    | PERF_ATTR_EXCLUDE_HV,
                 wakeup_events_or_watermark: 0,
                 bp_type: 0,
                 config1: 0,
@@ -486,7 +488,7 @@ mod linux_perf {
         iterations
     }
 
-    fn ioctl(fd: i32, request: libc::c_ulong, arg: libc::c_ulong) -> i32 {
+    fn ioctl(fd: i32, request: libc::Ioctl, arg: libc::c_ulong) -> i32 {
         unsafe { libc::ioctl(fd, request, arg) }
     }
 
