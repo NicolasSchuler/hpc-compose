@@ -4,6 +4,9 @@ pub(super) const TOP_LEVEL_HELP: &str = "\
 Normal run:
   hpc-compose up -f compose.yaml
 
+Conditional run:
+  hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
+
 Safe plan:
   hpc-compose plan -f compose.yaml
 
@@ -12,19 +15,27 @@ Debug failed run:
 
 Start a new spec:
   hpc-compose new --template minimal-batch --name my-app --output compose.yaml
+  hpc-compose evolve --output compose.yaml
 
 Workflow groups:
-  Start:          new, setup, context
-  Plan/Run:       plan, up, run
-  Observe/Debug:  debug, watch, status, logs, ps, stats, artifacts
+  Start:          new, evolve, setup, context
+  Plan/Run:       plan, up, when, alloc, run
+  Develop/Test:   test, dev, tmux
+  Observe/Debug:  weather, debug, watch, replay, status, logs, ps, stats, score, diff, artifacts, sweep
   Maintain:       cache, jobs, clean, down, cancel
-  Advanced:       validate, inspect, config, render, prepare, preflight, doctor, schema, completions";
+  Advanced:       validate, lint, inspect, config, render, prepare, preflight, doctor, schema, completions";
 
 pub(super) const VALIDATE_HELP: &str = "\
 Examples:
   hpc-compose validate -f compose.yaml
   hpc-compose validate -f compose.yaml --strict-env
   hpc-compose validate -f compose.yaml --format json";
+
+pub(super) const LINT_HELP: &str = "\
+Examples:
+  hpc-compose lint -f compose.yaml
+  hpc-compose lint -f compose.yaml --allow-warnings
+  hpc-compose lint -f compose.yaml --format json";
 
 pub(super) const RENDER_HELP: &str = "\
 Examples:
@@ -44,11 +55,18 @@ Examples:
   hpc-compose preflight -f compose.yaml --strict
   hpc-compose preflight -f compose.yaml --format json";
 
+pub(super) const WEATHER_HELP: &str = "\
+Examples:
+  hpc-compose weather
+  hpc-compose weather --format json
+  hpc-compose weather --sinfo-bin /site/bin/sinfo --squeue-bin /site/bin/squeue";
+
 pub(super) const INSPECT_HELP: &str = "\
 Examples:
   hpc-compose inspect -f compose.yaml
   hpc-compose inspect --verbose -f compose.yaml
-  hpc-compose inspect -f compose.yaml --format json";
+  hpc-compose inspect -f compose.yaml --format json
+  hpc-compose inspect --rightsize -f compose.yaml";
 
 pub(super) const CONFIG_HELP: &str = "\
 Examples:
@@ -74,19 +92,94 @@ Examples:
   hpc-compose up --detach -f compose.yaml
   hpc-compose up --detach --format json -f compose.yaml
   hpc-compose up --dry-run -f compose.yaml
+  hpc-compose up --watch-queue --queue-warn-after 15m -f compose.yaml
   hpc-compose up --watch-mode line -f compose.yaml
   hpc-compose up --hold-on-exit always -f compose.yaml";
+
+pub(super) const TEST_HELP: &str = "\
+Examples:
+  hpc-compose test --local -f compose.yaml
+  hpc-compose test --submit --time 00:01:00 -f compose.yaml
+  hpc-compose test --submit --timeout 180s --format json -f compose.yaml
+
+Smoke tests are finite: every service must start, pass configured readiness, and complete successfully.";
+
+pub(super) const DEV_HELP: &str = "\
+Examples:
+  hpc-compose dev -f compose.yaml
+  hpc-compose dev -f compose.yaml --watch-path ./src
+  hpc-compose dev -f compose.yaml --debounce-ms 500 --keep-running
+
+Local dev mode watches bind-mounted source directories and asks the local supervisor to restart affected services.";
+
+pub(super) const TMUX_HELP: &str = "\
+Examples:
+  hpc-compose tmux -f compose.yaml
+  hpc-compose tmux -f compose.yaml --job-id local-123
+  hpc-compose tmux -f compose.yaml --session demo --no-attach
+
+tmux panes tail service logs; the local supervisor still owns process launch and restarts.";
+
+pub(super) const SWEEP_HELP: &str = "\
+Examples:
+  hpc-compose sweep submit -f train.yaml --dry-run
+  hpc-compose sweep submit -f train.yaml
+  hpc-compose sweep status -f train.yaml
+  hpc-compose sweep list -f train.yaml";
+
+pub(super) const SWEEP_SUBMIT_HELP: &str = "\
+Examples:
+  hpc-compose sweep submit -f train.yaml --dry-run
+  hpc-compose sweep submit -f train.yaml --max-trials 200
+  hpc-compose sweep submit -f train.yaml --format json";
+
+pub(super) const SWEEP_STATUS_HELP: &str = "\
+Examples:
+  hpc-compose sweep status -f train.yaml
+  hpc-compose sweep status -f train.yaml --sweep-id sweep-123
+  hpc-compose sweep status -f train.yaml --format json";
+
+pub(super) const SWEEP_LIST_HELP: &str = "\
+Examples:
+  hpc-compose sweep list -f train.yaml
+  hpc-compose sweep list -f train.yaml --format json";
+
+pub(super) const WHEN_HELP: &str = "\
+Examples:
+  hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
+  hpc-compose when -f compose.yaml --after-job 12345
+  hpc-compose when -f compose.yaml --between 22:00-06:00
+  hpc-compose when --detach --format json -f compose.yaml --partition gpu8 --free-nodes 4";
+
+pub(super) const ALLOC_HELP: &str = "\
+Examples:
+  hpc-compose alloc -f compose.yaml
+  hpc-compose alloc -f compose.yaml -- bash -lc 'hpc-compose run app -- python -m pytest'
+  hpc-compose alloc -f compose.yaml --skip-prepare";
 
 pub(super) const STATUS_HELP: &str = "\
 Examples:
   hpc-compose status -f compose.yaml
+  hpc-compose status -f compose.yaml --array
   hpc-compose status -f compose.yaml --format json";
 
 pub(super) const STATS_HELP: &str = "\
 Examples:
   hpc-compose stats -f compose.yaml
   hpc-compose stats -f compose.yaml --format json
+  hpc-compose stats -f compose.yaml --accounting --format csv
   hpc-compose stats -f compose.yaml --format csv";
+
+pub(super) const SCORE_HELP: &str = "\
+Examples:
+  hpc-compose score 12345
+  hpc-compose score -f compose.yaml
+  hpc-compose score 12345 --pue 1.3 --gpu-tdp-w 350 --format json";
+
+pub(super) const DIFF_HELP: &str = "\
+Examples:
+  hpc-compose diff 12345 12346 -f compose.yaml
+  hpc-compose diff 12345 12346 --format json";
 
 pub(super) const ARTIFACTS_HELP: &str = "\
 Examples:
@@ -98,6 +191,7 @@ pub(super) const LOGS_HELP: &str = "\
 Examples:
   hpc-compose logs -f compose.yaml
   hpc-compose logs -f compose.yaml --service app --follow
+  hpc-compose logs -f compose.yaml --grep 'error|oom' --since 30m
   hpc-compose logs -f compose.yaml --job-id 12345 --lines 200";
 
 pub(super) const PS_HELP: &str = "\
@@ -113,6 +207,14 @@ Examples:
   hpc-compose watch -f compose.yaml --job-id 12345 --lines 200
   hpc-compose watch -f compose.yaml --watch-mode line
   hpc-compose watch -f compose.yaml --hold-on-exit always";
+
+pub(super) const REPLAY_HELP: &str = "\
+Examples:
+  hpc-compose replay -f compose.yaml
+  hpc-compose replay -f compose.yaml --speed 10
+  hpc-compose replay -f compose.yaml --job-id 12345 --service app
+  hpc-compose replay -f compose.yaml --no-tui
+  hpc-compose replay -f compose.yaml --format json";
 
 pub(super) const DEBUG_HELP: &str = "\
 Examples:
@@ -136,6 +238,8 @@ pub(super) const RUN_HELP: &str = "\
 Examples:
   hpc-compose run -f compose.yaml app -- python -m pytest
   hpc-compose run -f compose.yaml app -- bash
+  hpc-compose alloc -f compose.yaml
+  hpc-compose run -f compose.yaml app -- python -m pytest
   hpc-compose run --image docker://python:3.12 -- python -V";
 
 pub(super) const SHELL_HELP: &str = "\
@@ -150,6 +254,14 @@ Examples:
   hpc-compose new --describe-template minimal-batch
   hpc-compose new --template minimal-batch --name my-app --output compose.yaml
   hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml";
+
+pub(super) const EVOLVE_HELP: &str = "\
+Examples:
+  hpc-compose evolve
+  hpc-compose evolve --list-lessons
+  hpc-compose evolve --describe-lesson progressive-complexity
+  hpc-compose evolve --output compose.yaml --name my-app --cache-dir '<shared-cache-dir>'
+  hpc-compose evolve --yes --until readiness --format json";
 
 pub(super) const CACHE_HELP: &str = "\
 Examples:
@@ -209,7 +321,9 @@ Examples:
 
 const TOP_LEVEL_EXAMPLES: &[&str] = &[
     "hpc-compose up -f compose.yaml",
+    "hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4",
     "hpc-compose plan -f compose.yaml",
+    "hpc-compose evolve --output compose.yaml",
     "hpc-compose debug -f compose.yaml --preflight",
     "hpc-compose validate -f compose.yaml",
     "hpc-compose inspect --verbose -f compose.yaml",
@@ -221,6 +335,12 @@ const VALIDATE_EXAMPLES: &[&str] = &[
     "hpc-compose validate -f compose.yaml",
     "hpc-compose validate -f compose.yaml --strict-env",
     "hpc-compose validate -f compose.yaml --format json",
+];
+
+const LINT_EXAMPLES: &[&str] = &[
+    "hpc-compose lint -f compose.yaml",
+    "hpc-compose lint -f compose.yaml --allow-warnings",
+    "hpc-compose lint -f compose.yaml --format json",
 ];
 
 const RENDER_EXAMPLES: &[&str] = &[
@@ -274,6 +394,20 @@ const UP_EXAMPLES: &[&str] = &[
     "hpc-compose up --hold-on-exit always -f compose.yaml",
 ];
 
+const WHEN_EXAMPLES: &[&str] = &[
+    "hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4",
+    "hpc-compose when -f compose.yaml --after-job 12345",
+    "hpc-compose when -f compose.yaml --between 22:00-06:00",
+    "hpc-compose when --detach --format json -f compose.yaml --partition gpu8 --free-nodes 4",
+];
+
+const SWEEP_EXAMPLES: &[&str] = &[
+    "hpc-compose sweep submit -f train.yaml --dry-run",
+    "hpc-compose sweep submit -f train.yaml",
+    "hpc-compose sweep status -f train.yaml",
+    "hpc-compose sweep list -f train.yaml",
+];
+
 const STATUS_EXAMPLES: &[&str] = &[
     "hpc-compose status -f compose.yaml",
     "hpc-compose status -f compose.yaml --format json",
@@ -283,6 +417,12 @@ const STATS_EXAMPLES: &[&str] = &[
     "hpc-compose stats -f compose.yaml",
     "hpc-compose stats -f compose.yaml --format json",
     "hpc-compose stats -f compose.yaml --format csv",
+];
+
+const SCORE_EXAMPLES: &[&str] = &[
+    "hpc-compose score 12345",
+    "hpc-compose score -f compose.yaml",
+    "hpc-compose score 12345 --pue 1.3 --gpu-tdp-w 350 --format json",
 ];
 
 const ARTIFACTS_EXAMPLES: &[&str] = &[
@@ -309,6 +449,14 @@ const WATCH_EXAMPLES: &[&str] = &[
     "hpc-compose watch -f compose.yaml --job-id 12345 --lines 200",
     "hpc-compose watch -f compose.yaml --watch-mode line",
     "hpc-compose watch -f compose.yaml --hold-on-exit always",
+];
+
+const REPLAY_EXAMPLES: &[&str] = &[
+    "hpc-compose replay -f compose.yaml",
+    "hpc-compose replay -f compose.yaml --speed 10",
+    "hpc-compose replay -f compose.yaml --job-id 12345 --service app",
+    "hpc-compose replay -f compose.yaml --no-tui",
+    "hpc-compose replay -f compose.yaml --format json",
 ];
 
 const DEBUG_EXAMPLES: &[&str] = &[
@@ -346,6 +494,14 @@ const NEW_EXAMPLES: &[&str] = &[
     "hpc-compose new --describe-template minimal-batch",
     "hpc-compose new --template minimal-batch --name my-app --output compose.yaml",
     "hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml",
+];
+
+const EVOLVE_EXAMPLES: &[&str] = &[
+    "hpc-compose evolve",
+    "hpc-compose evolve --list-lessons",
+    "hpc-compose evolve --describe-lesson progressive-complexity",
+    "hpc-compose evolve --output compose.yaml --name my-app --cache-dir '<shared-cache-dir>'",
+    "hpc-compose evolve --yes --until readiness --format json",
 ];
 
 const CACHE_EXAMPLES: &[&str] = &[
@@ -416,6 +572,7 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
     match path {
         [] => TOP_LEVEL_EXAMPLES,
         ["validate"] => VALIDATE_EXAMPLES,
+        ["lint"] => LINT_EXAMPLES,
         ["render"] => RENDER_EXAMPLES,
         ["prepare"] => PREPARE_EXAMPLES,
         ["preflight"] => PREFLIGHT_EXAMPLES,
@@ -428,18 +585,26 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["doctor", "fabric-smoke"] => DOCTOR_EXAMPLES,
         ["plan"] => PLAN_EXAMPLES,
         ["up"] => UP_EXAMPLES,
+        ["when"] => WHEN_EXAMPLES,
+        ["sweep"] => SWEEP_EXAMPLES,
+        ["sweep", "submit"] => SWEEP_EXAMPLES,
+        ["sweep", "status"] => SWEEP_EXAMPLES,
+        ["sweep", "list"] => SWEEP_EXAMPLES,
         ["status"] => STATUS_EXAMPLES,
         ["stats"] => STATS_EXAMPLES,
+        ["score"] => SCORE_EXAMPLES,
         ["artifacts"] => ARTIFACTS_EXAMPLES,
         ["logs"] => LOGS_EXAMPLES,
         ["ps"] => PS_EXAMPLES,
         ["watch"] => WATCH_EXAMPLES,
+        ["replay"] => REPLAY_EXAMPLES,
         ["debug"] => DEBUG_EXAMPLES,
         ["cancel"] => CANCEL_EXAMPLES,
         ["down"] => DOWN_EXAMPLES,
         ["run"] => RUN_EXAMPLES,
         ["shell"] => SHELL_EXAMPLES,
         ["new"] => NEW_EXAMPLES,
+        ["evolve"] => EVOLVE_EXAMPLES,
         ["cache"] => CACHE_EXAMPLES,
         ["cache", "list"] => CACHE_LIST_EXAMPLES,
         ["cache", "inspect"] => CACHE_INSPECT_EXAMPLES,

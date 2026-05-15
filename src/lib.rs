@@ -44,8 +44,10 @@ pub mod cluster;
 pub mod commands;
 pub mod context;
 pub(crate) mod domain;
+pub mod evolve;
 pub mod init;
 pub mod job;
+pub mod lint;
 pub mod manpages;
 pub(crate) mod output;
 pub(crate) mod path_util;
@@ -55,12 +57,15 @@ pub mod prepare;
 pub(crate) mod progress;
 pub(crate) mod readiness_util;
 pub mod render;
+pub mod rendezvous;
 pub mod schema;
 pub mod spec;
 pub(crate) mod spec_error;
 pub(crate) mod term;
 pub(crate) mod tracked_paths;
 pub(crate) mod watch_ui;
+pub mod weather;
+pub(crate) mod when;
 
 /// Converts a CLI failure into a rendered diagnostic report while preserving
 /// structured spec diagnostics when they are present inside an `anyhow::Error`.

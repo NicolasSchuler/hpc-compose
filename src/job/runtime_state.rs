@@ -55,6 +55,12 @@ pub(super) struct ServiceRuntimeStateEntry {
     #[serde(default)]
     pub(super) last_exit_code: Option<i32>,
     #[serde(default)]
+    pub(super) started_at: Option<u64>,
+    #[serde(default)]
+    pub(super) finished_at: Option<u64>,
+    #[serde(default)]
+    pub(super) duration_seconds: Option<u64>,
+    #[serde(default)]
     pub(super) first_failure_at: Option<u64>,
     #[serde(default)]
     pub(super) first_failure_exit_code: Option<i32>,
@@ -72,6 +78,26 @@ pub(super) struct ServiceRuntimeStateEntry {
     pub(super) ntasks_per_node: Option<u32>,
     #[serde(default)]
     pub(super) nodelist: Option<String>,
+    #[serde(default)]
+    pub(super) assertions: Option<ServiceRuntimeAssertionState>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct ServiceRuntimeAssertionState {
+    #[serde(default)]
+    pub(super) configured: bool,
+    #[serde(default)]
+    pub(super) status: Option<String>,
+    #[serde(default)]
+    pub(super) expected_exit_code: Option<i32>,
+    #[serde(default)]
+    pub(super) artifacts_contain: Option<String>,
+    #[serde(default)]
+    pub(super) max_duration_seconds: Option<u64>,
+    #[serde(default)]
+    pub(super) duration_seconds: Option<u64>,
+    #[serde(default)]
+    pub(super) failures: Vec<String>,
 }
 
 pub(super) fn load_runtime_state(record: &SubmissionRecord) -> Option<ServiceRuntimeStateFile> {

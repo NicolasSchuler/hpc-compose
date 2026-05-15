@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{HoldOnExit, OutputFormat, StatsOutputFormat, WatchMode};
@@ -13,14 +15,23 @@ use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, res
 #[cfg(test)]
 use hpc_compose::job::build_submission_record_with_backend;
 use hpc_compose::job::{
-    ArtifactExportOptions, CleanupMode, RequestedWalltime, SchedulerOptions, StatsOptions,
+    ArtifactExportOptions, CleanupMode, EfficiencyScoreOptions, MetricsProbeOptions,
+    RequestedWalltime, SWEEP_MANIFEST_SCHEMA_VERSION, SchedulerOptions, StatsOptions,
     SubmissionBackend, SubmissionKind, SubmissionRecord, SubmissionRecordBuildOptions,
-    build_cleanup_report, build_ps_snapshot, build_stats_snapshot, build_status_snapshot,
-    build_submission_record_with_backend_and_options, build_submission_record_with_options,
-    export_artifacts, find_submission_record_in_repo, jobs_dir_for, latest_record_path_for,
-    latest_run_record_path_for, load_submission_record, print_logs, remove_submission_record,
-    run_cleanup_report, runtime_job_root_for_record, scan_job_inventory, scan_job_records,
-    state_path_for_record, watch_submission, write_submission_record,
+    SweepExpansionTrial, SweepManifest, SweepManifestTrial, SweepTrialMetadata,
+    build_array_status_snapshot, build_cleanup_report, build_efficiency_score_report,
+    build_job_diff_report, build_metrics_probe_report, build_ps_snapshot, build_replay_report,
+    build_rightsize_report, build_stats_snapshot, build_status_snapshot,
+    build_status_snapshot_with_array, build_submission_record_with_backend_and_options,
+    build_submission_record_with_options, expand_sweep_with_limit, export_artifacts,
+    find_submission_record_in_repo, generate_sweep_id, interpolation_vars_for_sweep_trial,
+    jobs_dir_for, latest_canary_record_path_for, latest_record_path_for,
+    latest_run_record_path_for, load_submission_record, load_sweep_manifest, metadata_root_for,
+    parse_log_since_duration, print_logs, remove_submission_record, run_cleanup_report,
+    runtime_job_root_for_record, scan_job_inventory, scan_job_records, scan_sweep_manifests,
+    serialize_metrics_probe_report, state_path_for_record, sweep_manifest_path_for,
+    validate_metrics_probe_options, wait_for_job_start, watch_submission, write_submission_record,
+    write_sweep_manifest,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, PlanOptions, ServicePlacementMode, apply_resource_profile_defaults,
@@ -32,18 +43,26 @@ use hpc_compose::prepare::{
     prepare_runtime_plan,
 };
 use hpc_compose::render::{
-    RenderOptions, log_file_name_for_service, render_local_script, render_script_with_options,
+    LocalRenderOptions, RenderOptions, log_file_name_for_service, render_local_script,
+    render_local_script_with_options, render_script_with_options,
 };
+use hpc_compose::rendezvous::{self, RendezvousRegisterRequest};
 use hpc_compose::spec::{
-    CommandSpec, ComposeSpec, DependsOnSpec, EnvironmentSpec, RuntimeConfig, ServiceEnrootConfig,
-    ServiceFailureMode, ServiceRuntimeConfig, ServiceSlurmConfig, ServiceSpec, SlurmConfig,
-    SoftwareEnvConfig, parse_slurm_time_limit,
+    CommandSpec, ComposeSpec, DependsOnSpec, EnvironmentSpec, MetricsCollector, MetricsConfig,
+    RuntimeConfig, ServiceEnrootConfig, ServiceFailureMode, ServiceRuntimeConfig,
+    ServiceSlurmConfig, ServiceSpec, SlurmConfig, SoftwareEnvConfig, parse_slurm_time_limit,
+};
+use hpc_compose::when::{
+    MonitorOptions, RealMonitorRuntime, WhenConditionSummary, WhenConditions, monitor_until_ready,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::output;
 use crate::progress::{PrepareProgress, ProgressReporter};
 use crate::watch_ui;
+
+static DEV_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn watch_with_fallback(
     record: &SubmissionRecord,
@@ -80,6 +99,10 @@ fn latest_record_path(record: &SubmissionRecord) -> PathBuf {
     match record.kind {
         SubmissionKind::Main => latest_record_path_for(&record.compose_file),
         SubmissionKind::Run => latest_run_record_path_for(&record.compose_file),
+        SubmissionKind::Canary => latest_canary_record_path_for(&record.compose_file),
+        SubmissionKind::SweepTrial => {
+            jobs_dir_for(&record.compose_file).join(format!("{}.json", record.job_id))
+        }
     }
 }
 
@@ -130,6 +153,79 @@ fn tracked_cached_artifacts(plan: &RuntimePlan) -> Vec<PathBuf> {
         }
     }
     artifacts
+}
+
+struct UpInvocationLock {
+    path: Option<PathBuf>,
+}
+
+impl Drop for UpInvocationLock {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
+    let canonical = fs::canonicalize(compose_file).unwrap_or_else(|_| compose_file.to_path_buf());
+    let mut digest = Sha256::new();
+    digest.update(canonical.to_string_lossy().as_bytes());
+    let hash = hex::encode(digest.finalize());
+    let lock_dir = metadata_root_for(compose_file).join("locks");
+    if let Err(err) = fs::create_dir_all(&lock_dir) {
+        let _ = writeln!(
+            io::stderr(),
+            "warning: concurrent up protection unavailable because {} could not be created: {err}",
+            lock_dir.display()
+        );
+        let _ = io::stderr().flush();
+        return Ok(UpInvocationLock { path: None });
+    }
+    let path = lock_dir.join(format!("{hash}.up.lock"));
+    let command = env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let content = serde_json::json!({
+        "pid": std::process::id(),
+        "command": command,
+        "compose_path": canonical,
+        "created_at_unix": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    });
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string_pretty(&content).context("failed to serialize lock file")?
+            )
+            .with_context(|| format!("failed to write {}", path.display()))?;
+            Ok(UpInvocationLock { path: Some(path) })
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read_to_string(&path).unwrap_or_else(|_| "<unreadable>".to_string());
+            bail!(
+                "another hpc-compose up appears to be running for {}; lock file: {}; existing lock: {}; if this process is gone, remove the lock file and retry",
+                compose_file.display(),
+                path.display(),
+                existing.trim()
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            let _ = writeln!(
+                io::stderr(),
+                "warning: concurrent up protection unavailable because {} could not be created: {err}",
+                path.display()
+            );
+            let _ = io::stderr().flush();
+            Ok(UpInvocationLock { path: None })
+        }
+        Err(err) => Err(err).with_context(|| format!("failed to create {}", path.display())),
+    }
 }
 
 fn requested_walltime(plan: &RuntimePlan) -> Option<RequestedWalltime> {
@@ -235,6 +331,7 @@ fn build_ephemeral_runtime_plan(
             depends_on: DependsOnSpec::None,
             readiness: None,
             healthcheck: None,
+            assertions: None,
             software_env: SoftwareEnvConfig::default(),
             slurm: ServiceSlurmConfig::default(),
             runtime: ServiceRuntimeConfig::default(),
@@ -246,6 +343,7 @@ fn build_ephemeral_runtime_plan(
         runtime: RuntimeConfig::default(),
         software_env: SoftwareEnvConfig::default(),
         slurm: slurm_from_resource_options("hpc-compose-run", options)?,
+        sweep: None,
         services,
     };
     let synthetic_path = context.cwd.join("hpc-compose-run.yaml");
@@ -329,6 +427,172 @@ fn push_slurm_srun_options(args: &mut Vec<String>, slurm: &SlurmConfig) {
     if let Some(constraint) = &slurm.constraint {
         args.push(format!("--constraint={constraint}"));
     }
+}
+
+fn push_slurm_salloc_options(args: &mut Vec<String>, slurm: &SlurmConfig) {
+    args.push(format!(
+        "--job-name={}",
+        slurm.job_name.as_deref().unwrap_or("hpc-compose-alloc")
+    ));
+    if let Some(nodes) = slurm.nodes {
+        args.push(format!("--nodes={nodes}"));
+    }
+    if let Some(ntasks) = slurm.ntasks {
+        args.push(format!("--ntasks={ntasks}"));
+    }
+    if let Some(ntasks_per_node) = slurm.ntasks_per_node {
+        args.push(format!("--ntasks-per-node={ntasks_per_node}"));
+    }
+    if let Some(partition) = &slurm.partition {
+        args.push(format!("--partition={partition}"));
+    }
+    if let Some(account) = &slurm.account {
+        args.push(format!("--account={account}"));
+    }
+    if let Some(qos) = &slurm.qos {
+        args.push(format!("--qos={qos}"));
+    }
+    if let Some(time) = &slurm.time {
+        args.push(format!("--time={time}"));
+    }
+    if let Some(cpus) = slurm.cpus_per_task {
+        args.push(format!("--cpus-per-task={cpus}"));
+    }
+    if let Some(mem) = &slurm.mem {
+        args.push(format!("--mem={mem}"));
+    }
+    if let Some(gres) = &slurm.gres {
+        args.push(format!("--gres={gres}"));
+    } else if let Some(gpus) = slurm.gpus {
+        args.push(format!("--gpus={gpus}"));
+    }
+    if let Some(gpus_per_node) = slurm.gpus_per_node {
+        args.push(format!("--gpus-per-node={gpus_per_node}"));
+    }
+    if let Some(gpus_per_task) = slurm.gpus_per_task {
+        args.push(format!("--gpus-per-task={gpus_per_task}"));
+    }
+    if let Some(cpus_per_gpu) = slurm.cpus_per_gpu {
+        args.push(format!("--cpus-per-gpu={cpus_per_gpu}"));
+    }
+    if let Some(mem_per_gpu) = &slurm.mem_per_gpu {
+        args.push(format!("--mem-per-gpu={mem_per_gpu}"));
+    }
+    if let Some(gpu_bind) = &slurm.gpu_bind {
+        args.push(format!("--gpu-bind={gpu_bind}"));
+    }
+    if let Some(cpu_bind) = &slurm.cpu_bind {
+        args.push(format!("--cpu-bind={cpu_bind}"));
+    }
+    if let Some(mem_bind) = &slurm.mem_bind {
+        args.push(format!("--mem-bind={mem_bind}"));
+    }
+    if let Some(distribution) = &slurm.distribution {
+        args.push(format!("--distribution={distribution}"));
+    }
+    if let Some(hint) = &slurm.hint {
+        args.push(format!("--hint={hint}"));
+    }
+    if let Some(constraint) = &slurm.constraint {
+        args.push(format!("--constraint={constraint}"));
+    }
+    if let Some(dependency) = slurm.dependency_cli_value() {
+        args.push(format!("--dependency={dependency}"));
+    }
+    args.extend(slurm.submit_args.iter().cloned());
+}
+
+fn active_allocation_job_id() -> Option<String> {
+    let allocation = env::var("HPC_COMPOSE_ALLOCATION").ok()?;
+    if allocation != "1" {
+        return None;
+    }
+    env::var("SLURM_JOB_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn sh_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn allocation_bootstrap_script(
+    context: &ResolvedContext,
+    runtime_plan: &RuntimePlan,
+    submit_dir: &Path,
+) -> String {
+    let compose_file = context.compose_file.value.display().to_string();
+    let cache_dir = runtime_plan.cache_dir.display().to_string();
+    let project_dir = context
+        .compose_file
+        .value
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .display()
+        .to_string();
+    let scontrol = context.binaries.scontrol.value.as_str();
+    format!(
+        r#"set -euo pipefail
+submit_dir={submit_dir}
+cd "$submit_dir"
+job_id="${{SLURM_JOB_ID:?SLURM_JOB_ID is required inside salloc}}"
+allocation_dir="$submit_dir/.hpc-compose/$job_id/allocation"
+mkdir -p "$allocation_dir"
+nodelist_file="$allocation_dir/nodelist"
+raw_nodelist="${{SLURM_JOB_NODELIST:-${{SLURM_NODELIST:-}}}}"
+if [ -n "$raw_nodelist" ] && {scontrol} show hostnames "$raw_nodelist" > "$nodelist_file" 2>/dev/null; then
+  :
+elif [ -n "$raw_nodelist" ]; then
+  printf '%s\n' "$raw_nodelist" > "$nodelist_file"
+else
+  : > "$nodelist_file"
+fi
+primary_node="$(head -n 1 "$nodelist_file" 2>/dev/null || true)"
+node_count="$(wc -l < "$nodelist_file" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -z "$node_count" ] || [ "$node_count" = "0" ]; then
+  node_count="${{SLURM_JOB_NUM_NODES:-${{SLURM_NNODES:-1}}}}"
+fi
+if [ -z "$primary_node" ]; then
+  primary_node="${{HOSTNAME:-}}"
+fi
+export HPC_COMPOSE_ALLOCATION=1
+export HPC_COMPOSE_COMPOSE_FILE={compose_file}
+export HPC_COMPOSE_CACHE_DIR={cache_dir}
+export HPC_COMPOSE_PROJECT_DIR={project_dir}
+export HPC_COMPOSE_RUNTIME_BACKEND={runtime_backend}
+export HPC_COMPOSE_PRIMARY_NODE="$primary_node"
+export HPC_COMPOSE_NODE_COUNT="$node_count"
+export HPC_COMPOSE_NODELIST="$raw_nodelist"
+export HPC_COMPOSE_NODELIST_FILE="$nodelist_file"
+printf 'hpc-compose allocation %s ready on %s node(s)\n' "$job_id" "$node_count"
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+exec "${{SHELL:-/bin/bash}}" -l
+"#,
+        submit_dir = sh_quote(&submit_dir.display().to_string()),
+        scontrol = sh_quote(scontrol),
+        compose_file = sh_quote(&compose_file),
+        cache_dir = sh_quote(&cache_dir),
+        project_dir = sh_quote(&project_dir),
+        runtime_backend = sh_quote(runtime_plan.runtime.backend.as_str()),
+    )
+}
+
+fn strip_sbatch_directives(script: &str) -> String {
+    script
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("#SBATCH"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 fn diff_lines(previous: &str, current: &str) -> Option<String> {
@@ -808,6 +1072,669 @@ fn read_local_supervisor_pid(record: &SubmissionRecord) -> Result<Option<u32>> {
         .and_then(|value| u32::try_from(value).ok()))
 }
 
+struct PreparedLocalLaunch {
+    file: PathBuf,
+    submit_dir: PathBuf,
+    script_path: PathBuf,
+    runtime_plan: RuntimePlan,
+    record_options: SubmissionRecordBuildOptions,
+    output_format: OutputFormat,
+    local_job_id: String,
+}
+
+struct LocalLaunchOutcome {
+    record: SubmissionRecord,
+    submit_output: output::SubmitOutput,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_local_launch<F>(
+    context: &ResolvedContext,
+    script_out: Option<PathBuf>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    output_format: OutputFormat,
+    quiet: bool,
+    dev_reload: bool,
+    precheck: F,
+) -> Result<PreparedLocalLaunch>
+where
+    F: FnOnce(&RuntimePlan) -> Result<()>,
+{
+    let file = context.compose_file.value.clone();
+    let effective_config =
+        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+            &file,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let runtime_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    precheck(&runtime_plan)?;
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
+    ensure_local_submit_supported(&runtime_plan)?;
+    warn_local_ignored_scheduler_settings(&runtime_plan);
+    let record_options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::Main,
+        service_name: None,
+        command_override: None,
+        requested_walltime: requested_walltime(&runtime_plan),
+        slurm_array: runtime_plan.slurm.array.clone(),
+        sweep: None,
+        config_snapshot_yaml: Some(effective_config_yaml),
+        cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+    };
+
+    if !no_preflight {
+        let report = progress.run_checked_result(
+            "Running preflight checks",
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &runtime_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: false,
+                        skip_prepare,
+                        cluster_profile: None,
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
+        if output_format == OutputFormat::Text && (!quiet || report.has_errors()) {
+            output::print_report(&report, false);
+        }
+        if report.has_errors() {
+            bail!("preflight failed; fix the reported errors before local launch");
+        }
+    }
+
+    if !skip_prepare {
+        let prepare_progress =
+            PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
+        let summary = progress.run_result("Preparing runtime artifacts", || {
+            prepare_runtime_plan(
+                &runtime_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    keep_failed_prep,
+                    force_rebuild,
+                },
+            )
+        })?;
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet && output_format == OutputFormat::Text {
+            output::print_prepare_summary(&summary);
+        }
+    }
+
+    let local_job_id = generate_local_job_id();
+    let script = progress.run_result("Rendering local launcher script", || {
+        render_local_script_with_options(
+            &runtime_plan,
+            &local_job_id,
+            &context.binaries.enroot.value,
+            &LocalRenderOptions { dev_reload },
+        )
+    })?;
+    let script_path = script_out.unwrap_or_else(|| output::default_local_script_path(&file));
+    fs::write(&script_path, script).with_context(|| {
+        format!(
+            "failed to write rendered script to {}",
+            script_path.display()
+        )
+    })?;
+
+    Ok(PreparedLocalLaunch {
+        file,
+        submit_dir,
+        script_path,
+        runtime_plan,
+        record_options,
+        output_format,
+        local_job_id,
+    })
+}
+
+fn start_prepared_local_launch(prepared: &PreparedLocalLaunch) -> Result<LocalLaunchOutcome> {
+    let record = build_submission_record_with_backend_and_options(
+        &prepared.file,
+        &prepared.submit_dir,
+        &prepared.script_path,
+        &prepared.runtime_plan,
+        &prepared.local_job_id,
+        SubmissionBackend::Local,
+        &prepared.record_options,
+    )?;
+    write_submission_record(&record)
+        .context("failed to persist tracking metadata for local launch")?;
+    let supervisor_pid = match spawn_local_supervisor(
+        &prepared.submit_dir,
+        &prepared.script_path,
+        &record.batch_log,
+    ) {
+        Ok(pid) => pid,
+        Err(err) => {
+            rollback_local_tracking(&record, None);
+            return Err(err);
+        }
+    };
+    if let Err(err) =
+        write_local_runtime_state_stub(&record, &prepared.runtime_plan, supervisor_pid)
+    {
+        rollback_local_tracking(&record, Some(supervisor_pid));
+        return Err(err);
+    }
+
+    let submit_output = output::SubmitOutput {
+        backend: SubmissionBackend::Local,
+        compose_file: prepared.file.clone(),
+        script_path: prepared.script_path.clone(),
+        cache_dir: prepared.runtime_plan.cache_dir.clone(),
+        dry_run: false,
+        launched: true,
+        submitted: false,
+        sbatch_stdout: None,
+        job_id: Some(record.job_id.clone()),
+        tracking_persisted: true,
+        tracked_metadata_path: Some(latest_record_path(&record)),
+    };
+    Ok(LocalLaunchOutcome {
+        record,
+        submit_output,
+    })
+}
+
+fn print_local_launch_outcome(
+    prepared: &PreparedLocalLaunch,
+    outcome: &LocalLaunchOutcome,
+) -> Result<()> {
+    match prepared.output_format {
+        OutputFormat::Text => {
+            print_local_launch_details(
+                &outcome.record,
+                &prepared.runtime_plan,
+                &prepared.script_path,
+            );
+            output::print_submit_summary_box(
+                &prepared.runtime_plan,
+                &outcome.record.job_id,
+                &prepared.script_path,
+                Some(&latest_record_path(&outcome.record)),
+            );
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&outcome.submit_output)
+                    .context("failed to serialize local launch output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+struct PreparedSlurmSubmission {
+    file: PathBuf,
+    submit_dir: PathBuf,
+    script_path: PathBuf,
+    runtime_plan: RuntimePlan,
+    record_options: SubmissionRecordBuildOptions,
+    output_format: OutputFormat,
+}
+
+struct SlurmSubmitOutcome {
+    stdout: String,
+    tracked_submission: Option<(SubmissionRecord, bool)>,
+    submit_output: output::SubmitOutput,
+}
+
+fn submit_prepared_slurm_submission(
+    context: &ResolvedContext,
+    prepared: &PreparedSlurmSubmission,
+    progress: &ProgressReporter,
+) -> Result<SlurmSubmitOutcome> {
+    let output_result = progress.run_result("Submitting job to Slurm", || {
+        Command::new(&context.binaries.sbatch.value)
+            .args(sbatch_cli_args(&prepared.runtime_plan))
+            .arg(&prepared.script_path)
+            .output()
+            .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))
+    })?;
+    if !output_result.status.success() {
+        bail!(
+            "sbatch failed: {}",
+            String::from_utf8_lossy(&output_result.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output_result.stdout)
+        .trim_end()
+        .to_string();
+    let tracked_submission = if let Some(job_id) = output::extract_job_id(&stdout) {
+        let record = build_submission_record_with_options(
+            &prepared.file,
+            &prepared.submit_dir,
+            &prepared.script_path,
+            &prepared.runtime_plan,
+            job_id,
+            &prepared.record_options,
+        )?;
+        let persisted = match write_submission_record(&record) {
+            Ok(()) => true,
+            Err(err) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: job submitted, but failed to write tracking metadata: {err}"
+                );
+                let _ = io::stderr().flush();
+                false
+            }
+        };
+        Some((record, persisted))
+    } else {
+        None
+    };
+    let tracked_metadata_path = tracked_submission
+        .as_ref()
+        .and_then(|(record, persisted)| persisted.then(|| latest_record_path(record)));
+    let submit_output = output::SubmitOutput {
+        backend: SubmissionBackend::Slurm,
+        compose_file: prepared.file.clone(),
+        script_path: prepared.script_path.clone(),
+        cache_dir: prepared.runtime_plan.cache_dir.clone(),
+        dry_run: false,
+        launched: false,
+        submitted: true,
+        sbatch_stdout: Some(stdout.clone()),
+        job_id: tracked_submission
+            .as_ref()
+            .map(|(record, _)| record.job_id.clone()),
+        tracking_persisted: tracked_submission
+            .as_ref()
+            .is_some_and(|(_, persisted)| *persisted),
+        tracked_metadata_path,
+    };
+    Ok(SlurmSubmitOutcome {
+        stdout,
+        tracked_submission,
+        submit_output,
+    })
+}
+
+fn print_slurm_submit_outcome(
+    prepared: &PreparedSlurmSubmission,
+    outcome: &SlurmSubmitOutcome,
+) -> Result<()> {
+    match prepared.output_format {
+        OutputFormat::Text => {
+            if !outcome.stdout.is_empty() {
+                println!("{}", outcome.stdout);
+            }
+            output::print_submit_details(
+                &prepared.runtime_plan,
+                &prepared.script_path,
+                &outcome.stdout,
+            )?;
+            if let Some((record, persisted)) = outcome.tracked_submission.as_ref() {
+                if *persisted {
+                    let meta_path = latest_record_path(record);
+                    output::print_submit_summary_box(
+                        &prepared.runtime_plan,
+                        &record.job_id,
+                        &prepared.script_path,
+                        Some(&meta_path),
+                    );
+                } else {
+                    println!(
+                        "note: tracking metadata could not be written, so later status/logs commands will not auto-discover this submission"
+                    );
+                }
+            } else {
+                println!(
+                    "note: sbatch output did not include a numeric Slurm job id, so status/logs/watch are not trackable for this submission"
+                );
+            }
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&outcome.submit_output)
+                    .context("failed to serialize up output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn maybe_watch_slurm_submission(
+    context: &ResolvedContext,
+    outcome: &SlurmSubmitOutcome,
+    watch: bool,
+    watch_queue: bool,
+    queue_warn_after_seconds: Option<u64>,
+    watch_mode: WatchMode,
+    hold_on_exit: HoldOnExit,
+) -> Result<()> {
+    if !watch {
+        return Ok(());
+    }
+    let Some((record, _)) = outcome.tracked_submission.as_ref() else {
+        println!("note: skipping watch because the submission is not trackable");
+        return Ok(());
+    };
+    let scheduler_options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+    if watch_queue {
+        let _ = wait_for_job_start(record, &scheduler_options, queue_warn_after_seconds)?;
+    }
+    output::finish_watch(
+        record,
+        watch_with_fallback(
+            record,
+            &scheduler_options,
+            None,
+            100,
+            watch_mode,
+            hold_on_exit,
+        )?,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_slurm_submission<F>(
+    context: &ResolvedContext,
+    script_out: Option<PathBuf>,
+    time_override: Option<String>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    watch: bool,
+    allow_resume_changes: bool,
+    output_format: OutputFormat,
+    quiet: bool,
+    precheck: F,
+) -> Result<PreparedSlurmSubmission>
+where
+    F: FnOnce(&RuntimePlan) -> Result<()>,
+{
+    let file = context.compose_file.value.clone();
+    let effective_config =
+        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+            &file,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let mut runtime_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    if let Some(time) = time_override {
+        runtime_plan.slurm.time = Some(time);
+    }
+    precheck(&runtime_plan)?;
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
+    let record_options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::Main,
+        service_name: None,
+        command_override: None,
+        requested_walltime: requested_walltime(&runtime_plan),
+        slurm_array: runtime_plan.slurm.array.clone(),
+        sweep: None,
+        config_snapshot_yaml: Some(effective_config_yaml.clone()),
+        cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+    };
+
+    if maybe_check_resume_diff(
+        &file,
+        runtime_plan.slurm.resume_dir().is_some(),
+        &effective_config_yaml,
+        allow_resume_changes,
+        false,
+        output_format,
+    )? {
+        bail!("resume diff requested unexpectedly during conditional submission");
+    }
+    ensure_batch_submission_supported(&runtime_plan, watch, false)?;
+
+    let cluster_profile = load_discovered_cluster_profile(context)?;
+    if !no_preflight {
+        let report = progress.run_checked_result(
+            "Running preflight checks",
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &runtime_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: true,
+                        skip_prepare,
+                        cluster_profile: cluster_profile.clone(),
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
+        if output_format == OutputFormat::Text && (!quiet || report.has_errors()) {
+            output::print_report(&report, false);
+        }
+        if report.has_errors() {
+            bail!("preflight failed; fix the reported errors before conditional submission");
+        }
+    }
+
+    if !skip_prepare {
+        let prepare_progress =
+            PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
+        let summary = progress.run_result("Preparing runtime artifacts", || {
+            prepare_runtime_plan(
+                &runtime_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    keep_failed_prep,
+                    force_rebuild,
+                },
+            )
+        })?;
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet && output_format == OutputFormat::Text {
+            output::print_prepare_summary(&summary);
+        }
+    }
+
+    let script = progress.run_result("Rendering submission script", || {
+        render_script_with_options(
+            &runtime_plan,
+            &RenderOptions {
+                apptainer_bin: context.binaries.apptainer.value.clone(),
+                singularity_bin: context.binaries.singularity.value.clone(),
+                cluster_profile,
+            },
+        )
+    })?;
+    let script_path = script_out.unwrap_or_else(|| output::default_script_path(&file));
+    fs::write(&script_path, script).with_context(|| {
+        format!(
+            "failed to write rendered script to {}",
+            script_path.display()
+        )
+    })?;
+
+    Ok(PreparedSlurmSubmission {
+        file,
+        submit_dir,
+        script_path,
+        runtime_plan,
+        record_options,
+        output_format,
+    })
+}
+
+fn validate_when_plan_conditions(plan: &RuntimePlan, conditions: &WhenConditions) -> Result<()> {
+    if let Some(condition) = &conditions.free_nodes {
+        let Some(plan_partition) = plan.slurm.partition.as_deref() else {
+            bail!("--free-nodes requires x-slurm.partition to be set in the compose file");
+        };
+        if plan_partition != condition.partition {
+            bail!(
+                "--partition {} must match x-slurm.partition {} for --free-nodes",
+                condition.partition,
+                plan_partition
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct WhenSubmitOutput<'a> {
+    triggered: bool,
+    conditions: &'a [WhenConditionSummary],
+    submission: &'a output::SubmitOutput,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn when(
+    context: ResolvedContext,
+    conditions: WhenConditions,
+    poll_interval: std::time::Duration,
+    timeout: Option<std::time::Duration>,
+    script_out: Option<PathBuf>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    allow_resume_changes: bool,
+    detach: bool,
+    watch_mode: WatchMode,
+    hold_on_exit: HoldOnExit,
+    format: Option<OutputFormat>,
+    quiet: bool,
+) -> Result<()> {
+    let output_format = output::resolve_output_format(format, false);
+    let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
+    let prepared = prepare_slurm_submission(
+        &context,
+        script_out,
+        None,
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+        !detach,
+        allow_resume_changes,
+        output_format,
+        quiet,
+        |plan| validate_when_plan_conditions(plan, &conditions),
+    )?;
+
+    if output_format == OutputFormat::Text && !quiet {
+        println!("waiting for conditions:");
+        for description in condition_descriptions(&conditions) {
+            println!("  - {description}");
+        }
+    }
+
+    let monitor_options = MonitorOptions {
+        conditions,
+        poll_interval,
+        timeout,
+        sinfo_bin: context.binaries.sinfo.value.clone(),
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+    let mut runtime = RealMonitorRuntime::new();
+    let trigger = monitor_until_ready(&monitor_options, &mut runtime)?;
+
+    if output_format == OutputFormat::Text && !quiet {
+        println!("conditions satisfied:");
+        for condition in &trigger.conditions {
+            println!("  - {}", condition.detail);
+        }
+    }
+
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
+    let outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
+    match output_format {
+        OutputFormat::Text => {
+            print_slurm_submit_outcome(&prepared, &outcome)?;
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&WhenSubmitOutput {
+                    triggered: true,
+                    conditions: &trigger.conditions,
+                    submission: &outcome.submit_output,
+                })
+                .context("failed to serialize when output")?
+            );
+        }
+    }
+    maybe_watch_slurm_submission(
+        &context,
+        &outcome,
+        !detach,
+        false,
+        None,
+        watch_mode,
+        hold_on_exit,
+    )
+}
+
+fn condition_descriptions(conditions: &WhenConditions) -> Vec<String> {
+    let mut descriptions = Vec::new();
+    if let Some(condition) = &conditions.free_nodes {
+        descriptions.push(format!(
+            "partition {} has at least {} idle node(s)",
+            condition.partition, condition.minimum_idle_nodes
+        ));
+    }
+    if let Some(condition) = &conditions.after_job {
+        descriptions.push(format!(
+            "job {} satisfies {}",
+            condition.job_id,
+            condition.condition.as_str()
+        ));
+    }
+    if let Some(window) = &conditions.time_window {
+        descriptions.push(window.description());
+    }
+    descriptions
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn launch(
     context: ResolvedContext,
@@ -817,6 +1744,8 @@ pub(crate) fn launch(
     force_rebuild: bool,
     no_preflight: bool,
     watch: bool,
+    watch_queue: bool,
+    queue_warn_after_seconds: Option<u64>,
     local: bool,
     allow_resume_changes: bool,
     resume_diff_only: bool,
@@ -856,6 +1785,8 @@ pub(crate) fn launch(
         service_name: None,
         command_override: None,
         requested_walltime: requested_walltime(&runtime_plan),
+        slurm_array: runtime_plan.slurm.array.clone(),
+        sweep: None,
         config_snapshot_yaml: Some(effective_config_yaml.clone()),
         cached_artifacts: tracked_cached_artifacts(&runtime_plan),
     };
@@ -909,7 +1840,7 @@ pub(crate) fn launch(
             },
             |report| report.has_errors(),
         )?;
-        if !quiet || report.has_errors() {
+        if output_format == OutputFormat::Text && (!quiet || report.has_errors()) {
             output::print_report(&report, false);
         }
         if report.has_errors() {
@@ -1077,119 +2008,25 @@ pub(crate) fn launch(
         return Ok(());
     }
 
-    let output_result = progress.run_result("Submitting job to Slurm", || {
-        Command::new(&context.binaries.sbatch.value)
-            .args(sbatch_cli_args(&runtime_plan))
-            .arg(&script_path)
-            .output()
-            .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))
-    })?;
-    if !output_result.status.success() {
-        bail!(
-            "sbatch failed: {}",
-            String::from_utf8_lossy(&output_result.stderr).trim()
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&output_result.stdout);
-    let tracked_submission = if let Some(job_id) = output::extract_job_id(stdout.trim()) {
-        let record = build_submission_record_with_options(
-            &file,
-            &submit_dir,
-            &script_path,
-            &runtime_plan,
-            job_id,
-            &record_options,
-        )?;
-        let persisted = match write_submission_record(&record) {
-            Ok(()) => true,
-            Err(err) => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "warning: job submitted, but failed to write tracking metadata: {err}"
-                );
-                let _ = io::stderr().flush();
-                false
-            }
-        };
-        Some((record, persisted))
-    } else {
-        None
+    let prepared = PreparedSlurmSubmission {
+        file,
+        submit_dir,
+        script_path,
+        runtime_plan,
+        record_options,
+        output_format,
     };
-    let tracked_metadata_path = tracked_submission
-        .as_ref()
-        .and_then(|(record, persisted)| persisted.then(|| latest_record_path(record)));
-
-    match output_format {
-        OutputFormat::Text => {
-            print!("{stdout}");
-            output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
-            if let Some((record, persisted)) = tracked_submission.as_ref() {
-                if *persisted {
-                    let meta_path = latest_record_path(record);
-                    output::print_submit_summary_box(
-                        &runtime_plan,
-                        &record.job_id,
-                        &script_path,
-                        Some(&meta_path),
-                    );
-                } else {
-                    println!(
-                        "note: tracking metadata could not be written, so later status/logs commands will not auto-discover this submission"
-                    );
-                }
-            } else {
-                println!(
-                    "note: sbatch output did not include a numeric Slurm job id, so status/logs/watch are not trackable for this submission"
-                );
-            }
-        }
-        OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&output::SubmitOutput {
-                    backend: SubmissionBackend::Slurm,
-                    compose_file: file.clone(),
-                    script_path: script_path.clone(),
-                    cache_dir: runtime_plan.cache_dir.clone(),
-                    dry_run: false,
-                    launched: false,
-                    submitted: true,
-                    sbatch_stdout: Some(stdout.trim().to_string()),
-                    job_id: tracked_submission
-                        .as_ref()
-                        .map(|(record, _)| record.job_id.clone()),
-                    tracking_persisted: tracked_submission
-                        .as_ref()
-                        .is_some_and(|(_, persisted)| *persisted),
-                    tracked_metadata_path,
-                })
-                .context("failed to serialize up output")?
-            );
-        }
-    }
-
-    if watch {
-        let Some((record, _)) = tracked_submission.as_ref() else {
-            println!("note: skipping watch because the submission is not trackable");
-            return Ok(());
-        };
-        output::finish_watch(
-            record,
-            watch_with_fallback(
-                record,
-                &SchedulerOptions {
-                    squeue_bin: context.binaries.squeue.value.clone(),
-                    sacct_bin: context.binaries.sacct.value.clone(),
-                },
-                None,
-                100,
-                watch_mode,
-                hold_on_exit,
-            )?,
-        )?;
-    }
-    Ok(())
+    let outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
+    print_slurm_submit_outcome(&prepared, &outcome)?;
+    maybe_watch_slurm_submission(
+        &context,
+        &outcome,
+        watch,
+        watch_queue,
+        queue_warn_after_seconds,
+        watch_mode,
+        hold_on_exit,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1205,11 +2042,14 @@ pub(crate) fn up(
     resume_diff_only: bool,
     dry_run: bool,
     detach: bool,
+    watch_queue: bool,
+    queue_warn_after_seconds: Option<u64>,
     watch_mode: WatchMode,
     hold_on_exit: HoldOnExit,
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
+    let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     launch(
         context,
         script_out,
@@ -1218,6 +2058,8 @@ pub(crate) fn up(
         force_rebuild,
         no_preflight,
         !detach,
+        watch_queue,
+        queue_warn_after_seconds,
         local,
         allow_resume_changes,
         resume_diff_only,
@@ -1227,6 +2069,1440 @@ pub(crate) fn up(
         hold_on_exit,
         quiet,
     )
+}
+
+#[derive(Debug, Serialize)]
+struct SmokePhase {
+    name: &'static str,
+    status: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SmokeServiceResult {
+    service_name: String,
+    appeared: bool,
+    launched: bool,
+    readiness_configured: bool,
+    ready: bool,
+    completed_successfully: bool,
+    last_exit_code: Option<i32>,
+    status: Option<String>,
+    failures: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SmokeTestOutput {
+    ok: bool,
+    backend: SubmissionBackend,
+    compose_file: PathBuf,
+    job_id: String,
+    script_path: PathBuf,
+    timeout_seconds: u64,
+    phases: Vec<SmokePhase>,
+    services: Vec<SmokeServiceResult>,
+    failure_reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct SmokeEvaluation {
+    ok: bool,
+    services: Vec<SmokeServiceResult>,
+    failure_reason: Option<String>,
+}
+
+fn evaluate_smoke_snapshot(snapshot: &hpc_compose::job::StatusSnapshot) -> SmokeEvaluation {
+    let mut services = Vec::new();
+    let mut failures = Vec::new();
+    for service in &snapshot.services {
+        let appeared = true;
+        let launched = service.started_at.is_some()
+            || service.launcher_pid.is_some()
+            || service.last_exit_code.is_some();
+        let readiness_configured = service.readiness_configured.unwrap_or(false);
+        let ready = !readiness_configured || service.healthy.unwrap_or(false);
+        let completed_successfully = service.completed_successfully.unwrap_or(false);
+        let mut service_failures = Vec::new();
+        if !launched {
+            service_failures.push("service did not launch".to_string());
+        }
+        if !ready {
+            service_failures.push("configured readiness did not pass".to_string());
+        }
+        if !completed_successfully {
+            service_failures.push("service did not complete successfully".to_string());
+        }
+        if let Some(assertions) = &service.assertions
+            && assertions.configured
+            && !assertions.failures.is_empty()
+        {
+            service_failures.extend(
+                assertions
+                    .failures
+                    .iter()
+                    .map(|failure| format!("assertion failed: {failure}")),
+            );
+        }
+        if !service_failures.is_empty() {
+            failures.push(format!(
+                "{}: {}",
+                service.service_name,
+                service_failures.join("; ")
+            ));
+        }
+        services.push(SmokeServiceResult {
+            service_name: service.service_name.clone(),
+            appeared,
+            launched,
+            readiness_configured,
+            ready,
+            completed_successfully,
+            last_exit_code: service.last_exit_code,
+            status: service.status.clone(),
+            failures: service_failures,
+        });
+    }
+    if snapshot.services.is_empty() {
+        failures.push("runtime state did not include any services".to_string());
+    }
+    if snapshot.scheduler.failed {
+        failures.push(format!("scheduler state is {}", snapshot.scheduler.state));
+    }
+    let ok = failures.is_empty();
+    SmokeEvaluation {
+        ok,
+        services,
+        failure_reason: (!ok).then(|| failures.join("; ")),
+    }
+}
+
+fn wait_for_smoke_terminal(
+    record: &SubmissionRecord,
+    options: &SchedulerOptions,
+    timeout_seconds: u64,
+) -> Result<(hpc_compose::job::StatusSnapshot, bool)> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    loop {
+        let snapshot = build_status_snapshot(&record.compose_file, Some(&record.job_id), options)?;
+        if snapshot.scheduler.terminal {
+            return Ok((snapshot, false));
+        }
+        if Instant::now() >= deadline {
+            return Ok((snapshot, true));
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn cancel_smoke_timeout(context: &ResolvedContext, record: &SubmissionRecord) {
+    if record.backend == SubmissionBackend::Local {
+        if let Ok(Some(pid)) = read_local_supervisor_pid(record) {
+            let _ = kill_pid(pid);
+        }
+        return;
+    }
+    let _ = Command::new(&context.binaries.scancel.value)
+        .arg(&record.job_id)
+        .status();
+}
+
+fn print_smoke_output(output_format: OutputFormat, report: &SmokeTestOutput) -> Result<()> {
+    match output_format {
+        OutputFormat::Text => {
+            if report.ok {
+                println!("smoke test passed: {}", report.job_id);
+            } else {
+                println!("smoke test failed: {}", report.job_id);
+                if let Some(reason) = &report.failure_reason {
+                    println!("reason: {reason}");
+                }
+            }
+            println!("script: {}", report.script_path.display());
+            for service in &report.services {
+                let state = if service.failures.is_empty() {
+                    "ok".to_string()
+                } else {
+                    service.failures.join("; ")
+                };
+                println!("service {}: {state}", service.service_name);
+            }
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(report)
+                    .context("failed to serialize smoke test output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn smoke_test(
+    context: ResolvedContext,
+    local: bool,
+    submit: bool,
+    time: String,
+    timeout: String,
+    script_out: Option<PathBuf>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    format: Option<OutputFormat>,
+    quiet: bool,
+) -> Result<()> {
+    if local == submit {
+        bail!("test requires exactly one execution mode; choose --local or --submit");
+    }
+    if submit {
+        parse_slurm_time_limit(&time).context("test --time is invalid")?;
+    }
+    let timeout_seconds =
+        parse_log_since_duration(&timeout).context("test --timeout is invalid")?;
+    let output_format = output::resolve_output_format(format, false);
+    let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
+    let scheduler_options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+
+    let (backend, record, script_path) = if local {
+        let prepared = prepare_local_launch(
+            &context,
+            script_out,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            output_format,
+            quiet,
+            false,
+            |_| Ok(()),
+        )?;
+        let outcome = start_prepared_local_launch(&prepared)?;
+        (
+            SubmissionBackend::Local,
+            outcome.record,
+            prepared.script_path.clone(),
+        )
+    } else {
+        let prepared = prepare_slurm_submission(
+            &context,
+            script_out,
+            Some(time),
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            false,
+            false,
+            output_format,
+            quiet,
+            |_| Ok(()),
+        )?;
+        let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
+        let outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
+        let record = outcome
+            .tracked_submission
+            .as_ref()
+            .map(|(record, _)| record.clone())
+            .context(
+                "smoke test submission was not trackable; sbatch output did not include a job id",
+            )?;
+        (
+            SubmissionBackend::Slurm,
+            record,
+            prepared.script_path.clone(),
+        )
+    };
+
+    let (snapshot, timed_out) =
+        wait_for_smoke_terminal(&record, &scheduler_options, timeout_seconds)?;
+    if timed_out {
+        cancel_smoke_timeout(&context, &record);
+    }
+    let mut evaluation = evaluate_smoke_snapshot(&snapshot);
+    if timed_out {
+        let timeout_reason = format!("smoke test timed out after {timeout_seconds}s");
+        evaluation.ok = false;
+        evaluation.failure_reason = Some(match evaluation.failure_reason {
+            Some(reason) => format!("{timeout_reason}; {reason}"),
+            None => timeout_reason,
+        });
+    }
+    let report = SmokeTestOutput {
+        ok: evaluation.ok,
+        backend,
+        compose_file: record.compose_file.clone(),
+        job_id: record.job_id.clone(),
+        script_path,
+        timeout_seconds,
+        phases: vec![
+            SmokePhase {
+                name: "launch",
+                status: "ok",
+            },
+            SmokePhase {
+                name: "terminal",
+                status: if timed_out { "timeout" } else { "ok" },
+            },
+            SmokePhase {
+                name: "evaluate",
+                status: if evaluation.ok { "ok" } else { "failed" },
+            },
+        ],
+        services: evaluation.services,
+        failure_reason: evaluation.failure_reason.clone(),
+    };
+    print_smoke_output(output_format, &report)?;
+    if !report.ok {
+        bail!(
+            "{}",
+            report
+                .failure_reason
+                .unwrap_or_else(|| "smoke test failed".to_string())
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DevPathState {
+    modified_nanos: Option<u128>,
+    len: u64,
+    is_dir: bool,
+}
+
+#[derive(Debug, Clone)]
+struct DevWatchTarget {
+    root: PathBuf,
+    services: BTreeSet<String>,
+    snapshot: BTreeMap<PathBuf, DevPathState>,
+}
+
+type DevWatchSnapshot = BTreeMap<PathBuf, DevPathState>;
+
+fn normalize_dev_path(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn absolute_dev_path(cwd: &Path, path: &Path) -> PathBuf {
+    normalize_dev_path(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    })
+}
+
+fn canonical_dev_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn mount_host_path(mount: &str) -> Option<PathBuf> {
+    let (host, rest) = mount.split_once(':')?;
+    if host.is_empty() || rest.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(host))
+}
+
+fn infer_dev_watch_targets(
+    plan: &RuntimePlan,
+    cwd: &Path,
+    explicit_paths: &[PathBuf],
+) -> Result<Vec<DevWatchTarget>> {
+    let mut roots: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    let cache_dir = canonical_dev_path(&plan.cache_dir);
+    for service in &plan.ordered_services {
+        for mount in &service.volumes {
+            let Some(host) = mount_host_path(mount) else {
+                continue;
+            };
+            let host = absolute_dev_path(cwd, &host);
+            if !host.is_dir() {
+                continue;
+            }
+            let host = canonical_dev_path(&host);
+            if host.starts_with(&cache_dir) {
+                continue;
+            }
+            roots.entry(host).or_default().insert(service.name.clone());
+        }
+    }
+    let all_services = plan
+        .ordered_services
+        .iter()
+        .map(|service| service.name.clone())
+        .collect::<BTreeSet<_>>();
+    for raw_path in explicit_paths {
+        let path = absolute_dev_path(cwd, raw_path);
+        if !path.is_dir() {
+            bail!(
+                "dev --watch-path must point to an existing directory: {}",
+                path.display()
+            );
+        }
+        let path = canonical_dev_path(&path);
+        roots.entry(path).or_default().extend(all_services.clone());
+    }
+    if roots.is_empty() {
+        bail!(
+            "dev could not infer any watchable source directories from service volumes; add --watch-path PATH"
+        );
+    }
+    roots
+        .into_iter()
+        .map(|(root, services)| {
+            Ok(DevWatchTarget {
+                snapshot: collect_dev_snapshot(&root)?,
+                root,
+                services,
+            })
+        })
+        .collect()
+}
+
+fn path_modified_nanos(path: &Path) -> Option<u128> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+}
+
+fn collect_dev_snapshot(root: &Path) -> Result<DevWatchSnapshot> {
+    let mut snapshot = BTreeMap::new();
+    collect_dev_snapshot_inner(root, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+fn collect_dev_snapshot_inner(root: &Path, snapshot: &mut DevWatchSnapshot) -> Result<()> {
+    let metadata = match fs::metadata(root) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(()),
+    };
+    snapshot.insert(
+        root.to_path_buf(),
+        DevPathState {
+            modified_nanos: path_modified_nanos(root),
+            len: metadata.len(),
+            is_dir: metadata.is_dir(),
+        },
+    );
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        collect_dev_snapshot_inner(&path, snapshot)?;
+    }
+    Ok(())
+}
+
+fn write_dev_restart_request(control_dir: &Path, services: &BTreeSet<String>) -> Result<PathBuf> {
+    let request_dir = control_dir.join("restart");
+    fs::create_dir_all(&request_dir)
+        .with_context(|| format!("failed to create {}", request_dir.display()))?;
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = request_dir.join(format!("restart-{}-{millis}.request", std::process::id()));
+    let body = services.iter().cloned().collect::<Vec<_>>().join("\n");
+    fs::write(&path, format!("{body}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+extern "C" fn handle_dev_signal(_: libc::c_int) {
+    DEV_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn install_dev_signal_handlers() {
+    DEV_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGINT, handle_dev_signal as *const () as usize);
+        libc::signal(libc::SIGTERM, handle_dev_signal as *const () as usize);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dev(
+    context: ResolvedContext,
+    watch_paths: Vec<PathBuf>,
+    debounce_ms: u64,
+    keep_running: bool,
+    script_out: Option<PathBuf>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    quiet: bool,
+) -> Result<()> {
+    let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
+    let prepared = prepare_local_launch(
+        &context,
+        script_out,
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+        OutputFormat::Text,
+        quiet,
+        true,
+        |plan| infer_dev_watch_targets(plan, &context.cwd, &watch_paths).map(|_| ()),
+    )?;
+    let mut targets = infer_dev_watch_targets(&prepared.runtime_plan, &context.cwd, &watch_paths)?;
+    let outcome = start_prepared_local_launch(&prepared)?;
+    if !quiet {
+        print_local_launch_outcome(&prepared, &outcome)?;
+        println!("watching source directories:");
+        for target in &targets {
+            println!(
+                "  {} -> {}",
+                target.root.display(),
+                target
+                    .services
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    let control_dir = runtime_job_root_for_record(&outcome.record).join("dev-control");
+    install_dev_signal_handlers();
+    let scheduler_options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+    loop {
+        if DEV_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            if !keep_running && let Some(pid) = read_local_supervisor_pid(&outcome.record)? {
+                kill_pid(pid).with_context(|| {
+                    format!("failed to stop local dev job {}", outcome.record.job_id)
+                })?;
+                if !quiet {
+                    println!("stopped local dev job: {}", outcome.record.job_id);
+                }
+            }
+            return Ok(());
+        }
+        let snapshot = build_status_snapshot(
+            &outcome.record.compose_file,
+            Some(&outcome.record.job_id),
+            &scheduler_options,
+        )?;
+        if snapshot.scheduler.terminal {
+            if snapshot.scheduler.failed {
+                bail!(
+                    "local dev job {} reached terminal state {}",
+                    outcome.record.job_id,
+                    snapshot.scheduler.state
+                );
+            }
+            if !quiet {
+                println!(
+                    "local dev job {} completed; leaving dev mode",
+                    outcome.record.job_id
+                );
+            }
+            return Ok(());
+        }
+
+        let mut affected = BTreeSet::new();
+        for target in &mut targets {
+            let current = collect_dev_snapshot(&target.root)?;
+            if current != target.snapshot {
+                affected.extend(target.services.iter().cloned());
+                target.snapshot = current;
+            }
+        }
+        if !affected.is_empty() {
+            thread::sleep(Duration::from_millis(debounce_ms));
+            for target in &mut targets {
+                let current = collect_dev_snapshot(&target.root)?;
+                if current != target.snapshot {
+                    affected.extend(target.services.iter().cloned());
+                }
+                target.snapshot = current;
+            }
+            write_dev_restart_request(&control_dir, &affected)?;
+            if !quiet {
+                println!(
+                    "dev reload requested: {}",
+                    affected.iter().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn shell_quote_for_tmux_command(value: &Path) -> String {
+    let raw = value.to_string_lossy();
+    format!("'{}'", raw.replace('\'', "'\\''"))
+}
+
+fn ensure_tmux_available(tmux_bin: &str) -> Result<()> {
+    let output = Command::new(tmux_bin)
+        .arg("-V")
+        .output()
+        .with_context(|| format!("failed to execute tmux binary '{tmux_bin}'"))?;
+    if !output.status.success() {
+        bail!(
+            "tmux binary '{}' is not usable: {}",
+            tmux_bin,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn tmux_session_exists(tmux_bin: &str, session: &str) -> bool {
+    Command::new(tmux_bin)
+        .args(["has-session", "-t", session])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn run_tmux(tmux_bin: &str, args: &[&str]) -> Result<()> {
+    let output = Command::new(tmux_bin)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to execute tmux binary '{tmux_bin}'"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "tmux command failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+}
+
+fn run_tmux_capture(tmux_bin: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(tmux_bin)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to execute tmux binary '{tmux_bin}'"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    bail!(
+        "tmux command failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+}
+
+fn tmux_tail_command(path: &Path, lines: usize) -> String {
+    format!("tail -n {lines} -F {}", shell_quote_for_tmux_command(path))
+}
+
+fn open_tmux_dashboard(
+    record: &SubmissionRecord,
+    tmux_bin: &str,
+    session: Option<String>,
+    no_attach: bool,
+    lines: usize,
+) -> Result<String> {
+    if record.backend != SubmissionBackend::Local {
+        bail!(
+            "tmux only supports tracked local jobs; job {} uses {:?}",
+            record.job_id,
+            record.backend
+        );
+    }
+    ensure_tmux_available(tmux_bin)?;
+    if record.service_logs.is_empty() {
+        bail!(
+            "tracked job {} does not contain any service logs",
+            record.job_id
+        );
+    }
+    let session_name = session.unwrap_or_else(|| format!("hpc-compose-{}", record.job_id));
+    if !tmux_session_exists(tmux_bin, &session_name) {
+        let mut services = record.service_logs.iter();
+        let (first_service, first_log) = services.next().expect("checked non-empty");
+        let first_cmd = tmux_tail_command(first_log, lines);
+        run_tmux(
+            tmux_bin,
+            &[
+                "new-session",
+                "-d",
+                "-s",
+                &session_name,
+                "-n",
+                "logs",
+                &first_cmd,
+            ],
+        )?;
+        run_tmux(
+            tmux_bin,
+            &[
+                "select-pane",
+                "-t",
+                &format!("{session_name}:0.0"),
+                "-T",
+                first_service,
+            ],
+        )?;
+        for (service, log_path) in services {
+            let command = tmux_tail_command(log_path, lines);
+            let pane_id = run_tmux_capture(
+                tmux_bin,
+                &[
+                    "split-window",
+                    "-t",
+                    &format!("{session_name}:0"),
+                    "-d",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    &command,
+                ],
+            )?;
+            let target = if pane_id.is_empty() {
+                format!("{session_name}:0")
+            } else {
+                pane_id
+            };
+            run_tmux(tmux_bin, &["select-pane", "-t", &target, "-T", service])?;
+        }
+        run_tmux(
+            tmux_bin,
+            &["select-layout", "-t", &format!("{session_name}:0"), "tiled"],
+        )?;
+    }
+    if !no_attach {
+        run_tmux(tmux_bin, &["attach-session", "-t", &session_name])?;
+    }
+    Ok(session_name)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tmux(
+    context: ResolvedContext,
+    job_id: Option<String>,
+    session: Option<String>,
+    tmux_bin: String,
+    no_attach: bool,
+    lines: usize,
+    script_out: Option<PathBuf>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    quiet: bool,
+) -> Result<()> {
+    let record = if let Some(job_id) = job_id {
+        resolve_tracked_record(&context, Some(&job_id))?
+            .with_context(|| format!("tracked job '{job_id}' was not found"))?
+    } else {
+        let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
+        let prepared = prepare_local_launch(
+            &context,
+            script_out,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            OutputFormat::Text,
+            quiet,
+            false,
+            |_| Ok(()),
+        )?;
+        let outcome = start_prepared_local_launch(&prepared)?;
+        if !quiet {
+            print_local_launch_outcome(&prepared, &outcome)?;
+        }
+        outcome.record
+    };
+    let session_name = open_tmux_dashboard(&record, &tmux_bin, session, no_attach, lines)?;
+    if no_attach && !quiet {
+        println!("tmux session: {session_name}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct GerminateOutput<'a> {
+    compose_file: &'a Path,
+    script_path: &'a Path,
+    cache_dir: &'a Path,
+    dry_run: bool,
+    job_id: Option<&'a str>,
+    tracked_metadata_path: Option<PathBuf>,
+    yaml_patch: Option<String>,
+    report: Option<&'a hpc_compose::job::RightsizeReport>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn germinate(
+    context: ResolvedContext,
+    script_out: Option<PathBuf>,
+    canary_time: String,
+    metrics_interval: u64,
+    pending_timeout: String,
+    min_cpus: u32,
+    min_mem: String,
+    min_gpus: u32,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    dry_run: bool,
+    format: Option<OutputFormat>,
+    quiet: bool,
+) -> Result<()> {
+    if metrics_interval == 0 {
+        bail!("germinate --metrics-interval must be at least 1");
+    }
+    if min_cpus == 0 {
+        bail!("germinate --min-cpus must be at least 1");
+    }
+    if min_gpus == 0 {
+        bail!("germinate --min-gpus must be at least 1");
+    }
+    if min_mem.trim().is_empty() {
+        bail!("germinate --min-mem must not be empty");
+    }
+    parse_slurm_time_limit(&canary_time).context("germinate --canary-time is invalid")?;
+    let pending_timeout_seconds = parse_log_since_duration(&pending_timeout)
+        .context("germinate --pending-timeout is invalid")?;
+
+    let file = context.compose_file.value.clone();
+    let output_format = output::resolve_output_format(format, false);
+    let effective_config =
+        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+            &file,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let original_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    if original_plan.slurm.array.is_some() {
+        bail!("germinate does not support x-slurm.array; submit one representative task instead");
+    }
+    ensure_batch_submission_supported(&original_plan, false, false)?;
+
+    let canary_plan = minimized_canary_plan(
+        &original_plan,
+        &canary_time,
+        metrics_interval,
+        min_cpus,
+        &min_mem,
+        min_gpus,
+    );
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+
+    if !no_preflight {
+        let report = progress.run_checked_result(
+            "Running canary preflight checks",
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &canary_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: true,
+                        skip_prepare,
+                        cluster_profile: cluster_profile.clone(),
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
+        if output_format == OutputFormat::Text && (!quiet || report.has_errors()) {
+            output::print_report(&report, false);
+        }
+        if report.has_errors() {
+            bail!("preflight failed; fix the reported errors before submitting a canary");
+        }
+    }
+
+    if !skip_prepare {
+        let prepare_progress =
+            PrepareProgress::new(&canary_plan, !quiet && output_format == OutputFormat::Text);
+        let summary = progress.run_result("Preparing canary runtime artifacts", || {
+            prepare_runtime_plan(
+                &canary_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    keep_failed_prep,
+                    force_rebuild,
+                },
+            )
+        })?;
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet && output_format == OutputFormat::Text {
+            output::print_prepare_summary(&summary);
+        }
+    }
+
+    let script = progress.run_result("Rendering canary submission script", || {
+        render_script_with_options(
+            &canary_plan,
+            &RenderOptions {
+                apptainer_bin: context.binaries.apptainer.value.clone(),
+                singularity_bin: context.binaries.singularity.value.clone(),
+                cluster_profile,
+            },
+        )
+    })?;
+    let script_path = script_out.unwrap_or_else(|| default_canary_script_path(&file));
+    fs::write(&script_path, script).with_context(|| {
+        format!(
+            "failed to write rendered canary script to {}",
+            script_path.display()
+        )
+    })?;
+
+    if dry_run {
+        match output_format {
+            OutputFormat::Text => {
+                println!("  script: {}", script_path.display());
+                println!("  cache:  {}", canary_plan.cache_dir.display());
+                println!("dry run: skipping sbatch submission");
+            }
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&GerminateOutput {
+                        compose_file: &file,
+                        script_path: &script_path,
+                        cache_dir: &canary_plan.cache_dir,
+                        dry_run: true,
+                        job_id: None,
+                        tracked_metadata_path: None,
+                        yaml_patch: None,
+                        report: None,
+                    })
+                    .context("failed to serialize germinate output")?
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let record_options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::Canary,
+        service_name: None,
+        command_override: None,
+        requested_walltime: requested_walltime(&canary_plan),
+        slurm_array: None,
+        sweep: None,
+        config_snapshot_yaml: Some(effective_config_yaml),
+        cached_artifacts: tracked_cached_artifacts(&canary_plan),
+    };
+    let prepared = PreparedSlurmSubmission {
+        file: file.clone(),
+        submit_dir,
+        script_path: script_path.clone(),
+        runtime_plan: canary_plan.clone(),
+        record_options,
+        output_format,
+    };
+    let outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
+    let Some((record, persisted)) = outcome.tracked_submission.as_ref() else {
+        bail!("sbatch output did not include a numeric Slurm job id; cannot analyze canary usage");
+    };
+    if !persisted {
+        bail!("canary submitted but tracking metadata could not be written; cannot analyze usage");
+    }
+
+    wait_for_canary_terminal(
+        &file,
+        &record.job_id,
+        pending_timeout_seconds,
+        &SchedulerOptions {
+            squeue_bin: context.binaries.squeue.value.clone(),
+            sacct_bin: context.binaries.sacct.value.clone(),
+        },
+    )?;
+
+    let mut report = build_rightsize_report(
+        &original_plan,
+        record,
+        &StatsOptions {
+            sstat_bin: context.binaries.sstat.value.clone(),
+            scheduler: SchedulerOptions {
+                squeue_bin: context.binaries.squeue.value.clone(),
+                sacct_bin: context.binaries.sacct.value.clone(),
+            },
+            accounting: true,
+        },
+    )?;
+    suppress_canary_walltime_recommendations(&mut report);
+    let yaml_patch = recommendation_yaml_patch(&report);
+
+    match output_format {
+        OutputFormat::Text => {
+            println!("canary job: {}", record.job_id);
+            println!("rendered script: {}", script_path.display());
+            println!("tracked metadata: {}", latest_record_path(record).display());
+            output::print_rightsize_report(&report)?;
+            println!();
+            println!("{}", hpc_compose::term::styled_bold("suggested YAML patch"));
+            if yaml_patch.trim().is_empty() {
+                println!(
+                    "No concrete YAML resource changes suggested from the available evidence."
+                );
+            } else {
+                println!("{yaml_patch}");
+            }
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&GerminateOutput {
+                    compose_file: &file,
+                    script_path: &script_path,
+                    cache_dir: &canary_plan.cache_dir,
+                    dry_run: false,
+                    job_id: Some(&record.job_id),
+                    tracked_metadata_path: Some(latest_record_path(record)),
+                    yaml_patch: Some(yaml_patch),
+                    report: Some(&report),
+                })
+                .context("failed to serialize germinate output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn default_canary_script_path(compose_file: &Path) -> PathBuf {
+    let parent = compose_file.parent().unwrap_or_else(|| Path::new("."));
+    parent.join("hpc-compose-canary.sbatch")
+}
+
+fn minimized_canary_plan(
+    original: &RuntimePlan,
+    canary_time: &str,
+    metrics_interval: u64,
+    min_cpus: u32,
+    min_mem: &str,
+    min_gpus: u32,
+) -> RuntimePlan {
+    let mut plan = original.clone();
+    plan.name = format!("{}-canary", original.name);
+    plan.slurm.time = Some(canary_time.to_string());
+    plan.slurm.cpus_per_task = Some(min_cpus);
+    plan.slurm.mem = Some(min_mem.to_string());
+    if allocation_or_service_requests_gpus(original) {
+        if plan.slurm.gpus.is_some() {
+            plan.slurm.gpus = Some(min_gpus);
+        }
+        if plan.slurm.gpus_per_node.is_some() {
+            plan.slurm.gpus_per_node = Some(min_gpus);
+        }
+        if plan.slurm.gpus_per_task.is_some() {
+            plan.slurm.gpus_per_task = Some(min_gpus);
+        }
+    }
+    plan.slurm.metrics = Some(MetricsConfig {
+        enabled: Some(true),
+        interval_seconds: Some(metrics_interval),
+        collectors: vec![MetricsCollector::Gpu, MetricsCollector::Slurm],
+    });
+    for service in &mut plan.ordered_services {
+        if service.slurm.cpus_per_task.is_some() {
+            service.slurm.cpus_per_task = Some(min_cpus);
+        }
+        if service.slurm.gpus.is_some() {
+            service.slurm.gpus = Some(min_gpus);
+        }
+        if service.slurm.gpus_per_node.is_some() {
+            service.slurm.gpus_per_node = Some(min_gpus);
+        }
+        if service.slurm.gpus_per_task.is_some() {
+            service.slurm.gpus_per_task = Some(min_gpus);
+        }
+    }
+    plan
+}
+
+fn allocation_or_service_requests_gpus(plan: &RuntimePlan) -> bool {
+    plan.slurm.gpus.unwrap_or(0) > 0
+        || plan.slurm.gpus_per_node.unwrap_or(0) > 0
+        || plan.slurm.gpus_per_task.unwrap_or(0) > 0
+        || plan
+            .slurm
+            .gres
+            .as_deref()
+            .is_some_and(|gres| gres.contains("gpu"))
+        || plan.ordered_services.iter().any(|service| {
+            service.slurm.gpus.unwrap_or(0) > 0
+                || service.slurm.gpus_per_node.unwrap_or(0) > 0
+                || service.slurm.gpus_per_task.unwrap_or(0) > 0
+                || service
+                    .slurm
+                    .gres
+                    .as_deref()
+                    .is_some_and(|gres| gres.contains("gpu"))
+        })
+}
+
+fn wait_for_canary_terminal(
+    spec_path: &Path,
+    job_id: &str,
+    timeout_seconds: u64,
+    scheduler: &SchedulerOptions,
+) -> Result<()> {
+    let started = SystemTime::now();
+    loop {
+        let snapshot = build_status_snapshot(spec_path, Some(job_id), scheduler)
+            .with_context(|| format!("failed to inspect canary job {job_id}"))?;
+        if snapshot.scheduler.terminal {
+            return Ok(());
+        }
+        let elapsed = started
+            .elapsed()
+            .map(|duration| duration.as_secs())
+            .unwrap_or(timeout_seconds);
+        if elapsed >= timeout_seconds {
+            bail!(
+                "canary job {job_id} did not reach a terminal scheduler state within {timeout_seconds}s; inspect the queue with `hpc-compose status --job-id {job_id}`"
+            );
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn suppress_canary_walltime_recommendations(report: &mut hpc_compose::job::RightsizeReport) {
+    let before = report.recommendations.len();
+    report
+        .recommendations
+        .retain(|recommendation| recommendation.resource != "time");
+    if report.recommendations.len() != before {
+        report.notes.push(
+            "walltime is observed from the canary but not down-sized from a one-minute probe"
+                .to_string(),
+        );
+    }
+}
+
+fn recommendation_yaml_patch(report: &hpc_compose::job::RightsizeReport) -> String {
+    let mut top_level = BTreeMap::<String, String>::new();
+    let mut services = BTreeMap::<String, BTreeMap<String, String>>::new();
+    let mut unknown = Vec::new();
+    for recommendation in &report.recommendations {
+        if let Some(key) = recommendation.target_path.strip_prefix("x-slurm.") {
+            top_level.insert(key.to_string(), recommendation.suggested.clone());
+        } else if let Some(rest) = recommendation.target_path.strip_prefix("services.") {
+            if let Some((service, key)) = rest.split_once(".x-slurm.") {
+                services
+                    .entry(service.to_string())
+                    .or_default()
+                    .insert(key.to_string(), recommendation.suggested.clone());
+            } else {
+                unknown.push(recommendation);
+            }
+        } else {
+            unknown.push(recommendation);
+        }
+    }
+    let mut out = String::new();
+    if !top_level.is_empty() {
+        out.push_str("x-slurm:\n");
+        for (key, value) in top_level {
+            out.push_str(&format!("  {key}: {value}\n"));
+        }
+    }
+    if !services.is_empty() {
+        out.push_str("services:\n");
+        for (service, values) in services {
+            out.push_str(&format!("  {service}:\n"));
+            out.push_str("    x-slurm:\n");
+            for (key, value) in values {
+                out.push_str(&format!("      {key}: {value}\n"));
+            }
+        }
+    }
+    for recommendation in unknown {
+        out.push_str(&format!(
+            "# {}: {}\n",
+            recommendation.target_path, recommendation.suggested
+        ));
+    }
+    out
+}
+
+#[derive(Debug, Serialize)]
+struct RendezvousRegisterOutput {
+    cache_dir: PathBuf,
+    record_path: PathBuf,
+    record: hpc_compose::rendezvous::RendezvousRecord,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rendezvous_register(
+    cache_dir: PathBuf,
+    name: String,
+    job_id: String,
+    service: Option<String>,
+    host: String,
+    port: u16,
+    protocol: String,
+    path: Option<String>,
+    ttl_seconds: u64,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let now = rendezvous::unix_timestamp_now();
+    let record = rendezvous::build_record(
+        &cache_dir,
+        RendezvousRegisterRequest {
+            name,
+            job_id,
+            service,
+            host,
+            port,
+            protocol,
+            path,
+            ttl_seconds,
+            metadata: BTreeMap::new(),
+        },
+        now,
+    )?;
+    let record_path = rendezvous::register(&cache_dir, &record)?;
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            println!("registered rendezvous: {}", record.name);
+            println!("url: {}", record.url);
+            println!("job id: {}", record.job_id);
+            println!("record: {}", record_path.display());
+        }
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&RendezvousRegisterOutput {
+                cache_dir,
+                record_path,
+                record,
+            })
+            .context("failed to serialize rendezvous register output")?
+        ),
+    }
+    Ok(())
+}
+
+pub(crate) fn rendezvous_resolve(
+    cache_dir: PathBuf,
+    name: String,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let Some(record) = rendezvous::resolve(&cache_dir, &name, rendezvous::unix_timestamp_now())?
+    else {
+        bail!(
+            "no live rendezvous record named '{}' found under {}",
+            name,
+            rendezvous::root_dir(&cache_dir).display()
+        );
+    };
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            println!("name: {}", record.name);
+            println!("url: {}", record.url);
+            println!("host: {}", record.host);
+            println!("port: {}", record.port);
+            println!("job id: {}", record.job_id);
+            if let Some(service) = &record.service {
+                println!("service: {service}");
+            }
+            println!(
+                "expires in: {}s",
+                record.ttl_seconds.saturating_sub(
+                    rendezvous::unix_timestamp_now().saturating_sub(record.registered_at)
+                )
+            );
+        }
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&record)
+                .context("failed to serialize rendezvous resolve output")?
+        ),
+    }
+    Ok(())
+}
+
+pub(crate) fn rendezvous_list(cache_dir: PathBuf, format: Option<OutputFormat>) -> Result<()> {
+    let records = rendezvous::list(&cache_dir, rendezvous::unix_timestamp_now())?;
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            if records.is_empty() {
+                println!(
+                    "no live rendezvous records found under {}",
+                    rendezvous::root_dir(&cache_dir).display()
+                );
+            } else {
+                for record in records {
+                    println!("{} {} job={}", record.name, record.url, record.job_id);
+                }
+            }
+        }
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&records)
+                .context("failed to serialize rendezvous list output")?
+        ),
+    }
+    Ok(())
+}
+
+pub(crate) fn rendezvous_prune(cache_dir: PathBuf, format: Option<OutputFormat>) -> Result<()> {
+    let report = rendezvous::prune(&cache_dir, rendezvous::unix_timestamp_now())?;
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            println!("removed {} rendezvous record(s)", report.removed.len());
+            for path in &report.removed {
+                println!("  {}", path.display());
+            }
+        }
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .context("failed to serialize rendezvous prune output")?
+        ),
+    }
+    Ok(())
+}
+
+pub(crate) fn alloc(
+    context: ResolvedContext,
+    command: Vec<String>,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    quiet: bool,
+) -> Result<()> {
+    let runtime_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    if runtime_plan.slurm.array.is_some() {
+        bail!(
+            "alloc does not support x-slurm.array; interactive allocations run one compose allocation"
+        );
+    }
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+    let progress = ProgressReporter::new(!quiet);
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+
+    if !no_preflight {
+        let report = progress.run_checked_result(
+            "Running preflight checks",
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &runtime_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.salloc.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: true,
+                        skip_prepare,
+                        cluster_profile: cluster_profile.clone(),
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
+        if !quiet || report.has_errors() {
+            output::print_report(&report, false);
+        }
+        if report.has_errors() {
+            bail!("preflight failed; fix the reported errors before opening an allocation");
+        }
+    }
+
+    if !skip_prepare {
+        let prepare_progress = PrepareProgress::new(&runtime_plan, !quiet);
+        let summary = progress.run_result("Preparing runtime artifacts", || {
+            prepare_runtime_plan(
+                &runtime_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    keep_failed_prep,
+                    force_rebuild,
+                },
+            )
+        })?;
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet {
+            output::print_prepare_summary(&summary);
+        }
+    }
+
+    let bootstrap = allocation_bootstrap_script(&context, &runtime_plan, &submit_dir);
+    let mut args = Vec::new();
+    push_slurm_salloc_options(&mut args, &runtime_plan.slurm);
+    args.push("bash".to_string());
+    args.push("-lc".to_string());
+    args.push(bootstrap);
+    args.push("hpc-compose-alloc".to_string());
+    args.extend(command);
+
+    if !quiet {
+        println!(
+            "opening Slurm allocation with {}",
+            context.binaries.salloc.value
+        );
+    }
+    let status = Command::new(&context.binaries.salloc.value)
+        .args(&args)
+        .current_dir(&submit_dir)
+        .status()
+        .with_context(|| format!("failed to execute '{}'", context.binaries.salloc.value))?;
+    if !status.success() {
+        bail!("salloc failed with status {status}");
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1243,6 +3519,7 @@ pub(crate) fn run_service(
 ) -> Result<()> {
     let file = context.compose_file.value.clone();
     let progress = ProgressReporter::new(!quiet);
+    let active_allocation_job_id = active_allocation_job_id();
     let mut runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1283,7 +3560,10 @@ pub(crate) fn run_service(
                         enroot_bin: context.binaries.enroot.value.clone(),
                         apptainer_bin: context.binaries.apptainer.value.clone(),
                         singularity_bin: context.binaries.singularity.value.clone(),
-                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        sbatch_bin: active_allocation_job_id
+                            .as_ref()
+                            .map(|_| context.binaries.srun.value.clone())
+                            .unwrap_or_else(|| context.binaries.sbatch.value.clone()),
                         srun_bin: context.binaries.srun.value.clone(),
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: true,
@@ -1323,14 +3603,19 @@ pub(crate) fn run_service(
     }
 
     let script = progress.run_result("Rendering run script", || {
-        render_script_with_options(
+        let script = render_script_with_options(
             &runtime_plan,
             &RenderOptions {
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
                 cluster_profile,
             },
-        )
+        )?;
+        Ok::<_, anyhow::Error>(if active_allocation_job_id.is_some() {
+            strip_sbatch_directives(&script)
+        } else {
+            script
+        })
     })?;
     let script_path = script_out.unwrap_or_else(|| default_run_script_path(&file, &service_name));
     fs::write(&script_path, script).with_context(|| {
@@ -1339,6 +3624,44 @@ pub(crate) fn run_service(
             script_path.display()
         )
     })?;
+
+    if let Some(job_id) = active_allocation_job_id.as_deref() {
+        println!("using active Slurm allocation {job_id}");
+        let record = build_submission_record_with_options(
+            &file,
+            &submit_dir,
+            &script_path,
+            &runtime_plan,
+            job_id,
+            &SubmissionRecordBuildOptions {
+                kind: SubmissionKind::Run,
+                service_name: Some(service_name.clone()),
+                command_override: Some(command.clone()),
+                requested_walltime: requested_walltime(&runtime_plan),
+                slurm_array: None,
+                sweep: None,
+                config_snapshot_yaml: None,
+                cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+            },
+        )?;
+        write_submission_record(&record)
+            .context("failed to persist tracking metadata for in-allocation run")?;
+        output::print_submit_summary_box(
+            &runtime_plan,
+            &record.job_id,
+            &script_path,
+            Some(&latest_record_path(&record)),
+        );
+        let status = Command::new("bash")
+            .arg(&script_path)
+            .current_dir(&submit_dir)
+            .status()
+            .with_context(|| format!("failed to execute '{}'", script_path.display()))?;
+        if !status.success() {
+            bail!("in-allocation run failed with status {status}");
+        }
+        return Ok(());
+    }
 
     let output_result = progress.run_result("Submitting run job to Slurm", || {
         Command::new(&context.binaries.sbatch.value)
@@ -1376,6 +3699,8 @@ pub(crate) fn run_service(
             service_name: Some(service_name.clone()),
             command_override: Some(command),
             requested_walltime: requested_walltime(&runtime_plan),
+            slurm_array: runtime_plan.slurm.array.clone(),
+            sweep: None,
             config_snapshot_yaml: None,
             cached_artifacts: tracked_cached_artifacts(&runtime_plan),
         },
@@ -1520,6 +3845,8 @@ pub(crate) fn run_ephemeral(
         service_name: Some("run".to_string()),
         command_override: Some(command),
         requested_walltime: requested_walltime(&runtime_plan),
+        slurm_array: runtime_plan.slurm.array.clone(),
+        sweep: None,
         config_snapshot_yaml: None,
         cached_artifacts: tracked_cached_artifacts(&runtime_plan),
     };
@@ -1685,26 +4012,44 @@ pub(crate) fn status(
     job_id: Option<String>,
     format: Option<OutputFormat>,
     json: bool,
+    array: bool,
 ) -> Result<()> {
-    let record = match job_id.as_deref() {
-        Some(_) => resolve_tracked_record(&context, job_id.as_deref())?,
+    let lookup_job_id = if array {
+        job_id
+            .as_deref()
+            .and_then(|value| value.split_once('_').map(|(parent, _)| parent.to_string()))
+            .or_else(|| job_id.clone())
+    } else {
+        job_id.clone()
+    };
+    let record = match lookup_job_id.as_deref() {
+        Some(_) => resolve_tracked_record(&context, lookup_job_id.as_deref())?,
         None => None,
     };
-    if job_id.is_some() && record.is_none() {
-        bail!("{}", tracked_job_hint(job_id.as_deref()));
+    if lookup_job_id.is_some() && record.is_none() {
+        bail!("{}", tracked_job_hint(lookup_job_id.as_deref()));
     }
     let compose_file = record
         .as_ref()
         .map(|record| record.compose_file.as_path())
         .unwrap_or(context.compose_file.value.as_path());
-    let snapshot = build_status_snapshot(
+    let scheduler_options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value,
+        sacct_bin: context.binaries.sacct.value,
+    };
+    let mut snapshot = build_status_snapshot_with_array(
         compose_file,
-        job_id.as_deref(),
-        &SchedulerOptions {
-            squeue_bin: context.binaries.squeue.value,
-            sacct_bin: context.binaries.sacct.value,
-        },
+        lookup_job_id.as_deref(),
+        &scheduler_options,
+        array,
     )?;
+    if array && job_id.as_deref() != lookup_job_id.as_deref() {
+        snapshot.array = Some(build_array_status_snapshot(
+            &snapshot.record,
+            job_id.as_deref(),
+            &scheduler_options,
+        )?);
+    }
     match output::resolve_output_format(format, json) {
         OutputFormat::Text => {
             output::print_status_snapshot(&snapshot).context("failed to write status output")?;
@@ -1725,6 +4070,7 @@ pub(crate) fn stats(
     job_id: Option<String>,
     json: bool,
     format: Option<StatsOutputFormat>,
+    accounting: bool,
 ) -> Result<()> {
     let record = match job_id.as_deref() {
         Some(_) => resolve_tracked_record(&context, job_id.as_deref())?,
@@ -1743,6 +4089,7 @@ pub(crate) fn stats(
                 sacct_bin: context.binaries.sacct.value,
             },
             sstat_bin: context.binaries.sstat.value,
+            accounting,
         },
     )?;
     match output::resolve_stats_output_format(format, json) {
@@ -1761,6 +4108,79 @@ pub(crate) fn stats(
         StatsOutputFormat::Jsonl => {
             output::write_stats_snapshot_jsonl(&mut io::stdout(), &snapshot)
                 .context("failed to write jsonl stats output")?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn metrics_probe(
+    duration_seconds: u64,
+    format: OutputFormat,
+    compare_nvidia_smi: bool,
+) -> Result<()> {
+    if format != OutputFormat::Json {
+        bail!("metrics-probe currently supports only --format json");
+    }
+    let options = MetricsProbeOptions {
+        duration_seconds,
+        compare_nvidia_smi,
+    };
+    validate_metrics_probe_options(options)?;
+    let report = build_metrics_probe_report(options)?;
+    println!("{}", serialize_metrics_probe_report(&report)?);
+    Ok(())
+}
+
+pub(crate) fn score(
+    context: ResolvedContext,
+    job_id: Option<String>,
+    json: bool,
+    format: Option<OutputFormat>,
+    pue: f64,
+    gpu_tdp_w: f64,
+    cpu_watts_per_core: f64,
+) -> Result<()> {
+    let record = resolve_tracked_record(&context, job_id.as_deref())?
+        .with_context(|| tracked_job_hint(job_id.as_deref()))?;
+    let runtime_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &record.compose_file,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )
+        .with_context(|| {
+            format!(
+                "failed to load runtime plan for tracked job {} from {}",
+                record.job_id,
+                record.compose_file.display()
+            )
+        })?;
+    let report = build_efficiency_score_report(
+        &runtime_plan,
+        &record,
+        &EfficiencyScoreOptions {
+            scheduler: SchedulerOptions {
+                squeue_bin: context.binaries.squeue.value,
+                sacct_bin: context.binaries.sacct.value,
+            },
+            sstat_bin: context.binaries.sstat.value,
+            pue,
+            gpu_tdp_w,
+            cpu_watts_per_core,
+        },
+    )?;
+    match output::resolve_output_format(format, json) {
+        OutputFormat::Text => {
+            output::print_efficiency_score_report(&report)
+                .context("failed to write score output")?;
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .context("failed to serialize score output")?
+            );
         }
     }
     Ok(())
@@ -1798,16 +4218,60 @@ pub(crate) fn artifacts(
     Ok(())
 }
 
+pub(crate) fn diff(
+    context: ResolvedContext,
+    job_id_1: String,
+    job_id_2: String,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let left = resolve_tracked_record(&context, Some(&job_id_1))?
+        .with_context(|| format!("tracked job '{job_id_1}' was not found"))?;
+    let right = resolve_tracked_record(&context, Some(&job_id_2))?
+        .with_context(|| format!("tracked job '{job_id_2}' was not found"))?;
+    let report = build_job_diff_report(
+        &left,
+        &right,
+        &SchedulerOptions {
+            squeue_bin: context.binaries.squeue.value,
+            sacct_bin: context.binaries.sacct.value,
+        },
+    );
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            output::print_job_diff_report(&report).context("failed to write diff output")?;
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).context("failed to serialize diff output")?
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn logs(
     context: ResolvedContext,
     job_id: Option<String>,
     service: Option<String>,
     follow: bool,
     lines: usize,
+    grep: Option<String>,
+    since: Option<String>,
 ) -> Result<()> {
     let record = resolve_tracked_record(&context, job_id.as_deref())?
         .with_context(|| tracked_job_hint(job_id.as_deref()))?;
-    print_logs(&record, service.as_deref(), lines, follow)
+    let since_seconds = since.as_deref().map(parse_log_since_duration).transpose()?;
+    print_logs(
+        &record,
+        &hpc_compose::job::LogPrintOptions {
+            service,
+            lines,
+            follow,
+            grep,
+            since_seconds,
+        },
+    )
 }
 
 pub(crate) fn ps(
@@ -1872,6 +4336,125 @@ pub(crate) fn watch(
             hold_on_exit,
         )?,
     )
+}
+
+pub(crate) fn replay(
+    context: ResolvedContext,
+    job_id: Option<String>,
+    service: Option<String>,
+    speed: f64,
+    lines: usize,
+    no_tui: bool,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    if !speed.is_finite() || speed <= 0.0 {
+        bail!("replay --speed must be a positive finite number");
+    }
+    let record = resolve_tracked_record(&context, job_id.as_deref())?
+        .with_context(|| tracked_job_hint(job_id.as_deref()))?;
+    let report = build_replay_report(&record, service.as_deref())?;
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .context("failed to serialize replay output")?
+            );
+            Ok(())
+        }
+        OutputFormat::Text if no_tui => print_replay_summary(&report),
+        OutputFormat::Text => {
+            if watch_ui::can_use_watch_ui() {
+                match watch_ui::run_replay_ui(&report, service.as_deref(), lines, speed) {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        let _ = writeln!(
+                            io::stderr(),
+                            "warning: replay UI unavailable ({err}); printing static replay summary"
+                        );
+                        let _ = io::stderr().flush();
+                        print_replay_summary(&report)
+                    }
+                }
+            } else {
+                print_replay_summary(&report)
+            }
+        }
+    }
+}
+
+fn print_replay_summary(report: &hpc_compose::job::ReplayReport) -> Result<()> {
+    let mut stdout = io::stdout();
+    writeln!(
+        stdout,
+        "hpc-compose replay | job {} | {}",
+        report.job_id, report.fidelity
+    )
+    .context("failed to write replay output")?;
+    if let (Some(start), Some(end)) = (report.timeline_start_unix, report.timeline_end_unix) {
+        writeln!(stdout, "timeline: {start}..{end}")?;
+    }
+    writeln!(stdout, "events: {}", report.events.len())?;
+    if !report.notes.is_empty() {
+        writeln!(stdout, "notes:")?;
+        for note in &report.notes {
+            writeln!(stdout, "  - {note}")?;
+        }
+    }
+    writeln!(stdout, "artifacts:")?;
+    for path in &report.artifacts.runtime_roots {
+        writeln!(stdout, "  runtime: {}", path.display())?;
+    }
+    for path in &report.artifacts.service_exit_dirs {
+        writeln!(stdout, "  service-exits: {}", path.display())?;
+    }
+    for path in &report.artifacts.metrics_dirs {
+        writeln!(stdout, "  metrics: {}", path.display())?;
+    }
+    writeln!(stdout, "timeline:")?;
+    for frame in &report.frames {
+        let event = &frame.event;
+        let service = event
+            .service
+            .as_deref()
+            .map(|service| format!(" service={service}"))
+            .unwrap_or_default();
+        let exit = event
+            .exit_code
+            .map(|code| format!(" exit={code}"))
+            .unwrap_or_default();
+        let detail = event
+            .detail
+            .as_deref()
+            .map(|detail| format!(" ({detail})"))
+            .unwrap_or_default();
+        let metrics = frame
+            .metrics_line
+            .as_deref()
+            .map(|line| format!(" | metrics: {line}"))
+            .unwrap_or_default();
+        writeln!(
+            stdout,
+            "  {} {}{}{}{}{}",
+            event.at_unix,
+            replay_event_kind_label(event.kind),
+            service,
+            exit,
+            detail,
+            metrics
+        )?;
+    }
+    stdout.flush().context("failed to flush replay output")
+}
+
+fn replay_event_kind_label(kind: hpc_compose::job::ReplayEventKind) -> &'static str {
+    match kind {
+        hpc_compose::job::ReplayEventKind::AttemptStart => "attempt_start",
+        hpc_compose::job::ReplayEventKind::ServiceStart => "service_start",
+        hpc_compose::job::ReplayEventKind::MetricsSample => "metrics_sample",
+        hpc_compose::job::ReplayEventKind::ServiceExit => "service_exit",
+        hpc_compose::job::ReplayEventKind::FinalSnapshot => "final_snapshot",
+    }
 }
 
 fn tracked_job_hint(job_id: Option<&str>) -> String {
@@ -2117,6 +4700,7 @@ fn resolved_binary_overrides(context: &ResolvedContext) -> BinaryOverrides {
         enroot: Some(context.binaries.enroot.value.clone()),
         apptainer: Some(context.binaries.apptainer.value.clone()),
         singularity: Some(context.binaries.singularity.value.clone()),
+        salloc: Some(context.binaries.salloc.value.clone()),
         sbatch: Some(context.binaries.sbatch.value.clone()),
         srun: Some(context.binaries.srun.value.clone()),
         scontrol: Some(context.binaries.scontrol.value.clone()),
@@ -2125,6 +4709,8 @@ fn resolved_binary_overrides(context: &ResolvedContext) -> BinaryOverrides {
         sacct: Some(context.binaries.sacct.value.clone()),
         sstat: Some(context.binaries.sstat.value.clone()),
         scancel: Some(context.binaries.scancel.value.clone()),
+        sshare: Some(context.binaries.sshare.value.clone()),
+        sprio: Some(context.binaries.sprio.value.clone()),
     }
 }
 
@@ -2451,6 +5037,574 @@ pub(crate) fn jobs_list(disk_usage: bool, format: Option<OutputFormat>) -> Resul
     Ok(())
 }
 
+const DEFAULT_SWEEP_MAX_TRIALS: usize = 100;
+
+#[derive(Debug, Serialize)]
+struct SweepSubmitOutput<'a> {
+    dry_run: bool,
+    manifest_path: Option<PathBuf>,
+    manifest: &'a SweepManifest,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepStatusOutput {
+    sweep_id: String,
+    compose_file: PathBuf,
+    submitted_at: u64,
+    summary: BTreeMap<String, usize>,
+    trials: Vec<SweepStatusTrialOutput>,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepStatusTrialOutput {
+    trial_id: String,
+    index: usize,
+    variables: BTreeMap<String, String>,
+    job_id: Option<String>,
+    status: String,
+    scheduler_state: Option<String>,
+    record_path: Option<PathBuf>,
+    submit_error: Option<String>,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepListOutput {
+    compose_file: PathBuf,
+    sweeps: Vec<SweepManifest>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sweep_submit(
+    context: ResolvedContext,
+    dry_run: bool,
+    max_trials: Option<usize>,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    format: Option<OutputFormat>,
+    quiet: bool,
+) -> Result<()> {
+    let file = context.compose_file.value.clone();
+    let sweep = ComposeSpec::load_sweep(&file)?.with_context(|| {
+        format!(
+            "{} does not contain a top-level sweep block",
+            file.display()
+        )
+    })?;
+    let sweep_id = generate_sweep_id();
+    let max_trials = max_trials.unwrap_or(DEFAULT_SWEEP_MAX_TRIALS);
+    let expansion = expand_sweep_with_limit(&sweep, &sweep_id, Some(max_trials))?;
+
+    let output_format = output::resolve_output_format(format, false);
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+    let manifest_path = sweep_manifest_path_for(&file, &sweep_id);
+    let sweep_root = manifest_path
+        .parent()
+        .context("sweep manifest path has no parent")?
+        .to_path_buf();
+    let submitted_at = unix_timestamp_now_for_command();
+    let mut manifest = SweepManifest {
+        schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
+        sweep_id: sweep_id.clone(),
+        compose_file: file.clone(),
+        submitted_at,
+        matrix: expansion.matrix.clone(),
+        seed: expansion.seed.clone(),
+        total_combinations: expansion.total_combinations,
+        trials: expansion
+            .trials
+            .iter()
+            .map(|trial| SweepManifestTrial {
+                trial_id: trial.trial_id.clone(),
+                index: trial.index,
+                variables: trial.variables.clone(),
+                script_path: sweep_root.join(format!("{}.sbatch", trial.trial_id)),
+                job_id: None,
+                record_path: None,
+                submitted_at: None,
+                submit_error: None,
+            })
+            .collect(),
+    };
+
+    if dry_run {
+        let cluster_profile = load_discovered_cluster_profile(&context)?;
+        for trial in &expansion.trials {
+            validate_sweep_trial_plan(&context, trial, &sweep_id, cluster_profile.clone())?;
+        }
+        print_sweep_submit_output(output_format, true, None, &manifest)?;
+        return Ok(());
+    }
+
+    write_sweep_manifest(&manifest).context("failed to persist initial sweep manifest")?;
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
+
+    for (index, trial) in expansion.trials.iter().enumerate() {
+        let result = submit_sweep_trial(
+            &context,
+            trial,
+            &sweep_id,
+            &submit_dir,
+            &manifest.trials[index].script_path,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            cluster_profile.clone(),
+            &progress,
+            output_format,
+            quiet,
+        );
+        match result {
+            Ok(record) => {
+                let record_path = latest_record_path(&record);
+                manifest.trials[index].job_id = Some(record.job_id.clone());
+                manifest.trials[index].record_path = Some(record_path);
+                manifest.trials[index].submitted_at = Some(record.submitted_at);
+                write_sweep_manifest(&manifest)
+                    .context("failed to persist sweep manifest after trial submission")?;
+                if output_format == OutputFormat::Text {
+                    println!(
+                        "submitted {} job {} ({})",
+                        trial.trial_id,
+                        record.job_id,
+                        format_sweep_variables(&trial.variables)
+                    );
+                }
+            }
+            Err(err) => {
+                manifest.trials[index].submit_error = Some(err.to_string());
+                write_sweep_manifest(&manifest)
+                    .context("failed to persist sweep manifest after trial failure")?;
+                return Err(err.context(format!("sweep trial {} failed", trial.trial_id)));
+            }
+        }
+    }
+
+    print_sweep_submit_output(output_format, false, Some(manifest_path), &manifest)
+}
+
+fn validate_sweep_trial_plan(
+    context: &ResolvedContext,
+    trial: &SweepExpansionTrial,
+    sweep_id: &str,
+    cluster_profile: Option<hpc_compose::cluster::ClusterProfile>,
+) -> Result<()> {
+    let vars = sweep_interpolation_vars(context, sweep_id, trial);
+    let runtime_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    if runtime_plan.slurm.array.is_some() {
+        bail!(
+            "sweep submit does not support x-slurm.array; each sweep trial is already a separate allocation"
+        );
+    }
+    render_script_with_options(
+        &runtime_plan,
+        &RenderOptions {
+            apptainer_bin: context.binaries.apptainer.value.clone(),
+            singularity_bin: context.binaries.singularity.value.clone(),
+            cluster_profile,
+        },
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_sweep_trial(
+    context: &ResolvedContext,
+    trial: &SweepExpansionTrial,
+    sweep_id: &str,
+    submit_dir: &Path,
+    script_path: &Path,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    cluster_profile: Option<hpc_compose::cluster::ClusterProfile>,
+    progress: &ProgressReporter,
+    output_format: OutputFormat,
+    quiet: bool,
+) -> Result<SubmissionRecord> {
+    let vars = sweep_interpolation_vars(context, sweep_id, trial);
+    let file = context.compose_file.value.clone();
+    let effective_config =
+        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+            &file,
+            &vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let runtime_plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &file,
+            &vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    if runtime_plan.slurm.array.is_some() {
+        bail!(
+            "sweep submit does not support x-slurm.array; each sweep trial is already a separate allocation"
+        );
+    }
+
+    if !no_preflight {
+        let report = progress.run_checked_result(
+            format!("Running preflight checks for {}", trial.trial_id),
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &runtime_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: true,
+                        skip_prepare,
+                        cluster_profile: cluster_profile.clone(),
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
+        if !quiet || report.has_errors() {
+            output::print_report(&report, false);
+        }
+        if report.has_errors() {
+            bail!("preflight failed for sweep trial {}", trial.trial_id);
+        }
+    }
+
+    if !skip_prepare {
+        let prepare_progress =
+            PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
+        let summary = progress.run_result(format!("Preparing {}", trial.trial_id), || {
+            prepare_runtime_plan(
+                &runtime_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    keep_failed_prep: false,
+                    force_rebuild,
+                },
+            )
+        })?;
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet && output_format == OutputFormat::Text {
+            output::print_prepare_summary(&summary);
+        }
+    }
+
+    let script = progress.run_result(format!("Rendering {}", trial.trial_id), || {
+        render_script_with_options(
+            &runtime_plan,
+            &RenderOptions {
+                apptainer_bin: context.binaries.apptainer.value.clone(),
+                singularity_bin: context.binaries.singularity.value.clone(),
+                cluster_profile,
+            },
+        )
+    })?;
+    fs::write(script_path, script).with_context(|| {
+        format!(
+            "failed to write rendered script to {}",
+            script_path.display()
+        )
+    })?;
+
+    let prepared = PreparedSlurmSubmission {
+        file,
+        submit_dir: submit_dir.to_path_buf(),
+        script_path: script_path.to_path_buf(),
+        runtime_plan: runtime_plan.clone(),
+        record_options: SubmissionRecordBuildOptions {
+            kind: SubmissionKind::SweepTrial,
+            service_name: None,
+            command_override: None,
+            requested_walltime: requested_walltime(&runtime_plan),
+            slurm_array: None,
+            sweep: Some(SweepTrialMetadata {
+                sweep_id: sweep_id.to_string(),
+                trial_id: trial.trial_id.clone(),
+                trial_index: trial.index,
+                variables: trial.variables.clone(),
+            }),
+            config_snapshot_yaml: Some(effective_config_yaml),
+            cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+        },
+        output_format,
+    };
+    let outcome = submit_prepared_slurm_submission(context, &prepared, progress)?;
+    let Some((record, persisted)) = outcome.tracked_submission else {
+        bail!(
+            "sbatch output for sweep trial {} did not include a numeric Slurm job id",
+            trial.trial_id
+        );
+    };
+    if !persisted {
+        bail!(
+            "tracking metadata could not be written for sweep trial {} job {}",
+            trial.trial_id,
+            record.job_id
+        );
+    }
+    Ok(record)
+}
+
+fn sweep_interpolation_vars(
+    context: &ResolvedContext,
+    sweep_id: &str,
+    trial: &SweepExpansionTrial,
+) -> BTreeMap<String, String> {
+    let mut vars = context.interpolation_vars.clone();
+    vars.extend(interpolation_vars_for_sweep_trial(sweep_id, trial));
+    vars
+}
+
+fn print_sweep_submit_output(
+    output_format: OutputFormat,
+    dry_run: bool,
+    manifest_path: Option<PathBuf>,
+    manifest: &SweepManifest,
+) -> Result<()> {
+    match output_format {
+        OutputFormat::Text => {
+            println!("sweep: {}", manifest.sweep_id);
+            println!("trials: {}", manifest.trials.len());
+            if let Some(seed) = &manifest.seed {
+                println!("seed: {seed}");
+            }
+            if dry_run {
+                println!("dry run: no scripts written and no jobs submitted");
+            } else if let Some(path) = &manifest_path {
+                println!("manifest: {}", path.display());
+            }
+            for trial in &manifest.trials {
+                let status = trial
+                    .job_id
+                    .as_deref()
+                    .or(trial.submit_error.as_deref())
+                    .unwrap_or("pending submit");
+                println!(
+                    "  {} {} {}",
+                    trial.trial_id,
+                    status,
+                    format_sweep_variables(&trial.variables)
+                );
+            }
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&SweepSubmitOutput {
+                    dry_run,
+                    manifest_path,
+                    manifest,
+                })
+                .context("failed to serialize sweep submit output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn sweep_status(
+    context: ResolvedContext,
+    sweep_id: Option<String>,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let manifest = load_sweep_manifest(&context.compose_file.value, sweep_id.as_deref())?;
+    let options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value,
+        sacct_bin: context.binaries.sacct.value,
+    };
+    let mut summary = BTreeMap::new();
+    let trials = manifest
+        .trials
+        .iter()
+        .map(|trial| {
+            let output = status_for_sweep_trial(&manifest, trial, &options);
+            *summary.entry(output.status.clone()).or_insert(0) += 1;
+            output
+        })
+        .collect::<Vec<_>>();
+    let report = SweepStatusOutput {
+        sweep_id: manifest.sweep_id,
+        compose_file: manifest.compose_file,
+        submitted_at: manifest.submitted_at,
+        summary,
+        trials,
+    };
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => print_sweep_status_output(&report),
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .context("failed to serialize sweep status output")?
+            );
+            Ok(())
+        }
+    }
+}
+
+fn status_for_sweep_trial(
+    manifest: &SweepManifest,
+    trial: &SweepManifestTrial,
+    options: &SchedulerOptions,
+) -> SweepStatusTrialOutput {
+    if let Some(error) = &trial.submit_error {
+        return SweepStatusTrialOutput {
+            trial_id: trial.trial_id.clone(),
+            index: trial.index,
+            variables: trial.variables.clone(),
+            job_id: trial.job_id.clone(),
+            status: "submit_failed".to_string(),
+            scheduler_state: None,
+            record_path: trial.record_path.clone(),
+            submit_error: Some(error.clone()),
+            detail: None,
+        };
+    }
+    let Some(job_id) = trial.job_id.as_deref() else {
+        return SweepStatusTrialOutput {
+            trial_id: trial.trial_id.clone(),
+            index: trial.index,
+            variables: trial.variables.clone(),
+            job_id: None,
+            status: "unknown".to_string(),
+            scheduler_state: None,
+            record_path: trial.record_path.clone(),
+            submit_error: None,
+            detail: Some("trial has no recorded job id".to_string()),
+        };
+    };
+    match build_status_snapshot(&manifest.compose_file, Some(job_id), options) {
+        Ok(snapshot) => SweepStatusTrialOutput {
+            trial_id: trial.trial_id.clone(),
+            index: trial.index,
+            variables: trial.variables.clone(),
+            job_id: Some(job_id.to_string()),
+            status: categorize_sweep_status(&snapshot),
+            scheduler_state: Some(snapshot.scheduler.state),
+            record_path: trial.record_path.clone(),
+            submit_error: None,
+            detail: None,
+        },
+        Err(err) => SweepStatusTrialOutput {
+            trial_id: trial.trial_id.clone(),
+            index: trial.index,
+            variables: trial.variables.clone(),
+            job_id: Some(job_id.to_string()),
+            status: "missing_tracking".to_string(),
+            scheduler_state: None,
+            record_path: trial.record_path.clone(),
+            submit_error: None,
+            detail: Some(err.to_string()),
+        },
+    }
+}
+
+fn categorize_sweep_status(snapshot: &hpc_compose::job::StatusSnapshot) -> String {
+    if snapshot.scheduler.state == "PENDING" {
+        return "pending".to_string();
+    }
+    if snapshot.scheduler.state == "RUNNING" {
+        return "running".to_string();
+    }
+    let service_failed = snapshot.services.iter().any(|service| {
+        service.status.as_deref() == Some("failed")
+            || service
+                .assertions
+                .as_ref()
+                .is_some_and(|assertions| !assertions.failures.is_empty())
+    });
+    if snapshot.scheduler.terminal {
+        if snapshot.scheduler.failed || service_failed {
+            "failed".to_string()
+        } else {
+            "completed".to_string()
+        }
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn print_sweep_status_output(report: &SweepStatusOutput) -> Result<()> {
+    println!("sweep: {}", report.sweep_id);
+    println!("trials: {}", report.trials.len());
+    print!("summary:");
+    for (status, count) in &report.summary {
+        print!(" {status}={count}");
+    }
+    println!();
+    for trial in &report.trials {
+        let job = trial.job_id.as_deref().unwrap_or("-");
+        let scheduler = trial.scheduler_state.as_deref().unwrap_or("-");
+        println!(
+            "  {} {:<16} job={} scheduler={} {}",
+            trial.trial_id,
+            trial.status,
+            job,
+            scheduler,
+            format_sweep_variables(&trial.variables)
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn sweep_list(context: ResolvedContext, format: Option<OutputFormat>) -> Result<()> {
+    let sweeps = scan_sweep_manifests(&context.compose_file.value)?;
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Text => {
+            println!("compose: {}", context.compose_file.value.display());
+            println!("sweeps: {}", sweeps.len());
+            for sweep in &sweeps {
+                println!(
+                    "  {} trials={} submitted_at={}",
+                    sweep.sweep_id,
+                    sweep.trials.len(),
+                    sweep.submitted_at
+                );
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&SweepListOutput {
+                    compose_file: context.compose_file.value,
+                    sweeps,
+                })
+                .context("failed to serialize sweep list output")?
+            );
+            Ok(())
+        }
+    }
+}
+
+fn format_sweep_variables(vars: &BTreeMap<String, String>) -> String {
+    vars.iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn unix_timestamp_now_for_command() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 pub(crate) fn clean(
     context: ResolvedContext,
     age: Option<u64>,
@@ -2568,6 +5722,7 @@ mod tests {
                 enroot: resolved_string("/definitely/missing-enroot"),
                 apptainer: resolved_string("/definitely/missing-apptainer"),
                 singularity: resolved_string("/definitely/missing-singularity"),
+                salloc: resolved_string("/definitely/missing-salloc"),
                 sbatch: resolved_string("/definitely/missing-sbatch"),
                 srun: resolved_string("/definitely/missing-srun"),
                 scontrol: resolved_string("/definitely/missing-scontrol"),
@@ -2576,10 +5731,171 @@ mod tests {
                 sacct: resolved_string("/definitely/missing-sacct"),
                 sstat: resolved_string("/definitely/missing-sstat"),
                 scancel: resolved_string("/definitely/missing-scancel"),
+                sshare: resolved_string("/definitely/missing-sshare"),
+                sprio: resolved_string("/definitely/missing-sprio"),
             },
             interpolation_vars: BTreeMap::new(),
             interpolation_var_sources: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn dev_watch_inference_uses_directory_mounts_and_explicit_roots() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let local_image = tmpdir.path().join("local.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        let source_dir = tmpdir.path().join("src");
+        let relative_source_dir = tmpdir.path().join("relative-src");
+        let explicit_dir = tmpdir.path().join("extra");
+        let cache_dir = tmpdir.path().join("cache");
+        let file_mount = tmpdir.path().join("settings.toml");
+        fs::create_dir_all(&source_dir).expect("source dir");
+        fs::create_dir_all(&relative_source_dir).expect("relative source dir");
+        fs::create_dir_all(&explicit_dir).expect("explicit dir");
+        fs::create_dir_all(&cache_dir).expect("cache dir");
+        fs::write(&file_mount, "x").expect("file mount");
+        let compose = tmpdir.path().join("compose-dev.yaml");
+        fs::write(
+            &compose,
+            format!(
+                "name: demo\nx-slurm:\n  cache_dir: {}\nservices:\n  api:\n    image: {}\n    command: /bin/true\n    volumes:\n      - {}:/workspace\n      - ./relative-src:/relative\n      - {}:/config.toml:ro\n      - {}:/cache\n  worker:\n    image: {}\n    command: /bin/true\n    volumes:\n      - {}:/workspace\n",
+                cache_dir.display(),
+                local_image.display(),
+                source_dir.display(),
+                file_mount.display(),
+                cache_dir.display(),
+                local_image.display(),
+                source_dir.display(),
+            ),
+        )
+        .expect("compose");
+        let plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let targets =
+            infer_dev_watch_targets(&plan, tmpdir.path(), std::slice::from_ref(&explicit_dir))
+                .expect("watch targets");
+        let source_dir = canonical_dev_path(&source_dir);
+        let relative_source_dir = canonical_dev_path(&relative_source_dir);
+        let explicit_dir = canonical_dev_path(&explicit_dir);
+        let cache_dir = canonical_dev_path(&cache_dir);
+        let file_mount = canonical_dev_path(&file_mount);
+        let source = targets
+            .iter()
+            .find(|target| target.root == source_dir)
+            .expect("source target");
+        assert!(source.services.contains("api"));
+        assert!(source.services.contains("worker"));
+        let relative_source = targets
+            .iter()
+            .find(|target| target.root == relative_source_dir)
+            .unwrap_or_else(|| panic!("relative source target missing from {targets:#?}"));
+        assert!(relative_source.services.contains("api"));
+        assert!(!targets.iter().any(|target| target.root == cache_dir));
+        assert!(!targets.iter().any(|target| target.root == file_mount));
+        let explicit = targets
+            .iter()
+            .find(|target| target.root == explicit_dir)
+            .expect("explicit target");
+        assert_eq!(
+            explicit.services,
+            ["api".to_string(), "worker".to_string()]
+                .into_iter()
+                .collect()
+        );
+
+        let before = collect_dev_snapshot(&source_dir).expect("snapshot before");
+        fs::write(source_dir.join("main.py"), "print('hi')\n").expect("source change");
+        let after = collect_dev_snapshot(&source_dir).expect("snapshot after");
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn smoke_evaluation_rejects_missing_readiness_and_completion() {
+        let snapshot = hpc_compose::job::StatusSnapshot {
+            record: SubmissionRecord {
+                schema_version: 2,
+                backend: SubmissionBackend::Slurm,
+                kind: SubmissionKind::Main,
+                job_id: "123".into(),
+                submitted_at: 1,
+                compose_file: PathBuf::from("compose.yaml"),
+                submit_dir: PathBuf::from("/tmp"),
+                script_path: PathBuf::from("job.sbatch"),
+                cache_dir: PathBuf::from("/tmp/cache"),
+                batch_log: PathBuf::from("slurm-123.out"),
+                service_logs: BTreeMap::new(),
+                artifact_export_dir: None,
+                resume_dir: None,
+                service_name: None,
+                command_override: None,
+                requested_walltime: None,
+                slurm_array: None,
+                sweep: None,
+                config_snapshot_yaml: None,
+                cached_artifacts: Vec::new(),
+            },
+            scheduler: hpc_compose::job::SchedulerStatus {
+                state: "COMPLETED".into(),
+                source: hpc_compose::job::SchedulerSource::Sacct,
+                terminal: true,
+                failed: false,
+                detail: None,
+            },
+            queue_diagnostics: None,
+            array: None,
+            log_dir: PathBuf::from("/tmp/logs"),
+            batch_log: hpc_compose::job::BatchLogStatus {
+                path: PathBuf::from("slurm-123.out"),
+                present: true,
+                updated_at: None,
+                updated_age_seconds: None,
+            },
+            services: vec![hpc_compose::job::PsServiceRow {
+                service_name: "api".into(),
+                path: PathBuf::from("api.log"),
+                present: true,
+                updated_at: None,
+                updated_age_seconds: None,
+                log_path: None,
+                step_name: None,
+                launch_index: Some(0),
+                launcher_pid: None,
+                healthy: Some(false),
+                completed_successfully: Some(false),
+                readiness_configured: Some(true),
+                status: Some("exited(1)".into()),
+                failure_policy_mode: Some("ignore".into()),
+                restart_count: Some(0),
+                max_restarts: None,
+                window_seconds: None,
+                max_restarts_in_window: None,
+                restart_failures_in_window: None,
+                last_exit_code: Some(1),
+                started_at: Some(10),
+                finished_at: Some(11),
+                duration_seconds: Some(1),
+                assertions: None,
+                placement_mode: None,
+                nodes: None,
+                ntasks: None,
+                ntasks_per_node: None,
+                nodelist: None,
+            }],
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+        };
+        let evaluation = evaluate_smoke_snapshot(&snapshot);
+        assert!(!evaluation.ok);
+        let reason = evaluation.failure_reason.expect("failure reason");
+        assert!(reason.contains("api"));
+        assert!(reason.contains("readiness"));
+        assert!(reason.contains("complete successfully"));
+    }
+
+    #[test]
+    fn tmux_tail_command_quotes_log_paths() {
+        let command = tmux_tail_command(Path::new("/tmp/demo run/api's log.txt"), 25);
+        assert_eq!(command, "tail -n 25 -F '/tmp/demo run/api'\\''s log.txt'");
     }
 
     #[test]
@@ -2597,6 +5913,8 @@ mod tests {
             false,
             true,
             false,
+            false,
+            None,
             false,
             false,
             false,
@@ -2616,6 +5934,8 @@ mod tests {
             true,
             false,
             false,
+            None,
+            false,
             false,
             false,
             true,
@@ -2631,18 +5951,19 @@ mod tests {
             Some("12345".into()),
             Some(OutputFormat::Json),
             false,
+            false,
         )
         .expect_err("status should require tracked metadata");
         assert!(status_err.to_string().contains("tracked job '12345'"));
 
-        let stats_err = stats(
+        stats(
             context.clone(),
             Some("12345".into()),
             false,
             Some(StatsOutputFormat::Json),
+            false,
         )
-        .expect_err("stats should surface scheduler execution failure");
-        assert!(stats_err.to_string().contains("failed to execute"));
+        .expect("stats should degrade when scheduler commands are unavailable");
 
         let artifacts_err = artifacts(
             context.clone(),
@@ -2659,7 +5980,7 @@ mod tests {
                 .contains("no tracked submission metadata exists")
         );
 
-        let logs_err = logs(context.clone(), None, None, false, 10)
+        let logs_err = logs(context.clone(), None, None, false, 10, None, None)
             .expect_err("logs should require a tracked submission");
         assert!(
             logs_err
@@ -2701,6 +6022,8 @@ mod tests {
             false,
             true,
             false,
+            false,
+            None,
             false,
             false,
             false,
@@ -3187,6 +6510,7 @@ mod tests {
             Some(record.job_id.clone()),
             Some(OutputFormat::Json),
             false,
+            false,
         )
         .expect("status");
         stats(
@@ -3194,6 +6518,7 @@ mod tests {
             Some(record.job_id.clone()),
             false,
             Some(StatsOutputFormat::Json),
+            false,
         )
         .expect("stats");
         ps(
@@ -3208,6 +6533,8 @@ mod tests {
             Some("api".into()),
             false,
             10,
+            None,
+            None,
         )
         .expect("logs");
         watch(

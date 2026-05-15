@@ -1,0 +1,30 @@
+name: rendezvous-model-server
+
+x-slurm:
+  job_name: model-server
+  partition: gpu
+  time: "02:00:00"
+  mem: 32G
+  gpus: 1
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  model:
+    image: python:3.12-slim
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python -m http.server 8000
+    readiness:
+      type: tcp
+      port: 8000
+      timeout_seconds: 60
+    x-slurm:
+      rendezvous:
+        register:
+          name: model-server
+          port: 8000
+          protocol: http
+          path: /
+          ttl_seconds: 3600

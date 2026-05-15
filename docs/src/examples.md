@@ -61,6 +61,8 @@ These four examples are the intended conversion funnel.
 
 Use this ordering when you are new to the project:
 
+For a guided version of the first five concepts, run `hpc-compose evolve --output compose.yaml`. The `progressive-complexity` lesson walks through `minimal`, `second-service`, `readiness`, `failure-policy`, and `multi-node-placement` as one evolving valid spec.
+
 | Stage | Start here | Why |
 | --- | --- | --- |
 | Authoring only | `minimal-batch.yaml` with `plan` and `plan --show-script` | Confirms the tool understands a spec without touching Slurm. |
@@ -90,6 +92,7 @@ The matrix below covers the broader set of runnable examples beyond the four pro
 | Example | Availability | What it demonstrates | When to start from it |
 | --- | --- | --- | --- |
 | [`dev-python-app.yaml`](example-source.md#dev-python-app) | Built-in template | Mounted source code plus `x-runtime.prepare.commands` for dependencies | You want an iterative development workflow |
+| [`dev-python-smoke.yaml`](example-source.md#dev-python-smoke) | Repository file | Finite smoke-test variant of the source-mounted Python app | You want to test a development spec without a long-running process |
 | [`llm-curl-workflow.yaml`](example-source.md#llm-curl-workflow) | Built-in template | Repo-local variant of the smallest concrete inference workflow | You want the same LLM stack but with models under the repository tree |
 | [`llama-app.yaml`](example-source.md#llama-app) | Built-in template | GPU-backed service, mounted model files, dependent app service | You need accelerator resources or a model-serving pattern |
 | [`llama-uv-worker.yaml`](example-source.md#llama-uv-worker) | Built-in template | llama.cpp serving plus a source-mounted Python worker executed through `uv` | You want the GGUF server plus mounted worker pattern |
@@ -112,12 +115,16 @@ The matrix below covers the broader set of runnable examples beyond the four pro
 | [`postgres-etl.yaml`](example-source.md#postgres-etl) | Built-in template | PostgreSQL plus a Python data processing job | You need a database-backed batch pipeline |
 | [`restart-policy.yaml`](example-source.md#restart-policy) | Built-in template | Per-service `restart_on_failure` with bounded retries and a rolling-window crash-loop guard | You need transient-failure retries without letting one service spin forever |
 | [`training-checkpoints.yaml`](example-source.md#training-checkpoints) | Built-in template | GPU training with checkpoints exported to shared storage | You need durable checkpoint outputs but not automatic resume semantics |
+| [`training-sweep.yaml`](example-source.md#training-sweep) | Repository file | Embedded `sweep` parameters with interpolation defaults for dry-run and normal render workflows | You want a small hyperparameter sweep starting point |
 | [`vllm-openai.yaml`](example-source.md#vllm-openai) | Built-in template | vLLM serving with an in-job Python client | You want vLLM-based inference instead of llama.cpp |
 | [`vllm-uv-worker.yaml`](example-source.md#vllm-uv-worker) | Built-in template | vLLM serving plus a source-mounted Python worker executed through `uv` | You want a common LLM stack with mounted app code |
 | [`mpi-hello.yaml`](example-source.md#mpi-hello) | Built-in template | MPI hello world using service-level `x-slurm.mpi` | You need a small first-class MPI workload |
 | [`multi-stage-pipeline.yaml`](example-source.md#multi-stage-pipeline) | Built-in template | Two-stage pipeline coordinating through the shared job mount | You need file-based stage-to-stage handoff |
 | [`pipeline-dag.yaml`](example-source.md#pipeline-dag) | Built-in template | One-shot preprocess -> train -> postprocess DAG using successful-completion dependencies | You need stage completion, not service readiness, to gate downstream work |
 | [`fairseq-preprocess.yaml`](example-source.md#fairseq-preprocess) | Built-in template | CPU-heavy NLP data preprocessing with parallel workers | You need a CPU-bound data preprocessing pipeline |
+| [`canary-right-size.yaml`](example-source.md#canary-right-size) | Repository file | A deliberately over-requested training probe for `hpc-compose germinate` | You want to practice right-sizing recommendations before changing a real spec |
+| [`rendezvous-model-server.yaml`](example-source.md#rendezvous-model-server) | Repository file | A provider job that registers a model-server endpoint in the shared cache | You want one Slurm allocation to publish a service for later jobs |
+| [`rendezvous-client.yaml`](example-source.md#rendezvous-client) | Repository file | A separate client job that resolves `HPC_COMPOSE_RDZV_MODEL_SERVER_URL` | You want cross-job service discovery through shared storage |
 
 ## Which Example Should I Start From?
 
@@ -132,7 +139,11 @@ The matrix below covers the broader set of runnable examples beyond the four pro
 - Start with [`ray-symmetric.yaml`](example-source.md#ray-symmetric), [`dask-scheduler-workers.yaml`](example-source.md#dask-scheduler-workers), [`spark-standalone.yaml`](example-source.md#spark-standalone), or [`flux-nested.yaml`](example-source.md#flux-nested) if your distributed framework already fits inside one Slurm allocation.
 - Start with [`nextflow-bridge.yaml`](example-source.md#nextflow-bridge) or [`snakemake-bridge.yaml`](example-source.md#snakemake-bridge) when you want hpc-compose submission, tracking, logs, and artifacts around a workflow-engine command. These bridge templates do not parse workflow files and do not replace the engines' native cluster executors.
 - Start with [`dev-python-app.yaml`](example-source.md#dev-python-app) if you want a source-mounted development loop.
+- Start with [`dev-python-smoke.yaml`](example-source.md#dev-python-smoke) if you want a finite smoke-test companion for the source-mounted development example.
+- Start with [`training-sweep.yaml`](example-source.md#training-sweep) when you want many independent trial allocations from one embedded `sweep` block.
 - Start with [`restart-policy.yaml`](example-source.md#restart-policy) if you need a clear starting point for `restart_on_failure` tuning and `status`-visible retry budgets.
+- Start with [`canary-right-size.yaml`](example-source.md#canary-right-size) when your first question is whether a large GPU or memory request is justified.
+- Start with [`rendezvous-model-server.yaml`](example-source.md#rendezvous-model-server) plus [`rendezvous-client.yaml`](example-source.md#rendezvous-client) when the provider and client should run as separate Slurm jobs.
 
 Companion notes for the more involved examples live alongside the example assets:
 
@@ -140,6 +151,22 @@ Companion notes for the more involved examples live alongside the example assets
 - [`examples/llama-uv-worker/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llama-uv-worker/README.md)
 - [`examples/vllm-uv-worker/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-uv-worker/README.md)
 - [`examples/models/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/models/README.md)
+
+## Development Workflow Recipe
+
+`examples/dev-python-app.yaml` mounts `examples/app/` and runs a long-lived Python process, so it is best for hot reload:
+
+```bash
+hpc-compose dev -f examples/dev-python-app.yaml
+hpc-compose tmux -f examples/dev-python-app.yaml --no-attach
+```
+
+`examples/dev-python-smoke.yaml` keeps the same mounted-source shape but uses a finite command, so it is suitable for smoke tests:
+
+```bash
+hpc-compose test --local -f examples/dev-python-smoke.yaml
+hpc-compose test --submit --time 00:01:00 -f examples/dev-python-smoke.yaml
+```
 
 ## Adaptation Checklist
 

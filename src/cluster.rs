@@ -1447,6 +1447,7 @@ mod tests {
             enroot: resolved_binary(tmpdir.join("enroot")),
             apptainer: resolved_binary(tmpdir.join("missing-apptainer")),
             singularity: resolved_binary(tmpdir.join("missing-singularity")),
+            salloc: resolved_binary(tmpdir.join("salloc")),
             sbatch: resolved_binary(tmpdir.join("sbatch")),
             srun: resolved_binary(tmpdir.join("srun")),
             scontrol: resolved_binary(tmpdir.join("scontrol")),
@@ -1455,6 +1456,8 @@ mod tests {
             sacct: resolved_binary(tmpdir.join("sacct")),
             sstat: resolved_binary(tmpdir.join("sstat")),
             scancel: resolved_binary(tmpdir.join("scancel")),
+            sshare: resolved_binary(tmpdir.join("sshare")),
+            sprio: resolved_binary(tmpdir.join("sprio")),
         }
     }
 
@@ -1483,6 +1486,7 @@ mod tests {
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                assertions: None,
                 failure_policy: ServiceFailurePolicy::default(),
                 placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
@@ -1998,6 +2002,7 @@ name = ""
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                assertions: None,
                 failure_policy: ServiceFailurePolicy::default(),
                 placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig {

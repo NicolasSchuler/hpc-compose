@@ -12,6 +12,14 @@ hpc-compose doctor cluster-report
 
 This writes `.hpc-compose/cluster.toml` by default. Use `--out -` to print TOML instead.
 
+For a live advisory snapshot of current conditions, use:
+
+```bash
+hpc-compose weather
+```
+
+`weather` reads stable labels and hints from the discovered cluster profile when present, but live node, queue, fairshare, and priority data come from one-shot Slurm probes and are not persisted in `.hpc-compose/cluster.toml`.
+
 ## What Gets Discovered
 
 The profile generator uses available local tools and environment hints:

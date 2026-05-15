@@ -78,6 +78,16 @@ pub struct RenderedManPage {
 }
 
 pub fn render_manpages() -> Vec<RenderedManPage> {
+    std::thread::Builder::new()
+        .name("hpc-compose-manpages".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(render_manpages_inner)
+        .expect("failed to spawn manpage renderer")
+        .join()
+        .expect("manpage renderer panicked")
+}
+
+fn render_manpages_inner() -> Vec<RenderedManPage> {
     let mut root = build_cli_command();
     root.build();
     let root_for_refs = root.clone();

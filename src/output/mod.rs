@@ -15,7 +15,8 @@ use hpc_compose::init::{
     templates,
 };
 use hpc_compose::job::{
-    ArtifactExportReport, CleanupReport, JobInventoryScan, PsSnapshot, StatsSnapshot,
+    ArtifactExportReport, CleanupReport, EfficiencyScoreReport, JobDiffChange, JobDiffReport,
+    JobInventoryScan, PsSnapshot, RightsizeConfidence, RightsizeReport, StatsSnapshot,
     StatusSnapshot, SubmissionBackend, WatchOutcome, scheduler_source_label,
 };
 use hpc_compose::planner::{
@@ -108,6 +109,30 @@ pub(crate) struct SubmitOutput {
     pub(crate) job_id: Option<String>,
     pub(crate) tracking_persisted: bool,
     pub(crate) tracked_metadata_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DependencyGraphOutput {
+    pub(crate) nodes: Vec<DependencyGraphNode>,
+    pub(crate) edges: Vec<DependencyGraphEdge>,
+    pub(crate) roots: Vec<String>,
+    pub(crate) leaves: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DependencyGraphNode {
+    pub(crate) service: String,
+    pub(crate) readiness: String,
+    pub(crate) readiness_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DependencyGraphEdge {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) condition: String,
+    pub(crate) readiness: String,
+    pub(crate) readiness_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -431,6 +456,14 @@ pub(crate) fn print_stats_snapshot(snapshot: &StatsSnapshot) -> io::Result<()> {
     write_stats_snapshot(&mut io::stdout(), snapshot)
 }
 
+pub(crate) fn print_rightsize_report(report: &RightsizeReport) -> io::Result<()> {
+    write_rightsize_report(&mut io::stdout(), report)
+}
+
+pub(crate) fn print_efficiency_score_report(report: &EfficiencyScoreReport) -> io::Result<()> {
+    write_efficiency_score_report(&mut io::stdout(), report)
+}
+
 pub(crate) fn print_artifact_export_report(report: &ArtifactExportReport) -> io::Result<()> {
     write_artifact_export_report(&mut io::stdout(), report)
 }
@@ -469,6 +502,10 @@ pub(crate) fn print_cleanup_report(report: &CleanupReport, disk_usage: bool) -> 
     write_cleanup_report(&mut io::stdout(), report, disk_usage)
 }
 
+pub(crate) fn print_job_diff_report(report: &JobDiffReport) -> io::Result<()> {
+    write_job_diff_report(&mut io::stdout(), report)
+}
+
 fn write_job_inventory_scan(
     writer: &mut impl Write,
     report: &JobInventoryScan,
@@ -498,6 +535,8 @@ fn write_job_inventory_scan(
             match job.kind {
                 hpc_compose::job::SubmissionKind::Main => "main",
                 hpc_compose::job::SubmissionKind::Run => "run",
+                hpc_compose::job::SubmissionKind::Canary => "canary",
+                hpc_compose::job::SubmissionKind::SweepTrial => "sweep_trial",
             },
             term::styled_dim(&job.compose_file.display().to_string()),
             term::styled_bold("age"),
@@ -599,6 +638,61 @@ fn write_cleanup_report(
     Ok(())
 }
 
+fn write_job_diff_report(writer: &mut impl Write, report: &JobDiffReport) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} -> {}",
+        term::styled_bold(&report.left.job_id),
+        term::styled_bold(&report.right.job_id)
+    )?;
+    writeln!(writer, "{}", term::styled_section_header("Outcome:"))?;
+    if report.outcome_changes.is_empty() {
+        writeln!(writer, "  no outcome changes")?;
+    } else {
+        write_diff_changes(writer, &report.outcome_changes, usize::MAX)?;
+    }
+    writeln!(writer, "{}", term::styled_section_header("Resources:"))?;
+    if report.resource_changes.is_empty() {
+        writeln!(writer, "  no resource changes")?;
+    } else {
+        write_diff_changes(writer, &report.resource_changes, usize::MAX)?;
+    }
+    writeln!(writer, "{}", term::styled_section_header("Config:"))?;
+    if report.config_changes.is_empty() {
+        writeln!(writer, "  no config changes")?;
+    } else {
+        write_diff_changes(writer, &report.config_changes, 25)?;
+        if report.config_changes.len() > 25 {
+            writeln!(
+                writer,
+                "  ... {} more config changes; use --format json for full detail",
+                report.config_changes.len() - 25
+            )?;
+        }
+    }
+    for note in &report.notes {
+        writeln!(writer, "note: {note}")?;
+    }
+    Ok(())
+}
+
+fn write_diff_changes(
+    writer: &mut impl Write,
+    changes: &[JobDiffChange],
+    limit: usize,
+) -> io::Result<()> {
+    for change in changes.iter().take(limit) {
+        writeln!(
+            writer,
+            "  {}: {} -> {}",
+            change.path,
+            change.left.as_deref().unwrap_or("<missing>"),
+            change.right.as_deref().unwrap_or("<missing>")
+        )?;
+    }
+    Ok(())
+}
+
 fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> io::Result<()> {
     writeln!(
         writer,
@@ -688,6 +782,9 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
             None => "unknown".to_string(),
         }
     )?;
+    if snapshot.scheduler.terminal {
+        write_service_outcome_summary(writer, snapshot)?;
+    }
     for service in &snapshot.services {
         let age = match service.updated_age_seconds {
             Some(seconds) => format_age_seconds(seconds),
@@ -794,6 +891,37 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
                 completed
             )?;
         }
+        if let Some(assertions) = &service.assertions
+            && (assertions.configured || assertions.status.as_deref() != Some("none"))
+        {
+            let status = assertions.status.as_deref().unwrap_or("unknown");
+            let expected_exit = assertions
+                .expected_exit_code
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let artifact_pattern = assertions.artifacts_contain.as_deref().unwrap_or("-");
+            let max_duration = assertions
+                .max_duration_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let duration = assertions
+                .duration_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            writeln!(
+                writer,
+                "  assert service '{}': status={} exit_code={} artifacts_contain={} duration={}/{}s",
+                service.service_name,
+                term::styled_service_status(status),
+                expected_exit,
+                artifact_pattern,
+                duration,
+                max_duration
+            )?;
+            for failure in &assertions.failures {
+                writeln!(writer, "    assertion: {failure}")?;
+            }
+        }
         if service.placement_mode.is_some()
             || service.nodes.is_some()
             || service.ntasks.is_some()
@@ -821,6 +949,126 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
             )?;
         }
     }
+    if let Some(array) = &snapshot.array {
+        write_array_status(writer, array)?;
+    }
+    Ok(())
+}
+
+fn write_service_outcome_summary(
+    writer: &mut impl Write,
+    snapshot: &StatusSnapshot,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{}",
+        term::styled_section_header("Service outcomes:")
+    )?;
+    if snapshot.services.is_empty() {
+        writeln!(writer, "  none")?;
+        return Ok(());
+    }
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+    table.set_header(vec![
+        "service",
+        "readiness",
+        "status",
+        "exit",
+        "restarts",
+        "duration",
+    ]);
+    for service in &snapshot.services {
+        let readiness = readiness_outcome_label(service, snapshot.scheduler.terminal);
+        let status = service.status.as_deref().unwrap_or("unknown");
+        let exit = service
+            .last_exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let restarts = service
+            .restart_count
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let duration = service
+            .duration_seconds
+            .map(format_compact_elapsed)
+            .unwrap_or_else(|| "-".to_string());
+        table.add_row(vec![
+            service.service_name.clone(),
+            readiness.to_string(),
+            term::styled_service_status(status),
+            exit,
+            restarts,
+            duration,
+        ]);
+    }
+    write!(writer, "{table}")?;
+    Ok(())
+}
+
+fn readiness_outcome_label(
+    service: &hpc_compose::job::PsServiceRow,
+    terminal: bool,
+) -> &'static str {
+    if service.readiness_configured == Some(false) {
+        return "n/a";
+    }
+    match service.healthy {
+        Some(true) => "passed",
+        Some(false) if terminal => "failed",
+        _ if service.readiness_configured == Some(true) && terminal => "failed",
+        _ => "n/a",
+    }
+}
+
+fn write_array_status(
+    writer: &mut impl Write,
+    array: &hpc_compose::job::ArrayStatusSnapshot,
+) -> io::Result<()> {
+    writeln!(writer, "{}", term::styled_section_header("Array tasks:"))?;
+    writeln!(
+        writer,
+        "  parent job id: {}{}",
+        array.parent_job_id,
+        array
+            .filtered_task_id
+            .map(|task| format!(" task={task}"))
+            .unwrap_or_default()
+    )?;
+    if let Some(reason) = &array.reason {
+        writeln!(writer, "  note: {reason}")?;
+    }
+    if array.state_counts.is_empty() {
+        writeln!(writer, "  counts: none")?;
+    } else {
+        let counts = array
+            .state_counts
+            .iter()
+            .map(|(state, count)| format!("{state}={count}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        writeln!(writer, "  counts: {counts}")?;
+    }
+    if array.tasks.is_empty() {
+        writeln!(writer, "  tasks: none")?;
+        return Ok(());
+    }
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+    table.set_header(vec!["task", "state", "source", "exit", "elapsed", "reason"]);
+    for task in &array.tasks {
+        table.add_row(vec![
+            task.task_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| task.job_id_raw.clone()),
+            term::styled_scheduler_state(&task.state),
+            scheduler_source_label(task.source).to_string(),
+            task.exit_code.clone().unwrap_or_else(|| "-".to_string()),
+            task.elapsed.clone().unwrap_or_else(|| "-".to_string()),
+            task.reason.clone().unwrap_or_else(|| "-".to_string()),
+        ]);
+    }
+    write!(writer, "{table}")?;
     Ok(())
 }
 
@@ -919,6 +1167,48 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
     }
     for note in &snapshot.notes {
         writeln!(writer, "note: {note}")?;
+    }
+    if let Some(accounting) = &snapshot.accounting {
+        writeln!(writer)?;
+        writeln!(writer, "accounting source: {}", accounting.source)?;
+        if !accounting.available {
+            writeln!(
+                writer,
+                "accounting reason: {}",
+                accounting.reason.as_deref().unwrap_or("unavailable")
+            )?;
+        }
+        if let Some(summary) = &accounting.summary {
+            writeln!(
+                writer,
+                "allocated cpu hours: {}",
+                display_optional_f64(summary.allocated_cpu_hours)
+            )?;
+            writeln!(
+                writer,
+                "total cpu hours: {}",
+                display_optional_f64(summary.total_cpu_hours)
+            )?;
+            writeln!(
+                writer,
+                "allocated gpu hours: {}",
+                display_optional_f64(summary.allocated_gpu_hours)
+            )?;
+            writeln!(
+                writer,
+                "allocated memory byte-seconds: {} ({})",
+                display_optional_f64(summary.allocated_memory_byte_seconds),
+                summary.memory_basis
+            )?;
+            writeln!(
+                writer,
+                "max rss bytes: {}",
+                summary
+                    .max_rss_bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            )?;
+        }
     }
     if let Some(failure) = &snapshot.first_failure {
         writeln!(
@@ -1032,10 +1322,244 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
     Ok(())
 }
 
+fn write_rightsize_report(writer: &mut impl Write, report: &RightsizeReport) -> io::Result<()> {
+    writeln!(writer, "{}", term::styled_label("job id", &report.job_id))?;
+    writeln!(
+        writer,
+        "{}: {} ({})",
+        term::styled_bold("scheduler state"),
+        term::styled_scheduler_state(&report.scheduler_state),
+        report.scheduler_source
+    )?;
+    writeln!(
+        writer,
+        "{}: {}",
+        term::styled_bold("rightsize status"),
+        if report.complete {
+            "complete"
+        } else {
+            "provisional"
+        }
+    )?;
+    if !report.sources.is_empty() {
+        writeln!(writer, "sources: {}", report.sources.join(", "))?;
+    }
+    for note in &report.notes {
+        writeln!(writer, "note: {note}")?;
+    }
+
+    if !report.observations.is_empty() {
+        writeln!(writer)?;
+        writeln!(writer, "{}", term::styled_bold("observations"))?;
+        for observation in &report.observations {
+            let requested = observation.requested.as_deref().unwrap_or("-");
+            let observed = observation.observed.as_deref().unwrap_or("-");
+            let utilization = observation
+                .utilization
+                .map(|value| format!(" ({:.1}%)", value * 100.0))
+                .unwrap_or_default();
+            writeln!(
+                writer,
+                "- {} [{}]: observed {} of {}{} via {} ({})",
+                observation.resource,
+                observation.scope,
+                observed,
+                requested,
+                utilization,
+                observation.source,
+                confidence_label(observation.confidence),
+            )?;
+            if let Some(note) = &observation.note {
+                writeln!(writer, "  note: {note}")?;
+            }
+        }
+    }
+
+    writeln!(writer)?;
+    writeln!(writer, "{}", term::styled_bold("recommendations"))?;
+    if report.recommendations.is_empty() {
+        writeln!(
+            writer,
+            "No concrete right-sizing changes suggested from the available evidence."
+        )?;
+        return Ok(());
+    }
+    for recommendation in &report.recommendations {
+        writeln!(
+            writer,
+            "- {}: consider {}: {} (was {}, observed {}; confidence: {})",
+            recommendation.scope,
+            recommendation.target_path,
+            recommendation.suggested,
+            recommendation.current,
+            recommendation.observed,
+            confidence_label(recommendation.confidence),
+        )?;
+        writeln!(writer, "  reason: {}", recommendation.reason)?;
+    }
+    Ok(())
+}
+
+fn write_efficiency_score_report(
+    writer: &mut impl Write,
+    report: &EfficiencyScoreReport,
+) -> io::Result<()> {
+    const INNER_WIDTH: usize = 46;
+    writeln!(writer, "+{}+", "-".repeat(INNER_WIDTH + 2))?;
+    write_score_card_line(
+        writer,
+        INNER_WIDTH,
+        &format!("EFFICIENCY SCORE: {}/100 ({})", report.score, report.grade),
+    )?;
+    write_score_card_line(writer, INNER_WIDTH, "")?;
+    write_score_metric_line(writer, INNER_WIDTH, report, "gpu_utilization", "GPU Util")?;
+    write_score_metric_line(writer, INNER_WIDTH, report, "memory_utilization", "Memory")?;
+    write_score_metric_line(
+        writer,
+        INNER_WIDTH,
+        report,
+        "compute_time_utilization",
+        "Walltime",
+    )?;
+    let energy = report
+        .energy_kwh
+        .map(|value| format!("~{value:.2} kWh"))
+        .unwrap_or_else(|| "n/a".to_string());
+    write_score_card_line(writer, INNER_WIDTH, &format!("Energy:     {energy}"))?;
+    write_score_card_line(writer, INNER_WIDTH, "")?;
+    let tip = report
+        .tips
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "No concrete right-sizing tip from available evidence.".to_string());
+    for line in wrap_score_card_text(&format!("Tip: {tip}"), INNER_WIDTH) {
+        write_score_card_line(writer, INNER_WIDTH, &line)?;
+    }
+    writeln!(writer, "+{}+", "-".repeat(INNER_WIDTH + 2))?;
+    writeln!(
+        writer,
+        "{}: {} ({})",
+        term::styled_bold("scheduler state"),
+        term::styled_scheduler_state(&report.scheduler_state),
+        report.scheduler_source
+    )?;
+    writeln!(
+        writer,
+        "{}: {}",
+        term::styled_bold("score status"),
+        if report.complete {
+            "complete"
+        } else {
+            "provisional"
+        }
+    )?;
+    writeln!(
+        writer,
+        "confidence: {}",
+        score_confidence_label(report.confidence)
+    )?;
+    if !report.sources.is_empty() {
+        writeln!(writer, "sources: {}", report.sources.join(", "))?;
+    }
+    for note in &report.notes {
+        writeln!(writer, "note: {note}")?;
+    }
+    Ok(())
+}
+
+fn write_score_metric_line(
+    writer: &mut impl Write,
+    width: usize,
+    report: &EfficiencyScoreReport,
+    name: &str,
+    label: &str,
+) -> io::Result<()> {
+    let component = report
+        .components
+        .iter()
+        .find(|component| component.name == name);
+    let value = component
+        .and_then(|component| component.utilization)
+        .map(|utilization| format!("{:>3.0}%", (utilization * 100.0).clamp(0.0, 999.0)))
+        .unwrap_or_else(|| "n/a".to_string());
+    let bar = component
+        .and_then(|component| component.utilization)
+        .map(score_bar)
+        .unwrap_or_else(|| "..........".to_string());
+    write_score_card_line(writer, width, &format!("{label:<11} {value:>5} {bar}"))
+}
+
+fn write_score_card_line(writer: &mut impl Write, width: usize, content: &str) -> io::Result<()> {
+    let clipped = clip_ascii(content, width);
+    writeln!(writer, "| {clipped:<width$} |")
+}
+
+fn score_bar(utilization: f64) -> String {
+    let filled = ((utilization.clamp(0.0, 1.0) * 10.0).round() as usize).min(10);
+    format!("{}{}", "#".repeat(filled), ".".repeat(10 - filled))
+}
+
+fn wrap_score_card_text(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let next_len = if current.is_empty() {
+            word.len()
+        } else {
+            current.len() + 1 + word.len()
+        };
+        if next_len > width && !current.is_empty() {
+            lines.push(current);
+            current = word.to_string();
+        } else if current.is_empty() {
+            current = word.to_string();
+        } else {
+            current.push(' ');
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn clip_ascii(value: &str, width: usize) -> String {
+    if value.len() <= width {
+        return value.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    format!("{}...", &value[..width - 3])
+}
+
+fn score_confidence_label(confidence: hpc_compose::job::EfficiencyScoreConfidence) -> &'static str {
+    match confidence {
+        hpc_compose::job::EfficiencyScoreConfidence::High => "high",
+        hpc_compose::job::EfficiencyScoreConfidence::Medium => "medium",
+        hpc_compose::job::EfficiencyScoreConfidence::Low => "low",
+    }
+}
+
+fn confidence_label(confidence: RightsizeConfidence) -> &'static str {
+    match confidence {
+        RightsizeConfidence::High => "high",
+        RightsizeConfidence::Medium => "medium",
+        RightsizeConfidence::Low => "low",
+    }
+}
+
 pub(crate) fn write_stats_snapshot_csv(
     writer: &mut impl Write,
     snapshot: &StatsSnapshot,
 ) -> io::Result<()> {
+    if snapshot.accounting.is_some() {
+        return write_accounting_snapshot_csv(writer, snapshot);
+    }
     writeln!(
         writer,
         "job_id,scheduler_state,scheduler_source,stats_source,step_id,ntasks,ave_cpu,ave_rss,max_rss,alloc_tres,tres_usage_in_ave,gpu_count,gpu_util,gpu_mem,alloc_tres_map,usage_tres_in_ave_map"
@@ -1084,8 +1608,32 @@ pub(crate) fn write_stats_snapshot_jsonl(
             "is_resume": snapshot.is_resume,
             "resume_dir": snapshot.resume_dir,
             "first_failure": snapshot.first_failure,
+            "accounting": snapshot.accounting,
         }),
     )?;
+    if let Some(accounting) = &snapshot.accounting {
+        write_jsonl_record(
+            writer,
+            &serde_json::json!({
+                "record_type": "accounting_summary",
+                "job_id": snapshot.job_id,
+                "available": accounting.available,
+                "reason": accounting.reason,
+                "source": accounting.source,
+                "summary": accounting.summary,
+            }),
+        )?;
+        for row in &accounting.rows {
+            write_jsonl_record(
+                writer,
+                &serde_json::json!({
+                    "record_type": "accounting_row",
+                    "job_id": snapshot.job_id,
+                    "row": row,
+                }),
+            )?;
+        }
+    }
     for note in &snapshot.notes {
         write_jsonl_record(
             writer,
@@ -1150,6 +1698,62 @@ pub(crate) fn write_stats_snapshot_jsonl(
         )?;
     }
     Ok(())
+}
+
+fn write_accounting_snapshot_csv(
+    writer: &mut impl Write,
+    snapshot: &StatsSnapshot,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "job_id,accounting_available,accounting_reason,allocated_cpu_hours,total_cpu_hours,allocated_gpu_hours,allocated_memory_byte_seconds,memory_basis,max_rss_bytes"
+    )?;
+    let accounting = snapshot.accounting.as_ref();
+    let summary = accounting.and_then(|accounting| accounting.summary.as_ref());
+    writeln!(
+        writer,
+        "{},{},{},{},{},{},{},{},{}",
+        csv_field(&snapshot.job_id),
+        csv_field(if accounting.is_some_and(|item| item.available) {
+            "true"
+        } else {
+            "false"
+        }),
+        csv_field(
+            accounting
+                .and_then(|item| item.reason.as_deref())
+                .unwrap_or("")
+        ),
+        csv_field(
+            &format_optional_f64(summary.and_then(|summary| summary.allocated_cpu_hours))
+                .unwrap_or_default()
+        ),
+        csv_field(
+            &format_optional_f64(summary.and_then(|summary| summary.total_cpu_hours))
+                .unwrap_or_default()
+        ),
+        csv_field(
+            &format_optional_f64(summary.and_then(|summary| summary.allocated_gpu_hours))
+                .unwrap_or_default()
+        ),
+        csv_field(
+            &format_optional_f64(
+                summary.and_then(|summary| { summary.allocated_memory_byte_seconds })
+            )
+            .unwrap_or_default()
+        ),
+        csv_field(
+            summary
+                .map(|summary| summary.memory_basis.as_str())
+                .unwrap_or("")
+        ),
+        csv_field(
+            &summary
+                .and_then(|summary| summary.max_rss_bytes)
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        ),
+    )
 }
 
 fn write_jsonl_record(writer: &mut impl Write, value: &serde_json::Value) -> io::Result<()> {
@@ -1414,6 +2018,203 @@ fn write_tree_node(
 pub(crate) fn print_plan_inspect_tree(plan: &Plan, runtime_plan: &RuntimePlan) -> Result<()> {
     let mut writer = io::stdout();
     write_plan_inspect_tree(&mut writer, plan, runtime_plan).context("failed to write tree output")
+}
+
+pub(crate) fn build_dependency_graph(
+    plan: &Plan,
+    runtime_plan: &RuntimePlan,
+) -> DependencyGraphOutput {
+    let runtime_by_name = runtime_plan
+        .ordered_services
+        .iter()
+        .map(|service| (service.name.as_str(), service))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut incoming = std::collections::BTreeMap::<String, usize>::new();
+    let mut outgoing = std::collections::BTreeMap::<String, usize>::new();
+    let mut nodes = Vec::with_capacity(plan.ordered_services.len());
+    let mut edges = Vec::new();
+
+    for planned in &plan.ordered_services {
+        let runtime = runtime_by_name.get(planned.name.as_str());
+        let readiness = runtime
+            .map(|service| readiness_description(service.readiness.as_ref()))
+            .unwrap_or_else(|| readiness_description(planned.readiness.as_ref()));
+        let readiness_type = runtime
+            .and_then(|service| service.readiness.as_ref())
+            .or(planned.readiness.as_ref())
+            .map(readiness_type)
+            .unwrap_or("none")
+            .to_string();
+        incoming.entry(planned.name.clone()).or_insert(0);
+        outgoing.entry(planned.name.clone()).or_insert(0);
+        nodes.push(DependencyGraphNode {
+            service: planned.name.clone(),
+            readiness,
+            readiness_type,
+        });
+    }
+
+    let node_readiness = nodes
+        .iter()
+        .map(|node| {
+            (
+                node.service.as_str(),
+                (node.readiness.as_str(), node.readiness_type.as_str()),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for planned in &plan.ordered_services {
+        for dependency in &planned.depends_on {
+            *incoming.entry(planned.name.clone()).or_insert(0) += 1;
+            *outgoing.entry(dependency.name.clone()).or_insert(0) += 1;
+            let (readiness, readiness_type) = node_readiness
+                .get(dependency.name.as_str())
+                .copied()
+                .unwrap_or(("none", "none"));
+            edges.push(DependencyGraphEdge {
+                from: dependency.name.clone(),
+                to: planned.name.clone(),
+                condition: dependency_condition_label(dependency.condition).to_string(),
+                readiness: readiness.to_string(),
+                readiness_type: readiness_type.to_string(),
+            });
+        }
+    }
+
+    let roots = nodes
+        .iter()
+        .filter(|node| incoming.get(&node.service).copied().unwrap_or(0) == 0)
+        .map(|node| node.service.clone())
+        .collect();
+    let leaves = nodes
+        .iter()
+        .filter(|node| outgoing.get(&node.service).copied().unwrap_or(0) == 0)
+        .map(|node| node.service.clone())
+        .collect();
+
+    DependencyGraphOutput {
+        nodes,
+        edges,
+        roots,
+        leaves,
+    }
+}
+
+pub(crate) fn print_dependency_graph_text(graph: &DependencyGraphOutput) -> io::Result<()> {
+    write_dependency_graph_text(&mut io::stdout(), graph)
+}
+
+pub(crate) fn print_dependency_graph_dot(graph: &DependencyGraphOutput) -> io::Result<()> {
+    write_dependency_graph_dot(&mut io::stdout(), graph)
+}
+
+fn write_dependency_graph_text(
+    writer: &mut impl Write,
+    graph: &DependencyGraphOutput,
+) -> io::Result<()> {
+    writeln!(writer, "dependency graph:")?;
+    writeln!(
+        writer,
+        "  roots: {}",
+        if graph.roots.is_empty() {
+            "none".to_string()
+        } else {
+            graph.roots.join(", ")
+        }
+    )?;
+    writeln!(
+        writer,
+        "  leaves: {}",
+        if graph.leaves.is_empty() {
+            "none".to_string()
+        } else {
+            graph.leaves.join(", ")
+        }
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "services:")?;
+    for node in &graph.nodes {
+        writeln!(
+            writer,
+            "  {} readiness={} ({})",
+            node.service, node.readiness_type, node.readiness
+        )?;
+    }
+    writeln!(writer)?;
+    writeln!(writer, "edges:")?;
+    if graph.edges.is_empty() {
+        writeln!(writer, "  none")?;
+    } else {
+        for edge in &graph.edges {
+            writeln!(
+                writer,
+                "  {} -> {} condition={} readiness={} ({})",
+                edge.from, edge.to, edge.condition, edge.readiness_type, edge.readiness
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn write_dependency_graph_dot(
+    writer: &mut impl Write,
+    graph: &DependencyGraphOutput,
+) -> io::Result<()> {
+    writeln!(writer, "digraph hpc_compose_dependencies {{")?;
+    writeln!(writer, "  rankdir=LR;")?;
+    for node in &graph.nodes {
+        writeln!(
+            writer,
+            "  \"{}\" [label=\"{}\\nreadiness: {}\"];",
+            dot_escape(&node.service),
+            dot_escape(&node.service),
+            dot_escape(&node.readiness_type)
+        )?;
+    }
+    for edge in &graph.edges {
+        writeln!(
+            writer,
+            "  \"{}\" -> \"{}\" [label=\"{} / {}\"];",
+            dot_escape(&edge.from),
+            dot_escape(&edge.to),
+            dot_escape(&edge.condition),
+            dot_escape(&edge.readiness_type)
+        )?;
+    }
+    writeln!(writer, "}}")
+}
+
+fn dependency_condition_label(condition: DependencyCondition) -> &'static str {
+    match condition {
+        DependencyCondition::ServiceStarted => "service_started",
+        DependencyCondition::ServiceHealthy => "service_healthy",
+        DependencyCondition::ServiceCompletedSuccessfully => "service_completed_successfully",
+    }
+}
+
+fn readiness_type(readiness: &hpc_compose::spec::ReadinessSpec) -> &'static str {
+    match readiness {
+        hpc_compose::spec::ReadinessSpec::Sleep { .. } => "sleep",
+        hpc_compose::spec::ReadinessSpec::Tcp { .. } => "tcp",
+        hpc_compose::spec::ReadinessSpec::Log { .. } => "log",
+        hpc_compose::spec::ReadinessSpec::Http { .. } => "http",
+    }
+}
+
+fn dot_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn write_plan_inspect_verbose(
@@ -2021,6 +2822,14 @@ fn display_optional_stats_value(value: Option<&str>) -> &str {
     }
 }
 
+fn display_optional_f64(value: Option<f64>) -> String {
+    format_optional_f64(value).unwrap_or_else(|| "-".to_string())
+}
+
+fn format_optional_f64(value: Option<f64>) -> Option<String> {
+    value.map(|value| format!("{value:.6}"))
+}
+
 fn runtime_presence_label(runtime_present: bool, legacy_present: bool) -> &'static str {
     match (runtime_present, legacy_present) {
         (true, true) => "runtime+legacy",
@@ -2513,6 +3322,15 @@ fn format_age_seconds(seconds: u64) -> String {
     }
 }
 
+fn format_compact_elapsed(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m{}s", seconds / 60, seconds % 60),
+        3600..=86_399 => format!("{}h{}m", seconds / 3600, (seconds % 3600) / 60),
+        _ => format!("{}d{}h", seconds / 86_400, (seconds % 86_400) / 3600),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2528,8 +3346,8 @@ mod tests {
         ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
         CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, JobInventoryEntry,
         JobInventoryScan, QueueDiagnostics, SamplerSnapshot, SchedulerSource, SchedulerStatus,
-        ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats, SubmissionKind,
-        SubmissionRecord,
+        ServiceAssertionStatus, ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats,
+        SubmissionKind, SubmissionRecord,
     };
     use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
     use hpc_compose::spec::{
@@ -2551,6 +3369,7 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -2755,6 +3574,10 @@ services:
             max_restarts_in_window: None,
             restart_failures_in_window: None,
             last_exit_code: None,
+            started_at: None,
+            finished_at: None,
+            duration_seconds: None,
+            assertions: None,
             placement_mode: None,
             nodes: None,
             ntasks: None,
@@ -3100,6 +3923,7 @@ services:
                 eligible_time: Some("2026-04-06T10:00:00".into()),
                 start_time: Some("2026-04-06T10:05:00".into()),
             }),
+            array: None,
             log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
             batch_log: BatchLogStatus {
                 path: tmpdir.path().join("slurm-12345.out"),
@@ -3115,6 +3939,15 @@ services:
                 max_restarts_in_window: Some(3),
                 restart_failures_in_window: Some(1),
                 last_exit_code: Some(0),
+                assertions: Some(ServiceAssertionStatus {
+                    configured: true,
+                    status: Some("failed".into()),
+                    expected_exit_code: Some(0),
+                    artifacts_contain: Some("/hpc-compose/job/model/*.pt".into()),
+                    max_duration_seconds: Some(7200),
+                    duration_seconds: Some(7210),
+                    failures: vec!["expected max_duration_seconds <= 7200, got 7210".into()],
+                }),
                 placement_mode: Some("distributed".into()),
                 nodes: Some(2),
                 ntasks: Some(4),
@@ -3138,6 +3971,8 @@ services:
         let status_plain = strip_ansi(&status_text);
         assert!(status_plain.contains("Scheduler:"));
         assert!(status_plain.contains("  state: COMPLETED (sacct)"));
+        assert!(status_plain.contains("Service outcomes:"));
+        assert!(status_plain.contains("passed"));
         assert!(status_plain.contains("  note: finished"));
         assert!(status_plain.contains("  eligible time: 2026-04-06T10:00:00"));
         assert!(status_plain.contains("  start time: 2026-04-06T10:05:00"));
@@ -3150,6 +3985,12 @@ services:
         assert!(status_plain.contains(
             "  state service 'svc/name': failure_policy=restart_on_failure restarts=1/3 window=1/3@60s last_exit=0"
         ));
+        assert!(status_plain.contains(
+            "  assert service 'svc/name': status=failed exit_code=0 artifacts_contain=/hpc-compose/job/model/*.pt duration=7210/7200s"
+        ));
+        assert!(
+            status_plain.contains("    assertion: expected max_duration_seconds <= 7200, got 7210")
+        );
         assert!(status_plain.contains(
             "  placement service 'svc/name': mode=distributed nodes=2 ntasks=4 ntasks_per_node=2 nodelist=node01 node02"
         ));
@@ -3166,6 +4007,7 @@ services:
                 ),
             },
             queue_diagnostics: None,
+            array: None,
             log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
             batch_log: BatchLogStatus {
                 path: tmpdir.path().join("slurm-12345.out"),
@@ -3264,6 +4106,7 @@ services:
                 slurm: None,
             }),
             steps: vec![sample_step()],
+            accounting: None,
             first_failure: Some(hpc_compose::job::FirstFailure {
                 service: "trainer".into(),
                 exit_code: 42,
@@ -3311,6 +4154,7 @@ services:
             available: false,
             sampler: None,
             steps: Vec::new(),
+            accounting: None,
             first_failure: None,
             source: "sstat".into(),
             notes: Vec::new(),
@@ -3403,6 +4247,7 @@ services:
                 working_dir: service.working_dir.clone(),
                 depends_on: service.depends_on.clone(),
                 readiness: service.readiness.clone(),
+                assertions: service.assertions.clone(),
                 failure_policy: service.failure_policy.clone(),
                 placement: service.placement.clone(),
                 slurm: service.slurm.clone(),
@@ -3594,6 +4439,7 @@ services:
                 eligible_time: Some("2026-04-06T10:00:00".into()),
                 start_time: Some("2026-04-06T10:05:00".into()),
             }),
+            array: None,
             log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
             batch_log: BatchLogStatus {
                 path: tmpdir.path().join("slurm-12345.out"),
@@ -3624,6 +4470,7 @@ services:
             notes: Vec::new(),
             sampler: None,
             steps: vec![sample_step()],
+            accounting: None,
             first_failure: None,
             attempt: Some(1),
             is_resume: Some(false),
@@ -3823,6 +4670,13 @@ services:
             file: Some(compose.clone()),
             verbose: false,
             tree: false,
+            rightsize: false,
+            dependencies: false,
+            dependencies_format: hpc_compose::cli::DependencyOutputFormat::Text,
+            job_id: None,
+            sstat_bin: "sstat".into(),
+            squeue_bin: "squeue".into(),
+            sacct_bin: "sacct".into(),
             format: None,
             json: false,
         })
@@ -3847,6 +4701,8 @@ services:
             resume_diff_only: false,
             dry_run: false,
             detach: true,
+            watch_queue: false,
+            queue_warn_after: None,
             watch_mode: WatchMode::Auto,
             hold_on_exit: HoldOnExit::Failure,
             no_tui: false,
@@ -3874,6 +4730,8 @@ services:
             resume_diff_only: false,
             dry_run: false,
             detach: true,
+            watch_queue: false,
+            queue_warn_after: None,
             watch_mode: WatchMode::Auto,
             hold_on_exit: HoldOnExit::Failure,
             no_tui: false,
@@ -3899,6 +4757,8 @@ services:
             resume_diff_only: false,
             dry_run: false,
             detach: true,
+            watch_queue: false,
+            queue_warn_after: None,
             watch_mode: WatchMode::Auto,
             hold_on_exit: HoldOnExit::Failure,
             no_tui: false,
@@ -4036,6 +4896,7 @@ services:
                 detail: None,
             },
             queue_diagnostics: None,
+            array: None,
             log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
             batch_log: BatchLogStatus {
                 path: tmpdir.path().join("slurm-12345.out"),
@@ -4075,6 +4936,10 @@ services:
                     max_restarts_in_window: None,
                     restart_failures_in_window: None,
                     last_exit_code: Some(17),
+                    started_at: None,
+                    finished_at: None,
+                    duration_seconds: None,
+                    assertions: None,
                     placement_mode: None,
                     nodes: None,
                     ntasks: None,

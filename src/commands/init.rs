@@ -320,8 +320,21 @@ pub(crate) fn completions(shell: Shell) -> Result<()> {
 }
 
 fn completions_to_writer(shell: Shell, writer: &mut impl Write) -> Result<()> {
-    let mut cmd = build_cli_command();
-    clap_complete::generate(shell, &mut cmd, "hpc-compose", writer);
+    let output = std::thread::Builder::new()
+        .name("hpc-compose-completions".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let mut cmd = build_cli_command();
+            let mut output = Vec::new();
+            clap_complete::generate(shell, &mut cmd, "hpc-compose", &mut output);
+            output
+        })
+        .context("failed to spawn completion generator")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("completion generator panicked"))?;
+    writer
+        .write_all(&output)
+        .context("failed to write shell completions")?;
     Ok(())
 }
 
@@ -401,6 +414,7 @@ fn parse_binary_entries(entries: &[String]) -> Result<BinaryOverrides> {
             "enroot" => overrides.enroot = Some(value.to_string()),
             "apptainer" => overrides.apptainer = Some(value.to_string()),
             "singularity" => overrides.singularity = Some(value.to_string()),
+            "salloc" => overrides.salloc = Some(value.to_string()),
             "sbatch" => overrides.sbatch = Some(value.to_string()),
             "srun" => overrides.srun = Some(value.to_string()),
             "scontrol" => overrides.scontrol = Some(value.to_string()),
@@ -409,8 +423,10 @@ fn parse_binary_entries(entries: &[String]) -> Result<BinaryOverrides> {
             "sacct" => overrides.sacct = Some(value.to_string()),
             "sstat" => overrides.sstat = Some(value.to_string()),
             "scancel" => overrides.scancel = Some(value.to_string()),
+            "sshare" => overrides.sshare = Some(value.to_string()),
+            "sprio" => overrides.sprio = Some(value.to_string()),
             _ => bail!(
-                "invalid binary name '{name}'; supported names: enroot, apptainer, singularity, sbatch, srun, scontrol, sinfo, squeue, sacct, sstat, scancel"
+                "invalid binary name '{name}'; supported names: enroot, apptainer, singularity, salloc, sbatch, srun, scontrol, sinfo, squeue, sacct, sstat, scancel, sshare, sprio"
             ),
         }
     }
@@ -427,6 +443,9 @@ fn format_binary_entries(overrides: &BinaryOverrides) -> String {
     }
     if let Some(value) = &overrides.singularity {
         entries.push(format!("singularity={value}"));
+    }
+    if let Some(value) = &overrides.salloc {
+        entries.push(format!("salloc={value}"));
     }
     if let Some(value) = &overrides.sbatch {
         entries.push(format!("sbatch={value}"));
@@ -451,6 +470,12 @@ fn format_binary_entries(overrides: &BinaryOverrides) -> String {
     }
     if let Some(value) = &overrides.scancel {
         entries.push(format!("scancel={value}"));
+    }
+    if let Some(value) = &overrides.sshare {
+        entries.push(format!("sshare={value}"));
+    }
+    if let Some(value) = &overrides.sprio {
+        entries.push(format!("sprio={value}"));
     }
     entries.join(",")
 }
@@ -509,19 +534,28 @@ mod tests {
 
         let binaries = parse_binary_entries(&[
             "enroot=/bin/enroot".to_string(),
+            "salloc=/bin/salloc".to_string(),
             "sbatch=/bin/sbatch".to_string(),
             "srun=/bin/srun".to_string(),
             "squeue=/bin/squeue".to_string(),
             "sacct=/bin/sacct".to_string(),
             "sstat=/bin/sstat".to_string(),
             "scancel=/bin/scancel".to_string(),
+            "sshare=/bin/sshare".to_string(),
+            "sprio=/bin/sprio".to_string(),
         ])
         .expect("binaries");
         assert_eq!(binaries.enroot.as_deref(), Some("/bin/enroot"));
+        assert_eq!(binaries.salloc.as_deref(), Some("/bin/salloc"));
         assert_eq!(binaries.scancel.as_deref(), Some("/bin/scancel"));
+        assert_eq!(binaries.sshare.as_deref(), Some("/bin/sshare"));
+        assert_eq!(binaries.sprio.as_deref(), Some("/bin/sprio"));
         let formatted = format_binary_entries(&binaries);
         assert!(formatted.contains("enroot=/bin/enroot"));
+        assert!(formatted.contains("salloc=/bin/salloc"));
         assert!(formatted.contains("scancel=/bin/scancel"));
+        assert!(formatted.contains("sshare=/bin/sshare"));
+        assert!(formatted.contains("sprio=/bin/sprio"));
         assert!(
             parse_binary_entries(&["unknown=/bin/x".to_string()])
                 .expect_err("unknown binary")

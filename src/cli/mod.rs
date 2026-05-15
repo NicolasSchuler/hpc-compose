@@ -8,7 +8,9 @@ mod commands;
 mod help;
 
 pub use crate::term::ColorPolicy;
-pub use commands::{CacheCommands, Cli, Commands, DoctorCommands, JobsCommands};
+pub use commands::{
+    CacheCommands, Cli, Commands, DoctorCommands, JobsCommands, RendezvousCommands, SweepCommands,
+};
 pub use help::examples_for_path;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -23,6 +25,12 @@ pub enum StatsOutputFormat {
     Json,
     Csv,
     Jsonl,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum DependencyOutputFormat {
+    Text,
+    Dot,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]

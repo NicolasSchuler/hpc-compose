@@ -1,7 +1,8 @@
+use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
 use super::runtime_state::load_runtime_state;
 use super::scheduler::{
-    build_local_scheduler_status, reconcile_scheduler_status, stats_unavailable_reason,
-    unix_timestamp_now,
+    build_local_scheduler_status, command_unavailable_detail, command_unavailable_error,
+    reconcile_scheduler_status, stats_unavailable_reason, unix_timestamp_now,
 };
 use super::*;
 
@@ -19,6 +20,8 @@ pub struct StatsSnapshot {
     pub notes: Vec<String>,
     pub sampler: Option<SamplerSnapshot>,
     pub steps: Vec<StepStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting: Option<AccountingSnapshot>,
     pub first_failure: Option<FirstFailure>,
     pub attempt: Option<u32>,
     pub is_resume: Option<bool>,
@@ -163,6 +166,7 @@ impl Default for SchedulerOptions {
 pub struct StatsOptions {
     pub scheduler: SchedulerOptions,
     pub sstat_bin: String,
+    pub accounting: bool,
 }
 
 impl Default for StatsOptions {
@@ -170,6 +174,7 @@ impl Default for StatsOptions {
         Self {
             scheduler: SchedulerOptions::default(),
             sstat_bin: "sstat".to_string(),
+            accounting: false,
         }
     }
 }
@@ -298,6 +303,7 @@ pub fn build_stats_snapshot(
     });
     let used_sampler_steps = !steps.is_empty();
     let mut used_live_sstat = false;
+    let mut sstat_unavailable_reason = None;
 
     if steps.is_empty()
         && record.as_ref().map(|record| record.backend) != Some(SubmissionBackend::Local)
@@ -311,6 +317,11 @@ pub fn build_stats_snapshot(
                 notes.push(format!(
                     "live sstat fallback failed while reading sampler-backed stats: {err}"
                 ));
+            }
+            Err(err) if command_unavailable_anyhow(&err) => {
+                let reason = command_unavailable_anyhow_detail("sstat", &options.sstat_bin, &err);
+                notes.push(reason.clone());
+                sstat_unavailable_reason = Some(reason);
             }
             Err(err) => return Err(err),
         }
@@ -350,8 +361,19 @@ pub fn build_stats_snapshot(
         && record.as_ref().map(|record| record.backend) == Some(SubmissionBackend::Local)
     {
         Some("runtime metrics are not available because no local sampler data has been collected yet".to_string())
+    } else if !available && sstat_unavailable_reason.is_some() {
+        sstat_unavailable_reason
     } else {
         (!available).then(|| stats_unavailable_reason(&scheduler))
+    };
+    let accounting = if options.accounting {
+        Some(build_accounting_snapshot(
+            &job_id,
+            record.as_ref(),
+            &options.scheduler.sacct_bin,
+        )?)
+    } else {
+        None
     };
 
     Ok(StatsSnapshot {
@@ -365,6 +387,7 @@ pub fn build_stats_snapshot(
         notes,
         sampler,
         steps,
+        accounting,
         first_failure: runtime_state
             .as_ref()
             .and_then(first_failure_from_runtime_state),
@@ -382,6 +405,25 @@ pub fn metrics_dir_for_record(record: &SubmissionRecord) -> PathBuf {
         &record.submit_dir,
         &record.job_id,
     ))
+}
+
+fn command_unavailable_anyhow(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(command_unavailable_error)
+    })
+}
+
+fn command_unavailable_anyhow_detail(
+    command_name: &str,
+    binary: &str,
+    err: &anyhow::Error,
+) -> String {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .map(|io| command_unavailable_detail(command_name, binary, io))
+        .unwrap_or_else(|| format!("{command_name} not available at '{binary}' ({err})"))
 }
 
 impl StepStats {
@@ -786,7 +828,7 @@ pub(crate) fn parse_sstat_output(job_id: &str, stdout: &str) -> Result<Vec<StepS
     Ok(steps)
 }
 
-fn parse_tres_map(raw: &str) -> Result<BTreeMap<String, String>> {
+pub(super) fn parse_tres_map(raw: &str) -> Result<BTreeMap<String, String>> {
     let mut values = BTreeMap::new();
     for segment in raw.split(',') {
         let segment = segment.trim();
@@ -801,7 +843,7 @@ fn parse_tres_map(raw: &str) -> Result<BTreeMap<String, String>> {
     Ok(values)
 }
 
-fn find_tres_value(values: &BTreeMap<String, String>, key: &str) -> Option<String> {
+pub(super) fn find_tres_value(values: &BTreeMap<String, String>, key: &str) -> Option<String> {
     if let Some(value) = values.get(key) {
         return Some(value.clone());
     }

@@ -31,6 +31,10 @@ pub struct SubmissionRecord {
     #[serde(default)]
     pub requested_walltime: Option<RequestedWalltime>,
     #[serde(default)]
+    pub slurm_array: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<SweepTrialMetadata>,
+    #[serde(default)]
     pub config_snapshot_yaml: Option<String>,
     #[serde(default)]
     pub cached_artifacts: Vec<PathBuf>,
@@ -56,6 +60,20 @@ pub enum SubmissionKind {
     Main,
     /// A one-off `run` submission scoped to one service.
     Run,
+    /// A short right-sizing probe submitted by `germinate`.
+    Canary,
+    /// One trial submitted by `sweep submit`.
+    SweepTrial,
+}
+
+/// Sweep metadata attached to a trial submission record.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SweepTrialMetadata {
+    pub sweep_id: String,
+    pub trial_id: String,
+    pub trial_index: usize,
+    pub variables: BTreeMap<String, String>,
 }
 
 /// Parsed requested allocation walltime persisted with a tracked record.
@@ -74,6 +92,8 @@ pub struct SubmissionRecordBuildOptions {
     pub service_name: Option<String>,
     pub command_override: Option<Vec<String>>,
     pub requested_walltime: Option<RequestedWalltime>,
+    pub slurm_array: Option<String>,
+    pub sweep: Option<SweepTrialMetadata>,
     pub config_snapshot_yaml: Option<String>,
     pub cached_artifacts: Vec<PathBuf>,
 }

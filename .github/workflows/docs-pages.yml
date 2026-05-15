@@ -35,7 +35,10 @@ jobs:
           echo "/tmp" >> "$GITHUB_PATH"
 
       - name: Build docs site
-        run: mdbook build docs
+        run: |
+          mdbook build docs
+          mkdir -p target/mdbook/schema
+          cp schema/hpc-compose.schema.json target/mdbook/schema/hpc-compose.schema.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9

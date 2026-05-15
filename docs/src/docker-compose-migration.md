@@ -56,6 +56,7 @@ services:
 ### hpc-compose
 
 ```yaml
+version: "1"
 name: my-app
 
 x-slurm:
@@ -94,12 +95,13 @@ services:
 
 ### Key changes
 
-1. **`build: .`** → `image: python:3.11-slim` + `x-runtime.prepare.commands` for dependencies.
-2. **`ports`** → Removed. Services communicate via `127.0.0.1` because they run on the same node.
-3. **`REDIS_HOST: redis`** → `REDIS_HOST: 127.0.0.1`. No DNS service names; use localhost.
-4. **`healthcheck`** → `readiness` with `type: tcp`.
-5. **Added `x-slurm`** block for Slurm resource allocation (time, memory, CPUs).
-6. **Configured a shared cache** for image storage, either through `x-slurm.cache_dir` as shown or project settings.
+1. **`version: "3.9"`** → `version: "1"` or remove the field. hpc-compose uses this as its own spec schema version, not a Docker Compose compatibility version.
+2. **`build: .`** → `image: python:3.11-slim` + `x-runtime.prepare.commands` for dependencies.
+3. **`ports`** → Removed. Services communicate via `127.0.0.1` because they run on the same node.
+4. **`REDIS_HOST: redis`** → `REDIS_HOST: 127.0.0.1`. No DNS service names; use localhost.
+5. **`healthcheck`** → `readiness` with `type: tcp`.
+6. **Added `x-slurm`** block for Slurm resource allocation (time, memory, CPUs).
+7. **Configured a shared cache** for image storage, either through `x-slurm.cache_dir` as shown or project settings.
 
 ## Key differences
 
@@ -229,17 +231,18 @@ The rolling-window fields have no direct Docker Compose equivalent. They exist t
 
 ## Migration checklist
 
-1. **Remove `build:`** — Replace with `image:` pointing to a base image. Move dependency installation to `x-runtime.prepare.commands`.
-2. **Remove `ports:`** — Use host-network semantics instead of container port publishing.
-3. **Remove `networks:` / `network_mode:`** — There is no Docker-style overlay network or service-name DNS layer.
-4. **Remove Compose `restart:`** — use `services.<name>.x-slurm.failure_policy` when you need per-service restart behavior.
-5. **Remove `deploy:`** — Use `x-slurm` for resource allocation.
-6. **Replace service hostnames** — Change any service-name references (e.g. `redis`, `postgres`) to `127.0.0.1` for same-node helpers, or to explicit allocation metadata for distributed runs.
-7. **Replace `healthcheck:`** — Convert to `readiness:` with `type: tcp`, `type: log`, or `type: sleep`.
-8. **Add `x-slurm:`** — Set `time`, `mem`, `cpus_per_task`, and optionally `gpus`, `partition`, `account`.
-9. **Set cache storage** — Point `x-slurm.cache_dir` or `setup --cache-dir` to shared storage visible from login and compute nodes.
-10. **Validate** — Run `hpc-compose validate -f compose.yaml` to check the converted spec.
-11. **Inspect** — Run `hpc-compose inspect --verbose -f compose.yaml` to confirm the planner understood your intent.
+1. **Replace Compose `version:`** — Use `version: "1"` or omit the field; values like `"3.9"` are rejected by hpc-compose.
+2. **Remove `build:`** — Replace with `image:` pointing to a base image. Move dependency installation to `x-runtime.prepare.commands`.
+3. **Remove `ports:`** — Use host-network semantics instead of container port publishing.
+4. **Remove `networks:` / `network_mode:`** — There is no Docker-style overlay network or service-name DNS layer.
+5. **Remove Compose `restart:`** — use `services.<name>.x-slurm.failure_policy` when you need per-service restart behavior.
+6. **Remove `deploy:`** — Use `x-slurm` for resource allocation.
+7. **Replace service hostnames** — Change any service-name references (e.g. `redis`, `postgres`) to `127.0.0.1` for same-node helpers, or to explicit allocation metadata for distributed runs.
+8. **Replace `healthcheck:`** — Convert to `readiness:` with `type: tcp`, `type: log`, or `type: sleep`.
+9. **Add `x-slurm:`** — Set `time`, `mem`, `cpus_per_task`, and optionally `gpus`, `partition`, `account`.
+10. **Set cache storage** — Point `x-slurm.cache_dir` or `setup --cache-dir` to shared storage visible from login and compute nodes.
+11. **Validate** — Run `hpc-compose validate -f compose.yaml` to check the converted spec.
+12. **Inspect** — Run `hpc-compose inspect --verbose -f compose.yaml` to confirm the planner understood your intent.
 
 ## Related docs
 

@@ -210,6 +210,7 @@ hpc-compose up -f compose.yaml
 ```
 
 `up` is the preferred end-to-end cluster flow. It runs preflight unless disabled, prepares images unless skipped, renders the script, calls `sbatch`, records tracked job metadata, polls scheduler state, and streams logs.
+It also uses a spec-scoped lock under `.hpc-compose/locks/` so two concurrent `up` invocations against the same compose file do not race through prepare/render/submit.
 
 Useful options:
 
@@ -219,6 +220,8 @@ Useful options:
 - `--no-preflight` skips the preflight phase.
 - `--detach` submits or launches, records tracking metadata, and returns without watching.
 - `--format text|json` is accepted with `--detach` or `--dry-run`.
+- `--watch-queue` waits in line-oriented queue output until the Slurm job reaches `RUNNING`, then opens the normal watch view.
+- `--queue-warn-after <DURATION>` warns once when `--watch-queue` stays `PENDING` longer than the threshold; the default is `10m`, and `0` disables the warning.
 - `--watch-mode auto|tui|line` selects the live output mode; `--no-tui` is a line-mode alias.
 - `--hold-on-exit never|failure|always` controls whether the TUI stays open after the job reaches a terminal scheduler state.
 - `--resume-diff-only` prints resume-sensitive config diffs without launching.
@@ -227,6 +230,27 @@ Useful options:
 `up --local` is Linux + Pyxis-only and single-host. See [Runtime Backends](runtime-backends.md#local-mode).
 
 Array jobs should be submitted with `up --detach`; use `SLURM_ARRAY_TASK_ID` in the service command and output patterns such as `%A_%a` for task-specific logs. Scheduler dependencies declared with `x-slurm.after_job` or `x-slurm.dependency` are passed to `sbatch --dependency=...` at submit time. Arrays and scheduler dependencies are not supported by `up --local`.
+
+For conditional submission on a busy partition, use `when`:
+
+```bash
+hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
+hpc-compose when -f compose.yaml --after-job 12345
+hpc-compose when -f compose.yaml --between 22:00-06:00
+```
+
+`when` is a foreground monitor. Interrupt it with Ctrl-C to stop waiting before the job is submitted. It runs preflight, image preparation, and script rendering before the wait begins, so submission is immediate once the conditions match; use `--skip-prepare` only when the required runtime artifacts already exist. `--detach` applies after submission: it still waits in the foreground for conditions, then returns after tracking metadata is written instead of opening the watch view.
+
+Idle-node checks are advisory, not reservations. Another user can still submit first, and Slurm may queue the job after `when` calls `sbatch`. Keep polling gentle on shared login nodes: the default `60s` interval is a good starting point, and intervals below `30s` should be reserved for short, intentional watches.
+
+For interactive development inside one allocation, use `alloc`:
+
+```bash
+hpc-compose alloc -f compose.yaml
+hpc-compose run app -- python -m pytest
+```
+
+Inside the allocation shell, `run SERVICE -- CMD` reuses the active allocation with `srun` instead of submitting a new `sbatch` job. `alloc` exports `HPC_COMPOSE_*` metadata for the compose file, cache directory, runtime backend, and allocated nodes.
 
 ## 6. Run Preflight When Debugging Cluster Readiness
 
@@ -270,13 +294,15 @@ This is useful when debugging generated `srun` arguments, mounts, environment pa
 ```bash
 hpc-compose jobs list
 hpc-compose status -f compose.yaml
+hpc-compose status -f compose.yaml --array
 hpc-compose ps -f compose.yaml
 hpc-compose watch -f compose.yaml
+hpc-compose replay -f compose.yaml --speed 10
 hpc-compose logs -f compose.yaml --service app --follow
 hpc-compose stats -f compose.yaml --format jsonl
 ```
 
-Use [Runtime Observability](runtime-observability.md) for tracked state, logs, metrics, and machine-readable output. Use [Artifacts and Resume](artifacts-and-resume.md) for artifact bundles and resume-aware attempts.
+For a failed run, a practical investigation path is `hpc-compose jobs list`, then `hpc-compose replay -f compose.yaml --job-id <job-id>` to find the failure moment, then `debug`, `logs`, or `stats` for deeper evidence. Use [Runtime Observability](runtime-observability.md) for tracked state, replay, logs, metrics, and machine-readable output. Use [Artifacts and Resume](artifacts-and-resume.md) for artifact bundles and resume-aware attempts.
 
 ## 10. Manage Cache And Old State
 

@@ -18,12 +18,28 @@ Source: `examples/app-redis-worker.yaml`
 {{#include ../../examples/app-redis-worker.yaml}}
 ```
 
+## Canary Right Size
+
+Source: `examples/canary-right-size.yaml`
+
+```yaml
+{{#include ../../examples/canary-right-size.yaml}}
+```
+
 ## Dev Python App
 
 Source: `examples/dev-python-app.yaml`
 
 ```yaml
 {{#include ../../examples/dev-python-app.yaml}}
+```
+
+## Dev Python Smoke
+
+Source: `examples/dev-python-smoke.yaml`
+
+```yaml
+{{#include ../../examples/dev-python-smoke.yaml}}
 ```
 
 ## Fairseq Preprocess
@@ -162,6 +178,22 @@ Source: `examples/ray-symmetric.yaml`
 {{#include ../../examples/ray-symmetric.yaml}}
 ```
 
+## Rendezvous Client
+
+Source: `examples/rendezvous-client.yaml`
+
+```yaml
+{{#include ../../examples/rendezvous-client.yaml}}
+```
+
+## Rendezvous Model Server
+
+Source: `examples/rendezvous-model-server.yaml`
+
+```yaml
+{{#include ../../examples/rendezvous-model-server.yaml}}
+```
+
 ## Ray Head Workers
 
 Source: `examples/ray-head-workers.yaml`
@@ -256,6 +288,14 @@ Source: `examples/training-resume.yaml`
 
 ```yaml
 {{#include ../../examples/training-resume.yaml}}
+```
+
+## Training Sweep
+
+Source: `examples/training-sweep.yaml`
+
+```yaml
+{{#include ../../examples/training-sweep.yaml}}
 ```
 
 ## vLLM OpenAI

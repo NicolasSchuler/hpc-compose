@@ -9,9 +9,10 @@ use crate::cluster::ClusterProfile;
 use crate::planner::{ExecutionSpec, ServicePlacementMode};
 use crate::prepare::{RuntimePlan, RuntimeService};
 use crate::spec::{
-    ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec, RuntimeBackend,
-    RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchScope, ServiceFailureMode, ServiceHookContext,
-    SlurmConfig, SoftwareEnvConfig, StageMode, StageOutWhen,
+    ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
+    RendezvousRegisterConfig, RuntimeBackend, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchScope,
+    ServiceFailureMode, ServiceHookContext, ServiceHookEvent, SlurmConfig, SoftwareEnvConfig,
+    StageMode, StageOutWhen,
 };
 use crate::tracked_paths;
 
@@ -55,6 +56,23 @@ struct DistributedRenderEnv {
 
 /// Renders a local launcher script that reuses the normal runtime orchestration.
 pub fn render_local_script(plan: &RuntimePlan, job_id: &str, enroot_bin: &str) -> Result<String> {
+    render_local_script_with_options(plan, job_id, enroot_bin, &LocalRenderOptions::default())
+}
+
+/// Local launcher render options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalRenderOptions {
+    /// Enables the development control directory consumed by the local supervisor.
+    pub dev_reload: bool,
+}
+
+/// Renders a local launcher script with explicit local-supervisor options.
+pub fn render_local_script_with_options(
+    plan: &RuntimePlan,
+    job_id: &str,
+    enroot_bin: &str,
+    options: &LocalRenderOptions,
+) -> Result<String> {
     let base = render_script(plan)?;
     let body = strip_sbatch_directives(&base);
     let mut out = String::new();
@@ -76,6 +94,14 @@ pub fn render_local_script(plan: &RuntimePlan, job_id: &str, enroot_bin: &str) -
         shell_quote(enroot_bin)
     )
     .expect("String write is infallible");
+    if options.dev_reload {
+        writeln!(
+            out,
+            "export HPC_COMPOSE_DEV_CONTROL_DIR=\"$SLURM_SUBMIT_DIR/{}/${{SLURM_JOB_ID}}/dev-control\"",
+            tracked_paths::METADATA_DIR_NAME
+        )
+        .expect("String write is infallible");
+    }
     writeln!(
         out,
         "HPC_COMPOSE_LOCAL_BIN_DIR=\"$SLURM_SUBMIT_DIR/{}/${{SLURM_JOB_ID}}/.local-bin\"",
@@ -139,6 +165,35 @@ pub fn distributed_environment_names_for_service(
     names.sort();
     names.dedup();
     names
+}
+
+fn rendezvous_environment_names(names: &[String]) -> Vec<String> {
+    let mut env = vec![
+        "HPC_COMPOSE_RDZV_NAME".to_string(),
+        "HPC_COMPOSE_RDZV_URL".to_string(),
+        "HPC_COMPOSE_RDZV_HOST".to_string(),
+        "HPC_COMPOSE_RDZV_PORT".to_string(),
+        "HPC_COMPOSE_RDZV_PROTOCOL".to_string(),
+        "HPC_COMPOSE_RDZV_PATH".to_string(),
+        "HPC_COMPOSE_RDZV_JOB_ID".to_string(),
+        "HPC_COMPOSE_RDZV_SERVICE".to_string(),
+    ];
+    for name in names {
+        let token = crate::rendezvous::env_token(name);
+        env.extend([
+            format!("HPC_COMPOSE_RDZV_{token}_NAME"),
+            format!("HPC_COMPOSE_RDZV_{token}_URL"),
+            format!("HPC_COMPOSE_RDZV_{token}_HOST"),
+            format!("HPC_COMPOSE_RDZV_{token}_PORT"),
+            format!("HPC_COMPOSE_RDZV_{token}_PROTOCOL"),
+            format!("HPC_COMPOSE_RDZV_{token}_PATH"),
+            format!("HPC_COMPOSE_RDZV_{token}_JOB_ID"),
+            format!("HPC_COMPOSE_RDZV_{token}_SERVICE"),
+        ]);
+    }
+    env.sort();
+    env.dedup();
+    env
 }
 
 fn distributed_render_env(
@@ -252,10 +307,30 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         .ordered_services
         .iter()
         .any(distributed_helpers_enabled);
-    let hooks_enabled = plan
+    let hooks_enabled = plan.ordered_services.iter().any(|service| {
+        service.slurm.prologue.is_some()
+            || service.slurm.epilogue.is_some()
+            || !service.slurm.hooks.is_empty()
+    });
+    let assertions_enabled = plan
         .ordered_services
         .iter()
-        .any(|service| service.slurm.prologue.is_some() || service.slurm.epilogue.is_some());
+        .any(|service| service.assertions.is_some());
+    let rendezvous_client_names = plan
+        .slurm
+        .rendezvous
+        .as_ref()
+        .map(|rendezvous| rendezvous.discover.clone())
+        .unwrap_or_default();
+    let rendezvous_enabled = !rendezvous_client_names.is_empty()
+        || plan.ordered_services.iter().any(|service| {
+            service
+                .slurm
+                .rendezvous
+                .as_ref()
+                .and_then(|rendezvous| rendezvous.register.as_ref())
+                .is_some()
+        });
     let software_env_enabled = !plan.slurm.software_env.is_empty()
         || plan
             .ordered_services
@@ -536,6 +611,9 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     if distributed_env_enabled {
         out.push_str(" \"$DIST_HOSTFILE_DIR\"");
     }
+    if rendezvous_enabled {
+        out.push_str(" \"$CACHE_ROOT/rendezvous\"");
+    }
     out.push_str(" \"$ENROOT_CACHE_PATH\" \"$ENROOT_DATA_PATH\" \"$ENROOT_TEMP_PATH\"\n\n");
 
     out.push_str("SERVICE_PIDS=()\n");
@@ -554,6 +632,8 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("SERVICE_RESTART_FAILURES_IN_WINDOW=()\n");
     out.push_str("SERVICE_RESTART_FAILURE_TIMESTAMPS=()\n");
     out.push_str("SERVICE_LAST_EXIT_CODE=()\n");
+    out.push_str("SERVICE_STARTED_AT=()\n");
+    out.push_str("SERVICE_FINISHED_AT=()\n");
     out.push_str("SERVICE_FIRST_FAILURE_AT=()\n");
     out.push_str("SERVICE_FIRST_FAILURE_EXIT_CODE=()\n");
     out.push_str("SERVICE_FIRST_FAILURE_NODE=()\n");
@@ -565,6 +645,23 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("SERVICE_STEP_NODELIST=()\n");
     out.push_str("SERVICE_HOST_EPILOGUE_SCRIPTS=()\n");
     out.push_str("SERVICE_HOST_EPILOGUE_RAN=()\n");
+    out.push_str("SERVICE_EVENT_HOOK_MANIFESTS=()\n");
+    if rendezvous_enabled {
+        out.push_str("SERVICE_RDZV_NAMES=()\n");
+        out.push_str("SERVICE_RDZV_PORTS=()\n");
+        out.push_str("SERVICE_RDZV_PROTOCOLS=()\n");
+        out.push_str("SERVICE_RDZV_PATHS=()\n");
+        out.push_str("SERVICE_RDZV_TTLS=()\n");
+        out.push_str("SERVICE_RDZV_REGISTERED=()\n");
+    }
+    if assertions_enabled {
+        out.push_str("SERVICE_ASSERT_EXIT_CODES=()\n");
+        out.push_str("SERVICE_ASSERT_ARTIFACT_PATTERNS=()\n");
+        out.push_str("SERVICE_ASSERT_MAX_DURATIONS=()\n");
+        out.push_str("SERVICE_ASSERT_DURATIONS=()\n");
+        out.push_str("SERVICE_ASSERT_STATUS=()\n");
+        out.push_str("SERVICE_ASSERT_FAILURES=()\n");
+    }
     out.push_str("ALLOCATION_NODES=()\n");
     out.push_str("SERVICE_LAUNCH_FNS=()\n");
     out.push_str("SERVICE_DEPENDENTS=()\n");
@@ -572,6 +669,33 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("WAIT_HELPER_EXITED=0\n");
     out.push_str("WAIT_HELPER_EXIT_STATUS=\"\"\n");
     out.push_str("declare -A SERVICE_INDEX_BY_NAME=()\n\n");
+    if rendezvous_enabled {
+        out.push_str(&format!(
+            "RDZV_CLIENT_NAMES={}\n",
+            bash_array_literal(&rendezvous_client_names)
+        ));
+        out.push_str("RDZV_CLIENT_TIMEOUT_SECONDS=");
+        out.push_str(
+            &plan
+                .slurm
+                .rendezvous
+                .as_ref()
+                .and_then(|rendezvous| rendezvous.timeout_seconds)
+                .unwrap_or(30)
+                .to_string(),
+        );
+        out.push('\n');
+        out.push_str(&format!(
+            "RDZV_CLIENT_REQUIRED={}\n\n",
+            flag(
+                plan.slurm
+                    .rendezvous
+                    .as_ref()
+                    .and_then(|rendezvous| rendezvous.require)
+                    .unwrap_or(true)
+            )
+        ));
+    }
     if artifacts_enabled {
         out.push_str(&format!(
             "ARTIFACTS_COLLECT_POLICY={}\n",
@@ -738,6 +862,24 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  fi\n");
     out.push_str("  printf ']'\n");
     out.push_str("}\n\n");
+
+    if assertions_enabled {
+        out.push_str("json_lines_array() {\n");
+        out.push_str("  local raw=${1-}\n");
+        out.push_str("  local first=1\n");
+        out.push_str("  local line\n");
+        out.push_str("  printf '['\n");
+        out.push_str("  while IFS= read -r line; do\n");
+        out.push_str("    [[ -z \"$line\" ]] && continue\n");
+        out.push_str("    if (( first == 0 )); then\n");
+        out.push_str("      printf ','\n");
+        out.push_str("    fi\n");
+        out.push_str("    printf '\"%s\"' \"$(json_escape \"$line\")\"\n");
+        out.push_str("    first=0\n");
+        out.push_str("  done <<< \"$raw\"\n");
+        out.push_str("  printf ']'\n");
+        out.push_str("}\n\n");
+    }
 
     out.push_str("reset_wait_helper_exit_state() {\n");
     out.push_str("  WAIT_HELPER_EXITED=0\n");
@@ -940,6 +1082,54 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("    bash \"$script_path\"\n");
         out.push_str("  ) >>\"$logfile\" 2>&1\n");
         out.push_str("}\n\n");
+
+        out.push_str("run_service_event_hooks() {\n");
+        out.push_str("  local index=$1\n");
+        out.push_str("  local event=$2\n");
+        out.push_str("  local service_exit_code=$3\n");
+        out.push_str("  local manifest=${SERVICE_EVENT_HOOK_MANIFESTS[index]:-}\n");
+        out.push_str("  [[ -n \"$manifest\" && -f \"$manifest\" ]] || return 0\n");
+        out.push_str("  local service_name=${SERVICE_NAMES[index]:-unknown}\n");
+        out.push_str("  local logfile=${SERVICE_LOG_PATHS[index]:-}\n");
+        out.push_str("  [[ -n \"$logfile\" ]] || return 0\n");
+        out.push_str("  local restart_count=${SERVICE_RESTART_COUNT[index]:-0}\n");
+        out.push_str("  local max_restarts=${SERVICE_MAX_RESTARTS[index]:-0}\n");
+        out.push_str("  local window_seconds=${SERVICE_WINDOW_SECONDS[index]:-0}\n");
+        out.push_str(
+            "  local max_restarts_in_window=${SERVICE_MAX_RESTARTS_IN_WINDOW[index]:-0}\n",
+        );
+        out.push_str(
+            "  local restart_failures_in_window=${SERVICE_RESTART_FAILURES_IN_WINDOW[index]:-0}\n",
+        );
+        out.push_str("  local hook_event script_path\n");
+        out.push_str("  while IFS=$'\\t' read -r hook_event script_path; do\n");
+        out.push_str(
+            "    [[ \"$hook_event\" == \"$event\" && -n \"$script_path\" ]] || continue\n",
+        );
+        out.push_str("    local hook_status=0\n");
+        out.push_str("    (\n");
+        out.push_str("      export HPC_COMPOSE_SERVICE_NAME=\"$service_name\"\n");
+        out.push_str("      export HPC_COMPOSE_HOOK_PHASE=\"$event\"\n");
+        out.push_str("      export HPC_COMPOSE_SERVICE_LOG=\"$logfile\"\n");
+        out.push_str("      export HPC_COMPOSE_SERVICE_EXIT_CODE=\"$service_exit_code\"\n");
+        out.push_str("      export HPC_COMPOSE_ATTEMPT=\"$ATTEMPT\"\n");
+        out.push_str("      export HPC_COMPOSE_RESTART_COUNT=\"$restart_count\"\n");
+        out.push_str("      export HPC_COMPOSE_MAX_RESTARTS=\"$max_restarts\"\n");
+        out.push_str("      export HPC_COMPOSE_WINDOW_SECONDS=\"$window_seconds\"\n");
+        out.push_str(
+            "      export HPC_COMPOSE_MAX_RESTARTS_IN_WINDOW=\"$max_restarts_in_window\"\n",
+        );
+        out.push_str(
+            "      export HPC_COMPOSE_RESTART_FAILURES_IN_WINDOW=\"$restart_failures_in_window\"\n",
+        );
+        out.push_str("      bash \"$script_path\"\n");
+        out.push_str("    ) >>\"$logfile\" 2>&1 || hook_status=$?\n");
+        out.push_str("    if (( hook_status != 0 )); then\n");
+        out.push_str("      echo \"Event hook '$event' for service '$service_name' exited with status $hook_status\" >>\"$logfile\" 2>&1\n");
+        out.push_str("    fi\n");
+        out.push_str("  done < \"$manifest\"\n");
+        out.push_str("  return 0\n");
+        out.push_str("}\n\n");
     }
 
     out.push_str("write_resume_metadata() {\n");
@@ -1001,7 +1191,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("      if (( first == 0 )); then\n");
     out.push_str("        printf ','\n");
     out.push_str("      fi\n");
-    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"completed_successfully\":%s,\"readiness_configured\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"window_seconds\":%s,\"max_restarts_in_window\":%s,\"restart_failures_in_window\":%s,\"restart_failure_timestamps\":%s,\"last_exit_code\":%s,\"first_failure_at\":%s,\"first_failure_exit_code\":%s,\"first_failure_node\":%s,\"first_failure_rank\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s}' \\\n");
+    out.push_str("      printf '\\n    {\"service_name\":\"%s\",\"step_name\":\"%s\",\"log_path\":\"%s\",\"launch_index\":%s,\"launcher_pid\":%s,\"healthy\":%s,\"completed_successfully\":%s,\"readiness_configured\":%s,\"failure_policy_mode\":\"%s\",\"restart_count\":%s,\"max_restarts\":%s,\"window_seconds\":%s,\"max_restarts_in_window\":%s,\"restart_failures_in_window\":%s,\"restart_failure_timestamps\":%s,\"last_exit_code\":%s,\"started_at\":%s,\"finished_at\":%s,\"first_failure_at\":%s,\"first_failure_exit_code\":%s,\"first_failure_node\":%s,\"first_failure_rank\":%s,\"placement_mode\":%s,\"nodes\":%s,\"ntasks\":%s,\"ntasks_per_node\":%s,\"nodelist\":%s' \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_NAMES[i]}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_STEP_NAMES[i]:-}\")\" \\\n");
     out.push_str("        \"$(json_escape \"${SERVICE_LOG_PATHS[i]:-}\")\" \\\n");
@@ -1020,6 +1210,8 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         "        \"$(json_number_array \"${SERVICE_RESTART_FAILURE_TIMESTAMPS[i]:-}\")\" \\\n",
     );
     out.push_str("        \"$(if [[ -n \"${SERVICE_LAST_EXIT_CODE[i]:-}\" ]]; then printf '%s' \"${SERVICE_LAST_EXIT_CODE[i]}\"; else printf null; fi)\" \\\n");
+    out.push_str("        \"$(json_number_or_null \"${SERVICE_STARTED_AT[i]:-}\")\" \\\n");
+    out.push_str("        \"$(json_number_or_null \"${SERVICE_FINISHED_AT[i]:-}\")\" \\\n");
     out.push_str("        \"$(json_number_or_null \"${SERVICE_FIRST_FAILURE_AT[i]:-}\")\" \\\n");
     out.push_str(
         "        \"$(json_number_or_null \"${SERVICE_FIRST_FAILURE_EXIT_CODE[i]:-}\")\" \\\n",
@@ -1033,6 +1225,25 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         "        \"$(json_number_or_null \"${SERVICE_STEP_NTASKS_PER_NODE[i]:-}\")\" \\\n",
     );
     out.push_str("        \"$(json_string_or_null \"${SERVICE_STEP_NODELIST[i]:-}\")\"\n");
+    if assertions_enabled {
+        out.push_str("      printf ',\"assertions\":{\"configured\":%s,\"status\":\"%s\",\"expected_exit_code\":%s,\"artifacts_contain\":%s,\"max_duration_seconds\":%s,\"duration_seconds\":%s,\"failures\":%s}' \\\n");
+        out.push_str("        \"$(if [[ -n \"${SERVICE_ASSERT_EXIT_CODES[i]:-}\" || -n \"${SERVICE_ASSERT_ARTIFACT_PATTERNS[i]:-}\" || -n \"${SERVICE_ASSERT_MAX_DURATIONS[i]:-}\" ]]; then printf true; else printf false; fi)\" \\\n");
+        out.push_str("        \"$(json_escape \"${SERVICE_ASSERT_STATUS[i]:-none}\")\" \\\n");
+        out.push_str(
+            "        \"$(json_number_or_null \"${SERVICE_ASSERT_EXIT_CODES[i]:-}\")\" \\\n",
+        );
+        out.push_str(
+            "        \"$(json_string_or_null \"${SERVICE_ASSERT_ARTIFACT_PATTERNS[i]:-}\")\" \\\n",
+        );
+        out.push_str(
+            "        \"$(json_number_or_null \"${SERVICE_ASSERT_MAX_DURATIONS[i]:-}\")\" \\\n",
+        );
+        out.push_str(
+            "        \"$(json_number_or_null \"${SERVICE_ASSERT_DURATIONS[i]:-}\")\" \\\n",
+        );
+        out.push_str("        \"$(json_lines_array \"${SERVICE_ASSERT_FAILURES[i]:-}\")\"\n");
+    }
+    out.push_str("      printf '}'\n");
     out.push_str("      first=0\n");
     out.push_str("    done\n");
     out.push_str("    printf '\\n  ]\\n}\\n'\n");
@@ -1068,6 +1279,106 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  done\n");
     out.push_str("}\n\n");
 
+    if assertions_enabled {
+        out.push_str("append_assert_failure() {\n");
+        out.push_str("  local index=$1\n");
+        out.push_str("  local message=$2\n");
+        out.push_str("  if [[ -n \"${SERVICE_ASSERT_FAILURES[index]:-}\" ]]; then\n");
+        out.push_str("    SERVICE_ASSERT_FAILURES[index]+=$'\\n'\n");
+        out.push_str("  fi\n");
+        out.push_str("  SERVICE_ASSERT_FAILURES[index]+=\"$message\"\n");
+        out.push_str("}\n\n");
+
+        out.push_str("assertion_configured() {\n");
+        out.push_str("  local index=$1\n");
+        out.push_str("  [[ -n \"${SERVICE_ASSERT_EXIT_CODES[index]:-}\" || -n \"${SERVICE_ASSERT_ARTIFACT_PATTERNS[index]:-}\" || -n \"${SERVICE_ASSERT_MAX_DURATIONS[index]:-}\" ]]\n");
+        out.push_str("}\n\n");
+
+        out.push_str("evaluate_service_assertions() {\n");
+        out.push_str("  local index=$1\n");
+        out.push_str("  local name=${SERVICE_NAMES[index]:-unknown}\n");
+        out.push_str("  if ! assertion_configured \"$index\"; then\n");
+        out.push_str("    SERVICE_ASSERT_STATUS[index]=\"none\"\n");
+        out.push_str("    SERVICE_ASSERT_FAILURES[index]=\"\"\n");
+        out.push_str("    return 0\n");
+        out.push_str("  fi\n");
+        out.push_str("  SERVICE_ASSERT_STATUS[index]=\"passed\"\n");
+        out.push_str("  SERVICE_ASSERT_FAILURES[index]=\"\"\n");
+        out.push_str("  if [[ -n \"$RECEIVED_SIGNAL\" ]]; then\n");
+        out.push_str("    SERVICE_ASSERT_STATUS[index]=\"skipped\"\n");
+        out.push_str("    append_assert_failure \"$index\" \"skipped because job received signal $RECEIVED_SIGNAL\"\n");
+        out.push_str("    return 0\n");
+        out.push_str("  fi\n");
+        out.push_str("  local failed=0\n");
+        out.push_str("  local expected_exit=${SERVICE_ASSERT_EXIT_CODES[index]:-}\n");
+        out.push_str("  if [[ -n \"$expected_exit\" ]]; then\n");
+        out.push_str("    local actual_exit=${SERVICE_LAST_EXIT_CODE[index]:-}\n");
+        out.push_str("    if [[ -z \"$actual_exit\" ]]; then\n");
+        out.push_str("      append_assert_failure \"$index\" \"expected exit_code $expected_exit, but no exit code was recorded\"\n");
+        out.push_str("      failed=1\n");
+        out.push_str("    elif [[ \"$actual_exit\" != \"$expected_exit\" ]]; then\n");
+        out.push_str("      append_assert_failure \"$index\" \"expected exit_code $expected_exit, got $actual_exit\"\n");
+        out.push_str("      failed=1\n");
+        out.push_str("    fi\n");
+        out.push_str("  fi\n");
+        out.push_str("  local artifact_pattern=${SERVICE_ASSERT_ARTIFACT_PATTERNS[index]:-}\n");
+        out.push_str("  if [[ -n \"$artifact_pattern\" ]]; then\n");
+        out.push_str("    local host_pattern=\"$JOB_TMP${artifact_pattern#/hpc-compose/job}\"\n");
+        out.push_str("    local shopt_state\n");
+        out.push_str("    shopt_state=$(shopt -p nullglob globstar dotglob)\n");
+        out.push_str("    shopt -s nullglob globstar dotglob\n");
+        out.push_str("    local match_count=0\n");
+        out.push_str("    local matched\n");
+        out.push_str("    while IFS= read -r matched; do\n");
+        out.push_str("      [[ -n \"$matched\" ]] || continue\n");
+        out.push_str("      match_count=$((match_count + 1))\n");
+        out.push_str("      break\n");
+        out.push_str("    done < <(compgen -G \"$host_pattern\" || true)\n");
+        out.push_str("    eval \"$shopt_state\"\n");
+        out.push_str("    if (( match_count == 0 )); then\n");
+        out.push_str("      append_assert_failure \"$index\" \"expected artifacts_contain '$artifact_pattern' to match at least one path\"\n");
+        out.push_str("      failed=1\n");
+        out.push_str("    fi\n");
+        out.push_str("  fi\n");
+        out.push_str("  local max_duration=${SERVICE_ASSERT_MAX_DURATIONS[index]:-}\n");
+        out.push_str("  if [[ -n \"$max_duration\" ]]; then\n");
+        out.push_str("    local started_at=${SERVICE_STARTED_AT[index]:-}\n");
+        out.push_str("    local finished_at=${SERVICE_FINISHED_AT[index]:-}\n");
+        out.push_str("    if [[ -z \"$started_at\" || -z \"$finished_at\" ]]; then\n");
+        out.push_str("      append_assert_failure \"$index\" \"expected max_duration_seconds $max_duration, but service runtime was not fully recorded\"\n");
+        out.push_str("      failed=1\n");
+        out.push_str("    else\n");
+        out.push_str("      local duration=$(( finished_at >= started_at ? finished_at - started_at : 0 ))\n");
+        out.push_str("      SERVICE_ASSERT_DURATIONS[index]=\"$duration\"\n");
+        out.push_str("      if (( duration > max_duration )); then\n");
+        out.push_str("        append_assert_failure \"$index\" \"expected max_duration_seconds <= $max_duration, got $duration\"\n");
+        out.push_str("        failed=1\n");
+        out.push_str("      fi\n");
+        out.push_str("    fi\n");
+        out.push_str("  fi\n");
+        out.push_str("  if (( failed != 0 )); then\n");
+        out.push_str("    SERVICE_ASSERT_STATUS[index]=\"failed\"\n");
+        out.push_str("    echo \"Assertions failed for service '$name': ${SERVICE_ASSERT_FAILURES[index]//$'\\n'/; }\" >&2\n");
+        out.push_str("    return 1\n");
+        out.push_str("  fi\n");
+        out.push_str("  return 0\n");
+        out.push_str("}\n\n");
+
+        out.push_str("evaluate_assertions() {\n");
+        out.push_str("  local status=0\n");
+        out.push_str("  local i\n");
+        out.push_str("  for i in \"${!SERVICE_NAMES[@]}\"; do\n");
+        out.push_str("    evaluate_service_assertions \"$i\" || status=1\n");
+        out.push_str("  done\n");
+        out.push_str("  write_state_file\n");
+        out.push_str("  return \"$status\"\n");
+        out.push_str("}\n\n");
+    }
+
+    if rendezvous_enabled {
+        render_rendezvous_helpers(&mut out);
+    }
+
     out.push_str("cleanup() {\n");
     out.push_str("  local code=$?\n");
     out.push_str("  trap - EXIT INT TERM\n");
@@ -1084,8 +1395,24 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  fi\n");
     out.push_str("  JOB_EXIT_CODE=\"$code\"\n");
     out.push_str("  local stage_out_status=0\n");
+    if assertions_enabled {
+        out.push_str("  local assertion_status=0\n");
+    }
     out.push_str("  kill_services\n");
     out.push_str("  reap_services_after_cleanup\n");
+    if assertions_enabled {
+        out.push_str("  evaluate_assertions || assertion_status=$?\n");
+        out.push_str("  if (( assertion_status != 0 )); then\n");
+        out.push_str("    if (( code == 0 )); then\n");
+        out.push_str("      code=$assertion_status\n");
+        out.push_str("    fi\n");
+        out.push_str("    JOB_STATUS=\"FAILED\"\n");
+        out.push_str("    JOB_EXIT_CODE=\"$code\"\n");
+        out.push_str("  fi\n");
+    }
+    if rendezvous_enabled {
+        out.push_str("  deregister_rendezvous_records || true\n");
+    }
     out.push_str("  write_state_file\n");
     if artifacts_enabled {
         out.push_str("  collect_artifacts \"$code\" || true\n");
@@ -1132,7 +1459,10 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  local step_nodelist=${16}\n");
     out.push_str("  local readiness_configured=${17}\n");
     out.push_str("  local host_epilogue_script=${18}\n");
+    out.push_str("  local event_hooks_manifest=${19}\n");
     out.push_str("  local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}\n");
+    out.push_str("  local launched_at\n");
+    out.push_str("  launched_at=$(date +%s)\n");
     out.push_str("  if [[ -n \"$index\" ]]; then\n");
     out.push_str("    SERVICE_PIDS[index]=\"$pid\"\n");
     out.push_str("    SERVICE_STEP_NAMES[index]=\"$step_name\"\n");
@@ -1145,8 +1475,16 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("    SERVICE_STEP_NTASKS[index]=\"$step_ntasks\"\n");
     out.push_str("    SERVICE_STEP_NTASKS_PER_NODE[index]=\"$step_ntasks_per_node\"\n");
     out.push_str("    SERVICE_STEP_NODELIST[index]=\"$step_nodelist\"\n");
+    out.push_str("    if [[ -z \"${SERVICE_STARTED_AT[index]:-}\" ]]; then\n");
+    out.push_str("      SERVICE_STARTED_AT[index]=\"$launched_at\"\n");
+    out.push_str("    fi\n");
+    out.push_str("    SERVICE_FINISHED_AT[index]=\"\"\n");
     out.push_str("    SERVICE_HOST_EPILOGUE_SCRIPTS[index]=\"$host_epilogue_script\"\n");
     out.push_str("    SERVICE_HOST_EPILOGUE_RAN[index]=\"0\"\n");
+    out.push_str("    SERVICE_EVENT_HOOK_MANIFESTS[index]=\"$event_hooks_manifest\"\n");
+    if rendezvous_enabled {
+        out.push_str("    SERVICE_RDZV_REGISTERED[index]=\"0\"\n");
+    }
     out.push_str("    SERVICE_LAUNCH_FNS[index]=\"$launch_fn\"\n");
     out.push_str("    if [[ -n \"$dependents_csv\" ]]; then\n");
     out.push_str("      SERVICE_DEPENDENTS[index]=\"$dependents_csv\"\n");
@@ -1169,6 +1507,8 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("    SERVICE_RESTART_FAILURES_IN_WINDOW+=(\"0\")\n");
     out.push_str("    SERVICE_RESTART_FAILURE_TIMESTAMPS+=(\"\")\n");
     out.push_str("    SERVICE_LAST_EXIT_CODE+=(\"\")\n");
+    out.push_str("    SERVICE_STARTED_AT+=(\"$launched_at\")\n");
+    out.push_str("    SERVICE_FINISHED_AT+=(\"\")\n");
     out.push_str("    SERVICE_FIRST_FAILURE_AT+=(\"\")\n");
     out.push_str("    SERVICE_FIRST_FAILURE_EXIT_CODE+=(\"\")\n");
     out.push_str("    SERVICE_FIRST_FAILURE_NODE+=(\"\")\n");
@@ -1180,6 +1520,23 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("    SERVICE_STEP_NODELIST+=(\"$step_nodelist\")\n");
     out.push_str("    SERVICE_HOST_EPILOGUE_SCRIPTS+=(\"$host_epilogue_script\")\n");
     out.push_str("    SERVICE_HOST_EPILOGUE_RAN+=(\"0\")\n");
+    out.push_str("    SERVICE_EVENT_HOOK_MANIFESTS+=(\"$event_hooks_manifest\")\n");
+    if rendezvous_enabled {
+        out.push_str("    SERVICE_RDZV_NAMES+=(\"\")\n");
+        out.push_str("    SERVICE_RDZV_PORTS+=(\"\")\n");
+        out.push_str("    SERVICE_RDZV_PROTOCOLS+=(\"\")\n");
+        out.push_str("    SERVICE_RDZV_PATHS+=(\"\")\n");
+        out.push_str("    SERVICE_RDZV_TTLS+=(\"\")\n");
+        out.push_str("    SERVICE_RDZV_REGISTERED+=(\"0\")\n");
+    }
+    if assertions_enabled {
+        out.push_str("    SERVICE_ASSERT_EXIT_CODES+=(\"\")\n");
+        out.push_str("    SERVICE_ASSERT_ARTIFACT_PATTERNS+=(\"\")\n");
+        out.push_str("    SERVICE_ASSERT_MAX_DURATIONS+=(\"\")\n");
+        out.push_str("    SERVICE_ASSERT_DURATIONS+=(\"\")\n");
+        out.push_str("    SERVICE_ASSERT_STATUS+=(\"none\")\n");
+        out.push_str("    SERVICE_ASSERT_FAILURES+=(\"\")\n");
+    }
     out.push_str("    SERVICE_LAUNCH_FNS+=(\"$launch_fn\")\n");
     out.push_str("    SERVICE_DEPENDENTS+=(\"$dependents_csv\")\n");
     out.push_str("    SERVICE_INDEX_BY_NAME[\"$name\"]=$index\n");
@@ -1353,11 +1710,17 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("    wait_for_service_started \"$dependency\" \"$target\" || return 1\n");
     out.push_str("    index=$(service_index_for \"$dependency\") || return 1\n");
     out.push_str("    if [[ \"${SERVICE_HEALTHY[index]:-0}\" == \"1\" ]]; then\n");
+    if rendezvous_enabled {
+        out.push_str("      register_service_rendezvous_by_index \"$index\" || return 1\n");
+    }
     out.push_str("      return 0\n");
     out.push_str("    fi\n");
     out.push_str("    local pid=${SERVICE_PIDS[index]}\n");
     out.push_str("    if \"$wait_fn\" \"$pid\" \"$dependency\"; then\n");
     out.push_str("      SERVICE_HEALTHY[index]=\"1\"\n");
+    if rendezvous_enabled {
+        out.push_str("      register_service_rendezvous_by_index \"$index\" || return 1\n");
+    }
     out.push_str("      write_state_file\n");
     out.push_str("      return 0\n");
     out.push_str("    fi\n");
@@ -1469,6 +1832,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("    fi\n");
     out.push_str("  fi\n");
     out.push_str("  status=$effective_status\n");
+    out.push_str("  SERVICE_FINISHED_AT[index]=\"$(date +%s)\"\n");
     out.push_str("  SERVICE_LAST_EXIT_CODE[index]=\"$status\"\n");
     out.push_str("  if (( status != 0 )) && [[ -z \"${SERVICE_FIRST_FAILURE_EXIT_CODE[index]:-}\" ]]; then\n");
     out.push_str("    SERVICE_FIRST_FAILURE_AT[index]=\"$(date +%s)\"\n");
@@ -1510,6 +1874,11 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str(
         "      echo \"Service '$name' exited with status $status after $restart_failures_in_window/$max_restarts_in_window restart-triggering exits in ${window_seconds}s\" >&2\n",
     );
+    if hooks_enabled {
+        out.push_str(
+            "      run_service_event_hooks \"$index\" window_exhausted \"$status\" || true\n",
+        );
+    }
     out.push_str("      emit_dependency_failure_diagnostic \"$name\"\n");
     out.push_str("      return \"$status\"\n");
     out.push_str("    fi\n");
@@ -1525,15 +1894,18 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("    local next_restart=$((restart_count + 1))\n");
     out.push_str("    SERVICE_RESTART_COUNT[index]=\"$next_restart\"\n");
     out.push_str("    write_state_file\n");
-    out.push_str("    if (( backoff_seconds > 0 )); then\n");
-    out.push_str("      sleep \"$backoff_seconds\"\n");
-    out.push_str("    fi\n");
     out.push_str("    if [[ -z \"$launch_fn\" ]]; then\n");
     out.push_str(
         "      echo \"Service '$name' requested restart but no launch function is registered\" >&2\n",
     );
     out.push_str("      emit_dependency_failure_diagnostic \"$name\"\n");
     out.push_str("      return \"$status\"\n");
+    out.push_str("    fi\n");
+    if hooks_enabled {
+        out.push_str("    run_service_event_hooks \"$index\" restart \"$status\" || true\n");
+    }
+    out.push_str("    if (( backoff_seconds > 0 )); then\n");
+    out.push_str("      sleep \"$backoff_seconds\"\n");
     out.push_str("    fi\n");
     out.push_str(
         "    echo \"Service '$name' exited with status $status; restarting ($next_restart/$max_restarts)\" >&2\n",
@@ -1546,8 +1918,60 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  return \"$status\"\n");
     out.push_str("}\n\n");
 
+    out.push_str("restart_service_for_dev() {\n");
+    out.push_str("  local name=$1\n");
+    out.push_str("  local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}\n");
+    out.push_str("  if [[ -z \"$index\" ]]; then\n");
+    out.push_str("    echo \"dev reload requested unknown service '$name'\" >&2\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  local pid=${SERVICE_PIDS[index]:-}\n");
+    out.push_str("  if [[ -n \"$pid\" ]]; then\n");
+    out.push_str("    if kill -0 \"$pid\" 2>/dev/null; then\n");
+    out.push_str("      echo \"Dev reload: stopping service '$name'\" >&2\n");
+    out.push_str("      kill \"$pid\" 2>/dev/null || true\n");
+    out.push_str("    fi\n");
+    out.push_str("    wait \"$pid\" 2>/dev/null || true\n");
+    out.push_str("  fi\n");
+    out.push_str("  SERVICE_PIDS[index]=''\n");
+    out.push_str("  SERVICE_HEALTHY[index]='0'\n");
+    out.push_str("  SERVICE_COMPLETED_SUCCESSFULLY[index]='0'\n");
+    out.push_str("  SERVICE_LAST_EXIT_CODE[index]=''\n");
+    out.push_str("  SERVICE_FINISHED_AT[index]=''\n");
+    out.push_str("  write_state_file\n");
+    out.push_str("  local launch_fn=${SERVICE_LAUNCH_FNS[index]:-}\n");
+    out.push_str("  if [[ -z \"$launch_fn\" ]]; then\n");
+    out.push_str("    echo \"dev reload requested service '$name' but no launch function is registered\" >&2\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  echo \"Dev reload: restarting service '$name'\" >&2\n");
+    out.push_str("  \"$launch_fn\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("process_dev_restart_requests() {\n");
+    out.push_str("  [[ -n \"${HPC_COMPOSE_DEV_CONTROL_DIR:-}\" ]] || return 0\n");
+    out.push_str("  local request_dir=\"$HPC_COMPOSE_DEV_CONTROL_DIR/restart\"\n");
+    out.push_str("  [[ -d \"$request_dir\" ]] || return 0\n");
+    out.push_str("  local shopt_state\n");
+    out.push_str("  shopt_state=$(shopt -p nullglob)\n");
+    out.push_str("  shopt -s nullglob\n");
+    out.push_str("  local -a request_files=(\"$request_dir\"/*.request)\n");
+    out.push_str("  eval \"$shopt_state\"\n");
+    out.push_str("  local request_file\n");
+    out.push_str("  for request_file in \"${request_files[@]}\"; do\n");
+    out.push_str("    [[ -f \"$request_file\" ]] || continue\n");
+    out.push_str("    local service_name\n");
+    out.push_str("    while IFS= read -r service_name; do\n");
+    out.push_str("      [[ -z \"$service_name\" ]] && continue\n");
+    out.push_str("      restart_service_for_dev \"$service_name\"\n");
+    out.push_str("    done < \"$request_file\"\n");
+    out.push_str("    rm -f \"$request_file\" || true\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+
     out.push_str("monitor_services() {\n");
     out.push_str("  while true; do\n");
+    out.push_str("    process_dev_restart_requests\n");
     out.push_str("    local tracked=0\n");
     out.push_str("    for i in \"${!SERVICE_PIDS[@]}\"; do\n");
     out.push_str("      local pid=${SERVICE_PIDS[i]}\n");
@@ -1594,6 +2018,9 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     }
     if stage_enabled {
         out.push_str("stage_in_paths\n\n");
+    }
+    if !rendezvous_client_names.is_empty() {
+        out.push_str("resolve_rendezvous_dependencies\n\n");
     }
 
     for service in &plan.ordered_services {
@@ -2214,16 +2641,17 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("  while IFS= read -r line; do\n");
     out.push_str("    [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
     out.push_str("    IFS=',' read -r raw_index raw_uuid raw_name raw_util_gpu raw_util_mem raw_mem_used raw_mem_total raw_temp raw_power_draw raw_power_limit <<< \"$line\"\n");
-    out.push_str("    local index=$(trim_whitespace \"$raw_index\")\n");
-    out.push_str("    local uuid=$(trim_whitespace \"$raw_uuid\")\n");
-    out.push_str("    local name=$(trim_whitespace \"$raw_name\")\n");
-    out.push_str("    local util_gpu=$(trim_whitespace \"$raw_util_gpu\")\n");
-    out.push_str("    local util_mem=$(trim_whitespace \"$raw_util_mem\")\n");
-    out.push_str("    local mem_used=$(trim_whitespace \"$raw_mem_used\")\n");
-    out.push_str("    local mem_total=$(trim_whitespace \"$raw_mem_total\")\n");
-    out.push_str("    local temperature=$(trim_whitespace \"$raw_temp\")\n");
-    out.push_str("    local power_draw=$(trim_whitespace \"$raw_power_draw\")\n");
-    out.push_str("    local power_limit=$(trim_whitespace \"$raw_power_limit\")\n");
+    out.push_str("    local index uuid name util_gpu util_mem mem_used mem_total temperature power_draw power_limit\n");
+    out.push_str("    index=$(trim_whitespace \"$raw_index\")\n");
+    out.push_str("    uuid=$(trim_whitespace \"$raw_uuid\")\n");
+    out.push_str("    name=$(trim_whitespace \"$raw_name\")\n");
+    out.push_str("    util_gpu=$(trim_whitespace \"$raw_util_gpu\")\n");
+    out.push_str("    util_mem=$(trim_whitespace \"$raw_util_mem\")\n");
+    out.push_str("    mem_used=$(trim_whitespace \"$raw_mem_used\")\n");
+    out.push_str("    mem_total=$(trim_whitespace \"$raw_mem_total\")\n");
+    out.push_str("    temperature=$(trim_whitespace \"$raw_temp\")\n");
+    out.push_str("    power_draw=$(trim_whitespace \"$raw_power_draw\")\n");
+    out.push_str("    power_limit=$(trim_whitespace \"$raw_power_limit\")\n");
     out.push_str("    printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"index\":%s,\"uuid\":%s,\"name\":%s,\"utilization_gpu\":%s,\"utilization_memory\":%s,\"memory_used_mib\":%s,\"memory_total_mib\":%s,\"temperature_c\":%s,\"power_draw_w\":%s,\"power_limit_w\":%s}\\n' \\\n");
     out.push_str("      \"$(json_escape \"$sampled_at\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$sample_node\")\" \\\n");
@@ -2243,10 +2671,11 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("    while IFS= read -r line; do\n");
     out.push_str("      [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
     out.push_str("      IFS=',' read -r raw_gpu_uuid raw_pid raw_process_name raw_used_memory <<< \"$line\"\n");
-    out.push_str("      local gpu_uuid=$(trim_whitespace \"$raw_gpu_uuid\")\n");
-    out.push_str("      local pid=$(trim_whitespace \"$raw_pid\")\n");
-    out.push_str("      local process_name=$(trim_whitespace \"$raw_process_name\")\n");
-    out.push_str("      local used_memory=$(trim_whitespace \"$raw_used_memory\")\n");
+    out.push_str("      local gpu_uuid pid process_name used_memory\n");
+    out.push_str("      gpu_uuid=$(trim_whitespace \"$raw_gpu_uuid\")\n");
+    out.push_str("      pid=$(trim_whitespace \"$raw_pid\")\n");
+    out.push_str("      process_name=$(trim_whitespace \"$raw_process_name\")\n");
+    out.push_str("      used_memory=$(trim_whitespace \"$raw_used_memory\")\n");
     out.push_str("      printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s}\\n' \\\n");
     out.push_str("        \"$(json_escape \"$sampled_at\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"$sample_node\")\" \\\n");
@@ -2405,16 +2834,18 @@ fn render_metrics_helpers(out: &mut String) {
     out.push_str("      mark_slurm_collector_unavailable \"malformed sstat output while sampling metrics\"\n");
     out.push_str("      return 0\n");
     out.push_str("    fi\n");
-    out.push_str("    local step_id=$(trim_whitespace \"${fields[0]}\")\n");
+    out.push_str("    local step_id\n");
+    out.push_str("    step_id=$(trim_whitespace \"${fields[0]}\")\n");
     out.push_str("    if [[ ! \"$step_id\" =~ ^${SLURM_JOB_ID}\\.[0-9]+$ ]]; then\n");
     out.push_str("      continue\n");
     out.push_str("    fi\n");
-    out.push_str("    local ntasks=$(trim_whitespace \"${fields[1]}\")\n");
-    out.push_str("    local ave_cpu=$(trim_whitespace \"${fields[2]}\")\n");
-    out.push_str("    local ave_rss=$(trim_whitespace \"${fields[3]}\")\n");
-    out.push_str("    local max_rss=$(trim_whitespace \"${fields[4]}\")\n");
-    out.push_str("    local alloc_tres=$(trim_whitespace \"${fields[5]}\")\n");
-    out.push_str("    local tres_usage_in_ave=$(trim_whitespace \"${fields[6]}\")\n");
+    out.push_str("    local ntasks ave_cpu ave_rss max_rss alloc_tres tres_usage_in_ave\n");
+    out.push_str("    ntasks=$(trim_whitespace \"${fields[1]}\")\n");
+    out.push_str("    ave_cpu=$(trim_whitespace \"${fields[2]}\")\n");
+    out.push_str("    ave_rss=$(trim_whitespace \"${fields[3]}\")\n");
+    out.push_str("    max_rss=$(trim_whitespace \"${fields[4]}\")\n");
+    out.push_str("    alloc_tres=$(trim_whitespace \"${fields[5]}\")\n");
+    out.push_str("    tres_usage_in_ave=$(trim_whitespace \"${fields[6]}\")\n");
     out.push_str("    printf '{\"sampled_at\":\"%s\",\"step_id\":%s,\"ntasks\":%s,\"ave_cpu\":%s,\"ave_rss\":%s,\"max_rss\":%s,\"alloc_tres\":%s,\"tres_usage_in_ave\":%s}\\n' \\\n");
     out.push_str("      \"$(json_escape \"$sampled_at\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$step_id\")\" \\\n");
@@ -2811,6 +3242,149 @@ fn render_artifact_helpers(out: &mut String) {
     out.push_str("}\n\n");
 }
 
+fn render_rendezvous_helpers(out: &mut String) {
+    out.push_str(
+        r#"rdzv_env_token() {
+  local value=$1
+  value=${value^^}
+  value=${value//[^A-Z0-9]/_}
+  printf '%s' "$value"
+}
+
+rdzv_json_string_field() {
+  local file=$1
+  local field=$2
+  sed -n "s/^[[:space:]]*\"$field\"[[:space:]]*:[[:space:]]*\"\(.*\)\"[,]*/\1/p" "$file" | head -n 1
+}
+
+rdzv_json_number_field() {
+  local file=$1
+  local field=$2
+  sed -n "s/^[[:space:]]*\"$field\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[,]*/\1/p" "$file" | head -n 1
+}
+
+rdzv_export_record_env() {
+  local name=$1
+  local file=$2
+  local token
+  token=$(rdzv_env_token "$name")
+  local url host port protocol path job_id service
+  url=$(rdzv_json_string_field "$file" url)
+  host=$(rdzv_json_string_field "$file" host)
+  port=$(rdzv_json_number_field "$file" port)
+  protocol=$(rdzv_json_string_field "$file" protocol)
+  path=$(rdzv_json_string_field "$file" path)
+  job_id=$(rdzv_json_string_field "$file" job_id)
+  service=$(rdzv_json_string_field "$file" service)
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_NAME=$name")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_URL=$url")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_HOST=$host")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_PORT=$port")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_PROTOCOL=$protocol")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_PATH=$path")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_JOB_ID=$job_id")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_SERVICE=$service")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_${token}_NAME=$name")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_${token}_URL=$url")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_${token}_HOST=$host")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_${token}_PORT=$port")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_${token}_PROTOCOL=$protocol")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_${token}_PATH=$path")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_${token}_JOB_ID=$job_id")
+  RDZV_LAUNCH_ENV+=("HPC_COMPOSE_RDZV_${token}_SERVICE=$service")
+}
+
+resolve_rendezvous_dependencies() {
+  RDZV_LAUNCH_ENV=()
+  local name file registered_at ttl now start
+  start=$(date +%s)
+  for name in "${RDZV_CLIENT_NAMES[@]:-}"; do
+    file="$CACHE_ROOT/rendezvous/$name/latest.json"
+    while true; do
+      if [[ -f "$file" ]]; then
+        registered_at=$(rdzv_json_number_field "$file" registered_at)
+        ttl=$(rdzv_json_number_field "$file" ttl_seconds)
+        now=$(date +%s)
+        if [[ -n "$registered_at" && -n "$ttl" && $(( now - registered_at )) -lt "$ttl" ]]; then
+          rdzv_export_record_env "$name" "$file"
+          break
+        fi
+      fi
+      if (( $(date +%s) - start >= RDZV_CLIENT_TIMEOUT_SECONDS )); then
+        if [[ "$RDZV_CLIENT_REQUIRED" == "1" ]]; then
+          echo "Timed out resolving rendezvous '$name' under $CACHE_ROOT/rendezvous" >&2
+          return 1
+        fi
+        echo "warning: rendezvous '$name' not resolved before timeout" >&2
+        break
+      fi
+      sleep 1
+    done
+  done
+}
+
+register_service_rendezvous_by_index() {
+  local index=$1
+  local rdzv_name=${SERVICE_RDZV_NAMES[index]:-}
+  [[ -z "$rdzv_name" ]] && return 0
+  [[ "${SERVICE_RDZV_REGISTERED[index]:-0}" == "1" ]] && return 0
+  local service_name=${SERVICE_NAMES[index]:-unknown}
+  local host
+  host=$(first_word "${SERVICE_STEP_NODELIST[index]:-$HPC_COMPOSE_PRIMARY_NODE}")
+  local port=${SERVICE_RDZV_PORTS[index]:-}
+  local protocol=${SERVICE_RDZV_PROTOCOLS[index]:-http}
+  local path=${SERVICE_RDZV_PATHS[index]:-}
+  local ttl=${SERVICE_RDZV_TTLS[index]:-3600}
+  local url="${protocol}://${host}:${port}${path}"
+  local dir="$CACHE_ROOT/rendezvous/$rdzv_name"
+  local token
+  token=$(printf '%s-%s' "$SLURM_JOB_ID" "$service_name" | tr -c 'A-Za-z0-9_.-' '_')
+  local record="$dir/$token.json"
+  local latest_tmp="$dir/latest.json.tmp"
+  mkdir -p "$dir"
+  cat > "$record.tmp" <<HPC_COMPOSE_RDZV_JSON
+{
+  "schema_version": 1,
+  "name": "$(json_escape "$rdzv_name")",
+  "job_id": "$(json_escape "$SLURM_JOB_ID")",
+  "service": "$(json_escape "$service_name")",
+  "host": "$(json_escape "$host")",
+  "port": $port,
+  "protocol": "$(json_escape "$protocol")",
+  "path": "$(json_escape "$path")",
+  "url": "$(json_escape "$url")",
+  "registered_at": $(date +%s),
+  "ttl_seconds": $ttl,
+  "cache_dir": "$(json_escape "$CACHE_ROOT")",
+  "metadata": {}
+}
+HPC_COMPOSE_RDZV_JSON
+  mv "$record.tmp" "$record"
+  cp "$record" "$latest_tmp"
+  mv "$latest_tmp" "$dir/latest.json"
+  SERVICE_RDZV_REGISTERED[index]="1"
+  echo "Registered rendezvous '$rdzv_name' for service '$service_name' at $url"
+}
+
+deregister_rendezvous_records() {
+  local i
+  for i in "${!SERVICE_NAMES[@]}"; do
+    local rdzv_name=${SERVICE_RDZV_NAMES[i]:-}
+    [[ -z "$rdzv_name" ]] && continue
+    local latest="$CACHE_ROOT/rendezvous/$rdzv_name/latest.json"
+    [[ -f "$latest" ]] || continue
+    local owner
+    owner=$(rdzv_json_string_field "$latest" job_id)
+    if [[ "$owner" == "$SLURM_JOB_ID" ]]; then
+      rm -f "$latest"
+    fi
+  done
+}
+
+"#,
+    );
+}
+
 struct RenderServiceContext<'a> {
     service_index: usize,
     dependents: &'a [String],
@@ -2820,6 +3394,48 @@ struct RenderServiceContext<'a> {
     options: &'a RenderOptions,
     scratch_configured: bool,
     allocation_gpu_requested: bool,
+}
+
+fn render_service_rendezvous_registration(
+    out: &mut String,
+    register: &RendezvousRegisterConfig,
+    readiness_wait_fn: Option<&str>,
+) {
+    let protocol = register.protocol.as_deref().unwrap_or("http");
+    let path = register.path.as_deref().unwrap_or("");
+    let ttl = register.ttl_seconds.unwrap_or(3600);
+    out.push_str("  local rdzv_index=${SERVICE_INDEX_BY_NAME[\"$service_name\"]}\n");
+    out.push_str(&format!(
+        "  SERVICE_RDZV_NAMES[rdzv_index]={}\n",
+        shell_quote(&register.name)
+    ));
+    out.push_str(&format!(
+        "  SERVICE_RDZV_PORTS[rdzv_index]={}\n",
+        register.port
+    ));
+    out.push_str(&format!(
+        "  SERVICE_RDZV_PROTOCOLS[rdzv_index]={}\n",
+        shell_quote(protocol)
+    ));
+    out.push_str(&format!(
+        "  SERVICE_RDZV_PATHS[rdzv_index]={}\n",
+        shell_quote(path)
+    ));
+    out.push_str(&format!("  SERVICE_RDZV_TTLS[rdzv_index]={ttl}\n"));
+    out.push_str("  SERVICE_RDZV_REGISTERED[rdzv_index]=\"0\"\n");
+    if let Some(wait_fn) = readiness_wait_fn {
+        out.push_str(&format!(
+            "  if {wait_fn} \"$pid\" \"$service_name\"; then\n"
+        ));
+        out.push_str("    SERVICE_HEALTHY[rdzv_index]=\"1\"\n");
+        out.push_str("    register_service_rendezvous_by_index \"$rdzv_index\"\n");
+        out.push_str("    write_state_file\n");
+        out.push_str("  else\n");
+        out.push_str("    return 1\n");
+        out.push_str("  fi\n");
+    } else {
+        out.push_str("  register_service_rendezvous_by_index \"$rdzv_index\"\n");
+    }
 }
 
 fn render_service(out: &mut String, service: &RuntimeService, context: &RenderServiceContext<'_>) {
@@ -2843,6 +3459,9 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
         software_env_export_names(context.global_software_env, &service.slurm.software_env);
     let mut extra_container_env = distributed_extra_container_env;
     extra_container_env.extend(software_env_keys.clone());
+    if let Some(rendezvous) = &context.slurm.rendezvous {
+        extra_container_env.extend(rendezvous_environment_names(&rendezvous.discover));
+    }
     if context.slurm.array.is_some() {
         extra_container_env.extend(
             [
@@ -2898,9 +3517,12 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
         shell_quote(&service.name)
     ));
     out.push_str(&format!("  local logfile=\"$LOG_DIR/{log_file_name}\"\n"));
-    out.push_str("  : > \"$logfile\"\n");
+    out.push_str("  if [[ -z \"${SERVICE_INDEX_BY_NAME[\"$service_name\"]:-}\" ]]; then\n");
+    out.push_str("    : > \"$logfile\"\n");
+    out.push_str("  fi\n");
     out.push_str("  local host_prologue_script=\"\"\n");
     out.push_str("  local host_epilogue_script=\"\"\n");
+    out.push_str("  local event_hooks_manifest=\"\"\n");
     if let Some(hook) = host_prologue {
         let file = hook_file_name(&service_id, "host-prologue");
         let target = format!("\"$HOOKS_DIR/{file}\"");
@@ -2924,6 +3546,32 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
             &body,
         );
         out.push_str(&format!("  host_epilogue_script=\"$HOOKS_DIR/{file}\"\n"));
+    }
+    if !service.slurm.hooks.is_empty() {
+        let manifest_file = format!("{service_id}.event-hooks.tsv");
+        out.push_str(&format!(
+            "  event_hooks_manifest=\"$HOOKS_DIR/{manifest_file}\"\n"
+        ));
+        out.push_str("  : > \"$event_hooks_manifest\"\n");
+        for (index, hook) in service.slurm.hooks.iter().enumerate() {
+            let event = hook_event_label(hook.on);
+            let file = hook_file_name(&service_id, &format!("host-event-{event}-{index}"));
+            let target = format!("\"$HOOKS_DIR/{file}\"");
+            let body = host_hook_file_body(&hook.script);
+            push_hook_file(
+                out,
+                &target,
+                &format!(
+                    "HPC_COMPOSE_HOOK_{}_HOST_EVENT_{}_{}",
+                    service_id, event, index
+                ),
+                &body,
+            );
+            out.push_str(&format!(
+                "  printf '%s\\t%s\\n' {} \"$HOOKS_DIR/{file}\" >> \"$event_hooks_manifest\"\n",
+                shell_quote(event)
+            ));
+        }
     }
     if let Some(hook) = container_prologue {
         let file = hook_file_name(&service_id, "container-prologue");
@@ -3216,6 +3864,9 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
             }
         }
     }
+    if context.slurm.rendezvous.is_some() {
+        out.push_str("  launch_env+=(\"${RDZV_LAUNCH_ENV[@]:-}\")\n");
+    }
     out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
     out.push_str("    launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")\n");
     out.push_str("    launch_env+=(\"HPC_COMPOSE_ATTEMPT=$ATTEMPT\")\n");
@@ -3269,7 +3920,7 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
     out.push_str("    pid=$!\n");
     out.push_str("  fi\n");
     out.push_str(&format!(
-        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {} {} {} {} {} {} {} {} {} \"$host_epilogue_script\"\n",
+        "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {} {} {} {} {} {} {} {} {} \"$host_epilogue_script\" \"$event_hooks_manifest\"\n",
         shell_quote(&service.name),
         shell_quote(&step_name),
         shell_quote(failure_policy_mode_label(service.failure_policy.mode)),
@@ -3302,6 +3953,48 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
             "0"
         }
     ));
+    if let Some(register) = service
+        .slurm
+        .rendezvous
+        .as_ref()
+        .and_then(|rendezvous| rendezvous.register.as_ref())
+    {
+        let readiness_wait_fn = service
+            .readiness
+            .as_ref()
+            .map(|_| format!("wait_until_{}_ready", service_token(&service.name)));
+        render_service_rendezvous_registration(out, register, readiness_wait_fn.as_deref());
+    }
+    if let Some(assertions) = &service.assertions {
+        let expected_exit = assertions
+            .exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let artifact_pattern = assertions
+            .normalized_artifacts_contain()
+            .unwrap_or_default();
+        let max_duration = assertions
+            .max_duration_seconds
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        out.push_str("  local assert_index=${SERVICE_INDEX_BY_NAME[\"$service_name\"]}\n");
+        out.push_str(&format!(
+            "  SERVICE_ASSERT_EXIT_CODES[assert_index]={}\n",
+            shell_quote(&expected_exit)
+        ));
+        out.push_str(&format!(
+            "  SERVICE_ASSERT_ARTIFACT_PATTERNS[assert_index]={}\n",
+            shell_quote(&artifact_pattern)
+        ));
+        out.push_str(&format!(
+            "  SERVICE_ASSERT_MAX_DURATIONS[assert_index]={}\n",
+            shell_quote(&max_duration)
+        ));
+        out.push_str("  SERVICE_ASSERT_DURATIONS[assert_index]=\"\"\n");
+        out.push_str("  SERVICE_ASSERT_STATUS[assert_index]=\"pending\"\n");
+        out.push_str("  SERVICE_ASSERT_FAILURES[assert_index]=\"\"\n");
+        out.push_str("  write_state_file\n");
+    }
     out.push_str("}\n");
 }
 
@@ -3894,6 +4587,13 @@ fn failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
     }
 }
 
+fn hook_event_label(event: ServiceHookEvent) -> &'static str {
+    match event {
+        ServiceHookEvent::Restart => "restart",
+        ServiceHookEvent::WindowExhausted => "window_exhausted",
+    }
+}
+
 fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     match mode {
         ServicePlacementMode::PrimaryNode => "primary_node",
@@ -3940,9 +4640,10 @@ mod tests {
     use crate::planner::ServicePlacement;
     use crate::spec::{
         DependencyCondition, MpiConfig, MpiProfile, MpiType, ReadinessSpec, ResumeConfig,
-        RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceDependency,
-        ServiceFailurePolicy, ServiceHookContext, ServiceHookSpec, ServiceScratchConfig,
-        ServiceSlurmConfig, SlurmConfig, StageInConfig, StageMode, StageOutConfig, StageOutWhen,
+        RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceAssertSpec,
+        ServiceDependency, ServiceEventHookSpec, ServiceFailurePolicy, ServiceHookContext,
+        ServiceHookEvent, ServiceHookSpec, ServiceScratchConfig, ServiceSlurmConfig, SlurmConfig,
+        StageInConfig, StageMode, StageOutConfig, StageOutWhen,
     };
 
     fn runtime_service() -> RuntimeService {
@@ -3959,6 +4660,7 @@ mod tests {
                 port: 8080,
                 timeout_seconds: Some(20),
             }),
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -3994,6 +4696,8 @@ mod tests {
             "SERVICE_RESTART_FAILURES_IN_WINDOW",
             "SERVICE_RESTART_FAILURE_TIMESTAMPS",
             "SERVICE_LAST_EXIT_CODE",
+            "SERVICE_STARTED_AT",
+            "SERVICE_FINISHED_AT",
             "SERVICE_FIRST_FAILURE_AT",
             "SERVICE_FIRST_FAILURE_EXIT_CODE",
             "SERVICE_FIRST_FAILURE_NODE",
@@ -4005,6 +4709,7 @@ mod tests {
             "SERVICE_STEP_NODELIST",
             "SERVICE_HOST_EPILOGUE_SCRIPTS",
             "SERVICE_HOST_EPILOGUE_RAN",
+            "SERVICE_EVENT_HOOK_MANIFESTS",
             "SERVICE_LAUNCH_FNS",
             "SERVICE_DEPENDENTS",
         ] {
@@ -4128,6 +4833,60 @@ esac
         write_fake_scontrol(tmpdir);
     }
 
+    fn write_fake_runtime_srun_exit_sequence(
+        tmpdir: &std::path::Path,
+        service_name: &str,
+        exits: &[i32],
+    ) {
+        let srun = tmpdir.join("srun");
+        let mut exit_cases = String::new();
+        for (index, code) in exits.iter().enumerate() {
+            exit_cases.push_str(&format!("    {}) exit {code} ;;\n", index + 1));
+        }
+        let fallback_exit = exits.last().copied().unwrap_or(0);
+        write_executable(
+            &srun,
+            &format!(
+                r#"#!/bin/bash
+set -euo pipefail
+if [[ "${{1:-}}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+job_name=""
+for arg in "$@"; do
+  case "$arg" in
+    --job-name=*)
+      job_name="${{arg#--job-name=}}"
+      break
+      ;;
+  esac
+done
+state_root="${{SLURM_SUBMIT_DIR:-$PWD}}/.hpc-compose/fake-runtime-srun"
+mkdir -p "$state_root"
+key="$(printf '%s' "$job_name" | tr -c 'A-Za-z0-9._-' '_')"
+count_file="$state_root/${{key}}.count"
+count=0
+if [[ -f "$count_file" ]]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+echo "$count" > "$count_file"
+if [[ "$job_name" == {} ]]; then
+  case "$count" in
+{}    *) exit {} ;;
+  esac
+fi
+exit 0
+"#,
+                shell_quote(&format!("hpc-compose:{service_name}")),
+                exit_cases,
+                fallback_exit
+            ),
+        );
+        write_fake_scontrol(tmpdir);
+    }
+
     fn write_fake_scontrol(tmpdir: &std::path::Path) {
         let scontrol = tmpdir.join("scontrol");
         write_executable(
@@ -4149,15 +4908,15 @@ exit 1
         );
     }
 
-    fn run_rendered_script(
+    fn run_rendered_script_output(
         tmpdir: &std::path::Path,
         script_path: &std::path::Path,
         restart_count: u32,
-    ) {
+    ) -> std::process::Output {
         let mut path = std::ffi::OsString::from(tmpdir.as_os_str());
         path.push(":");
         path.push(std::env::var_os("PATH").unwrap_or_default());
-        let output = Command::new("bash")
+        Command::new("bash")
             .arg(script_path)
             .current_dir(tmpdir)
             .env("PATH", path)
@@ -4167,7 +4926,15 @@ exit 1
             .env("SLURM_SUBMIT_DIR", tmpdir)
             .env("SLURM_RESTART_COUNT", restart_count.to_string())
             .output()
-            .expect("run rendered script");
+            .expect("run rendered script")
+    }
+
+    fn run_rendered_script(
+        tmpdir: &std::path::Path,
+        script_path: &std::path::Path,
+        restart_count: u32,
+    ) {
+        let output = run_rendered_script_output(tmpdir, script_path, restart_count);
         assert!(
             output.status.success(),
             "script failed\nstdout:\n{}\nstderr:\n{}",
@@ -4576,6 +5343,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -4610,6 +5378,7 @@ exit 1
                 pattern: "ready".into(),
                 timeout_seconds: None,
             }),
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig {
@@ -4718,6 +5487,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: Some(ReadinessSpec::Sleep { seconds: 3 }),
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -4790,6 +5560,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig {
@@ -5159,6 +5930,7 @@ exit 1
                 pattern: "ready".into(),
                 timeout_seconds: Some(5),
             }),
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -5201,6 +5973,7 @@ exit 1
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                assertions: None,
                 failure_policy: ServiceFailurePolicy::default(),
                 placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
@@ -5231,6 +6004,7 @@ exit 1
                 pattern: "ready".into(),
                 timeout_seconds: Some(30),
             }),
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -5246,6 +6020,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -5264,6 +6039,7 @@ exit 1
                 condition: DependencyCondition::ServiceHealthy,
             }],
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -5309,6 +6085,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -5327,6 +6104,7 @@ exit 1
                 condition: DependencyCondition::ServiceCompletedSuccessfully,
             }],
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig {
@@ -5387,6 +6165,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: crate::spec::ServiceFailurePolicy {
                 mode: ServiceFailureMode::RestartOnFailure,
                 max_restarts: 3,
@@ -5408,6 +6187,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: crate::spec::ServiceFailurePolicy {
                 mode: ServiceFailureMode::Ignore,
                 max_restarts: 0,
@@ -5432,6 +6212,7 @@ exit 1
                 condition: DependencyCondition::ServiceStarted,
             }],
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -5605,6 +6386,46 @@ exit 1
         assert!(script.contains("host_pattern=\"$JOB_TMP${declared_pattern#/hpc-compose/job}\""));
         assert!(script.contains("container_match=\"/hpc-compose/job${matched#\"$JOB_TMP\"}\""));
         assert!(script.contains("write_artifact_bundles_json"));
+    }
+
+    #[test]
+    fn render_service_assertions_in_cleanup_before_artifacts() {
+        let mut service = runtime_service();
+        service.assertions = Some(ServiceAssertSpec {
+            exit_code: Some(0),
+            artifacts_contain: Some("model/*.pt".into()),
+            max_duration_seconds: Some(7200),
+        });
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                artifacts: Some(crate::spec::ArtifactsConfig {
+                    collect: ArtifactCollectPolicy::Always,
+                    export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                    paths: vec!["/hpc-compose/job/model/*.pt".into()],
+                    bundles: BTreeMap::new(),
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("SERVICE_ASSERT_EXIT_CODES=()"));
+        assert!(script.contains("evaluate_assertions || assertion_status=$?"));
+        assert!(script.contains(
+            "SERVICE_ASSERT_ARTIFACT_PATTERNS[assert_index]='/hpc-compose/job/model/*.pt'"
+        ));
+        assert!(script.contains("SERVICE_ASSERT_MAX_DURATIONS[assert_index]='7200'"));
+        let assertions_pos = script
+            .find("evaluate_assertions || assertion_status=$?")
+            .expect("assertions");
+        let artifacts_pos = script
+            .find("collect_artifacts \"$code\" || true")
+            .expect("artifacts");
+        assert!(assertions_pos < artifacts_pos);
     }
 
     #[test]
@@ -5782,6 +6603,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: Some(ReadinessSpec::Sleep { seconds: 1 }),
+            assertions: None,
             failure_policy: ServiceFailurePolicy {
                 mode: ServiceFailureMode::RestartOnFailure,
                 max_restarts: 1,
@@ -5806,6 +6628,7 @@ exit 1
                 condition: DependencyCondition::ServiceHealthy,
             }],
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig::default(),
@@ -5890,6 +6713,7 @@ exit 1
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy {
                 mode: ServiceFailureMode::RestartOnFailure,
                 max_restarts: 1,
@@ -5929,6 +6753,123 @@ exit 1
         assert_eq!(
             hooks.lines().collect::<Vec<_>>(),
             vec!["prologue:api", "epilogue:41", "prologue:api", "epilogue:0"]
+        );
+    }
+
+    #[test]
+    fn rendered_script_runs_restart_event_hooks_best_effort() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        write_fake_runtime_srun_with_dependency_restart(tmpdir.path());
+        let service = RuntimeService {
+            name: "api".into(),
+            runtime_image: PathBuf::from("/shared/cache/api.sqsh"),
+            execution: ExecutionSpec::Shell("echo api".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 1,
+                backoff_seconds: 0,
+                window_seconds: 60,
+                max_restarts_in_window: 1,
+            },
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig {
+                hooks: vec![ServiceEventHookSpec {
+                    on: ServiceHookEvent::Restart,
+                    context: ServiceHookContext::Host,
+                    script: "printf 'restart:%s:%s:%s:%s/%s:%s\\n' \"$HPC_COMPOSE_HOOK_PHASE\" \"$HPC_COMPOSE_SERVICE_NAME\" \"$HPC_COMPOSE_SERVICE_EXIT_CODE\" \"$HPC_COMPOSE_RESTART_COUNT\" \"$HPC_COMPOSE_MAX_RESTARTS\" \"$HPC_COMPOSE_ATTEMPT\" >> \"$SLURM_SUBMIT_DIR/events.log\"\nexit 9".into(),
+                }],
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service],
+        };
+        let script = render_script(&plan).expect("script");
+        let script_path = tmpdir.path().join("restart-event-hook.sbatch");
+        write_executable(&script_path, &script);
+
+        run_rendered_script(tmpdir.path(), &script_path, 0);
+
+        let events = fs::read_to_string(tmpdir.path().join("events.log")).expect("events log");
+        assert_eq!(
+            events.lines().collect::<Vec<_>>(),
+            vec!["restart:restart:api:41:1/1:0"]
+        );
+        let service_log = fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/logs/api.log"))
+            .expect("service log");
+        assert!(
+            service_log.contains("Event hook 'restart' for service 'api' exited with status 9")
+        );
+    }
+
+    #[test]
+    fn rendered_script_runs_window_exhausted_hook_once() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        write_fake_runtime_srun_exit_sequence(tmpdir.path(), "loopy", &[41, 42]);
+        let service = RuntimeService {
+            name: "loopy".into(),
+            runtime_image: PathBuf::from("/shared/cache/loopy.sqsh"),
+            execution: ExecutionSpec::Shell("echo loopy".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 5,
+                backoff_seconds: 0,
+                window_seconds: 60,
+                max_restarts_in_window: 1,
+            },
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig {
+                hooks: vec![ServiceEventHookSpec {
+                    on: ServiceHookEvent::WindowExhausted,
+                    context: ServiceHookContext::Host,
+                    script: "printf 'window:%s:%s:%s:%s/%s\\n' \"$HPC_COMPOSE_HOOK_PHASE\" \"$HPC_COMPOSE_SERVICE_NAME\" \"$HPC_COMPOSE_SERVICE_EXIT_CODE\" \"$HPC_COMPOSE_RESTART_FAILURES_IN_WINDOW\" \"$HPC_COMPOSE_MAX_RESTARTS_IN_WINDOW\" >> \"$SLURM_SUBMIT_DIR/events.log\"".into(),
+                }],
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: tmpdir.path().join("cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service],
+        };
+        let script = render_script(&plan).expect("script");
+        let script_path = tmpdir.path().join("window-event-hook.sbatch");
+        write_executable(&script_path, &script);
+
+        let output = run_rendered_script_output(tmpdir.path(), &script_path, 0);
+        assert!(
+            !output.status.success(),
+            "script unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let events = fs::read_to_string(tmpdir.path().join("events.log")).expect("events log");
+        assert_eq!(
+            events.lines().collect::<Vec<_>>(),
+            vec!["window:window_exhausted:loopy:42:1/1"]
         );
     }
 

@@ -1,0 +1,28 @@
+name: canary-right-size
+
+x-slurm:
+  job_name: canary-right-size
+  partition: gpu
+  time: "04:00:00"
+  mem: 64G
+  gpus: 4
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+  metrics:
+    enabled: true
+    interval_seconds: 10
+
+services:
+  trainer:
+    image: python:3.12-slim
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python - <<'PY'
+        import time
+        data = bytearray(512 * 1024 * 1024)
+        print(f"allocated {len(data)} bytes")
+        time.sleep(20)
+        PY
+    x-slurm:
+      cpus_per_task: 8

@@ -10,6 +10,7 @@
 # Choose
 
 - [Examples](examples.md)
+- [Spec Metamorphosis](evolve.md)
 - [Task Guide](task-guide.md)
 - [Docker Compose Migration](docker-compose-migration.md)
 
@@ -24,17 +25,22 @@
 # Operate
 
 - [Runbook](runbook.md)
+- [Development Workflow](development-workflow.md)
 - [Troubleshooting](troubleshooting.md)
 - [Cluster Profiles](cluster-profiles.md)
 - [HAICORE Guide](haicore-guide.md)
 - [Runtime Observability](runtime-observability.md)
+- [Hyperparameter Sweeps](sweeps.md)
+- [Right-Sizing With Canary Runs](canary-runs.md)
 - [Cache Management](cache-management.md)
+- [Cross-Job Rendezvous](cross-job-rendezvous.md)
 - [Artifacts and Resume](artifacts-and-resume.md)
 
 # Reference
 
 - [CLI Reference](cli-reference.md)
 - [Spec Reference](spec-reference.md)
+- [Migration to Spec v2](migration-v2.md)
 - [Example Source](example-source.md)
 
 # Project

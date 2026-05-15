@@ -56,6 +56,23 @@ hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
 
 `--age` and `--all-unused` are mutually exclusive.
 
+## Rendezvous Records
+
+Cross-job rendezvous uses the same shared cache root:
+
+```text
+<cache_dir>/rendezvous/<name>/latest.json
+```
+
+These records are small endpoint descriptors, not runtime images. They are pruned separately:
+
+```bash
+hpc-compose rendezvous list --cache-dir "$CACHE_DIR"
+hpc-compose rendezvous prune --cache-dir "$CACHE_DIR"
+```
+
+Provider cleanup removes `latest.json` only when the finishing job still owns it, so an older provider cannot erase a newer provider's record.
+
 ## After Upgrading
 
 Cache keys include the tool version, so upgrading `hpc-compose` invalidates existing cached artifacts. Expect a full rebuild on the next `prepare` or `up`, then optionally prune old entries:
@@ -69,3 +86,4 @@ hpc-compose cache prune --age 0
 - [Quickstart](quickstart.md#4-pick-and-test-a-cache-directory)
 - [Runbook](runbook.md)
 - [CLI Reference](cli-reference.md#cache-maintenance)
+- [Cross-Job Rendezvous](cross-job-rendezvous.md)

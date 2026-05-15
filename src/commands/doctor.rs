@@ -1733,6 +1733,7 @@ mod tests {
             enroot: resolved_string("/definitely/missing-enroot"),
             apptainer: resolved_string("/definitely/missing-apptainer"),
             singularity: resolved_string("/definitely/missing-singularity"),
+            salloc: resolved_string("/definitely/missing-salloc"),
             sbatch: resolved_string("/definitely/missing-sbatch"),
             srun: resolved_string(&srun.display().to_string()),
             scontrol: resolved_string("/definitely/missing-scontrol"),
@@ -1741,6 +1742,8 @@ mod tests {
             sacct: resolved_string("/definitely/missing-sacct"),
             sstat: resolved_string("/definitely/missing-sstat"),
             scancel: resolved_string("/definitely/missing-scancel"),
+            sshare: resolved_string("/definitely/missing-sshare"),
+            sprio: resolved_string("/definitely/missing-sprio"),
         }
     }
 
@@ -1772,6 +1775,7 @@ mod tests {
             working_dir: None,
             depends_on: Vec::new(),
             readiness: None,
+            assertions: None,
             failure_policy: ServiceFailurePolicy::default(),
             placement: ServicePlacement::default(),
             slurm: ServiceSlurmConfig {

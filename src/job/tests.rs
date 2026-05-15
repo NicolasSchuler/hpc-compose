@@ -29,6 +29,7 @@ fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                assertions: None,
                 failure_policy: ServiceFailurePolicy::default(),
                 placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
@@ -44,6 +45,7 @@ fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
                 working_dir: None,
                 depends_on: Vec::new(),
                 readiness: None,
+                assertions: None,
                 failure_policy: ServiceFailurePolicy::default(),
                 placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
@@ -173,6 +175,8 @@ fn defaults_and_path_helpers_cover_remaining_helpers() {
         service_name: None,
         command_override: None,
         requested_walltime: None,
+        slurm_array: None,
+        sweep: None,
         config_snapshot_yaml: None,
         cached_artifacts: Vec::new(),
     };
@@ -357,7 +361,17 @@ fn build_status_snapshot_and_log_selection_cover_additional_paths() {
     let err = selected_service_logs(&record, Some("missing")).expect_err("missing service");
     assert!(err.to_string().contains("service 'missing'"));
 
-    print_logs(&record, Some("api"), 1, false).expect("print logs");
+    print_logs(
+        &record,
+        &LogPrintOptions {
+            service: Some("api".into()),
+            lines: 1,
+            follow: false,
+            grep: None,
+            since_seconds: None,
+        },
+    )
+    .expect("print logs");
 }
 
 #[test]
@@ -938,6 +952,7 @@ fn build_stats_snapshot_falls_back_when_sampler_data_is_malformed() {
                 sacct_bin: sacct.display().to_string(),
             },
             sstat_bin: sstat.display().to_string(),
+            accounting: false,
         },
     )
     .expect("snapshot");
@@ -1015,6 +1030,7 @@ fn build_stats_snapshot_uses_tracked_sampler_for_explicit_job_id() {
                 sacct_bin: sacct.display().to_string(),
             },
             sstat_bin: sstat.display().to_string(),
+            accounting: false,
         },
     )
     .expect("snapshot");

@@ -352,7 +352,7 @@ pub fn render_template_with_optional_cache_dir(
     render_template_body(template.body, template.name, app_name, cache_dir)
 }
 
-fn render_template_body(
+pub(crate) fn render_template_body(
     body: &str,
     template_name: &str,
     app_name: &str,

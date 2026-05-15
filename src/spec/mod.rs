@@ -1,10 +1,12 @@
 //! Compose-like spec parsing, interpolation, and validation.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::de::Visitor;
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::domain::{MountParts, parse_node_index_ranges, split_mount_parts};
 
@@ -23,7 +25,8 @@ use validation::{
     parse_duration_seconds, parse_healthcheck_argv, parse_http_probe, parse_nc_probe,
     validate_artifact_bundle_name, validate_artifact_path, validate_positive_u32,
     validate_resume_path, validate_sbatch_safe_string, validate_sbatch_safe_strings,
-    validate_shell_hook_script, validate_slurm_array_spec, validate_slurm_job_id,
+    validate_service_assert_artifact_pattern, validate_shell_hook_script,
+    validate_slurm_array_spec, validate_slurm_job_id,
 };
 
 /// Top-level compose file accepted by `hpc-compose`.
@@ -38,7 +41,219 @@ pub struct ComposeSpec {
     pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm", default)]
     pub slurm: SlurmConfig,
+    #[serde(default)]
+    pub sweep: Option<SweepConfig>,
     pub services: BTreeMap<String, ServiceSpec>,
+}
+
+/// Embedded hyperparameter sweep metadata.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SweepConfig {
+    pub parameters: BTreeMap<String, Vec<SweepParameterValue>>,
+    pub matrix: SweepMatrix,
+}
+
+impl SweepConfig {
+    /// Returns the number of parameter combinations in this sweep.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Cartesian product would overflow `usize`.
+    pub fn total_trials(&self) -> Result<usize> {
+        self.parameters.values().try_fold(1_usize, |total, values| {
+            total
+                .checked_mul(values.len())
+                .context("sweep parameter matrix is too large")
+        })
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.parameters.is_empty() {
+            bail!("sweep.parameters must contain at least one parameter");
+        }
+        for (name, values) in &self.parameters {
+            validate_sweep_parameter_name(name)?;
+            if values.is_empty() {
+                bail!("sweep.parameters.{name} must contain at least one value");
+            }
+        }
+        if let SweepMatrix::Random { random, .. } = &self.matrix {
+            if *random == 0 {
+                bail!("sweep.matrix.random must be at least 1");
+            }
+            let total = self.total_trials()?;
+            if *random > total {
+                bail!(
+                    "sweep.matrix.random requests {random} trials but only {total} combinations exist"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_sweep_parameter_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        bail!("sweep parameter names must not be empty");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        bail!("sweep parameter '{name}' is not a valid interpolation variable name");
+    }
+    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        bail!("sweep parameter '{name}' is not a valid interpolation variable name");
+    }
+    if name.starts_with("HPC_COMPOSE_SWEEP_") {
+        bail!("sweep parameter '{name}' uses the reserved HPC_COMPOSE_SWEEP_ prefix");
+    }
+    Ok(())
+}
+
+/// One scalar sweep parameter value, stored as the string passed to interpolation.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct SweepParameterValue(String);
+
+impl SweepParameterValue {
+    /// Returns the interpolation value for this sweep scalar.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SweepParameterValue {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for SweepParameterValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ScalarVisitor;
+
+        impl Visitor<'_> for ScalarVisitor {
+            type Value = SweepParameterValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a string, number, or boolean sweep value")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SweepParameterValue(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SweepParameterValue(value))
+            }
+
+            fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SweepParameterValue(value.to_string()))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SweepParameterValue(value.to_string()))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SweepParameterValue(value.to_string()))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SweepParameterValue(value.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(ScalarVisitor)
+    }
+}
+
+/// Sweep matrix expansion strategy.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SweepMatrix {
+    Full,
+    Random {
+        random: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seed: Option<String>,
+    },
+}
+
+impl<'de> Deserialize<'de> for SweepMatrix {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RandomMatrix {
+            random: usize,
+            #[serde(default)]
+            seed: Option<String>,
+        }
+
+        struct MatrixVisitor;
+
+        impl<'de> Visitor<'de> for MatrixVisitor {
+            type Value = SweepMatrix;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("\"full\" or a mapping with random and optional seed")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value == "full" {
+                    Ok(SweepMatrix::Full)
+                } else {
+                    Err(E::custom(
+                        "sweep.matrix must be \"full\" or { random, seed }",
+                    ))
+                }
+            }
+
+            fn visit_map<A>(self, map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                let random = RandomMatrix::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(SweepMatrix::Random {
+                    random: random.random,
+                    seed: random.seed,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(MatrixVisitor)
+    }
 }
 
 /// Top-level runtime backend configuration.
@@ -198,6 +413,105 @@ pub struct SlurmConfig {
     pub setup: Vec<String>,
     #[serde(default)]
     pub submit_args: Vec<String>,
+    #[serde(default)]
+    pub rendezvous: Option<RendezvousClientConfig>,
+}
+
+/// Top-level client-side cross-job rendezvous discovery config.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RendezvousClientConfig {
+    pub discover: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawRendezvousClientConfig {
+    Name(String),
+    Names(Vec<String>),
+    Mapping(RawRendezvousClientMapping),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRendezvousClientMapping {
+    #[serde(default)]
+    discover: Option<RawRendezvousDiscover>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    require: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawRendezvousDiscover {
+    Name(String),
+    Names(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for RendezvousClientConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let raw = RawRendezvousClientConfig::deserialize(deserializer)?;
+        let config = match raw {
+            RawRendezvousClientConfig::Name(name) => Self {
+                discover: vec![name],
+                timeout_seconds: None,
+                require: None,
+            },
+            RawRendezvousClientConfig::Names(discover) => Self {
+                discover,
+                timeout_seconds: None,
+                require: None,
+            },
+            RawRendezvousClientConfig::Mapping(mapping) => {
+                let discover = match mapping.discover {
+                    Some(RawRendezvousDiscover::Name(name)) => vec![name],
+                    Some(RawRendezvousDiscover::Names(names)) => names,
+                    None => Vec::new(),
+                };
+                Self {
+                    discover,
+                    timeout_seconds: mapping.timeout_seconds,
+                    require: mapping.require,
+                }
+            }
+        };
+        Ok(config)
+    }
+}
+
+/// Per-service provider-side rendezvous config.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceRendezvousConfig {
+    #[serde(default)]
+    pub register: Option<RendezvousRegisterConfig>,
+}
+
+/// Service registration written under `<cache_dir>/rendezvous/<name>/`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RendezvousRegisterConfig {
+    pub name: String,
+    pub port: u16,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// Accepted `x-slurm.after_job` syntaxes.
@@ -583,6 +897,8 @@ pub struct ServiceSpec {
     pub readiness: Option<ReadinessSpec>,
     #[serde(default)]
     pub healthcheck: Option<HealthcheckSpec>,
+    #[serde(rename = "assert", default)]
+    pub assertions: Option<ServiceAssertSpec>,
     #[serde(rename = "x-env", default)]
     pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm", default)]
@@ -591,6 +907,39 @@ pub struct ServiceSpec {
     pub runtime: ServiceRuntimeConfig,
     #[serde(rename = "x-enroot", default)]
     pub enroot: ServiceEnrootConfig,
+}
+
+/// Per-service post-run assertion contract.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceAssertSpec {
+    #[serde(default)]
+    pub exit_code: Option<u16>,
+    #[serde(default)]
+    pub artifacts_contain: Option<String>,
+    #[serde(default)]
+    pub max_duration_seconds: Option<u64>,
+}
+
+impl ServiceAssertSpec {
+    /// Returns true when at least one assertion is configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.exit_code.is_none()
+            && self.artifacts_contain.is_none()
+            && self.max_duration_seconds.is_none()
+    }
+
+    /// Returns the container-rooted artifact glob used by the runtime script.
+    ///
+    /// Relative patterns resolve under `/hpc-compose/job`.
+    #[must_use]
+    pub fn normalized_artifacts_contain(&self) -> Option<String> {
+        self.artifacts_contain
+            .as_deref()
+            .map(normalize_service_assert_artifact_pattern)
+    }
 }
 
 /// Per-service `x-slurm` overrides.
@@ -645,7 +994,11 @@ pub struct ServiceSlurmConfig {
     #[serde(default)]
     pub epilogue: Option<ServiceHookSpec>,
     #[serde(default)]
+    pub hooks: Vec<ServiceEventHookSpec>,
+    #[serde(default)]
     pub scratch: Option<ServiceScratchConfig>,
+    #[serde(default)]
+    pub rendezvous: Option<ServiceRendezvousConfig>,
 }
 
 /// Per-service scratch mount override.
@@ -677,6 +1030,27 @@ pub struct ServiceHookSpec {
     /// Execution context for this hook.
     pub context: ServiceHookContext,
     /// Shell script body to run for this hook.
+    pub script: String,
+}
+
+/// Event emitted by the service failure-policy supervisor.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceHookEvent {
+    /// A failed service is about to be relaunched by `restart_on_failure`.
+    Restart,
+    /// A failed service exceeded the rolling restart-window guard.
+    WindowExhausted,
+}
+
+/// Per-service failure-policy event hook.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceEventHookSpec {
+    pub on: ServiceHookEvent,
+    #[serde(default)]
+    pub context: ServiceHookContext,
     pub script: String,
 }
 
@@ -965,6 +1339,8 @@ pub struct EffectiveComposeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub runtime: RuntimeConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<SweepConfig>,
     #[serde(rename = "x-env", skip_serializing_if = "SoftwareEnvConfig::is_empty")]
     pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm")]
@@ -1055,6 +1431,8 @@ pub struct EffectiveSlurmConfig {
     pub setup: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub submit_args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendezvous: Option<RendezvousClientConfig>,
 }
 
 /// Stable effective representation of an id-based Slurm dependency.
@@ -1122,6 +1500,8 @@ pub struct EffectiveServiceConfig {
     pub depends_on: BTreeMap<String, EffectiveDependsOnCondition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness: Option<ReadinessSpec>,
+    #[serde(rename = "assert", skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<ServiceAssertSpec>,
     #[serde(rename = "x-env", skip_serializing_if = "SoftwareEnvConfig::is_empty")]
     pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm")]
@@ -1185,8 +1565,12 @@ pub struct EffectiveServiceSlurmConfig {
     pub prologue: Option<ServiceHookSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub epilogue: Option<ServiceHookSpec>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub hooks: Vec<ServiceEventHookSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scratch: Option<ServiceScratchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendezvous: Option<ServiceRendezvousConfig>,
     pub failure_policy: EffectiveFailurePolicyConfig,
 }
 
@@ -1417,6 +1801,22 @@ fn default_http_status_code() -> u16 {
 }
 
 impl ComposeSpec {
+    /// Loads only the embedded sweep metadata without applying interpolation to
+    /// the runnable spec. This lets `sweep submit` provide trial variables that
+    /// a normal `plan` invocation may not have in its environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, the YAML cannot be
+    /// parsed, or the sweep block is invalid.
+    pub fn load_sweep(path: &Path) -> Result<Option<SweepConfig>> {
+        let spec = load_raw_spec(path)?;
+        if let Some(sweep) = &spec.sweep {
+            sweep.validate()?;
+        }
+        Ok(spec.sweep)
+    }
+
     /// Loads, interpolates, and validates a compose file from disk.
     ///
     /// # Errors
@@ -1457,6 +1857,9 @@ impl ComposeSpec {
 
     fn validate(&mut self) -> Result<()> {
         self.software_env.validate("x-env")?;
+        if let Some(sweep) = &self.sweep {
+            sweep.validate()?;
+        }
         self.slurm.software_env = self.software_env.clone();
         self.slurm.validate()?;
         for (name, service) in &mut self.services {
@@ -1479,6 +1882,9 @@ impl ComposeSpec {
             service
                 .software_env
                 .validate(&format!("service '{name}' x-env"))?;
+            if let Some(assertions) = &service.assertions {
+                assertions.validate(name)?;
+            }
             service.slurm.software_env = service.software_env.clone();
             service.slurm.validate(name)?;
             service.runtime.validate(name)?;
@@ -1560,6 +1966,7 @@ impl ComposeSpec {
                     working_dir: service.working_dir.clone(),
                     depends_on,
                     readiness: service.readiness.clone(),
+                    assertions: service.assertions.clone(),
                     software_env: service.software_env.clone(),
                     slurm: EffectiveServiceSlurmConfig {
                         nodes: service.slurm.nodes,
@@ -1583,7 +1990,9 @@ impl ComposeSpec {
                         mpi: service.slurm.mpi.clone(),
                         prologue: service.slurm.prologue.clone(),
                         epilogue: service.slurm.epilogue.clone(),
+                        hooks: service.slurm.hooks.clone(),
                         scratch: service.slurm.scratch.clone(),
+                        rendezvous: service.slurm.rendezvous.clone(),
                         failure_policy: EffectiveFailurePolicyConfig::from_policy(
                             &normalized_policy,
                         ),
@@ -1597,6 +2006,7 @@ impl ComposeSpec {
         Ok(EffectiveComposeConfig {
             name: self.name.clone(),
             runtime: self.runtime.clone(),
+            sweep: self.sweep.clone(),
             software_env: self.software_env.clone(),
             slurm: EffectiveSlurmConfig {
                 resources: self.slurm.resources.clone(),
@@ -1669,6 +2079,7 @@ impl ComposeSpec {
                     }),
                 setup: self.slurm.setup.clone(),
                 submit_args: self.slurm.submit_args.clone(),
+                rendezvous: self.slurm.rendezvous.clone(),
             },
             services,
         })
@@ -2139,6 +2550,9 @@ impl SlurmConfig {
                 );
             }
         }
+        if let Some(rendezvous) = &self.rendezvous {
+            rendezvous.validate()?;
+        }
         Ok(())
     }
 
@@ -2185,6 +2599,9 @@ impl SlurmConfig {
             notify.interpolate(vars)?;
         }
         interpolate_vec_strings(&mut self.submit_args, vars)?;
+        if let Some(rendezvous) = &mut self.rendezvous {
+            rendezvous.interpolate(vars)?;
+        }
         Ok(())
     }
 }
@@ -2370,6 +2787,9 @@ impl ServiceSpec {
         if let Some(healthcheck) = &mut self.healthcheck {
             healthcheck.interpolate(vars)?;
         }
+        if let Some(assertions) = &mut self.assertions {
+            assertions.interpolate(vars)?;
+        }
         self.software_env.interpolate(vars)?;
         self.slurm.interpolate(vars)?;
         self.runtime.interpolate(vars)?;
@@ -2456,6 +2876,34 @@ impl ServiceSpec {
     }
 }
 
+impl ServiceAssertSpec {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        if self.is_empty() {
+            bail!("service '{service_name}' assert must configure at least one assertion");
+        }
+        if let Some(exit_code) = self.exit_code
+            && exit_code > 255
+        {
+            bail!("service '{service_name}' assert.exit_code must be between 0 and 255");
+        }
+        if let Some(pattern) = self.artifacts_contain.as_deref() {
+            validate_service_assert_artifact_pattern(
+                pattern,
+                &format!("service '{service_name}' assert.artifacts_contain"),
+            )?;
+        }
+        if matches!(self.max_duration_seconds, Some(0)) {
+            bail!("service '{service_name}' assert.max_duration_seconds must be at least 1");
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_optional_string(&mut self.artifacts_contain, vars)?;
+        Ok(())
+    }
+}
+
 fn validate_service_script(value: &str, field: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{field} must not be empty");
@@ -2464,6 +2912,138 @@ fn validate_service_script(value: &str, field: &str) -> Result<()> {
         bail!("{field} must not contain null bytes");
     }
     Ok(())
+}
+
+fn validate_rendezvous_name(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        bail!("{field} must contain only ASCII letters, digits, '.', '_', or '-'");
+    }
+    Ok(())
+}
+
+fn validate_rendezvous_protocol(value: Option<&str>, field: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    {
+        bail!("{field} must contain only ASCII letters, digits, '+', '-', or '.'");
+    }
+    Ok(())
+}
+
+fn validate_rendezvous_path(value: Option<&str>, field: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.contains('\0') {
+        bail!("{field} must not contain null bytes");
+    }
+    if !value.is_empty() && !value.starts_with('/') {
+        bail!("{field} must be empty or start with '/'");
+    }
+    Ok(())
+}
+
+impl RendezvousClientConfig {
+    fn validate(&self) -> Result<()> {
+        if self.discover.is_empty() {
+            bail!("x-slurm.rendezvous.discover must contain at least one name");
+        }
+        for (index, name) in self.discover.iter().enumerate() {
+            validate_rendezvous_name(name, &format!("x-slurm.rendezvous.discover[{index}]"))?;
+        }
+        if matches!(self.timeout_seconds, Some(0)) {
+            bail!("x-slurm.rendezvous.timeout_seconds must be at least 1");
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        interpolate_vec_strings(&mut self.discover, vars)
+    }
+}
+
+impl ServiceRendezvousConfig {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        let Some(register) = &self.register else {
+            return Ok(());
+        };
+        register.validate(service_name)
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        if let Some(register) = &mut self.register {
+            register.interpolate(vars)?;
+        }
+        Ok(())
+    }
+}
+
+impl RendezvousRegisterConfig {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        validate_rendezvous_name(
+            &self.name,
+            &format!("service '{service_name}' x-slurm.rendezvous.register.name"),
+        )?;
+        if self.port == 0 {
+            bail!("service '{service_name}' x-slurm.rendezvous.register.port must be at least 1");
+        }
+        validate_rendezvous_protocol(
+            self.protocol.as_deref(),
+            &format!("service '{service_name}' x-slurm.rendezvous.register.protocol"),
+        )?;
+        validate_rendezvous_path(
+            self.path.as_deref(),
+            &format!("service '{service_name}' x-slurm.rendezvous.register.path"),
+        )?;
+        if matches!(self.ttl_seconds, Some(0)) {
+            bail!(
+                "service '{service_name}' x-slurm.rendezvous.register.ttl_seconds must be at least 1"
+            );
+        }
+        for (key, value) in &self.metadata {
+            validate_rendezvous_name(
+                key,
+                &format!("service '{service_name}' x-slurm.rendezvous.register.metadata key"),
+            )?;
+            if value.contains('\0') {
+                bail!(
+                    "service '{service_name}' x-slurm.rendezvous.register.metadata.{key} must not contain null bytes"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
+        self.name = interpolate_string(&self.name, vars)?;
+        interpolate_optional_string(&mut self.protocol, vars)?;
+        interpolate_optional_string(&mut self.path, vars)?;
+        for value in self.metadata.values_mut() {
+            *value = interpolate_string(value, vars)?;
+        }
+        Ok(())
+    }
+}
+
+fn normalize_service_assert_artifact_pattern(value: &str) -> String {
+    if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("/hpc-compose/job/{value}")
+    }
 }
 
 impl ServiceSlurmConfig {
@@ -2553,6 +3133,12 @@ impl ServiceSlurmConfig {
         }
         if let Some(epilogue) = &self.epilogue {
             epilogue.validate(&format!("service '{service_name}' x-slurm.epilogue"))?;
+        }
+        for (index, hook) in self.hooks.iter().enumerate() {
+            hook.validate(&format!("service '{service_name}' x-slurm.hooks[{index}]"))?;
+        }
+        if let Some(rendezvous) = &self.rendezvous {
+            rendezvous.validate(service_name)?;
         }
         Ok(())
     }
@@ -2655,6 +3241,9 @@ impl ServiceSlurmConfig {
         if let Some(mpi) = &mut self.mpi {
             mpi.interpolate(vars)?;
         }
+        if let Some(rendezvous) = &mut self.rendezvous {
+            rendezvous.interpolate(vars)?;
+        }
         Ok(())
     }
 }
@@ -2731,6 +3320,18 @@ impl ServiceHookSpec {
     #[must_use]
     pub fn is_host(&self) -> bool {
         self.context == ServiceHookContext::Host
+    }
+}
+
+impl ServiceEventHookSpec {
+    fn validate(&self, field: &str) -> Result<()> {
+        validate_shell_hook_script(&self.script, field)?;
+        if self.context != ServiceHookContext::Host {
+            bail!(
+                "{field}.context must be host; event-driven hooks do not support container context"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -3323,6 +3924,50 @@ services:
     }
 
     #[test]
+    fn service_event_hooks_accept_restart_and_window_exhausted() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  trainer:
+    image: trainer:latest
+    command: python train.py
+    x-slurm:
+      hooks:
+        - on: restart
+          script: |
+            echo "restart ${SLURM_JOB_ID}"
+        - on: window_exhausted
+          context: host
+          script: |
+            echo window
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load spec");
+        let service = spec.services.get("trainer").expect("trainer");
+        assert_eq!(service.slurm.hooks.len(), 2);
+        assert_eq!(service.slurm.hooks[0].on, ServiceHookEvent::Restart);
+        assert_eq!(service.slurm.hooks[0].context, ServiceHookContext::Host);
+        assert!(service.slurm.hooks[0].script.contains("${SLURM_JOB_ID}"));
+        assert_eq!(service.slurm.hooks[1].on, ServiceHookEvent::WindowExhausted);
+
+        let effective = spec
+            .effective_config(&tmpdir.path().join("cache"), &BTreeMap::new())
+            .expect("effective config");
+        let json = serde_json::to_value(effective).expect("effective json");
+        assert_eq!(
+            json["services"]["trainer"]["x-slurm"]["hooks"][0]["on"],
+            "restart"
+        );
+        assert_eq!(
+            json["services"]["trainer"]["x-slurm"]["hooks"][1]["context"],
+            "host"
+        );
+    }
+
+    #[test]
     fn service_hooks_reject_empty_scripts_and_unknown_fields() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let empty = write_spec(
@@ -3360,6 +4005,62 @@ services:
     }
 
     #[test]
+    fn service_event_hooks_reject_invalid_declarations() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let empty = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      hooks:
+        - on: restart
+          script: ""
+"#,
+        );
+        let err = ComposeSpec::load(&empty).expect_err("empty event hook should fail");
+        assert!(err.to_string().contains("x-slurm.hooks[0]"));
+        assert!(err.to_string().contains("must not be empty"));
+
+        let unknown = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      hooks:
+        - on: first_failure
+          script: echo first
+"#,
+        );
+        let err = ComposeSpec::load(&unknown).expect_err("unknown event should fail");
+        assert!(
+            err.to_string().contains("failed to deserialize spec")
+                || err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
+
+        let container = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      hooks:
+        - on: restart
+          context: container
+          script: echo restart
+"#,
+        );
+        let err = ComposeSpec::load(&container).expect_err("container event hook should fail");
+        assert!(err.to_string().contains("x-slurm.hooks[0].context"));
+        assert!(err.to_string().contains("must be host"));
+    }
+
+    #[test]
     fn rejects_non_mapping_root() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let path = write_spec(tmpdir.path(), "- not-a-mapping\n");
@@ -3376,6 +4077,220 @@ services:
         let path = write_spec(tmpdir.path(), "name: demo\n");
         let err = ComposeSpec::load(&path).expect_err("should fail");
         assert!(err.to_string().contains("top-level 'services'"));
+    }
+
+    #[test]
+    fn spec_version_accepts_v1_and_rejects_mismatches() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+        for body in [
+            "services:\n  app:\n    image: redis:7\n",
+            "version: \"1\"\nservices:\n  app:\n    image: redis:7\n",
+            "version: 1\nservices:\n  app:\n    image: redis:7\n",
+        ] {
+            let path = write_spec(tmpdir.path(), body);
+            ComposeSpec::load(&path).unwrap_or_else(|err| panic!("v1 should load: {err:#}"));
+        }
+
+        let v2 = write_spec(
+            tmpdir.path(),
+            "version: \"2\"\nservices:\n  app:\n    image: redis:7\n",
+        );
+        let err = ComposeSpec::load(&v2).expect_err("v2 should fail");
+        let message = err.to_string();
+        assert!(message.contains("unsupported hpc-compose spec version '2'"));
+        assert!(message.contains("steps was renamed to services in v2"));
+        assert!(message.contains("docs/migration-v2.md"));
+
+        let compose_version = write_spec(
+            tmpdir.path(),
+            "version: \"3.9\"\nservices:\n  app:\n    image: redis:7\n",
+        );
+        let err = ComposeSpec::load(&compose_version).expect_err("compose version should fail");
+        let message = err.to_string();
+        assert!(message.contains("Docker Compose version"));
+        assert!(message.contains("version: \"1\""));
+
+        for (body, expected_kind) in [
+            (
+                "version: true\nservices:\n  app:\n    image: redis:7\n",
+                "bool",
+            ),
+            (
+                "version: [1]\nservices:\n  app:\n    image: redis:7\n",
+                "sequence",
+            ),
+            (
+                "version:\n  major: 1\nservices:\n  app:\n    image: redis:7\n",
+                "mapping",
+            ),
+        ] {
+            let path = write_spec(tmpdir.path(), body);
+            let err = ComposeSpec::load(&path).expect_err("invalid version shape");
+            let message = err.to_string();
+            assert!(message.contains("top-level 'version' must be"));
+            assert!(message.contains(expected_kind));
+        }
+    }
+
+    #[test]
+    fn sweep_config_accepts_scalar_values_and_random_matrix() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+name: sweep-demo
+sweep:
+  parameters:
+    lr: [0.001, 0.01]
+    batch_size: [32, 64]
+    use_amp: [true, false]
+  matrix:
+    random: 3
+    seed: stable
+services:
+  trainer:
+    image: python:3.11
+    command: python train.py --lr ${lr:-0.001}
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load sweep spec");
+        let sweep = spec.sweep.expect("sweep config");
+        assert_eq!(sweep.total_trials().expect("total"), 8);
+        let values = sweep.parameters.get("use_amp").expect("use_amp values");
+        assert_eq!(values[0].as_str(), "true");
+
+        let loaded = ComposeSpec::load_sweep(&path)
+            .expect("load sweep only")
+            .expect("sweep only config");
+        assert_eq!(loaded.parameters.len(), 3);
+    }
+
+    #[test]
+    fn sweep_config_rejects_invalid_shapes() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        for (body, expected) in [
+            (
+                r#"
+sweep:
+  spec: train.yaml
+  parameters:
+    lr: [0.1]
+  matrix: full
+services:
+  app:
+    image: redis:7
+"#,
+                "sweep.spec is not supported",
+            ),
+            (
+                r#"
+sweep:
+  typo: true
+  parameters:
+    lr: [0.1]
+  matrix: full
+services:
+  app:
+    image: redis:7
+"#,
+                "unknown field `typo`",
+            ),
+            (
+                r#"
+sweep:
+  parameters: {}
+  matrix: full
+services:
+  app:
+    image: redis:7
+"#,
+                "must contain at least one parameter",
+            ),
+            (
+                r#"
+sweep:
+  parameters:
+    1bad: [0.1]
+  matrix: full
+services:
+  app:
+    image: redis:7
+"#,
+                "valid interpolation variable name",
+            ),
+            (
+                r#"
+sweep:
+  parameters:
+    HPC_COMPOSE_SWEEP_ID: [abc]
+  matrix: full
+services:
+  app:
+    image: redis:7
+"#,
+                "reserved HPC_COMPOSE_SWEEP_ prefix",
+            ),
+            (
+                r#"
+sweep:
+  parameters:
+    lr: []
+  matrix: full
+services:
+  app:
+    image: redis:7
+"#,
+                "must contain at least one value",
+            ),
+            (
+                r#"
+sweep:
+  parameters:
+    lr:
+      - [0.1]
+  matrix: full
+services:
+  app:
+    image: redis:7
+"#,
+                "string, number, or boolean sweep value",
+            ),
+            (
+                r#"
+sweep:
+  parameters:
+    lr: [0.1]
+  matrix:
+    random: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "must be at least 1",
+            ),
+            (
+                r#"
+sweep:
+  parameters:
+    lr: [0.1]
+  matrix:
+    random: 2
+services:
+  app:
+    image: redis:7
+"#,
+                "only 1 combinations exist",
+            ),
+        ] {
+            let path = write_spec(tmpdir.path(), body);
+            let err = ComposeSpec::load(&path).expect_err("invalid sweep");
+            assert!(
+                format!("{err:#}").contains(expected),
+                "expected '{expected}', got {err:#}"
+            );
+        }
     }
 
     #[test]
@@ -3617,6 +4532,279 @@ steps:
             )
         );
         assert_eq!(scripted.software_env.modules.load, vec!["netcdf/4.9"]);
+    }
+
+    #[test]
+    fn root_extends_merges_before_validation_and_normalization() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::write(
+            tmpdir.path().join("base.yaml"),
+            r#"
+name: base
+x-slurm:
+  mem: 8G
+steps:
+  app:
+    image: redis:7
+    environment:
+      BASE: yes
+    volumes:
+      - /shared/base:/data
+      - /shared/keep:/keep:ro
+"#,
+        )
+        .expect("base");
+        let child = write_spec(
+            tmpdir.path(),
+            r#"
+extends: base.yaml
+name: child
+x-slurm:
+  cpus_per_task: 4
+services:
+  app:
+    command: echo child
+    environment:
+      CHILD: yes
+    volumes:
+      - /shared/child:/data
+      - /tmp/logs:/logs
+"#,
+        );
+
+        let spec = ComposeSpec::load(&child).expect("load extended spec");
+        assert_eq!(spec.name.as_deref(), Some("child"));
+        assert_eq!(spec.slurm.mem.as_deref(), Some("8G"));
+        assert_eq!(spec.slurm.cpus_per_task, Some(4));
+        let app = spec.services.get("app").expect("app");
+        assert_eq!(app.image.as_deref(), Some("redis:7"));
+        assert_eq!(
+            app.command.as_ref().and_then(CommandSpec::as_string),
+            Some("echo child")
+        );
+        assert_eq!(
+            app.environment.to_pairs().expect("env"),
+            vec![
+                ("BASE".to_string(), "yes".to_string()),
+                ("CHILD".to_string(), "yes".to_string())
+            ]
+        );
+        assert_eq!(
+            app.volumes,
+            vec![
+                "/shared/child:/data".to_string(),
+                "/shared/keep:/keep:ro".to_string(),
+                "/tmp/logs:/logs".to_string()
+            ]
+        );
+
+        let steps_child = write_spec(
+            tmpdir.path(),
+            r#"
+extends: base.yaml
+steps:
+  app:
+    command: echo steps-child
+"#,
+        );
+        let spec = ComposeSpec::load(&steps_child).expect("load child steps alias");
+        let app = spec.services.get("app").expect("app");
+        assert_eq!(app.image.as_deref(), Some("redis:7"));
+        assert_eq!(
+            app.command.as_ref().and_then(CommandSpec::as_string),
+            Some("echo steps-child")
+        );
+    }
+
+    #[test]
+    fn service_extends_supports_same_file_and_external_file_shorthand() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::write(
+            tmpdir.path().join("service-base.yaml"),
+            r#"
+services:
+  worker:
+    image: redis:7
+    command: echo external
+    x-slurm:
+      cpus_per_task: 2
+"#,
+        )
+        .expect("external base");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  base:
+    image: alpine:3
+    environment:
+      SHARED: "1"
+  app:
+    extends: base
+    command: echo app
+  worker:
+    extends: service-base.yaml
+    command: echo child
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load extended services");
+        let app = spec.services.get("app").expect("app");
+        assert_eq!(app.image.as_deref(), Some("alpine:3"));
+        assert_eq!(
+            app.environment.to_pairs().expect("env"),
+            vec![("SHARED".to_string(), "1".to_string())]
+        );
+        assert_eq!(
+            app.command.as_ref().and_then(CommandSpec::as_string),
+            Some("echo app")
+        );
+        let worker = spec.services.get("worker").expect("worker");
+        assert_eq!(worker.image.as_deref(), Some("redis:7"));
+        assert_eq!(
+            worker.command.as_ref().and_then(CommandSpec::as_string),
+            Some("echo child")
+        );
+        assert_eq!(worker.slurm.cpus_per_task, Some(2));
+    }
+
+    #[test]
+    fn service_extends_mapping_can_select_external_service() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::write(
+            tmpdir.path().join("base.yaml"),
+            r#"
+services:
+  template:
+    image: redis:7
+    command: echo template
+"#,
+        )
+        .expect("base");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    extends:
+      file: base.yaml
+      service: template
+    command: echo app
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load mapping extends");
+        let app = spec.services.get("app").expect("app");
+        assert_eq!(app.image.as_deref(), Some("redis:7"));
+        assert_eq!(
+            app.command.as_ref().and_then(CommandSpec::as_string),
+            Some("echo app")
+        );
+    }
+
+    #[test]
+    fn recursive_extends_and_cycle_errors_are_reported() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        fs::write(
+            tmpdir.path().join("base.yaml"),
+            r#"
+services:
+  app:
+    image: redis:7
+"#,
+        )
+        .expect("base");
+        fs::write(
+            tmpdir.path().join("mid.yaml"),
+            r#"
+extends: base.yaml
+services:
+  app:
+    command: echo mid
+"#,
+        )
+        .expect("mid");
+        let child = write_spec(
+            tmpdir.path(),
+            r#"
+extends: mid.yaml
+services:
+  app:
+    environment:
+      CHILD: yes
+"#,
+        );
+        let spec = ComposeSpec::load(&child).expect("recursive extends");
+        let app = spec.services.get("app").expect("app");
+        assert_eq!(app.image.as_deref(), Some("redis:7"));
+        assert_eq!(
+            app.command.as_ref().and_then(CommandSpec::as_string),
+            Some("echo mid")
+        );
+
+        fs::write(
+            tmpdir.path().join("cycle-a.yaml"),
+            "extends: cycle-b.yaml\nservices:\n  app:\n    image: redis:7\n",
+        )
+        .expect("cycle a");
+        fs::write(
+            tmpdir.path().join("cycle-b.yaml"),
+            "extends: cycle-a.yaml\nservices:\n  app:\n    image: redis:7\n",
+        )
+        .expect("cycle b");
+        let err = ComposeSpec::load(&tmpdir.path().join("cycle-a.yaml")).expect_err("cycle");
+        assert!(format!("{err:#}").contains("extends cycle"));
+
+        let service_cycle = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  a:
+    extends: b
+  b:
+    extends: a
+"#,
+        );
+        let err = ComposeSpec::load(&service_cycle).expect_err("service cycle");
+        assert!(err.to_string().contains("service extends cycle"));
+    }
+
+    #[test]
+    fn extends_reports_missing_files_and_services() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let missing_file = write_spec(
+            tmpdir.path(),
+            r#"
+extends: missing.yaml
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let err = ComposeSpec::load(&missing_file).expect_err("missing file");
+        assert!(format!("{err:#}").contains("failed to load"));
+
+        fs::write(
+            tmpdir.path().join("base.yaml"),
+            r#"
+services:
+  other:
+    image: redis:7
+"#,
+        )
+        .expect("base");
+        let missing_service = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    extends:
+      file: base.yaml
+      service: template
+"#,
+        );
+        let err = ComposeSpec::load(&missing_service).expect_err("missing service");
+        assert!(err.to_string().contains("was not found"));
     }
 
     #[test]
@@ -4252,6 +5440,72 @@ services:
         );
         let err = ComposeSpec::load(&unsupported).expect_err("unsupported");
         assert!(err.to_string().contains("healthcheck.interval"));
+    }
+
+    #[test]
+    fn service_assert_contract_parses_and_validates() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  train:
+    image: trainer:latest
+    assert:
+      exit_code: 0
+      artifacts_contain: "model/*.pt"
+      max_duration_seconds: 7200
+"#,
+        );
+        let spec = ComposeSpec::load(&path).expect("load");
+        let train = spec.services.get("train").expect("service");
+        assert_eq!(
+            train
+                .assertions
+                .as_ref()
+                .and_then(ServiceAssertSpec::normalized_artifacts_contain)
+                .as_deref(),
+            Some("/hpc-compose/job/model/*.pt")
+        );
+        let config = spec
+            .effective_config(&tmpdir.path().join("cache"), &BTreeMap::new())
+            .expect("effective config");
+        let value = serde_json::to_value(config).expect("config json");
+        assert_eq!(value["services"]["train"]["assert"]["exit_code"], 0);
+        assert_eq!(
+            value["services"]["train"]["assert"]["artifacts_contain"],
+            "model/*.pt"
+        );
+        assert_eq!(
+            value["services"]["train"]["assert"]["max_duration_seconds"],
+            7200
+        );
+
+        for (yaml, needle) in [
+            (
+                "services:\n  train:\n    image: trainer:latest\n    assert:\n      exit_code: 256\n",
+                "assert.exit_code",
+            ),
+            (
+                "services:\n  train:\n    image: trainer:latest\n    assert:\n      artifacts_contain: ''\n",
+                "assert.artifacts_contain",
+            ),
+            (
+                "services:\n  train:\n    image: trainer:latest\n    assert:\n      artifacts_contain: /outside/*.pt\n",
+                "under /hpc-compose/job",
+            ),
+            (
+                "services:\n  train:\n    image: trainer:latest\n    assert:\n      max_duration_seconds: 0\n",
+                "assert.max_duration_seconds",
+            ),
+        ] {
+            let path = write_spec(tmpdir.path(), yaml);
+            let err = ComposeSpec::load(&path).expect_err("invalid assert");
+            assert!(
+                err.to_string().contains(needle),
+                "expected error containing {needle:?}, got {err}"
+            );
+        }
     }
 
     #[test]
@@ -5429,7 +6683,7 @@ services:
             key in key_strategy().prop_filter("unsupported root key", |key| {
                 !matches!(
                     key.as_str(),
-                    "name" | "modules" | "runtime" | "services" | "steps" | "version" | "x-env" | "x-slurm"
+                    "name" | "modules" | "runtime" | "services" | "steps" | "sweep" | "version" | "x-env" | "x-slurm"
                 )
             })
         ) {
@@ -5483,7 +6737,7 @@ services:
         #[test]
         fn property_accepts_minimal_valid_specs_with_allowed_keys_only(
             name in prop::option::of(string_regex("[a-z][a-z0-9_-]{0,8}").expect("name regex")),
-            version in prop::option::of(Just("3".to_string())),
+            version in prop::option::of(Just("1".to_string())),
             working_dir in prop::option::of(string_regex("/[A-Za-z0-9_/-]{1,12}").expect("dir regex")),
             command in prop::option::of(value_strategy()),
         ) {

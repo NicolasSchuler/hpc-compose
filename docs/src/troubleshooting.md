@@ -27,6 +27,11 @@ hpc-compose debug -f compose.yaml --preflight
 | Anonymous pull or registry warning | Registry credentials are missing or rate limits apply. | Configure credentials before relying on private or rate-limited images. |
 | Services start in the wrong order | Dependency condition or readiness is too weak. | Use `service_healthy` with `readiness`, or `service_completed_successfully` for DAG stages. |
 | No service logs exist | The batch script failed before launching a service. | Use `debug` to see scheduler state, the tracked top-level batch log tail, and missing-log hints. |
+| `dev` reports no watchable source directories | Services only mount files, missing paths, cache paths, or container-only paths. | Mount the source as a host directory or pass `hpc-compose dev --watch-path ./src -f compose.yaml`. |
+| Readiness never passes | Probe target, pattern, host, or dependency timing does not match the real service. | Inspect the service log with `logs --service <name>` and try a finite `hpc-compose test --local` or short `test --submit` spec. |
+| Smoke test times out | The spec is long-running, readiness blocks forever, or the scheduler job never reaches terminal state. | Make the smoke spec finite, lower service readiness timeouts, and use `--format json` to inspect the failed phase and service reason. |
+| `tmux` is unavailable or attach fails | `tmux` is not installed or the shell is non-interactive. | Install `tmux`, pass `--tmux-bin <PATH>`, or create the dashboard with `--no-attach`. |
+| Local mode is unsupported | Local workflows require a Linux host with Pyxis-compatible Enroot behavior. | Use authoring commands on non-Linux hosts, then run `test --submit` or `up` on a supported Slurm login node. |
 
 ## Readiness Issues
 
@@ -35,6 +40,8 @@ Use `depends_on` with `condition: service_healthy` when a dependent must wait fo
 Use `condition: service_completed_successfully` for one-shot DAG stages where the next service should start only after the previous stage exits with status `0`, such as preprocess -> train -> postprocess.
 
 When a TCP port opens before the service is fully usable, prefer HTTP or log-based readiness over TCP readiness.
+
+For `hpc-compose test`, readiness failures are terminal smoke-test failures. A service with configured readiness must become healthy and then complete successfully; ignored sidecars are still expected to pass in a smoke spec.
 
 ## Preview A Run
 

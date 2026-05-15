@@ -103,6 +103,80 @@ services:
 }
 
 #[test]
+fn submit_uses_profile_env_files_for_runtime_interpolation() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("local image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "profile-compose.yaml",
+        &format!(
+            r#"
+name: env-file-profile
+x-slurm:
+  job_name: env-file-profile
+  cache_dir: ${{CACHE_DIR}}
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    fs::write(
+        tmpdir.path().join("profile.env"),
+        format!("CACHE_DIR={}\n", cache_dir.display()),
+    )
+    .expect("profile env");
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "dev"
+
+[profiles.dev]
+compose_file = "{}"
+env_files = ["profile.env"]
+
+[profiles.dev.binaries]
+enroot = "{}"
+sbatch = "{}"
+srun = "{}"
+"#,
+            compose.file_name().and_then(|v| v.to_str()).expect("name"),
+            enroot.display(),
+            sbatch.display(),
+            srun.display(),
+        ),
+    )
+    .expect("settings");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--profile",
+            "dev",
+            "up",
+            "--detach",
+            "--skip-prepare",
+            "--no-preflight",
+        ],
+    );
+    assert_success(&output);
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("Submitted batch job 12345"));
+    assert!(stdout.contains("cache dir:"));
+}
+
+#[test]
 fn context_json_reports_sources_and_runtime_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let root = fs::canonicalize(tmpdir.path()).expect("canonical root");

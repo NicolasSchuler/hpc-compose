@@ -13,7 +13,7 @@ runtime:
 
 | Backend | Launch shape | Required tools | Image/artifact shape | Notes |
 | --- | --- | --- | --- | --- |
-| `pyxis` | `srun --container-*` | Slurm with Pyxis support plus Enroot on the submission host | remote images or local `.sqsh` / `.squashfs` | Default path and the only backend supported by `up --local`. |
+| `pyxis` | `srun --container-*` | Slurm with Pyxis support plus Enroot on the submission host | remote images or local `.sqsh` / `.squashfs` | Default path and the only backend supported by local development workflows. |
 | `apptainer` | `srun` plus `apptainer exec/run` | `apptainer` on submission and compute nodes | remote images prepared or reused as `.sif`; local `.sif` accepted | Use when the site standardizes on Apptainer instead of Pyxis. |
 | `singularity` | `srun` plus `singularity exec/run` | `singularity` on submission and compute nodes | remote images prepared or reused as `.sif`; local `.sif` accepted | Similar to Apptainer for sites that still use Singularity. |
 | `host` | direct `srun` command | Slurm client tools and host software/modules | no container image | Services must set `command` or `entrypoint`; image prepare and container bind mounts are not applied. |
@@ -32,15 +32,17 @@ hpc-compose preflight -f compose.yaml
 
 ## Local Mode
 
-`up --local` is intentionally narrow:
+`up --local`, `test --local`, `dev`, and `tmux` are intentionally narrow:
 
 - Linux only
 - `runtime.backend: pyxis` only
+- Pyxis-compatible Enroot tooling on the host
 - single-host specs only
 - no distributed or partitioned placement
 - no service-level MPI
+- no Slurm arrays or scheduler dependencies
 
-Use local mode to inspect and debug a Pyxis/Enroot single-host launch path. It is not a replacement for Slurm distributed execution.
+Use local mode to inspect and debug a Pyxis/Enroot single-host launch path. `dev` adds file-change restart requests to the local supervisor, and `tmux` tails tracked local service logs in panes. Neither command changes the process-supervision model, and local mode is not a replacement for Slurm distributed execution.
 
 ## Host Runtime Notes
 

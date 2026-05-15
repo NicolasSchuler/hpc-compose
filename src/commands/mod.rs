@@ -5,18 +5,26 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{
-    CacheCommands, Cli, Commands, DoctorCommands, JobsCommands, OutputFormat, WatchMode,
+    CacheCommands, Cli, Commands, DoctorCommands, JobsCommands, OutputFormat, RendezvousCommands,
+    SweepCommands, WatchMode,
 };
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
 };
+use hpc_compose::job::parse_queue_warn_after_duration;
 use hpc_compose::term;
+use hpc_compose::when::{
+    AfterJobCondition, FreeNodesCondition, TimeWindow, WhenConditions, parse_after_job_condition,
+    parse_duration as parse_when_duration, parse_poll_interval,
+};
 
 mod cache;
 mod doctor;
+mod evolve;
 mod init;
 mod runtime;
 mod spec;
+mod weather;
 
 #[derive(Debug, Clone, Default)]
 struct GlobalCommandOptions {
@@ -62,6 +70,15 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             spec::validate(context, strict_env, format)
+        }
+        Commands::Lint {
+            file,
+            strict_env,
+            allow_warnings,
+            format,
+        } => {
+            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            spec::lint(context, strict_env, allow_warnings, format)
         }
         Commands::Render {
             file,
@@ -122,11 +139,36 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             file,
             verbose,
             tree,
+            rightsize,
+            dependencies,
+            dependencies_format,
+            job_id,
+            sstat_bin,
+            squeue_bin,
+            sacct_bin,
             format,
             json,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
-            spec::inspect(context, verbose, tree, format, json)
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--sstat-bin", &sstat_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            spec::inspect(
+                context,
+                verbose,
+                tree,
+                rightsize,
+                dependencies,
+                dependencies_format,
+                job_id,
+                format,
+                json,
+            )
         }
         Commands::Config {
             file,
@@ -239,6 +281,25 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 doctor::doctor(format, &binaries, cluster_report, cluster_report_out)
             }
         }
+        Commands::Weather {
+            format,
+            sinfo_bin,
+            squeue_bin,
+            sshare_bin,
+            sprio_bin,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--sinfo-bin", &sinfo_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sshare-bin", &sshare_bin),
+                    ("--sprio-bin", &sprio_bin),
+                ],
+            );
+            let binaries = resolve_command_binaries(options, binary_overrides)?;
+            weather::weather(format, &binaries)
+        }
         Commands::Up {
             file,
             script_out,
@@ -258,6 +319,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             resume_diff_only,
             dry_run,
             detach,
+            watch_queue,
+            queue_warn_after,
             watch_mode,
             hold_on_exit,
             no_tui,
@@ -266,6 +329,23 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             if format.is_some() && !detach && !dry_run {
                 bail!("up --format requires --detach or --dry-run");
             }
+            if watch_queue && detach {
+                bail!("up --watch-queue cannot be combined with --detach");
+            }
+            if watch_queue && dry_run {
+                bail!("up --watch-queue cannot be combined with --dry-run");
+            }
+            if watch_queue && local {
+                bail!("up --watch-queue cannot be combined with --local");
+            }
+            if queue_warn_after.is_some() && !watch_queue {
+                bail!("up --queue-warn-after requires --watch-queue");
+            }
+            let queue_warn_after_seconds = if watch_queue {
+                parse_queue_warn_after_duration(queue_warn_after.as_deref().unwrap_or("10m"))?
+            } else {
+                None
+            };
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
@@ -292,9 +372,392 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 resume_diff_only,
                 dry_run,
                 detach,
+                watch_queue,
+                queue_warn_after_seconds,
                 watch_mode,
                 hold_on_exit,
                 format,
+                options.quiet,
+            )
+        }
+        Commands::Test {
+            file,
+            local,
+            submit,
+            time,
+            timeout,
+            script_out,
+            sbatch_bin,
+            srun_bin,
+            squeue_bin,
+            sacct_bin,
+            scancel_bin,
+            enroot_bin,
+            apptainer_bin,
+            singularity_bin,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            format,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                    ("--scancel-bin", &scancel_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::smoke_test(
+                context,
+                local,
+                submit,
+                time,
+                timeout,
+                script_out,
+                keep_failed_prep,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
+                format,
+                options.quiet,
+            )
+        }
+        Commands::Dev {
+            file,
+            watch_paths,
+            debounce_ms,
+            keep_running,
+            script_out,
+            enroot_bin,
+            apptainer_bin,
+            singularity_bin,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::dev(
+                context,
+                watch_paths,
+                debounce_ms,
+                keep_running,
+                script_out,
+                keep_failed_prep,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
+                options.quiet,
+            )
+        }
+        Commands::Tmux {
+            file,
+            job_id,
+            session,
+            tmux_bin,
+            no_attach,
+            lines,
+            script_out,
+            enroot_bin,
+            apptainer_bin,
+            singularity_bin,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::tmux(
+                context,
+                job_id,
+                session,
+                tmux_bin,
+                no_attach,
+                lines,
+                script_out,
+                keep_failed_prep,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
+                options.quiet,
+            )
+        }
+        Commands::Sweep { command } => match command {
+            SweepCommands::Submit {
+                file,
+                dry_run,
+                max_trials,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
+                format,
+                sbatch_bin,
+                srun_bin,
+                scontrol_bin,
+                enroot_bin,
+                apptainer_bin,
+                singularity_bin,
+            } => {
+                let binary_overrides = resolve_binary_overrides(
+                    options,
+                    &[
+                        ("--enroot-bin", &enroot_bin),
+                        ("--sbatch-bin", &sbatch_bin),
+                        ("--srun-bin", &srun_bin),
+                        ("--scontrol-bin", &scontrol_bin),
+                        ("--apptainer-bin", &apptainer_bin),
+                        ("--singularity-bin", &singularity_bin),
+                    ],
+                );
+                let context = resolve_command_context(options, file, binary_overrides)?;
+                runtime::sweep_submit(
+                    context,
+                    dry_run,
+                    max_trials,
+                    skip_prepare,
+                    force_rebuild,
+                    no_preflight,
+                    format,
+                    options.quiet,
+                )
+            }
+            SweepCommands::Status {
+                file,
+                sweep_id,
+                format,
+                squeue_bin,
+                sacct_bin,
+            } => {
+                let binary_overrides = resolve_binary_overrides(
+                    options,
+                    &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
+                );
+                let context = resolve_command_context(options, file, binary_overrides)?;
+                runtime::sweep_status(context, sweep_id, format)
+            }
+            SweepCommands::List { file, format } => {
+                let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+                runtime::sweep_list(context, format)
+            }
+        },
+        Commands::Germinate {
+            file,
+            script_out,
+            canary_time,
+            metrics_interval,
+            pending_timeout,
+            min_cpus,
+            min_mem,
+            min_gpus,
+            sbatch_bin,
+            srun_bin,
+            squeue_bin,
+            sacct_bin,
+            sstat_bin,
+            enroot_bin,
+            apptainer_bin,
+            singularity_bin,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            dry_run,
+            format,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                    ("--sstat-bin", &sstat_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::germinate(
+                context,
+                script_out,
+                canary_time,
+                metrics_interval,
+                pending_timeout,
+                min_cpus,
+                min_mem,
+                min_gpus,
+                keep_failed_prep,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
+                dry_run,
+                format,
+                options.quiet,
+            )
+        }
+        Commands::When {
+            file,
+            partition,
+            free_nodes,
+            after_job,
+            after_job_condition,
+            between,
+            poll_interval,
+            timeout,
+            script_out,
+            sbatch_bin,
+            srun_bin,
+            sinfo_bin,
+            squeue_bin,
+            sacct_bin,
+            enroot_bin,
+            apptainer_bin,
+            singularity_bin,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            allow_resume_changes,
+            detach,
+            watch_mode,
+            hold_on_exit,
+            no_tui,
+            format,
+        } => {
+            if format.is_some() && !detach {
+                bail!("when --format requires --detach");
+            }
+            let free_nodes = match free_nodes {
+                Some(0) => bail!("when --free-nodes must be greater than zero"),
+                Some(minimum_idle_nodes) => {
+                    let partition = partition
+                        .clone()
+                        .context("when --free-nodes requires --partition")?;
+                    Some(FreeNodesCondition {
+                        partition,
+                        minimum_idle_nodes,
+                    })
+                }
+                None => None,
+            };
+            if after_job.is_none() && after_job_condition != "afterany" {
+                bail!("when --after-job-condition requires --after-job");
+            }
+            let after_job = match after_job {
+                Some(job_id) => {
+                    validate_when_job_id(&job_id)?;
+                    Some(AfterJobCondition {
+                        job_id,
+                        condition: parse_after_job_condition(&after_job_condition)?,
+                    })
+                }
+                None => None,
+            };
+            let time_window = between.as_deref().map(TimeWindow::parse).transpose()?;
+            let conditions = WhenConditions {
+                free_nodes,
+                after_job,
+                time_window,
+            };
+            if conditions.is_empty() {
+                bail!("when requires at least one of --free-nodes, --after-job, or --between");
+            }
+            let poll_interval = parse_poll_interval(Some(&poll_interval))?;
+            let timeout = timeout.as_deref().map(parse_when_duration).transpose()?;
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--enroot-bin", &enroot_bin),
+                    ("--sbatch-bin", &sbatch_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--sinfo-bin", &sinfo_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            let watch_mode = resolve_watch_mode(watch_mode, no_tui)?;
+            runtime::when(
+                context,
+                conditions,
+                poll_interval,
+                timeout,
+                script_out,
+                keep_failed_prep,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
+                allow_resume_changes,
+                detach,
+                watch_mode,
+                hold_on_exit,
+                format,
+                options.quiet,
+            )
+        }
+        Commands::Alloc {
+            file,
+            mut command,
+            salloc_bin,
+            srun_bin,
+            scontrol_bin,
+            enroot_bin,
+            apptainer_bin,
+            singularity_bin,
+            keep_failed_prep,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+        } => {
+            if command.first().is_some_and(|arg| arg == "--") {
+                command.remove(0);
+            }
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--salloc-bin", &salloc_bin),
+                    ("--srun-bin", &srun_bin),
+                    ("--scontrol-bin", &scontrol_bin),
+                    ("--enroot-bin", &enroot_bin),
+                    ("--apptainer-bin", &apptainer_bin),
+                    ("--singularity-bin", &singularity_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::alloc(
+                context,
+                command,
+                keep_failed_prep,
+                skip_prepare,
+                force_rebuild,
+                no_preflight,
                 options.quiet,
             )
         }
@@ -303,6 +766,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             job_id,
             format,
             json,
+            array,
             squeue_bin,
             sacct_bin,
         } => {
@@ -311,13 +775,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::status(context, job_id, format, json)
+            runtime::status(context, job_id, format, json, array)
         }
         Commands::Stats {
             file,
             job_id,
             json,
             format,
+            accounting,
             sstat_bin,
             squeue_bin,
             sacct_bin,
@@ -331,7 +796,58 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::stats(context, job_id, json, format)
+            runtime::stats(context, job_id, json, format, accounting)
+        }
+        Commands::MetricsProbe {
+            duration_seconds,
+            format,
+            compare_nvidia_smi,
+        } => runtime::metrics_probe(duration_seconds, format, compare_nvidia_smi),
+        Commands::Score {
+            job_id,
+            file,
+            json,
+            format,
+            pue,
+            gpu_tdp_w,
+            cpu_watts_per_core,
+            sstat_bin,
+            squeue_bin,
+            sacct_bin,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[
+                    ("--sstat-bin", &sstat_bin),
+                    ("--squeue-bin", &squeue_bin),
+                    ("--sacct-bin", &sacct_bin),
+                ],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::score(
+                context,
+                job_id,
+                json,
+                format,
+                pue,
+                gpu_tdp_w,
+                cpu_watts_per_core,
+            )
+        }
+        Commands::Diff {
+            job_id_1,
+            job_id_2,
+            file,
+            format,
+            squeue_bin,
+            sacct_bin,
+        } => {
+            let binary_overrides = resolve_binary_overrides(
+                options,
+                &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
+            );
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            runtime::diff(context, job_id_1, job_id_2, format)
         }
         Commands::Artifacts {
             file,
@@ -349,10 +865,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             job_id,
             service,
             follow,
+            grep,
+            since,
             lines,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
-            runtime::logs(context, job_id, service, follow, lines)
+            runtime::logs(context, job_id, service, follow, lines, grep, since)
         }
         Commands::Ps {
             file,
@@ -386,6 +904,18 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, binary_overrides)?;
             let watch_mode = resolve_watch_mode(watch_mode, no_tui)?;
             runtime::watch(context, job_id, service, lines, watch_mode, hold_on_exit)
+        }
+        Commands::Replay {
+            file,
+            job_id,
+            service,
+            speed,
+            lines,
+            no_tui,
+            format,
+        } => {
+            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            runtime::replay(context, job_id, service, speed, lines, no_tui, format)
         }
         Commands::Debug {
             file,
@@ -600,6 +1130,104 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             force,
             format,
         ),
+        Commands::Evolve {
+            lesson,
+            list_lessons,
+            describe_lesson,
+            name,
+            cache_dir,
+            output,
+            force,
+            yes,
+            until,
+            format,
+        } => evolve::command(
+            lesson,
+            list_lessons,
+            describe_lesson,
+            name,
+            cache_dir,
+            output,
+            force,
+            yes,
+            until,
+            format,
+        ),
+        Commands::Rendezvous { command } => match command {
+            RendezvousCommands::Register {
+                name,
+                host,
+                port,
+                job_id,
+                service,
+                protocol,
+                path,
+                ttl_seconds,
+                cache_dir,
+                format,
+            } => {
+                let cache_dir = match cache_dir {
+                    Some(path) => path,
+                    None => {
+                        let context =
+                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        context.cache_dir.value
+                    }
+                };
+                let job_id = job_id
+                    .or_else(|| env::var("SLURM_JOB_ID").ok())
+                    .context("rendezvous register requires --job-id outside a Slurm job")?;
+                runtime::rendezvous_register(
+                    cache_dir,
+                    name,
+                    job_id,
+                    service,
+                    host,
+                    port,
+                    protocol,
+                    path,
+                    ttl_seconds,
+                    format,
+                )
+            }
+            RendezvousCommands::Resolve {
+                name,
+                cache_dir,
+                format,
+            } => {
+                let cache_dir = match cache_dir {
+                    Some(path) => path,
+                    None => {
+                        let context =
+                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        context.cache_dir.value
+                    }
+                };
+                runtime::rendezvous_resolve(cache_dir, name, format)
+            }
+            RendezvousCommands::List { cache_dir, format } => {
+                let cache_dir = match cache_dir {
+                    Some(path) => path,
+                    None => {
+                        let context =
+                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        context.cache_dir.value
+                    }
+                };
+                runtime::rendezvous_list(cache_dir, format)
+            }
+            RendezvousCommands::Prune { cache_dir, format } => {
+                let cache_dir = match cache_dir {
+                    Some(path) => path,
+                    None => {
+                        let context =
+                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        context.cache_dir.value
+                    }
+                };
+                runtime::rendezvous_prune(cache_dir, format)
+            }
+        },
         Commands::Cache { command } => match command {
             CacheCommands::List { cache_dir, format } => {
                 let cache_dir = match cache_dir {
@@ -711,6 +1339,20 @@ fn resolve_watch_mode(watch_mode: WatchMode, no_tui: bool) -> Result<WatchMode> 
     }
 }
 
+fn validate_when_job_id(job_id: &str) -> Result<()> {
+    let valid_decimal =
+        |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
+    let valid = if let Some((job, task)) = job_id.split_once('_') {
+        valid_decimal(job) && valid_decimal(task)
+    } else {
+        valid_decimal(job_id)
+    };
+    if !valid {
+        bail!("when --after-job must be a Slurm job id like 12345 or array task id like 12345_7");
+    }
+    Ok(())
+}
+
 fn ensure_run_image_mode_uses_separator(options: &GlobalCommandOptions) -> Result<()> {
     if options.assume_explicit_values {
         return Ok(());
@@ -764,6 +1406,7 @@ fn run_flag_takes_value(value: &str) -> bool {
             | "--partition"
             | "--env"
             | "--script-out"
+            | "--salloc-bin"
             | "--sbatch-bin"
             | "--srun-bin"
             | "--enroot-bin"
@@ -915,6 +1558,13 @@ const BINARY_OVERRIDE_ENTRIES: &[BinaryOverrideEntry] = &[
         },
     },
     BinaryOverrideEntry {
+        flag: "--salloc-bin",
+        setter: |mut o, v| {
+            o.salloc = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
         flag: "--sbatch-bin",
         setter: |mut o, v| {
             o.sbatch = Some(v);
@@ -967,6 +1617,20 @@ const BINARY_OVERRIDE_ENTRIES: &[BinaryOverrideEntry] = &[
         flag: "--scancel-bin",
         setter: |mut o, v| {
             o.scancel = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--sshare-bin",
+        setter: |mut o, v| {
+            o.sshare = Some(v);
+            o
+        },
+    },
+    BinaryOverrideEntry {
+        flag: "--sprio-bin",
+        setter: |mut o, v| {
+            o.sprio = Some(v);
             o
         },
     },

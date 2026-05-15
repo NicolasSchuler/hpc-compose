@@ -13,8 +13,8 @@ use crossterm::execute;
 use crossterm::terminal::{self, Clear, ClearType};
 use hpc_compose::cli::HoldOnExit;
 use hpc_compose::job::{
-    PsServiceRow, PsSnapshot, SchedulerOptions, StatsOptions, StatsSnapshot, SubmissionRecord,
-    WalltimeProgress, WatchOutcome, build_ps_snapshot, build_stats_snapshot,
+    PsServiceRow, PsSnapshot, ReplayReport, SchedulerOptions, StatsOptions, StatsSnapshot,
+    SubmissionRecord, WalltimeProgress, WatchOutcome, build_ps_snapshot, build_stats_snapshot,
     format_walltime_summary, walltime_progress, walltime_progress_percent,
 };
 
@@ -35,6 +35,13 @@ pub(crate) enum WatchKey {
     First,
     Last,
     End,
+    SeekBackward,
+    SeekForward,
+    PreviousEvent,
+    NextEvent,
+    ReplayStart,
+    SpeedDown,
+    SpeedUp,
     Tab,
     TogglePause,
     ToggleAllLogs,
@@ -63,6 +70,14 @@ pub(crate) struct WatchHoldState {
     pub(crate) failed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReplayWatchStatus {
+    pub(crate) cursor_unix: u64,
+    pub(crate) speed: f64,
+    pub(crate) paused: bool,
+    pub(crate) fidelity: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WatchModel {
     pub(crate) snapshot: PsSnapshot,
@@ -78,6 +93,7 @@ pub(crate) struct WatchModel {
     pub(crate) filter: Option<String>,
     pub(crate) search_buffer: String,
     pub(crate) input_mode: InputMode,
+    pub(crate) replay: Option<ReplayWatchStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,10 +223,182 @@ pub(crate) fn run_watch_ui(
     Ok(result.outcome)
 }
 
+pub(crate) fn run_replay_ui(
+    report: &ReplayReport,
+    initial_service: Option<&str>,
+    lines: usize,
+    speed: f64,
+) -> Result<()> {
+    let guard = TerminalGuard::enter()?;
+    let result = run_replay_ui_loop(report, initial_service, lines, speed);
+    drop(guard);
+    result
+}
+
 #[derive(Debug)]
 struct WatchLoopResult {
     outcome: WatchOutcome,
     command_hint: Option<String>,
+}
+
+fn run_replay_ui_loop(
+    report: &ReplayReport,
+    initial_service: Option<&str>,
+    lines: usize,
+    speed: f64,
+) -> Result<()> {
+    if report.frames.is_empty() {
+        return Ok(());
+    }
+    let mut playback = ReplayPlaybackState::new(report, speed);
+    let mut snapshot = report.frames[playback.frame_index].snapshot.clone();
+    let mut selected_index = initial_selected_index(&snapshot, initial_service)?;
+    let (_, height) = terminal_size();
+    let mut log_buffer = SelectedLogBuffer::seed(
+        snapshot.services.get(selected_index),
+        lines,
+        log_capacity(height),
+    );
+    let mut show_help = false;
+    let mut filter: Option<String> = None;
+    let mut input_mode = InputMode::Normal;
+    let mut search_buffer = String::new();
+    let mut log_scroll = 0usize;
+    let mut log_view_mode = LogViewMode::Selected;
+    let mut last_tick = Instant::now();
+
+    loop {
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(last_tick);
+        last_tick = now;
+        if !playback.paused {
+            let advanced = playback.cursor_unix as f64 + elapsed.as_secs_f64() * playback.speed;
+            playback.cursor_unix = report.clamp_cursor(advanced.floor().max(0.0) as u64);
+            playback.frame_index = report.frame_index_at_or_before(playback.cursor_unix);
+            if Some(playback.cursor_unix) == report.timeline_end_unix {
+                playback.paused = true;
+            }
+        }
+
+        let frame = &report.frames[playback.frame_index];
+        snapshot = frame.snapshot.clone();
+        let effective = filtered_services(&snapshot.services, filter.as_deref());
+        selected_index = clamp_selected_index_raw(&effective, selected_index);
+        let (_, height) = terminal_size();
+        let resolved = effective.get(selected_index);
+        let original_index = resolved.and_then(|row| {
+            snapshot
+                .services
+                .iter()
+                .position(|service| service.service_name == row.service_name)
+        });
+        log_buffer.reseed_if_needed(
+            original_index.map(|index| &snapshot.services[index]),
+            lines,
+            log_capacity(height),
+        );
+        let all_log_lines = build_all_log_lines(&snapshot, lines, log_capacity(height));
+        let displayed_log_lines = match log_view_mode {
+            LogViewMode::Selected => log_buffer.lines.clone(),
+            LogViewMode::All => all_log_lines.clone(),
+        };
+
+        render_model(
+            &WatchModel {
+                snapshot: snapshot.clone(),
+                selected_index,
+                walltime_progress: None,
+                log_lines: displayed_log_lines,
+                follow_logs: false,
+                log_scroll,
+                log_view_mode,
+                hold_state: None,
+                metrics_line: frame.metrics_line.clone(),
+                show_help,
+                filter: filter.clone(),
+                search_buffer: search_buffer.clone(),
+                input_mode,
+                replay: Some(ReplayWatchStatus {
+                    cursor_unix: playback.cursor_unix,
+                    speed: playback.speed,
+                    paused: playback.paused,
+                    fidelity: report.fidelity.clone(),
+                }),
+            },
+            terminal_size(),
+        )?;
+
+        if let Some(event) = read_watch_event(INPUT_POLL_INTERVAL)? {
+            if input_mode == InputMode::Search {
+                let key = match event {
+                    WatchInput::Search(key) => key,
+                    WatchInput::Normal(WatchKey::Quit) => SearchKey::Cancel,
+                    _ => continue,
+                };
+                match key {
+                    SearchKey::Char(ch) => search_buffer.push(ch),
+                    SearchKey::Backspace => {
+                        search_buffer.pop();
+                    }
+                    SearchKey::Clear => search_buffer.clear(),
+                    SearchKey::Submit => {
+                        filter = if search_buffer.is_empty() {
+                            None
+                        } else {
+                            Some(search_buffer.clone())
+                        };
+                        input_mode = InputMode::Normal;
+                        selected_index = 0;
+                    }
+                    SearchKey::Cancel => {
+                        search_buffer.clear();
+                        input_mode = InputMode::Normal;
+                    }
+                }
+            } else if let WatchInput::Normal(key) = event {
+                match key {
+                    WatchKey::Quit => return Ok(()),
+                    WatchKey::Help => show_help = !show_help,
+                    WatchKey::Search => {
+                        input_mode = InputMode::Search;
+                        search_buffer = filter.clone().unwrap_or_default();
+                    }
+                    WatchKey::TogglePause
+                    | WatchKey::SeekBackward
+                    | WatchKey::SeekForward
+                    | WatchKey::PreviousEvent
+                    | WatchKey::NextEvent
+                    | WatchKey::ReplayStart
+                    | WatchKey::SpeedDown
+                    | WatchKey::SpeedUp => {
+                        playback = apply_replay_key(playback, report, key);
+                    }
+                    WatchKey::ToggleAllLogs => {
+                        log_view_mode = match log_view_mode {
+                            LogViewMode::Selected => LogViewMode::All,
+                            LogViewMode::All => LogViewMode::Selected,
+                        };
+                        log_scroll = 0;
+                    }
+                    WatchKey::PageUp => {
+                        log_scroll = log_scroll.saturating_add(10);
+                    }
+                    WatchKey::PageDown => {
+                        log_scroll = log_scroll.saturating_sub(10);
+                    }
+                    WatchKey::End => {
+                        log_scroll = 0;
+                        playback = apply_replay_key(playback, report, WatchKey::Last);
+                    }
+                    other => {
+                        let effective = filtered_services(&snapshot.services, filter.as_deref());
+                        selected_index = apply_watch_key(selected_index, effective.len(), other);
+                        log_scroll = 0;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn run_watch_ui_loop(
@@ -334,6 +522,7 @@ fn run_watch_ui_loop(
                 filter: filter.clone(),
                 search_buffer: search_buffer.clone(),
                 input_mode,
+                replay: None,
             },
             terminal_size(),
         )?;
@@ -470,7 +659,14 @@ pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: 
         WatchKey::Down | WatchKey::Tab => (selected_index + 1).min(service_count - 1),
         WatchKey::First => 0,
         WatchKey::Last => service_count - 1,
-        WatchKey::PageUp
+        WatchKey::SeekBackward
+        | WatchKey::SeekForward
+        | WatchKey::PreviousEvent
+        | WatchKey::NextEvent
+        | WatchKey::ReplayStart
+        | WatchKey::SpeedDown
+        | WatchKey::SpeedUp
+        | WatchKey::PageUp
         | WatchKey::PageDown
         | WatchKey::End
         | WatchKey::TogglePause
@@ -482,6 +678,92 @@ pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: 
         | WatchKey::Help
         | WatchKey::Search => selected_index,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ReplayPlaybackState {
+    pub(crate) frame_index: usize,
+    pub(crate) cursor_unix: u64,
+    pub(crate) paused: bool,
+    pub(crate) speed: f64,
+}
+
+impl ReplayPlaybackState {
+    pub(crate) fn new(report: &ReplayReport, speed: f64) -> Self {
+        let cursor_unix = report.timeline_start_unix.unwrap_or(0);
+        Self {
+            frame_index: 0,
+            cursor_unix,
+            paused: false,
+            speed,
+        }
+    }
+}
+
+pub(crate) fn apply_replay_key(
+    mut state: ReplayPlaybackState,
+    report: &ReplayReport,
+    key: WatchKey,
+) -> ReplayPlaybackState {
+    if report.frames.is_empty() {
+        return state;
+    }
+    match key {
+        WatchKey::TogglePause => state.paused = !state.paused,
+        WatchKey::SeekBackward => {
+            state.cursor_unix = report.clamp_cursor(state.cursor_unix.saturating_sub(5));
+            state.frame_index = report.frame_index_at_or_before(state.cursor_unix);
+            state.paused = true;
+        }
+        WatchKey::SeekForward => {
+            state.cursor_unix = report.clamp_cursor(state.cursor_unix.saturating_add(5));
+            state.frame_index = report.frame_index_at_or_before(state.cursor_unix);
+            state.paused = true;
+        }
+        WatchKey::PreviousEvent => {
+            state.frame_index = state.frame_index.saturating_sub(1);
+            state.cursor_unix = report.frames[state.frame_index].cursor_unix;
+            state.paused = true;
+        }
+        WatchKey::NextEvent => {
+            state.frame_index = (state.frame_index + 1).min(report.frames.len() - 1);
+            state.cursor_unix = report.frames[state.frame_index].cursor_unix;
+            state.paused = true;
+        }
+        WatchKey::ReplayStart => {
+            state.frame_index = 0;
+            state.cursor_unix = report.frames[0].cursor_unix;
+            state.paused = true;
+        }
+        WatchKey::Last | WatchKey::End => {
+            state.frame_index = report.frames.len() - 1;
+            state.cursor_unix = report.frames[state.frame_index].cursor_unix;
+            state.paused = true;
+        }
+        WatchKey::SpeedDown => state.speed = previous_replay_speed(state.speed),
+        WatchKey::SpeedUp => state.speed = next_replay_speed(state.speed),
+        _ => {}
+    }
+    state
+}
+
+fn previous_replay_speed(current: f64) -> f64 {
+    const SPEEDS: [f64; 3] = [1.0, 10.0, 100.0];
+    SPEEDS
+        .iter()
+        .rev()
+        .copied()
+        .find(|speed| *speed < current)
+        .unwrap_or(SPEEDS[0])
+}
+
+fn next_replay_speed(current: f64) -> f64 {
+    const SPEEDS: [f64; 3] = [1.0, 10.0, 100.0];
+    SPEEDS
+        .iter()
+        .copied()
+        .find(|speed| *speed > current)
+        .unwrap_or(SPEEDS[SPEEDS.len() - 1])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,7 +792,14 @@ fn map_key_event(key: KeyEvent) -> Option<WatchInput> {
         KeyCode::Char('j') | KeyCode::Down => Some(WatchInput::Normal(WatchKey::Down)),
         KeyCode::Char('k') | KeyCode::Up => Some(WatchInput::Normal(WatchKey::Up)),
         KeyCode::Char('g') => Some(WatchInput::Normal(WatchKey::First)),
+        KeyCode::Home => Some(WatchInput::Normal(WatchKey::ReplayStart)),
         KeyCode::Char('G') => Some(WatchInput::Normal(WatchKey::Last)),
+        KeyCode::Left => Some(WatchInput::Normal(WatchKey::SeekBackward)),
+        KeyCode::Right => Some(WatchInput::Normal(WatchKey::SeekForward)),
+        KeyCode::Char('[') => Some(WatchInput::Normal(WatchKey::PreviousEvent)),
+        KeyCode::Char(']') => Some(WatchInput::Normal(WatchKey::NextEvent)),
+        KeyCode::Char('-') => Some(WatchInput::Normal(WatchKey::SpeedDown)),
+        KeyCode::Char('+') | KeyCode::Char('=') => Some(WatchInput::Normal(WatchKey::SpeedUp)),
         KeyCode::Tab => Some(WatchInput::Normal(WatchKey::Tab)),
         KeyCode::PageUp => Some(WatchInput::Normal(WatchKey::PageUp)),
         KeyCode::PageDown => Some(WatchInput::Normal(WatchKey::PageDown)),
@@ -556,18 +845,27 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         .map(|f| format!(" | {}", term::styled_warning(&format!("filter: {f}"))))
         .unwrap_or_default();
 
+    let title_line = if let Some(replay) = &model.replay {
+        format!(
+            "{} | {} | job {}{}",
+            term::styled_bold("hpc-compose replay"),
+            replay_header_status(replay),
+            model.snapshot.record.job_id,
+            filter_indicator
+        )
+    } else {
+        format!(
+            "{} | {} | job {}{}{}",
+            term::styled_bold("hpc-compose watch"),
+            scheduler,
+            model.snapshot.record.job_id,
+            filter_indicator,
+            hold_indicator(model.hold_state)
+        )
+    };
+
     let mut lines = vec![
-        fit_line(
-            &format!(
-                "{} | {} | job {}{}{}",
-                term::styled_bold("hpc-compose watch"),
-                scheduler,
-                model.snapshot.record.job_id,
-                filter_indicator,
-                hold_indicator(model.hold_state)
-            ),
-            width,
-        ),
+        fit_line(&title_line, width),
         fit_line(
             &format!(
                 "services: {} | selected: {} | logs: {} {}",
@@ -616,9 +914,22 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         help_lines.push(fit_line("  g           first service", width));
         help_lines.push(fit_line("  G           last service", width));
         help_lines.push(fit_line("  /           filter services", width));
-        help_lines.push(fit_line("  Space       pause or follow log tail", width));
+        if model.replay.is_some() {
+            help_lines.push(fit_line("  Space       pause or play replay", width));
+            help_lines.push(fit_line("  +/-         change replay speed", width));
+            help_lines.push(fit_line("  Left/Right  seek replay by 5 seconds", width));
+            help_lines.push(fit_line(
+                "  [ / ]       previous or next replay event",
+                width,
+            ));
+            help_lines.push(fit_line("  Home/End    first or final replay frame", width));
+        } else {
+            help_lines.push(fit_line("  Space       pause or follow log tail", width));
+        }
         help_lines.push(fit_line("  PgUp/PgDn   scroll log tail", width));
-        help_lines.push(fit_line("  End         return to live log tail", width));
+        if model.replay.is_none() {
+            help_lines.push(fit_line("  End         return to live log tail", width));
+        }
         help_lines.push(fit_line("  a           toggle selected/all logs", width));
         help_lines.push(fit_line(
             "  d/l/s       debug/logs/stats command after final state",
@@ -631,6 +942,8 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
 
     let footer = if model.input_mode == InputMode::Search {
         "Enter apply  Esc cancel  Ctrl-U clear  Backspace delete"
+    } else if model.replay.is_some() {
+        "q quit  Space play/pause  +/- speed  Left/Right seek  [/] event  Home/End bounds"
     } else if model.hold_state.is_some() {
         "q exit  d debug  l logs  s stats  ? help"
     } else {
@@ -775,11 +1088,19 @@ fn render_compact_watch_frame(
         &mut lines,
         width,
         height,
-        &format!(
-            "{} | job {}",
-            term::styled_bold("hpc-compose watch"),
-            model.snapshot.record.job_id
-        ),
+        &match &model.replay {
+            Some(replay) => format!(
+                "{} | {} | job {}",
+                term::styled_bold("hpc-compose replay"),
+                replay_header_status(replay),
+                model.snapshot.record.job_id
+            ),
+            None => format!(
+                "{} | job {}",
+                term::styled_bold("hpc-compose watch"),
+                model.snapshot.record.job_id
+            ),
+        },
     );
     push_fit_line(
         &mut lines,
@@ -897,7 +1218,9 @@ fn render_compact_watch_frame(
         &mut lines,
         width,
         height,
-        if model.hold_state.is_some() {
+        if model.replay.is_some() {
+            "q quit  Space play/pause  +/- speed  [/] event"
+        } else if model.hold_state.is_some() {
             "q exit  d debug  l logs  s stats"
         } else {
             "q quit  ? help  / filter  Space pause"
@@ -922,6 +1245,25 @@ fn hold_indicator(hold: Option<WatchHoldState>) -> String {
             format!(" | {}", term::styled_success("held: completed"))
         }
         None => String::new(),
+    }
+}
+
+fn replay_header_status(replay: &ReplayWatchStatus) -> String {
+    let playback = if replay.paused { "PAUSED" } else { "PLAY" };
+    format!(
+        "t={} | speed={} | {} | {}",
+        replay.cursor_unix,
+        replay_speed_label(replay.speed),
+        playback,
+        replay.fidelity
+    )
+}
+
+fn replay_speed_label(speed: f64) -> String {
+    if (speed.fract()).abs() < f64::EPSILON {
+        format!("{speed:.0}x")
+    } else {
+        format!("{speed:.2}x")
     }
 }
 
@@ -1055,6 +1397,7 @@ fn load_watch_metrics_line(
         &StatsOptions {
             scheduler: scheduler.clone(),
             sstat_bin: "sstat".to_string(),
+            accounting: false,
         },
     )
     .ok()?;
@@ -1601,10 +1944,11 @@ mod tests {
     use super::*;
     use crate::output;
     use hpc_compose::job::{
-        PsSnapshot, QueueDiagnostics, RequestedWalltime, SchedulerOptions, SchedulerSource,
-        SchedulerStatus, SubmissionBackend, SubmissionKind, SubmissionRecord, WalltimeProgress,
-        WatchOutcome, build_submission_record_with_backend, state_path_for_record,
-        write_submission_record,
+        PsSnapshot, QueueDiagnostics, ReplayArtifactPaths, ReplayEvent, ReplayEventKind,
+        ReplayFrame, ReplayReport, ReplayServiceFrame, RequestedWalltime, SchedulerOptions,
+        SchedulerSource, SchedulerStatus, SubmissionBackend, SubmissionKind, SubmissionRecord,
+        WalltimeProgress, WatchOutcome, build_submission_record_with_backend,
+        state_path_for_record, write_submission_record,
     };
 
     fn sample_snapshot() -> PsSnapshot {
@@ -1629,6 +1973,8 @@ mod tests {
                     original: "00:10:00".into(),
                     seconds: 600,
                 }),
+                slurm_array: None,
+                sweep: None,
                 config_snapshot_yaml: None,
                 cached_artifacts: Vec::new(),
             },
@@ -1667,6 +2013,10 @@ mod tests {
                     max_restarts_in_window: Some(3),
                     restart_failures_in_window: Some(1),
                     last_exit_code: None,
+                    started_at: None,
+                    finished_at: None,
+                    duration_seconds: None,
+                    assertions: None,
                     placement_mode: Some("primary".into()),
                     nodes: Some(1),
                     ntasks: Some(1),
@@ -1694,6 +2044,10 @@ mod tests {
                     max_restarts_in_window: None,
                     restart_failures_in_window: None,
                     last_exit_code: None,
+                    started_at: None,
+                    finished_at: None,
+                    duration_seconds: None,
+                    assertions: None,
                     placement_mode: None,
                     nodes: None,
                     ntasks: None,
@@ -1722,6 +2076,82 @@ mod tests {
             filter: None,
             search_buffer: String::new(),
             input_mode: InputMode::Normal,
+            replay: None,
+        }
+    }
+
+    fn sample_replay_report() -> ReplayReport {
+        let snapshot = sample_snapshot();
+        let events = vec![
+            ReplayEvent {
+                at_unix: 100,
+                attempt: None,
+                kind: ReplayEventKind::ServiceStart,
+                service: Some("api".into()),
+                exit_code: None,
+                detail: Some("started".into()),
+            },
+            ReplayEvent {
+                at_unix: 110,
+                attempt: None,
+                kind: ReplayEventKind::ServiceExit,
+                service: Some("api".into()),
+                exit_code: Some(7),
+                detail: Some("node=n1".into()),
+            },
+        ];
+        let frames = events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| ReplayFrame {
+                cursor_unix: event.at_unix,
+                event_index: index,
+                event: event.clone(),
+                services: vec![ReplayServiceFrame {
+                    service_name: "api".into(),
+                    status: if index == 0 {
+                        "running".into()
+                    } else {
+                        "failed".into()
+                    },
+                    started_at: Some(100),
+                    finished_at: (index == 1).then_some(110),
+                    last_exit_code: (index == 1).then_some(7),
+                    restart_count: Some(0),
+                }],
+                metrics_line: (index == 1).then_some("gpu: 1 util=90% mem=4/8 MiB".into()),
+                fidelity_note: Some("best-effort replay from existing tracked artifacts".into()),
+                snapshot: {
+                    let mut snapshot = snapshot.clone();
+                    snapshot.scheduler.state = if index == 0 {
+                        "RUNNING".into()
+                    } else {
+                        "FAILED".into()
+                    };
+                    snapshot.scheduler.failed = index == 1;
+                    snapshot.scheduler.terminal = index == 1;
+                    snapshot.scheduler.detail =
+                        Some("best-effort replay from existing tracked artifacts".into());
+                    snapshot.services[0].status = Some(if index == 0 {
+                        "running".into()
+                    } else {
+                        "failed".into()
+                    });
+                    snapshot.services[0].last_exit_code = (index == 1).then_some(7);
+                    snapshot
+                },
+            })
+            .collect::<Vec<_>>();
+        ReplayReport {
+            job_id: "12345".into(),
+            record: snapshot.record.clone(),
+            fidelity: "best-effort".into(),
+            notes: vec!["best-effort".into()],
+            artifacts: ReplayArtifactPaths::default(),
+            events,
+            frames,
+            timeline_start_unix: Some(100),
+            timeline_end_unix: Some(110),
         }
     }
 
@@ -1795,6 +2225,74 @@ mod tests {
         assert!(frame.contains("worker"));
         assert!(frame.contains("q quit"));
         assert!(frame.lines().count() <= 18);
+    }
+
+    #[test]
+    fn render_watch_frame_shows_replay_status_and_controls() {
+        let report = sample_replay_report();
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: report.frames[1].snapshot.clone(),
+                metrics_line: report.frames[1].metrics_line.clone(),
+                replay: Some(ReplayWatchStatus {
+                    cursor_unix: 110,
+                    speed: 10.0,
+                    paused: true,
+                    fidelity: "best-effort".into(),
+                }),
+                ..sample_watch_model()
+            },
+            110,
+            22,
+        );
+        let stripped = strip_ansi_for_snapshot(&frame);
+        assert!(stripped.contains("hpc-compose replay"));
+        assert!(stripped.contains("t=110 | speed=10x | PAUSED | best-effort"));
+        assert!(stripped.contains("gpu: 1 util=90% mem=4/8 MiB"));
+        assert!(stripped.contains("Space play/pause"));
+        assert!(stripped.contains("[/] event"));
+    }
+
+    #[test]
+    fn render_compact_watch_frame_shows_replay_header() {
+        let report = sample_replay_report();
+        let frame = render_watch_frame(
+            &WatchModel {
+                snapshot: report.frames[0].snapshot.clone(),
+                replay: Some(ReplayWatchStatus {
+                    cursor_unix: 100,
+                    speed: 1.0,
+                    paused: false,
+                    fidelity: "best-effort".into(),
+                }),
+                ..sample_watch_model()
+            },
+            60,
+            10,
+        );
+        let stripped = strip_ansi_for_snapshot(&frame);
+        assert!(stripped.contains("hpc-compose replay"));
+        assert!(stripped.contains("speed=1x"));
+        assert!(stripped.contains("Space play/pause"));
+    }
+
+    #[test]
+    fn replay_key_navigation_updates_playback_state() {
+        let report = sample_replay_report();
+        let state = ReplayPlaybackState::new(&report, 1.0);
+        let paused = apply_replay_key(state, &report, WatchKey::TogglePause);
+        assert!(paused.paused);
+        let next = apply_replay_key(paused, &report, WatchKey::NextEvent);
+        assert_eq!(next.frame_index, 1);
+        assert_eq!(next.cursor_unix, 110);
+        let faster = apply_replay_key(next, &report, WatchKey::SpeedUp);
+        assert_eq!(faster.speed, 10.0);
+        let slower = apply_replay_key(faster, &report, WatchKey::SpeedDown);
+        assert_eq!(slower.speed, 1.0);
+        let first = apply_replay_key(next, &report, WatchKey::ReplayStart);
+        assert_eq!(first.frame_index, 0);
+        let final_state = apply_replay_key(first, &report, WatchKey::End);
+        assert_eq!(final_state.frame_index, 1);
     }
 
     #[test]
@@ -1976,6 +2474,10 @@ mod tests {
             max_restarts_in_window: None,
             restart_failures_in_window: None,
             last_exit_code: None,
+            started_at: None,
+            finished_at: None,
+            duration_seconds: None,
+            assertions: None,
             placement_mode: None,
             nodes: None,
             ntasks: None,
@@ -2013,6 +2515,10 @@ mod tests {
             max_restarts_in_window: None,
             restart_failures_in_window: None,
             last_exit_code: None,
+            started_at: None,
+            finished_at: None,
+            duration_seconds: None,
+            assertions: None,
             placement_mode: None,
             nodes: None,
             ntasks: None,
@@ -2177,6 +2683,38 @@ mod tests {
         )
         .expect("run watch ui");
         assert!(matches!(outcome, WatchOutcome::Completed(_)));
+    }
+
+    #[test]
+    fn should_hold_on_exit_matches_policy_and_terminal_outcome() {
+        fn status(state: &str, failed: bool) -> SchedulerStatus {
+            SchedulerStatus {
+                state: state.into(),
+                source: SchedulerSource::Sacct,
+                terminal: true,
+                failed,
+                detail: None,
+            }
+        }
+
+        let completed = WatchOutcome::Completed(status("COMPLETED", false));
+        let failed = WatchOutcome::Failed(status("FAILED", true));
+        let unknown = WatchOutcome::Unknown(status("unknown", false));
+        let interrupted = WatchOutcome::Interrupted(status("RUNNING", false));
+
+        for outcome in [&completed, &failed, &unknown, &interrupted] {
+            assert!(!should_hold_on_exit(HoldOnExit::Never, outcome));
+        }
+
+        assert!(!should_hold_on_exit(HoldOnExit::Failure, &completed));
+        assert!(should_hold_on_exit(HoldOnExit::Failure, &failed));
+        assert!(!should_hold_on_exit(HoldOnExit::Failure, &unknown));
+        assert!(!should_hold_on_exit(HoldOnExit::Failure, &interrupted));
+
+        assert!(should_hold_on_exit(HoldOnExit::Always, &completed));
+        assert!(should_hold_on_exit(HoldOnExit::Always, &failed));
+        assert!(!should_hold_on_exit(HoldOnExit::Always, &unknown));
+        assert!(!should_hold_on_exit(HoldOnExit::Always, &interrupted));
     }
 
     #[test]

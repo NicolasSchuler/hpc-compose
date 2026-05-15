@@ -1,0 +1,22 @@
+name: dev-python-smoke
+
+x-slurm:
+  job_name: dev-python-smoke
+  time: "00:01:00"
+  mem: 2G
+  cpus_per_task: 1
+
+services:
+  app:
+    image: python:3.11-slim
+    working_dir: /workspace
+    volumes:
+      - ./app:/workspace
+    command:
+      - python
+      - -c
+      - "import main; print('smoke ok', flush=True)"
+    x-runtime:
+      prepare:
+        commands:
+          - pip install --no-cache-dir fastapi uvicorn openai

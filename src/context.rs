@@ -16,6 +16,7 @@ const DEFAULT_COMPOSE_FILE: &str = "compose.yaml";
 const DEFAULT_ENROOT_BIN: &str = "enroot";
 const DEFAULT_APPTAINER_BIN: &str = "apptainer";
 const DEFAULT_SINGULARITY_BIN: &str = "singularity";
+const DEFAULT_SALLOC_BIN: &str = "salloc";
 const DEFAULT_SBATCH_BIN: &str = "sbatch";
 const DEFAULT_SRUN_BIN: &str = "srun";
 const DEFAULT_SCONTROL_BIN: &str = "scontrol";
@@ -24,6 +25,8 @@ const DEFAULT_SQUEUE_BIN: &str = "squeue";
 const DEFAULT_SACCT_BIN: &str = "sacct";
 const DEFAULT_SSTAT_BIN: &str = "sstat";
 const DEFAULT_SCANCEL_BIN: &str = "scancel";
+const DEFAULT_SSHARE_BIN: &str = "sshare";
+const DEFAULT_SPRIO_BIN: &str = "sprio";
 
 /// Source that provided a resolved value.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +67,8 @@ pub struct BinaryOverrides {
     #[serde(default)]
     pub singularity: Option<String>,
     #[serde(default)]
+    pub salloc: Option<String>,
+    #[serde(default)]
     pub sbatch: Option<String>,
     #[serde(default)]
     pub srun: Option<String>,
@@ -79,6 +84,10 @@ pub struct BinaryOverrides {
     pub sstat: Option<String>,
     #[serde(default)]
     pub scancel: Option<String>,
+    #[serde(default)]
+    pub sshare: Option<String>,
+    #[serde(default)]
+    pub sprio: Option<String>,
 }
 
 /// Cache path defaults in settings.
@@ -213,6 +222,7 @@ pub struct ResolvedBinaries {
     pub enroot: ResolvedValue<String>,
     pub apptainer: ResolvedValue<String>,
     pub singularity: ResolvedValue<String>,
+    pub salloc: ResolvedValue<String>,
     pub sbatch: ResolvedValue<String>,
     pub srun: ResolvedValue<String>,
     pub scontrol: ResolvedValue<String>,
@@ -221,6 +231,8 @@ pub struct ResolvedBinaries {
     pub sacct: ResolvedValue<String>,
     pub sstat: ResolvedValue<String>,
     pub scancel: ResolvedValue<String>,
+    pub sshare: ResolvedValue<String>,
+    pub sprio: ResolvedValue<String>,
 }
 
 /// Effective context used to execute commands.
@@ -586,6 +598,12 @@ fn resolve_binaries(
             defaults.and_then(|d| d.singularity.clone()),
             DEFAULT_SINGULARITY_BIN,
         ),
+        salloc: resolve_binary(
+            cli.salloc.clone(),
+            profile.and_then(|p| p.salloc.clone()),
+            defaults.and_then(|d| d.salloc.clone()),
+            DEFAULT_SALLOC_BIN,
+        ),
         sbatch: resolve_binary(
             cli.sbatch.clone(),
             profile.and_then(|p| p.sbatch.clone()),
@@ -633,6 +651,18 @@ fn resolve_binaries(
             profile.and_then(|p| p.scancel.clone()),
             defaults.and_then(|d| d.scancel.clone()),
             DEFAULT_SCANCEL_BIN,
+        ),
+        sshare: resolve_binary(
+            cli.sshare.clone(),
+            profile.and_then(|p| p.sshare.clone()),
+            defaults.and_then(|d| d.sshare.clone()),
+            DEFAULT_SSHARE_BIN,
+        ),
+        sprio: resolve_binary(
+            cli.sprio.clone(),
+            profile.and_then(|p| p.sprio.clone()),
+            defaults.and_then(|d| d.sprio.clone()),
+            DEFAULT_SPRIO_BIN,
         ),
     }
 }
@@ -1089,6 +1119,8 @@ mod tests {
             .env
             .insert("MAP".into(), "defaults-map".into());
         settings.defaults.binaries.squeue = Some("/defaults/squeue".into());
+        settings.defaults.binaries.sshare = Some("/defaults/sshare".into());
+        settings.defaults.binaries.sprio = Some("/defaults/sprio".into());
         write_settings(&settings_path, &settings).expect("write settings");
 
         fs::write(
@@ -1107,6 +1139,8 @@ mod tests {
         .expect("resolve explicit settings");
         assert_eq!(resolved.compose_file.source, ValueSource::Defaults);
         assert_eq!(resolved.binaries.squeue.source, ValueSource::Defaults);
+        assert_eq!(resolved.binaries.sshare.value, "/defaults/sshare");
+        assert_eq!(resolved.binaries.sprio.value, "/defaults/sprio");
         assert_eq!(
             resolved
                 .interpolation_vars

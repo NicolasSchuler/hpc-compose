@@ -42,6 +42,7 @@ Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slur
 - service startup ordering and readiness gates inside that allocation
 - Slurm-native arrays, submit-time dependencies, and reusable resource profiles
 - Pyxis/Enroot, Apptainer, Singularity, or host runtime backends
+- finite spec smoke tests plus local `dev` and `tmux` workflows for single-host authoring
 - one-off `run --image ... -- <cmd>` jobs and direct `shell --image ...` sessions
 - tracked logs, state, metrics, artifacts, cache entries, and follow-up commands
 
@@ -75,6 +76,7 @@ Installer availability is not the same as full runtime support. Check the [Suppo
 - [Quickstart](docs/src/quickstart.md)
 - [Examples](docs/src/examples.md)
 - [Task Guide](docs/src/task-guide.md)
+- [Development Workflow](docs/src/development-workflow.md)
 - [Runtime Backends](docs/src/runtime-backends.md)
 - [Runbook](docs/src/runbook.md)
 - [Troubleshooting](docs/src/troubleshooting.md)
@@ -104,7 +106,7 @@ If you use `hpc-compose` in research, please cite the software. GitHub also expo
 @software{schuler_hpc_compose_2026,
   author = {Schuler, Nicolas},
   title = {hpc-compose},
-  version = {0.1.38},
+  version = {0.1.39},
   year = {2026},
   publisher = {Karlsruhe Institute of Technology (KIT)},
   url = {https://github.com/NicolasSchuler/hpc-compose}

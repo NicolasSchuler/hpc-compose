@@ -6,33 +6,34 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 
 - `spec`: parse, interpolate, and validate the supported Compose subset
 - `planner`: normalize the parsed spec into a deterministic plan
+- `lint`: run opinionated static checks over validated plans
 - `context`: resolve `.hpc-compose/settings.toml`, profiles, env files, interpolation variables, and binary overrides
 - `cluster`: generate and apply best-effort cluster capability profiles from `doctor cluster-report`
 - `preflight`: check login-node prerequisites and cluster policy issues
 - `prepare`: import base images and rebuild prepared runtime artifacts
 - `render`: generate the final `sbatch` script and service launch commands
-- `job`: track submissions, logs, metrics, status, and artifact export
+- `job`: track submissions, logs, metrics, replay, status, and artifact export
 - `tracked_paths`: centralize the `.hpc-compose/` layout used by render and job tracking
 - `cache`: persist cache manifests for imported and prepared images
 - `init`: expose the shipped example templates for `hpc-compose new` plus the legacy `init` alias
 - `schema` and `manpages`: expose the checked-in JSON Schema and generated section-1 manpage flow
-- `commands/spec`: binary-only handlers for `plan`, `validate`, `render`, `prepare`, `preflight`, `config`, and `inspect`
-- `commands/runtime`: binary-only handlers for `up`, `debug`, `run`, `status`, `ps`, `watch`, `stats`, `artifacts`, `logs`, `down`, `cancel`, and `clean`
+- `commands/spec`: binary-only handlers for `plan`, `validate`, `lint`, `render`, `prepare`, `preflight`, `config`, and `inspect`
+- `commands/runtime`: binary-only handlers for `up`, `debug`, `run`, `status`, `ps`, `watch`, `replay`, `stats`, `artifacts`, `logs`, `down`, `cancel`, and `clean`
 - `commands/cache`: binary-only handlers for cache inspection and pruning
 - `commands/init`: binary-only handlers for `new` / `init`, `setup`, `context`, and `completions`
-- `watch_ui`: terminal UI controller and renderer for `up` and `watch`
+- `watch_ui`: terminal UI controller and renderer for `up`, `watch`, and replay playback
 - `output`: binary-only text, JSON, CSV, and JSONL formatting helpers
 
 ## Execution flow
 
-1. `ComposeSpec::load` parses YAML, validates supported keys, interpolates variables, and applies semantic validation.
+1. `ComposeSpec::load` parses YAML, resolves authoring `extends`, validates supported keys, interpolates variables, and applies semantic validation.
 2. `planner::build_plan` resolves paths, command shapes, dependencies, and prepare blocks into a normalized plan.
 3. `prepare::build_runtime_plan` computes concrete cache artifact locations.
 4. `context` and optional cluster profiles provide resolved paths, binaries, env, and compatibility warnings.
 5. `preflight::run` checks cluster prerequisites before submission.
 6. `prepare::prepare_runtime_plan` imports or rebuilds artifacts when needed.
 7. `render::render_script` emits the batch script consumed by `sbatch`.
-8. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `ps`, `watch`, `stats`, `logs`, `cancel`, and artifact export.
+8. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `ps`, `watch`, `replay`, `stats`, `logs`, `cancel`, and artifact export. `job::replay` reconstructs a best-effort timeline from existing state, service-exit, metrics, and log artifacts while reusing the watch renderer for playback.
 9. `commands/*` turns CLI variants into library calls, and `output` formats the final presentation.
 
 ## Tracked Runtime Layout

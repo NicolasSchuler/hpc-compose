@@ -137,6 +137,267 @@ fn validate_and_render_commands_work() {
 }
 
 #[test]
+fn inspect_dependencies_outputs_text_dot_and_json() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_dir = tmpdir.path().join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache");
+    let image = tmpdir.path().join("image.sqsh");
+    fs::write(&image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: deps
+x-slurm:
+  cache_dir: {}
+services:
+  db:
+    image: {}
+    command: ["sleep", "1"]
+    readiness:
+      type: sleep
+      seconds: 1
+  api:
+    image: {}
+    command: ["echo", "api"]
+    depends_on:
+      db:
+        condition: service_healthy
+"#,
+            cache_dir.display(),
+            image.display(),
+            image.display()
+        ),
+    );
+
+    let text = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dependencies",
+        ],
+    );
+    assert_success(&text);
+    let text_out = stdout_text(&text);
+    assert!(text_out.contains("dependency graph:"));
+    assert!(text_out.contains("db -> api condition=service_healthy readiness=sleep"));
+
+    let dot = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dependencies",
+            "--dependencies-format",
+            "dot",
+        ],
+    );
+    assert_success(&dot);
+    let dot_out = stdout_text(&dot);
+    assert!(dot_out.contains("digraph hpc_compose_dependencies"));
+    assert!(dot_out.contains("\"db\" -> \"api\""));
+
+    let json = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dependencies",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&json);
+    let value: Value = serde_json::from_str(&stdout_text(&json)).expect("deps json");
+    assert_eq!(value["edges"][0]["from"], Value::from("db"));
+    assert_eq!(value["edges"][0]["to"], Value::from("api"));
+
+    let invalid = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dependencies",
+            "--dependencies-format",
+            "dot",
+            "--format",
+            "json",
+        ],
+    );
+    assert_failure(&invalid);
+    assert!(stderr_text(&invalid).contains("cannot be combined"));
+}
+
+#[test]
+fn validate_rejects_unsupported_spec_version_with_migration_hint() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+version: "2"
+services:
+  app:
+    image: redis:7
+"#,
+    );
+
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    let stderr = stderr_text(&validate);
+    assert!(stderr.contains("unsupported hpc-compose spec version '2'"));
+    assert!(stderr.contains("steps was renamed to services in v2"));
+    assert!(stderr.contains("docs/migration-v2.md"));
+}
+
+#[test]
+fn extends_is_visible_to_validate_config_plan_and_render() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::write(
+        tmpdir.path().join("base.yaml"),
+        r#"
+name: base
+x-slurm:
+  job_name: from-base
+services:
+  app:
+    image: redis:7
+    command: echo base
+    volumes:
+      - ./base-data:/data
+"#,
+    )
+    .expect("base");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+extends: base.yaml
+name: child
+services:
+  app:
+    command: echo child
+    volumes:
+      - ./child-data:/data
+"#,
+    );
+
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&validate);
+
+    let config = run_cli(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&config);
+    let config_value: Value = serde_json::from_str(&stdout_text(&config)).expect("config json");
+    assert_eq!(config_value["services"]["app"]["image"], "redis:7");
+    assert_eq!(config_value["services"]["app"]["command"], "echo child");
+    let volumes = config_value["services"]["app"]["volumes"]
+        .as_array()
+        .expect("volumes");
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0], "./child-data:/data");
+    assert!(stdout_text(&config).find("extends").is_none());
+
+    let plan = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&plan);
+    let plan_value: Value = serde_json::from_str(&stdout_text(&plan)).expect("plan json");
+    assert_eq!(plan_value["runtime_plan"]["name"], "from-base");
+
+    let render = run_cli(
+        tmpdir.path(),
+        &["render", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&render);
+    assert!(stdout_text(&render).contains("echo child"));
+}
+
+#[test]
+fn lint_reports_opinionated_findings_and_allow_warnings_controls_exit() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join("shared")).expect("shared");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+x-slurm:
+  mem: 256M
+  cpus_per_task: 2
+services:
+  app:
+    image: redis:7
+    depends_on:
+      - redis
+  redis:
+    image: redis:7
+  sidecar:
+    image: redis:7
+    volumes:
+      - ./shared:/shared
+    x-slurm:
+      failure_policy:
+        mode: ignore
+"#,
+    );
+
+    let lint = run_cli(
+        tmpdir.path(),
+        &["lint", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&lint);
+    let stdout = stdout_text(&lint);
+    assert!(stdout.contains("HPC001"));
+    assert!(stdout.contains("HPC002"));
+    assert!(stdout.contains("HPC003"));
+    assert!(stderr_text(&lint).contains("lint found"));
+
+    let lint_json = run_cli(
+        tmpdir.path(),
+        &[
+            "lint",
+            "-f",
+            compose.to_str().expect("path"),
+            "--allow-warnings",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&lint_json);
+    let payload: Value = serde_json::from_str(&stdout_text(&lint_json)).expect("lint json");
+    assert_eq!(payload["passed"], Value::from(true));
+    assert_eq!(payload["error_count"], Value::from(0));
+    assert!(payload["warning_count"].as_u64().unwrap_or_default() >= 3);
+}
+
+#[test]
 fn render_emits_array_directive_and_forwards_array_environment() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");
@@ -702,6 +963,14 @@ services:
         context: container
         script: |
           echo "job=${{SLURM_JOB_ID}}"
+      hooks:
+        - on: restart
+          script: |
+            echo "restart ${{HPC_COMPOSE_SERVICE_NAME}}"
+        - on: window_exhausted
+          context: host
+          script: |
+            echo "window exhausted"
 "#,
             cache_root.path().display()
         ),
@@ -735,6 +1004,10 @@ services:
             .unwrap_or_default()
             .contains("${SLURM_JOB_ID}")
     );
+    assert_eq!(
+        config_value["services"]["trainer"]["x-slurm"]["hooks"][0]["on"],
+        Value::from("restart")
+    );
 
     let inspect = run_cli(
         tmpdir.path(),
@@ -752,6 +1025,10 @@ services:
         inspect_value["ordered_services"][0]["slurm"]["epilogue"]["context"],
         Value::from("container")
     );
+    assert_eq!(
+        inspect_value["ordered_services"][0]["slurm"]["hooks"][1]["on"],
+        Value::from("window_exhausted")
+    );
 
     let render = run_cli(
         tmpdir.path(),
@@ -767,7 +1044,14 @@ services:
     let render_value: Value = serde_json::from_str(&stdout_text(&render)).expect("render json");
     let script = render_value["script"].as_str().unwrap_or_default();
     assert!(script.contains("trainer.host-prologue.sh"));
+    assert!(script.contains("trainer.host-event-restart-0.sh"));
+    assert!(script.contains("trainer.host-event-window_exhausted-1.sh"));
     assert!(script.contains("trainer.container-wrapper.sh"));
+
+    let schema = run_cli(tmpdir.path(), &["schema"]);
+    assert_success(&schema);
+    assert!(stdout_text(&schema).contains("\"serviceEventHook\""));
+    assert!(stdout_text(&schema).contains("\"window_exhausted\""));
 }
 
 #[test]
@@ -961,17 +1245,34 @@ fn schema_command_emits_checked_in_schema() {
     let value: Value = serde_json::from_str(&stdout).expect("schema json");
     assert_eq!(
         value["$schema"],
-        Value::from("https://json-schema.org/draft/2020-12/schema")
+        Value::from("http://json-schema.org/draft-07/schema")
     );
     assert_eq!(value["additionalProperties"], Value::from(false));
+    assert_eq!(
+        value["properties"]["version"]["oneOf"],
+        serde_json::json!([
+            {
+                "type": "string",
+                "const": "1"
+            },
+            {
+                "type": "integer",
+                "const": 1
+            }
+        ])
+    );
+    assert!(value["properties"]["extends"].is_object());
     assert!(value["properties"]["services"].is_object());
     assert!(value["properties"]["steps"].is_object());
     assert!(value["properties"]["modules"].is_object());
     assert!(value["properties"]["x-slurm"].is_object());
-    assert!(value["$defs"]["service"]["properties"]["script"].is_object());
-    assert!(value["$defs"]["service"]["properties"]["modules"].is_object());
+    assert!(value["definitions"]["rootExtends"].is_object());
+    assert!(value["definitions"]["serviceExtends"].is_object());
+    assert!(value["definitions"]["service"]["properties"]["extends"].is_object());
+    assert!(value["definitions"]["service"]["properties"]["script"].is_object());
+    assert!(value["definitions"]["service"]["properties"]["modules"].is_object());
     assert_eq!(
-        value["$defs"]["dependencyCondition"]["properties"]["condition"]["enum"],
+        value["definitions"]["dependencyCondition"]["properties"]["condition"]["enum"],
         serde_json::json!([
             "service_started",
             "service_healthy",
@@ -979,15 +1280,15 @@ fn schema_command_emits_checked_in_schema() {
         ])
     );
     assert_eq!(
-        value["$defs"]["mpi"]["properties"]["type"]["pattern"],
+        value["definitions"]["mpi"]["properties"]["type"]["pattern"],
         Value::from("^[A-Za-z0-9_][A-Za-z0-9_.+-]*$")
     );
     assert_eq!(
-        value["$defs"]["mpi"]["properties"]["launcher"]["enum"],
+        value["definitions"]["mpi"]["properties"]["launcher"]["enum"],
         serde_json::json!(["srun"])
     );
     assert_eq!(
-        value["$defs"]["mpi"]["properties"]["implementation"]["enum"][0],
+        value["definitions"]["mpi"]["properties"]["implementation"]["enum"][0],
         Value::from("openmpi")
     );
 

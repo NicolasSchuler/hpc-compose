@@ -9,16 +9,21 @@ These capabilities are modeled, validated, and intentionally supported by the pl
 | Area | Support |
 | --- | --- |
 | Allocation model | One Slurm allocation per application |
-| Submission flow | `new`, `plan`, `validate`, `config`, `inspect`, `preflight`, `prepare`, `render`, `up`, `run`, `debug` |
-| Tracked job workflow | `status`, `ps`, `watch`, `stats`, `logs`, `down`, `cancel`, `artifacts`, `clean`, cache inspection/pruning |
+| Submission flow | `new`, `plan`, `validate`, `config`, `inspect`, `preflight`, `prepare`, `render`, `up`, `when`, `alloc`, `run`, `debug` |
+| Tracked job workflow | `status`, `ps`, `watch`, `stats`, `score`, `logs`, `down`, `cancel`, `artifacts`, `clean`, cache inspection/pruning |
 | Top-level Slurm fields | `job_name`, `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, GPU/CPU binding fields, `constraint`, `output`, `error`, `chdir` |
 | Service step fields | `nodes`, `placement`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, GPU/CPU binding fields, `mpi` |
 | Multi-node model | Single-node jobs, full-allocation distributed steps, and explicit node-index partitioning within one allocation |
 | Runtime orchestration | `depends_on`, readiness checks, one-shot completion dependencies, service failure policies, primary-node helper placement, explicit co-location through `placement.share_with` |
-| Service hooks | Per-service `prologue` and `epilogue` shell hooks on the host supervisor or inside the container |
+| Service hooks | Per-service `prologue` and `epilogue` lifecycle hooks, plus host-side `restart` and `window_exhausted` event hooks |
 | Runtime workflow | Pyxis/Enroot `.sqsh`, Apptainer/Singularity `.sif`, host runtime commands, `x-runtime.prepare`, shared cache handling |
 | Scratch and staging | `x-slurm.scratch`, `stage_in`, `stage_out`, per-service scratch opt-out, raw `#BB`/`#DW` burst-buffer directives |
 | Job tracking | Scheduler state via `squeue`/`sacct`, step stats via `sstat`, tracked logs, runtime state, metrics, artifacts, resume metadata |
+| Advisory cluster weather | `weather` summarizes current node and queue conditions from read-only Slurm probes without reserving resources or changing submission behavior |
+| Conditional submission | `when` actively monitors typed conditions, then submits one normal `hpc-compose` allocation |
+| Canary right-sizing | `germinate` submits one short canary, writes `latest-canary.json`, and recommends resource settings without rewriting the spec |
+| Hyperparameter sweeps | `sweep submit` expands one embedded sweep into many independent single-allocation jobs, then `sweep status` aggregates their tracked state |
+| Cross-job rendezvous | Provider/client discovery through shared-cache JSON records under one cluster-visible cache directory |
 
 ## Raw pass-through
 
@@ -42,10 +47,12 @@ These capabilities are intentionally outside the product seam.
 | `sacctmgr` account administration | Out of scope |
 | Reservation creation or lifecycle management | Out of scope |
 | Federation / multi-cluster control | Out of scope |
+| Cross-cluster service discovery | Out of scope; rendezvous is same-cluster shared-storage coordination only |
 | Generic `scontrol` mutation | Out of scope |
-| Broad cluster inspection tools such as a full `sinfo` / `sprio` / `sreport` frontend | Out of scope |
+| Broad cluster inspection tools such as a full `sinfo` / `sprio` / `sreport` frontend | Out of scope; `weather` is limited to a compact advisory snapshot |
+| Background submit daemons or reservations | Out of scope; `when` is a foreground advisory monitor and does not reserve resources |
 | Dynamic scheduling or bin packing across nodes | Not supported; use explicit `x-slurm.placement` selectors |
-| Heterogeneous jobs and job arrays as first-class workflow concepts | Not supported in v1 |
+| Heterogeneous jobs and job arrays as first-class workflow concepts | Not supported in v1; sweeps deliberately submit many normal allocations instead of Slurm arrays |
 | Compose `build`, `ports`, custom networks, `restart`, `deploy` | Not supported |
 
 ## Non-goals

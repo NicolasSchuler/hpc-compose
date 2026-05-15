@@ -3,10 +3,15 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_norway::{Mapping, Value};
 
+use crate::spec_error::SpecError;
+
+const SUPPORTED_SPEC_VERSION: &str = "1";
 const ROOT_ALLOWED_KEYS: &[&str] = &[
-    "name", "modules", "runtime", "services", "steps", "version", "x-env", "x-slurm",
+    "extends", "name", "modules", "runtime", "services", "steps", "sweep", "version", "x-env",
+    "x-slurm",
 ];
 const SERVICE_ALLOWED_KEYS: &[&str] = &[
+    "extends",
     "image",
     "command",
     "entrypoint",
@@ -18,6 +23,7 @@ const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "depends_on",
     "readiness",
     "healthcheck",
+    "assert",
     "x-env",
     "x-slurm",
     "x-runtime",
@@ -48,6 +54,30 @@ pub(super) fn validate_sbatch_safe_strings<'a>(
 ) -> Result<()> {
     for (index, value) in values.into_iter().enumerate() {
         validate_sbatch_safe_string(Some(value), &format!("{field}[{index}]"))?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_service_assert_artifact_pattern(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if value.contains('\n') || value.contains('\r') {
+        bail!("{field} must not contain line breaks");
+    }
+    if value.contains('\0') {
+        bail!("{field} must not contain null bytes");
+    }
+    let normalized = if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("/hpc-compose/job/{value}")
+    };
+    if normalized != "/hpc-compose/job" && !normalized.starts_with("/hpc-compose/job/") {
+        bail!("{field} must be relative or rooted under /hpc-compose/job");
+    }
+    if normalized.split('/').any(|part| part == "..") {
+        bail!("{field} must not contain '..' path components");
     }
     Ok(())
 }
@@ -370,7 +400,9 @@ pub(super) fn validate_root(value: &Value) -> Result<()> {
         bail!("top-level YAML document must be a mapping");
     };
     validate_mapping_keys("root", root, ROOT_ALLOWED_KEYS)?;
+    validate_spec_version(root)?;
     validate_modules_alias_conflict("root", root)?;
+    validate_sweep_authoring_shape(root)?;
     let services_key = Value::String("services".into());
     let steps_key = Value::String("steps".into());
     let services = root.get(&services_key);
@@ -400,6 +432,83 @@ pub(super) fn validate_root(value: &Value) -> Result<()> {
         validate_script_conflicts(service_name, service_mapping)?;
     }
     Ok(())
+}
+
+fn validate_sweep_authoring_shape(root: &Mapping) -> Result<()> {
+    let Some(sweep) = root.get(Value::String("sweep".into())) else {
+        return Ok(());
+    };
+    let Some(sweep) = sweep.as_mapping() else {
+        bail!("top-level 'sweep' must be a mapping");
+    };
+    if sweep.contains_key(Value::String("spec".into())) {
+        bail!("sweep.spec is not supported in v1; embed sweep in the compose file");
+    }
+    Ok(())
+}
+
+fn validate_spec_version(root: &Mapping) -> Result<()> {
+    let version_key = Value::String("version".into());
+    let Some(value) = root.get(&version_key) else {
+        return Ok(());
+    };
+    let version = spec_version_label(value)?;
+    if version == SUPPORTED_SPEC_VERSION {
+        return Ok(());
+    }
+    Err(SpecError::UnsupportedSpecVersion {
+        version: version.clone(),
+        supported: SUPPORTED_SPEC_VERSION,
+        help_text: migration_hint_for_version(&version).to_string(),
+    }
+    .into())
+}
+
+fn spec_version_label(value: &Value) -> Result<String> {
+    match value {
+        Value::String(version) => Ok(version.clone()),
+        Value::Number(version) => {
+            if version.as_u64() == Some(1) {
+                Ok(SUPPORTED_SPEC_VERSION.to_string())
+            } else {
+                Ok(version.to_string())
+            }
+        }
+        other => Err(SpecError::InvalidSpecVersion {
+            got: value_kind(other).to_string(),
+        }
+        .into()),
+    }
+}
+
+fn migration_hint_for_version(version: &str) -> &'static str {
+    if version == "2" {
+        return "steps was renamed to services in v2 - see docs/migration-v2.md";
+    }
+    if looks_like_docker_compose_version(version) {
+        return "Top-level `version` is the hpc-compose schema version, not a Docker Compose version. Use `version: \"1\"` or omit `version` after migrating; see docs/docker-compose-migration.md.";
+    }
+    "Use `version: \"1\"` or omit `version` for v1 specs. Upgrade hpc-compose if this file targets a newer schema."
+}
+
+fn looks_like_docker_compose_version(version: &str) -> bool {
+    matches!(
+        version,
+        "3" | "3.0" | "3.1" | "3.2" | "3.3" | "3.4" | "3.5" | "3.6" | "3.7" | "3.8" | "3.9"
+    ) || version.starts_with("2.")
+        || version.starts_with("3.")
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Sequence(_) => "sequence",
+        Value::Mapping(_) => "mapping",
+        Value::Tagged(_) => "tagged value",
+    }
 }
 
 fn validate_modules_alias_conflict(scope: &str, mapping: &Mapping) -> Result<()> {

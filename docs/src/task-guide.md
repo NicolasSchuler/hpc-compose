@@ -5,6 +5,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 ## First run
 
 - Read [Quickstart](quickstart.md).
+- Run `hpc-compose evolve --output compose.yaml` if you want a guided progression from `minimal` through `multi-node-placement`.
 - Run `hpc-compose new --list-templates` if you want to inspect the built-in starter templates before choosing one.
 - Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --output compose.yaml`.
 - Before running on a cluster, configure a shared cache with `hpc-compose setup --cache-dir '<shared-cache-dir>'` or explicit `x-slurm.cache_dir`. If you copy a repository example that uses `CACHE_DIR`, override it for your cluster before running.
@@ -79,7 +80,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 ## Automation and scripting with JSON output
 
-- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `plan`, `validate`, `render`, `prepare`, `preflight`, `config`, `inspect`, `debug`, `status`, `ps`, `stats`, `artifacts`, `down`, `cancel`, `setup`, `cache`, `clean`, and `context`. For `up`, `--format json` requires `--detach` or `--dry-run`.
+- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `plan`, `validate`, `render`, `prepare`, `preflight`, `config`, `inspect`, `debug`, `status`, `ps`, `stats`, `score`, `artifacts`, `down`, `cancel`, `setup`, `cache`, `clean`, and `context`. For `up`, `--format json` requires `--detach` or `--dry-run`.
 - Include `context --format json` when automation needs resolved compose path, binaries, referenced interpolation vars, and runtime path roots.
 - Use `hpc-compose stats --format jsonl` or `--format csv` when downstream tooling wants row-oriented metrics.
 - Treat `--json` as a compatibility alias on older machine-readable commands; new automation should prefer `--format json`. Streaming commands such as `logs --follow`, `watch`, and `completions` keep their native text or script output.

@@ -4,8 +4,12 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const METADATA_DIR_NAME: &str = ".hpc-compose";
 pub(crate) const JOBS_DIR_NAME: &str = "jobs";
+pub(crate) const SWEEPS_DIR_NAME: &str = "sweeps";
 pub(crate) const LATEST_RECORD_FILE_NAME: &str = "latest.json";
 pub(crate) const RUN_LATEST_RECORD_FILE_NAME: &str = "latest-run.json";
+pub(crate) const CANARY_LATEST_RECORD_FILE_NAME: &str = "latest-canary.json";
+pub(crate) const SWEEP_LATEST_RECORD_FILE_NAME: &str = "latest.json";
+pub(crate) const SWEEP_MANIFEST_FILE_NAME: &str = "sweep.json";
 pub(crate) const ATTEMPTS_DIR_NAME: &str = "attempts";
 pub(crate) const LOGS_DIR_NAME: &str = "logs";
 pub(crate) const METRICS_DIR_NAME: &str = "metrics";
@@ -33,6 +37,26 @@ pub(crate) fn jobs_dir_for(spec_path: &Path) -> PathBuf {
 }
 
 #[must_use]
+pub(crate) fn sweeps_dir_for(spec_path: &Path) -> PathBuf {
+    metadata_root_for(spec_path).join(SWEEPS_DIR_NAME)
+}
+
+#[must_use]
+pub(crate) fn sweep_root_for(spec_path: &Path, sweep_id: &str) -> PathBuf {
+    sweeps_dir_for(spec_path).join(sweep_id)
+}
+
+#[must_use]
+pub(crate) fn sweep_manifest_path_for(spec_path: &Path, sweep_id: &str) -> PathBuf {
+    sweep_root_for(spec_path, sweep_id).join(SWEEP_MANIFEST_FILE_NAME)
+}
+
+#[must_use]
+pub(crate) fn latest_sweep_manifest_path_for(spec_path: &Path) -> PathBuf {
+    sweeps_dir_for(spec_path).join(SWEEP_LATEST_RECORD_FILE_NAME)
+}
+
+#[must_use]
 pub(crate) fn latest_record_path_for(spec_path: &Path) -> PathBuf {
     metadata_root_for(spec_path).join(LATEST_RECORD_FILE_NAME)
 }
@@ -40,6 +64,11 @@ pub(crate) fn latest_record_path_for(spec_path: &Path) -> PathBuf {
 #[must_use]
 pub(crate) fn latest_run_record_path_for(spec_path: &Path) -> PathBuf {
     metadata_root_for(spec_path).join(RUN_LATEST_RECORD_FILE_NAME)
+}
+
+#[must_use]
+pub(crate) fn latest_canary_record_path_for(spec_path: &Path) -> PathBuf {
+    metadata_root_for(spec_path).join(CANARY_LATEST_RECORD_FILE_NAME)
 }
 
 #[must_use]
@@ -138,6 +167,10 @@ mod tests {
         assert_eq!(
             latest_run_record_path_for(spec_path),
             Path::new("/tmp/project/.hpc-compose/latest-run.json")
+        );
+        assert_eq!(
+            latest_canary_record_path_for(spec_path),
+            Path::new("/tmp/project/.hpc-compose/latest-canary.json")
         );
     }
 

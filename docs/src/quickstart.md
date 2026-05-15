@@ -38,6 +38,12 @@ hpc-compose new \
   --output compose.yaml
 ```
 
+If you want a guided learning path instead of a single starter template, run the Spec Metamorphosis tutorial:
+
+```bash
+hpc-compose evolve --output compose.yaml
+```
+
 Then inspect the static plan:
 
 ```bash
@@ -86,6 +92,8 @@ hpc-compose plan -f examples/minimal-batch.yaml
 
 The [Examples](examples.md) page is the single selection guide for beginner, LLM, training, distributed, and pipeline workflows.
 
+Use [Spec Metamorphosis](evolve.md) when you want to learn those concepts progressively in one evolving valid spec.
+
 ## 4. Pick And Test A Cache Directory
 
 `cache_dir` is optional in the spec, but real clusters usually need a site-specific shared path because image preparation happens before the job starts and compute nodes must later see those artifacts.
@@ -132,7 +140,7 @@ When you move to a supported Linux submission host, the normal run is:
 hpc-compose up -f compose.yaml
 ```
 
-`up` runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to line-oriented output. The watch UI holds the final screen on failures by default; use `--hold-on-exit never|failure|always` to tune that behavior. Use `hpc-compose up --detach -f compose.yaml` when you want submit-and-return behavior.
+`up` runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to line-oriented output. Add `--watch-queue` when you want line-oriented queue polling until the Slurm job reaches `RUNNING` before the normal watch view opens; `--queue-warn-after <DURATION>` controls the one-time long-pending warning. The watch UI holds the final screen on failures by default; use `--hold-on-exit never|failure|always` to tune that behavior. Use `hpc-compose up --detach -f compose.yaml` when you want submit-and-return behavior.
 
 Success looks like:
 

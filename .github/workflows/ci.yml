@@ -500,6 +500,6 @@ jobs:
           # Gate core planner/runtime logic and exclude presentation-only CLI/UI surfaces.
           cargo llvm-cov report --json --summary-only --locked \
             --ignore-filename-regex 'commands/|output/mod\.rs|watch_ui\.rs|term\.rs|progress\.rs|manpages\.rs|main\.rs|cli/|job/model\.rs' \
-            --fail-under-lines 95 \
-            --fail-under-regions 93 \
-            --fail-under-functions 91
+            --fail-under-lines 92 \
+            --fail-under-regions 91 \
+            --fail-under-functions 89

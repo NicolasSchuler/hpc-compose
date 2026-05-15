@@ -2,10 +2,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use hpc_compose::cli::build_cli_command;
+use hpc_compose::evolve;
 use serde_json::Value;
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn build_cli_command_for_test() -> clap::Command {
+    std::thread::Builder::new()
+        .name("build-cli-command".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(build_cli_command)
+        .expect("spawn CLI command builder")
+        .join()
+        .expect("CLI command builder should not panic")
 }
 
 fn example_yaml_files() -> Vec<String> {
@@ -77,7 +88,11 @@ fn cli_reference_mentions_every_public_command_path() {
     let cli_reference =
         fs::read_to_string(repo_root().join("docs/src/cli-reference.md")).expect("cli reference");
     let mut command_paths = Vec::new();
-    collect_public_command_paths(&build_cli_command(), Vec::new(), &mut command_paths);
+    collect_public_command_paths(
+        &build_cli_command_for_test(),
+        Vec::new(),
+        &mut command_paths,
+    );
     command_paths.sort();
     command_paths.dedup();
 
@@ -97,7 +112,7 @@ fn cli_reference_mentions_every_public_command_path() {
 fn cli_reference_mentions_every_public_global_flag() {
     let cli_reference =
         fs::read_to_string(repo_root().join("docs/src/cli-reference.md")).expect("cli reference");
-    for flag in collect_global_long_flags(&build_cli_command()) {
+    for flag in collect_global_long_flags(&build_cli_command_for_test()) {
         assert!(
             cli_reference.contains(&format!("`{flag}"))
                 || cli_reference.contains(&format!("`{flag} ")),
@@ -117,6 +132,7 @@ fn cli_reference_documents_accessibility_and_automation_flags() {
         "`--watch-mode auto|tui|line`",
         "`--no-tui`",
         "Accessible and Automation-Friendly Output",
+        "hpc-compose replay -f compose.yaml --no-tui",
         "hpc-compose logs -f compose.yaml --service app --follow",
         "hpc-compose status -f compose.yaml --format json",
     ] {
@@ -124,6 +140,37 @@ fn cli_reference_documents_accessibility_and_automation_flags() {
             cli_reference.contains(expected),
             "docs/src/cli-reference.md should mention CLI accessibility/automation detail '{expected}'"
         );
+    }
+}
+
+#[test]
+fn docs_mention_every_shipped_evolve_lesson_and_step() {
+    let mut docs = String::new();
+    for path in [
+        "docs/src/SUMMARY.md",
+        "docs/src/evolve.md",
+        "docs/src/quickstart.md",
+        "docs/src/examples.md",
+        "docs/src/task-guide.md",
+        "docs/src/cli-reference.md",
+    ] {
+        docs.push_str(&fs::read_to_string(repo_root().join(path)).expect("read evolve docs"));
+        docs.push('\n');
+    }
+
+    for lesson in evolve::lessons() {
+        assert!(
+            docs.contains(lesson.id()),
+            "docs should mention evolve lesson id '{}'",
+            lesson.id()
+        );
+        for step in lesson.steps() {
+            assert!(
+                docs.contains(step.id()),
+                "docs should mention evolve step id '{}'",
+                step.id()
+            );
+        }
     }
 }
 
@@ -214,6 +261,10 @@ fn runtime_observability_documents_watch_ui_controls_and_line_mode() {
         "--hold-on-exit never|failure|always",
         "--watch-mode line",
         "--no-tui",
+        "best-effort",
+        "service-exits",
+        "metrics",
+        "speed",
         "screen reader",
     ] {
         assert!(

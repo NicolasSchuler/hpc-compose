@@ -2,10 +2,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use hpc_compose::cli::OutputFormat;
+use hpc_compose::cli::{DependencyOutputFormat, OutputFormat};
 use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 use hpc_compose::context::{ResolvedContext, ResolvedValue, ValueSource};
-use hpc_compose::job::{jobs_dir_for, metadata_root_for};
+use hpc_compose::job::{
+    SchedulerOptions, StatsOptions, build_rightsize_report, jobs_dir_for, load_submission_record,
+    metadata_root_for,
+};
+use hpc_compose::lint::{LintFinding, LintLevel};
 use hpc_compose::planner::ImageSource;
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{PrepareOptions, RuntimePlan, build_runtime_plan, prepare_runtime_plan};
@@ -68,6 +72,108 @@ pub(crate) fn validate(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct LintOutput {
+    passed: bool,
+    compose_file: PathBuf,
+    warning_count: usize,
+    error_count: usize,
+    findings: Vec<LintFinding>,
+}
+
+pub(crate) fn lint(
+    context: ResolvedContext,
+    strict_env: bool,
+    allow_warnings: bool,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let (plan, runtime_plan) =
+        output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    if strict_env {
+        let missing =
+            missing_defaulted_variables(&context.compose_file.value, &context.interpolation_vars)?;
+        if !missing.is_empty() {
+            bail!(
+                "strict env validation failed; missing variables consumed default fallbacks: {}",
+                missing.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+    let findings = hpc_compose::lint::lint_plan(&plan, &runtime_plan, cluster_profile.as_ref());
+    let warning_count = findings
+        .iter()
+        .filter(|finding| finding.level == LintLevel::Warning)
+        .count();
+    let error_count = findings
+        .iter()
+        .filter(|finding| finding.level == LintLevel::Error)
+        .count();
+    let passed = error_count == 0 && (allow_warnings || warning_count == 0);
+
+    match output_common::resolve_output_format(format, false) {
+        OutputFormat::Text => print_lint_findings(&findings, passed),
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&LintOutput {
+                    passed,
+                    compose_file: plan.spec_path,
+                    warning_count,
+                    error_count,
+                    findings,
+                })
+                .context("failed to serialize lint output")?
+            );
+        }
+    }
+
+    if !passed {
+        bail!(
+            "lint found {warning_count} warning(s) and {error_count} error(s); pass --allow-warnings to allow warnings"
+        );
+    }
+    Ok(())
+}
+
+fn print_lint_findings(findings: &[LintFinding], passed: bool) {
+    if findings.is_empty() {
+        println!("{}", term::styled_success("spec passed lint"));
+        return;
+    }
+    for finding in findings {
+        let level = match finding.level {
+            LintLevel::Warning => term::styled_warning("WARN"),
+            LintLevel::Error => term::styled_error("ERROR"),
+        };
+        if let Some(service) = finding.service.as_deref() {
+            println!(
+                "{} {} service={}: {}",
+                level, finding.code, service, finding.message
+            );
+        } else {
+            println!("{} {}: {}", level, finding.code, finding.message);
+        }
+        if let Some(field) = finding.field.as_deref() {
+            println!("  field: {field}");
+        }
+        if let Some(recommendation) = finding.recommendation.as_deref() {
+            println!("  recommendation: {recommendation}");
+        }
+    }
+    if passed {
+        println!(
+            "{}",
+            term::styled_success("lint passed with allowed warnings")
+        );
+    }
 }
 
 pub(crate) fn render(
@@ -431,10 +537,15 @@ pub(crate) fn preflight(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn inspect(
     context: ResolvedContext,
     verbose: bool,
     tree: bool,
+    rightsize: bool,
+    dependencies: bool,
+    dependencies_format: DependencyOutputFormat,
+    job_id: Option<String>,
     format: Option<OutputFormat>,
     json: bool,
 ) -> Result<()> {
@@ -445,6 +556,72 @@ pub(crate) fn inspect(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
+    if rightsize {
+        let record = load_submission_record(&context.compose_file.value, job_id.as_deref())
+            .with_context(|| {
+                if let Some(job_id) = job_id.as_deref() {
+                    format!(
+                        "inspect --rightsize requires tracked submission metadata for job {job_id}; run hpc-compose up --detach -f {} first",
+                        context.compose_file.value.display()
+                    )
+                } else {
+                    format!(
+                        "inspect --rightsize requires tracked submission metadata; run hpc-compose up --detach -f {} first",
+                        context.compose_file.value.display()
+                    )
+                }
+            })?;
+        let report = build_rightsize_report(
+            &runtime_plan,
+            &record,
+            &StatsOptions {
+                scheduler: SchedulerOptions {
+                    squeue_bin: context.binaries.squeue.value.clone(),
+                    sacct_bin: context.binaries.sacct.value.clone(),
+                },
+                sstat_bin: context.binaries.sstat.value.clone(),
+                accounting: false,
+            },
+        )?;
+        match output_common::resolve_output_format(format, json) {
+            OutputFormat::Text => output_spec::print_rightsize_report(&report)
+                .context("failed to write rightsize output")?,
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .context("failed to serialize rightsize output")?
+                );
+            }
+        }
+        return Ok(());
+    }
+    if dependencies {
+        let output_format = output_common::resolve_output_format(format, json);
+        if output_format == OutputFormat::Json && dependencies_format == DependencyOutputFormat::Dot
+        {
+            bail!(
+                "inspect --dependencies --format json cannot be combined with --dependencies-format dot"
+            );
+        }
+        let graph = crate::output::build_dependency_graph(&plan, &runtime_plan);
+        match output_format {
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&graph)
+                        .context("failed to serialize dependency graph output")?
+                );
+            }
+            OutputFormat::Text => match dependencies_format {
+                DependencyOutputFormat::Text => crate::output::print_dependency_graph_text(&graph)
+                    .context("failed to write dependency graph output")?,
+                DependencyOutputFormat::Dot => crate::output::print_dependency_graph_dot(&graph)
+                    .context("failed to write dependency graph DOT output")?,
+            },
+        }
+        return Ok(());
+    }
     match output_common::resolve_output_format(format, json) {
         OutputFormat::Text => {
             if tree {
@@ -751,7 +928,7 @@ pub(crate) fn context(
                 term::styled_label(
                     "binaries",
                     &format!(
-                        "enroot={} ({:?}) sbatch={} ({:?}) srun={} ({:?}) squeue={} ({:?}) sacct={} ({:?}) sstat={} ({:?}) scancel={} ({:?})",
+                        "enroot={} ({:?}) sbatch={} ({:?}) srun={} ({:?}) squeue={} ({:?}) sacct={} ({:?}) sstat={} ({:?}) scancel={} ({:?}) sshare={} ({:?}) sprio={} ({:?})",
                         output.binaries.enroot.value,
                         output.binaries.enroot.source,
                         output.binaries.sbatch.value,
@@ -766,6 +943,10 @@ pub(crate) fn context(
                         output.binaries.sstat.source,
                         output.binaries.scancel.value,
                         output.binaries.scancel.source,
+                        output.binaries.sshare.value,
+                        output.binaries.sshare.source,
+                        output.binaries.sprio.value,
+                        output.binaries.sprio.source,
                     )
                 )
             );
@@ -1047,6 +1228,10 @@ services:
                 value: "singularity".to_string(),
                 source: ValueSource::Builtin,
             },
+            salloc: ResolvedValue {
+                value: "salloc".to_string(),
+                source: ValueSource::Builtin,
+            },
             sbatch: resolved(&sbatch),
             srun: resolved(&srun),
             scontrol: ResolvedValue {
@@ -1071,6 +1256,14 @@ services:
             },
             scancel: ResolvedValue {
                 value: "scancel".to_string(),
+                source: ValueSource::Builtin,
+            },
+            sshare: ResolvedValue {
+                value: "sshare".to_string(),
+                source: ValueSource::Builtin,
+            },
+            sprio: ResolvedValue {
+                value: "sprio".to_string(),
                 source: ValueSource::Builtin,
             },
         }
@@ -1139,6 +1332,10 @@ services:
             resolved_context.clone(),
             false,
             false,
+            false,
+            false,
+            DependencyOutputFormat::Text,
+            None,
             Some(OutputFormat::Json),
             false,
         )
@@ -1214,7 +1411,18 @@ services:
             None,
         )
         .expect("render text");
-        inspect(resolved_context, true, false, None, false).expect("inspect verbose text");
+        inspect(
+            resolved_context,
+            true,
+            false,
+            false,
+            false,
+            DependencyOutputFormat::Text,
+            None,
+            None,
+            false,
+        )
+        .expect("inspect verbose text");
 
         let strict_compose = tmpdir.path().join("compose-strict.yaml");
         fs::create_dir_all(tmpdir.path().join("cache-strict")).expect("strict cache");

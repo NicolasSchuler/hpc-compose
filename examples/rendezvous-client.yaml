@@ -1,0 +1,17 @@
+name: rendezvous-client
+
+x-slurm:
+  job_name: model-client
+  time: "00:10:00"
+  mem: 2G
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+  rendezvous: model-server
+
+services:
+  client:
+    image: curlimages/curl:8.10.1
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        curl -fsS "$${HPC_COMPOSE_RDZV_MODEL_SERVER_URL}"

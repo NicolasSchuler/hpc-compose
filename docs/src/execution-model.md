@@ -37,6 +37,8 @@ state service 'worker': failure_policy=restart_on_failure restarts=1/5 window=1/
 
 Use `logs` to inspect the corresponding restart messages from the batch script when you need to distinguish lifetime-cap exhaustion from rolling-window exhaustion.
 
+Use per-service `x-slurm.hooks` when you want host-side notifications around those policy transitions. `on: restart` runs before a granted relaunch; `on: window_exhausted` runs when the rolling-window guard blocks another restart. These hooks are best-effort and do not change the service policy outcome.
+
 ## Which paths must be shared
 
 - The resolved cache directory must be visible from both the login node and the compute nodes. It may come from `x-slurm.cache_dir`, project settings, or the builtin `$HOME/.cache/hpc-compose` fallback.

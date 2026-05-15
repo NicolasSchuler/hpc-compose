@@ -3,6 +3,7 @@ use super::scheduler::{
 };
 use super::*;
 use crate::term;
+use regex::Regex;
 
 /// Final outcome returned by `watch_submission`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,24 +26,122 @@ pub(super) struct LogCursor {
     pub(super) pending: String,
 }
 
-/// Prints tracked service logs, optionally following them until interrupted.
-pub fn print_logs(
+/// Options for printing tracked service logs.
+#[derive(Debug, Clone, Default)]
+pub struct LogPrintOptions {
+    /// Optional service to select from the tracked service log map.
+    pub service: Option<String>,
+    /// Number of trailing lines to print before follow mode begins.
+    pub lines: usize,
+    /// Continue printing appended log output until interrupted.
+    pub follow: bool,
+    /// Optional Rust regex pattern applied to raw log lines.
+    pub grep: Option<String>,
+    /// Optional coarse lower bound based on the log file modification time.
+    pub since_seconds: Option<u64>,
+}
+
+/// Polls scheduler state until a submitted Slurm job is ready for the normal watch view.
+pub fn wait_for_job_start(
     record: &SubmissionRecord,
-    service: Option<&str>,
-    lines: usize,
-    follow: bool,
-) -> Result<()> {
-    let selected = selected_service_logs(record, service)?;
+    options: &SchedulerOptions,
+    pending_warn_after_seconds: Option<u64>,
+) -> Result<SchedulerStatus> {
     let mut stdout = io::stdout();
-    emit_initial_tail(&selected, lines, &mut stdout)?;
-    if !follow {
+    writeln!(stdout, "waiting for job {} to start...", record.job_id)
+        .context("failed to write queue wait output")?;
+    stdout
+        .flush()
+        .context("failed to flush queue wait output")?;
+
+    let mut last_state: Option<(String, SchedulerSource)> = None;
+    let mut last_visible_at: Option<u64> = None;
+    let mut pending_warning_emitted = false;
+
+    loop {
+        let (raw_status, queue_diagnostics) =
+            probe_scheduler_status_with_queue_diagnostics(&record.job_id, options);
+        let now = unix_timestamp_now();
+        if raw_status.source != SchedulerSource::LocalOnly {
+            last_visible_at = Some(now);
+        }
+        let status =
+            reconcile_scheduler_status(raw_status, record.submitted_at, last_visible_at, now);
+        let state_key = (status.state.clone(), status.source);
+        let state_changed = last_state.as_ref() != Some(&state_key);
+        if state_changed {
+            writeln!(
+                stdout,
+                "queue state: {} ({})",
+                status.state,
+                scheduler_source_label(status.source)
+            )
+            .context("failed to write queue wait state")?;
+            if let Some(detail) = &status.detail {
+                writeln!(stdout, "note: {detail}").context("failed to write queue wait detail")?;
+            }
+            write_queue_diagnostics(&mut stdout, queue_diagnostics.as_ref())?;
+            stdout
+                .flush()
+                .context("failed to flush queue wait output")?;
+            last_state = Some(state_key);
+        }
+
+        if status.state == "PENDING"
+            && !pending_warning_emitted
+            && pending_warn_after_seconds.is_some_and(|seconds| {
+                seconds > 0 && now.saturating_sub(record.submitted_at) >= seconds
+            })
+        {
+            warn_pending_queue_wait(
+                record,
+                pending_warn_after_seconds,
+                queue_diagnostics.as_ref(),
+            );
+            pending_warning_emitted = true;
+        }
+
+        if status.state == "RUNNING" || status.terminal {
+            return Ok(status);
+        }
+        match status.source {
+            SchedulerSource::LocalOnly if is_transitional_local_only(&status) => {
+                thread::sleep(POLL_INTERVAL);
+            }
+            SchedulerSource::LocalOnly => return Ok(status),
+            _ => thread::sleep(POLL_INTERVAL),
+        }
+    }
+}
+
+/// Prints tracked service logs, optionally following them until interrupted.
+pub fn print_logs(record: &SubmissionRecord, options: &LogPrintOptions) -> Result<()> {
+    let grep = match options.grep.as_deref() {
+        Some(pattern) => Some(
+            Regex::new(pattern).with_context(|| format!("invalid --grep pattern '{pattern}'"))?,
+        ),
+        None => None,
+    };
+    let since_cutoff = options
+        .since_seconds
+        .map(|seconds| unix_timestamp_now().saturating_sub(seconds));
+    let selected = selected_service_logs(record, options.service.as_deref())?;
+    let mut stdout = io::stdout();
+    emit_initial_tail_filtered(
+        &selected,
+        options.lines,
+        grep.as_ref(),
+        since_cutoff,
+        &mut stdout,
+    )?;
+    if !options.follow {
         stdout.flush().context("failed to flush log output")?;
         return Ok(());
     }
 
     let mut cursors = build_cursors(&selected);
     loop {
-        let emitted = drain_log_cursors(&mut cursors, &mut stdout)?;
+        let emitted = drain_log_cursors_filtered(&mut cursors, grep.as_ref(), &mut stdout)?;
         stdout.flush().context("failed to flush log output")?;
         if !emitted {
             thread::sleep(POLL_INTERVAL);
@@ -132,6 +231,64 @@ pub fn watch_submission(
             _ => thread::sleep(POLL_INTERVAL),
         }
     }
+}
+
+fn write_queue_diagnostics(
+    writer: &mut impl Write,
+    diagnostics: Option<&QueueDiagnostics>,
+) -> Result<()> {
+    let Some(diagnostics) = diagnostics else {
+        return Ok(());
+    };
+    if let Some(reason) = &diagnostics.pending_reason {
+        writeln!(writer, "  pending reason: {reason}")
+            .context("failed to write queue pending reason")?;
+    }
+    if let Some(eligible_time) = &diagnostics.eligible_time {
+        writeln!(writer, "  eligible time: {eligible_time}")
+            .context("failed to write queue eligible time")?;
+    }
+    if let Some(start_time) = &diagnostics.start_time {
+        writeln!(writer, "  start time: {start_time}")
+            .context("failed to write queue start time")?;
+    }
+    Ok(())
+}
+
+fn warn_pending_queue_wait(
+    record: &SubmissionRecord,
+    pending_warn_after_seconds: Option<u64>,
+    diagnostics: Option<&QueueDiagnostics>,
+) {
+    let Some(seconds) = pending_warn_after_seconds else {
+        return;
+    };
+    if seconds == 0 {
+        return;
+    }
+    let mut detail = format!(
+        "warning: job {} still PENDING after {}",
+        record.job_id,
+        format_walltime_duration(seconds)
+    );
+    if let Some(diagnostics) = diagnostics {
+        let mut parts = Vec::new();
+        if let Some(reason) = &diagnostics.pending_reason {
+            parts.push(format!("pending reason: {reason}"));
+        }
+        if let Some(eligible_time) = &diagnostics.eligible_time {
+            parts.push(format!("eligible time: {eligible_time}"));
+        }
+        if let Some(start_time) = &diagnostics.start_time {
+            parts.push(format!("start time: {start_time}"));
+        }
+        if !parts.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(&parts.join("; "));
+        }
+    }
+    let _ = writeln!(io::stderr(), "{detail}");
+    let _ = io::stderr().flush();
 }
 
 fn watch_local_submission(
@@ -225,9 +382,29 @@ fn emit_initial_tail(
     lines: usize,
     writer: &mut impl Write,
 ) -> Result<()> {
+    emit_initial_tail_filtered(selected, lines, None, None, writer)
+}
+
+fn emit_initial_tail_filtered(
+    selected: &[(String, PathBuf)],
+    lines: usize,
+    grep: Option<&Regex>,
+    since_cutoff: Option<u64>,
+    writer: &mut impl Write,
+) -> Result<()> {
     let tailed = selected
         .iter()
-        .map(|(service, path)| Ok((service.clone(), tail_lines(path, lines)?)))
+        .map(|(service, path)| {
+            let lines = if log_file_is_recent_enough(path, since_cutoff) {
+                tail_lines(path, lines)?
+                    .into_iter()
+                    .filter(|line| grep.is_none_or(|grep| grep.is_match(line)))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            Ok((service.clone(), lines))
+        })
         .collect::<Result<Vec<_>>>()?;
     let max_len = tailed
         .iter()
@@ -249,6 +426,17 @@ fn emit_initial_tail(
     Ok(())
 }
 
+fn log_file_is_recent_enough(path: &Path, since_cutoff: Option<u64>) -> bool {
+    let Some(since_cutoff) = since_cutoff else {
+        return true;
+    };
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(system_time_to_unix)
+        .is_some_and(|updated_at| updated_at >= since_cutoff)
+}
+
 fn build_cursors(selected: &[(String, PathBuf)]) -> Vec<LogCursor> {
     let mut cursors = Vec::with_capacity(selected.len());
     for (service_name, path) in selected {
@@ -267,9 +455,20 @@ fn build_cursors(selected: &[(String, PathBuf)]) -> Vec<LogCursor> {
 }
 
 fn drain_log_cursors(cursors: &mut [LogCursor], writer: &mut impl Write) -> Result<bool> {
+    drain_log_cursors_filtered(cursors, None, writer)
+}
+
+fn drain_log_cursors_filtered(
+    cursors: &mut [LogCursor],
+    grep: Option<&Regex>,
+    writer: &mut impl Write,
+) -> Result<bool> {
     let mut emitted = false;
     for cursor in cursors {
         for line in read_new_lines(cursor)? {
+            if grep.is_some_and(|grep| !grep.is_match(&line)) {
+                continue;
+            }
             writeln!(
                 writer,
                 "{} {line}",
@@ -342,6 +541,105 @@ pub(crate) fn tail_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
         collected.drain(0..(collected.len() - lines));
     }
     Ok(collected)
+}
+
+/// Parses a compact duration string accepted by `logs --since`.
+pub fn parse_log_since_duration(raw: &str) -> Result<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("--since must not be empty");
+    }
+    if let Ok(seconds) = trimmed.parse::<u64>() {
+        if seconds == 0 {
+            bail!("--since must be greater than zero");
+        }
+        return Ok(seconds);
+    }
+
+    let mut total = 0_u64;
+    let mut digits = String::new();
+    let mut consumed_unit = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        let value = digits
+            .parse::<u64>()
+            .with_context(|| format!("unsupported --since duration '{trimmed}'"))?;
+        if value == 0 {
+            bail!("--since duration segments must be greater than zero");
+        }
+        let multiplier = match ch {
+            's' => 1,
+            'm' => 60,
+            'h' => 3_600,
+            'd' => 86_400,
+            _ => {
+                bail!("unsupported --since duration unit '{ch}' in '{trimmed}'; use s, m, h, or d")
+            }
+        };
+        total = total.saturating_add(value.saturating_mul(multiplier));
+        digits.clear();
+        consumed_unit = true;
+    }
+    if !digits.is_empty() || !consumed_unit || total == 0 {
+        bail!("unsupported --since duration '{trimmed}'; use values like 30s, 15m, or 1h30m");
+    }
+    Ok(total)
+}
+
+/// Parses the compact duration accepted by `up --queue-warn-after`.
+pub fn parse_queue_warn_after_duration(raw: &str) -> Result<Option<u64>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("--queue-warn-after must not be empty");
+    }
+    if let Ok(seconds) = trimmed.parse::<u64>() {
+        return Ok((seconds > 0).then_some(seconds));
+    }
+
+    let mut total = 0_u64;
+    let mut digits = String::new();
+    let mut consumed_unit = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if digits.is_empty() {
+            bail!("unsupported --queue-warn-after duration '{trimmed}'");
+        }
+        let value = digits
+            .parse::<u64>()
+            .with_context(|| format!("unsupported --queue-warn-after duration '{trimmed}'"))?;
+        let multiplier = match ch {
+            's' => 1,
+            'm' => 60,
+            'h' => 3_600,
+            'd' => 86_400,
+            _ => {
+                bail!(
+                    "unsupported --queue-warn-after duration unit '{ch}' in '{trimmed}'; use s, m, h, or d"
+                )
+            }
+        };
+        total = total.saturating_add(value.saturating_mul(multiplier));
+        digits.clear();
+        consumed_unit = true;
+    }
+    if !digits.is_empty() || !consumed_unit {
+        bail!(
+            "unsupported --queue-warn-after duration '{trimmed}'; use values like 30s, 15m, 1h30m, or 0"
+        );
+    }
+    Ok((total > 0).then_some(total))
+}
+
+fn system_time_to_unix(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 #[cfg(test)]
@@ -450,6 +748,41 @@ mod tests {
             tail_lines(&log, 1).expect("last line"),
             vec!["two".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_log_since_duration_accepts_compact_units() {
+        assert_eq!(parse_log_since_duration("30s").expect("30s"), 30);
+        assert_eq!(parse_log_since_duration("15m").expect("15m"), 900);
+        assert_eq!(parse_log_since_duration("2h").expect("2h"), 7_200);
+        assert_eq!(parse_log_since_duration("1d").expect("1d"), 86_400);
+        assert_eq!(parse_log_since_duration("1h30m").expect("compound"), 5_400);
+        assert_eq!(parse_log_since_duration("42").expect("seconds"), 42);
+        assert!(parse_log_since_duration("").is_err());
+        assert!(parse_log_since_duration("0").is_err());
+        assert!(parse_log_since_duration("7q").is_err());
+        assert!(parse_log_since_duration("7m30").is_err());
+    }
+
+    #[test]
+    fn parse_queue_warn_after_duration_accepts_compact_units_and_zero() {
+        assert_eq!(
+            parse_queue_warn_after_duration("30s").expect("30s"),
+            Some(30)
+        );
+        assert_eq!(
+            parse_queue_warn_after_duration("15m").expect("15m"),
+            Some(900)
+        );
+        assert_eq!(
+            parse_queue_warn_after_duration("1h30m").expect("compound"),
+            Some(5_400)
+        );
+        assert_eq!(parse_queue_warn_after_duration("0").expect("0"), None);
+        assert_eq!(parse_queue_warn_after_duration("0s").expect("0s"), None);
+        assert!(parse_queue_warn_after_duration("").is_err());
+        assert!(parse_queue_warn_after_duration("7q").is_err());
+        assert!(parse_queue_warn_after_duration("7m30").is_err());
     }
 
     #[test]

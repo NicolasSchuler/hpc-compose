@@ -129,17 +129,18 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let top_help_stdout = stdout_text(&top_help);
     assert!(top_help_stdout.contains("Normal run:"));
     assert!(top_help_stdout.contains("up -f compose.yaml"));
+    assert!(top_help_stdout.contains("Conditional run:"));
+    assert!(top_help_stdout.contains("when -f compose.yaml --partition gpu8 --free-nodes 4"));
     assert!(top_help_stdout.contains("Safe plan:"));
     assert!(top_help_stdout.contains("plan -f compose.yaml"));
     assert!(top_help_stdout.contains("Debug failed run:"));
     assert!(top_help_stdout.contains("debug -f compose.yaml --preflight"));
     assert!(top_help_stdout.contains("Start a new spec:"));
     assert!(top_help_stdout.contains("Workflow groups:"));
-    assert!(top_help_stdout.contains("Plan/Run:       plan, up, run"));
-    assert!(
-        top_help_stdout
-            .contains("Observe/Debug:  debug, watch, status, logs, ps, stats, artifacts")
-    );
+    assert!(top_help_stdout.contains("Plan/Run:       plan, up, when, alloc, run"));
+    assert!(top_help_stdout.contains(
+        "Observe/Debug:  weather, debug, watch, replay, status, logs, ps, stats, score, diff"
+    ));
     assert!(top_help_stdout.contains("--color <WHEN>"));
     assert!(top_help_stdout.contains("--quiet"));
     assert!(top_help_stdout.contains("--profile <NAME>"));
@@ -151,6 +152,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(top_help_stdout.contains("plan         Validate and preview a static execution plan"));
     assert!(top_help_stdout.contains("debug        Diagnose the latest tracked run"));
     assert!(top_help_stdout.contains("up           Submit, watch, and stream logs in one command"));
+    assert!(top_help_stdout.contains("when         Submit once cluster conditions are met"));
     assert!(top_help_stdout.contains("logs         Print tracked service logs"));
     assert!(top_help_stdout.contains("ps           Show tracked per-service runtime state"));
     assert!(top_help_stdout.contains("watch        Watch a tracked job in a live terminal UI"));
@@ -163,6 +165,10 @@ fn help_and_template_discovery_surface_guided_workflows() {
         top_help_stdout
             .contains("new          Write a starter compose file from a built-in template")
     );
+    assert!(
+        top_help_stdout
+            .contains("evolve       Learn specs by progressively evolving a valid compose file")
+    );
     assert!(top_help_stdout.contains("jobs         List tracked jobs under the current repo tree"));
     assert!(top_help_stdout.contains("clean        Remove old tracked job directories"));
     assert!(top_help_stdout.contains("completions  Generate shell completions"));
@@ -172,6 +178,13 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let new_help_stdout = stdout_text(&new_help);
     assert!(new_help_stdout.contains("--list-templates"));
     assert!(new_help_stdout.contains("--describe-template <TEMPLATE>"));
+
+    let evolve_help = run_cli(tmpdir.path(), &["evolve", "--help"]);
+    assert_success(&evolve_help);
+    let evolve_help_stdout = stdout_text(&evolve_help);
+    assert!(evolve_help_stdout.contains("--list-lessons"));
+    assert!(evolve_help_stdout.contains("--describe-lesson <LESSON>"));
+    assert!(evolve_help_stdout.contains("--until <STEP>"));
 
     let init_help = run_cli(tmpdir.path(), &["init", "--help"]);
     assert_success(&init_help);
@@ -206,8 +219,18 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert_success(&up_help);
     let up_help_stdout = stdout_text(&up_help);
     assert!(up_help_stdout.contains("--detach"));
+    assert!(up_help_stdout.contains("--watch-queue"));
+    assert!(up_help_stdout.contains("--queue-warn-after <DURATION>"));
     assert!(up_help_stdout.contains("--watch-mode <MODE>"));
     assert!(up_help_stdout.contains("--no-tui"));
+
+    let when_help = run_cli(tmpdir.path(), &["when", "--help"]);
+    assert_success(&when_help);
+    let when_help_stdout = stdout_text(&when_help);
+    assert!(when_help_stdout.contains("--free-nodes <NODES>"));
+    assert!(when_help_stdout.contains("--after-job <JOB_ID>"));
+    assert!(when_help_stdout.contains("--between <HH:MM-HH:MM>"));
+    assert!(when_help_stdout.contains("--poll-interval <DURATION>"));
 
     let debug_help = run_cli(tmpdir.path(), &["debug", "--help"]);
     assert_success(&debug_help);
@@ -318,6 +341,184 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(new_stdout.contains("Cache dir (optional)"));
     let generated = fs::read_to_string(tmpdir.path().join("compose.yaml")).expect("compose");
     assert!(!generated.contains("cache_dir:"));
+}
+
+#[test]
+fn evolve_lists_describes_runs_and_validates_progressive_specs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    let list = run_cli(tmpdir.path(), &["evolve", "--list-lessons"]);
+    assert_success(&list);
+    let list_stdout = stdout_text(&list);
+    assert!(list_stdout.contains("progressive-complexity"));
+    assert!(list_stdout.contains("5 steps"));
+
+    let list_json = run_cli(
+        tmpdir.path(),
+        &["evolve", "--list-lessons", "--format", "json"],
+    );
+    assert_success(&list_json);
+    let list_payload: Value = serde_json::from_str(&stdout_text(&list_json)).expect("list json");
+    assert_eq!(list_payload["lessons"][0]["id"], "progressive-complexity");
+    assert_eq!(list_payload["lessons"][0]["step_count"], 5);
+
+    let describe = run_cli(
+        tmpdir.path(),
+        &["evolve", "--describe-lesson", "progressive-complexity"],
+    );
+    assert_success(&describe);
+    let describe_stdout = stdout_text(&describe);
+    assert!(describe_stdout.contains("lesson: progressive-complexity"));
+    assert!(describe_stdout.contains("readiness"));
+    assert!(describe_stdout.contains("multi-node-placement"));
+
+    let describe_json = run_cli(
+        tmpdir.path(),
+        &[
+            "evolve",
+            "--describe-lesson",
+            "progressive-complexity",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&describe_json);
+    let describe_payload: Value =
+        serde_json::from_str(&stdout_text(&describe_json)).expect("describe json");
+    assert_eq!(describe_payload["id"], "progressive-complexity");
+    let step_ids = describe_payload["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| step["id"].as_str().expect("step id").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        step_ids,
+        vec![
+            "minimal",
+            "second-service",
+            "readiness",
+            "failure-policy",
+            "multi-node-placement"
+        ]
+    );
+
+    let interactive_json = run_cli(tmpdir.path(), &["evolve", "--format", "json"]);
+    assert_failure(&interactive_json);
+    assert!(
+        stderr_text(&interactive_json).contains("--format json requires --yes"),
+        "stderr was {}",
+        stderr_text(&interactive_json)
+    );
+
+    let readiness_path = tmpdir.path().join("readiness.yaml");
+    let readiness = run_cli(
+        tmpdir.path(),
+        &[
+            "evolve",
+            "--yes",
+            "--until",
+            "readiness",
+            "--name",
+            "custom-evolve",
+            "--output",
+            readiness_path.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&readiness);
+    let readiness_payload: Value =
+        serde_json::from_str(&stdout_text(&readiness)).expect("readiness json");
+    assert_eq!(readiness_payload["final_step"], "readiness");
+    assert_eq!(
+        readiness_payload["accepted_steps"]
+            .as_array()
+            .expect("accepted")
+            .len(),
+        3
+    );
+    let readiness_yaml = fs::read_to_string(&readiness_path).expect("readiness yaml");
+    assert!(readiness_yaml.contains("name: custom-evolve"));
+    assert!(readiness_yaml.contains("condition: service_healthy"));
+    assert!(!readiness_yaml.contains("cache_dir:"));
+
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", readiness_path.to_str().expect("path")],
+    );
+    assert_success(&validate);
+    let plan = run_cli(
+        tmpdir.path(),
+        &["plan", "-f", readiness_path.to_str().expect("path")],
+    );
+    assert_success(&plan);
+
+    let overwrite = run_cli(
+        tmpdir.path(),
+        &[
+            "evolve",
+            "--yes",
+            "--until",
+            "minimal",
+            "--output",
+            readiness_path.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&overwrite);
+    assert!(stderr_text(&overwrite).contains("refusing to overwrite"));
+
+    let forced = run_cli(
+        tmpdir.path(),
+        &[
+            "evolve",
+            "--yes",
+            "--until",
+            "minimal",
+            "--cache-dir",
+            "/tmp/evolve-cache",
+            "--output",
+            readiness_path.to_str().expect("path"),
+            "--force",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&forced);
+    let forced_yaml = fs::read_to_string(&readiness_path).expect("forced yaml");
+    assert!(forced_yaml.contains("cache_dir: /tmp/evolve-cache"));
+}
+
+#[test]
+fn evolve_interactive_accept_skip_and_quit_keeps_last_accepted_valid_spec() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output_path = tmpdir.path().join("interactive.yaml");
+
+    let output = run_cli_with_stdin(
+        tmpdir.path(),
+        &["evolve", "--output", output_path.to_str().expect("path")],
+        "\ns\nq\n",
+    );
+    assert_success(&output);
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("Controls: Enter/y/a accept"));
+    assert!(stdout.contains("skipped second-service"));
+    assert!(stdout.contains("accepted 1 step(s); final step: minimal"));
+
+    let yaml = fs::read_to_string(&output_path).expect("interactive yaml");
+    assert!(yaml.contains("Hello from Slurm"));
+    assert!(!yaml.contains("worker:"));
+
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", output_path.to_str().expect("path")],
+    );
+    assert_success(&validate);
+    let plan = run_cli(
+        tmpdir.path(),
+        &["plan", "-f", output_path.to_str().expect("path")],
+    );
+    assert_success(&plan);
 }
 
 #[test]

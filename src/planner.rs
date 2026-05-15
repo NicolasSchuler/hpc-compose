@@ -12,8 +12,8 @@ use crate::domain::{MountParts, resolve_node_index_expr, split_mount_parts};
 use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{
     CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, RuntimeBackend,
-    RuntimeConfig, ServiceDependency, ServiceFailureMode, ServiceFailurePolicy, ServiceSlurmConfig,
-    SlurmConfig,
+    RuntimeConfig, ServiceAssertSpec, ServiceDependency, ServiceFailureMode, ServiceFailurePolicy,
+    ServiceSlurmConfig, SlurmConfig,
 };
 
 const RESERVED_RUNTIME_MOUNT_DESTINATIONS: &[&str] = &["/hpc-compose/job"];
@@ -56,6 +56,7 @@ pub struct PlannedService {
     pub working_dir: Option<String>,
     pub depends_on: Vec<ServiceDependency>,
     pub readiness: Option<ReadinessSpec>,
+    pub assertions: Option<ServiceAssertSpec>,
     pub failure_policy: ServiceFailurePolicy,
     pub placement: ServicePlacement,
     pub slurm: ServiceSlurmConfig,
@@ -306,6 +307,7 @@ pub fn build_plan_with_options(
                 working_dir,
                 depends_on,
                 readiness: service.readiness.clone(),
+                assertions: service.assertions.clone(),
                 failure_policy,
                 placement: ServicePlacement {
                     mode: ServicePlacementMode::PrimaryNode,
@@ -1279,6 +1281,7 @@ mod tests {
             depends_on: DependsOnSpec::None,
             readiness: None,
             healthcheck: None,
+            assertions: None,
             software_env: crate::spec::SoftwareEnvConfig::default(),
             slurm: ServiceSlurmConfig::default(),
             runtime: ServiceRuntimeConfig::default(),
@@ -1313,6 +1316,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             services,
+            sweep: None,
         };
 
         let plan = build_plan_with_options(
@@ -1371,6 +1375,7 @@ mod tests {
                 slurm: SlurmConfig::default(),
                 software_env: crate::spec::SoftwareEnvConfig::default(),
                 services,
+                sweep: None,
             };
             let plan = build_plan(Path::new("."), spec).expect("plan");
             let positions = plan
@@ -1394,6 +1399,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([("redis".into(), service("redis:7"))]),
         };
         let plan = build_plan(Path::new("."), spec).expect("plan");
@@ -1413,6 +1419,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -1437,6 +1444,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -1463,6 +1471,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -1577,6 +1586,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([("app".into(), app)]),
         };
 
@@ -1607,6 +1617,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "app".into(),
@@ -1638,6 +1649,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -1705,6 +1717,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([("redis".into(), svc)]),
         };
         let tmpdir = tempfile::tempdir().expect("tmpdir");
@@ -1730,6 +1743,7 @@ mod tests {
                 name: None,
                 slurm: SlurmConfig::default(),
                 software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
                 services: BTreeMap::new(),
             },
         )
@@ -1747,6 +1761,7 @@ mod tests {
                     ..SlurmConfig::default()
                 },
                 software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
                 services: BTreeMap::from([("app".into(), service("redis:7"))]),
             },
         )
@@ -1775,6 +1790,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "a".into(),
@@ -1819,6 +1835,7 @@ mod tests {
                     ..SlurmConfig::default()
                 },
                 software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
                 services: BTreeMap::from([
                     (
                         "a".into(),
@@ -1883,6 +1900,7 @@ mod tests {
                     ..SlurmConfig::default()
                 },
                 software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
                 services: BTreeMap::from([(
                     "workers".into(),
                     ServiceSpec {
@@ -1919,6 +1937,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "a".into(),
@@ -1959,6 +1978,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "a".into(),
@@ -1999,6 +2019,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "ps".into(),
@@ -2056,6 +2077,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "a".into(),
                 ServiceSpec {
@@ -2081,6 +2103,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "a".into(),
                 ServiceSpec {
@@ -2107,6 +2130,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "a".into(),
@@ -2155,6 +2179,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "trainer".into(),
                 ServiceSpec {
@@ -2186,6 +2211,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -2217,6 +2243,7 @@ mod tests {
                 ..SlurmConfig::default()
             },
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "ps".into(),
@@ -2335,6 +2362,7 @@ mod tests {
                     condition: DependencyCondition::ServiceStarted,
                 }],
                 readiness: None,
+                assertions: None,
                 failure_policy: ServiceFailurePolicy::default(),
                 placement: ServicePlacement::default(),
                 slurm: ServiceSlurmConfig::default(),
@@ -2359,6 +2387,7 @@ mod tests {
                         condition: DependencyCondition::ServiceStarted,
                     }],
                     readiness: None,
+                    assertions: None,
                     failure_policy: ServiceFailurePolicy::default(),
                     placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
@@ -2379,6 +2408,7 @@ mod tests {
                         condition: DependencyCondition::ServiceStarted,
                     }],
                     readiness: None,
+                    assertions: None,
                     failure_policy: ServiceFailurePolicy::default(),
                     placement: ServicePlacement::default(),
                     slurm: ServiceSlurmConfig::default(),
@@ -2507,6 +2537,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "app".into(),
@@ -2538,6 +2569,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "app".into(),
@@ -2598,6 +2630,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 ("default".into(), service("redis:7")),
                 (
@@ -2702,6 +2735,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "window-seconds-only".into(),
@@ -2779,6 +2813,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -2807,6 +2842,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -2832,6 +2868,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -2857,6 +2894,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([(
                 "app".into(),
                 ServiceSpec {
@@ -2886,6 +2924,7 @@ mod tests {
             name: Some("demo".into()),
             slurm: SlurmConfig::default(),
             software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
             services: BTreeMap::from([
                 (
                     "app".into(),

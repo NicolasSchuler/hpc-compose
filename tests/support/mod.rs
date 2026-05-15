@@ -549,6 +549,21 @@ echo "Submitted batch job 12345"
     path
 }
 
+pub(crate) fn write_fake_module(tmpdir: &Path, log_path: &Path) -> PathBuf {
+    let path = tmpdir.join("module");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+"#,
+            log_path.display()
+        ),
+    );
+    path
+}
+
 pub(crate) fn write_fake_scancel(tmpdir: &Path, log_path: &Path, success: bool) -> PathBuf {
     let path = tmpdir.join(if success { "scancel" } else { "scancel-fail" });
     let body = if success {
@@ -756,6 +771,51 @@ exec '{}' "$@"
     path
 }
 
+pub(crate) fn write_fake_sacct_accounting(
+    tmpdir: &Path,
+    state_file: &Path,
+    accounting_file: &Path,
+) -> PathBuf {
+    let path = tmpdir.join("sacct-accounting");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+format_string=""
+for arg in "$@"; do
+  case "$arg" in
+    --format=*)
+      format_string="${{arg#--format=}}"
+      ;;
+  esac
+done
+if [[ "$format_string" == *"JobIDRaw,JobName,State"* ]]; then
+  cat '{}' 2>/dev/null || true
+  exit 0
+fi
+exec '{}' "$@"
+"#,
+            accounting_file.display(),
+            write_fake_sacct(tmpdir, state_file).display()
+        ),
+    );
+    path
+}
+
+pub(crate) fn write_fake_sacct_failure(tmpdir: &Path) -> PathBuf {
+    let path = tmpdir.join("sacct-fail");
+    write_script(
+        &path,
+        r#"#!/bin/bash
+set -euo pipefail
+echo "accounting database unavailable" >&2
+exit 42
+"#,
+    );
+    path
+}
+
 pub(crate) fn write_fake_sstat(tmpdir: &Path, output_file: &Path) -> PathBuf {
     let path = tmpdir.join("sstat");
     write_script(
@@ -823,6 +883,26 @@ pub(crate) fn write_fake_watch_sbatch(
     final_log_line: &str,
     gap_seconds: u64,
 ) -> PathBuf {
+    write_fake_watch_sbatch_with_pending_delay(
+        tmpdir,
+        squeue_state,
+        sacct_state,
+        terminal_state,
+        final_log_line,
+        gap_seconds,
+        1,
+    )
+}
+
+pub(crate) fn write_fake_watch_sbatch_with_pending_delay(
+    tmpdir: &Path,
+    squeue_state: &Path,
+    sacct_state: &Path,
+    terminal_state: &str,
+    final_log_line: &str,
+    gap_seconds: u64,
+    pending_delay_seconds: u64,
+) -> PathBuf {
     let path = tmpdir.join(format!("sbatch-{}", terminal_state.to_lowercase()));
     let log_dir = tmpdir.join(".hpc-compose/12345/logs");
     let service_log = log_dir.join(log_file_name_for_service("app"));
@@ -835,7 +915,7 @@ mkdir -p '{}'
 printf 'PENDING\n' > '{}'
 rm -f '{}'
 (
-  sleep 1
+  sleep {}
   printf 'RUNNING\n' > '{}'
   printf 'booting\n' > '{}'
   sleep 1
@@ -849,6 +929,7 @@ echo "Submitted batch job 12345"
             log_dir.display(),
             squeue_state.display(),
             sacct_state.display(),
+            pending_delay_seconds,
             squeue_state.display(),
             service_log.display(),
             final_log_line,

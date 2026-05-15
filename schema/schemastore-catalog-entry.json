@@ -1,0 +1,11 @@
+{
+  "name": "hpc-compose",
+  "description": "Compose-like specifications for single-allocation Slurm jobs.",
+  "fileMatch": [
+    "hpc-compose.yaml",
+    "hpc-compose.yml",
+    "*.hpc-compose.yaml",
+    "*.hpc-compose.yml"
+  ],
+  "url": "https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose.schema.json"
+}

@@ -766,6 +766,8 @@ mod tests {
             service_name: None,
             command_override: None,
             requested_walltime: None,
+            slurm_array: None,
+            sweep: None,
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
         };

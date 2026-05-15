@@ -21,14 +21,21 @@ use crate::prepare::RuntimePlan;
 use crate::render::log_file_name_for_service;
 use crate::tracked_paths;
 
+mod accounting;
 mod artifacts;
+mod diff;
 mod logs;
+mod metrics_probe;
 mod model;
 mod ps;
 mod record;
+mod replay;
+mod rightsize;
 mod runtime_state;
 mod scheduler;
+mod score;
 mod stats;
+mod sweep;
 
 #[cfg(test)]
 use artifacts::{copy_path_recursive, remove_existing_destination, resolve_export_dir};
@@ -39,15 +46,26 @@ use stats::{
     load_sampler_snapshot, parse_sstat_output, probe_step_stats, step_from_slurm_sample_row,
 };
 
+pub use accounting::{AccountingRow, AccountingSnapshot, AccountingSummary};
 pub use artifacts::{
     ArtifactBundleManifest, ArtifactBundleProvenance, ArtifactEntryMetadata, ArtifactExportOptions,
     ArtifactExportReport, ArtifactManifest, BundleExportReport, artifact_manifest_path_for_record,
     artifact_payload_dir_for_record, artifacts_dir_for_record, export_artifacts,
 };
-pub use logs::{WatchOutcome, print_logs, watch_submission};
+pub use diff::{
+    JobDiffChange, JobDiffReport, JobDiffServiceStatus, JobDiffSide, build_job_diff_report,
+};
+pub use logs::{
+    LogPrintOptions, WatchOutcome, parse_log_since_duration, parse_queue_warn_after_duration,
+    print_logs, wait_for_job_start, watch_submission,
+};
+pub use metrics_probe::{
+    MetricsProbeOptions, MetricsProbeReport, build_metrics_probe_report,
+    serialize_metrics_probe_report, validate_metrics_probe_options,
+};
 pub use model::{
     RequestedWalltime, SchedulerSource, SubmissionBackend, SubmissionKind, SubmissionRecord,
-    SubmissionRecordBuildOptions,
+    SubmissionRecordBuildOptions, SweepTrialMetadata,
 };
 pub use ps::{PsSnapshot, build_ps_snapshot};
 pub use record::{
@@ -55,22 +73,41 @@ pub use record::{
     build_cleanup_report, build_submission_record, build_submission_record_with_backend,
     build_submission_record_with_backend_and_options, build_submission_record_with_options,
     clean_all_except_latest, clean_by_age, find_submission_record_in_repo, jobs_dir_for,
-    latest_record_path_for, latest_run_record_path_for, load_submission_record, log_dir_for_record,
-    metadata_root_for, persist_submission_record, remove_submission_record, run_cleanup_report,
-    runtime_job_root_for_record, scan_job_inventory, scan_job_records, state_path_for_record,
-    write_submission_record,
+    latest_canary_record_path_for, latest_record_path_for, latest_run_record_path_for,
+    load_submission_record, log_dir_for_record, metadata_root_for, persist_submission_record,
+    remove_submission_record, run_cleanup_report, runtime_job_root_for_record, scan_job_inventory,
+    scan_job_records, state_path_for_record, write_submission_record,
+};
+pub use replay::{
+    ReplayArtifactPaths, ReplayEvent, ReplayEventKind, ReplayFrame, ReplayReport,
+    ReplayServiceFrame, build_replay_report,
+};
+pub use rightsize::{
+    RightsizeConfidence, RightsizeObservation, RightsizeRecommendation, RightsizeReport,
+    build_rightsize_report,
 };
 pub use scheduler::{
-    BatchLogStatus, PsServiceRow, QueueDiagnostics, SchedulerStatus, ServiceLogStatus,
-    StatusSnapshot, WalltimeProgress, build_status_snapshot, format_walltime_duration,
-    format_walltime_summary, parse_scheduler_timestamp, probe_scheduler_status,
-    probe_scheduler_status_with_queue_diagnostics, scheduler_source_label, walltime_progress,
-    walltime_progress_percent,
+    ArrayStatusSnapshot, ArrayTaskStatus, BatchLogStatus, PsServiceRow, QueueDiagnostics,
+    SchedulerStatus, ServiceAssertionStatus, ServiceLogStatus, StatusSnapshot, WalltimeProgress,
+    build_array_status_snapshot, build_status_snapshot, build_status_snapshot_with_array,
+    format_walltime_duration, format_walltime_summary, parse_scheduler_timestamp,
+    probe_scheduler_status, probe_scheduler_status_with_queue_diagnostics, scheduler_source_label,
+    walltime_progress, walltime_progress_percent,
+};
+pub use score::{
+    EfficiencyScoreComponent, EfficiencyScoreConfidence, EfficiencyScoreOptions,
+    EfficiencyScoreReport, build_efficiency_score_report,
 };
 pub use stats::{
     CollectorStatus, FirstFailure, GpuDeviceSample, GpuNodeSummary, GpuProcessSample, GpuSnapshot,
     SamplerSnapshot, SchedulerOptions, SlurmSamplerSnapshot, StatsOptions, StatsSnapshot,
     StepStats, build_stats_snapshot, metrics_dir_for_record,
+};
+pub use sweep::{
+    SWEEP_MANIFEST_SCHEMA_VERSION, SweepExpansion, SweepExpansionTrial, SweepManifest,
+    SweepManifestTrial, expand_sweep, expand_sweep_with_limit, generate_sweep_id,
+    interpolation_vars_for_sweep_trial, latest_sweep_manifest_path_for, load_sweep_manifest,
+    scan_sweep_manifests, sweep_manifest_path_for, write_sweep_manifest,
 };
 
 const SUBMISSION_SCHEMA_VERSION: u32 = 2;

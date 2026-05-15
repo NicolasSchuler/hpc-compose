@@ -9,8 +9,10 @@ This page is intentionally complete. If you are new, start with [Quickstart](qui
 | Need | Section |
 | --- | --- |
 | Overall YAML shape | [Top-level shape](#top-level-shape) and [Top-level fields](#top-level-fields) |
+| Shared templates and overrides | [`extends`](#extends) |
 | Runtime backend choice | [`runtime`](#runtime) and [Runtime Backends](runtime-backends.md) |
 | Slurm allocation settings | [`x-slurm`](#x-slurm) |
+| Hyperparameter sweeps | [`sweep`](#sweep) and [Hyperparameter Sweeps](sweeps.md) |
 | Service command, image, env, and mounts | [Service fields](#service-fields), [Image rules](#image-rules), [`command` and `entrypoint`](#command-and-entrypoint), [`environment`](#environment), [`volumes`](#volumes) |
 | Startup ordering | [`depends_on`](#depends_on), [`readiness`](#readiness), and [`healthcheck`](#healthcheck) |
 | Multi-node placement and MPI | [Multi-node placement rules](#multi-node-placement-rules), [`services.<name>.x-slurm.placement`](#servicesnamex-slurmplacement), and [`services.<name>.x-slurm.mpi`](#servicesnamex-slurmmpi) |
@@ -22,7 +24,7 @@ This page is intentionally complete. If you are new, start with [Quickstart](qui
 
 ```yaml
 name: demo
-version: "3.9"
+version: "1"
 
 runtime:
   backend: pyxis
@@ -40,14 +42,109 @@ services:
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
+| `extends` | string | omitted | Top-level authoring-only path to a base spec. The base is resolved before interpolation, validation, planning, and `config` output. |
 | `name` | string | omitted | Used as the Slurm job name when `x-slurm.job_name` is not set. |
-| `version` | string | omitted | Accepted for Compose compatibility. Ignored by the planner. |
+| `version` | string `"1"` or integer `1` | `1` | hpc-compose spec schema version. Omit for v1 or set explicitly to `"1"`; Docker Compose values such as `"3.9"` are rejected after migration. |
 | `runtime` | mapping | `backend: pyxis` | Selects the service runtime backend and GPU passthrough policy. |
 | `services` | mapping | required | Must contain at least one service. |
 | `steps` | mapping | alias for `services` | Use either `services` or `steps`, not both. |
 | `modules` | list of strings | omitted | List-only shorthand for top-level `x-env.modules.load`; cannot be combined with `x-env.modules`. |
 | `x-env` | mapping | omitted | Structured host-side module, Spack view, and environment setup shared by all services. |
 | `x-slurm` | mapping | omitted | Top-level Slurm settings and shared runtime defaults. |
+| `sweep` | mapping | omitted | Embedded hyperparameter sweep metadata consumed by `hpc-compose sweep submit/status/list`. Normal commands treat it as metadata. |
+
+## `extends`
+
+`extends` is an authoring feature for sharing base specs and service templates without copying large cluster-specific blocks. It is resolved before interpolation, validation, planning, rendering, tracked metadata, and `hpc-compose config`; the effective config no longer contains any `extends` keys.
+
+Top-level `extends` points at a base YAML file:
+
+```yaml
+extends: cluster-base.yaml
+
+x-slurm:
+  time: "02:00:00"
+
+services:
+  trainer:
+    command: python train.py
+```
+
+Service-level `extends` supports three forms:
+
+```yaml
+services:
+  api:
+    extends: base-service
+
+  worker:
+    extends: service-templates.yaml
+
+  trainer:
+    extends:
+      file: ml-templates.yaml
+      service: gpu-worker
+```
+
+Rules:
+
+- Top-level `extends` must be a file path string.
+- A service string that looks like a YAML file path, such as `base.yaml`, `../base.yml`, or a path with a separator, uses the same service name from that file. Other strings refer to a service in the same file.
+- A service mapping can select `{ file, service }`; omit `file` to select a service from the same file.
+- Extends references are recursive and cycles are rejected.
+- Maps merge recursively. Sequences append base-first. Child scalars replace base scalars.
+- Service `volumes` merge by container target, so a child mount for `/data` replaces the base mount for `/data` while unrelated base mounts are kept.
+- Relative host paths in the final plan still resolve against the leaf compose file passed with `-f`.
+- There is no delete or unset syntax in this version.
+
+## `sweep`
+
+`sweep` defines trial variables for `hpc-compose sweep submit`. It is a top-level metadata block; every generated trial is still planned, rendered, submitted, and tracked as a normal one-allocation job.
+
+Full Cartesian product:
+
+```yaml
+sweep:
+  parameters:
+    lr: [0.001, 0.01, 0.1]
+    batch_size: [32, 64]
+  matrix: full
+```
+
+Random sample without replacement:
+
+```yaml
+sweep:
+  parameters:
+    lr: [0.001, 0.01, 0.1]
+    batch_size: [32, 64]
+  matrix:
+    random: 5
+    seed: "optional-stable-seed"
+```
+
+Rules:
+
+- `parameters` must contain at least one key, and every value list must contain at least one scalar.
+- Parameter keys must be valid interpolation variable names: `[A-Za-z_][A-Za-z0-9_]*`.
+- Parameter keys must not use the reserved `HPC_COMPOSE_SWEEP_` prefix.
+- Parameter values may be strings, numbers, or booleans. They are passed to interpolation as strings.
+- `matrix: full` expands the Cartesian product deterministically over sorted parameter names.
+- `matrix.random` must be at least 1 and cannot exceed the total number of combinations.
+- `matrix.seed` is optional. If omitted, `sweep submit` derives a seed from the new sweep id and persists it.
+- `sweep.spec` is rejected in v1; embed the sweep in the same compose file.
+
+For each trial, sweep variables override existing interpolation variables from `.env`, environment, settings, or `--env`. These reserved variables are also available:
+
+| Variable | Meaning |
+| --- | --- |
+| `HPC_COMPOSE_SWEEP_ID` | Persisted sweep id. |
+| `HPC_COMPOSE_SWEEP_TRIAL` | Trial label such as `t000`. |
+| `HPC_COMPOSE_SWEEP_TRIAL_INDEX` | Zero-based trial index. |
+
+Normal commands do not expand the sweep matrix. If the runnable spec contains `${lr}` with no default, ordinary `plan`, `up`, and `render` still fail unless `lr` is provided. Use defaults such as `${lr:-0.001}` when the base spec should remain runnable, or use `hpc-compose sweep submit --dry-run` to validate sweep-only variables.
+
+`hpc-compose sweep submit` rejects `x-slurm.array`, because every sweep trial is already its own allocation. See [Hyperparameter Sweeps](sweeps.md) for manifests, status aggregation, and examples.
 
 ## `x-env`
 
@@ -103,6 +200,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, `--cache-dir`, and `--default-profile`. |
 | `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, referenced interpolation vars, runtime paths, and value sources; supports `--format json`. Sensitive-looking interpolation values are redacted unless `--show-values` is passed. |
 | `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
+| `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. |
 | `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
 
 ## `x-slurm`
@@ -151,6 +249,7 @@ These fields live under the top-level `x-slurm` block.
 | `notify` | mapping | omitted | First-class Slurm email notification settings. |
 | `setup` | list of strings | omitted | Raw shell lines inserted into the generated batch script before service launches. |
 | `submit_args` | list of strings | omitted | Extra raw Slurm arguments appended as `#SBATCH ...` lines. |
+| `rendezvous` | string, list, or mapping | omitted | Resolve cross-job service records from the shared cache and inject `HPC_COMPOSE_RDZV_*` env vars. |
 
 ### Resource profiles
 
@@ -377,6 +476,30 @@ x-slurm:
   - In multi-node jobs, `gpu` sampling launches one best-effort sampler task per allocated node and writes node metadata into GPU rows; legacy rows without `node` remain readable as primary-node samples.
   - Sampler files are written under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` on the host and are also visible inside containers at `/hpc-compose/job/metrics`.
   - Diagnostics are written under `metrics/diagnostics/` when available, including `nvidia-smi topo -m`, `nvidia-smi -q`, selected fabric/GPU environment variables, and best-effort `ibstat`, `ibv_devinfo`, `ucx_info -v`, and `fi_info` output.
+
+### `x-slurm.rendezvous`
+
+Client-side cross-job discovery resolves records from `<cache_dir>/rendezvous/<name>/latest.json` before launching services:
+
+```yaml
+x-slurm:
+  cache_dir: /cluster/shared/hpc-compose-cache
+  rendezvous: model-server
+```
+
+The mapping form supports multiple names and a timeout:
+
+```yaml
+x-slurm:
+  rendezvous:
+    discover:
+      - model-server
+      - tokenizer
+    timeout_seconds: 60
+    require: true
+```
+
+Resolved records become generic variables such as `HPC_COMPOSE_RDZV_URL` and name-scoped variables such as `HPC_COMPOSE_RDZV_MODEL_SERVER_URL`.
   - Collector failures are best-effort and do not fail the batch job.
 
 ### `x-slurm.artifacts`
@@ -481,6 +604,7 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
+| `extends` | string or mapping | omitted | Authoring-only service template reference. See [`extends`](#extends). |
 | `image` | string | required unless `runtime.backend: host` | Can be a remote image reference, a local `.sqsh` / `.squashfs` path for Pyxis, or a local `.sif` path for Apptainer/Singularity. |
 | `command` | string or list of strings | omitted | Shell form or exec form. |
 | `entrypoint` | string or list of strings | omitted | Must use the same form as `command` when both are present. |
@@ -492,6 +616,7 @@ When both `gres` and `gpus` are set at the same level, `gres` takes priority and
 | `depends_on` | list or mapping | omitted | Dependency list with `service_started` or `service_healthy` conditions. |
 | `readiness` | mapping | omitted | Post-launch readiness gate. |
 | `healthcheck` | mapping | omitted | Compose-compatible sugar for a subset of `readiness`. Mutually exclusive with `readiness`. |
+| `assert` | mapping | omitted | Post-run service contract checked during batch cleanup and surfaced in `status`. |
 | `x-env` | mapping | omitted | Structured host-side module, Spack view, and environment setup for this service. |
 | `x-slurm` | mapping | omitted | Per-service Slurm overrides. |
 | `x-runtime` | mapping | omitted | Backend-neutral image preparation rules. |
@@ -690,6 +815,29 @@ Rules:
 - `interval`, `retries`, and `start_period` are parsed but rejected in v1.
 - HTTP-style healthchecks normalize to `readiness.type: http` with `status_code: 200`.
 
+## `assert`
+
+`assert` defines post-run contracts for a service. Checks run in the rendered script's `cleanup()` after services are reaped and before artifact collection or stage-out. Any failed assertion marks the job failed, even when the service uses `x-slurm.failure_policy.mode: ignore`.
+
+```yaml
+services:
+  train:
+    image: trainer:latest
+    command: python train.py
+    assert:
+      exit_code: 0
+      artifacts_contain: "model/*.pt"
+      max_duration_seconds: 7200
+```
+
+| Field | Shape | Notes |
+| --- | --- | --- |
+| `exit_code` | integer `0..255` | Expected final service exit code. |
+| `artifacts_contain` | string | Glob that must match at least one path. Relative patterns resolve under `/hpc-compose/job`; absolute patterns must stay under `/hpc-compose/job`. |
+| `max_duration_seconds` | positive integer | Maximum wall-clock seconds from first service launch to terminal service exit, including restart time. |
+
+At least one assertion field is required. Assertion results are written into runtime `state.json`; `hpc-compose status --format json` includes them under each service's `assertions` object.
+
 ## Service-level `x-slurm`
 
 These fields live under `services.<name>.x-slurm`.
@@ -718,6 +866,32 @@ These fields live under `services.<name>.x-slurm`.
 | `failure_policy` | mapping | omitted | Per-service failure handling (`fail_job`, `ignore`, `restart_on_failure`). |
 | `prologue` | string or mapping | omitted | Per-service shell hook run before each launch attempt. String shorthand runs on the host. |
 | `epilogue` | string or mapping | omitted | Per-service shell hook run after each service exit attempt. String shorthand runs on the host. |
+| `hooks` | list of mappings | omitted | Host-side event hooks for failure-policy transitions such as accepted restarts and crash-loop window exhaustion. |
+| `rendezvous` | mapping | omitted | Provider registration config for cross-job service discovery. |
+
+### `services.<name>.x-slurm.rendezvous`
+
+Provider-side registration writes an atomic shared-cache record after readiness succeeds when readiness is configured:
+
+```yaml
+services:
+  model:
+    image: python:3.12-slim
+    command: python -m http.server 8000
+    readiness:
+      type: tcp
+      port: 8000
+    x-slurm:
+      rendezvous:
+        register:
+          name: model-server
+          port: 8000
+          protocol: http
+          path: /
+          ttl_seconds: 3600
+```
+
+Names are single safe path components using ASCII letters, digits, `.`, `_`, and `-`. Rendezvous is same-cluster shared-storage coordination only; it does not provide DNS, tunneling, or authentication.
 
 ### `services.<name>.x-slurm.prologue` / `epilogue`
 
@@ -743,6 +917,35 @@ services:
 - Host hooks run in the generated batch supervisor on the allocation's primary execution context. Container hooks wrap the service command inside the container and can use `/hpc-compose/job`.
 - Hook stdout/stderr is written to the service log.
 - Container hooks require an explicit `command` or `entrypoint`; image-default services cannot be wrapped.
+
+### `services.<name>.x-slurm.hooks`
+
+```yaml
+services:
+  trainer:
+    image: trainer:latest
+    command: python train.py
+    x-slurm:
+      failure_policy:
+        mode: restart_on_failure
+      hooks:
+        - on: restart
+          context: host
+          script: |
+            echo "Service $HPC_COMPOSE_SERVICE_NAME restarted (attempt $HPC_COMPOSE_ATTEMPT)" >> /shared/restart.log
+        - on: window_exhausted
+          script: |
+            curl -X POST "$WEBHOOK_URL" -d '{"alert": "crash loop detected"}'
+```
+
+- Shape: list of mappings with `on`, `script`, and optional `context`.
+- `on`: `restart` or `window_exhausted`.
+- `context`: `host` only. Omitted `context` defaults to `host`; `container` is rejected for event hooks.
+- `restart` runs after a non-zero exit has passed the lifetime and rolling-window guards, after restart counters are recorded, and before backoff/relaunch.
+- `window_exhausted` runs only when the rolling-window guard blocks another restart. It does not run for lifetime `max_restarts` exhaustion.
+- Event hooks are best-effort observability hooks. A non-zero hook exit is logged to the service log and does not change the restart or failure-policy outcome.
+- Event hook scripts are emitted as trusted shell and are not Compose-interpolated.
+- Event hooks receive `HPC_COMPOSE_HOOK_PHASE`, `HPC_COMPOSE_SERVICE_NAME`, `HPC_COMPOSE_SERVICE_LOG`, `HPC_COMPOSE_SERVICE_EXIT_CODE`, `HPC_COMPOSE_ATTEMPT`, `HPC_COMPOSE_RESTART_COUNT`, `HPC_COMPOSE_MAX_RESTARTS`, `HPC_COMPOSE_WINDOW_SECONDS`, `HPC_COMPOSE_MAX_RESTARTS_IN_WINDOW`, and `HPC_COMPOSE_RESTART_FAILURES_IN_WINDOW`.
 
 ### `services.<name>.x-slurm.placement`
 
@@ -903,6 +1106,7 @@ Semantics:
 - If a non-zero exit would exceed the rolling-window cap, the job fails immediately and that blocked exit is not recorded as a consumed restart.
 - Successful exits do not trigger restarts and do not add entries to the rolling window.
 - The rolling window is attempt-local to one live batch-script execution. It is not hydrated from prior `state.json`, resume metadata, or Slurm requeue history.
+- `x-slurm.hooks` can observe accepted `restart` events and blocked `window_exhausted` events without changing the policy decision.
 
 Tracked state:
 

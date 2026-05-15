@@ -1,0 +1,37 @@
+name: training-sweep
+
+x-slurm:
+  job_name: training-sweep
+  time: "00:20:00"
+  mem: 8G
+  cpus_per_task: 2
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+sweep:
+  parameters:
+    lr: [0.001, 0.01, 0.1]
+    batch_size: [32, 64]
+  matrix: full
+
+services:
+  trainer:
+    image: python:3.11-slim
+    environment:
+      LR: "${lr:-0.001}"
+      BATCH_SIZE: "${batch_size:-32}"
+      SWEEP_ID: "${HPC_COMPOSE_SWEEP_ID:-manual}"
+      TRIAL_ID: "${HPC_COMPOSE_SWEEP_TRIAL:-manual}"
+    command:
+      - python
+      - -c
+      - |
+        import os
+        import random
+
+        lr = float(os.environ["LR"])
+        batch_size = int(os.environ["BATCH_SIZE"])
+        random.seed(f"{lr}:{batch_size}")
+        score = 0.8 + random.random() * 0.05
+
+        print(f"sweep={os.environ['SWEEP_ID']} trial={os.environ['TRIAL_ID']}")
+        print(f"lr={lr} batch_size={batch_size} score={score:.4f}")

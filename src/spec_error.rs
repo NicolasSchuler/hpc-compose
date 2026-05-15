@@ -29,6 +29,25 @@ pub(crate) enum SpecError {
         help_text: String,
     },
 
+    #[error(
+        "unsupported hpc-compose spec version '{version}'; this build supports version '{supported}'. {help_text}"
+    )]
+    #[diagnostic(code(hpc_compose::spec::unsupported_version), help("{help_text}"))]
+    UnsupportedSpecVersion {
+        version: String,
+        supported: &'static str,
+        help_text: String,
+    },
+
+    #[error(
+        "top-level 'version' must be string \"1\" or integer 1, got {got}. Use `version: \"1\"` or omit `version` for v1 specs."
+    )]
+    #[diagnostic(
+        code(hpc_compose::spec::invalid_version),
+        help("Use `version: \"1\"` or omit `version` for v1 specs.")
+    )]
+    InvalidSpecVersion { got: String },
+
     #[error("x-slurm.artifacts.export_dir is required when x-slurm.artifacts is present")]
     #[diagnostic(
         code(hpc_compose::spec::artifacts_missing_export_dir),

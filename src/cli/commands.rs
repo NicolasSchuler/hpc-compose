@@ -4,7 +4,9 @@ use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
 use super::help::*;
-use super::{ColorPolicy, HoldOnExit, OutputFormat, StatsOutputFormat, WatchMode};
+use super::{
+    ColorPolicy, DependencyOutputFormat, HoldOnExit, OutputFormat, StatsOutputFormat, WatchMode,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -68,6 +70,28 @@ pub enum Commands {
             help = "Fail when ${VAR:-default} or ${VAR-default} fallbacks are used because VAR is missing"
         )]
         strict_env: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        display_order = 405,
+        about = "Run opinionated static lint checks on a compose spec",
+        long_about = "Run stricter static checks on a validated compose specification. Lint catches suspicious authoring choices that are structurally valid but often risky on shared HPC systems.",
+        after_help = LINT_HELP
+    )]
+    Lint {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Fail when ${VAR:-default} or ${VAR-default} fallbacks are used because VAR is missing"
+        )]
+        strict_env: bool,
+        #[arg(
+            long,
+            help = "Exit successfully when only warning-level findings are present"
+        )]
+        allow_warnings: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -224,11 +248,65 @@ pub enum Commands {
         file: Option<PathBuf>,
         #[arg(
             long,
+            conflicts_with_all = ["rightsize", "dependencies"],
             help = "Include resolved environment values and final mount mappings"
         )]
         verbose: bool,
-        #[arg(long, help = "Show services as a dependency tree")]
+        #[arg(
+            long,
+            conflicts_with_all = ["rightsize", "dependencies"],
+            help = "Show services as a dependency tree"
+        )]
         tree: bool,
+        #[arg(
+            long,
+            conflicts_with = "dependencies",
+            help = "Compare requested resources against tracked post-run usage and suggest conservative replacements"
+        )]
+        rightsize: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["verbose", "tree", "rightsize"],
+            help = "Show the normalized service dependency graph"
+        )]
+        dependencies: bool,
+        #[arg(
+            long = "dependencies-format",
+            requires = "dependencies",
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "text",
+            help = "Dependency graph output format"
+        )]
+        dependencies_format: DependencyOutputFormat,
+        #[arg(
+            long,
+            requires = "rightsize",
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to right-size instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sstat",
+            help = "Path to the sstat executable for --rightsize"
+        )]
+        sstat_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable for --rightsize"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable for --rightsize"
+        )]
+        sacct_bin: String,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(long, hide = true, conflicts_with = "format")]
@@ -424,6 +502,44 @@ pub enum Commands {
         singularity_bin: String,
     },
     #[command(
+        display_order = 465,
+        about = "Show advisory live cluster conditions",
+        long_about = "Show a compact one-shot dashboard of live Slurm node, queue, fairshare, and priority signals. This is advisory cluster weather, not a reservation, scheduler mutation, or full Slurm inspection frontend.",
+        after_help = WEATHER_HELP
+    )]
+    Weather {
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sinfo",
+            help = "Path to the sinfo executable"
+        )]
+        sinfo_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sshare",
+            help = "Path to the sshare executable"
+        )]
+        sshare_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sprio",
+            help = "Path to the sprio executable"
+        )]
+        sprio_bin: String,
+    },
+    #[command(
         display_order = 110,
         about = "Submit, watch, and stream logs in one command",
         long_about = "Run the normal end-to-end workflow: optional preflight, image preparation, script rendering, sbatch submission or local launch, and immediate live watching with log streaming and exit-code propagation.",
@@ -531,6 +647,17 @@ pub enum Commands {
         detach: bool,
         #[arg(
             long,
+            help = "After Slurm submission, poll queue state until the job reaches RUNNING before opening the watch view"
+        )]
+        watch_queue: bool,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            help = "Warn when --watch-queue stays PENDING longer than this duration; default is 10m, and 0 disables the warning"
+        )]
+        queue_warn_after: Option<String>,
+        #[arg(
+            long,
             value_enum,
             value_name = "MODE",
             default_value = "auto",
@@ -559,6 +686,644 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 112,
+        about = "Submit and inspect hyperparameter sweeps",
+        long_about = "Expand an embedded top-level sweep block into independent tracked Slurm submissions, then aggregate their tracked scheduler and runtime state.",
+        after_help = SWEEP_HELP
+    )]
+    Sweep {
+        #[command(subcommand)]
+        command: SweepCommands,
+    },
+    #[command(
+        display_order = 111,
+        about = "Submit a short canary run and recommend resource settings",
+        long_about = "Submit a minimized Slurm canary allocation, force metrics sampling on, wait for it to finish, then compare observed usage against the original compose request and print right-sizing recommendations."
+    )]
+    Germinate {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered canary script to this path before submission"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "TIME",
+            default_value = "00:01:00",
+            help = "Walltime for the canary allocation"
+        )]
+        canary_time: String,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 5,
+            help = "Metrics sampler interval forced into the canary plan"
+        )]
+        metrics_interval: u64,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            default_value = "30m",
+            help = "Give up if the canary remains non-terminal for this long"
+        )]
+        pending_timeout: String,
+        #[arg(
+            long,
+            value_name = "CPUS",
+            default_value_t = 1,
+            help = "Minimum canary CPUs per task"
+        )]
+        min_cpus: u32,
+        #[arg(
+            long,
+            value_name = "MEM",
+            default_value = "1G",
+            help = "Minimum canary memory"
+        )]
+        min_mem: String,
+        #[arg(
+            long,
+            value_name = "GPUS",
+            default_value_t = 1,
+            help = "Minimum canary GPU count when the original plan requests GPUs"
+        )]
+        min_gpus: u32,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sstat",
+            help = "Path to the sstat executable"
+        )]
+        sstat_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+        #[arg(
+            long,
+            help = "Keep failed preparation state on disk for later inspection"
+        )]
+        keep_failed_prep: bool,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(
+            long,
+            help = "Refresh imported and prepared artifacts before submission"
+        )]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before submission")]
+        no_preflight: bool,
+        #[arg(long, help = "Render the canary script without submitting it")]
+        dry_run: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        name = "test",
+        display_order = 113,
+        about = "Smoke-test a compose spec end to end",
+        long_about = "Validate, prepare, render, launch, and evaluate a finite compose smoke test. Choose --local for the local Pyxis/Enroot supervisor or --submit for a short Slurm submission.",
+        after_help = TEST_HELP
+    )]
+    Test {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Run the smoke test through the local Pyxis/Enroot supervisor"
+        )]
+        local: bool,
+        #[arg(long, help = "Submit the smoke test to Slurm")]
+        submit: bool,
+        #[arg(
+            long,
+            value_name = "TIME",
+            default_value = "00:01:00",
+            help = "Walltime override for --submit smoke tests"
+        )]
+        time: String,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            default_value = "180s",
+            help = "Maximum time to wait for the smoke test to reach a terminal result"
+        )]
+        timeout: String,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered launcher script to this path"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scancel",
+            help = "Path to the scancel executable"
+        )]
+        scancel_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+        #[arg(
+            long,
+            help = "Keep failed preparation state on disk for later inspection"
+        )]
+        keep_failed_prep: bool,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(long, help = "Refresh imported and prepared artifacts before launch")]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before launch")]
+        no_preflight: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        display_order = 114,
+        about = "Run a local hot-reload development loop",
+        long_about = "Launch the compose spec with the local Pyxis/Enroot supervisor, watch bind-mounted source directories, and request targeted service restarts when files change.",
+        after_help = DEV_HELP
+    )]
+    Dev {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long = "watch-path",
+            value_name = "PATH",
+            help = "Additional source directory to watch; restarts all services when it changes"
+        )]
+        watch_paths: Vec<PathBuf>,
+        #[arg(
+            long,
+            value_name = "MILLISECONDS",
+            default_value_t = 300,
+            help = "Debounce file changes before requesting a restart"
+        )]
+        debounce_ms: u64,
+        #[arg(long, help = "Leave the local supervisor running when dev exits")]
+        keep_running: bool,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered local launcher script to this path"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+        #[arg(
+            long,
+            help = "Keep failed preparation state on disk for later inspection"
+        )]
+        keep_failed_prep: bool,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(long, help = "Refresh imported and prepared artifacts before launch")]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before launch")]
+        no_preflight: bool,
+    },
+    #[command(
+        display_order = 116,
+        about = "Open a tmux pane dashboard for local service logs",
+        long_about = "Launch or attach to a tracked local run and create one tmux pane per service, each tailing that service's log. tmux is a log dashboard; the existing local supervisor still owns service processes.",
+        after_help = TMUX_HELP
+    )]
+    Tmux {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked local job id to attach to instead of launching a new local run"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "tmux session name; defaults to hpc-compose-<job-id>"
+        )]
+        session: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "tmux",
+            help = "Path to the tmux executable"
+        )]
+        tmux_bin: String,
+        #[arg(long, help = "Create or update the tmux session without attaching")]
+        no_attach: bool,
+        #[arg(
+            long,
+            value_name = "LINES",
+            default_value_t = 100,
+            help = "Number of existing log lines each pane should show before following"
+        )]
+        lines: usize,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered local launcher script to this path when launching"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+        #[arg(
+            long,
+            help = "Keep failed preparation state on disk for later inspection"
+        )]
+        keep_failed_prep: bool,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(long, help = "Refresh imported and prepared artifacts before launch")]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before launch")]
+        no_preflight: bool,
+    },
+    #[command(
+        display_order = 112,
+        about = "Submit once cluster conditions are met",
+        long_about = "Prepare and render the compose job now, then monitor Slurm or local wall-clock conditions in the foreground and submit automatically when every condition is satisfied.",
+        after_help = WHEN_HELP
+    )]
+    When {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PARTITION",
+            requires = "free_nodes",
+            help = "Partition to monitor for --free-nodes; must match x-slurm.partition"
+        )]
+        partition: Option<String>,
+        #[arg(
+            long,
+            value_name = "NODES",
+            requires = "partition",
+            help = "Submit when the monitored partition has at least this many idle nodes"
+        )]
+        free_nodes: Option<u32>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Submit after this Slurm job reaches a terminal state matching --after-job-condition"
+        )]
+        after_job: Option<String>,
+        #[arg(
+            long,
+            value_name = "CONDITION",
+            default_value = "afterany",
+            help = "Dependency condition for --after-job: afterany, afterok, or afternotok"
+        )]
+        after_job_condition: String,
+        #[arg(
+            long,
+            value_name = "HH:MM-HH:MM",
+            help = "Submit only inside this local wall-clock window, e.g. 22:00-06:00"
+        )]
+        between: Option<String>,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            default_value = "60s",
+            help = "Polling interval for active monitoring; minimum 5s"
+        )]
+        poll_interval: String,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            help = "Give up if conditions are not met within this duration; 0s performs one check"
+        )]
+        timeout: Option<String>,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered launcher script to this path before monitoring"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sinfo",
+            help = "Path to the sinfo executable"
+        )]
+        sinfo_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+        #[arg(
+            long,
+            help = "Keep failed preparation state on disk for later inspection"
+        )]
+        keep_failed_prep: bool,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(
+            long,
+            help = "Refresh imported and prepared artifacts before monitoring"
+        )]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before monitoring")]
+        no_preflight: bool,
+        #[arg(
+            long,
+            help = "Allow submission even when resume config drift is detected"
+        )]
+        allow_resume_changes: bool,
+        #[arg(long, help = "Submit and return after tracking metadata is written")]
+        detach: bool,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "MODE",
+            default_value = "auto",
+            help = "Watch output mode after submission"
+        )]
+        watch_mode: WatchMode,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "WHEN",
+            default_value = "failure",
+            help = "Keep the watch UI open after terminal states"
+        )]
+        hold_on_exit: HoldOnExit,
+        #[arg(
+            long,
+            help = "Use line-oriented watch output instead of the terminal UI"
+        )]
+        no_tui: bool,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "FORMAT",
+            help = "Output format for --detach"
+        )]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        display_order = 115,
+        about = "Open an interactive Slurm allocation for iterative service runs",
+        long_about = "Request one Slurm allocation using the compose file's top-level x-slurm settings, prepare images, export HPC_COMPOSE_* allocation metadata, and open a login shell or run the command after --.",
+        after_help = ALLOC_HELP
+    )]
+    Alloc {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            value_name = "COMMAND",
+            num_args = 0..,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "Optional command to run inside the allocation after --; defaults to $SHELL -l"
+        )]
+        command: Vec<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "salloc",
+            help = "Path to the salloc executable"
+        )]
+        salloc_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scontrol",
+            help = "Path to the scontrol executable"
+        )]
+        scontrol_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+        #[arg(
+            long,
+            help = "Keep failed preparation state on disk for later inspection"
+        )]
+        keep_failed_prep: bool,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(
+            long,
+            help = "Refresh imported and prepared artifacts before opening the allocation"
+        )]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before opening the allocation")]
+        no_preflight: bool,
+    },
+    #[command(
         display_order = 220,
         about = "Show tracked scheduler state and log locations",
         long_about = "Read tracked submission metadata and query the scheduler to show current batch state, runtime paths, log locations, and placement details.",
@@ -582,6 +1347,11 @@ pub enum Commands {
         format: Option<OutputFormat>,
         #[arg(long, hide = true, conflicts_with = "format")]
         json: bool,
+        #[arg(
+            long,
+            help = "Include Slurm array task rows from squeue --array and sacct --array"
+        )]
+        array: bool,
         #[arg(
             long,
             value_name = "PATH",
@@ -623,11 +1393,132 @@ pub enum Commands {
         format: Option<StatsOutputFormat>,
         #[arg(
             long,
+            help = "Include on-demand sacct accounting rollups for completed or visible Slurm jobs"
+        )]
+        accounting: bool,
+        #[arg(
+            long,
             value_name = "PATH",
             default_value = "sstat",
             help = "Path to the sstat executable"
         )]
         sstat_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+    },
+    #[command(name = "metrics-probe", hide = true)]
+    MetricsProbe {
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 5,
+            help = "Duration of the internal CPU workload used for perf counter probing"
+        )]
+        duration_seconds: u64,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "FORMAT",
+            default_value = "json",
+            help = "Output format"
+        )]
+        format: OutputFormat,
+        #[arg(
+            long,
+            help = "Also time one nvidia-smi query for rough overhead comparison"
+        )]
+        compare_nvidia_smi: bool,
+    },
+    #[command(
+        display_order = 252,
+        about = "Score tracked job resource efficiency",
+        long_about = "Compute a post-run 0-100 efficiency score for a tracked Slurm job from GPU sampler history, memory usage, active compute time, accounting, and best-effort energy estimates.",
+        after_help = SCORE_HELP
+    )]
+    Score {
+        #[arg(value_name = "JOB_ID", help = "Tracked Slurm job id to score")]
+        job_id: Option<String>,
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with = "format")]
+        json: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            default_value_t = 1.20,
+            help = "Power usage effectiveness multiplier for kWh estimates"
+        )]
+        pue: f64,
+        #[arg(
+            long,
+            value_name = "WATTS",
+            default_value_t = 300.0,
+            help = "Fallback GPU TDP in watts when sampler power is unavailable"
+        )]
+        gpu_tdp_w: f64,
+        #[arg(
+            long,
+            value_name = "WATTS",
+            default_value_t = 8.0,
+            help = "Fallback CPU watts per allocated core for energy estimates"
+        )]
+        cpu_watts_per_core: f64,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sstat",
+            help = "Path to the sstat executable"
+        )]
+        sstat_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+    },
+    #[command(
+        display_order = 255,
+        about = "Compare two tracked job submissions",
+        long_about = "Compare tracked submission metadata, effective config snapshots, selected resource settings, and observed outcomes between two jobs.",
+        after_help = DIFF_HELP
+    )]
+    Diff {
+        #[arg(value_name = "JOB_ID_1", help = "Earlier or left-hand tracked job id")]
+        job_id_1: String,
+        #[arg(value_name = "JOB_ID_2", help = "Later or right-hand tracked job id")]
+        job_id_2: String,
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
         #[arg(
             long,
             value_name = "PATH",
@@ -704,6 +1595,18 @@ pub enum Commands {
         service: Option<String>,
         #[arg(long, help = "Follow appended log output until interrupted")]
         follow: bool,
+        #[arg(
+            long = "grep",
+            value_name = "PATTERN",
+            help = "Only print log lines matching this Rust regex pattern"
+        )]
+        grep: Option<String>,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            help = "Only print initial log tails for files updated within this coarse duration, e.g. 30s, 15m, 2h, or 1d"
+        )]
+        since: Option<String>,
         #[arg(
             long,
             value_name = "LINES",
@@ -817,6 +1720,52 @@ pub enum Commands {
             help = "Use line-oriented watch output instead of the terminal UI"
         )]
         no_tui: bool,
+    },
+    #[command(
+        display_order = 215,
+        about = "Replay a tracked job timeline from runtime artifacts",
+        long_about = "Reconstruct a best-effort timeline from tracked state, service-exit markers, metrics JSONL, and logs, then replay it in the watch-style terminal UI or print a static summary.",
+        after_help = REPLAY_HELP
+    )]
+    Replay {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to replay instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "SERVICE",
+            help = "Service to focus initially and include in the replay"
+        )]
+        service: Option<String>,
+        #[arg(
+            long,
+            value_name = "MULTIPLIER",
+            default_value_t = 1.0,
+            allow_hyphen_values = true,
+            help = "Replay speed multiplier, e.g. 1, 10, or 100"
+        )]
+        speed: f64,
+        #[arg(
+            long,
+            value_name = "LINES",
+            default_value_t = 100,
+            help = "Number of trailing log lines to seed into the replay view"
+        )]
+        lines: usize,
+        #[arg(long, help = "Print a static event summary instead of opening the TUI")]
+        no_tui: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
     },
     #[command(
         display_order = 200,
@@ -1215,6 +2164,67 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 15,
+        about = "Learn specs by progressively evolving a valid compose file",
+        long_about = "Run an authoring-only tutorial that starts from a minimal valid spec and progressively adds services, readiness, failure policy, and multi-node placement. Each accepted step validates and writes the current spec without submitting a job, preparing images, or running preflight.",
+        after_help = EVOLVE_HELP
+    )]
+    Evolve {
+        #[arg(
+            long,
+            value_name = "LESSON",
+            help = "Lesson id to run; defaults to progressive-complexity"
+        )]
+        lesson: Option<String>,
+        #[arg(
+            long,
+            help = "List shipped evolve lessons and exit",
+            conflicts_with_all = ["describe_lesson", "lesson", "name", "cache_dir", "output", "force", "yes", "until"]
+        )]
+        list_lessons: bool,
+        #[arg(
+            long = "describe-lesson",
+            value_name = "LESSON",
+            help = "Describe one evolve lesson and exit",
+            conflicts_with_all = ["list_lessons", "lesson", "name", "cache_dir", "output", "force", "yes", "until"]
+        )]
+        describe_lesson: Option<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Application name written into each accepted spec"
+        )]
+        name: Option<String>,
+        #[arg(
+            long,
+            value_name = "CACHE_DIR",
+            help = "Optional shared cache directory written into each accepted spec"
+        )]
+        cache_dir: Option<String>,
+        #[arg(
+            long,
+            value_name = "FILE",
+            default_value = "compose.yaml",
+            help = "Path to the compose file to evolve"
+        )]
+        output: PathBuf,
+        #[arg(long, help = "Overwrite the output file if it already exists")]
+        force: bool,
+        #[arg(
+            long,
+            help = "Accept each step noninteractively; required with --format json"
+        )]
+        yes: bool,
+        #[arg(
+            long,
+            value_name = "STEP",
+            help = "Stop after this step id, for example readiness"
+        )]
+        until: Option<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
         display_order = 300,
         about = "Inspect and prune cached image artifacts",
         long_about = "Inspect reusable imported and prepared image artifacts stored under the cache directory, or prune entries that are no longer needed.",
@@ -1223,6 +2233,15 @@ pub enum Commands {
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
+    },
+    #[command(
+        display_order = 305,
+        about = "Inspect and manage shared-cache rendezvous records",
+        long_about = "Register, resolve, list, or prune cross-job service discovery records under the active cache directory."
+    )]
+    Rendezvous {
+        #[command(subcommand)]
+        command: RendezvousCommands,
     },
     #[command(
         display_order = 310,
@@ -1512,6 +2531,86 @@ pub enum CacheCommands {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum RendezvousCommands {
+    #[command(about = "Register a provider record in the shared cache")]
+    Register {
+        #[arg(value_name = "NAME", help = "Rendezvous name")]
+        name: String,
+        #[arg(long, value_name = "HOST", help = "Reachable provider host")]
+        host: String,
+        #[arg(long, value_name = "PORT", help = "Reachable provider port")]
+        port: u16,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Owning Slurm job id; defaults to $SLURM_JOB_ID when set"
+        )]
+        job_id: Option<String>,
+        #[arg(long, value_name = "SERVICE", help = "Optional owning service name")]
+        service: Option<String>,
+        #[arg(
+            long,
+            value_name = "PROTOCOL",
+            default_value = "http",
+            help = "URL protocol written into the record"
+        )]
+        protocol: String,
+        #[arg(long, value_name = "PATH", help = "Optional URL path, such as /v1")]
+        path: Option<String>,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 3600,
+            help = "Registration TTL"
+        )]
+        ttl_seconds: u64,
+        #[arg(
+            long,
+            value_name = "CACHE_DIR",
+            help = "Cache directory to use instead of the active context cache"
+        )]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(about = "Resolve one provider record from the shared cache")]
+    Resolve {
+        #[arg(value_name = "NAME", help = "Rendezvous name")]
+        name: String,
+        #[arg(
+            long,
+            value_name = "CACHE_DIR",
+            help = "Cache directory to use instead of the active context cache"
+        )]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(about = "List live provider records in the shared cache")]
+    List {
+        #[arg(
+            long,
+            value_name = "CACHE_DIR",
+            help = "Cache directory to use instead of the active context cache"
+        )]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(about = "Remove expired provider records from the shared cache")]
+    Prune {
+        #[arg(
+            long,
+            value_name = "CACHE_DIR",
+            help = "Cache directory to use instead of the active context cache"
+        )]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum JobsCommands {
     #[command(
         about = "List tracked jobs discovered under the repo tree",
@@ -1524,6 +2623,125 @@ pub enum JobsCommands {
             help = "Include recursive disk-usage totals for tracked job paths"
         )]
         disk_usage: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SweepCommands {
+    #[command(
+        about = "Submit all trials in an embedded sweep",
+        long_about = "Expand the top-level sweep block, render one batch script per trial, submit each trial as an independent Slurm job, and persist a sweep manifest.",
+        after_help = SWEEP_SUBMIT_HELP
+    )]
+    Submit {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Validate and print the expanded trials without writing scripts or submitting jobs"
+        )]
+        dry_run: bool,
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Maximum number of trials allowed for this submission; defaults to 100"
+        )]
+        max_trials: Option<usize>,
+        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
+        skip_prepare: bool,
+        #[arg(
+            long,
+            help = "Refresh imported and prepared artifacts before submission"
+        )]
+        force_rebuild: bool,
+        #[arg(long, help = "Skip the preflight phase before submission")]
+        no_preflight: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scontrol",
+            help = "Path to the scontrol executable"
+        )]
+        scontrol_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "enroot",
+            help = "Path to the enroot executable"
+        )]
+        enroot_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "apptainer",
+            help = "Path to the apptainer executable"
+        )]
+        apptainer_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "singularity",
+            help = "Path to the singularity executable"
+        )]
+        singularity_bin: String,
+    },
+    #[command(
+        about = "Show aggregated tracked state for one sweep",
+        long_about = "Load a persisted sweep manifest and query tracked scheduler/runtime state for each submitted trial.",
+        after_help = SWEEP_STATUS_HELP
+    )]
+    Status {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Sweep id to inspect; defaults to the latest sweep"
+        )]
+        sweep_id: Option<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+    },
+    #[command(
+        about = "List persisted sweeps for a compose file",
+        long_about = "List sweep manifests stored under the compose file's .hpc-compose/sweeps directory without querying the scheduler.",
+        after_help = SWEEP_LIST_HELP
+    )]
+    List {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
