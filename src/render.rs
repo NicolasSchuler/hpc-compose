@@ -3336,7 +3336,8 @@ register_service_rendezvous_by_index() {
   local protocol=${SERVICE_RDZV_PROTOCOLS[index]:-http}
   local path=${SERVICE_RDZV_PATHS[index]:-}
   local ttl=${SERVICE_RDZV_TTLS[index]:-3600}
-  local metadata_json=${SERVICE_RDZV_METADATA_JSON[index]:-{}}
+  local metadata_json=${SERVICE_RDZV_METADATA_JSON[index]:-}
+  [[ -z "$metadata_json" ]] && metadata_json='{}'
   local url="${protocol}://${host}:${port}${path}"
   local dir="$CACHE_ROOT/rendezvous/$rdzv_name"
   local token

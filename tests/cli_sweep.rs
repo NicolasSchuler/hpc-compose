@@ -438,11 +438,11 @@ fn sweep_list_reports_persisted_manifests_without_scheduler() {
             >= pair[1]["submitted_at"].as_u64().unwrap_or_default()
     }));
     assert!(sweeps.iter().any(|sweep| {
-        sweep["sweep_id"] == Value::from(first_sweep_id.as_str())
+        sweep["sweep_id"] == first_sweep_id.as_str()
             && sweep["trials"].as_array().expect("trials").len() == 1
     }));
     assert!(sweeps.iter().any(|sweep| {
-        sweep["sweep_id"] == Value::from(second_sweep_id.as_str())
+        sweep["sweep_id"] == second_sweep_id.as_str()
             && sweep["trials"].as_array().expect("trials").len() == 2
     }));
 
