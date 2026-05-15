@@ -57,6 +57,7 @@ jobs:
           components: llvm-tools-preview
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
@@ -125,6 +126,7 @@ jobs:
           components: rustfmt
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -143,6 +145,7 @@ jobs:
           components: clippy
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Run clippy
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -160,6 +163,7 @@ jobs:
           toolchain: stable
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Run test suite
         run: cargo test --locked
@@ -195,6 +199,7 @@ jobs:
           toolchain: stable
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Install shellcheck
         run: |
@@ -234,6 +239,7 @@ jobs:
           toolchain: stable
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Run authoring-focused tests
         run: cargo test --locked --test cli_context --test cli_init --test cli_spec --test public_api --test release_metadata
@@ -260,6 +266,7 @@ jobs:
           toolchain: stable
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -284,6 +291,7 @@ jobs:
           toolchain: stable
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Install Linux musl toolchain
         if: runner.os == 'Linux'
@@ -404,6 +412,7 @@ jobs:
           toolchain: stable
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Package checkout artifact for formula smoke test
         shell: bash
@@ -488,6 +497,7 @@ jobs:
           toolchain: stable
           rustflags: ""
           cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@ddc7029b5ba1e37640598eb3580cdbefa9662f46

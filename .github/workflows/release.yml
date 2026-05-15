@@ -38,6 +38,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-bin: false
 
       - name: Verify release tag matches Cargo package version
         shell: bash
@@ -111,6 +112,7 @@ jobs:
         with:
           toolchain: stable
           rustflags: ""
+          cache-bin: false
 
       - name: Install Linux musl toolchain
         if: endsWith(matrix.target, '-unknown-linux-musl')
