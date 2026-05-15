@@ -828,7 +828,7 @@ sinfo = "{sinfo}"
     assert_eq!(payload["path"], Value::from(out_path.display().to_string()));
     assert_eq!(
         payload["profile"]["slurm_version"],
-        Value::from("sbatch 24.05")
+        Value::from("slurm 24.05")
     );
     assert_eq!(payload["profile"]["runtimes"]["pyxis"], Value::from(true));
     assert_eq!(payload["profile"]["runtimes"]["enroot"], Value::from(true));

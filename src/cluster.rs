@@ -498,7 +498,8 @@ impl ClusterProfile {
 pub fn generate_cluster_profile(binaries: &ResolvedBinaries) -> ClusterReportGeneration {
     let mut diagnostics = Report { items: Vec::new() };
     let slurm_version = run_capture(&binaries.sbatch.value, &["--version"], &mut diagnostics)
-        .or_else(|| run_capture(&binaries.srun.value, &["--version"], &mut diagnostics));
+        .or_else(|| run_capture(&binaries.srun.value, &["--version"], &mut diagnostics))
+        .map(normalize_slurm_version);
     let partitions = collect_partitions(binaries, &mut diagnostics);
     let mpi_types = run_capture(&binaries.srun.value, &["--mpi=list"], &mut diagnostics)
         .map(|raw| advertised_mpi_types(&raw))
@@ -892,6 +893,35 @@ fn run_capture(bin: &str, args: &[&str], diagnostics: &mut Report) -> Option<Str
             None
         }
     }
+}
+
+fn normalize_slurm_version(raw: String) -> String {
+    let trimmed = raw.trim();
+    let mut parts = trimmed.split_whitespace();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(program), Some(version), None)
+            if is_slurm_command_version(program)
+                && version.chars().next().is_some_and(|ch| ch.is_ascii_digit()) =>
+        {
+            format!("slurm {version}")
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+fn is_slurm_command_version(program: &str) -> bool {
+    matches!(
+        program,
+        "slurm"
+            | "sbatch"
+            | "srun"
+            | "salloc"
+            | "sacct"
+            | "scontrol"
+            | "scancel"
+            | "sinfo"
+            | "squeue"
+    )
 }
 
 fn srun_has_pyxis(srun_bin: &str) -> bool {
@@ -1803,6 +1833,22 @@ name = ""
         assert!(text.contains("captured"));
         assert!(text.contains("exited with status"));
         assert!(text.contains("failed to run"));
+    }
+
+    #[test]
+    fn normalize_slurm_version_canonicalizes_slurm_clients() {
+        assert_eq!(
+            normalize_slurm_version("sbatch 24.05.1".to_string()),
+            "slurm 24.05.1"
+        );
+        assert_eq!(
+            normalize_slurm_version("srun 24.05.1".to_string()),
+            "slurm 24.05.1"
+        );
+        assert_eq!(
+            normalize_slurm_version("custom wrapper 24.05.1".to_string()),
+            "custom wrapper 24.05.1"
+        );
     }
 
     #[test]
