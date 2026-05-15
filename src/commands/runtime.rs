@@ -3138,6 +3138,9 @@ fn minimized_canary_plan(
         if plan.slurm.gpus_per_task.is_some() {
             plan.slurm.gpus_per_task = Some(min_gpus);
         }
+        if let Some(gres) = &mut plan.slurm.gres {
+            *gres = minimized_gpu_gres(gres, min_gpus);
+        }
     }
     plan.slurm.metrics = Some(MetricsConfig {
         enabled: Some(true),
@@ -3157,8 +3160,39 @@ fn minimized_canary_plan(
         if service.slurm.gpus_per_task.is_some() {
             service.slurm.gpus_per_task = Some(min_gpus);
         }
+        if let Some(gres) = &mut service.slurm.gres {
+            *gres = minimized_gpu_gres(gres, min_gpus);
+        }
     }
     plan
+}
+
+fn minimized_gpu_gres(gres: &str, min_gpus: u32) -> String {
+    gres.split(',')
+        .map(|part| minimized_gpu_gres_part(part.trim(), min_gpus))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn minimized_gpu_gres_part(part: &str, min_gpus: u32) -> String {
+    let mut fields = part.split(':').collect::<Vec<_>>();
+    let Some(resource) = fields.first().copied() else {
+        return part.to_string();
+    };
+    if resource != "gpu" && !resource.ends_with("/gpu") {
+        return part.to_string();
+    }
+    if fields
+        .last()
+        .is_some_and(|last| last.parse::<u32>().is_ok())
+    {
+        fields.pop();
+        fields.push("");
+        let mut minimized = fields.join(":");
+        minimized.push_str(&min_gpus.to_string());
+        return minimized;
+    }
+    part.to_string()
 }
 
 fn allocation_or_service_requests_gpus(plan: &RuntimePlan) -> bool {
@@ -3425,6 +3459,9 @@ pub(crate) fn alloc(
         bail!(
             "alloc does not support x-slurm.array; interactive allocations run one compose allocation"
         );
+    }
+    if runtime_plan.slurm.has_scheduler_dependency() {
+        bail!("alloc does not support Slurm job dependencies");
     }
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let progress = ProgressReporter::new(!quiet);

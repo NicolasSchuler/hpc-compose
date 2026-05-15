@@ -1335,6 +1335,64 @@ mod tests {
         assert_eq!(plan.slurm.mem.as_deref(), Some("32G"));
     }
 
+    #[test]
+    fn resource_profile_defaults_include_new_resource_fields() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "accelerated".to_string(),
+            ResourceProfile {
+                gres: Some("gpu:a100:2".into()),
+                gpus_per_node: Some(2),
+                gpus_per_task: Some(1),
+                cpus_per_gpu: Some(8),
+                mem_per_gpu: Some("24G".into()),
+                gpu_bind: Some("closest".into()),
+                cpu_bind: Some("cores".into()),
+                mem_bind: Some("local".into()),
+                distribution: Some("block:block".into()),
+                hint: Some("nomultithread".into()),
+                constraint: Some("a100".into()),
+                ..ResourceProfile::default()
+            },
+        );
+
+        let plan = build_plan_with_options(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    resources: Some("accelerated".into()),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([("app".into(), service("redis:7"))]),
+            },
+            PlanOptions {
+                resource_profiles: profiles,
+                ..PlanOptions::default()
+            },
+        )
+        .expect("profile defaults");
+
+        assert_eq!(plan.slurm.gres.as_deref(), Some("gpu:a100:2"));
+        assert_eq!(plan.slurm.gpus_per_node, Some(2));
+        assert_eq!(plan.slurm.gpus_per_task, Some(1));
+        assert_eq!(plan.slurm.cpus_per_gpu, Some(8));
+        assert_eq!(plan.slurm.mem_per_gpu.as_deref(), Some("24G"));
+        assert_eq!(plan.slurm.gpu_bind.as_deref(), Some("closest"));
+        assert_eq!(plan.slurm.cpu_bind.as_deref(), Some("cores"));
+        assert_eq!(plan.slurm.mem_bind.as_deref(), Some("local"));
+        assert_eq!(plan.slurm.distribution.as_deref(), Some("block:block"));
+        assert_eq!(plan.slurm.hint.as_deref(), Some("nomultithread"));
+        assert_eq!(plan.slurm.constraint.as_deref(), Some("a100"));
+    }
+
     proptest! {
         #[test]
         fn property_node_ranges_resolve_to_sorted_in_range_sets(
@@ -1882,6 +1940,699 @@ mod tests {
         assert_eq!(a.placement.nodes, 4);
         assert_eq!(a.placement.node_indices, Some(vec![0, 1, 2, 3]));
         assert_eq!(b.placement.node_indices, Some(vec![4, 5, 6, 7]));
+    }
+
+    #[test]
+    fn plan_resolves_sparse_placement_with_start_index_and_exclude() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(8),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([(
+                    "workers".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_count: Some(3),
+                                start_index: Some(2),
+                                exclude: Some("3,5".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                )]),
+            },
+        )
+        .expect("sparse placement");
+
+        let workers = &plan.ordered_services[0];
+        assert_eq!(workers.placement.mode, ServicePlacementMode::Partitioned);
+        assert_eq!(workers.placement.nodes, 3);
+        assert_eq!(workers.placement.node_indices, Some(vec![2, 4, 6]));
+        assert_eq!(workers.placement.exclude_indices, vec![3, 5]);
+    }
+
+    #[test]
+    fn build_plan_resolves_node_percent_with_start_index_and_exclude() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(10),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([(
+                    "workers".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_percent: Some(50),
+                                start_index: Some(2),
+                                exclude: Some("3,7".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                )]),
+            },
+        )
+        .expect("percent placement");
+
+        let workers = &plan.ordered_services[0];
+        assert_eq!(workers.placement.nodes, 4);
+        assert_eq!(workers.placement.node_indices, Some(vec![2, 4, 5, 6]));
+        assert_eq!(workers.placement.exclude_indices, vec![3, 7]);
+    }
+
+    #[test]
+    fn build_plan_rejects_start_index_outside_allocation() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let err = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(2),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([(
+                    "app".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_count: Some(1),
+                                start_index: Some(2),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                )]),
+            },
+        )
+        .expect_err("start index out of allocation");
+        assert!(
+            err.to_string()
+                .contains("start_index=2 is outside the 2 node allocation")
+        );
+    }
+
+    #[test]
+    fn build_plan_rejects_node_count_when_start_index_leaves_too_few_nodes() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let err = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(3),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([(
+                    "app".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_count: Some(2),
+                                start_index: Some(2),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                )]),
+            },
+        )
+        .expect_err("not enough eligible nodes");
+        let text = err.to_string();
+        assert!(text.contains("requests 2 node(s)"), "{text}");
+        assert!(text.contains("only 1 eligible node(s)"), "{text}");
+    }
+
+    #[test]
+    fn build_plan_resolves_explicit_full_allocation_range_as_distributed() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(4),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([(
+                    "trainer".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                node_range: Some("0-3".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                )]),
+            },
+        )
+        .expect("full allocation placement");
+
+        let trainer = &plan.ordered_services[0];
+        assert_eq!(trainer.placement.mode, ServicePlacementMode::Distributed);
+        assert_eq!(trainer.placement.nodes, 4);
+        assert_eq!(trainer.placement.node_indices, None);
+    }
+
+    #[test]
+    fn build_plan_rejects_service_nodes_mismatch_with_explicit_placement() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let err = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(4),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([(
+                    "app".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            nodes: Some(2),
+                            placement: Some(ServicePlacementSpec {
+                                node_range: Some("0".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                )]),
+            },
+        )
+        .expect_err("nodes mismatch");
+        assert!(
+            err.to_string()
+                .contains("sets x-slurm.nodes=2 but x-slurm.placement resolves to 1 node"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn build_plan_rejects_unknown_share_with_target_with_context() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let err = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(2),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([(
+                    "sidecar".into(),
+                    ServiceSpec {
+                        slurm: ServiceSlurmConfig {
+                            placement: Some(ServicePlacementSpec {
+                                share_with: Some("missing".into()),
+                                ..ServicePlacementSpec::default()
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("redis:7")
+                    },
+                )]),
+            },
+        )
+        .expect_err("unknown share_with target");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("service 'sidecar' x-slurm.placement.share_with references 'missing'"),
+            "{text}"
+        );
+        assert!(text.contains("service 'missing' does not exist"), "{text}");
+    }
+
+    #[test]
+    fn build_plan_share_with_recomputes_task_geometry_for_sharer() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(4),
+                    ntasks: Some(8),
+                    ntasks_per_node: Some(2),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([
+                    (
+                        "worker".into(),
+                        ServiceSpec {
+                            slurm: ServiceSlurmConfig {
+                                placement: Some(ServicePlacementSpec {
+                                    node_range: Some("0-1".into()),
+                                    ..ServicePlacementSpec::default()
+                                }),
+                                ..ServiceSlurmConfig::default()
+                            },
+                            ..service("python:3.11-slim")
+                        },
+                    ),
+                    (
+                        "sidecar".into(),
+                        ServiceSpec {
+                            slurm: ServiceSlurmConfig {
+                                ntasks: Some(1),
+                                placement: Some(ServicePlacementSpec {
+                                    share_with: Some("worker".into()),
+                                    ..ServicePlacementSpec::default()
+                                }),
+                                ..ServiceSlurmConfig::default()
+                            },
+                            ..service("redis:7")
+                        },
+                    ),
+                ]),
+            },
+        )
+        .expect("shared placement");
+
+        let by_name = plan
+            .ordered_services
+            .iter()
+            .map(|service| (service.name.as_str(), &service.placement))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(by_name["worker"].node_indices, Some(vec![0, 1]));
+        assert_eq!(by_name["sidecar"].node_indices, Some(vec![0, 1]));
+        assert_eq!(by_name["sidecar"].ntasks, Some(1));
+        assert_eq!(by_name["sidecar"].ntasks_per_node, None);
+        assert!(by_name["sidecar"].allow_overlap);
+    }
+
+    #[test]
+    fn plan_step_task_geometry_respects_service_overrides_before_allocation_defaults() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    nodes: Some(6),
+                    ntasks: Some(24),
+                    ntasks_per_node: Some(4),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([
+                    (
+                        "inherits".into(),
+                        ServiceSpec {
+                            slurm: ServiceSlurmConfig {
+                                placement: Some(ServicePlacementSpec {
+                                    node_range: Some("0-1".into()),
+                                    ..ServicePlacementSpec::default()
+                                }),
+                                ..ServiceSlurmConfig::default()
+                            },
+                            ..service("alpine:3.20")
+                        },
+                    ),
+                    (
+                        "task_override".into(),
+                        ServiceSpec {
+                            slurm: ServiceSlurmConfig {
+                                ntasks: Some(6),
+                                placement: Some(ServicePlacementSpec {
+                                    node_range: Some("2-3".into()),
+                                    ..ServicePlacementSpec::default()
+                                }),
+                                ..ServiceSlurmConfig::default()
+                            },
+                            ..service("python:3.11-slim")
+                        },
+                    ),
+                    (
+                        "per_node_override".into(),
+                        ServiceSpec {
+                            slurm: ServiceSlurmConfig {
+                                ntasks_per_node: Some(2),
+                                placement: Some(ServicePlacementSpec {
+                                    node_range: Some("4-5".into()),
+                                    ..ServicePlacementSpec::default()
+                                }),
+                                ..ServiceSlurmConfig::default()
+                            },
+                            ..service("ubuntu:24.04")
+                        },
+                    ),
+                ]),
+            },
+        )
+        .expect("task geometry plan");
+
+        let by_name = plan
+            .ordered_services
+            .iter()
+            .map(|service| (service.name.as_str(), &service.placement))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(by_name["inherits"].ntasks, Some(24));
+        assert_eq!(by_name["inherits"].ntasks_per_node, Some(4));
+        assert_eq!(by_name["task_override"].ntasks, Some(6));
+        assert_eq!(by_name["task_override"].ntasks_per_node, None);
+        assert_eq!(by_name["per_node_override"].ntasks, Some(24));
+        assert_eq!(by_name["per_node_override"].ntasks_per_node, Some(2));
+    }
+
+    #[test]
+    fn plan_rejects_missing_resource_profile_reference() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let err = build_plan_with_options(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    resources: Some("missing".into()),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([("app".into(), service("redis:7"))]),
+            },
+            PlanOptions::default(),
+        )
+        .expect_err("missing profile");
+
+        assert!(
+            err.to_string()
+                .contains("references undefined resource profile 'missing'")
+        );
+    }
+
+    #[test]
+    fn plan_resolves_cache_dir_with_missing_synthetic_spec_path_and_project_override() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let project_dir = tmpdir.path().join("project");
+
+        let explicit = build_plan_with_options(
+            Path::new("synthetic/compose.yaml"),
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig {
+                    cache_dir: Some("./cache".into()),
+                    ..SlurmConfig::default()
+                },
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([("app".into(), service("redis:7"))]),
+            },
+            PlanOptions {
+                project_dir_override: Some(project_dir.clone()),
+                allow_missing_spec_path: true,
+                ..PlanOptions::default()
+            },
+        )
+        .expect("synthetic explicit cache plan");
+        assert_eq!(explicit.project_dir, project_dir);
+        assert_eq!(explicit.cache_dir, explicit.project_dir.join("cache"));
+
+        let fallback = build_plan_with_options(
+            Path::new("synthetic/compose.yaml"),
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig::default(),
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([("app".into(), service("redis:7"))]),
+            },
+            PlanOptions {
+                cache_dir_default: Some(Path::new("/shared/cache").into()),
+                project_dir_override: Some(project_dir),
+                allow_missing_spec_path: true,
+                ..PlanOptions::default()
+            },
+        )
+        .expect("synthetic default cache plan");
+        assert_eq!(fallback.cache_dir, Path::new("/shared/cache"));
+    }
+
+    #[test]
+    fn plan_rejects_service_nodes_mismatch_and_mpi_expected_rank_mismatch() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let nodes_mismatch = ComposeSpec {
+            runtime: RuntimeConfig::default(),
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(4),
+                ..SlurmConfig::default()
+            },
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        nodes: Some(2),
+                        placement: Some(ServicePlacementSpec {
+                            node_range: Some("0".into()),
+                            ..ServicePlacementSpec::default()
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("redis:7")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, nodes_mismatch).expect_err("node mismatch");
+        assert!(err.to_string().contains("resolves to 1 node"));
+
+        let rank_mismatch = ComposeSpec {
+            runtime: RuntimeConfig::default(),
+            name: Some("demo".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                ..SlurmConfig::default()
+            },
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
+            services: BTreeMap::from([(
+                "trainer".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        ntasks_per_node: Some(2),
+                        mpi: Some(MpiConfig {
+                            mpi_type: MpiType::new("pmix").expect("mpi type"),
+                            profile: None,
+                            implementation: None,
+                            launcher: MpiLauncher::default(),
+                            expected_ranks: Some(5),
+                            host_mpi: None,
+                        }),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("python:3.11-slim")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, rank_mismatch).expect_err("rank mismatch");
+        assert!(err.to_string().contains("expected_ranks=5"));
+        assert!(err.to_string().contains("launches 4 rank"));
+    }
+
+    #[test]
+    fn plan_normalizes_host_mpi_bind_paths_env_and_rejects_backend_prepare_conflicts() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        std::fs::write(&compose, "services: {}\n").expect("write");
+
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                runtime: RuntimeConfig::default(),
+                name: Some("demo".into()),
+                slurm: SlurmConfig::default(),
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([(
+                    "trainer".into(),
+                    ServiceSpec {
+                        environment: EnvironmentSpec::Map(BTreeMap::from([(
+                            "APP_ENV".into(),
+                            "prod".into(),
+                        )])),
+                        slurm: ServiceSlurmConfig {
+                            mpi: Some(MpiConfig {
+                                mpi_type: MpiType::new("pmix").expect("mpi type"),
+                                profile: None,
+                                implementation: None,
+                                launcher: MpiLauncher::default(),
+                                expected_ranks: None,
+                                host_mpi: Some(HostMpiConfig {
+                                    bind_paths: vec!["./mpi:/opt/mpi:ro".into()],
+                                    env: EnvironmentSpec::Map(BTreeMap::from([(
+                                        "MPI_HOME".into(),
+                                        "/opt/mpi".into(),
+                                    )])),
+                                }),
+                            }),
+                            ..ServiceSlurmConfig::default()
+                        },
+                        ..service("python:3.11-slim")
+                    },
+                )]),
+            },
+        )
+        .expect("host mpi plan");
+        let planned = &plan.ordered_services[0];
+        assert_eq!(
+            planned.environment,
+            vec![
+                ("APP_ENV".to_string(), "prod".to_string()),
+                ("MPI_HOME".to_string(), "/opt/mpi".to_string()),
+            ]
+        );
+        assert_eq!(
+            planned.volumes,
+            vec![format!(
+                "{}:/opt/mpi:ro",
+                plan.project_dir.join("mpi").display()
+            )]
+        );
+
+        let host_prepare = ComposeSpec {
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Host,
+                ..RuntimeConfig::default()
+            },
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    image: None,
+                    command: Some(CommandSpec::String("/bin/true".into())),
+                    runtime: ServiceRuntimeConfig {
+                        prepare: Some(PrepareSpec {
+                            commands: vec!["echo prepare".into()],
+                            mounts: Vec::new(),
+                            env: EnvironmentSpec::None,
+                            root: true,
+                        }),
+                    },
+                    ..service("ignored:latest")
+                },
+            )]),
+        };
+        let err = build_plan(&compose, host_prepare).expect_err("host prepare conflict");
+        assert!(err.to_string().contains("image prepare"));
+        assert!(err.to_string().contains("runtime.backend=host"));
+
+        let enroot_prepare_with_sif = ComposeSpec {
+            runtime: RuntimeConfig {
+                backend: RuntimeBackend::Apptainer,
+                ..RuntimeConfig::default()
+            },
+            name: Some("demo".into()),
+            slurm: SlurmConfig::default(),
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    enroot: ServiceEnrootConfig {
+                        prepare: Some(PrepareSpec {
+                            commands: vec!["echo prepare".into()],
+                            mounts: Vec::new(),
+                            env: EnvironmentSpec::None,
+                            root: true,
+                        }),
+                    },
+                    ..service("docker://redis:7")
+                },
+            )]),
+        };
+        let err =
+            build_plan(&compose, enroot_prepare_with_sif).expect_err("enroot prepare conflict");
+        assert!(err.to_string().contains("x-enroot.prepare"));
+        assert!(err.to_string().contains("runtime.backend=apptainer"));
     }
 
     #[test]

@@ -425,6 +425,93 @@ fn value_label(value: &Value) -> String {
 mod tests {
     use super::*;
 
+    fn local_diff_record(
+        root: &Path,
+        job_id: &str,
+        config_snapshot_yaml: &str,
+    ) -> SubmissionRecord {
+        let mut service_logs = BTreeMap::new();
+        service_logs.insert(
+            "app".to_string(),
+            root.join(format!(".hpc-compose/{job_id}/logs/app.log")),
+        );
+        SubmissionRecord {
+            schema_version: SUBMISSION_SCHEMA_VERSION,
+            backend: SubmissionBackend::Local,
+            kind: SubmissionKind::Main,
+            job_id: job_id.to_string(),
+            submitted_at: 100,
+            compose_file: root.join("compose.yaml"),
+            submit_dir: root.to_path_buf(),
+            script_path: root.join(format!("{job_id}.sbatch")),
+            cache_dir: root.join("cache"),
+            batch_log: root.join(format!("job-{job_id}.out")),
+            service_logs,
+            artifact_export_dir: None,
+            resume_dir: None,
+            service_name: None,
+            command_override: None,
+            requested_walltime: None,
+            slurm_array: None,
+            sweep: None,
+            config_snapshot_yaml: Some(config_snapshot_yaml.to_string()),
+            cached_artifacts: Vec::new(),
+        }
+    }
+
+    fn write_local_diff_record(record: &SubmissionRecord, state_json: &str) {
+        fs::write(
+            &record.compose_file,
+            "services:\n  app:\n    image: app.sqsh\n",
+        )
+        .expect("compose");
+        write_submission_record(record).expect("record");
+        let state_path = state_path_for_record(record);
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("state dir");
+        }
+        fs::write(state_path, state_json).expect("state");
+    }
+
+    #[test]
+    fn diff_notes_malformed_config_snapshots_but_preserves_outcome_changes() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let left = local_diff_record(tmpdir.path(), "111", "x-slurm: [not valid");
+        let right = local_diff_record(
+            tmpdir.path(),
+            "222",
+            "x-slurm:\n  time: 00:20:00\nservices:\n  app:\n    image: app.sqsh\n",
+        );
+        write_local_diff_record(
+            &left,
+            r#"{"backend":"local","job_status":"COMPLETED","job_exit_code":0,"services":[{"service_name":"app","completed_successfully":true,"last_exit_code":0}]}"#,
+        );
+        write_local_diff_record(
+            &right,
+            r#"{"backend":"local","job_status":"FAILED","job_exit_code":7,"services":[{"service_name":"app","last_exit_code":7}]}"#,
+        );
+
+        let report = build_job_diff_report(&left, &right, &SchedulerOptions::default());
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("config snapshot for job 111 could not be parsed"))
+        );
+        assert!(
+            report
+                .outcome_changes
+                .iter()
+                .any(|change| change.path == "scheduler.state")
+        );
+        assert!(
+            report
+                .outcome_changes
+                .iter()
+                .any(|change| change.path == "services.app.last_exit_code")
+        );
+    }
+
     #[test]
     fn diff_json_values_reports_nested_changes() {
         let left = serde_json::json!({"x-slurm": {"time": "00:10:00"}, "services": {"app": {"image": "a"}}});
@@ -435,6 +522,84 @@ mod tests {
             changes
                 .iter()
                 .any(|change| change.path == "services.app.image")
+        );
+    }
+
+    #[test]
+    fn diff_resource_changes_reports_added_and_removed_services() {
+        let left = serde_json::json!({
+            "services": {
+                "app": {"image": "app.sqsh"},
+                "sidecar": {"image": "sidecar.sqsh"}
+            }
+        });
+        let right = serde_json::json!({
+            "services": {
+                "app": {"image": "app.sqsh"},
+                "worker": {"image": "worker.sqsh"}
+            }
+        });
+
+        let changes = resource_changes(&left, &right);
+        assert!(changes.iter().any(|change| {
+            change.path == "services.worker.image"
+                && change.left.is_none()
+                && change.right.as_deref() == Some("worker.sqsh")
+        }));
+        assert!(changes.iter().any(|change| {
+            change.path == "services.sidecar.image"
+                && change.left.as_deref() == Some("sidecar.sqsh")
+                && change.right.is_none()
+        }));
+    }
+
+    #[test]
+    fn diff_status_unavailable_still_reports_snapshot_resource_changes() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut left = local_diff_record(
+            tmpdir.path(),
+            "111",
+            "x-slurm:\n  time: 00:10:00\nservices:\n  app:\n    image: app.sqsh\n",
+        );
+        left.backend = SubmissionBackend::Slurm;
+        let mut right = local_diff_record(
+            tmpdir.path(),
+            "222",
+            "x-slurm:\n  time: 00:20:00\nservices:\n  app:\n    image: app.sqsh\n",
+        );
+        right.backend = SubmissionBackend::Slurm;
+        fs::write(
+            &left.compose_file,
+            "services:\n  app:\n    image: app.sqsh\n",
+        )
+        .expect("compose");
+
+        let report = build_job_diff_report(
+            &left,
+            &right,
+            &SchedulerOptions {
+                squeue_bin: "/definitely/not/squeue".into(),
+                sacct_bin: "/definitely/not/sacct".into(),
+            },
+        );
+
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("status unavailable for job 111"))
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("status unavailable for job 222"))
+        );
+        assert!(
+            report
+                .resource_changes
+                .iter()
+                .any(|change| change.path == "x-slurm.time")
         );
     }
 }

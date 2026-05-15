@@ -298,6 +298,131 @@ dir = "{}"
 }
 
 #[test]
+fn cache_inspect_host_backend_reports_no_image_artifacts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_compose(
+        tmpdir.path(),
+        "host-compose.yaml",
+        &format!(
+            r#"
+runtime:
+  backend: host
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    command: /bin/true
+"#,
+            cache_dir.display()
+        ),
+    );
+
+    let inspect = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--service",
+            "app",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&inspect);
+    let payload: Value = serde_json::from_str(&stdout_text(&inspect)).expect("inspect json");
+    let service = &payload["services"][0];
+    assert_eq!(service["service_name"], Value::from("app"));
+    assert_eq!(service["source_image"], Value::from("host"));
+    assert_eq!(service["base_artifact"], Value::Null);
+    assert_eq!(
+        service["current_reuse_expectation"],
+        Value::from("host runtime")
+    );
+    assert_eq!(service["runtime_artifact"]["path"], Value::from(""));
+    assert_eq!(
+        service["runtime_artifact"]["artifact_present"],
+        Value::from(false)
+    );
+    assert_eq!(service["runtime_artifact"]["manifest"], Value::Null);
+}
+
+#[test]
+fn cache_inspect_local_sqsh_reports_present_and_missing_without_base_artifact() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let present = tmpdir.path().join("present.sqsh");
+    let missing = tmpdir.path().join("missing.sqsh");
+    fs::write(&present, "sqsh").expect("present sqsh");
+    let compose = write_compose(
+        tmpdir.path(),
+        "local-sqsh.yaml",
+        &format!(
+            r#"
+x-slurm:
+  cache_dir: {}
+services:
+  present:
+    image: {}
+    command: /bin/true
+  missing:
+    image: {}
+    command: /bin/true
+"#,
+            cache_dir.display(),
+            present.display(),
+            missing.display()
+        ),
+    );
+
+    let inspect = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&inspect);
+    let payload: Value = serde_json::from_str(&stdout_text(&inspect)).expect("inspect json");
+    let services = payload["services"].as_array().expect("services");
+    let present_service = services
+        .iter()
+        .find(|service| service["service_name"] == "present")
+        .expect("present service");
+    let missing_service = services
+        .iter()
+        .find(|service| service["service_name"] == "missing")
+        .expect("missing service");
+
+    assert_eq!(present_service["base_artifact"], Value::Null);
+    assert_eq!(missing_service["base_artifact"], Value::Null);
+    assert_eq!(
+        present_service["runtime_artifact"]["artifact_present"],
+        Value::from(true)
+    );
+    assert_eq!(
+        missing_service["runtime_artifact"]["artifact_present"],
+        Value::from(false)
+    );
+    assert_eq!(
+        present_service["current_reuse_expectation"],
+        Value::from("local image present")
+    );
+    assert_eq!(
+        missing_service["current_reuse_expectation"],
+        Value::from("local image missing")
+    );
+}
+
+#[test]
 fn cache_prune_argument_validation_and_all_unused_path_work() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -360,6 +485,54 @@ services:
     assert_success(&prune_unused);
     assert!(stdout_text(&prune_unused).contains("removed: 2"));
     assert!(!plan_a.ordered_services[0].runtime_image.exists());
+}
+
+#[test]
+fn cache_prune_all_unused_keeps_current_plan_artifacts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let enroot = write_fake_enroot(tmpdir.path());
+    let plan = runtime_plan(&compose);
+
+    let prepare = run_cli(
+        tmpdir.path(),
+        &[
+            "prepare",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+        ],
+    );
+    assert_success(&prepare);
+    let runtime_image = plan.ordered_services[0].runtime_image.clone();
+    let base_image =
+        hpc_compose::prepare::base_image_path(&plan.cache_dir, &plan.ordered_services[0]);
+    assert!(runtime_image.exists());
+    assert!(base_image.exists());
+
+    let prune = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "prune",
+            "--all-unused",
+            "-f",
+            compose.to_str().expect("path"),
+            "--cache-dir",
+            cache_dir.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&prune);
+    let payload: Value = serde_json::from_str(&stdout_text(&prune)).expect("prune json");
+    assert_eq!(payload["mode"], Value::from("all_unused"));
+    assert_eq!(payload["removed_count"], Value::from(0));
+    assert!(runtime_image.exists());
+    assert!(base_image.exists());
 }
 
 #[test]

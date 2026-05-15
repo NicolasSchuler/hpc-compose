@@ -3,8 +3,9 @@ mod support;
 use std::fs;
 
 use hpc_compose::job::{
-    build_submission_record, latest_record_path_for, load_submission_record,
-    write_submission_record,
+    SubmissionKind, SubmissionRecordBuildOptions, build_submission_record,
+    build_submission_record_with_options, jobs_dir_for, latest_record_path_for,
+    load_submission_record, write_submission_record,
 };
 use serde_json::Value;
 use support::*;
@@ -23,6 +24,32 @@ fn write_record(
         &submit_dir.join(format!("{job_id}.sbatch")),
         &plan,
         job_id,
+    )
+    .expect("record");
+    record.submitted_at = submitted_at;
+    write_submission_record(&record).expect("write record");
+}
+
+fn write_record_with_kind(
+    compose: &std::path::Path,
+    submit_dir: &std::path::Path,
+    job_id: &str,
+    kind: SubmissionKind,
+    submitted_at: u64,
+) {
+    fs::create_dir_all(submit_dir).expect("submit dir");
+    let plan = runtime_plan(compose);
+    let mut record = build_submission_record_with_options(
+        compose,
+        submit_dir,
+        &submit_dir.join(format!("{job_id}.sbatch")),
+        &plan,
+        job_id,
+        &SubmissionRecordBuildOptions {
+            kind,
+            service_name: (kind == SubmissionKind::Run).then(|| "app".to_string()),
+            ..SubmissionRecordBuildOptions::default()
+        },
     )
     .expect("record");
     record.submitted_at = submitted_at;
@@ -94,6 +121,54 @@ fn jobs_list_scans_repo_tree_and_recovers_latest_when_pointer_is_missing() {
 }
 
 #[test]
+fn jobs_list_marks_latest_independently_by_submission_kind() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let submit_dir = tmpdir.path().join("submit");
+
+    write_record_with_kind(&compose, &submit_dir, "10001", SubmissionKind::Main, 10);
+    write_record_with_kind(&compose, &submit_dir, "10002", SubmissionKind::Main, 20);
+    write_record_with_kind(&compose, &submit_dir, "20001", SubmissionKind::Run, 15);
+    write_record_with_kind(&compose, &submit_dir, "30001", SubmissionKind::Canary, 12);
+    write_record_with_kind(
+        &compose,
+        &submit_dir,
+        "40001",
+        SubmissionKind::SweepTrial,
+        25,
+    );
+
+    let json = run_cli(tmpdir.path(), &["jobs", "list", "--format", "json"]);
+    assert_success(&json);
+    let payload: Value = serde_json::from_str(&stdout_text(&json)).expect("jobs json");
+    let jobs = payload["jobs"].as_array().expect("jobs array");
+    let by_id = |job_id: &str| {
+        jobs.iter()
+            .find(|job| job["job_id"] == job_id)
+            .unwrap_or_else(|| panic!("missing job {job_id}"))
+    };
+    assert_eq!(by_id("10001")["is_latest"], Value::from(false));
+    assert_eq!(by_id("10002")["is_latest"], Value::from(true));
+    assert_eq!(by_id("20001")["is_latest"], Value::from(true));
+    assert_eq!(by_id("30001")["is_latest"], Value::from(true));
+    assert_eq!(by_id("40001")["is_latest"], Value::from(false));
+
+    let text = run_cli(tmpdir.path(), &["jobs", "list"]);
+    assert_success(&text);
+    let stdout = stdout_text(&text);
+    assert!(stdout.contains("* 10002 kind=main"));
+    assert!(stdout.contains("* 20001 kind=run"));
+    assert!(stdout.contains("* 30001 kind=canary"));
+    assert!(stdout.contains("- 40001 kind=sweep_trial"));
+}
+
+#[test]
 fn jobs_list_reports_disk_usage_in_json_when_requested() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
@@ -120,6 +195,47 @@ fn jobs_list_reports_disk_usage_in_json_when_requested() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0]["job_id"], Value::from("44444"));
     assert!(jobs[0]["disk_usage_bytes"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn jobs_list_reports_legacy_runtime_root_and_disk_usage() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let submit_dir = tmpdir.path().join("submit");
+
+    write_record(&compose, &submit_dir, "55556", 50);
+    let metadata_root = jobs_dir_for(&compose)
+        .parent()
+        .expect("metadata root")
+        .to_path_buf();
+    let legacy_logs = metadata_root.join("55556/logs");
+    fs::create_dir_all(&legacy_logs).expect("legacy logs");
+    fs::write(legacy_logs.join("app.log"), "legacy runtime\n").expect("legacy log");
+
+    let json = run_cli(
+        &project,
+        &["jobs", "list", "--disk-usage", "--format", "json"],
+    );
+    assert_success(&json);
+    let payload: Value = serde_json::from_str(&stdout_text(&json)).expect("jobs json");
+    let job = &payload["jobs"].as_array().expect("jobs array")[0];
+    assert_eq!(job["job_id"], Value::from("55556"));
+    assert_eq!(job["runtime_job_root_present"], Value::from(false));
+    assert_eq!(job["legacy_runtime_job_root_present"], Value::from(true));
+    assert!(job["disk_usage_bytes"].as_u64().unwrap_or(0) > 0);
+
+    let text = run_cli(&project, &["jobs", "list", "--disk-usage"]);
+    assert_success(&text);
+    let stdout = stdout_text(&text);
+    assert!(stdout.contains("* 55556"));
+    assert!(stdout.contains("runtime=legacy"));
+    assert!(stdout.contains("size="));
 }
 
 #[test]
@@ -216,6 +332,37 @@ fn jobs_list_ignores_stale_latest_pointer() {
         .expect("newer job");
     assert_eq!(older_job["is_latest"], Value::from(false));
     assert_eq!(newer_job["is_latest"], Value::from(true));
+}
+
+#[test]
+fn jobs_list_ignores_corrupt_records_and_reports_valid_jobs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let submit_dir = tmpdir.path().join("submit");
+
+    write_record(&compose, &submit_dir, "11111", 10);
+    let jobs_dir = jobs_dir_for(&compose);
+    fs::create_dir_all(&jobs_dir).expect("jobs dir exists");
+    fs::write(jobs_dir.join("corrupt.json"), "{not json").expect("corrupt record");
+
+    let json = run_cli(tmpdir.path(), &["jobs", "list", "--format", "json"]);
+    assert_success(&json);
+    let payload: Value = serde_json::from_str(&stdout_text(&json)).expect("jobs json");
+    let jobs = payload["jobs"].as_array().expect("jobs array");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["job_id"], Value::from("11111"));
+
+    let text = run_cli(tmpdir.path(), &["jobs", "list"]);
+    assert_success(&text);
+    let stdout = stdout_text(&text);
+    assert!(stdout.contains("11111"));
+    assert!(!stdout.contains("corrupt"));
 }
 
 #[test]

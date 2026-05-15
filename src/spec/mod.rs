@@ -4977,6 +4977,981 @@ services:
     }
 
     #[test]
+    fn slurm_resource_count_validation_rejects_zero_for_all_first_class_counts() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cases = [
+            (
+                "top-level nodes",
+                r#"
+x-slurm:
+  nodes: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.nodes",
+            ),
+            (
+                "top-level ntasks",
+                r#"
+x-slurm:
+  ntasks: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.ntasks",
+            ),
+            (
+                "top-level ntasks_per_node",
+                r#"
+x-slurm:
+  ntasks_per_node: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.ntasks_per_node",
+            ),
+            (
+                "top-level cpus_per_task",
+                r#"
+x-slurm:
+  cpus_per_task: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.cpus_per_task",
+            ),
+            (
+                "top-level gpus",
+                r#"
+x-slurm:
+  gpus: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.gpus",
+            ),
+            (
+                "top-level gpus_per_node",
+                r#"
+x-slurm:
+  gpus_per_node: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.gpus_per_node",
+            ),
+            (
+                "top-level gpus_per_task",
+                r#"
+x-slurm:
+  gpus_per_task: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.gpus_per_task",
+            ),
+            (
+                "top-level cpus_per_gpu",
+                r#"
+x-slurm:
+  cpus_per_gpu: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.cpus_per_gpu",
+            ),
+            (
+                "service nodes",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      nodes: 0
+"#,
+                "service 'app' x-slurm.nodes",
+            ),
+            (
+                "service ntasks",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      ntasks: 0
+"#,
+                "service 'app' x-slurm.ntasks",
+            ),
+            (
+                "service ntasks_per_node",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      ntasks_per_node: 0
+"#,
+                "service 'app' x-slurm.ntasks_per_node",
+            ),
+            (
+                "service cpus_per_task",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      cpus_per_task: 0
+"#,
+                "service 'app' x-slurm.cpus_per_task",
+            ),
+            (
+                "service gpus",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      gpus: 0
+"#,
+                "service 'app' x-slurm.gpus",
+            ),
+            (
+                "service gpus_per_node",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      gpus_per_node: 0
+"#,
+                "service 'app' x-slurm.gpus_per_node",
+            ),
+            (
+                "service gpus_per_task",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      gpus_per_task: 0
+"#,
+                "service 'app' x-slurm.gpus_per_task",
+            ),
+            (
+                "service cpus_per_gpu",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      cpus_per_gpu: 0
+"#,
+                "service 'app' x-slurm.cpus_per_gpu",
+            ),
+            (
+                "service mpi expected ranks",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: pmix
+        expected_ranks: 0
+"#,
+                "service 'app' x-slurm.mpi.expected_ranks",
+            ),
+        ];
+
+        for (label, body, expected_field) in cases {
+            let path = write_spec(tmpdir.path(), body);
+            let err = match ComposeSpec::load(&path) {
+                Ok(_) => panic!("{label} should reject zero resource count"),
+                Err(err) => err,
+            };
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(expected_field),
+                "{label} should mention {expected_field}; got {text}"
+            );
+            assert!(
+                text.contains("must be at least 1"),
+                "{label} should preserve positive-count message; got {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn slurm_raw_flag_conflicts_cover_notify_dependency_and_resource_aliases() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cases = [
+            (
+                "after_job dependency",
+                r#"
+x-slurm:
+  after_job:
+    id: "67890"
+  submit_args:
+    - "--dependency=afterok:67890"
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.after_job cannot be combined with raw --dependency",
+            ),
+            (
+                "dependency alias",
+                r#"
+x-slurm:
+  dependency: singleton
+  submit_args:
+    - "--dependency singleton"
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.dependency cannot be combined with raw --dependency",
+            ),
+            (
+                "notify mail",
+                r#"
+x-slurm:
+  notify:
+    email:
+      to: ops@example.com
+  submit_args:
+    - "--mail-type=END"
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.notify.email cannot be combined with raw --mail-type/--mail-user",
+            ),
+            (
+                "gpu bind",
+                r#"
+x-slurm:
+  gpu_bind: closest
+  submit_args:
+    - "--gpu-bind=none"
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.gpu_bind cannot be combined with raw --gpu-bind",
+            ),
+            (
+                "service mem_per_gpu",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mem_per_gpu: 10G
+      extra_srun_args:
+        - "--mem-per-gpu=20G"
+"#,
+                "service 'app' x-slurm.mem_per_gpu cannot be combined with raw --mem-per-gpu",
+            ),
+            (
+                "service distribution",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      distribution: block
+      extra_srun_args:
+        - "--distribution cyclic"
+"#,
+                "service 'app' x-slurm.distribution cannot be combined with raw --distribution",
+            ),
+        ];
+
+        for (label, body, expected) in cases {
+            let path = write_spec(tmpdir.path(), body);
+            let err = match ComposeSpec::load(&path) {
+                Ok(_) => panic!("{label} should reject duplicate raw Slurm flag"),
+                Err(err) => err,
+            };
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(expected),
+                "{label} should mention {expected}; got {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn slurm_raw_flag_conflicts_reject_short_array_alias() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  array: "0-3"
+  submit_args:
+    - "-a 0-7"
+services:
+  app:
+    image: redis:7
+"#,
+        );
+
+        let err = ComposeSpec::load(&path).expect_err("raw -a conflict");
+        assert!(
+            err.to_string()
+                .contains("x-slurm.array cannot be combined with raw -a"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn raw_flag_conflicts_ignore_longer_prefixes() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  array: "0-3"
+  gpu_bind: closest
+  submit_args:
+    - "--array-task-throttle=2"
+    - "--gpu-bind-extra=debug"
+services:
+  app:
+    image: redis:7
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("longer flag prefixes are not conflicts");
+        assert_eq!(spec.slurm.array.as_deref(), Some("0-3"));
+        assert_eq!(spec.slurm.submit_args.len(), 2);
+    }
+
+    #[test]
+    fn rendezvous_validation_rejects_invalid_names_protocols_paths_and_empty_discovery() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cases = [
+            (
+                "empty discovery",
+                r#"
+x-slurm:
+  rendezvous:
+    discover: []
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.rendezvous.discover must contain at least one name",
+            ),
+            (
+                "invalid discovery name",
+                r#"
+x-slurm:
+  rendezvous:
+    discover:
+      - "bad name"
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.rendezvous.discover[0] must contain only ASCII letters",
+            ),
+            (
+                "invalid provider name",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      rendezvous:
+        register:
+          name: "bad name"
+          port: 8080
+"#,
+                "x-slurm.rendezvous.register.name must contain only ASCII letters",
+            ),
+            (
+                "invalid provider port",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      rendezvous:
+        register:
+          name: api
+          port: 0
+"#,
+                "x-slurm.rendezvous.register.port must be at least 1",
+            ),
+            (
+                "invalid provider protocol",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      rendezvous:
+        register:
+          name: api
+          port: 8080
+          protocol: "http://bad"
+"#,
+                "x-slurm.rendezvous.register.protocol must contain only ASCII letters",
+            ),
+            (
+                "invalid provider path",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      rendezvous:
+        register:
+          name: api
+          port: 8080
+          path: v1
+"#,
+                "x-slurm.rendezvous.register.path must be empty or start with '/'",
+            ),
+            (
+                "invalid provider ttl",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      rendezvous:
+        register:
+          name: api
+          port: 8080
+          ttl_seconds: 0
+"#,
+                "x-slurm.rendezvous.register.ttl_seconds must be at least 1",
+            ),
+        ];
+
+        for (label, body, expected) in cases {
+            let path = write_spec(tmpdir.path(), body);
+            let err = match ComposeSpec::load(&path) {
+                Ok(_) => panic!("{label} should reject invalid rendezvous config"),
+                Err(err) => err,
+            };
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(expected),
+                "{label} should mention {expected}; got {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendezvous_validation_rejects_timeout_zero_and_bad_metadata() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cases = [
+            (
+                "timeout zero",
+                r#"
+x-slurm:
+  rendezvous:
+    discover: api
+    timeout_seconds: 0
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.rendezvous.timeout_seconds must be at least 1",
+            ),
+            (
+                "metadata key",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      rendezvous:
+        register:
+          name: api
+          port: 8080
+          metadata:
+            "bad key": value
+"#,
+                "x-slurm.rendezvous.register.metadata key must contain only ASCII",
+            ),
+            (
+                "metadata value",
+                "services:\n  app:\n    image: redis:7\n    x-slurm:\n      rendezvous:\n        register:\n          name: api\n          port: 8080\n          metadata:\n            version: \"bad\\0value\"\n",
+                "x-slurm.rendezvous.register.metadata.version must not contain null bytes",
+            ),
+        ];
+
+        for (label, body, expected) in cases {
+            let path = write_spec(tmpdir.path(), body);
+            let err = match ComposeSpec::load(&path) {
+                Ok(_) => panic!("{label} should reject invalid rendezvous config"),
+                Err(err) => err,
+            };
+            let text = format!("{err:#}");
+            assert!(text.contains(expected), "{label}: {text}");
+        }
+    }
+
+    #[test]
+    fn slurm_stage_scratch_and_burst_buffer_validation_rejects_invalid_paths_and_directives() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cases = [
+            (
+                "scratch empty base",
+                r#"
+x-slurm:
+  scratch:
+    base: " "
+    mount: /scratch
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.scratch.base must not be empty",
+            ),
+            (
+                "scratch relative mount",
+                r#"
+x-slurm:
+  scratch:
+    base: /scratch
+    mount: scratch
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.scratch.mount must be an absolute container path",
+            ),
+            (
+                "stage-in empty source",
+                r#"
+x-slurm:
+  stage_in:
+    - from: " "
+      to: /hpc-compose/job/input
+services:
+  app:
+    image: redis:7
+"#,
+                "x-slurm.stage_in[0].from must not be empty",
+            ),
+            (
+                "stage-out nul destination",
+                "x-slurm:\n  stage_out:\n    - from: /hpc-compose/job/out\n      to: \"bad\\0path\"\nservices:\n  app:\n    image: redis:7\n",
+                "x-slurm.stage_out[0].to must not contain null bytes",
+            ),
+            (
+                "burst-buffer prefix",
+                r##"
+x-slurm:
+  burst_buffer:
+    directives:
+      - "#BAD capacity=10G"
+services:
+  app:
+    image: redis:7
+"##,
+                "x-slurm.burst_buffer.directives[0] must start with '#BB ' or '#DW '",
+            ),
+        ];
+
+        for (label, body, expected) in cases {
+            let path = write_spec(tmpdir.path(), body);
+            let err = match ComposeSpec::load(&path) {
+                Ok(_) => panic!("{label} should reject invalid staging config"),
+                Err(err) => err,
+            };
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(expected),
+                "{label} should mention {expected}; got {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn slurm_notify_and_dependency_helpers_normalize_defaults_and_interpolate_ids() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  after_job:
+    id: ${UPSTREAM_JOB:-67890}
+    condition: afterok
+  dependency: singleton
+  notify:
+    email:
+      to: ${MAIL_TO:-ops@example.com}
+services:
+  app:
+    image: redis:7
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load spec");
+        assert!(spec.slurm.has_scheduler_dependency());
+        assert_eq!(
+            spec.slurm.dependency_cli_value().as_deref(),
+            Some("afterok:67890,singleton")
+        );
+        assert_eq!(
+            spec.slurm.notify_email_events(),
+            vec![NotifyEvent::End, NotifyEvent::Fail]
+        );
+        assert_eq!(
+            spec.slurm.notify_mail_type_value().as_deref(),
+            Some("END,FAIL")
+        );
+        assert_eq!(spec.slurm.notify_email_recipient(), Some("ops@example.com"));
+    }
+
+    #[test]
+    fn rendezvous_config_accepts_shorthand_and_interpolates_provider_metadata() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  rendezvous:
+    discover: ${SERVICE_NAME:-api}
+    timeout_seconds: 15
+    require: true
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      rendezvous:
+        register:
+          name: ${SERVICE_NAME:-api}
+          port: 8080
+          protocol: http+tcp
+          path: /v1
+          ttl_seconds: 30
+          metadata:
+            version: ${VERSION:-canary}
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load spec");
+        let client = spec.slurm.rendezvous.expect("client rendezvous");
+        assert_eq!(client.discover, vec!["api"]);
+        assert_eq!(client.timeout_seconds, Some(15));
+        assert_eq!(client.require, Some(true));
+
+        let service = spec.services.get("app").expect("app");
+        let register = service
+            .slurm
+            .rendezvous
+            .as_ref()
+            .and_then(|rendezvous| rendezvous.register.as_ref())
+            .expect("register");
+        assert_eq!(register.name, "api");
+        assert_eq!(register.port, 8080);
+        assert_eq!(register.protocol.as_deref(), Some("http+tcp"));
+        assert_eq!(register.path.as_deref(), Some("/v1"));
+        assert_eq!(register.ttl_seconds, Some(30));
+        assert_eq!(
+            register.metadata.get("version").map(String::as_str),
+            Some("canary")
+        );
+    }
+
+    #[test]
+    fn rendezvous_provider_interpolates_fields_and_metadata_values() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      rendezvous:
+        register:
+          name: ${RDZV_NAME:-api}
+          port: 8080
+          protocol: ${RDZV_PROTOCOL:-http}
+          path: ${RDZV_PATH:-/ready}
+          metadata:
+            role: ${RDZV_ROLE:-primary}
+"#,
+        );
+
+        let spec = ComposeSpec::load(&path).expect("load spec");
+        let register = spec.services["app"]
+            .slurm
+            .rendezvous
+            .as_ref()
+            .and_then(|config| config.register.as_ref())
+            .expect("register config");
+        assert_eq!(register.name, "api");
+        assert_eq!(register.protocol.as_deref(), Some("http"));
+        assert_eq!(register.path.as_deref(), Some("/ready"));
+        assert_eq!(
+            register.metadata.get("role").map(String::as_str),
+            Some("primary")
+        );
+    }
+
+    #[test]
+    fn service_placement_validation_rejects_selector_conflicts_and_invalid_bounds() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cases = [
+            (
+                "missing selector",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement: {}
+"#,
+                "must set exactly one of node_range, node_count, node_percent, or share_with",
+            ),
+            (
+                "conflicting selectors",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_range: "0"
+        node_count: 1
+"#,
+                "must set exactly one of node_range, node_count, node_percent, or share_with",
+            ),
+            (
+                "zero node count",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_count: 0
+"#,
+                "x-slurm.placement.node_count must be at least 1",
+            ),
+            (
+                "percent too large",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_percent: 101
+"#,
+                "x-slurm.placement.node_percent must be between 1 and 100",
+            ),
+            (
+                "start index with range",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        node_range: "0-1"
+        start_index: 1
+"#,
+                "x-slurm.placement.start_index is only valid with node_count or node_percent",
+            ),
+            (
+                "share with exclude",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        share_with: other
+        exclude: "0"
+"#,
+                "x-slurm.placement.share_with cannot be combined with start_index or exclude",
+            ),
+        ];
+
+        for (label, body, expected) in cases {
+            let path = write_spec(tmpdir.path(), body);
+            let err = match ComposeSpec::load(&path) {
+                Ok(_) => panic!("{label} should reject invalid placement"),
+                Err(err) => err,
+            };
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(expected),
+                "{label} should mention {expected}; got {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn service_placement_rejects_blank_share_with() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = write_spec(
+            tmpdir.path(),
+            r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      placement:
+        share_with: " "
+"#,
+        );
+
+        let err = ComposeSpec::load(&path).expect_err("blank share_with");
+        assert!(
+            err.to_string()
+                .contains("x-slurm.placement.share_with must not be empty"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn notify_empty_on_defaults_to_end_fail_and_all_collapses_to_all() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let default_events = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  notify:
+    email:
+      to: ops@example.com
+      on: []
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let spec = ComposeSpec::load(&default_events).expect("default notify events");
+        assert_eq!(
+            spec.slurm.notify_email_events(),
+            vec![NotifyEvent::End, NotifyEvent::Fail]
+        );
+        assert_eq!(
+            spec.slurm.notify_mail_type_value().as_deref(),
+            Some("END,FAIL")
+        );
+
+        let all_events = write_spec(
+            tmpdir.path(),
+            r#"
+x-slurm:
+  notify:
+    email:
+      to: ops@example.com
+      on:
+        - start
+        - all
+        - fail
+services:
+  app:
+    image: redis:7
+"#,
+        );
+        let spec = ComposeSpec::load(&all_events).expect("all notify events");
+        assert_eq!(spec.slurm.notify_email_events(), vec![NotifyEvent::All]);
+        assert_eq!(spec.slurm.notify_mail_type_value().as_deref(), Some("ALL"));
+    }
+
+    #[test]
+    fn service_mpi_host_config_validation_covers_bind_paths_env_and_profile_conflicts() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cases = [
+            (
+                "relative container bind",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: pmix
+        host_mpi:
+          bind_paths:
+            - /opt/mpi:opt/mpi
+"#,
+                "container path must be absolute",
+            ),
+            (
+                "bad bind mode",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: pmix
+        host_mpi:
+          bind_paths:
+            - /opt/mpi:/opt/mpi:cached
+"#,
+                "uses unsupported mode 'cached'",
+            ),
+            (
+                "bad env name",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: pmix
+        host_mpi:
+          env:
+            BAD-NAME: value
+"#,
+                "x-slurm.mpi.host_mpi.env.BAD-NAME",
+            ),
+            (
+                "profile implementation conflict",
+                r#"
+services:
+  app:
+    image: redis:7
+    x-slurm:
+      mpi:
+        type: pmix
+        profile: openmpi
+        implementation: mpich
+"#,
+                "x-slurm.mpi.profile=openmpi conflicts with x-slurm.mpi.implementation=mpich",
+            ),
+        ];
+
+        for (label, body, expected) in cases {
+            let path = write_spec(tmpdir.path(), body);
+            let err = match ComposeSpec::load(&path) {
+                Ok(_) => panic!("{label} should reject invalid MPI config"),
+                Err(err) => err,
+            };
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(expected),
+                "{label} should mention {expected}; got {text}"
+            );
+        }
+    }
+
+    #[test]
     fn metrics_block_defaults_to_enabled_interval_and_collectors() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let path = write_spec(

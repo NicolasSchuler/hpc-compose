@@ -1340,6 +1340,158 @@ mod tests {
         assert_eq!(estimate.basis, "configured_tdp+pue");
     }
 
+    #[test]
+    fn score_invalid_options_fail_before_scheduler_queries() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = SubmissionRecord {
+            schema_version: super::super::SUBMISSION_SCHEMA_VERSION,
+            backend: SubmissionBackend::Slurm,
+            kind: super::super::SubmissionKind::Main,
+            job_id: "12345".into(),
+            submitted_at: 100,
+            compose_file: tmpdir.path().join("compose.yaml"),
+            submit_dir: tmpdir.path().to_path_buf(),
+            script_path: tmpdir.path().join("job.sbatch"),
+            cache_dir: tmpdir.path().join("cache"),
+            batch_log: tmpdir.path().join("slurm-12345.out"),
+            service_logs: BTreeMap::new(),
+            artifact_export_dir: None,
+            resume_dir: None,
+            service_name: None,
+            command_override: None,
+            requested_walltime: None,
+            slurm_array: None,
+            sweep: None,
+            config_snapshot_yaml: None,
+            cached_artifacts: Vec::new(),
+        };
+        let cases = [
+            (
+                EfficiencyScoreOptions {
+                    pue: 0.0,
+                    scheduler: SchedulerOptions {
+                        squeue_bin: "/definitely/not/squeue".into(),
+                        sacct_bin: "/definitely/not/sacct".into(),
+                    },
+                    sstat_bin: "/definitely/not/sstat".into(),
+                    ..EfficiencyScoreOptions::default()
+                },
+                "score --pue must be greater than 0",
+            ),
+            (
+                EfficiencyScoreOptions {
+                    gpu_tdp_w: -1.0,
+                    scheduler: SchedulerOptions {
+                        squeue_bin: "/definitely/not/squeue".into(),
+                        sacct_bin: "/definitely/not/sacct".into(),
+                    },
+                    sstat_bin: "/definitely/not/sstat".into(),
+                    ..EfficiencyScoreOptions::default()
+                },
+                "score --gpu-tdp-w must be non-negative",
+            ),
+            (
+                EfficiencyScoreOptions {
+                    cpu_watts_per_core: -1.0,
+                    scheduler: SchedulerOptions {
+                        squeue_bin: "/definitely/not/squeue".into(),
+                        sacct_bin: "/definitely/not/sacct".into(),
+                    },
+                    sstat_bin: "/definitely/not/sstat".into(),
+                    ..EfficiencyScoreOptions::default()
+                },
+                "score --cpu-watts-per-core must be non-negative",
+            ),
+        ];
+
+        for (options, expected) in cases {
+            let err = build_efficiency_score_report(&minimal_plan(), &record, &options)
+                .expect_err("invalid score option should fail before probing scheduler");
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn score_rejects_local_record_before_scheduler_queries() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = SubmissionRecord {
+            schema_version: super::super::SUBMISSION_SCHEMA_VERSION,
+            backend: SubmissionBackend::Local,
+            kind: super::super::SubmissionKind::Main,
+            job_id: "local-123".into(),
+            submitted_at: 100,
+            compose_file: tmpdir.path().join("compose.yaml"),
+            submit_dir: tmpdir.path().to_path_buf(),
+            script_path: tmpdir.path().join("job.sh"),
+            cache_dir: tmpdir.path().join("cache"),
+            batch_log: tmpdir.path().join("local.out"),
+            service_logs: BTreeMap::new(),
+            artifact_export_dir: None,
+            resume_dir: None,
+            service_name: None,
+            command_override: None,
+            requested_walltime: None,
+            slurm_array: None,
+            sweep: None,
+            config_snapshot_yaml: None,
+            cached_artifacts: Vec::new(),
+        };
+        let err = build_efficiency_score_report(
+            &minimal_plan(),
+            &record,
+            &EfficiencyScoreOptions {
+                scheduler: SchedulerOptions {
+                    squeue_bin: "/definitely/not/squeue".into(),
+                    sacct_bin: "/definitely/not/sacct".into(),
+                },
+                sstat_bin: "/definitely/not/sstat".into(),
+                ..EfficiencyScoreOptions::default()
+            },
+        )
+        .expect_err("local score should fail before scheduler probing");
+
+        assert_eq!(
+            err.to_string(),
+            "score requires a tracked Slurm submission; local runs are not supported"
+        );
+    }
+
+    #[test]
+    fn score_uses_sstat_gpu_utilization_when_sampler_gpu_history_absent() {
+        let component = gpu_utilization_component(
+            &ScoreSamplerHistory::default(),
+            &[StepStats {
+                step_id: "12345.0".into(),
+                ntasks: "1".into(),
+                ave_cpu: String::new(),
+                ave_rss: String::new(),
+                max_rss: String::new(),
+                alloc_tres: "cpu=1,gres/gpu=1".into(),
+                tres_usage_in_ave: "gres/gpuutil=80".into(),
+                alloc_tres_map: BTreeMap::from([
+                    ("cpu".into(), "1".into()),
+                    ("gres/gpu".into(), "1".into()),
+                ]),
+                usage_tres_in_ave_map: BTreeMap::from([("gres/gpuutil".into(), "80".into())]),
+                gpu_count: Some("1".into()),
+                gpu_util: Some("80".into()),
+                gpu_mem: None,
+            }],
+        );
+
+        assert!(component.available);
+        assert_eq!(component.name, "gpu_utilization");
+        assert_eq!(component.source, "sstat");
+        assert_eq!(component.confidence, EfficiencyScoreConfidence::Medium);
+        assert_eq!(component.observed.as_deref(), Some("80.0%"));
+        assert!(
+            component
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("Slurm TRES accounting"))
+        );
+    }
+
     fn minimal_plan() -> RuntimePlan {
         RuntimePlan {
             name: "score-test".into(),

@@ -68,7 +68,8 @@ fn submit_command_runs_end_to_end_with_fake_tools() {
     let plan = runtime_plan(&compose);
     let enroot = write_fake_enroot(tmpdir.path());
     let srun = write_fake_srun(tmpdir.path());
-    let sbatch = write_fake_sbatch(tmpdir.path());
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
     let script_out = tmpdir.path().join("submit.sbatch");
 
     let submit = run_cli(
@@ -187,6 +188,137 @@ exec "$@"
     assert!(env.contains(compose.to_str().expect("compose")));
     assert!(env.contains(cache_dir.to_str().expect("cache")));
     assert!(env.contains("|2|node01"));
+}
+
+#[test]
+fn alloc_rejects_array_and_scheduler_dependency_before_salloc() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("image.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let salloc_called = tmpdir.path().join("salloc.called");
+    let salloc = tmpdir.path().join("salloc");
+    write_script(
+        &salloc,
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\ntouch '{}'\nexit 0\n",
+            salloc_called.display()
+        ),
+    );
+
+    let array_compose = write_compose(
+        tmpdir.path(),
+        "array.yaml",
+        &format!(
+            r#"
+x-slurm:
+  array: 0-3
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let array = run_cli(
+        tmpdir.path(),
+        &[
+            "alloc",
+            "-f",
+            array_compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--salloc-bin",
+            salloc.to_str().expect("path"),
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&array);
+    assert!(stderr_text(&array).contains("alloc does not support x-slurm.array"));
+    assert!(!salloc_called.exists());
+
+    let dependency_compose = write_compose(
+        tmpdir.path(),
+        "dependency.yaml",
+        &format!(
+            r#"
+x-slurm:
+  after_job: "12345"
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let dependency = run_cli(
+        tmpdir.path(),
+        &[
+            "alloc",
+            "-f",
+            dependency_compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--salloc-bin",
+            salloc.to_str().expect("path"),
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&dependency);
+    assert!(stderr_text(&dependency).contains("alloc does not support Slurm job dependencies"));
+    assert!(!salloc_called.exists());
+}
+
+#[test]
+fn alloc_rejects_singleton_dependency_before_salloc() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("image.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let salloc_called = tmpdir.path().join("salloc.called");
+    let salloc = tmpdir.path().join("salloc-singleton");
+    write_script(
+        &salloc,
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\ntouch '{}'\nexit 0\n",
+            salloc_called.display()
+        ),
+    );
+    let compose = write_compose(
+        tmpdir.path(),
+        "singleton.yaml",
+        &format!(
+            r#"
+x-slurm:
+  dependency: singleton
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "alloc",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--salloc-bin",
+            salloc.to_str().expect("path"),
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("alloc does not support Slurm job dependencies"));
+    assert!(!salloc_called.exists());
 }
 
 #[test]
@@ -827,7 +959,8 @@ fn submit_skip_prepare_reuses_existing_artifact() {
     let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
     let enroot = write_fake_enroot(tmpdir.path());
     let srun = write_fake_srun(tmpdir.path());
-    let sbatch = write_fake_sbatch(tmpdir.path());
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
 
     let prepare = run_cli(
         tmpdir.path(),
@@ -890,7 +1023,8 @@ services:
     );
     let runtime_log = tmpdir.path().join(format!("{backend}.log"));
     let runtime = write_fake_sif_runtime(tmpdir.path(), backend, &runtime_log);
-    let sbatch = write_fake_sbatch(tmpdir.path());
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
     let script_out = tmpdir.path().join(format!("{backend}.sbatch"));
 
     let mut args = vec![
@@ -2183,6 +2317,119 @@ fn replay_resume_attempts_are_reported_in_attempt_order() {
 }
 
 #[test]
+fn replay_service_filter_excludes_other_service_events_and_frames() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let (compose, mut record) = write_replay_fixture(&tmpdir);
+    let job_root = tmpdir.path().join(".hpc-compose/12345");
+    let sidecar_log = job_root.join("logs/sidecar.log");
+    fs::write(&sidecar_log, "sidecar boot\n").expect("sidecar log");
+    record.service_logs.insert("sidecar".into(), sidecar_log);
+    write_submission_record(&record).expect("rewrite record");
+    fs::write(
+        job_root.join("state.json"),
+        r#"{"services":[{"service_name":"app","started_at":101,"finished_at":120,"last_exit_code":7,"step_name":"hpc-compose:app"},{"service_name":"sidecar","started_at":102,"finished_at":130,"last_exit_code":0,"step_name":"hpc-compose:sidecar"}]}"#,
+    )
+    .expect("state");
+    fs::write(
+        job_root.join("service-exits/sidecar.jsonl"),
+        "{\"service\":\"sidecar\",\"exit_code\":0,\"at_unix\":130,\"node\":\"n1\"}\n",
+    )
+    .expect("sidecar exit marker");
+
+    let replay = run_cli(
+        tmpdir.path(),
+        &[
+            "replay",
+            "-f",
+            compose.to_str().expect("path"),
+            "--service",
+            "app",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&replay);
+    let value: Value = serde_json::from_str(&stdout_text(&replay)).expect("replay json");
+    assert!(
+        value["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .all(|event| event["service"].as_str() != Some("sidecar"))
+    );
+    assert!(
+        value["frames"]
+            .as_array()
+            .expect("frames")
+            .iter()
+            .all(|frame| frame["services"]
+                .as_array()
+                .expect("services")
+                .iter()
+                .all(|service| service["service_name"].as_str() == Some("app")))
+    );
+}
+
+#[test]
+fn replay_malformed_metric_rows_report_notes_without_losing_exit_timeline() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let (compose, _record) = write_replay_fixture(&tmpdir);
+    let job_root = tmpdir.path().join(".hpc-compose/12345");
+    fs::write(
+        job_root.join("metrics/gpu.jsonl"),
+        "not json\n{\"sampled_at\":\"not-a-time\",\"utilization_gpu\":\"20\"}\n{\"sampled_at\":\"1970-01-01T00:02:00Z\",\"utilization_gpu\":\"70\",\"memory_used_mib\":\"2\",\"memory_total_mib\":\"4\"}\n",
+    )
+    .expect("gpu metrics");
+
+    let replay = run_cli(
+        tmpdir.path(),
+        &[
+            "replay",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&replay);
+    let value: Value = serde_json::from_str(&stdout_text(&replay)).expect("replay json");
+    assert!(
+        value["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .is_some_and(|note| note.contains("gpu.jsonl line 1")))
+    );
+    assert!(
+        value["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note.as_str().is_some_and(
+                |note| note.contains("could not parse metrics timestamp 'not-a-time'")
+            ))
+    );
+    assert!(
+        value["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .any(|event| event["kind"] == "service_exit" && event["exit_code"] == 7)
+    );
+    assert!(
+        value["frames"]
+            .as_array()
+            .expect("frames")
+            .iter()
+            .any(|frame| frame["metrics_line"]
+                .as_str()
+                .is_some_and(|line| line.contains("gpu: 1")))
+    );
+}
+
+#[test]
 fn submit_watch_falls_back_when_ui_initialization_fails() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -2558,6 +2805,113 @@ fn stats_accounting_handles_empty_and_failed_sacct() {
     );
     assert_failure(&failed);
     assert!(stderr_text(&failed).contains("sacct accounting query failed"));
+}
+
+#[test]
+fn stats_accounting_empty_rows_keep_json_shape_stable() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let squeue_state = tmpdir.path().join("accounting-empty-shape-squeue.state");
+    let sacct_state = tmpdir.path().join("accounting-empty-shape-sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let accounting_output = tmpdir.path().join("accounting-empty-shape.output");
+    fs::write(&accounting_output, "").expect("empty accounting");
+    let sstat_output = tmpdir.path().join("accounting-empty-shape-sstat.output");
+    fs::write(&sstat_output, "").expect("empty sstat");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "stats",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "55555",
+            "--accounting",
+            "--format",
+            "json",
+            "--sstat-bin",
+            write_fake_sstat(tmpdir.path(), &sstat_output)
+                .to_str()
+                .expect("path"),
+            "--squeue-bin",
+            write_fake_squeue(tmpdir.path(), &squeue_state)
+                .to_str()
+                .expect("path"),
+            "--sacct-bin",
+            write_fake_sacct_accounting(tmpdir.path(), &sacct_state, &accounting_output)
+                .to_str()
+                .expect("path"),
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("stats json");
+    assert_eq!(payload["accounting"]["available"], Value::from(false));
+    assert_eq!(payload["accounting"]["source"], Value::from("sacct"));
+    assert_eq!(payload["accounting"]["summary"], Value::Null);
+    assert_eq!(
+        payload["accounting"]["rows"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert!(
+        payload["accounting"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no accounting rows")
+    );
+}
+
+#[test]
+fn stats_malformed_sacct_accounting_reports_line_number() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let squeue_state = tmpdir.path().join("stats-bad-accounting-squeue.state");
+    let sacct_state = tmpdir.path().join("stats-bad-accounting-sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let accounting_output = tmpdir.path().join("stats-bad-accounting.output");
+    fs::write(
+        &accounting_output,
+        "\
+JobIDRaw|JobName|State|ExitCode|ElapsedRaw|AllocCPUS|CPUTimeRAW|TotalCPU|AllocTRES|ReqTRES|MaxRSS|TRESUsageInTot|NNodes|Account|QOS|Partition|Start|End
+12345|too|short
+",
+    )
+    .expect("accounting output");
+    let sacct = write_fake_sacct_accounting(tmpdir.path(), &sacct_state, &accounting_output);
+    let sstat_output = tmpdir.path().join("stats-bad-accounting-sstat.output");
+    fs::write(&sstat_output, "").expect("sstat output");
+    let sstat = write_fake_sstat(tmpdir.path(), &sstat_output);
+
+    let stats = run_cli(
+        tmpdir.path(),
+        &[
+            "stats",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "12345",
+            "--accounting",
+            "--format",
+            "json",
+            "--sstat-bin",
+            sstat.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&stats);
+    let stderr = stderr_text(&stats);
+    assert!(stderr.contains("malformed sacct accounting output on line 2"));
+    assert!(stderr.contains("expected 18 fields"));
 }
 
 #[test]
@@ -3239,6 +3593,260 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
 }
 
 #[test]
+fn score_reports_low_confidence_with_accounting_only() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose-score-accounting.yaml",
+        &format!(
+            r#"
+name: accounting-only
+x-slurm:
+  job_name: accounting-only
+  time: "00:05:00"
+  cache_dir: {}
+services:
+  app:
+    image: python:3.11-slim
+    command: python app.py
+"#,
+            cache_dir.display()
+        ),
+    );
+    let plan = runtime_plan(&compose);
+    let record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("score-accounting.sbatch"),
+        &plan,
+        "24680",
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    let squeue_state = tmpdir.path().join("score-accounting-squeue.state");
+    let sacct_state = tmpdir.path().join("score-accounting-sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let accounting_output = tmpdir.path().join("score-accounting.output");
+    fs::write(
+        &accounting_output,
+        "\
+24680|accounting-only|COMPLETED|0:0|300|2|600|00:10:00|cpu=2|cpu=2||cpu=00:10:00|1|acct|normal|cpu|2026-01-01T00:00:00|2026-01-01T00:05:00
+",
+    )
+    .expect("accounting output");
+    let sacct = write_fake_sacct_accounting(tmpdir.path(), &sacct_state, &accounting_output);
+    let sstat_output = tmpdir.path().join("score-accounting-sstat.output");
+    fs::write(&sstat_output, "").expect("sstat output");
+    let sstat = write_fake_sstat(tmpdir.path(), &sstat_output);
+
+    let score = run_cli(
+        tmpdir.path(),
+        &[
+            "score",
+            "24680",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--sstat-bin",
+            sstat.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&score);
+    let value: Value = serde_json::from_str(&stdout_text(&score)).expect("score json");
+    assert_eq!(value["complete"], Value::from(true));
+    assert_eq!(value["confidence"], Value::from("low"));
+    assert_eq!(value["sources"], serde_json::json!(["sacct"]));
+    assert!(value["components"].as_array().is_some_and(|components| {
+        components
+            .iter()
+            .filter(|component| component["available"] == true)
+            .all(|component| component["name"] == "energy_budget_utilization")
+    }));
+}
+
+#[test]
+fn score_invalid_resource_options_fail_before_scheduler_queries() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose-score-invalid.yaml",
+        &format!(
+            r#"
+name: score-invalid
+x-slurm:
+  job_name: score-invalid
+  time: "00:05:00"
+  cache_dir: {}
+services:
+  app:
+    image: python:3.11-slim
+    command: python app.py
+"#,
+            cache_dir.display()
+        ),
+    );
+    let plan = runtime_plan(&compose);
+    let record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("score-invalid.sbatch"),
+        &plan,
+        "98765",
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    let tool_log = tmpdir.path().join("score-invalid-tools.log");
+    let squeue = tmpdir.path().join("score-invalid-squeue");
+    let sacct = tmpdir.path().join("score-invalid-sacct");
+    let sstat = tmpdir.path().join("score-invalid-sstat");
+    for (path, name) in [(&squeue, "squeue"), (&sacct, "sacct"), (&sstat, "sstat")] {
+        write_script(
+            path,
+            &format!(
+                "#!/bin/bash\nset -euo pipefail\nprintf '{}:%s\\n' \"$*\" >> '{}'\nexit 0\n",
+                name,
+                tool_log.display()
+            ),
+        );
+    }
+
+    for (option_args, expected) in [
+        (vec!["--pue", "0"], "score --pue must be greater than 0"),
+        (
+            vec!["--gpu-tdp-w=-1"],
+            "score --gpu-tdp-w must be non-negative",
+        ),
+        (
+            vec!["--cpu-watts-per-core=-1"],
+            "score --cpu-watts-per-core must be non-negative",
+        ),
+    ] {
+        let _ = fs::remove_file(&tool_log);
+        let mut args = vec![
+            "score",
+            "98765",
+            "-f",
+            compose.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--sstat-bin",
+            sstat.to_str().expect("path"),
+        ];
+        args.extend(option_args);
+        let score = run_cli(tmpdir.path(), &args);
+        assert_failure(&score);
+        assert!(
+            stderr_text(&score).contains(expected),
+            "stderr did not contain {expected:?}:\n{}",
+            stderr_text(&score)
+        );
+        assert!(!tool_log.exists(), "scheduler tools should not be queried");
+    }
+}
+
+#[test]
+fn rightsize_running_job_is_provisional_and_incomplete() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose-rightsize-running.yaml",
+        &format!(
+            r#"
+name: rightsize-running
+x-slurm:
+  job_name: rightsize-running
+  time: "01:00:00"
+  mem: 8G
+  cache_dir: {}
+services:
+  app:
+    image: python:3.11-slim
+    command: python app.py
+    x-slurm:
+      cpus_per_task: 4
+"#,
+            cache_dir.display()
+        ),
+    );
+    let plan = runtime_plan(&compose);
+    let record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("rightsize-running.sbatch"),
+        &plan,
+        "13579",
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    let squeue_state = tmpdir.path().join("rightsize-running-squeue.state");
+    let sacct_state = tmpdir.path().join("rightsize-running-sacct.state");
+    fs::write(&squeue_state, "RUNNING\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let sstat_output = tmpdir.path().join("rightsize-running-sstat.output");
+    fs::write(
+        &sstat_output,
+        "\
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
+13579.0|1|00:10:00|1024M|2G|cpu=4,mem=8G|cpu=00:10:00
+",
+    )
+    .expect("sstat output");
+    let sstat = write_fake_sstat(tmpdir.path(), &sstat_output);
+
+    let rightsize = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "--rightsize",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--sstat-bin",
+            sstat.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&rightsize);
+    let value: Value = serde_json::from_str(&stdout_text(&rightsize)).expect("rightsize json");
+    assert_eq!(value["job_id"], Value::from("13579"));
+    assert_eq!(value["scheduler_state"], Value::from("RUNNING"));
+    assert_eq!(value["complete"], Value::from(false));
+    assert!(
+        value["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .is_some_and(|note| note.contains("provisional")))
+    );
+}
+
+#[test]
 fn inspect_rightsize_requires_tracked_metadata() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -3800,6 +4408,232 @@ services:
     assert!(!script.contains("#SBATCH --dependency"));
 }
 
+#[test]
+fn run_command_passes_scheduler_dependency_to_sbatch_cli_and_tracks_latest_run() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  after_job:
+    id: "12345"
+    condition: afterok
+  dependency: singleton
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let script_out = tmpdir.path().join("run-dependency.sbatch");
+
+    let run = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "app",
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_success(&run);
+    let sbatch_args = fs::read_to_string(&sbatch_log).expect("sbatch log");
+    assert!(sbatch_args.contains("--dependency=afterok:12345,singleton"));
+    assert!(tmpdir.path().join(".hpc-compose/latest-run.json").exists());
+    assert!(!tmpdir.path().join(".hpc-compose/latest.json").exists());
+    let script = fs::read_to_string(script_out).expect("script");
+    assert!(!script.contains("#SBATCH --dependency"));
+}
+
+#[test]
+fn run_command_rejects_arrays_before_sbatch_and_script_write() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "array-run.yaml",
+        &format!(
+            r#"
+x-slurm:
+  array: 0-3
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
+    let script_out = tmpdir.path().join("run-array.sbatch");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "app",
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("x-slurm.array requires --detach"));
+    assert!(!script_out.exists());
+    assert!(!sbatch_log.exists());
+}
+
+#[test]
+fn up_host_backend_detach_renders_direct_host_runtime() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "host.yaml",
+        &format!(
+            r#"
+name: host-demo
+runtime:
+  backend: host
+x-slurm:
+  job_name: host-demo
+  time: "00:02:00"
+  cache_dir: {}
+services:
+  app:
+    command:
+      - bash
+      - -lc
+      - echo host-runtime
+"#,
+            tmpdir.path().join("cache").display()
+        ),
+    );
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
+    let script_out = tmpdir.path().join("host.sbatch");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    let script = fs::read_to_string(&script_out).expect("script");
+    assert!(script.contains("hpc-compose:app"));
+    assert!(script.contains("'echo host-runtime'"));
+    assert!(!script.contains("--container-image"));
+    assert!(!script.contains("--container-env"));
+    assert!(!script.contains("apptainer exec"));
+    assert!(!script.contains("singularity exec"));
+    assert!(
+        fs::read_to_string(sbatch_log)
+            .expect("sbatch log")
+            .contains("host.sbatch")
+    );
+}
+
+#[test]
+fn up_gres_overrides_gpu_aliases_in_allocation_and_service_steps() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("trainer.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "gres.yaml",
+        &format!(
+            r#"
+name: gres-demo
+x-slurm:
+  job_name: gres-demo
+  time: "00:02:00"
+  cache_dir: {}
+  gpus: 8
+  gres: gpu:h100:4
+services:
+  trainer:
+    image: {}
+    command:
+      - python
+      - train.py
+    x-slurm:
+      gpus: 2
+      gres: gpu:h100:1
+"#,
+            tmpdir.path().join("cache").display(),
+            local_image.display()
+        ),
+    );
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let script_out = tmpdir.path().join("gres.sbatch");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    let script = fs::read_to_string(script_out).expect("script");
+    assert!(script.contains("#SBATCH --gres=gpu:h100:4"));
+    assert!(!script.contains("#SBATCH --gpus=8"));
+    assert!(script.contains("--gres=gpu:h100:1"));
+    assert!(!script.contains("--gpus=2"));
+}
+
 fn write_fake_when_tool(tmpdir: &std::path::Path, name: &str, stdout: &str) -> std::path::PathBuf {
     let path = tmpdir.join(name);
     write_script(
@@ -4005,6 +4839,85 @@ fn weather_fails_when_core_live_probes_are_unavailable() {
 
     assert_failure(&output);
     assert!(stderr_text(&output).contains("weather probes failed"));
+}
+
+#[test]
+fn weather_uses_profile_binary_overrides_for_all_weather_tools() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let settings_dir = tmpdir.path().join(".hpc-compose");
+    fs::create_dir_all(&settings_dir).expect("settings dir");
+    let log = tmpdir.path().join("weather-tools.log");
+    let sinfo = write_fake_weather_tool(
+        tmpdir.path(),
+        "profile-sinfo",
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nprintf 'sinfo:%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' 'gpu|idle|1|gpu:h100:8|'\n",
+            log.display()
+        ),
+    );
+    let squeue = write_fake_weather_tool(
+        tmpdir.path(),
+        "profile-squeue",
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nprintf 'squeue:%s\\n' \"$*\" >> '{}'\nif [[ \" $* \" == *\" --start \"* ]]; then printf '%s\\n' 'N/A'; else printf '%s\\n' 'RUNNING|profile-user'; fi\n",
+            log.display()
+        ),
+    );
+    let sshare = write_fake_weather_tool(
+        tmpdir.path(),
+        "profile-sshare",
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nprintf 'sshare:%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' 'acct|profile-user|0.6'\n",
+            log.display()
+        ),
+    );
+    let sprio = write_fake_weather_tool(
+        tmpdir.path(),
+        "profile-sprio",
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nprintf 'sprio:%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '42|100|10|0|0'\n",
+            log.display()
+        ),
+    );
+    fs::write(
+        settings_dir.join("settings.toml"),
+        format!(
+            r#"
+version = 1
+default_profile = "weather"
+
+[profiles.weather.binaries]
+sinfo = "{}"
+squeue = "{}"
+sshare = "{}"
+sprio = "{}"
+"#,
+            sinfo.display(),
+            squeue.display(),
+            sshare.display(),
+            sprio.display()
+        ),
+    )
+    .expect("settings");
+
+    let output = run_cli_with_env(
+        tmpdir.path(),
+        &["--profile", "weather", "weather", "--format", "json"],
+        &[("USER", "profile-user")],
+    );
+
+    assert_success(&output);
+    let value: Value = serde_json::from_str(&stdout_text(&output)).expect("weather json");
+    assert_eq!(value["nodes"]["gpu"]["free_nodes"], Value::from(1));
+    assert_eq!(value["user"]["running_jobs"], Value::from(1));
+    assert_eq!(value["fairshare"]["account"], Value::from("acct"));
+    assert_eq!(value["priority"]["top_job_id"], Value::from("42"));
+    let log = fs::read_to_string(log).expect("weather log");
+    assert!(log.contains("sinfo:-h -o %P|%T|%D|%G|%E"));
+    assert!(log.contains("squeue:-h -o %T|%u"));
+    assert!(log.contains("squeue:--start -h -o %S"));
+    assert!(log.contains("sshare:-n -P -u profile-user -o Account,User,FairShare"));
+    assert!(log.contains("sprio:-h -u profile-user -o %.18i|%Y|%F|%P|%Q"));
 }
 
 fn write_when_compose(tmpdir: &std::path::Path, partition: &str) -> std::path::PathBuf {
@@ -4252,6 +5165,48 @@ fn when_json_output_includes_conditions_and_submission() {
 }
 
 #[test]
+fn when_rejects_partition_mismatch_before_monitoring() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_when_compose(tmpdir.path(), "gpu8");
+    let sinfo_log = tmpdir.path().join("sinfo-called.log");
+    let sinfo = tmpdir.path().join("sinfo-when");
+    write_script(
+        &sinfo,
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'idle|4\\n'\n",
+            sinfo_log.display()
+        ),
+    );
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "when",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--partition",
+            "cpu",
+            "--free-nodes",
+            "1",
+            "--skip-prepare",
+            "--no-preflight",
+            "--sinfo-bin",
+            sinfo.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--partition cpu must match x-slurm.partition gpu8"));
+    assert!(!sinfo_log.exists());
+    assert!(!sbatch_log.exists());
+}
+
+#[test]
 fn local_submit_rejects_scheduler_arrays_and_dependencies() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");
@@ -4428,6 +5383,111 @@ fn run_image_mode_rejects_service_like_mixed_form() {
 }
 
 #[test]
+fn run_image_rejects_invalid_env_entries_before_launch() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
+    let script_out = tmpdir.path().join("ephemeral.sbatch");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--env",
+            "BROKEN",
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--env entries must use KEY=VALUE syntax"));
+    assert!(!script_out.exists());
+    assert!(!sbatch_log.exists());
+}
+
+#[test]
+fn run_image_local_tracks_latest_run_backend_without_main_latest() {
+    if std::env::consts::OS != "linux" {
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let script_out = tmpdir.path().join("ephemeral.local.sh");
+    let enroot = write_fake_enroot(tmpdir.path());
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_success(&output);
+    assert!(script_out.exists());
+    assert!(tmpdir.path().join(".hpc-compose/latest-run.json").exists());
+    assert!(!tmpdir.path().join(".hpc-compose/latest.json").exists());
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(tmpdir.path().join(".hpc-compose/latest-run.json"))
+            .expect("latest run"),
+    )
+    .expect("latest run json");
+    assert_eq!(record["kind"], Value::from("run"));
+    assert_eq!(record["backend"], Value::from("local"));
+}
+
+#[test]
+fn run_image_local_invalid_env_does_not_render_or_track() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let script_out = tmpdir.path().join("ephemeral.local.sh");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--local",
+            "--env",
+            "BROKEN",
+            "--skip-prepare",
+            "--no-preflight",
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--env entries must use KEY=VALUE syntax"));
+    assert!(!script_out.exists());
+    assert!(!tmpdir.path().join(".hpc-compose/latest-run.json").exists());
+}
+
+#[test]
 fn shell_command_invokes_srun_pty_with_image_resources_and_env() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");
@@ -4470,6 +5530,38 @@ exit 0
     assert!(log.contains("--container-env=FOO"));
     assert!(log.contains("bash -l"));
     assert!(log.contains("env:bar"));
+}
+
+#[test]
+fn shell_rejects_invalid_env_before_srun() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let srun_log = tmpdir.path().join("srun.log");
+    let srun = tmpdir.path().join("srun-shell-invalid-env");
+    write_script(
+        &srun,
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            srun_log.display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "shell",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--env",
+            "BROKEN",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--env entries must use KEY=VALUE syntax"));
+    assert!(!srun_log.exists());
 }
 
 #[test]
@@ -4527,6 +5619,209 @@ fn cancel_without_job_id_targets_newest_run_record() {
             .trim(),
         "22222"
     );
+}
+
+#[test]
+fn cancel_explicit_untracked_job_json_reports_no_tracking_removed() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let scancel_log = tmpdir.path().join("scancel.log");
+    let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "99999",
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("cancel json");
+    assert_eq!(payload["job_id"], Value::from("99999"));
+    assert_eq!(payload["cancelled"], Value::from(true));
+    assert_eq!(payload["tracking_removed"], Value::from(false));
+    assert_eq!(
+        fs::read_to_string(scancel_log).expect("scancel log").trim(),
+        "99999"
+    );
+}
+
+#[test]
+fn cancel_local_record_without_state_reports_not_running_and_removes_tracking() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+    let mut record = build_submission_record_with_backend_and_options(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("local.sh"),
+        &plan,
+        "local-missing-state",
+        SubmissionBackend::Local,
+        &SubmissionRecordBuildOptions::default(),
+    )
+    .expect("record");
+    record.submitted_at = 1;
+    write_submission_record(&record).expect("write record");
+    assert!(
+        tmpdir
+            .path()
+            .join(".hpc-compose/jobs/local-missing-state.json")
+            .exists()
+    );
+    assert!(!state_path_for_record(&record).exists());
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "local-missing-state",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("cancel json");
+    assert_eq!(payload["job_id"], Value::from("local-missing-state"));
+    assert_eq!(payload["cancelled"], Value::from(false));
+    assert_eq!(payload["tracking_removed"], Value::from(true));
+    assert!(
+        !tmpdir
+            .path()
+            .join(".hpc-compose/jobs/local-missing-state.json")
+            .exists()
+    );
+}
+
+#[test]
+fn tracked_job_resolution_rejects_duplicate_job_ids_without_file() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    for project in ["alpha", "beta"] {
+        let project_dir = tmpdir.path().join(project);
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let cache_dir = project_dir.join("cache");
+        let compose = write_prepare_compose(&project_dir, &cache_dir);
+        let plan = runtime_plan(&compose);
+        let mut record = build_submission_record(
+            &compose,
+            &project_dir,
+            &project_dir.join("job.sbatch"),
+            &plan,
+            "424242",
+        )
+        .expect("record");
+        record.submitted_at = if project == "alpha" { 1 } else { 2 };
+        write_submission_record(&record).expect("write record");
+    }
+
+    let score = run_cli(tmpdir.path(), &["score", "424242", "--format", "json"]);
+    assert_failure(&score);
+    let stderr = stderr_text(&score);
+    assert!(stderr.contains("multiple tracked submissions with job id '424242'"));
+    assert!(stderr.contains("disambiguate"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn status_explicit_job_id_prefers_current_compose_record_over_repo_duplicate() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let mut current_compose = None;
+    for project in ["alpha", "beta"] {
+        let project_dir = tmpdir.path().join(project);
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let cache_dir = project_dir.join("cache");
+        let compose = write_prepare_compose(&project_dir, &cache_dir);
+        let plan = runtime_plan(&compose);
+        let mut record = build_submission_record(
+            &compose,
+            &project_dir,
+            &project_dir.join("job.sbatch"),
+            &plan,
+            "424242",
+        )
+        .expect("record");
+        record.submitted_at = if project == "alpha" { 1 } else { 2 };
+        write_submission_record(&record).expect("write record");
+        if project == "alpha" {
+            current_compose = Some(compose);
+        }
+    }
+    let compose = current_compose.expect("current compose");
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "424242",
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status);
+    let payload: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    assert_eq!(payload["record"]["job_id"], Value::from("424242"));
+    assert_eq!(
+        payload["record"]["compose_file"],
+        Value::from(compose.display().to_string())
+    );
+    assert_eq!(payload["scheduler"]["state"], Value::from("COMPLETED"));
+}
+
+#[test]
+fn status_duplicate_job_id_without_file_reports_disambiguation() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    for project in ["alpha", "beta"] {
+        let project_dir = tmpdir.path().join(project);
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let cache_dir = project_dir.join("cache");
+        let compose = write_prepare_compose(&project_dir, &cache_dir);
+        let plan = runtime_plan(&compose);
+        let mut record = build_submission_record(
+            &compose,
+            &project_dir,
+            &project_dir.join("job.sbatch"),
+            &plan,
+            "525252",
+        )
+        .expect("record");
+        record.submitted_at = if project == "alpha" { 1 } else { 2 };
+        write_submission_record(&record).expect("write record");
+    }
+
+    let status = run_cli(
+        tmpdir.path(),
+        &["status", "--job-id", "525252", "--format", "json"],
+    );
+    assert_failure(&status);
+    let stderr = stderr_text(&status);
+    assert!(stderr.contains("multiple tracked submissions with job id '525252'"));
+    assert!(stderr.contains("disambiguate"), "stderr:\n{stderr}");
 }
 
 #[test]
@@ -5420,6 +6715,113 @@ services:
     let missing_snapshot = run_cli(tmpdir.path(), &["diff", "11111", "33333"]);
     assert_success(&missing_snapshot);
     assert!(stdout_text(&missing_snapshot).contains("config snapshot unavailable"));
+}
+
+#[test]
+fn diff_malformed_config_snapshot_reports_note_and_keeps_outcome_changes() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+
+    let left_options = SubmissionRecordBuildOptions {
+        config_snapshot_yaml: Some("x-slurm: [not valid".to_string()),
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let right_options = SubmissionRecordBuildOptions {
+        config_snapshot_yaml: Some(
+            "x-slurm:\n  time: \"00:20:00\"\nservices:\n  app:\n    image: python:3.11\n"
+                .to_string(),
+        ),
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let mut left = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "44444",
+        SubmissionBackend::Local,
+        &left_options,
+    )
+    .expect("left record");
+    left.submitted_at = 10;
+    let mut right = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "55555",
+        SubmissionBackend::Local,
+        &right_options,
+    )
+    .expect("right record");
+    right.submitted_at = 20;
+    write_submission_record(&left).expect("write left");
+    write_submission_record(&right).expect("write right");
+
+    let left_state_path = state_path_for_record(&left);
+    let right_state_path = state_path_for_record(&right);
+    fs::create_dir_all(left_state_path.parent().unwrap()).expect("left state dir");
+    fs::create_dir_all(right_state_path.parent().unwrap()).expect("right state dir");
+    fs::write(
+        &left_state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backend": "local",
+            "job_status": "COMPLETED",
+            "job_exit_code": 0,
+            "services": [{"service_name": "app", "last_exit_code": 0, "completed_successfully": true}]
+        }))
+        .expect("left state json"),
+    )
+    .expect("left state");
+    fs::write(
+        &right_state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backend": "local",
+            "job_status": "FAILED",
+            "job_exit_code": 7,
+            "services": [{"service_name": "app", "last_exit_code": 7}]
+        }))
+        .expect("right state json"),
+    )
+    .expect("right state");
+
+    let diff = run_cli(
+        tmpdir.path(),
+        &["diff", "44444", "55555", "--format", "json"],
+    );
+    assert_success(&diff);
+    let value: Value = serde_json::from_str(&stdout_text(&diff)).expect("diff json");
+    assert!(
+        value["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note.as_str().is_some_and(
+                |note| note.contains("config snapshot for job 44444 could not be parsed")
+            ))
+    );
+    assert!(
+        value["outcome_changes"]
+            .as_array()
+            .expect("outcome changes")
+            .iter()
+            .any(|change| change["path"] == "scheduler.state")
+    );
+    assert!(
+        value["outcome_changes"]
+            .as_array()
+            .expect("outcome changes")
+            .iter()
+            .any(|change| change["path"] == "services.app.last_exit_code")
+    );
 }
 
 #[test]
@@ -6873,6 +8275,84 @@ services:
             .join("results/12345/_hpc-compose/bundles/logs.json")
             .exists()
     );
+    assert!(
+        !tmpdir
+            .path()
+            .join("results/12345/metrics/meta.json")
+            .exists()
+    );
+}
+
+#[test]
+fn artifacts_unknown_job_id_fails_without_export_side_effects() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_artifacts_compose(tmpdir.path(), &cache_dir, "always");
+
+    let artifacts = run_cli(
+        tmpdir.path(),
+        &[
+            "artifacts",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "99999",
+            "--bundle",
+            "logs",
+            "--tarball",
+        ],
+    );
+    assert_failure(&artifacts);
+    assert!(!stderr_text(&artifacts).trim().is_empty());
+    assert!(!tmpdir.path().join("results/99999").exists());
+    assert!(!tmpdir.path().join("logs.tar.gz").exists());
+}
+
+#[test]
+fn artifacts_unknown_bundle_fails_without_export_side_effects() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_artifacts_compose(tmpdir.path(), &cache_dir, "always");
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script(tmpdir.path());
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let artifacts = run_cli(
+        tmpdir.path(),
+        &[
+            "artifacts",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "12345",
+            "--bundle",
+            "unknown",
+            "--tarball",
+        ],
+    );
+    assert_failure(&artifacts);
+    assert!(stderr_text(&artifacts).contains("artifact bundle 'unknown' is not available"));
+    assert!(!tmpdir.path().join("results/12345/bundles/unknown").exists());
+    assert!(!tmpdir.path().join("results/12345/unknown.tar.gz").exists());
     assert!(
         !tmpdir
             .path()

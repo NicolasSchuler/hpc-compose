@@ -446,6 +446,189 @@ services:
 }
 
 #[test]
+fn notify_email_renders_mail_user_and_normalized_mail_type() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "notify.yaml",
+        r#"
+name: notify-demo
+x-slurm:
+  notify:
+    email:
+      to: user@example.com
+      on:
+        - fail
+        - start
+        - end
+services:
+  app:
+    image: redis:7
+    command: /bin/true
+"#,
+    );
+
+    let render = run_cli(
+        tmpdir.path(),
+        &["render", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&render);
+    let script = stdout_text(&render);
+    assert!(script.contains("#SBATCH --mail-user=user@example.com"));
+    assert!(script.contains("#SBATCH --mail-type=BEGIN,END,FAIL"));
+}
+
+#[test]
+fn render_cli_applies_gres_precedence_from_compose() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "gres.yaml",
+        r#"
+name: gres-demo
+x-slurm:
+  gres: gpu:h100:4
+  gpus: 8
+services:
+  trainer:
+    image: redis:7
+    command: /bin/true
+    x-slurm:
+      gres: gpu:h100:2
+      gpus: 4
+"#,
+    );
+
+    let render = run_cli(
+        tmpdir.path(),
+        &["render", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&render);
+    let script = stdout_text(&render);
+    assert!(script.contains("#SBATCH --gres=gpu:h100:4"));
+    assert!(!script.contains("#SBATCH --gpus=8"));
+    assert!(script.contains("--gres=gpu:h100:2"));
+    assert!(!script.contains("--gpus=4"));
+}
+
+#[test]
+fn render_cli_emits_all_first_class_binding_flags_from_yaml() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "bindings.yaml",
+        r#"
+name: binding-demo
+x-slurm:
+  gpus_per_node: 4
+  gpus_per_task: 1
+  cpus_per_gpu: 8
+  mem_per_gpu: 40G
+  gpu_bind: closest
+  cpu_bind: cores
+  mem_bind: local
+  distribution: block:block
+  hint: nomultithread
+services:
+  trainer:
+    image: redis:7
+    command: /bin/true
+    x-slurm:
+      gpus_per_node: 2
+      gpus_per_task: 1
+      cpus_per_gpu: 6
+      mem_per_gpu: 20G
+      gpu_bind: closest
+      cpu_bind: cores
+      mem_bind: local
+      distribution: cyclic
+      hint: compute_bound
+"#,
+    );
+
+    let render = run_cli(
+        tmpdir.path(),
+        &["render", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&render);
+    let script = stdout_text(&render);
+    for expected in [
+        "#SBATCH --gpus-per-node=4",
+        "#SBATCH --gpus-per-task=1",
+        "#SBATCH --cpus-per-gpu=8",
+        "#SBATCH --mem-per-gpu=40G",
+        "#SBATCH --gpu-bind=closest",
+        "#SBATCH --cpu-bind=cores",
+        "#SBATCH --mem-bind=local",
+        "#SBATCH --distribution=block:block",
+        "#SBATCH --hint=nomultithread",
+        "--gpus-per-node=2",
+        "--gpus-per-task=1",
+        "--cpus-per-gpu=6",
+        "--mem-per-gpu=20G",
+        "--gpu-bind=closest",
+        "--cpu-bind=cores",
+        "--mem-bind=local",
+        "--distribution=cyclic",
+        "--hint=compute_bound",
+    ] {
+        assert!(script.contains(expected), "missing {expected}");
+    }
+}
+
+#[test]
+fn config_effective_normalizes_notify_empty_on_and_all() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cases = [
+        (
+            "empty-on.yaml",
+            "on: []",
+            serde_json::json!(["end", "fail"]),
+        ),
+        (
+            "all.yaml",
+            "on:\n        - start\n        - all\n        - fail",
+            serde_json::json!(["all"]),
+        ),
+    ];
+
+    for (name, on_yaml, expected) in cases {
+        let compose = write_compose(
+            tmpdir.path(),
+            name,
+            &format!(
+                r#"
+name: notify-config
+x-slurm:
+  notify:
+    email:
+      to: user@example.com
+      {on_yaml}
+services:
+  app:
+    image: redis:7
+    command: /bin/true
+"#
+            ),
+        );
+
+        let config = run_cli(
+            tmpdir.path(),
+            &[
+                "config",
+                "-f",
+                compose.to_str().expect("path"),
+                "--format",
+                "json",
+            ],
+        );
+        assert_success(&config);
+        let value: Value = serde_json::from_str(&stdout_text(&config)).expect("config json");
+        assert_eq!(value["x-slurm"]["notify"]["email"]["on"], expected);
+    }
+}
+
+#[test]
 fn render_applies_settings_resource_profile_defaults() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings dir");
@@ -698,6 +881,155 @@ services:
     assert_eq!(
         payload["variables"]["API_TOKEN"],
         Value::from("super-secret-token")
+    );
+}
+
+#[test]
+fn config_effective_outputs_new_slurm_resource_fields_and_defaults() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "resources.yaml",
+        &format!(
+            r#"
+name: resource-config
+x-slurm:
+  cache_dir: {}
+  nodes: 4
+  ntasks: 16
+  ntasks_per_node: 4
+  cpus_per_task: 2
+  gres: gpu:a100:4
+  gpus_per_node: 1
+  gpus_per_task: 1
+  cpus_per_gpu: 4
+  mem_per_gpu: 24G
+  gpu_bind: closest
+  cpu_bind: cores
+  mem_bind: local
+  distribution: block:block
+  hint: nomultithread
+  metrics: {{}}
+  notify:
+    email:
+      to: ops@example.com
+      on:
+        - fail
+        - start
+  rendezvous:
+    discover:
+      - api
+    timeout_seconds: 30
+    require: true
+services:
+  app:
+    image: redis:7
+    command: /bin/true
+    x-slurm:
+      placement:
+        node_count: 2
+        start_index: 1
+        exclude: "2"
+        allow_overlap: true
+      ntasks: 3
+      ntasks_per_node: 1
+      cpus_per_task: 4
+      gpus_per_node: 1
+      gpus_per_task: 1
+      cpus_per_gpu: 6
+      mem_per_gpu: 12G
+      gpu_bind: closest
+      time_limit: "00:10:00"
+      mpi:
+        type: pmix
+        expected_ranks: 3
+      rendezvous:
+        register:
+          name: api
+          port: 8080
+          protocol: http
+          path: /health
+          ttl_seconds: 60
+          metadata:
+            role: api
+"#,
+            cache_root.path().display()
+        ),
+    );
+
+    let config = run_cli(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&config);
+    let value: Value = serde_json::from_str(&stdout_text(&config)).expect("config json");
+    let slurm = &value["x-slurm"];
+    assert_eq!(
+        slurm["cache_dir"],
+        Value::from(cache_root.path().display().to_string())
+    );
+    assert_eq!(slurm["nodes"], Value::from(4));
+    assert_eq!(slurm["ntasks"], Value::from(16));
+    assert_eq!(slurm["ntasks_per_node"], Value::from(4));
+    assert_eq!(slurm["cpus_per_task"], Value::from(2));
+    assert_eq!(slurm["gres"], Value::from("gpu:a100:4"));
+    assert_eq!(slurm["gpus_per_node"], Value::from(1));
+    assert_eq!(slurm["gpus_per_task"], Value::from(1));
+    assert_eq!(slurm["cpus_per_gpu"], Value::from(4));
+    assert_eq!(slurm["mem_per_gpu"], Value::from("24G"));
+    assert_eq!(slurm["gpu_bind"], Value::from("closest"));
+    assert_eq!(slurm["cpu_bind"], Value::from("cores"));
+    assert_eq!(slurm["mem_bind"], Value::from("local"));
+    assert_eq!(slurm["distribution"], Value::from("block:block"));
+    assert_eq!(slurm["hint"], Value::from("nomultithread"));
+    assert_eq!(
+        slurm["metrics"],
+        serde_json::json!({
+            "enabled": true,
+            "interval_seconds": 5,
+            "collectors": ["gpu", "slurm"]
+        })
+    );
+    assert_eq!(
+        slurm["notify"]["email"],
+        serde_json::json!({"to": "ops@example.com", "on": ["start", "fail"]})
+    );
+    assert_eq!(slurm["rendezvous"]["discover"], serde_json::json!(["api"]));
+    assert_eq!(slurm["rendezvous"]["timeout_seconds"], Value::from(30));
+    assert_eq!(slurm["rendezvous"]["require"], Value::from(true));
+
+    let service_slurm = &value["services"]["app"]["x-slurm"];
+    assert_eq!(service_slurm["placement"]["node_count"], Value::from(2));
+    assert_eq!(service_slurm["placement"]["start_index"], Value::from(1));
+    assert_eq!(service_slurm["placement"]["exclude"], Value::from("2"));
+    assert_eq!(
+        service_slurm["placement"]["allow_overlap"],
+        Value::from(true)
+    );
+    assert_eq!(service_slurm["ntasks"], Value::from(3));
+    assert_eq!(service_slurm["ntasks_per_node"], Value::from(1));
+    assert_eq!(service_slurm["cpus_per_task"], Value::from(4));
+    assert_eq!(service_slurm["gpus_per_node"], Value::from(1));
+    assert_eq!(service_slurm["gpus_per_task"], Value::from(1));
+    assert_eq!(service_slurm["cpus_per_gpu"], Value::from(6));
+    assert_eq!(service_slurm["mem_per_gpu"], Value::from("12G"));
+    assert_eq!(service_slurm["gpu_bind"], Value::from("closest"));
+    assert_eq!(service_slurm["time_limit"], Value::from("00:10:00"));
+    assert_eq!(service_slurm["mpi"]["expected_ranks"], Value::from(3));
+    assert_eq!(
+        service_slurm["rendezvous"]["register"]["metadata"]["role"],
+        Value::from("api")
+    );
+    assert_eq!(
+        service_slurm["failure_policy"]["mode"],
+        Value::from("fail_job")
     );
 }
 
@@ -1300,6 +1632,10 @@ fn schema_command_emits_checked_in_schema() {
         value["definitions"]["mpi"]["properties"]["implementation"]["enum"][0],
         Value::from("openmpi")
     );
+    assert_eq!(
+        value["definitions"]["positiveInteger"]["minimum"],
+        Value::from(1)
+    );
 
     let checked_in = fs::read_to_string(repo_root().join("schema/hpc-compose.schema.json"))
         .expect("checked-in schema");
@@ -1309,6 +1645,49 @@ fn schema_command_emits_checked_in_schema() {
         format!("{checked_in}\n")
     };
     assert_eq!(stdout, expected);
+}
+
+#[test]
+fn schema_matches_new_resource_validation_surface() {
+    let output = run_cli(&repo_root(), &["schema"]);
+    assert_success(&output);
+    let value: Value = serde_json::from_str(&stdout_text(&output)).expect("schema json");
+    let slurm = &value["definitions"]["slurm"]["properties"];
+    let service_slurm = &value["definitions"]["serviceSlurm"]["properties"];
+    let placement = &value["definitions"]["servicePlacement"]["properties"];
+
+    for field in [
+        "ntasks",
+        "ntasks_per_node",
+        "gpus_per_node",
+        "gpus_per_task",
+        "cpus_per_gpu",
+    ] {
+        assert_eq!(
+            slurm[field]["$ref"],
+            Value::from("#/definitions/positiveInteger"),
+            "top-level x-slurm.{field}"
+        );
+        assert_eq!(
+            service_slurm[field]["$ref"],
+            Value::from("#/definitions/positiveInteger"),
+            "service x-slurm.{field}"
+        );
+    }
+    assert_eq!(
+        placement["node_count"]["$ref"],
+        Value::from("#/definitions/positiveInteger")
+    );
+    assert_eq!(placement["node_percent"]["minimum"], Value::from(1));
+    assert_eq!(placement["node_percent"]["maximum"], Value::from(100));
+    assert_eq!(
+        placement["start_index"]["$ref"],
+        Value::from("#/definitions/nonNegativeInteger")
+    );
+    assert_eq!(
+        value["definitions"]["mpi"]["properties"]["expected_ranks"]["$ref"],
+        Value::from("#/definitions/positiveInteger")
+    );
 }
 
 #[test]

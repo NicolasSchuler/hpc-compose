@@ -652,6 +652,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("SERVICE_RDZV_PROTOCOLS=()\n");
         out.push_str("SERVICE_RDZV_PATHS=()\n");
         out.push_str("SERVICE_RDZV_TTLS=()\n");
+        out.push_str("SERVICE_RDZV_METADATA_JSON=()\n");
         out.push_str("SERVICE_RDZV_REGISTERED=()\n");
     }
     if assertions_enabled {
@@ -1526,6 +1527,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("    SERVICE_RDZV_PROTOCOLS+=(\"\")\n");
         out.push_str("    SERVICE_RDZV_PATHS+=(\"\")\n");
         out.push_str("    SERVICE_RDZV_TTLS+=(\"\")\n");
+        out.push_str("    SERVICE_RDZV_METADATA_JSON+=(\"{}\")\n");
         out.push_str("    SERVICE_RDZV_REGISTERED+=(\"0\")\n");
     }
     if assertions_enabled {
@@ -3334,6 +3336,7 @@ register_service_rendezvous_by_index() {
   local protocol=${SERVICE_RDZV_PROTOCOLS[index]:-http}
   local path=${SERVICE_RDZV_PATHS[index]:-}
   local ttl=${SERVICE_RDZV_TTLS[index]:-3600}
+  local metadata_json=${SERVICE_RDZV_METADATA_JSON[index]:-{}}
   local url="${protocol}://${host}:${port}${path}"
   local dir="$CACHE_ROOT/rendezvous/$rdzv_name"
   local token
@@ -3355,7 +3358,7 @@ register_service_rendezvous_by_index() {
   "registered_at": $(date +%s),
   "ttl_seconds": $ttl,
   "cache_dir": "$(json_escape "$CACHE_ROOT")",
-  "metadata": {}
+  "metadata": $metadata_json
 }
 HPC_COMPOSE_RDZV_JSON
   mv "$record.tmp" "$record"
@@ -3421,6 +3424,12 @@ fn render_service_rendezvous_registration(
         shell_quote(path)
     ));
     out.push_str(&format!("  SERVICE_RDZV_TTLS[rdzv_index]={ttl}\n"));
+    let metadata_json =
+        serde_json::to_string(&register.metadata).expect("rendezvous metadata serializes");
+    out.push_str(&format!(
+        "  SERVICE_RDZV_METADATA_JSON[rdzv_index]={}\n",
+        shell_quote(&metadata_json)
+    ));
     out.push_str("  SERVICE_RDZV_REGISTERED[rdzv_index]=\"0\"\n");
     if let Some(wait_fn) = readiness_wait_fn {
         out.push_str(&format!(
@@ -4638,11 +4647,12 @@ mod tests {
     use crate::cluster::{ClusterProfile, DistributedProfile, RuntimeAvailability};
     use crate::planner::ServicePlacement;
     use crate::spec::{
-        DependencyCondition, MpiConfig, MpiProfile, MpiType, ReadinessSpec, ResumeConfig,
-        RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceAssertSpec,
-        ServiceDependency, ServiceEventHookSpec, ServiceFailurePolicy, ServiceHookContext,
-        ServiceHookEvent, ServiceHookSpec, ServiceScratchConfig, ServiceSlurmConfig, SlurmConfig,
-        StageInConfig, StageMode, StageOutConfig, StageOutWhen,
+        DependencyCondition, MpiConfig, MpiProfile, MpiType, ReadinessSpec,
+        RendezvousRegisterConfig, ResumeConfig, RuntimeConfig, RuntimeGpuPolicy,
+        ScratchCleanupPolicy, ScratchConfig, ServiceAssertSpec, ServiceDependency,
+        ServiceEventHookSpec, ServiceFailurePolicy, ServiceHookContext, ServiceHookEvent,
+        ServiceHookSpec, ServiceRendezvousConfig, ServiceScratchConfig, ServiceSlurmConfig,
+        SlurmConfig, StageInConfig, StageMode, StageOutConfig, StageOutWhen,
     };
 
     fn runtime_service() -> RuntimeService {
@@ -5440,6 +5450,156 @@ exit 1
             time_pos < strict_pos,
             "SBATCH header must precede shell commands"
         );
+    }
+
+    #[test]
+    fn render_gres_takes_precedence_over_gpus_at_allocation_and_service_levels() {
+        let service = RuntimeService {
+            name: "trainer".into(),
+            runtime_image: PathBuf::from("/shared/cache/trainer.sqsh"),
+            execution: ExecutionSpec::Exec(vec!["python".into(), "train.py".into()]),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig {
+                gpus: Some(8),
+                gres: Some("gpu:h100:4".into()),
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: None,
+            source: crate::planner::ImageSource::LocalSqsh(PathBuf::from(
+                "/shared/cache/trainer.sqsh",
+            )),
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                gpus: Some(8),
+                gres: Some("gpu:h100:4".into()),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(script.contains("#SBATCH --gres=gpu:h100:4"));
+        assert!(!script.contains("#SBATCH --gpus=8"));
+
+        let args = display_srun_command(&plan.ordered_services[0]);
+        assert!(args.contains(&"--gres=gpu:h100:4".to_string()));
+        assert!(!args.contains(&"--gpus=8".to_string()));
+    }
+
+    #[test]
+    fn render_gres_precedence_preserves_gpu_subresource_directives() {
+        let mut service = runtime_service();
+        service.name = "trainer".into();
+        service.slurm = ServiceSlurmConfig {
+            gpus: Some(8),
+            gres: Some("gpu:h100:4".into()),
+            gpus_per_node: Some(2),
+            gpus_per_task: Some(1),
+            ..ServiceSlurmConfig::default()
+        };
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig {
+                gpus: Some(8),
+                gres: Some("gpu:h100:4".into()),
+                gpus_per_node: Some(2),
+                gpus_per_task: Some(1),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        for expected in [
+            "#SBATCH --gres=gpu:h100:4",
+            "#SBATCH --gpus-per-node=2",
+            "#SBATCH --gpus-per-task=1",
+        ] {
+            assert!(script.contains(expected), "missing {expected}");
+        }
+        assert!(!script.contains("#SBATCH --gpus=8"));
+
+        let args = display_srun_command(&plan.ordered_services[0]);
+        assert!(args.contains(&"--gres=gpu:h100:4".to_string()));
+        assert!(args.contains(&"--gpus-per-node=2".to_string()));
+        assert!(args.contains(&"--gpus-per-task=1".to_string()));
+        assert!(!args.contains(&"--gpus=8".to_string()));
+    }
+
+    #[test]
+    fn display_srun_command_shows_partition_indices_and_excludes() {
+        let mut service = runtime_service();
+        service.placement = ServicePlacement {
+            mode: ServicePlacementMode::Partitioned,
+            nodes: 3,
+            ntasks: Some(3),
+            ntasks_per_node: None,
+            pin_to_primary_node: false,
+            node_indices: Some(vec![2, 4, 5]),
+            exclude_indices: vec![3, 6],
+            allow_overlap: false,
+        };
+
+        let display = display_srun_command(&service);
+        assert!(display.contains(&"--nodelist=<allocation-indices:2,4,5>".to_string()));
+        assert!(display.contains(&"--exclude=<allocation-indices:3,6>".to_string()));
+
+        let actual = build_srun_command(&service);
+        assert!(
+            actual
+                .iter()
+                .all(|arg| !arg.contains("<allocation-indices:"))
+        );
+    }
+
+    #[test]
+    fn render_rendezvous_registration_serializes_configured_metadata() {
+        let mut service = runtime_service();
+        service.name = "api".into();
+        service.readiness = None;
+        service.slurm.rendezvous = Some(ServiceRendezvousConfig {
+            register: Some(RendezvousRegisterConfig {
+                name: "api".into(),
+                port: 8080,
+                protocol: Some("http".into()),
+                path: Some("/ready".into()),
+                ttl_seconds: Some(60),
+                metadata: BTreeMap::from([
+                    ("role".into(), "api".into()),
+                    ("version".into(), "v1".into()),
+                ]),
+            }),
+        });
+        let plan = RuntimePlan {
+            name: "rdzv".into(),
+            cache_dir: PathBuf::from("/shared/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![service],
+        };
+
+        let script = render_script(&plan).expect("script");
+        assert!(
+            script.contains(
+                "SERVICE_RDZV_METADATA_JSON[rdzv_index]='{\"role\":\"api\",\"version\":\"v1\"}'"
+            ),
+            "{script}"
+        );
+        assert!(script.contains("\"metadata\": $metadata_json"));
+        assert!(!script.contains("\"metadata\": {}"));
     }
 
     #[test]

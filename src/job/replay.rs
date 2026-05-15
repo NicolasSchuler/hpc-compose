@@ -1131,6 +1131,129 @@ mod tests {
     }
 
     #[test]
+    fn replay_malformed_metric_rows_emit_notes_without_losing_exit_timeline() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = sample_record(tmpdir.path());
+        write_record(tmpdir.path(), &record);
+        let job_root = runtime_job_root_for_record(&record);
+        let exit_dir = job_root.join(SERVICE_EXITS_DIR_NAME);
+        fs::create_dir_all(&exit_dir).expect("exit dir");
+        fs::write(
+            exit_dir.join("app.jsonl"),
+            "{\"service\":\"app\",\"exit_code\":0,\"at_unix\":120}\n",
+        )
+        .expect("exit marker");
+        let metrics_dir = job_root.join("metrics");
+        fs::create_dir_all(&metrics_dir).expect("metrics");
+        fs::write(
+            metrics_dir.join("gpu.jsonl"),
+            "not json\n{\"sampled_at\":\"not-a-time\",\"utilization_gpu\":\"20\"}\n{\"sampled_at\":\"1970-01-01T00:02:00Z\",\"utilization_gpu\":\"70\",\"memory_used_mib\":\"2\",\"memory_total_mib\":\"4\"}\n",
+        )
+        .expect("gpu metrics");
+
+        let report = build_replay_report(&record, None).expect("replay");
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("gpu.jsonl line 1"))
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("could not parse metrics timestamp 'not-a-time'"))
+        );
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|event| event.kind == ReplayEventKind::ServiceExit
+                    && event.service.as_deref() == Some("app")
+                    && event.exit_code == Some(0))
+        );
+        assert!(report.frames.iter().any(|frame| {
+            frame.event.kind == ReplayEventKind::ServiceExit
+                && frame
+                    .metrics_line
+                    .as_deref()
+                    .is_some_and(|line| line.contains("gpu: 1"))
+        }));
+    }
+
+    #[test]
+    fn replay_without_state_exits_or_metrics_uses_submission_bounds() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = sample_record(tmpdir.path());
+        write_record(tmpdir.path(), &record);
+
+        let report = build_replay_report(&record, None).expect("replay");
+        assert_eq!(report.timeline_start_unix, Some(record.submitted_at));
+        assert_eq!(report.timeline_end_unix, Some(record.submitted_at));
+        assert!(report.events.iter().any(|event| {
+            event.kind == ReplayEventKind::AttemptStart && event.at_unix == record.submitted_at
+        }));
+        assert!(report.events.iter().any(|event| {
+            event.kind == ReplayEventKind::FinalSnapshot && event.at_unix == record.submitted_at
+        }));
+        assert!(
+            !report
+                .events
+                .iter()
+                .any(|event| event.kind == ReplayEventKind::ServiceExit)
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("could not read replay state"))
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("no service-exits directory"))
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("no historical metrics JSONL samples"))
+        );
+        assert!(
+            report
+                .frames
+                .iter()
+                .all(|frame| frame.services[0].status == "unknown")
+        );
+    }
+
+    #[test]
+    fn replay_merges_gpu_and_slurm_metrics_at_same_timestamp() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = sample_record(tmpdir.path());
+        write_record(tmpdir.path(), &record);
+        let metrics_dir = runtime_job_root_for_record(&record).join("metrics");
+        fs::create_dir_all(&metrics_dir).expect("metrics");
+        fs::write(
+            metrics_dir.join("gpu.jsonl"),
+            "{\"sampled_at\":\"1970-01-01T00:02:00Z\",\"utilization_gpu\":\"70\",\"memory_used_mib\":\"2\",\"memory_total_mib\":\"4\"}\n",
+        )
+        .expect("gpu metrics");
+        fs::write(
+            metrics_dir.join("slurm.jsonl"),
+            "{\"sampled_at\":\"1970-01-01T00:02:00Z\",\"step_id\":\"12345.0\"}\n{\"sampled_at\":\"1970-01-01T00:02:00Z\",\"step_id\":\"12345.1\"}\n",
+        )
+        .expect("slurm metrics");
+
+        let report = build_replay_report(&record, None).expect("replay");
+        assert!(report.frames.iter().any(|frame| {
+            frame.metrics_line.as_deref()
+                == Some("gpu: 1 util=70% mem=2/4 MiB | stats: sampler (2 steps)")
+        }));
+    }
+
+    #[test]
     fn replay_reconstructs_single_service_failure_from_final_state() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let record = sample_record(tmpdir.path());
