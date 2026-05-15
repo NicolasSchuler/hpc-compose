@@ -1370,7 +1370,6 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("  for i in \"${!SERVICE_NAMES[@]}\"; do\n");
         out.push_str("    evaluate_service_assertions \"$i\" || status=1\n");
         out.push_str("  done\n");
-        out.push_str("  write_state_file\n");
         out.push_str("  return \"$status\"\n");
         out.push_str("}\n\n");
     }
