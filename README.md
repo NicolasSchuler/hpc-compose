@@ -82,6 +82,7 @@ Installer availability is not the same as full runtime support. Check the [Suppo
 - [Troubleshooting](docs/src/troubleshooting.md)
 - [CLI Reference](docs/src/cli-reference.md)
 - [Spec Reference](docs/src/spec-reference.md)
+- [Codex Skill](docs/src/codex-skill.md)
 
 ## Feedback
 

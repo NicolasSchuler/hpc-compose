@@ -45,5 +45,6 @@
 
 # Project
 
+- [Codex Skill](codex-skill.md)
 - [Roadmap](roadmap.md)
 - [Architecture for Contributors](architecture.md)

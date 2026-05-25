@@ -1,0 +1,4 @@
+interface:
+  display_name: "hpc-compose"
+  short_description: "Adapt repositories for hpc-compose on Slurm"
+  default_prompt: "Use $hpc-compose to make this repository run with hpc-compose on HAICORE or another Slurm HPC cluster."
