@@ -753,6 +753,8 @@ services:
         ),
     );
     let enroot = write_fake_enroot(tmpdir.path());
+    // `dev` keeps watching after launch; this test only needs to observe the
+    // inferred watch roots before terminating the local process group.
     let output = run_cli_until_stdout_contains(
         tmpdir.path(),
         &[
