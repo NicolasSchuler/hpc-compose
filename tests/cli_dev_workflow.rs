@@ -772,7 +772,15 @@ services:
     let stdout = stdout_text(&output);
     assert!(stdout.contains("watching source directories"));
     assert!(stdout.contains(&src_dir.display().to_string()));
-    assert!(!stdout.contains(&cache_dir.display().to_string()));
+    let watched_roots = stdout
+        .lines()
+        .skip_while(|line| !line.contains("watching source directories"))
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(watched_roots.contains(&src_dir.display().to_string()));
+    assert!(!watched_roots.contains(&cache_dir.display().to_string()));
 }
 
 #[test]

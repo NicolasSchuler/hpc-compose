@@ -1060,6 +1060,14 @@ pub(crate) fn build_local_scheduler_status(
     let supervisor_pid = runtime_state
         .and_then(|state| state.supervisor_pid)
         .filter(|pid| *pid > 0);
+    if let Some(state) = runtime_state
+        .and_then(|state| state.job_status.clone())
+        .map(|state| normalize_scheduler_state(&state))
+        && is_terminal_state(&state)
+    {
+        return build_scheduler_status(state, SchedulerSource::LocalOnly);
+    }
+
     if let Some(pid) = supervisor_pid
         && pid_is_running(pid)
     {
@@ -1074,14 +1082,6 @@ pub(crate) fn build_local_scheduler_status(
             failed: false,
             detail: None,
         };
-    }
-
-    if let Some(state) = runtime_state
-        .and_then(|state| state.job_status.clone())
-        .map(|state| normalize_scheduler_state(&state))
-        && is_terminal_state(&state)
-    {
-        return build_scheduler_status(state, SchedulerSource::LocalOnly);
     }
 
     if let Some(exit_code) = runtime_state.and_then(|state| state.job_exit_code) {
@@ -1541,6 +1541,21 @@ mod tests {
         let cancelled = build_local_scheduler_status(Some(&cancelled_state));
         assert_eq!(cancelled.state, "CANCELLED");
         assert!(cancelled.terminal);
+
+        let terminal_with_live_pid = ServiceRuntimeStateFile {
+            backend: Some(SubmissionBackend::Local),
+            job_status: Some("completed".into()),
+            job_exit_code: Some(0),
+            supervisor_pid: Some(current_pid),
+            attempt: None,
+            is_resume: None,
+            resume_dir: None,
+            services: Vec::new(),
+        };
+        let completed = build_local_scheduler_status(Some(&terminal_with_live_pid));
+        assert_eq!(completed.state, "COMPLETED");
+        assert!(completed.terminal);
+        assert!(!completed.failed);
 
         let failed_by_exit = ServiceRuntimeStateFile {
             backend: Some(SubmissionBackend::Local),
