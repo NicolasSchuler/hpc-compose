@@ -39,7 +39,7 @@ miette = { version = "7", features = ["fancy"] }
 owo-colors = "4"
 regex = "1"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = "1.0.150"
 serde_norway = "0.9.42"
 sha2 = "0.11.0"
 shellexpand = "3.1.1"
