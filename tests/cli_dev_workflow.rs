@@ -1,6 +1,7 @@
 mod support;
 
 use std::fs;
+use std::time::Duration;
 
 use hpc_compose::job::{
     SubmissionBackend, build_submission_record_with_backend, load_submission_record,
@@ -752,7 +753,7 @@ services:
         ),
     );
     let enroot = write_fake_enroot(tmpdir.path());
-    let output = run_cli(
+    let output = run_cli_until_stdout_contains(
         tmpdir.path(),
         &[
             "dev",
@@ -763,8 +764,9 @@ services:
             "--enroot-bin",
             enroot.to_str().expect("path"),
         ],
+        "watching source directories",
+        Duration::from_secs(10),
     );
-    assert_success(&output);
     let stdout = stdout_text(&output);
     assert!(stdout.contains("watching source directories"));
     assert!(stdout.contains(&src_dir.display().to_string()));

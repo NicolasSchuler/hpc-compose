@@ -26,6 +26,53 @@ pub(crate) fn run_cli_with_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)])
     run_cli_inner(cwd, args, envs, None)
 }
 
+pub(crate) fn run_cli_until_stdout_contains(
+    cwd: &Path,
+    args: &[&str],
+    needle: &str,
+    timeout: Duration,
+) -> Output {
+    let stdout_file = tempfile::NamedTempFile::new_in(cwd).expect("stdout temp file");
+    let stderr_file = tempfile::NamedTempFile::new_in(cwd).expect("stderr temp file");
+    let mut command = Command::new(bin_path());
+    command
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file.reopen().expect("reopen stdout")))
+        .stderr(Stdio::from(stderr_file.reopen().expect("reopen stderr")));
+    command.process_group(0);
+
+    let mut child = command.spawn().expect("spawn cli");
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("poll cli") {
+            return captured_output(status, stdout_file.path(), stderr_file.path());
+        }
+        let stdout = fs::read_to_string(stdout_file.path()).unwrap_or_default();
+        if stdout.contains(needle) {
+            signal_process_group(child.id(), libc::SIGTERM);
+            let status = wait_or_kill(&mut child, Duration::from_secs(5));
+            return captured_output(status, stdout_file.path(), stderr_file.path());
+        }
+        if started.elapsed() >= timeout {
+            signal_process_group(child.id(), libc::SIGKILL);
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "cli did not print {:?} after {}s\ncwd: {}\nargs: {:?}\nstdout:\n{}\nstderr:\n{}",
+                needle,
+                timeout.as_secs(),
+                cwd.display(),
+                args,
+                fs::read_to_string(stdout_file.path()).unwrap_or_default(),
+                fs::read_to_string(stderr_file.path()).unwrap_or_default()
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn run_cli_inner(cwd: &Path, args: &[&str], envs: &[(&str, &str)], stdin: Option<&str>) -> Output {
     const CLI_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -64,7 +111,7 @@ fn run_cli_inner(cwd: &Path, args: &[&str], envs: &[(&str, &str)], stdin: Option
             break status;
         }
         if started.elapsed() >= CLI_TIMEOUT {
-            terminate_process_group(child.id());
+            signal_process_group(child.id(), libc::SIGKILL);
             let _ = child.kill();
             let _ = child.wait();
             let stdout = String::from_utf8_lossy(
@@ -96,12 +143,35 @@ fn run_cli_inner(cwd: &Path, args: &[&str], envs: &[(&str, &str)], stdin: Option
     }
 }
 
-fn terminate_process_group(pid: u32) {
+fn signal_process_group(pid: u32, signal: libc::c_int) {
     if pid == 0 || pid > i32::MAX as u32 {
         return;
     }
     unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
+        libc::kill(-(pid as i32), signal);
+    }
+}
+
+fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> std::process::ExitStatus {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("poll cli") {
+            return status;
+        }
+        if started.elapsed() >= timeout {
+            signal_process_group(child.id(), libc::SIGKILL);
+            let _ = child.kill();
+            return child.wait().expect("wait killed cli");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn captured_output(status: std::process::ExitStatus, stdout: &Path, stderr: &Path) -> Output {
+    Output {
+        status,
+        stdout: fs::read(stdout).expect("read stdout"),
+        stderr: fs::read(stderr).expect("read stderr"),
     }
 }
 
