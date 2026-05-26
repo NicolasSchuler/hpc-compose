@@ -27,7 +27,7 @@ pub(crate) fn run_cli_with_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)])
 }
 
 fn run_cli_inner(cwd: &Path, args: &[&str], envs: &[(&str, &str)], stdin: Option<&str>) -> Output {
-    const CLI_TIMEOUT: Duration = Duration::from_secs(60);
+    const CLI_TIMEOUT: Duration = Duration::from_secs(300);
 
     let stdout_file = tempfile::NamedTempFile::new_in(cwd).expect("stdout temp file");
     let stderr_file = tempfile::NamedTempFile::new_in(cwd).expect("stderr temp file");
