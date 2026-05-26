@@ -3,8 +3,11 @@
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use hpc_compose::planner::build_plan;
 use hpc_compose::prepare::{RuntimePlan, build_runtime_plan};
@@ -16,20 +19,84 @@ pub(crate) fn bin_path() -> PathBuf {
 }
 
 pub(crate) fn run_cli(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(bin_path())
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .expect("run cli")
+    run_cli_inner(cwd, args, &[], None)
 }
 
 pub(crate) fn run_cli_with_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    run_cli_inner(cwd, args, envs, None)
+}
+
+fn run_cli_inner(cwd: &Path, args: &[&str], envs: &[(&str, &str)], stdin: Option<&str>) -> Output {
+    const CLI_TIMEOUT: Duration = Duration::from_secs(60);
+
+    let stdout_file = tempfile::NamedTempFile::new_in(cwd).expect("stdout temp file");
+    let stderr_file = tempfile::NamedTempFile::new_in(cwd).expect("stderr temp file");
     let mut command = Command::new(bin_path());
-    command.current_dir(cwd).args(args);
+    command
+        .current_dir(cwd)
+        .args(args)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::from(stdout_file.reopen().expect("reopen stdout")))
+        .stderr(Stdio::from(stderr_file.reopen().expect("reopen stderr")));
     for (key, value) in envs {
         command.env(key, value);
     }
-    command.output().expect("run cli with env")
+    // Put each CLI invocation in its own process group so a timed-out test can
+    // clean up descendants spawned by fake scheduler/runtime scripts.
+    command.process_group(0);
+
+    let mut child = command.spawn().expect("spawn cli");
+    if let Some(input) = stdin
+        && let Some(mut child_stdin) = child.stdin.take()
+    {
+        child_stdin
+            .write_all(input.as_bytes())
+            .expect("write stdin");
+    }
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll cli") {
+            break status;
+        }
+        if started.elapsed() >= CLI_TIMEOUT {
+            terminate_process_group(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "cli timed out after {}s\ncwd: {}\nargs: {:?}\nstdout:\n{}\nstderr:\n{}",
+                CLI_TIMEOUT.as_secs(),
+                cwd.display(),
+                args,
+                String::from_utf8_lossy(
+                    &fs::read(stdout_file.path()).expect("read timed-out stdout")
+                ),
+                String::from_utf8_lossy(
+                    &fs::read(stderr_file.path()).expect("read timed-out stderr")
+                )
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    Output {
+        status,
+        stdout: fs::read(stdout_file.path()).expect("read stdout"),
+        stderr: fs::read(stderr_file.path()).expect("read stderr"),
+    }
+}
+
+fn terminate_process_group(pid: u32) {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return;
+    }
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
 }
 
 pub(crate) fn repo_root() -> PathBuf {
@@ -37,21 +104,7 @@ pub(crate) fn repo_root() -> PathBuf {
 }
 
 pub(crate) fn run_cli_with_stdin(cwd: &Path, args: &[&str], stdin: &str) -> Output {
-    let mut child = Command::new(bin_path())
-        .current_dir(cwd)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cli");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(stdin.as_bytes())
-        .expect("write stdin");
-    child.wait_with_output().expect("wait output")
+    run_cli_inner(cwd, args, &[], Some(stdin))
 }
 
 pub(crate) fn stdout_text(output: &Output) -> String {
