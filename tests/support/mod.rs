@@ -67,18 +67,24 @@ fn run_cli_inner(cwd: &Path, args: &[&str], envs: &[(&str, &str)], stdin: Option
             terminate_process_group(child.id());
             let _ = child.kill();
             let _ = child.wait();
-            panic!(
+            let stdout = String::from_utf8_lossy(
+                &fs::read(stdout_file.path()).expect("read timed-out stdout"),
+            )
+            .into_owned();
+            let stderr = String::from_utf8_lossy(
+                &fs::read(stderr_file.path()).expect("read timed-out stderr"),
+            )
+            .into_owned();
+            let message = format!(
                 "cli timed out after {}s\ncwd: {}\nargs: {:?}\nstdout:\n{}\nstderr:\n{}",
                 CLI_TIMEOUT.as_secs(),
                 cwd.display(),
                 args,
-                String::from_utf8_lossy(
-                    &fs::read(stdout_file.path()).expect("read timed-out stdout")
-                ),
-                String::from_utf8_lossy(
-                    &fs::read(stderr_file.path()).expect("read timed-out stderr")
-                )
+                stdout,
+                stderr
             );
+            emit_github_error(&message);
+            panic!("{}", message);
         }
         thread::sleep(Duration::from_millis(20));
     };
@@ -97,6 +103,17 @@ fn terminate_process_group(pid: u32) {
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
+}
+
+fn emit_github_error(message: &str) {
+    if std::env::var_os("GITHUB_ACTIONS").is_none() {
+        return;
+    }
+    let escaped = message
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A");
+    eprintln!("::error title=hpc-compose CLI test timeout::{escaped}");
 }
 
 pub(crate) fn repo_root() -> PathBuf {
