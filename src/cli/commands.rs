@@ -14,6 +14,7 @@ use super::{
     version,
     about = "Compile a compose-like spec into a single Slurm job",
     long_about = "Compile a compose-like specification into one Slurm batch job that launches one or more services through Pyxis/Enroot, Apptainer, Singularity, or host runtime software inside a single allocation. Use plan for static authoring, up for the normal run, and debug for one-command triage.",
+    help_template = "{about-with-newline}\n{usage-heading} {usage}\n\n{options}\n\n{after-help}",
     after_help = TOP_LEVEL_HELP
 )]
 pub struct Cli {
@@ -137,6 +138,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -144,6 +146,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -151,6 +154,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -193,6 +197,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -200,6 +205,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -207,6 +213,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -214,6 +221,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "scontrol",
+            help_heading = "Tool overrides",
             help = "Path to the scontrol executable"
         )]
         scontrol_bin: String,
@@ -221,6 +229,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -228,6 +237,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -290,6 +300,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sstat",
+            help_heading = "Tool overrides",
             help = "Path to the sstat executable for --rightsize"
         )]
         sstat_bin: String,
@@ -297,6 +308,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable for --rightsize"
         )]
         squeue_bin: String,
@@ -304,6 +316,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable for --rightsize"
         )]
         sacct_bin: String,
@@ -462,6 +475,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -469,6 +483,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -476,6 +491,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "scontrol",
+            help_heading = "Tool overrides",
             help = "Path to the scontrol executable"
         )]
         scontrol_bin: String,
@@ -483,6 +499,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -490,6 +507,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -497,6 +515,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -514,6 +533,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sinfo",
+            help_heading = "Tool overrides",
             help = "Path to the sinfo executable"
         )]
         sinfo_bin: String,
@@ -521,6 +541,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -528,6 +549,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sshare",
+            help_heading = "Tool overrides",
             help = "Path to the sshare executable"
         )]
         sshare_bin: String,
@@ -535,6 +557,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sprio",
+            help_heading = "Tool overrides",
             help = "Path to the sprio executable"
         )]
         sprio_bin: String,
@@ -563,6 +586,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -570,6 +594,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -577,6 +602,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -584,6 +610,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -591,6 +618,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -598,6 +626,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -605,6 +634,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -674,7 +704,8 @@ pub enum Commands {
         hold_on_exit: HoldOnExit,
         #[arg(
             long,
-            help = "Use line-oriented watch output instead of the terminal UI"
+            help = "Use line-oriented watch output instead of the terminal UI",
+            hide = true
         )]
         no_tui: bool,
         #[arg(
@@ -755,6 +786,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -762,6 +794,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -769,6 +802,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -776,6 +810,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -783,6 +818,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sstat",
+            help_heading = "Tool overrides",
             help = "Path to the sstat executable"
         )]
         sstat_bin: String,
@@ -790,6 +826,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -797,6 +834,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -804,6 +842,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -867,6 +906,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -874,6 +914,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -881,6 +922,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -888,6 +930,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -895,6 +938,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "scancel",
+            help_heading = "Tool overrides",
             help = "Path to the scancel executable"
         )]
         scancel_bin: String,
@@ -902,6 +946,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -909,6 +954,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -916,6 +962,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -967,6 +1014,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -974,6 +1022,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -981,6 +1030,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -1021,6 +1071,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "tmux",
+            help_heading = "Tool overrides",
             help = "Path to the tmux executable"
         )]
         tmux_bin: String,
@@ -1043,6 +1094,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -1050,6 +1102,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -1057,6 +1110,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -1142,6 +1196,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -1149,6 +1204,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -1156,6 +1212,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sinfo",
+            help_heading = "Tool overrides",
             help = "Path to the sinfo executable"
         )]
         sinfo_bin: String,
@@ -1163,6 +1220,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -1170,6 +1228,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -1177,6 +1236,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -1184,6 +1244,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -1191,6 +1252,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -1233,7 +1295,8 @@ pub enum Commands {
         hold_on_exit: HoldOnExit,
         #[arg(
             long,
-            help = "Use line-oriented watch output instead of the terminal UI"
+            help = "Use line-oriented watch output instead of the terminal UI",
+            hide = true
         )]
         no_tui: bool,
         #[arg(
@@ -1270,6 +1333,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "salloc",
+            help_heading = "Tool overrides",
             help = "Path to the salloc executable"
         )]
         salloc_bin: String,
@@ -1277,6 +1341,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -1284,6 +1349,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "scontrol",
+            help_heading = "Tool overrides",
             help = "Path to the scontrol executable"
         )]
         scontrol_bin: String,
@@ -1291,6 +1357,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -1298,6 +1365,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -1305,6 +1373,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -1356,6 +1425,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -1363,6 +1433,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -1400,6 +1471,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sstat",
+            help_heading = "Tool overrides",
             help = "Path to the sstat executable"
         )]
         sstat_bin: String,
@@ -1407,6 +1479,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -1414,6 +1487,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -1486,6 +1560,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sstat",
+            help_heading = "Tool overrides",
             help = "Path to the sstat executable"
         )]
         sstat_bin: String,
@@ -1493,6 +1568,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -1500,6 +1576,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -1523,6 +1600,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -1530,6 +1608,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -1641,6 +1720,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -1648,6 +1728,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -1689,6 +1770,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -1696,6 +1778,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -1717,7 +1800,8 @@ pub enum Commands {
         hold_on_exit: HoldOnExit,
         #[arg(
             long,
-            help = "Use line-oriented watch output instead of the terminal UI"
+            help = "Use line-oriented watch output instead of the terminal UI",
+            hide = true
         )]
         no_tui: bool,
     },
@@ -1762,7 +1846,11 @@ pub enum Commands {
             help = "Number of trailing log lines to seed into the replay view"
         )]
         lines: usize,
-        #[arg(long, help = "Print a static event summary instead of opening the TUI")]
+        #[arg(
+            long,
+            help = "Print a static event summary instead of opening the TUI",
+            hide = true
+        )]
         no_tui: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
@@ -1808,6 +1896,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -1815,6 +1904,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -1822,6 +1912,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -1829,6 +1920,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -1836,6 +1928,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -1843,6 +1936,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "scontrol",
+            help_heading = "Tool overrides",
             help = "Path to the scontrol executable"
         )]
         scontrol_bin: String,
@@ -1850,6 +1944,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -1857,6 +1952,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -1885,11 +1981,14 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "scancel",
+            help_heading = "Tool overrides",
             help = "Path to the scancel executable"
         )]
         scancel_bin: String,
         #[arg(long, help = "Also purge tracked cached image artifacts for this job")]
         purge_cache: bool,
+        #[arg(long, help = "Confirm this destructive action without prompting")]
+        yes: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -1917,11 +2016,14 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "scancel",
+            help_heading = "Tool overrides",
             help = "Path to the scancel executable"
         )]
         scancel_bin: String,
         #[arg(long, help = "Also purge tracked cached image artifacts for this job")]
         purge_cache: bool,
+        #[arg(long, help = "Confirm this destructive action without prompting")]
+        yes: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -2011,6 +2113,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -2018,6 +2121,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -2025,6 +2129,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -2032,6 +2137,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -2039,6 +2145,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -2046,6 +2153,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -2053,6 +2161,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
@@ -2107,6 +2216,7 @@ pub enum Commands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -2285,6 +2395,8 @@ pub enum Commands {
             help = "Preview the tracked job cleanup plan without deleting files"
         )]
         dry_run: bool,
+        #[arg(long, help = "Confirm this destructive action without prompting")]
+        yes: bool,
         #[arg(
             long,
             help = "Include recursive disk-usage totals for tracked job paths"
@@ -2525,6 +2637,8 @@ pub enum CacheCommands {
             help = "Remove cached artifacts that the current compose plan no longer references; requires -f/--file"
         )]
         all_unused: bool,
+        #[arg(long, help = "Confirm this destructive action without prompting")]
+        yes: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -2664,6 +2778,7 @@ pub enum SweepCommands {
             long,
             value_name = "PATH",
             default_value = "sbatch",
+            help_heading = "Tool overrides",
             help = "Path to the sbatch executable"
         )]
         sbatch_bin: String,
@@ -2671,6 +2786,7 @@ pub enum SweepCommands {
             long,
             value_name = "PATH",
             default_value = "srun",
+            help_heading = "Tool overrides",
             help = "Path to the srun executable"
         )]
         srun_bin: String,
@@ -2678,6 +2794,7 @@ pub enum SweepCommands {
             long,
             value_name = "PATH",
             default_value = "scontrol",
+            help_heading = "Tool overrides",
             help = "Path to the scontrol executable"
         )]
         scontrol_bin: String,
@@ -2685,6 +2802,7 @@ pub enum SweepCommands {
             long,
             value_name = "PATH",
             default_value = "enroot",
+            help_heading = "Tool overrides",
             help = "Path to the enroot executable"
         )]
         enroot_bin: String,
@@ -2692,6 +2810,7 @@ pub enum SweepCommands {
             long,
             value_name = "PATH",
             default_value = "apptainer",
+            help_heading = "Tool overrides",
             help = "Path to the apptainer executable"
         )]
         apptainer_bin: String,
@@ -2699,6 +2818,7 @@ pub enum SweepCommands {
             long,
             value_name = "PATH",
             default_value = "singularity",
+            help_heading = "Tool overrides",
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
@@ -2723,6 +2843,7 @@ pub enum SweepCommands {
             long,
             value_name = "PATH",
             default_value = "squeue",
+            help_heading = "Tool overrides",
             help = "Path to the squeue executable"
         )]
         squeue_bin: String,
@@ -2730,6 +2851,7 @@ pub enum SweepCommands {
             long,
             value_name = "PATH",
             default_value = "sacct",
+            help_heading = "Tool overrides",
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,

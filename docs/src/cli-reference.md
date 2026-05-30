@@ -141,7 +141,7 @@ Useful workflow flags:
 - `--format text|json` is accepted with `--detach` or `--dry-run`.
 - `--watch-queue` waits in line-oriented queue output until the Slurm job reaches `RUNNING`, then opens the normal watch view.
 - `--queue-warn-after <DURATION>` warns once when `--watch-queue` stays `PENDING` longer than the threshold; the default is `10m`, and `0` disables the warning.
-- `--watch-mode auto|tui|line` selects the live output mode; `--no-tui` is a line-mode alias.
+- `--watch-mode auto|tui|line` selects the live output mode. The older `--no-tui` alias still works for compatibility.
 - `--hold-on-exit never|failure|always` controls whether the TUI stays open after the job reaches a terminal scheduler state.
 - `--allow-resume-changes` acknowledges an intentional change to resume-coupled config between tracked runs.
 - `--resume-diff-only` prints the resume-sensitive config diff without submitting.
@@ -364,7 +364,6 @@ Use plain or structured output when terminal styling, progress labels, or altern
 hpc-compose --color never plan -f compose.yaml
 hpc-compose --quiet validate -f compose.yaml
 hpc-compose watch -f compose.yaml --watch-mode line
-hpc-compose replay -f compose.yaml --no-tui
 hpc-compose logs -f compose.yaml --service app --follow
 hpc-compose logs -f compose.yaml --grep 'error|oom' --since 30m
 hpc-compose status -f compose.yaml --format json
@@ -380,7 +379,7 @@ hpc-compose status -f compose.yaml --format json
 | `status` | Summarize scheduler state, the top-level batch log, per-service outcomes, and failure-policy state | Prefer `--format json` for automation. Add `--array` to include merged `squeue --array` and `sacct --array` task rows. |
 | `ps` | Show a stable per-service runtime snapshot | Useful when you want a point-in-time view instead of the live TUI. |
 | `watch` | Reconnect to the live watch UI | Falls back to line-oriented output on non-interactive terminals. |
-| `replay` | Reanimate a tracked job timeline from existing artifacts | Best-effort DVR view built from final state, service-exit markers, metrics JSONL, and logs. Use `--speed`, `--no-tui`, or `--format json` as needed. |
+| `replay` | Reanimate a tracked job timeline from existing artifacts | Best-effort DVR view built from final state, service-exit markers, metrics JSONL, and logs. Use `--speed` or `--format json` as needed. |
 | `logs` | Print tracked service logs | Add `--follow`, `--grep <pattern>`, or coarse `--since <duration>` as needed. |
 | `inspect --rightsize` | Suggest conservative resource request reductions after a tracked run | Uses tracked `sacct`, `sstat`, and sampler evidence; supports `--job-id` and `--format json`. |
 | `stats` | Report tracked runtime metrics, step stats, and optional accounting | Supports `--accounting`, `--format json`, `--format jsonl`, and `--format csv`. |
@@ -409,7 +408,6 @@ hpc-compose watch -f compose.yaml --hold-on-exit always
 hpc-compose replay -f compose.yaml
 hpc-compose replay -f compose.yaml --speed 10
 hpc-compose replay -f compose.yaml --job-id 12345 --service app
-hpc-compose replay -f compose.yaml --no-tui
 hpc-compose replay -f compose.yaml --format json
 hpc-compose logs -f compose.yaml --service app --follow
 hpc-compose logs -f compose.yaml --grep 'error|oom' --since 30m
@@ -419,8 +417,8 @@ hpc-compose stats -f compose.yaml --accounting --format csv
 hpc-compose score 12345
 hpc-compose diff 12345 12346 -f compose.yaml
 hpc-compose artifacts -f compose.yaml --bundle checkpoints --tarball
-hpc-compose down -f compose.yaml
-hpc-compose cancel -f compose.yaml
+hpc-compose down -f compose.yaml --yes
+hpc-compose cancel -f compose.yaml --yes
 hpc-compose clean -f compose.yaml --age 7 --dry-run
 hpc-compose rendezvous list
 hpc-compose rendezvous resolve model-server
@@ -439,8 +437,8 @@ hpc-compose rendezvous prune
 ```bash
 hpc-compose cache list
 hpc-compose cache inspect -f compose.yaml --service app
-hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
-hpc-compose cache prune --all-unused -f compose.yaml
+hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>' --yes
+hpc-compose cache prune --all-unused -f compose.yaml --yes
 ```
 
 ## Related Docs

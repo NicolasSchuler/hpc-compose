@@ -1,21 +1,19 @@
 pub(super) const FILE_ARG_HELP: &str = "Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml";
 
 pub(super) const TOP_LEVEL_HELP: &str = "\
-Normal run:
+Start from an existing spec:
+  hpc-compose plan -f compose.yaml
   hpc-compose up -f compose.yaml
 
-Conditional run:
-  hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
+Create or evolve a spec:
+  hpc-compose new --template minimal-batch --name my-app --output compose.yaml
+  hpc-compose evolve --output compose.yaml
 
-Safe plan:
-  hpc-compose plan -f compose.yaml
+Run when cluster conditions are friendlier:
+  hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
 
 Debug failed run:
   hpc-compose debug -f compose.yaml --preflight
-
-Start a new spec:
-  hpc-compose new --template minimal-batch --name my-app --output compose.yaml
-  hpc-compose evolve --output compose.yaml
 
 Workflow groups:
   Start:          new, evolve, setup, context
@@ -23,7 +21,9 @@ Workflow groups:
   Develop/Test:   test, dev, tmux
   Observe/Debug:  weather, debug, watch, replay, status, logs, ps, stats, score, diff, artifacts, sweep
   Maintain:       cache, jobs, clean, down, cancel
-  Advanced:       validate, lint, inspect, config, render, prepare, preflight, doctor, schema, completions";
+  Advanced:       validate, lint, inspect, config, render, prepare, preflight, doctor, schema, completions
+
+Use `hpc-compose help <command>` for command details.";
 
 pub(super) const VALIDATE_HELP: &str = "\
 Examples:
@@ -213,7 +213,6 @@ Examples:
   hpc-compose replay -f compose.yaml
   hpc-compose replay -f compose.yaml --speed 10
   hpc-compose replay -f compose.yaml --job-id 12345 --service app
-  hpc-compose replay -f compose.yaml --no-tui
   hpc-compose replay -f compose.yaml --format json";
 
 pub(super) const DEBUG_HELP: &str = "\
@@ -226,13 +225,14 @@ Examples:
 pub(super) const CANCEL_HELP: &str = "\
 Examples:
   hpc-compose cancel -f compose.yaml
-  hpc-compose cancel -f compose.yaml --job-id 12345";
+  hpc-compose cancel -f compose.yaml --job-id 12345
+  hpc-compose cancel -f compose.yaml --yes";
 
 pub(super) const DOWN_HELP: &str = "\
 Examples:
   hpc-compose down -f compose.yaml
   hpc-compose down --job-id 12345
-  hpc-compose down --job-id 12345 --purge-cache";
+  hpc-compose down --job-id 12345 --purge-cache --yes";
 
 pub(super) const RUN_HELP: &str = "\
 Examples:
@@ -267,7 +267,7 @@ pub(super) const CACHE_HELP: &str = "\
 Examples:
   hpc-compose cache list
   hpc-compose cache inspect -f compose.yaml
-  hpc-compose cache prune --age 7";
+  hpc-compose cache prune --age 7 --yes";
 
 pub(super) const CACHE_LIST_HELP: &str = "\
 Examples:
@@ -283,10 +283,10 @@ Examples:
 
 pub(super) const CACHE_PRUNE_HELP: &str = "\
 Examples:
-  hpc-compose --profile dev cache prune --age 14
-  hpc-compose cache prune --all-unused -f compose.yaml
-  hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
-  hpc-compose cache prune --age 7 --format json";
+  hpc-compose --profile dev cache prune --age 14 --yes
+  hpc-compose cache prune --all-unused -f compose.yaml --yes
+  hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>' --yes
+  hpc-compose cache prune --age 7 --yes --format json";
 
 pub(super) const JOBS_HELP: &str = "\
 Examples:
@@ -296,9 +296,9 @@ Examples:
 
 pub(super) const CLEAN_HELP: &str = "\
 Examples:
-  hpc-compose clean --age 7
+  hpc-compose clean --age 7 --yes
   hpc-compose clean --all --dry-run
-  hpc-compose clean --all --format json";
+  hpc-compose clean --all --yes --format json";
 
 pub(super) const CONTEXT_HELP: &str = "\
 Examples:
@@ -455,7 +455,6 @@ const REPLAY_EXAMPLES: &[&str] = &[
     "hpc-compose replay -f compose.yaml",
     "hpc-compose replay -f compose.yaml --speed 10",
     "hpc-compose replay -f compose.yaml --job-id 12345 --service app",
-    "hpc-compose replay -f compose.yaml --no-tui",
     "hpc-compose replay -f compose.yaml --format json",
 ];
 
@@ -469,12 +468,13 @@ const DEBUG_EXAMPLES: &[&str] = &[
 const CANCEL_EXAMPLES: &[&str] = &[
     "hpc-compose cancel -f compose.yaml",
     "hpc-compose cancel -f compose.yaml --job-id 12345",
+    "hpc-compose cancel -f compose.yaml --yes",
 ];
 
 const DOWN_EXAMPLES: &[&str] = &[
     "hpc-compose down -f compose.yaml",
     "hpc-compose down --job-id 12345",
-    "hpc-compose down --job-id 12345 --purge-cache",
+    "hpc-compose down --job-id 12345 --purge-cache --yes",
 ];
 
 const RUN_EXAMPLES: &[&str] = &[
@@ -507,7 +507,7 @@ const EVOLVE_EXAMPLES: &[&str] = &[
 const CACHE_EXAMPLES: &[&str] = &[
     "hpc-compose cache list",
     "hpc-compose cache inspect -f compose.yaml",
-    "hpc-compose cache prune --age 7",
+    "hpc-compose cache prune --age 7 --yes",
 ];
 
 const CACHE_LIST_EXAMPLES: &[&str] = &[
@@ -523,10 +523,10 @@ const CACHE_INSPECT_EXAMPLES: &[&str] = &[
 ];
 
 const CACHE_PRUNE_EXAMPLES: &[&str] = &[
-    "hpc-compose --profile dev cache prune --age 14",
-    "hpc-compose cache prune --all-unused -f compose.yaml",
-    "hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'",
-    "hpc-compose cache prune --age 7 --format json",
+    "hpc-compose --profile dev cache prune --age 14 --yes",
+    "hpc-compose cache prune --all-unused -f compose.yaml --yes",
+    "hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>' --yes",
+    "hpc-compose cache prune --age 7 --yes --format json",
 ];
 
 const JOBS_EXAMPLES: &[&str] = &[
@@ -536,9 +536,9 @@ const JOBS_EXAMPLES: &[&str] = &[
 ];
 
 const CLEAN_EXAMPLES: &[&str] = &[
-    "hpc-compose clean --age 7",
+    "hpc-compose clean --age 7 --yes",
     "hpc-compose clean --all --dry-run",
-    "hpc-compose clean --all --format json",
+    "hpc-compose clean --all --yes --format json",
 ];
 
 const CONTEXT_EXAMPLES: &[&str] = &[

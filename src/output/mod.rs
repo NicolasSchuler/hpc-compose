@@ -4794,6 +4794,7 @@ services:
                 cache_dir: Some(cache_dir.clone()),
                 age: None,
                 all_unused: true,
+                yes: false,
                 format: None,
             },
         })
@@ -4805,6 +4806,7 @@ services:
                 cache_dir: Some(cache_dir.clone()),
                 age: Some(7),
                 all_unused: true,
+                yes: false,
                 format: None,
             },
         })
@@ -4819,6 +4821,7 @@ services:
                 cache_dir: Some(cache_dir),
                 age: Some(999),
                 all_unused: false,
+                yes: true,
                 format: None,
             },
         })
@@ -4829,6 +4832,7 @@ services:
                 cache_dir: None,
                 age: None,
                 all_unused: true,
+                yes: true,
                 format: None,
             },
         })
@@ -4839,6 +4843,7 @@ services:
             job_id: Some("12345".into()),
             scancel_bin: scancel_ok.display().to_string(),
             purge_cache: false,
+            yes: false,
             format: None,
         })
         .expect("cancel ok");
@@ -4847,6 +4852,7 @@ services:
             job_id: Some("12345".into()),
             scancel_bin: scancel_fail.display().to_string(),
             purge_cache: false,
+            yes: false,
             format: None,
         })
         .expect_err("cancel fail");

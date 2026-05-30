@@ -132,7 +132,6 @@ fn cli_reference_documents_accessibility_and_automation_flags() {
         "`--watch-mode auto|tui|line`",
         "`--no-tui`",
         "Accessible and Automation-Friendly Output",
-        "hpc-compose replay -f compose.yaml --no-tui",
         "hpc-compose logs -f compose.yaml --service app --follow",
         "hpc-compose status -f compose.yaml --format json",
     ] {

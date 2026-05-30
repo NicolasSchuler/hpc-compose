@@ -16,7 +16,7 @@ hpc-compose ps -f compose.yaml
 hpc-compose watch -f compose.yaml
 hpc-compose watch -f compose.yaml --hold-on-exit always
 hpc-compose replay -f compose.yaml --speed 10
-hpc-compose replay -f compose.yaml --no-tui
+hpc-compose watch -f compose.yaml --watch-mode line
 hpc-compose logs -f compose.yaml --follow
 hpc-compose logs -f compose.yaml --grep 'error|oom' --since 30m
 hpc-compose stats -f compose.yaml
@@ -63,13 +63,13 @@ Keybindings:
 | `End` | Return to live-follow mode at the newest log lines. |
 | `a` | Toggle between the selected service log and all tracked service logs. |
 | `?` | Toggle in-UI help. |
-| `q` | Leave the watch view without cancelling the job. |
+| `q` / `Ctrl-C` | Leave the watch view without cancelling the job. |
 
 Use `--hold-on-exit never|failure|always` on `up` or `watch` to control whether the final TUI stays open after a terminal scheduler state. When the view is held, press `d`, `l`, or `s` to print the exact `debug`, `logs`, or `stats` command after leaving the alternate screen.
 
 Use `hpc-compose up --watch-queue` when you want explicit queue polling before the watch view opens. It prints queue state changes, pending reason, and expected start time when Slurm exposes them; `--queue-warn-after <DURATION>` controls the one-time long-pending warning.
 
-Use `--watch-mode line` or `--no-tui` when you are recording output, using a screen reader, running in CI, or working in a terminal where alternate-screen UIs are inconvenient. Line mode preserves detailed scheduler and log updates without alternate-screen control codes.
+Use `--watch-mode line` when you are recording output, using a screen reader, running in CI, or working in a terminal where alternate-screen UIs are inconvenient. The older `--no-tui` alias still works for compatibility. Line mode preserves detailed scheduler and log updates without alternate-screen control codes.
 
 ## Replay
 
@@ -79,7 +79,6 @@ Use `--watch-mode line` or `--no-tui` when you are recording output, using a scr
 hpc-compose replay -f compose.yaml
 hpc-compose replay -f compose.yaml --speed 10
 hpc-compose replay -f compose.yaml --job-id 12345 --service trainer
-hpc-compose replay -f compose.yaml --no-tui
 hpc-compose replay -f compose.yaml --format json
 ```
 
@@ -104,7 +103,7 @@ Replay data sources:
 | `logs/*.log` | Service log tails in the replay UI | Service logs do not include guaranteed per-line timestamps, so log panes are contextual tails, not exact log-time scrubbing. |
 | Scheduler commands | Not queried during replay | Historical queue state, pending reason changes, and accounting gaps are not reconstructed. |
 
-Use `--no-tui` for a static summary that exits immediately. Use `--format json` when notebooks, dashboards, or experiment records need the reconstructed events, frame summaries, artifact paths, and fidelity notes.
+Use `--format json` when notebooks, dashboards, or experiment records need the reconstructed events, frame summaries, artifact paths, and fidelity notes.
 
 ## Logs
 

@@ -1889,6 +1889,7 @@ fn submit_cancel_and_watch_conflict_support_json_output() {
             "cancel",
             "-f",
             compose.to_str().expect("path"),
+            "--yes",
             "--format",
             "json",
             "--scancel-bin",
@@ -4104,6 +4105,7 @@ fn cancel_uses_tracked_or_explicit_job_id() {
             "cancel",
             "-f",
             compose.to_str().expect("path"),
+            "--yes",
             "--scancel-bin",
             scancel.to_str().expect("path"),
         ],
@@ -4140,7 +4142,7 @@ fn cancel_reports_missing_record_and_scancel_failure() {
 
     let missing = run_cli(
         tmpdir.path(),
-        &["cancel", "-f", compose.to_str().expect("path")],
+        &["cancel", "-f", compose.to_str().expect("path"), "--yes"],
     );
     assert_failure(&missing);
     assert!(stderr_text(&missing).contains("no tracked submission metadata exists"));
@@ -4201,6 +4203,7 @@ fn down_command_cancels_and_removes_tracking() {
             "down",
             "-f",
             compose.to_str().expect("path"),
+            "--yes",
             "--scancel-bin",
             scancel.to_str().expect("path"),
             "--format",
@@ -5608,6 +5611,7 @@ fn cancel_without_job_id_targets_newest_run_record() {
             "cancel",
             "-f",
             compose.to_str().expect("path"),
+            "--yes",
             "--scancel-bin",
             scancel.to_str().expect("path"),
         ],
@@ -5857,6 +5861,7 @@ fn cancel_with_purge_cache_requires_tracked_artifact_snapshot() {
             "--job-id",
             "12345",
             "--purge-cache",
+            "--yes",
             "--scancel-bin",
             scancel.to_str().expect("path"),
         ],
@@ -8785,6 +8790,7 @@ fn clean_command_removes_old_job_directories() {
         &[
             "clean",
             "--all",
+            "--yes",
             "-f",
             compose.to_str().expect("path"),
             "--format",
@@ -8821,6 +8827,7 @@ fn clean_command_removes_old_job_directories() {
             "clean",
             "--age",
             "0",
+            "--yes",
             "-f",
             compose.to_str().expect("path"),
             "--format",
@@ -8886,7 +8893,14 @@ fn clean_text_reports_selected_jobs_and_kept_ids() {
 
     let clean = run_cli(
         tmpdir.path(),
-        &["clean", "--age", "0", "-f", compose.to_str().expect("path")],
+        &[
+            "clean",
+            "--age",
+            "0",
+            "--yes",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
     );
     assert_success(&clean);
     let stdout = stdout_text(&clean);
@@ -8954,6 +8968,7 @@ fn clean_all_preserves_latest_tracked_submission() {
         &[
             "clean",
             "--all",
+            "--yes",
             "-f",
             compose.to_str().expect("path"),
             "--format",
@@ -9095,6 +9110,7 @@ fn clean_uses_recorded_submit_dir_for_runtime_cleanup() {
             "clean",
             "--age",
             "0",
+            "--yes",
             "--format",
             "json",
             "-f",
@@ -9155,6 +9171,7 @@ fn clean_repairs_latest_pointer_and_removes_it_when_no_jobs_remain() {
             "clean",
             "--age",
             "7",
+            "--yes",
             "--format",
             "json",
             "-f",
@@ -9186,6 +9203,7 @@ fn clean_repairs_latest_pointer_and_removes_it_when_no_jobs_remain() {
             "clean",
             "--age",
             "0",
+            "--yes",
             "--format",
             "json",
             "-f",
@@ -9251,6 +9269,7 @@ fn clean_reports_missing_latest_pointer_separately_from_effective_latest() {
             "clean",
             "--age",
             "7",
+            "--yes",
             "--format",
             "json",
             "-f",

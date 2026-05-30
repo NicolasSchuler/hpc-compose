@@ -127,15 +127,16 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let top_help = run_cli(tmpdir.path(), &["--help"]);
     assert_success(&top_help);
     let top_help_stdout = stdout_text(&top_help);
-    assert!(top_help_stdout.contains("Normal run:"));
-    assert!(top_help_stdout.contains("up -f compose.yaml"));
-    assert!(top_help_stdout.contains("Conditional run:"));
-    assert!(top_help_stdout.contains("when -f compose.yaml --partition gpu8 --free-nodes 4"));
-    assert!(top_help_stdout.contains("Safe plan:"));
+    assert!(top_help_stdout.contains("Start from an existing spec:"));
     assert!(top_help_stdout.contains("plan -f compose.yaml"));
+    assert!(top_help_stdout.contains("up -f compose.yaml"));
+    assert!(top_help_stdout.contains("Create or evolve a spec:"));
+    assert!(top_help_stdout.contains("new --template minimal-batch"));
+    assert!(top_help_stdout.contains("evolve --output compose.yaml"));
+    assert!(top_help_stdout.contains("Run when cluster conditions are friendlier:"));
+    assert!(top_help_stdout.contains("when -f compose.yaml --partition gpu8 --free-nodes 4"));
     assert!(top_help_stdout.contains("Debug failed run:"));
     assert!(top_help_stdout.contains("debug -f compose.yaml --preflight"));
-    assert!(top_help_stdout.contains("Start a new spec:"));
     assert!(top_help_stdout.contains("Workflow groups:"));
     assert!(top_help_stdout.contains("Plan/Run:       plan, up, when, alloc, run"));
     assert!(top_help_stdout.contains(
@@ -147,31 +148,10 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(top_help_stdout.contains("--settings-file <PATH>"));
     assert!(!top_help_stdout.contains("submit       "));
     assert!(
-        top_help_stdout.contains("config       Render the fully interpolated effective config")
+        !top_help_stdout.contains("config       Render the fully interpolated effective config")
     );
-    assert!(top_help_stdout.contains("plan         Validate and preview a static execution plan"));
-    assert!(top_help_stdout.contains("debug        Diagnose the latest tracked run"));
-    assert!(top_help_stdout.contains("up           Submit, watch, and stream logs in one command"));
-    assert!(top_help_stdout.contains("when         Submit once cluster conditions are met"));
-    assert!(top_help_stdout.contains("logs         Print tracked service logs"));
-    assert!(top_help_stdout.contains("ps           Show tracked per-service runtime state"));
-    assert!(top_help_stdout.contains("watch        Watch a tracked job in a live terminal UI"));
-    assert!(top_help_stdout.contains("cancel       Cancel a tracked Slurm job"));
-    assert!(top_help_stdout.contains("down         Cancel a tracked job and clean tracked state"));
-    assert!(
-        top_help_stdout.contains("run          Run a one-off command in one service environment")
-    );
-    assert!(
-        top_help_stdout
-            .contains("new          Write a starter compose file from a built-in template")
-    );
-    assert!(
-        top_help_stdout
-            .contains("evolve       Learn specs by progressively evolving a valid compose file")
-    );
-    assert!(top_help_stdout.contains("jobs         List tracked jobs under the current repo tree"));
-    assert!(top_help_stdout.contains("clean        Remove old tracked job directories"));
-    assert!(top_help_stdout.contains("completions  Generate shell completions"));
+    assert!(!top_help_stdout.contains("plan         Validate and preview a static execution plan"));
+    assert!(top_help_stdout.contains("Use `hpc-compose help <command>` for command details."));
 
     let new_help = run_cli(tmpdir.path(), &["new", "--help"]);
     assert_success(&new_help);
@@ -222,7 +202,8 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(up_help_stdout.contains("--watch-queue"));
     assert!(up_help_stdout.contains("--queue-warn-after <DURATION>"));
     assert!(up_help_stdout.contains("--watch-mode <MODE>"));
-    assert!(up_help_stdout.contains("--no-tui"));
+    assert!(!up_help_stdout.contains("--no-tui"));
+    assert!(up_help_stdout.contains("Tool overrides"));
 
     let when_help = run_cli(tmpdir.path(), &["when", "--help"]);
     assert_success(&when_help);

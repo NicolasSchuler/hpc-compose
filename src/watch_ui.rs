@@ -3,7 +3,12 @@ use crate::term;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -25,6 +30,8 @@ const DEFAULT_HEIGHT: usize = 30;
 const MIN_TABLE_WIDTH: usize = 58;
 const FORCE_WATCH_UI_ENV: &str = "HPC_COMPOSE_FORCE_WATCH_UI";
 const METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
+type SharedPanicHook = Arc<Mutex<Option<PanicHook>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatchKey {
@@ -106,14 +113,17 @@ struct SelectedLogBuffer {
     capacity: usize,
 }
 
-#[derive(Debug)]
-struct TerminalGuard;
+struct TerminalGuard {
+    entered_terminal: bool,
+    restore_armed: Arc<AtomicBool>,
+    previous_hook: Option<SharedPanicHook>,
+}
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
         #[cfg(test)]
         {
-            Ok(Self)
+            Ok(Self::new(false))
         }
 
         #[cfg(not(test))]
@@ -129,25 +139,89 @@ impl TerminalGuard {
             stdout
                 .flush()
                 .context("failed to flush alternate-screen entry")?;
-            Ok(Self)
+            Ok(Self::new(true))
         }
+    }
+
+    fn new(entered_terminal: bool) -> Self {
+        let restore_armed = Arc::new(AtomicBool::new(true));
+        let previous_hook =
+            install_terminal_panic_hook(entered_terminal, Arc::clone(&restore_armed));
+        Self {
+            entered_terminal,
+            restore_armed,
+            previous_hook,
+        }
+    }
+
+    #[cfg(test)]
+    fn panic_restore_armed(&self) -> bool {
+        self.restore_armed.load(Ordering::SeqCst)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        #[cfg(not(test))]
-        {
-            let mut stdout = io::stdout();
-            let _ = execute!(
-                stdout,
-                crossterm::cursor::Show,
-                crossterm::terminal::LeaveAlternateScreen
-            );
-            let _ = terminal::disable_raw_mode();
-            let _ = stdout.flush();
+        self.restore_armed.store(false, Ordering::SeqCst);
+        if self.entered_terminal {
+            restore_terminal_best_effort();
+        }
+        if let Some(previous_hook) = self.previous_hook.take() {
+            restore_previous_panic_hook(previous_hook);
         }
     }
+}
+
+#[cfg(not(test))]
+fn install_terminal_panic_hook(
+    entered_terminal: bool,
+    restore_armed: Arc<AtomicBool>,
+) -> Option<SharedPanicHook> {
+    let previous_hook = std::panic::take_hook();
+    let previous_hook = Arc::new(Mutex::new(Some(previous_hook)));
+    let hook_previous = Arc::clone(&previous_hook);
+    std::panic::set_hook(Box::new(move |info| {
+        if entered_terminal && restore_armed.swap(false, Ordering::SeqCst) {
+            restore_terminal_best_effort();
+        }
+        if let Ok(guard) = hook_previous.lock()
+            && let Some(previous_hook) = guard.as_ref()
+        {
+            previous_hook(info);
+        }
+    }));
+    Some(previous_hook)
+}
+
+#[cfg(test)]
+fn install_terminal_panic_hook(
+    _entered_terminal: bool,
+    _restore_armed: Arc<AtomicBool>,
+) -> Option<SharedPanicHook> {
+    None
+}
+
+#[cfg(not(test))]
+fn restore_previous_panic_hook(previous_hook: SharedPanicHook) {
+    if let Ok(mut guard) = previous_hook.lock()
+        && let Some(previous_hook) = guard.take()
+    {
+        std::panic::set_hook(previous_hook);
+    }
+}
+
+#[cfg(test)]
+fn restore_previous_panic_hook(_previous_hook: SharedPanicHook) {}
+
+fn restore_terminal_best_effort() {
+    let mut stdout = io::stdout();
+    let _ = execute!(
+        stdout,
+        crossterm::cursor::Show,
+        crossterm::terminal::LeaveAlternateScreen
+    );
+    let _ = terminal::disable_raw_mode();
+    let _ = stdout.flush();
 }
 
 impl SelectedLogBuffer {
@@ -783,6 +857,9 @@ fn read_watch_event(timeout: Duration) -> Result<Option<WatchInput>> {
 }
 
 fn map_key_event(key: KeyEvent) -> Option<WatchInput> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+        return Some(WatchInput::Normal(WatchKey::Quit));
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('u')) {
         return Some(WatchInput::Search(SearchKey::Clear));
     }
@@ -2352,6 +2429,18 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_maps_to_quit() {
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(WatchInput::Normal(WatchKey::Quit))
+        );
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            Some(WatchInput::Search(SearchKey::Clear))
+        );
+    }
+
+    #[test]
     fn selection_and_formatting_helpers_cover_remaining_paths() {
         let snapshot = sample_snapshot();
         assert_eq!(initial_selected_index(&snapshot, None).expect("default"), 0);
@@ -2610,6 +2699,7 @@ mod tests {
     #[test]
     fn terminal_guard_and_run_watch_ui_cover_interactive_paths() {
         let guard = TerminalGuard::enter().expect("enter terminal guard");
+        assert!(guard.panic_restore_armed());
         drop(guard);
 
         render_model(

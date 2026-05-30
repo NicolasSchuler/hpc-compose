@@ -154,6 +154,7 @@ fn prepare_and_cache_commands_manage_artifacts() {
         &[
             "cache",
             "prune",
+            "--yes",
             "--age",
             "1",
             "--cache-dir",
@@ -169,6 +170,7 @@ fn prepare_and_cache_commands_manage_artifacts() {
         &[
             "cache",
             "prune",
+            "--yes",
             "--age",
             "1",
             "--cache-dir",
@@ -208,6 +210,7 @@ compose_file = "missing-compose.yaml"
             "dev",
             "cache",
             "prune",
+            "--yes",
             "--age",
             "1",
             "--cache-dir",
@@ -475,6 +478,7 @@ services:
         &[
             "cache",
             "prune",
+            "--yes",
             "--all-unused",
             "-f",
             compose_b.to_str().expect("path"),
@@ -518,6 +522,7 @@ fn cache_prune_all_unused_keeps_current_plan_artifacts() {
         &[
             "cache",
             "prune",
+            "--yes",
             "--all-unused",
             "-f",
             compose.to_str().expect("path"),
@@ -577,6 +582,7 @@ services:
         &[
             "cache",
             "prune",
+            "--yes",
             "--all-unused",
             "-f",
             compose_b.to_str().expect("path"),
@@ -678,6 +684,7 @@ compose_file = "profile-compose.yaml"
             "dev",
             "cache",
             "prune",
+            "--yes",
             "--age",
             "1",
             "--format",

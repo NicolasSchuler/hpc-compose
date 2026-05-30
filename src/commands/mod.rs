@@ -19,6 +19,7 @@ use hpc_compose::when::{
 };
 
 mod cache;
+mod confirm;
 mod doctor;
 mod evolve;
 mod init;
@@ -962,8 +963,15 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             job_id,
             scancel_bin,
             purge_cache,
+            yes,
             format,
         } => {
+            if cancel_requires_confirmation(job_id.as_deref(), purge_cache) {
+                confirm::confirm_destructive_action(
+                    &cancel_confirmation_action("cancel", job_id.as_deref(), purge_cache),
+                    yes,
+                )?;
+            }
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
             let context = resolve_command_context(options, file, binary_overrides)?;
@@ -974,8 +982,15 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             job_id,
             scancel_bin,
             purge_cache,
+            yes,
             format,
         } => {
+            if cancel_requires_confirmation(job_id.as_deref(), purge_cache) {
+                confirm::confirm_destructive_action(
+                    &cancel_confirmation_action("down", job_id.as_deref(), purge_cache),
+                    yes,
+                )?;
+            }
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
             let context = resolve_command_context(options, file, binary_overrides)?;
@@ -1253,6 +1268,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 cache_dir,
                 age,
                 all_unused,
+                yes,
                 format,
             } => {
                 if age.is_none() && !all_unused {
@@ -1265,14 +1281,20 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     let file = file.context(
                         "--all-unused requires -f/--file so the current plan can define which artifacts are still referenced",
                     )?;
+                    confirm::confirm_destructive_action(
+                        "prune cached artifacts that the current compose plan no longer references",
+                        yes,
+                    )?;
                     let context =
                         resolve_command_context(options, Some(file), BinaryOverrides::default())?;
                     cache::prune(context, cache_dir, age, all_unused, format)
                 } else if cache_dir.is_none() {
+                    confirm::confirm_destructive_action("prune cached artifacts by age", yes)?;
                     let context =
                         resolve_command_context(options, file, BinaryOverrides::default())?;
                     cache::prune(context, cache_dir, age, all_unused, format)
                 } else {
+                    confirm::confirm_destructive_action("prune cached artifacts by age", yes)?;
                     cache::prune_no_context(cache_dir, age, format)
                 }
             }
@@ -1285,11 +1307,20 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             age,
             all,
             dry_run,
+            yes,
             disk_usage,
             format,
         } => {
             if age.is_none() && !all {
                 bail!("clean requires either --age DAYS or --all");
+            }
+            if !dry_run {
+                let action = if all {
+                    "remove tracked job directories except the latest one"
+                } else {
+                    "remove tracked job directories by age"
+                };
+                confirm::confirm_destructive_action(action, yes)?;
             }
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             runtime::clean(context, age, all, dry_run, disk_usage, format)
@@ -1336,6 +1367,21 @@ fn resolve_watch_mode(watch_mode: WatchMode, no_tui: bool) -> Result<WatchMode> 
         Ok(WatchMode::Line)
     } else {
         Ok(watch_mode)
+    }
+}
+
+fn cancel_requires_confirmation(job_id: Option<&str>, purge_cache: bool) -> bool {
+    job_id.is_none() || purge_cache
+}
+
+fn cancel_confirmation_action(command: &str, job_id: Option<&str>, purge_cache: bool) -> String {
+    let target = job_id
+        .map(|id| format!("tracked job {id}"))
+        .unwrap_or_else(|| "the latest tracked job".to_string());
+    if purge_cache {
+        format!("{command} {target} and purge tracked cache artifacts")
+    } else {
+        format!("{command} {target}")
     }
 }
 
@@ -1691,12 +1737,21 @@ mod tests {
         };
         assert!(value_is_explicit(&assume_explicit, "--any-flag"));
 
+        assert!(!cancel_requires_confirmation(Some("42"), false));
+        assert!(cancel_requires_confirmation(None, false));
+        assert!(cancel_requires_confirmation(Some("42"), true));
+        assert_eq!(
+            cancel_confirmation_action("cancel", Some("42"), true),
+            "cancel tracked job 42 and purge tracked cache artifacts"
+        );
+
         let missing_cache_strategy = run_command(Commands::Cache {
             command: CacheCommands::Prune {
                 file: None,
                 cache_dir: None,
                 age: None,
                 all_unused: false,
+                yes: false,
                 format: None,
             },
         })
@@ -1713,6 +1768,7 @@ mod tests {
                 cache_dir: None,
                 age: Some(1),
                 all_unused: true,
+                yes: false,
                 format: None,
             },
         })
@@ -1729,6 +1785,7 @@ mod tests {
                 cache_dir: None,
                 age: None,
                 all_unused: true,
+                yes: false,
                 format: None,
             },
         })
@@ -1744,6 +1801,7 @@ mod tests {
             age: None,
             all: false,
             dry_run: false,
+            yes: false,
             disk_usage: false,
             format: None,
         })
