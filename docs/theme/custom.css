@@ -49,6 +49,11 @@
   line-height: 1.25;
 }
 
+.hpc-compose-trust {
+  color: var(--links);
+  font-weight: 600;
+}
+
 .hpc-compose-actions {
   display: flex;
   flex-wrap: wrap;

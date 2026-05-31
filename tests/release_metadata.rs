@@ -349,3 +349,19 @@ fn justfile_exposes_bootstrap_and_workflow_lint_recipes() {
         );
     }
 }
+
+#[test]
+fn just_clean_preserves_local_runtime_state() {
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("read justfile");
+    let mut lines = justfile.lines().skip_while(|line| line.trim() != "clean:");
+    assert_eq!(lines.next().map(str::trim), Some("clean:"));
+    let clean_recipe = lines
+        .take_while(|line| line.trim().is_empty() || line.starts_with(char::is_whitespace))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !clean_recipe.contains(".hpc-compose"),
+        "just clean must not delete .hpc-compose runtime/config state"
+    );
+}

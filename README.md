@@ -1,11 +1,17 @@
 <p align="center">
-  <img src="docs/logo.png" width="360" alt="hpc-compose logo">
+  <img src="docs/logo.png" width="420" alt="hpc-compose logo">
+  <br>
+  <strong>Compose-style multi-service workflows, compiled into one inspectable Slurm job.</strong>
+  <br>
+  One allocation &middot; one script &middot; Slurm-native runtime
 </p>
 
 # hpc-compose
 
 [![CI](https://github.com/NicolasSchuler/hpc-compose/actions/workflows/ci.yml/badge.svg)](https://github.com/NicolasSchuler/hpc-compose/actions/workflows/ci.yml)
+[![Docs](https://github.com/NicolasSchuler/hpc-compose/actions/workflows/docs-pages.yml/badge.svg)](https://nicolasschuler.github.io/hpc-compose/)
 [![Release](https://img.shields.io/github/v/release/NicolasSchuler/hpc-compose)](https://github.com/NicolasSchuler/hpc-compose/releases/latest)
+[![License](https://img.shields.io/github/license/NicolasSchuler/hpc-compose)](LICENSE)
 
 `hpc-compose` turns a small Compose-like YAML file into one inspectable Slurm job for multi-service HPC and research ML workflows.
 
@@ -107,7 +113,7 @@ If you use `hpc-compose` in research, please cite the software. GitHub also expo
 @software{schuler_hpc_compose_2026,
   author = {Schuler, Nicolas},
   title = {hpc-compose},
-  version = {0.1.43},
+  version = {0.1.44},
   year = {2026},
   publisher = {Karlsruhe Institute of Technology (KIT)},
   url = {https://github.com/NicolasSchuler/hpc-compose}

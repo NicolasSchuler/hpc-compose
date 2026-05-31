@@ -2,8 +2,9 @@
 
 <div class="hpc-compose-hero">
   <div class="hpc-compose-hero-copy">
-    <img class="hpc-compose-hero-mark" src="logo.png" alt="" aria-hidden="true">
+    <img class="hpc-compose-hero-mark" src="favicon.png" alt="" aria-hidden="true">
     <p class="hpc-compose-tagline">Compose-style multi-service workflows, compiled into one inspectable Slurm job.</p>
+    <p class="hpc-compose-trust">One allocation &middot; one script &middot; Slurm-native runtime.</p>
     <p><code>hpc-compose</code> gives research and HPC teams a small YAML authoring model for services, startup order, readiness checks, runtime backends, logs, artifacts, and follow-up commands.</p>
     <nav class="hpc-compose-actions" aria-label="Start using hpc-compose">
       <a class="primary" href="quickstart.html">Quickstart</a>

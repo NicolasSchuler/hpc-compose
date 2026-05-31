@@ -5,7 +5,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   const logo = document.createElement("img");
-  logo.src = `${window.HPC_COMPOSE_ROOT || ""}logo.png`;
+  logo.src = `${window.HPC_COMPOSE_ROOT || ""}favicon.png`;
   logo.alt = "";
   logo.setAttribute("aria-hidden", "true");
   logo.className = "hpc-compose-header-logo";

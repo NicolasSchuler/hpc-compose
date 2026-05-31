@@ -17,6 +17,9 @@ bootstrap-docs-tools: (_require-tools "cargo" "npm")
     cargo install lychee --locked --version "{{LYCHEE_VERSION}}"
     npm install --global "pa11y-ci@{{PA11Y_CI_VERSION}}"
 
+clean:
+    rm -rf target .tmp coverage htmlcov tarpaulin-report.html lcov.info *.profraw *.profdata
+
 workflow-check: (_require-tools "actionlint")
     actionlint -color
 
