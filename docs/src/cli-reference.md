@@ -18,6 +18,7 @@ This page maps the public `hpc-compose` CLI by workflow. Use [Quickstart](quicks
 | Command | Use it for | Notes |
 | --- | --- | --- |
 | `new` (alias: `init`) | Generate a starter compose file from a built-in template | Use `--list-templates` and `--describe-template <name>` to inspect templates before writing a file. `--cache-dir` is optional and writes an explicit `x-slurm.cache_dir`. |
+| `examples` | Search shipped examples and starter templates | Use `examples list`, `examples search`, and `examples coverage` to choose a starting spec or generate the docs coverage table. |
 | `evolve` | Learn spec features through a progressive valid-spec tutorial | Use `--list-lessons`, `--describe-lesson <id>`, and `--until <step>` to inspect or stop at a lesson step. `--format json` requires `--yes`. |
 | `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, binary overrides, and an optional profile cache default. |
 | `context` | Print the resolved execution context | Shows the selected profile, binaries, interpolation vars, runtime paths, and value sources. |
@@ -28,6 +29,10 @@ hpc-compose new --list-templates
 hpc-compose new --describe-template minimal-batch
 hpc-compose new --template minimal-batch --name my-app --output compose.yaml
 hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+hpc-compose examples list
+hpc-compose examples list --tag mpi --format json
+hpc-compose examples search 'vllm worker'
+hpc-compose examples coverage --format markdown
 hpc-compose evolve --list-lessons
 hpc-compose evolve --describe-lesson progressive-complexity
 hpc-compose evolve --output compose.yaml --name my-app
@@ -63,6 +68,7 @@ hpc-compose completions zsh
 | `inspect` | View the normalized runtime plan | `--verbose` can reveal resolved secrets and final mount mappings. Add `--dependencies` for a service DAG in text, DOT, or JSON form. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. |
 | `doctor cluster-report` | Generate a best-effort cluster capability profile | Writes `.hpc-compose/cluster.toml` by default; use `--out -` to print the TOML profile. |
+| `doctor readiness` | Explain or run one service readiness probe from the current host | Does not start services or submit jobs. Use `--run` only against an already reachable endpoint, tracked log, tunnel, or login-node-visible service. |
 | `doctor mpi-smoke` | Render or run a small MPI probe for one service | Reports requested/advertised MPI types, MPI profile metadata, discovered MPI installs, host MPI binds/env, and rendered `srun`; add `--submit` to consume a Slurm allocation. |
 | `doctor fabric-smoke` | Render or run MPI/NCCL/UCX/OFI smoke probes for one MPI service | Use `--checks auto` or a comma-separated list such as `mpi,nccl`; render-only by default, `--submit` consumes a Slurm allocation. |
 | `weather` | Show advisory live cluster conditions | One-shot dashboard from `sinfo`, `squeue`, optional `sshare`, and optional `sprio`; does not reserve resources or change submission behavior. |
@@ -95,6 +101,9 @@ hpc-compose inspect --dependencies -f compose.yaml
 hpc-compose inspect --dependencies --dependencies-format dot -f compose.yaml
 hpc-compose preflight -f compose.yaml
 hpc-compose doctor cluster-report
+hpc-compose doctor readiness -f compose.yaml --service api
+hpc-compose doctor readiness -f compose.yaml --service api --run
+hpc-compose doctor readiness -f compose.yaml --service api --run --log-file .hpc-compose/12345/logs/api.log
 hpc-compose doctor mpi-smoke -f compose.yaml --service trainer --script-out mpi-smoke.sbatch
 hpc-compose doctor mpi-smoke -f compose.yaml --service trainer --submit
 hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto --script-out fabric-smoke.sbatch

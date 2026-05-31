@@ -19,9 +19,9 @@ Workflow groups:
   Start:          new, evolve, setup, context
   Plan/Run:       plan, up, when, alloc, run
   Develop/Test:   test, dev, tmux
-  Observe/Debug:  weather, debug, watch, replay, status, logs, ps, stats, score, diff, artifacts, sweep
+  Observe/Debug:  weather, doctor, debug, watch, replay, status, logs, ps, stats, score, diff, artifacts, sweep
   Maintain:       cache, jobs, clean, down, cancel
-  Advanced:       validate, lint, inspect, config, render, prepare, preflight, doctor, schema, completions
+  Advanced:       examples, validate, lint, inspect, config, render, prepare, preflight, schema, completions
 
 Use `hpc-compose help <command>` for command details.";
 
@@ -254,6 +254,13 @@ Examples:
   hpc-compose new --describe-template minimal-batch
   hpc-compose new --template minimal-batch --name my-app --output compose.yaml
   hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml";
+
+pub(super) const EXAMPLES_HELP: &str = "\
+Examples:
+  hpc-compose examples list
+  hpc-compose examples list --tag mpi --format json
+  hpc-compose examples search 'vllm worker'
+  hpc-compose examples coverage --format markdown";
 
 pub(super) const EVOLVE_HELP: &str = "\
 Examples:
@@ -563,8 +570,17 @@ const COMPLETIONS_EXAMPLES: &[&str] = &[
 const DOCTOR_EXAMPLES: &[&str] = &[
     "hpc-compose doctor",
     "hpc-compose doctor cluster-report",
+    "hpc-compose doctor readiness -f compose.yaml --service api",
+    "hpc-compose doctor readiness -f compose.yaml --service api --run",
     "hpc-compose doctor mpi-smoke -f compose.yaml --service trainer",
     "hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto",
+];
+
+const EXAMPLES_EXAMPLES: &[&str] = &[
+    "hpc-compose examples list",
+    "hpc-compose examples list --tag mpi --format json",
+    "hpc-compose examples search 'vllm worker'",
+    "hpc-compose examples coverage --format markdown",
 ];
 
 #[must_use]
@@ -583,6 +599,11 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["doctor", "cluster-report"] => DOCTOR_EXAMPLES,
         ["doctor", "mpi-smoke"] => DOCTOR_EXAMPLES,
         ["doctor", "fabric-smoke"] => DOCTOR_EXAMPLES,
+        ["doctor", "readiness"] => DOCTOR_EXAMPLES,
+        ["examples"] => EXAMPLES_EXAMPLES,
+        ["examples", "list"] => EXAMPLES_EXAMPLES,
+        ["examples", "search"] => EXAMPLES_EXAMPLES,
+        ["examples", "coverage"] => EXAMPLES_EXAMPLES,
         ["plan"] => PLAN_EXAMPLES,
         ["up"] => UP_EXAMPLES,
         ["when"] => WHEN_EXAMPLES,

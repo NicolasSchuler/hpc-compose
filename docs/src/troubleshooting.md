@@ -41,6 +41,21 @@ Use `condition: service_completed_successfully` for one-shot DAG stages where th
 
 When a TCP port opens before the service is fully usable, prefer HTTP or log-based readiness over TCP readiness.
 
+Inspect the normalized readiness probe without starting or submitting anything:
+
+```bash
+hpc-compose doctor readiness -f compose.yaml --service api
+```
+
+If the service is already running, tunneled, or otherwise reachable from the current host, run the same probe host-side:
+
+```bash
+hpc-compose doctor readiness -f compose.yaml --service api --run
+hpc-compose doctor readiness -f compose.yaml --service api --run --log-file .hpc-compose/12345/logs/api.log
+```
+
+`doctor readiness --run` does not launch services, prepare images, or call Slurm. It only checks the selected readiness target from the current host, which makes it useful before testing a dependent service or while debugging an already tracked run.
+
 For `hpc-compose test`, readiness failures are terminal smoke-test failures. A service with configured readiness must become healthy and then complete successfully; ignored sidecars are still expected to pass in a smoke spec.
 
 ## Preview A Run

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{
-    CacheCommands, Cli, Commands, DoctorCommands, JobsCommands, OutputFormat, RendezvousCommands,
-    SweepCommands, WatchMode,
+    CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, JobsCommands, OutputFormat,
+    RendezvousCommands, SweepCommands, WatchMode,
 };
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
@@ -22,6 +22,7 @@ mod cache;
 mod confirm;
 mod doctor;
 mod evolve;
+mod examples;
 mod init;
 mod runtime;
 mod spec;
@@ -282,6 +283,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 doctor::doctor(format, &binaries, cluster_report, cluster_report_out)
             }
         }
+        Commands::Examples { command } => run_examples_subcommand(command),
         Commands::Weather {
             format,
             sinfo_bin,
@@ -1521,6 +1523,33 @@ fn run_doctor_subcommand(
                 },
             )
         }
+        DoctorCommands::Readiness {
+            file,
+            format,
+            service,
+            run,
+            log_file,
+            timeout_seconds,
+        } => {
+            let context = resolve_command_context(options, file, binary_overrides)?;
+            doctor::doctor_readiness(
+                context,
+                format.or(parent_format),
+                service,
+                run,
+                log_file,
+                timeout_seconds,
+                options.quiet,
+            )
+        }
+    }
+}
+
+fn run_examples_subcommand(command: ExamplesCommands) -> Result<()> {
+    match command {
+        ExamplesCommands::List { tag, format } => examples::list(tag, format),
+        ExamplesCommands::Search { query, format } => examples::search(query, format),
+        ExamplesCommands::Coverage { format } => examples::coverage(format),
     }
 }
 

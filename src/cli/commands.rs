@@ -5,7 +5,8 @@ use clap_complete::Shell;
 
 use super::help::*;
 use super::{
-    ColorPolicy, DependencyOutputFormat, HoldOnExit, OutputFormat, StatsOutputFormat, WatchMode,
+    ColorPolicy, DependencyOutputFormat, ExamplesOutputFormat, HoldOnExit, OutputFormat,
+    StatsOutputFormat, WatchMode,
 };
 
 #[derive(Debug, Parser)]
@@ -2474,6 +2475,16 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 465,
+        about = "Search shipped examples and starter templates",
+        long_about = "List, search, and render a coverage table for shipped hpc-compose examples and built-in starter templates.",
+        after_help = EXAMPLES_HELP
+    )]
+    Examples {
+        #[command(subcommand)]
+        command: ExamplesCommands,
+    },
+    #[command(
         display_order = 480,
         about = "Generate shell completions",
         long_about = "Generate shell completion scripts for the supported shells.",
@@ -2569,6 +2580,59 @@ pub enum DoctorCommands {
             help = "Timeout for a submitted fabric smoke job"
         )]
         timeout_seconds: u64,
+    },
+    #[command(about = "Explain or run one service readiness probe from the current host")]
+    Readiness {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "SERVICE",
+            help = "Service readiness probe to inspect; inferred when exactly one service defines readiness"
+        )]
+        service: Option<String>,
+        #[arg(
+            long,
+            help = "Run the readiness probe from the current host instead of only explaining it"
+        )]
+        run: bool,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Log file to inspect for readiness.type=log when --run is used"
+        )]
+        log_file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            help = "Override the probe timeout for this doctor run only"
+        )]
+        timeout_seconds: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExamplesCommands {
+    #[command(about = "List shipped examples and starter templates")]
+    List {
+        #[arg(long, value_name = "TAG", help = "Only show examples with this tag")]
+        tag: Option<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<ExamplesOutputFormat>,
+    },
+    #[command(about = "Search shipped examples and starter templates")]
+    Search {
+        #[arg(value_name = "QUERY", help = "Free-text search query")]
+        query: String,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<ExamplesOutputFormat>,
+    },
+    #[command(about = "Print the examples coverage table used by the docs")]
+    Coverage {
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<ExamplesOutputFormat>,
     },
 }
 

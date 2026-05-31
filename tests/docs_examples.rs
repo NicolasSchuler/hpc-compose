@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use hpc_compose::cli::build_cli_command;
 use hpc_compose::evolve;
+use hpc_compose::examples::{ExampleAvailability, examples};
+use hpc_compose::init::templates;
 use serde_json::Value;
 
 fn repo_root() -> &'static Path {
@@ -53,6 +55,63 @@ fn examples_guide_mentions_every_repository_yaml_example() {
             example_source.contains(&format!("../../examples/{file}")),
             "docs/src/example-source.md should include examples/{file}"
         );
+    }
+}
+
+#[test]
+fn example_registry_covers_repository_examples_and_templates() {
+    let registry = examples();
+    for file in example_yaml_files() {
+        let name = file.trim_end_matches(".yaml");
+        let matches = registry
+            .iter()
+            .filter(|example| example.name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "registry should contain one entry for {file}"
+        );
+        assert_eq!(matches[0].path, format!("examples/{file}"));
+        assert!(!matches[0].tags.is_empty(), "{file} should have tags");
+    }
+
+    for template in templates() {
+        let example = registry
+            .iter()
+            .find(|example| example.name == template.name)
+            .unwrap_or_else(|| panic!("template {} should have example metadata", template.name));
+        assert_eq!(
+            example.availability,
+            ExampleAvailability::BuiltInTemplate,
+            "template {} should be marked built-in",
+            template.name
+        );
+    }
+}
+
+#[test]
+fn examples_docs_include_registry_tags_and_availability() {
+    let examples_guide =
+        fs::read_to_string(repo_root().join("docs/src/examples.md")).expect("read examples guide");
+    for example in examples() {
+        assert!(
+            examples_guide.contains(&format!("{}.yaml", example.name)),
+            "examples docs should mention {}.yaml",
+            example.name
+        );
+        assert!(
+            examples_guide.contains(example.availability.label()),
+            "examples docs should mention availability {}",
+            example.availability.label()
+        );
+        for tag in example.tags {
+            assert!(
+                examples_guide.contains(&format!("`{tag}`")),
+                "examples docs should mention tag `{tag}` for {}",
+                example.name
+            );
+        }
     }
 }
 
@@ -134,6 +193,8 @@ fn cli_reference_documents_accessibility_and_automation_flags() {
         "Accessible and Automation-Friendly Output",
         "hpc-compose logs -f compose.yaml --service app --follow",
         "hpc-compose status -f compose.yaml --format json",
+        "hpc-compose doctor readiness -f compose.yaml --service api",
+        "hpc-compose examples list --tag mpi --format json",
     ] {
         assert!(
             cli_reference.contains(expected),

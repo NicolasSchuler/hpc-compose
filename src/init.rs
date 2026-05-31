@@ -211,22 +211,7 @@ pub fn cache_dir_placeholder() -> &'static str {
 /// Returns the category used by template discovery output.
 #[must_use]
 pub fn template_category(template_name: &str) -> &'static str {
-    match template_name {
-        "minimal-batch" | "dev-python-app" | "app-redis-worker" | "restart-policy" => "basics",
-        "llm-curl-workflow"
-        | "llm-curl-workflow-workdir"
-        | "llama-app"
-        | "llama-uv-worker"
-        | "vllm-openai"
-        | "vllm-uv-worker" => "llm",
-        "training-checkpoints" | "training-resume" | "fairseq-preprocess" => "training",
-        "postgres-etl"
-        | "nextflow-bridge"
-        | "snakemake-bridge"
-        | "multi-stage-pipeline"
-        | "pipeline-dag" => "workflow",
-        _ => "distributed",
-    }
+    crate::examples::example_category(template_name).unwrap_or("distributed")
 }
 
 /// Prompts on stdin/stdout for template, app name, and cache directory, using

@@ -45,6 +45,7 @@ pub mod commands;
 pub mod context;
 pub(crate) mod domain;
 pub mod evolve;
+pub mod examples;
 pub mod init;
 pub mod job;
 pub mod lint;

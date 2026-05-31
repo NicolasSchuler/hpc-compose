@@ -140,7 +140,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(top_help_stdout.contains("Workflow groups:"));
     assert!(top_help_stdout.contains("Plan/Run:       plan, up, when, alloc, run"));
     assert!(top_help_stdout.contains(
-        "Observe/Debug:  weather, debug, watch, replay, status, logs, ps, stats, score, diff"
+        "Observe/Debug:  weather, doctor, debug, watch, replay, status, logs, ps, stats, score, diff"
     ));
     assert!(top_help_stdout.contains("--color <WHEN>"));
     assert!(top_help_stdout.contains("--quiet"));
@@ -881,6 +881,46 @@ fn completions_command_generates_output() {
         );
         assert!(out.len() > 100, "completions should be non-trivial");
     }
+}
+
+#[test]
+fn examples_commands_list_search_and_coverage() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let list = run_cli(tmpdir.path(), &["examples", "list", "--tag", "mpi"]);
+    assert_success(&list);
+    let list_text = stdout_text(&list);
+    assert!(list_text.contains("multi-node-mpi"));
+    assert!(list_text.contains("tags:"));
+
+    let list_json = run_cli(
+        tmpdir.path(),
+        &["examples", "list", "--tag", "mpi", "--format", "json"],
+    );
+    assert_success(&list_json);
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout_text(&list_json)).expect("examples json");
+    assert!(
+        payload["examples"]
+            .as_array()
+            .expect("examples array")
+            .iter()
+            .any(|entry| entry["name"] == "multi-node-mpi")
+    );
+
+    let search = run_cli(tmpdir.path(), &["examples", "search", "vllm worker"]);
+    assert_success(&search);
+    let search_text = stdout_text(&search);
+    assert!(search_text.contains("vllm-uv-worker"));
+    assert!(!search_text.contains("mpi-hello"));
+
+    let coverage = run_cli(
+        tmpdir.path(),
+        &["examples", "coverage", "--format", "markdown"],
+    );
+    assert_success(&coverage);
+    let coverage_text = stdout_text(&coverage);
+    assert!(coverage_text.contains("| Example | Availability | Tags |"));
+    assert!(coverage_text.contains("minimal-batch.yaml"));
 }
 
 #[test]

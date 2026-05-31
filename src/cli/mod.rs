@@ -9,7 +9,8 @@ mod help;
 
 pub use crate::term::ColorPolicy;
 pub use commands::{
-    CacheCommands, Cli, Commands, DoctorCommands, JobsCommands, RendezvousCommands, SweepCommands,
+    CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, JobsCommands,
+    RendezvousCommands, SweepCommands,
 };
 pub use help::examples_for_path;
 
@@ -17,6 +18,13 @@ pub use help::examples_for_path;
 pub enum OutputFormat {
     Text,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum ExamplesOutputFormat {
+    Text,
+    Json,
+    Markdown,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]

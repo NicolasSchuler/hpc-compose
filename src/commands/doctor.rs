@@ -18,6 +18,9 @@ use hpc_compose::preflight::{Item, Level, Report};
 use hpc_compose::prepare::{
     PrepareOptions, RuntimePlan, RuntimeService, build_runtime_plan, prepare_runtime_plan,
 };
+use hpc_compose::readiness_util::{
+    ReadinessProbeDescription, ReadinessProbeResult, describe_readiness_probe, run_readiness_probe,
+};
 use hpc_compose::render::{
     RenderOptions, display_srun_command_for_backend, log_file_name_for_service,
     render_script_with_options,
@@ -483,6 +486,188 @@ pub(crate) fn doctor_fabric_smoke(
     Ok(())
 }
 
+pub(crate) fn doctor_readiness(
+    context: ResolvedContext,
+    format: Option<OutputFormat>,
+    service_name: Option<String>,
+    run: bool,
+    log_file: Option<PathBuf>,
+    timeout_seconds: Option<u64>,
+    quiet: bool,
+) -> Result<()> {
+    if matches!(timeout_seconds, Some(0)) {
+        bail!("doctor readiness --timeout-seconds must be at least 1");
+    }
+    let output_format = output::resolve_output_format(format, false);
+    let plan =
+        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    let runtime_plan = build_runtime_plan(&plan);
+    let service = select_readiness_service(&runtime_plan, service_name.as_deref())?;
+    let readiness = service
+        .readiness
+        .as_ref()
+        .context("selected service does not define readiness")?;
+    let description = describe_readiness_probe(readiness, timeout_seconds, log_file);
+    let result = if run {
+        Some(run_readiness_probe(&description)?)
+    } else {
+        None
+    };
+    let output = ReadinessDoctorOutput::new(service.name.clone(), run, description, result);
+
+    match output_format {
+        OutputFormat::Text => {
+            if !quiet {
+                print_readiness_doctor_text(&output);
+            }
+        }
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+    }
+
+    if run && !output.passed {
+        bail!("readiness probe failed");
+    }
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReadinessDoctorOutput {
+    ok: bool,
+    service: String,
+    #[serde(rename = "type")]
+    probe_type: &'static str,
+    mode: &'static str,
+    target: hpc_compose::readiness_util::ReadinessProbeTarget,
+    timeout_seconds: u64,
+    ran: bool,
+    passed: bool,
+    elapsed_seconds: Option<f64>,
+    diagnostics: Vec<String>,
+    next_steps: Vec<String>,
+    required_tool: Option<&'static str>,
+    generated_behavior: String,
+}
+
+impl ReadinessDoctorOutput {
+    fn new(
+        service: String,
+        ran: bool,
+        description: ReadinessProbeDescription,
+        result: Option<ReadinessProbeResult>,
+    ) -> Self {
+        let passed = result.as_ref().is_none_or(|result| result.passed);
+        let mut diagnostics = result
+            .as_ref()
+            .map(|result| result.diagnostics.clone())
+            .unwrap_or_default();
+        if !ran {
+            diagnostics.push(
+                "--run was not passed; this command only explained the normalized probe"
+                    .to_string(),
+            );
+        }
+        Self {
+            ok: !ran || passed,
+            service,
+            probe_type: description.probe_type,
+            mode: if ran { "run" } else { "explain" },
+            target: description.target,
+            timeout_seconds: description.timeout_seconds,
+            ran,
+            passed,
+            elapsed_seconds: result.as_ref().map(|result| result.elapsed_seconds),
+            diagnostics,
+            next_steps: readiness_next_steps(ran, passed),
+            required_tool: description.required_tool,
+            generated_behavior: description.generated_behavior,
+        }
+    }
+}
+
+fn readiness_next_steps(ran: bool, passed: bool) -> Vec<String> {
+    if !ran {
+        return vec![
+            "Pass --run to evaluate the probe from the current host.".to_string(),
+            "Use this only for an already running service, tunnel, tracked log, or login-node-visible endpoint.".to_string(),
+        ];
+    }
+    if passed {
+        vec!["The readiness target is reachable from this host.".to_string()]
+    } else {
+        vec![
+            "Check that the service is already running and reachable from this host.".to_string(),
+            "For log readiness, pass --log-file with the tracked service log path.".to_string(),
+        ]
+    }
+}
+
+fn print_readiness_doctor_text(output: &ReadinessDoctorOutput) {
+    println!("readiness service: {}", output.service);
+    println!("type: {}", output.probe_type);
+    println!("mode: {}", output.mode);
+    println!("target: {}", readiness_target_label(&output.target));
+    println!("timeout: {}s", output.timeout_seconds);
+    println!(
+        "required tool: {}",
+        output.required_tool.unwrap_or("none for host-side probe")
+    );
+    println!("generated behavior: {}", output.generated_behavior);
+    println!("run: {}", if output.ran { "yes" } else { "no" });
+    if output.ran {
+        println!(
+            "result: {}",
+            if output.passed { "passed" } else { "failed" }
+        );
+        if let Some(elapsed) = output.elapsed_seconds {
+            println!("elapsed: {elapsed:.3}s");
+        }
+    }
+    if !output.diagnostics.is_empty() {
+        println!("diagnostics:");
+        for diagnostic in &output.diagnostics {
+            println!("  - {diagnostic}");
+        }
+    }
+    println!("next steps:");
+    for step in &output.next_steps {
+        println!("  - {step}");
+    }
+}
+
+fn readiness_target_label(target: &hpc_compose::readiness_util::ReadinessProbeTarget) -> String {
+    match target {
+        hpc_compose::readiness_util::ReadinessProbeTarget::Sleep { seconds } => {
+            format!("sleep {seconds}s")
+        }
+        hpc_compose::readiness_util::ReadinessProbeTarget::Tcp { host, port } => {
+            format!("{host}:{port}")
+        }
+        hpc_compose::readiness_util::ReadinessProbeTarget::Log { pattern, log_file } => {
+            format!(
+                "pattern {:?} in {}",
+                pattern,
+                log_file
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<log file required for --run>".to_string())
+            )
+        }
+        hpc_compose::readiness_util::ReadinessProbeTarget::Http {
+            url,
+            expected_status,
+        } => {
+            format!("{url} expecting HTTP {expected_status}")
+        }
+    }
+}
+
 pub(crate) struct FabricSmokeOptions {
     pub(crate) format: Option<OutputFormat>,
     pub(crate) service_name: Option<String>,
@@ -907,6 +1092,41 @@ fn select_mpi_service<'a>(
         [] => bail!("doctor --mpi-smoke requires at least one service with x-slurm.mpi"),
         _ => bail!(
             "doctor --mpi-smoke found multiple MPI services; pass --service with one of: {}",
+            services
+                .iter()
+                .map(|service| service.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn select_readiness_service<'a>(
+    plan: &'a RuntimePlan,
+    requested: Option<&str>,
+) -> Result<&'a RuntimeService> {
+    if let Some(name) = requested {
+        let service = plan
+            .ordered_services
+            .iter()
+            .find(|service| service.name == name)
+            .with_context(|| format!("service '{name}' was not found in the compose plan"))?;
+        if service.readiness.is_none() {
+            bail!("service '{name}' does not define readiness");
+        }
+        return Ok(service);
+    }
+
+    let services = plan
+        .ordered_services
+        .iter()
+        .filter(|service| service.readiness.is_some())
+        .collect::<Vec<_>>();
+    match services.as_slice() {
+        [service] => Ok(*service),
+        [] => bail!("doctor readiness requires at least one service with readiness"),
+        _ => bail!(
+            "doctor readiness found multiple readiness services; pass --service with one of: {}",
             services
                 .iter()
                 .map(|service| service.name.as_str())
