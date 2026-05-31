@@ -52,7 +52,7 @@ impl ExampleInfo {
     /// Returns true when this example has the requested tag.
     #[must_use]
     pub fn has_tag(&self, tag: &str) -> bool {
-        self.tags.iter().any(|candidate| *candidate == tag)
+        self.tags.contains(&tag)
     }
 
     /// Returns true when this example should match a free-text query.
