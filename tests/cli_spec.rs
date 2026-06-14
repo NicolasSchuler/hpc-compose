@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::process::Command;
 
@@ -1688,6 +1689,473 @@ fn schema_matches_new_resource_validation_surface() {
         value["definitions"]["mpi"]["properties"]["expected_ranks"]["$ref"],
         Value::from("#/definitions/positiveInteger")
     );
+}
+
+fn load_schema_json() -> Value {
+    let output = run_cli(&repo_root(), &["schema"]);
+    assert_success(&output);
+    serde_json::from_str(&stdout_text(&output)).expect("schema json")
+}
+
+fn schema_definition_keys(value: &Value, definition: &str) -> BTreeSet<String> {
+    value["definitions"][definition]["properties"]
+        .as_object()
+        .unwrap_or_else(|| panic!("definition `{definition}` has no properties"))
+        .keys()
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn schema_root_and_service_keys_match_parser_whitelists() {
+    let value = load_schema_json();
+
+    let root_keys: BTreeSet<&str> = [
+        "extends", "name", "modules", "runtime", "services", "steps", "sweep", "version", "x-env",
+        "x-slurm",
+    ]
+    .into_iter()
+    .collect();
+    let actual_root: BTreeSet<String> = value["properties"]
+        .as_object()
+        .expect("root properties")
+        .keys()
+        .cloned()
+        .collect();
+    let root_ref: BTreeSet<String> = root_keys.iter().map(|s| s.to_string()).collect();
+    assert_eq!(actual_root, root_ref, "root property key drift");
+
+    let service_keys: BTreeSet<&str> = [
+        "extends",
+        "image",
+        "command",
+        "entrypoint",
+        "script",
+        "environment",
+        "modules",
+        "volumes",
+        "working_dir",
+        "depends_on",
+        "readiness",
+        "healthcheck",
+        "assert",
+        "x-env",
+        "x-slurm",
+        "x-runtime",
+        "x-enroot",
+    ]
+    .into_iter()
+    .collect();
+    let actual_service = schema_definition_keys(&value, "service");
+    let service_ref: BTreeSet<String> = service_keys.iter().map(|s| s.to_string()).collect();
+    assert_eq!(actual_service, service_ref, "service property key drift");
+}
+
+#[test]
+fn schema_definition_property_keys_match_exhaustive_catalog() {
+    let value = load_schema_json();
+
+    let catalog: &[(&str, &[&str])] = &[
+        (
+            "slurm",
+            &[
+                "resources",
+                "job_name",
+                "partition",
+                "account",
+                "qos",
+                "time",
+                "nodes",
+                "ntasks",
+                "ntasks_per_node",
+                "cpus_per_task",
+                "mem",
+                "gres",
+                "gpus",
+                "gpus_per_node",
+                "gpus_per_task",
+                "cpus_per_gpu",
+                "mem_per_gpu",
+                "gpu_bind",
+                "cpu_bind",
+                "mem_bind",
+                "distribution",
+                "hint",
+                "constraint",
+                "output",
+                "error",
+                "chdir",
+                "array",
+                "after_job",
+                "dependency",
+                "cache_dir",
+                "scratch",
+                "stage_in",
+                "stage_out",
+                "burst_buffer",
+                "metrics",
+                "artifacts",
+                "resume",
+                "notify",
+                "setup",
+                "submit_args",
+                "rendezvous",
+            ],
+        ),
+        (
+            "serviceSlurm",
+            &[
+                "nodes",
+                "placement",
+                "ntasks",
+                "ntasks_per_node",
+                "cpus_per_task",
+                "gpus",
+                "gres",
+                "gpus_per_node",
+                "gpus_per_task",
+                "cpus_per_gpu",
+                "mem_per_gpu",
+                "gpu_bind",
+                "cpu_bind",
+                "mem_bind",
+                "distribution",
+                "hint",
+                "time_limit",
+                "extra_srun_args",
+                "mpi",
+                "failure_policy",
+                "prologue",
+                "epilogue",
+                "hooks",
+                "scratch",
+                "rendezvous",
+            ],
+        ),
+        ("scratch", &["scope", "base", "mount", "cleanup"]),
+        ("stageIn", &["from", "to", "mode"]),
+        ("stageOut", &["from", "to", "when", "mode"]),
+        ("burstBuffer", &["directives"]),
+        ("metrics", &["enabled", "interval_seconds", "collectors"]),
+        ("artifacts", &["collect", "export_dir", "paths", "bundles"]),
+        ("artifactBundle", &["paths"]),
+        ("resume", &["path"]),
+        ("notify", &["email"]),
+        ("emailNotify", &["to", "on"]),
+        ("serviceScratch", &["enabled"]),
+        (
+            "servicePlacement",
+            &[
+                "node_range",
+                "node_count",
+                "node_percent",
+                "share_with",
+                "start_index",
+                "exclude",
+                "allow_overlap",
+            ],
+        ),
+        ("serviceEventHook", &["on", "context", "script"]),
+        (
+            "mpi",
+            &[
+                "type",
+                "profile",
+                "implementation",
+                "launcher",
+                "expected_ranks",
+                "host_mpi",
+            ],
+        ),
+        ("hostMpi", &["bind_paths", "env"]),
+        (
+            "failurePolicy",
+            &[
+                "mode",
+                "max_restarts",
+                "backoff_seconds",
+                "window_seconds",
+                "max_restarts_in_window",
+            ],
+        ),
+        (
+            "serviceAssert",
+            &["exit_code", "artifacts_contain", "max_duration_seconds"],
+        ),
+        (
+            "healthcheck",
+            &[
+                "test",
+                "timeout",
+                "disable",
+                "interval",
+                "retries",
+                "start_period",
+            ],
+        ),
+        ("serviceRendezvous", &["register"]),
+        ("prepare", &["commands", "mounts", "env", "root"]),
+        ("softwareEnv", &["modules", "spack", "env"]),
+        ("runtime", &["backend", "gpu"]),
+        ("serviceRuntime", &["prepare"]),
+        ("serviceEnroot", &["prepare"]),
+        ("sweep", &["parameters", "matrix"]),
+    ];
+
+    for (def_name, expected_keys) in catalog {
+        let expected: BTreeSet<String> = expected_keys.iter().map(|s| s.to_string()).collect();
+        let actual = schema_definition_keys(&value, def_name);
+        assert_eq!(
+            actual, expected,
+            "property key drift in definition `{def_name}`"
+        );
+
+        assert_eq!(
+            value["definitions"][def_name]["additionalProperties"],
+            Value::from(false),
+            "definition `{def_name}` must have additionalProperties: false"
+        );
+    }
+}
+
+#[test]
+fn schema_enum_values_match_rust_variants() {
+    let value = load_schema_json();
+    let slurm = &value["definitions"]["slurm"]["properties"];
+    let service_slurm = &value["definitions"]["serviceSlurm"]["properties"];
+
+    let cases: &[(&str, Value, &[&str])] = &[
+        // runtime enums
+        (
+            "runtime.backend",
+            value["definitions"]["runtime"]["properties"]["backend"]["enum"].clone(),
+            &["pyxis", "apptainer", "singularity", "host"],
+        ),
+        (
+            "runtime.gpu",
+            value["definitions"]["runtime"]["properties"]["gpu"]["enum"].clone(),
+            &["auto", "none", "nvidia"],
+        ),
+        // mpi enums
+        (
+            "mpi.implementation",
+            value["definitions"]["mpi"]["properties"]["implementation"]["enum"].clone(),
+            &[
+                "openmpi",
+                "mpich",
+                "intel_mpi",
+                "mvapich2",
+                "cray_mpi",
+                "hpe_mpi",
+                "unknown",
+            ],
+        ),
+        (
+            "mpi.profile",
+            value["definitions"]["mpi"]["properties"]["profile"]["enum"].clone(),
+            &["openmpi", "mpich", "intel_mpi"],
+        ),
+        (
+            "mpi.launcher",
+            value["definitions"]["mpi"]["properties"]["launcher"]["enum"].clone(),
+            &["srun"],
+        ),
+        // scratch enums
+        (
+            "scratch.scope",
+            value["definitions"]["scratch"]["properties"]["scope"]["enum"].clone(),
+            &["shared", "node_local"],
+        ),
+        (
+            "scratch.cleanup",
+            value["definitions"]["scratch"]["properties"]["cleanup"]["enum"].clone(),
+            &["always", "on_success", "never"],
+        ),
+        // stage enums
+        (
+            "stage_mode",
+            value["definitions"]["stageMode"]["enum"].clone(),
+            &["rsync", "copy"],
+        ),
+        (
+            "stage_out.when",
+            value["definitions"]["stageOut"]["properties"]["when"]["enum"].clone(),
+            &["always", "on_success", "on_failure"],
+        ),
+        // metrics
+        (
+            "metrics.collectors[item]",
+            value["definitions"]["metrics"]["properties"]["collectors"]["items"]["enum"].clone(),
+            &["gpu", "slurm"],
+        ),
+        // artifacts
+        (
+            "artifacts.collect",
+            value["definitions"]["artifacts"]["properties"]["collect"]["enum"].clone(),
+            &["always", "on_success", "on_failure"],
+        ),
+        // notify
+        (
+            "email.on[item]",
+            value["definitions"]["emailNotify"]["properties"]["on"]["items"]["enum"].clone(),
+            &["start", "end", "fail", "all"],
+        ),
+        // failure_policy
+        (
+            "failure_policy.mode",
+            value["definitions"]["failurePolicy"]["properties"]["mode"]["enum"].clone(),
+            &["fail_job", "ignore", "restart_on_failure"],
+        ),
+        // service hooks
+        (
+            "service_event_hook.on",
+            value["definitions"]["serviceEventHook"]["properties"]["on"]["enum"].clone(),
+            &["restart", "window_exhausted"],
+        ),
+        (
+            "service_hook.context",
+            value["definitions"]["serviceHook"]["oneOf"][1]["properties"]["context"]["enum"]
+                .clone(),
+            &["host", "container"],
+        ),
+        // dependency conditions
+        (
+            "depends_on.condition",
+            value["definitions"]["dependencyCondition"]["properties"]["condition"]["enum"].clone(),
+            &[
+                "service_started",
+                "service_healthy",
+                "service_completed_successfully",
+            ],
+        ),
+        (
+            "after_job.condition",
+            value["definitions"]["jobDependency"]["oneOf"][1]["properties"]["condition"]["enum"]
+                .clone(),
+            &["afterany", "afterok", "afternotok"],
+        ),
+        // top-level dependency mode
+        (
+            "dependency",
+            slurm["dependency"]["enum"].clone(),
+            &["singleton"],
+        ),
+    ];
+
+    // Touch service_slurm so the binding isn't flagged unused
+    let _ = &service_slurm["mpi"];
+
+    for (label, actual, expected) in cases {
+        let expected_json: Vec<Value> = expected.iter().map(|s| Value::from(*s)).collect();
+        assert_eq!(
+            actual,
+            &Value::from(expected_json),
+            "enum value drift for `{label}`"
+        );
+    }
+}
+
+#[test]
+fn schema_settings_command_emits_checked_in_schema() {
+    let output = run_cli(&repo_root(), &["schema", "--kind", "settings"]);
+    assert_success(&output);
+    assert!(stderr_text(&output).is_empty());
+
+    let stdout = stdout_text(&output);
+    let value: Value = serde_json::from_str(&stdout).expect("settings schema json");
+    assert_eq!(
+        value["$schema"],
+        Value::from("http://json-schema.org/draft-07/schema")
+    );
+    assert_eq!(value["additionalProperties"], Value::from(false));
+    assert_eq!(value["properties"]["version"]["const"], Value::from(1));
+    assert!(value["properties"]["defaults"].is_object());
+    assert!(value["properties"]["profiles"].is_object());
+    assert!(value["properties"]["resource_profiles"].is_object());
+
+    let checked_in =
+        fs::read_to_string(repo_root().join("schema/hpc-compose-settings.schema.json"))
+            .expect("checked-in settings schema");
+    let expected = if checked_in.ends_with('\n') {
+        checked_in
+    } else {
+        format!("{checked_in}\n")
+    };
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn settings_schema_definition_keys_match_exhaustive_catalog() {
+    let output = run_cli(&repo_root(), &["schema", "--kind", "settings"]);
+    assert_success(&output);
+    let value: Value = serde_json::from_str(&stdout_text(&output)).expect("settings schema json");
+
+    let catalog: &[(&str, &[&str])] = &[
+        (
+            "profileDefaults",
+            &["compose_file", "env_files", "env", "binaries", "cache"],
+        ),
+        (
+            "binaryOverrides",
+            &[
+                "enroot",
+                "apptainer",
+                "singularity",
+                "salloc",
+                "sbatch",
+                "srun",
+                "scontrol",
+                "sinfo",
+                "squeue",
+                "sacct",
+                "sstat",
+                "scancel",
+                "sshare",
+                "sprio",
+            ],
+        ),
+        ("cacheSettings", &["dir"]),
+        (
+            "resourceProfile",
+            &[
+                "partition",
+                "account",
+                "qos",
+                "time",
+                "nodes",
+                "ntasks",
+                "ntasks_per_node",
+                "cpus_per_task",
+                "mem",
+                "gres",
+                "gpus",
+                "gpus_per_node",
+                "gpus_per_task",
+                "cpus_per_gpu",
+                "mem_per_gpu",
+                "gpu_bind",
+                "cpu_bind",
+                "mem_bind",
+                "distribution",
+                "hint",
+                "constraint",
+            ],
+        ),
+    ];
+
+    for (def_name, expected_keys) in catalog {
+        let expected: BTreeSet<String> = expected_keys.iter().map(|s| s.to_string()).collect();
+        let actual = schema_definition_keys(&value, def_name);
+        assert_eq!(
+            actual, expected,
+            "settings property key drift in definition `{def_name}`"
+        );
+        assert_eq!(
+            value["definitions"][def_name]["additionalProperties"],
+            Value::from(false),
+            "settings definition `{def_name}` must have additionalProperties: false"
+        );
+    }
 }
 
 #[test]

@@ -3341,7 +3341,7 @@ mod tests {
     use super::*;
     use crate::commands::run_command;
     use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
-    use hpc_compose::cli::{CacheCommands, Commands, HoldOnExit, WatchMode};
+    use hpc_compose::cli::{CacheCommands, Commands, HoldOnExit, RuntimeLaunchArgs, WatchMode};
     use hpc_compose::job::{
         ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
         CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, JobInventoryEntry,
@@ -4631,7 +4631,8 @@ services:
             apptainer_bin: "apptainer".into(),
             singularity_bin: "singularity".into(),
             keep_failed_prep: false,
-            force: true,
+            force_rebuild: true,
+            force_deprecated: false,
             format: None,
         })
         .expect("prepare");
@@ -4641,7 +4642,6 @@ services:
             strict: true,
             verbose: false,
             format: None,
-            json: false,
             enroot_bin: enroot.display().to_string(),
             apptainer_bin: "apptainer".into(),
             singularity_bin: "singularity".into(),
@@ -4656,7 +4656,6 @@ services:
             strict: false,
             verbose: false,
             format: None,
-            json: false,
             enroot_bin: enroot.display().to_string(),
             apptainer_bin: "apptainer".into(),
             singularity_bin: "singularity".into(),
@@ -4678,24 +4677,25 @@ services:
             squeue_bin: "squeue".into(),
             sacct_bin: "sacct".into(),
             format: None,
-            json: false,
         })
         .expect("inspect");
 
         let err = run_command(Commands::Up {
-            file: Some(compose.clone()),
+            launch: RuntimeLaunchArgs {
+                file: Some(compose.clone()),
+                enroot_bin: enroot.display().to_string(),
+                apptainer_bin: "apptainer".into(),
+                singularity_bin: "singularity".into(),
+                keep_failed_prep: false,
+                skip_prepare: true,
+                force_rebuild: false,
+                no_preflight: true,
+            },
             script_out: None,
             sbatch_bin: sbatch_fail.display().to_string(),
             srun_bin: srun.display().to_string(),
-            enroot_bin: enroot.display().to_string(),
-            apptainer_bin: "apptainer".into(),
-            singularity_bin: "singularity".into(),
             squeue_bin: "squeue".into(),
             sacct_bin: "sacct".into(),
-            keep_failed_prep: false,
-            skip_prepare: true,
-            force_rebuild: false,
-            no_preflight: true,
             local: false,
             allow_resume_changes: false,
             resume_diff_only: false,
@@ -4705,26 +4705,27 @@ services:
             queue_warn_after: None,
             watch_mode: WatchMode::Auto,
             hold_on_exit: HoldOnExit::Failure,
-            no_tui: false,
             format: None,
         })
         .expect_err("sbatch fail");
         assert!(err.to_string().contains("sbatch failed"));
 
         run_command(Commands::Up {
-            file: Some(compose.clone()),
+            launch: RuntimeLaunchArgs {
+                file: Some(compose.clone()),
+                enroot_bin: enroot.display().to_string(),
+                apptainer_bin: "apptainer".into(),
+                singularity_bin: "singularity".into(),
+                keep_failed_prep: false,
+                skip_prepare: true,
+                force_rebuild: false,
+                no_preflight: false,
+            },
             script_out: Some(tmpdir.path().join("submit.sbatch")),
             sbatch_bin: sbatch_ok.display().to_string(),
             srun_bin: srun.display().to_string(),
-            enroot_bin: enroot.display().to_string(),
-            apptainer_bin: "apptainer".into(),
-            singularity_bin: "singularity".into(),
             squeue_bin: "squeue".into(),
             sacct_bin: "sacct".into(),
-            keep_failed_prep: false,
-            skip_prepare: true,
-            force_rebuild: false,
-            no_preflight: false,
             local: false,
             allow_resume_changes: false,
             resume_diff_only: false,
@@ -4734,24 +4735,25 @@ services:
             queue_warn_after: None,
             watch_mode: WatchMode::Auto,
             hold_on_exit: HoldOnExit::Failure,
-            no_tui: false,
             format: None,
         })
         .expect("submit");
         run_command(Commands::Up {
-            file: Some(compose.clone()),
+            launch: RuntimeLaunchArgs {
+                file: Some(compose.clone()),
+                enroot_bin: enroot.display().to_string(),
+                apptainer_bin: "apptainer".into(),
+                singularity_bin: "singularity".into(),
+                keep_failed_prep: false,
+                skip_prepare: true,
+                force_rebuild: false,
+                no_preflight: true,
+            },
             script_out: Some(tmpdir.path().join("submit-no-id.sbatch")),
             sbatch_bin: no_id_sbatch.display().to_string(),
             srun_bin: srun.display().to_string(),
-            enroot_bin: enroot.display().to_string(),
-            apptainer_bin: "apptainer".into(),
-            singularity_bin: "singularity".into(),
             squeue_bin: "squeue".into(),
             sacct_bin: "sacct".into(),
-            keep_failed_prep: false,
-            skip_prepare: true,
-            force_rebuild: false,
-            no_preflight: true,
             local: false,
             allow_resume_changes: false,
             resume_diff_only: false,
@@ -4761,7 +4763,6 @@ services:
             queue_warn_after: None,
             watch_mode: WatchMode::Auto,
             hold_on_exit: HoldOnExit::Failure,
-            no_tui: false,
             format: None,
         })
         .expect("submit without id");

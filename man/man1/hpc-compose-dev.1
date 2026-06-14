@@ -14,18 +14,6 @@ Launch the compose spec with the local Pyxis/Enroot supervisor, watch bind\-moun
 \fB-f\fR, \fB--file\fR \fIFILE\fR
 Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP
-\fB--watch\-path\fR \fIPATH\fR
-Additional source directory to watch; restarts all services when it changes.
-.TP
-\fB--debounce\-ms\fR \fIMILLISECONDS\fR
-Debounce file changes before requesting a restart. Default: 300.
-.TP
-\fB--keep\-running\fR
-Leave the local supervisor running when dev exits.
-.TP
-\fB--script\-out\fR \fIOUTPUT\fR
-Write the rendered local launcher script to this path.
-.TP
 \fB--enroot\-bin\fR \fIPATH\fR
 Path to the enroot executable. Default: enroot.
 .TP
@@ -39,13 +27,25 @@ Path to the singularity executable. Default: singularity.
 Keep failed preparation state on disk for later inspection.
 .TP
 \fB--skip\-prepare\fR
-Skip image preparation and reuse existing artifacts.
+Skip image import and prepare reuse checks.
 .TP
 \fB--force\-rebuild\fR
-Refresh imported and prepared artifacts before launch.
+Refresh imported and prepared artifacts before running.
 .TP
 \fB--no\-preflight\fR
-Skip the preflight phase before launch.
+Skip the preflight phase before running.
+.TP
+\fB--watch\-paths\fR \fIPATH\fR
+Additional source directory to watch; restarts all services when it changes.
+.TP
+\fB--debounce\-ms\fR \fIMILLISECONDS\fR
+Debounce file changes before requesting a restart. Default: 300.
+.TP
+\fB--keep\-running\fR
+Leave the local supervisor running when dev exits.
+.TP
+\fB--script\-out\fR \fIOUTPUT\fR
+Write the rendered local launcher script to this path.
 .TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.

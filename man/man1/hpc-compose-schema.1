@@ -8,8 +8,11 @@ hpc\-compose schema [OPTIONS]
 .fi
 .SH DESCRIPTION
 .PP
-Print the checked\-in JSON Schema for compose authoring tools. Rust validation remains the semantic source of truth.
+Print the checked\-in JSON Schema for compose authoring tools (default) or settings.toml authoring tools (\-\-kind settings). Rust validation remains the semantic source of truth.
 .SH OPTIONS
+.TP
+\fB--kind\fR \fIKIND\fR
+Which schema to print: 'compose' (default) or 'settings'. Possible values: compose, settings.
 .TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.

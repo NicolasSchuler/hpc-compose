@@ -107,7 +107,7 @@ Smoke tests are finite: every service must start, pass configured readiness, and
 pub(super) const DEV_HELP: &str = "\
 Examples:
   hpc-compose dev -f compose.yaml
-  hpc-compose dev -f compose.yaml --watch-path ./src
+  hpc-compose dev -f compose.yaml --watch-paths ./src
   hpc-compose dev -f compose.yaml --debounce-ms 500 --keep-running
 
 Local dev mode watches bind-mounted source directories and asks the local supervisor to restart affected services.";

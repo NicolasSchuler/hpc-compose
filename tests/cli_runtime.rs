@@ -1131,7 +1131,8 @@ services:
             "status",
             "-f",
             compose.to_str().expect("path"),
-            "--json",
+            "--format",
+            "json",
             "--squeue-bin",
             squeue.to_str().expect("path"),
             "--sacct-bin",
@@ -1212,7 +1213,8 @@ services:
             "status",
             "-f",
             compose.to_str().expect("path"),
-            "--json",
+            "--format",
+            "json",
             "--squeue-bin",
             squeue.to_str().expect("path"),
             "--sacct-bin",
@@ -1391,7 +1393,8 @@ services:
             "status",
             "-f",
             compose.to_str().expect("path"),
-            "--json",
+            "--format",
+            "json",
             "--squeue-bin",
             squeue.to_str().expect("path"),
             "--sacct-bin",
@@ -1798,7 +1801,8 @@ fn status_reports_pending_queue_diagnostics_in_text_and_json() {
             "status",
             "-f",
             compose.to_str().expect("path"),
-            "--json",
+            "--format",
+            "json",
             "--squeue-bin",
             squeue.to_str().expect("path"),
             "--sacct-bin",
@@ -2169,19 +2173,45 @@ fn replay_command_reports_json_timeline_and_artifacts() {
 }
 
 #[test]
-fn replay_no_tui_prints_stable_summary() {
+fn replay_line_mode_prints_stable_summary() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let (compose, _record) = write_replay_fixture(&tmpdir);
 
     let replay = run_cli(
         tmpdir.path(),
-        &["replay", "-f", compose.to_str().expect("path"), "--no-tui"],
+        &[
+            "replay",
+            "-f",
+            compose.to_str().expect("path"),
+            "--watch-mode",
+            "line",
+        ],
     );
     assert_success(&replay);
     let stdout = stdout_text(&replay);
     assert!(stdout.contains("hpc-compose replay | job 12345 | best-effort"));
     assert!(stdout.contains("service_exit service=app exit=7"));
     assert!(stdout.contains("metrics: gpu: 1"));
+}
+
+#[test]
+fn replay_explicit_tui_mode_fails_when_ui_cannot_start() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let (compose, _record) = write_replay_fixture(&tmpdir);
+
+    let replay = run_cli(
+        tmpdir.path(),
+        &[
+            "replay",
+            "-f",
+            compose.to_str().expect("path"),
+            "--watch-mode",
+            "tui",
+        ],
+    );
+    assert_failure(&replay);
+    assert!(stdout_text(&replay).trim().is_empty());
+    assert!(stderr_text(&replay).contains("--watch-mode tui"));
 }
 
 #[test]
@@ -2269,7 +2299,8 @@ fn replay_rejects_missing_service_and_invalid_speed() {
                 compose.to_str().expect("path"),
                 "--speed",
                 speed,
-                "--no-tui",
+                "--watch-mode",
+                "line",
             ],
         );
         assert_failure(&invalid);
@@ -2554,7 +2585,8 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
             "stats",
             "-f",
             compose.to_str().expect("path"),
-            "--json",
+            "--format",
+            "json",
             "--sstat-bin",
             sstat.to_str().expect("path"),
             "--squeue-bin",
@@ -3116,7 +3148,8 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
             "stats",
             "-f",
             compose.to_str().expect("path"),
-            "--json",
+            "--format",
+            "json",
             "--sstat-bin",
             stats_sstat_fail.to_str().expect("path"),
             "--squeue-bin",
@@ -3153,7 +3186,8 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
             compose.to_str().expect("path"),
             "--job-id",
             "12345",
-            "--json",
+            "--format",
+            "json",
             "--sstat-bin",
             stats_sstat_fail.to_str().expect("path"),
             "--squeue-bin",
@@ -3919,7 +3953,8 @@ fn stats_command_supports_explicit_job_id_without_metadata() {
             compose.to_str().expect("path"),
             "--job-id",
             "67890",
-            "--json",
+            "--format",
+            "json",
             "--sstat-bin",
             sstat.to_str().expect("path"),
             "--squeue-bin",
@@ -3959,7 +3994,8 @@ fn stats_command_reports_unavailable_for_pending_and_completed_jobs() {
             compose.to_str().expect("path"),
             "--job-id",
             "55555",
-            "--json",
+            "--format",
+            "json",
             "--sstat-bin",
             sstat.to_str().expect("path"),
             "--squeue-bin",
@@ -3992,7 +4028,8 @@ fn stats_command_reports_unavailable_for_pending_and_completed_jobs() {
             compose.to_str().expect("path"),
             "--job-id",
             "55555",
-            "--json",
+            "--format",
+            "json",
             "--sstat-bin",
             sstat.to_str().expect("path"),
             "--squeue-bin",

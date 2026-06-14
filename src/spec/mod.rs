@@ -9,6 +9,7 @@ use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::domain::{MountParts, parse_node_index_ranges, split_mount_parts};
+use crate::spec_error::SpecError;
 
 mod interpolate;
 mod parse;
@@ -1864,17 +1865,19 @@ impl ComposeSpec {
         self.slurm.validate()?;
         for (name, service) in &mut self.services {
             service.normalize_script_and_command(name)?;
-            service.normalize_healthcheck()?;
+            service.normalize_healthcheck(name)?;
             if service.runtime.prepare.is_some() && service.enroot.prepare.is_some() {
-                bail!(
-                    "service '{name}' sets both x-runtime.prepare and x-enroot.prepare; use only x-runtime.prepare for new specs"
-                );
+                return Err(SpecError::DuplicatePrepareHook {
+                    service: name.clone(),
+                }
+                .into());
             }
             if self.runtime.backend != RuntimeBackend::Pyxis && service.enroot.prepare.is_some() {
-                bail!(
-                    "service '{name}' uses x-enroot.prepare with runtime.backend={}; use x-runtime.prepare for non-Pyxis backends",
-                    self.runtime.backend.as_str()
-                );
+                return Err(SpecError::EnrootPrepareRequiresPyxis {
+                    service: name.clone(),
+                    backend: self.runtime.backend.as_str().to_string(),
+                }
+                .into());
             }
             service
                 .environment
@@ -2115,9 +2118,11 @@ impl DependsOnSpec {
                             DependencyCondition::ServiceCompletedSuccessfully
                         }
                         Some(other) => {
-                            bail!(
-                                "depends_on condition for service '{name}' must be 'service_started', 'service_healthy', or 'service_completed_successfully', got '{other}'"
-                            );
+                            return Err(SpecError::InvalidDependencyCondition {
+                                service: name.clone(),
+                                got: other.to_string(),
+                            }
+                            .into());
                         }
                     };
                     out.push(ServiceDependency {
@@ -2164,7 +2169,7 @@ impl EnvironmentSpec {
                 let mut pairs = Vec::with_capacity(items.len());
                 for item in items {
                     let Some((key, value)) = item.split_once('=') else {
-                        bail!("environment list items must use KEY=VALUE syntax");
+                        return Err(SpecError::InvalidEnvironmentEntry.into());
                     };
                     pairs.push((key.to_string(), value.to_string()));
                 }
@@ -2195,7 +2200,7 @@ impl EnvironmentSpec {
             EnvironmentSpec::List(items) => {
                 for item in items.iter_mut() {
                     let Some((key, value)) = item.split_once('=') else {
-                        bail!("environment list items must use KEY=VALUE syntax");
+                        return Err(SpecError::InvalidEnvironmentEntry.into());
                     };
                     *item = format!("{key}={}", interpolate_string(value, vars)?);
                 }
@@ -2452,7 +2457,10 @@ impl SlurmConfig {
             .as_deref()
             .is_some_and(|value| value.trim().is_empty())
         {
-            bail!("x-slurm.resources must not be empty");
+            return Err(SpecError::EmptyField {
+                field: "x-slurm.resources".into(),
+            }
+            .into());
         }
         validate_positive_u32(self.nodes, "x-slurm.nodes")?;
         validate_positive_u32(self.ntasks, "x-slurm.ntasks")?;
@@ -2503,19 +2511,20 @@ impl SlurmConfig {
         if let Some(metrics) = &self.metrics
             && matches!(metrics.interval_seconds, Some(0))
         {
-            bail!("x-slurm.metrics.interval_seconds must be at least 1");
+            return Err(SpecError::MetricsIntervalTooLow.into());
         }
         if let Some(artifacts) = &self.artifacts {
             let Some(export_dir) = artifacts.export_dir.as_deref() else {
-                bail!("x-slurm.artifacts.export_dir is required when x-slurm.artifacts is present");
+                return Err(SpecError::ArtifactsMissingExportDir.into());
             };
             if export_dir.trim().is_empty() {
-                bail!("x-slurm.artifacts.export_dir must not be empty");
+                return Err(SpecError::EmptyField {
+                    field: "x-slurm.artifacts.export_dir".into(),
+                }
+                .into());
             }
             if artifacts.paths.is_empty() && artifacts.bundles.is_empty() {
-                bail!(
-                    "x-slurm.artifacts must contain at least one source path in paths or bundles"
-                );
+                return Err(SpecError::ArtifactsNoSources.into());
             }
             for path in &artifacts.paths {
                 validate_artifact_path(path)?;
@@ -2800,10 +2809,18 @@ impl ServiceSpec {
     fn normalize_script_and_command(&mut self, name: &str) -> Result<()> {
         if let Some(script) = self.script.take() {
             if self.command.is_some() {
-                bail!("service '{name}' sets both script and command; use only one");
+                return Err(SpecError::ScriptCommandConflict {
+                    service: name.to_string(),
+                    conflict: "command".into(),
+                }
+                .into());
             }
             if self.entrypoint.is_some() {
-                bail!("service '{name}' sets both script and entrypoint; use only one");
+                return Err(SpecError::ScriptCommandConflict {
+                    service: name.to_string(),
+                    conflict: "entrypoint".into(),
+                }
+                .into());
             }
             validate_service_script(&script, &format!("service '{name}' script"))?;
             self.command = Some(CommandSpec::Vec(vec![
@@ -2823,9 +2840,12 @@ impl ServiceSpec {
             None => command.clone(),
             Some(CommandSpec::String(entrypoint)) => format!("{entrypoint} {command}"),
             Some(CommandSpec::Vec(_)) => {
-                bail!(
-                    "service '{name}' mixes array-form entrypoint with multi-line string command; use script or an explicit command list instead"
-                );
+                return Err(SpecError::MixedCommandForms {
+                    service: name.to_string(),
+                    form_a: "array".into(),
+                    form_b: "string".into(),
+                }
+                .into());
             }
         };
         self.command = Some(CommandSpec::Vec(vec![
@@ -2836,9 +2856,12 @@ impl ServiceSpec {
         Ok(())
     }
 
-    fn normalize_healthcheck(&mut self) -> Result<()> {
+    fn normalize_healthcheck(&mut self, name: &str) -> Result<()> {
         if self.readiness.is_some() && self.healthcheck.is_some() {
-            bail!("readiness and healthcheck are mutually exclusive; use only one");
+            return Err(SpecError::ReadinessHealthcheckConflict {
+                service: name.to_string(),
+            }
+            .into());
         }
 
         let Some(healthcheck) = self.healthcheck.take() else {
@@ -2849,19 +2872,25 @@ impl ServiceSpec {
             return Ok(());
         }
         if healthcheck.interval.is_some() {
-            bail!(
-                "healthcheck.interval is not supported; use healthcheck.timeout or explicit readiness instead"
-            );
+            return Err(SpecError::HealthcheckUnsupportedField {
+                service: name.to_string(),
+                field: "interval".into(),
+            }
+            .into());
         }
         if healthcheck.retries.is_some() {
-            bail!(
-                "healthcheck.retries is not supported; use healthcheck.timeout or explicit readiness instead"
-            );
+            return Err(SpecError::HealthcheckUnsupportedField {
+                service: name.to_string(),
+                field: "retries".into(),
+            }
+            .into());
         }
         if healthcheck.start_period.is_some() {
-            bail!(
-                "healthcheck.start_period is not supported; use healthcheck.timeout or explicit readiness instead"
-            );
+            return Err(SpecError::HealthcheckUnsupportedField {
+                service: name.to_string(),
+                field: "start_period".into(),
+            }
+            .into());
         }
         let timeout_seconds = healthcheck
             .timeout
@@ -3738,6 +3767,7 @@ mod tests {
     use std::fs;
     use std::sync::{Mutex, OnceLock};
 
+    use miette::Diagnostic;
     use proptest::prelude::*;
     use proptest::string::string_regex;
 
@@ -3855,8 +3885,11 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&path).expect_err("should fail");
-        assert!(err.to_string().contains("build is not supported in v1"));
-        assert!(err.to_string().contains("x-runtime.prepare"));
+        assert!(err.to_string().contains("unsupported key 'build'"));
+        assert!(err.downcast_ref::<SpecError>().is_some_and(|se| {
+            se.help()
+                .is_some_and(|h| h.to_string().contains("x-runtime.prepare"))
+        }));
     }
 
     #[test]
@@ -3873,7 +3906,7 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&path).expect_err("should fail");
-        assert!(err.to_string().contains("ports are not supported"));
+        assert!(err.to_string().contains("unsupported key 'ports'"));
     }
 
     #[test]
@@ -6683,10 +6716,7 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&non_mapping_services).expect_err("services mapping");
-        assert!(
-            err.to_string()
-                .contains("'services'/'steps' must be a mapping")
-        );
+        assert!(err.to_string().contains("'services' must be a mapping"));
 
         let non_mapping_service = write_spec(
             tmpdir.path(),
@@ -6696,7 +6726,7 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&non_mapping_service).expect_err("service mapping");
-        assert!(err.to_string().contains("service 'app' must be a mapping"));
+        assert!(err.to_string().contains("'app' must be a mapping"));
 
         let root_unknown = write_spec(
             tmpdir.path(),
@@ -6724,7 +6754,11 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&networks).expect_err("networks");
-        assert!(err.to_string().contains("custom container networking"));
+        assert!(err.to_string().contains("unsupported key 'networks'"));
+        assert!(err.downcast_ref::<SpecError>().is_some_and(|se| {
+            se.help()
+                .is_some_and(|h| h.to_string().contains("custom container networking"))
+        }));
 
         let restart = write_spec(
             tmpdir.path(),
@@ -6736,7 +6770,11 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&restart).expect_err("restart");
-        assert!(err.to_string().contains("x-slurm.failure_policy"));
+        assert!(err.to_string().contains("unsupported key 'restart'"));
+        assert!(err.downcast_ref::<SpecError>().is_some_and(|se| {
+            se.help()
+                .is_some_and(|h| h.to_string().contains("x-slurm.failure_policy"))
+        }));
 
         let deploy = write_spec(
             tmpdir.path(),
@@ -6748,7 +6786,11 @@ services:
 "#,
         );
         let err = ComposeSpec::load(&deploy).expect_err("deploy");
-        assert!(err.to_string().contains("long-running orchestrator"));
+        assert!(err.to_string().contains("unsupported key 'deploy'"));
+        assert!(err.downcast_ref::<SpecError>().is_some_and(|se| {
+            se.help()
+                .is_some_and(|h| h.to_string().contains("long-running orchestrator"))
+        }));
     }
 
     #[test]

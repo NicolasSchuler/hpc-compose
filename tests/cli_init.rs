@@ -38,7 +38,13 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
 
     let inspect_json = run_cli(
         tmpdir.path(),
-        &["inspect", "-f", compose.to_str().expect("path"), "--json"],
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
     );
     assert_success(&inspect_json);
     let inspect_json_stdout = stdout_text(&inspect_json);
@@ -51,7 +57,8 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
             "preflight",
             "-f",
             compose.to_str().expect("path"),
-            "--json",
+            "--format",
+            "json",
             "--enroot-bin",
             enroot.to_str().expect("path"),
             "--srun-bin",

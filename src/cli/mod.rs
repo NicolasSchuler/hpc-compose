@@ -10,7 +10,7 @@ mod help;
 pub use crate::term::ColorPolicy;
 pub use commands::{
     CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, JobsCommands,
-    RendezvousCommands, SweepCommands,
+    RendezvousCommands, RuntimeLaunchArgs, SweepCommands,
 };
 pub use help::examples_for_path;
 
@@ -53,6 +53,12 @@ pub enum HoldOnExit {
     Never,
     Failure,
     Always,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum SchemaKind {
+    Compose,
+    Settings,
 }
 
 /// Parses process arguments into the top-level CLI struct.

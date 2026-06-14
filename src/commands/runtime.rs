@@ -2243,7 +2243,7 @@ pub(crate) fn smoke_test(
     local: bool,
     submit: bool,
     time: String,
-    timeout: String,
+    wait_timeout: String,
     script_out: Option<PathBuf>,
     keep_failed_prep: bool,
     skip_prepare: bool,
@@ -2259,7 +2259,7 @@ pub(crate) fn smoke_test(
         parse_slurm_time_limit(&time).context("test --time is invalid")?;
     }
     let timeout_seconds =
-        parse_log_since_duration(&timeout).context("test --timeout is invalid")?;
+        parse_log_since_duration(&wait_timeout).context("test --wait-timeout is invalid")?;
     let output_format = output::resolve_output_format(format, false);
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     let scheduler_options = SchedulerOptions {
@@ -2449,7 +2449,7 @@ fn infer_dev_watch_targets(
         let path = absolute_dev_path(cwd, raw_path);
         if !path.is_dir() {
             bail!(
-                "dev --watch-path must point to an existing directory: {}",
+                "dev --watch-paths must point to an existing directory: {}",
                 path.display()
             );
         }
@@ -2458,7 +2458,7 @@ fn infer_dev_watch_targets(
     }
     if roots.is_empty() {
         bail!(
-            "dev could not infer any watchable source directories from service volumes; add --watch-path PATH"
+            "dev could not infer any watchable source directories from service volumes; add --watch-paths PATH"
         );
     }
     roots
@@ -4381,7 +4381,7 @@ pub(crate) fn replay(
     service: Option<String>,
     speed: f64,
     lines: usize,
-    no_tui: bool,
+    watch_mode: WatchMode,
     format: Option<OutputFormat>,
 ) -> Result<()> {
     if !speed.is_finite() || speed <= 0.0 {
@@ -4399,24 +4399,28 @@ pub(crate) fn replay(
             );
             Ok(())
         }
-        OutputFormat::Text if no_tui => print_replay_summary(&report),
-        OutputFormat::Text => {
-            if watch_ui::can_use_watch_ui() {
-                match watch_ui::run_replay_ui(&report, service.as_deref(), lines, speed) {
-                    Ok(()) => Ok(()),
-                    Err(err) => {
-                        let _ = writeln!(
-                            io::stderr(),
-                            "warning: replay UI unavailable ({err}); printing static replay summary"
-                        );
-                        let _ = io::stderr().flush();
-                        print_replay_summary(&report)
+        OutputFormat::Text => match watch_mode {
+            WatchMode::Line => print_replay_summary(&report),
+            WatchMode::Tui => watch_ui::run_replay_ui(&report, service.as_deref(), lines, speed)
+                .context("replay UI requested with --watch-mode tui but could not be started"),
+            WatchMode::Auto => {
+                if watch_ui::can_use_watch_ui() {
+                    match watch_ui::run_replay_ui(&report, service.as_deref(), lines, speed) {
+                        Ok(()) => Ok(()),
+                        Err(err) => {
+                            let _ = writeln!(
+                                io::stderr(),
+                                "warning: replay UI unavailable ({err}); printing static replay summary"
+                            );
+                            let _ = io::stderr().flush();
+                            print_replay_summary(&report)
+                        }
                     }
+                } else {
+                    print_replay_summary(&report)
                 }
-            } else {
-                print_replay_summary(&report)
             }
-        }
+        },
     }
 }
 

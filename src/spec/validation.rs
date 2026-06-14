@@ -218,7 +218,7 @@ pub(super) fn parse_healthcheck_argv(items: &[String]) -> Result<Vec<String>> {
             };
             Ok(shell.split_whitespace().map(ToString::to_string).collect())
         }
-        _ => bail!("healthcheck.test must start with CMD or CMD-SHELL for Compose compatibility"),
+        _ => return Err(SpecError::HealthcheckInvalidTest.into()),
     }
 }
 
@@ -324,9 +324,10 @@ pub(super) fn validate_artifact_bundle_name(name: &str) -> Result<()> {
 pub(super) fn validate_artifact_path(path: &str) -> Result<()> {
     let candidate = Path::new(path);
     if !candidate.is_absolute() {
-        bail!(
-            "x-slurm.artifacts.paths entries must be absolute paths under /hpc-compose/job, got '{path}'"
-        );
+        return Err(SpecError::ArtifactsInvalidPath {
+            path: path.to_string(),
+        }
+        .into());
     }
 
     let mut normalized = Vec::new();
@@ -351,10 +352,13 @@ pub(super) fn validate_artifact_path(path: &str) -> Result<()> {
     if normalized.first().map(String::as_str) != Some("hpc-compose")
         || normalized.get(1).map(String::as_str) != Some("job")
     {
-        bail!("x-slurm.artifacts.paths entries must stay under /hpc-compose/job, got '{path}'");
+        return Err(SpecError::ArtifactsInvalidPath {
+            path: path.to_string(),
+        }
+        .into());
     }
     if normalized.get(2).map(String::as_str) == Some("artifacts") {
-        bail!("x-slurm.artifacts.paths must not read from /hpc-compose/job/artifacts");
+        return Err(SpecError::ArtifactsReadsExportTree.into());
     }
     Ok(())
 }
@@ -367,7 +371,10 @@ pub(super) fn validate_resume_path(path: &str) -> Result<()> {
 
     let candidate = Path::new(trimmed);
     if !candidate.is_absolute() {
-        bail!("x-slurm.resume.path must be an absolute host path, got '{path}'");
+        return Err(SpecError::ResumeRelativePath {
+            path: path.to_string(),
+        }
+        .into());
     }
 
     let mut normalized = Vec::new();
@@ -390,14 +397,21 @@ pub(super) fn validate_resume_path(path: &str) -> Result<()> {
     }
 
     if normalized.first().map(String::as_str) == Some("hpc-compose") {
-        bail!("x-slurm.resume.path must be a host path, not a container-visible /hpc-compose path");
+        return Err(SpecError::ResumeContainerPath {
+            path: path.to_string(),
+        }
+        .into());
     }
     Ok(())
 }
 
 pub(super) fn validate_root(value: &Value) -> Result<()> {
     let Some(root) = value.as_mapping() else {
-        bail!("top-level YAML document must be a mapping");
+        return Err(SpecError::InvalidFieldType {
+            field: "root".into(),
+            got: "non-mapping".into(),
+        }
+        .into());
     };
     validate_mapping_keys("root", root, ROOT_ALLOWED_KEYS)?;
     validate_spec_version(root)?;
@@ -411,17 +425,25 @@ pub(super) fn validate_root(value: &Value) -> Result<()> {
         bail!("spec must not define both top-level 'services' and 'steps'; use only one");
     }
     let Some(services) = services.or(steps) else {
-        bail!("spec must contain a top-level 'services' or 'steps' mapping");
+        return Err(SpecError::MissingServices.into());
     };
     let Some(service_map) = services.as_mapping() else {
-        bail!("'services'/'steps' must be a mapping");
+        return Err(SpecError::InvalidFieldType {
+            field: "services".into(),
+            got: "non-mapping".into(),
+        }
+        .into());
     };
     for (name, service) in service_map {
         let Some(service_name) = name.as_str() else {
             bail!("service names must be strings");
         };
         let Some(service_mapping) = service.as_mapping() else {
-            bail!("service '{service_name}' must be a mapping");
+            return Err(SpecError::InvalidFieldType {
+                field: service_name.to_string(),
+                got: "non-mapping".into(),
+            }
+            .into());
         };
         validate_mapping_keys(
             &format!("service '{service_name}'"),
@@ -533,10 +555,18 @@ fn validate_script_conflicts(service_name: &str, mapping: &Mapping) -> Result<()
         return Ok(());
     }
     if mapping.contains_key(Value::String("command".into())) {
-        bail!("service '{service_name}' sets both script and command; use only one");
+        return Err(SpecError::ScriptCommandConflict {
+            service: service_name.to_string(),
+            conflict: "command".into(),
+        }
+        .into());
     }
     if mapping.contains_key(Value::String("entrypoint".into())) {
-        bail!("service '{service_name}' sets both script and entrypoint; use only one");
+        return Err(SpecError::ScriptCommandConflict {
+            service: service_name.to_string(),
+            conflict: "entrypoint".into(),
+        }
+        .into());
     }
     Ok(())
 }
@@ -565,9 +595,21 @@ fn validate_mapping_keys(scope: &str, mapping: &Mapping, allowed: &[&str]) -> Re
             "deploy" => {
                 "deploy is not supported; this tool targets one Slurm allocation, not a long-running orchestrator"
             }
-            other => bail!("{scope} uses unsupported key '{other}'"),
+            other => {
+                return Err(SpecError::UnsupportedServiceKey {
+                    scope: scope.to_string(),
+                    key: other.to_string(),
+                    help_text: "See the spec reference for supported keys.".into(),
+                }
+                .into());
+            }
         };
-        bail!("{scope}: {message}");
+        return Err(SpecError::UnsupportedServiceKey {
+            scope: scope.to_string(),
+            key: key_name.to_string(),
+            help_text: message.to_string(),
+        }
+        .into());
     }
     Ok(())
 }

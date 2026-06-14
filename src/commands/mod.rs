@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{
     CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, JobsCommands, OutputFormat,
-    RendezvousCommands, SweepCommands, WatchMode,
+    RendezvousCommands, SchemaKind, SweepCommands,
 };
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
@@ -96,7 +96,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             apptainer_bin,
             singularity_bin,
             keep_failed_prep,
-            force,
+            force_rebuild,
+            force_deprecated,
             format,
         } => {
             let binary_overrides = resolve_binary_overrides(
@@ -107,15 +108,26 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--singularity-bin", &singularity_bin),
                 ],
             );
+            if force_deprecated {
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: prepare --force is deprecated; use --force-rebuild instead"
+                );
+            }
             let context = resolve_command_context(options, file, binary_overrides)?;
-            spec::prepare(context, keep_failed_prep, force, format, options.quiet)
+            spec::prepare(
+                context,
+                keep_failed_prep,
+                force_rebuild || force_deprecated,
+                format,
+                options.quiet,
+            )
         }
         Commands::Preflight {
             file,
             strict,
             verbose,
             format,
-            json,
             enroot_bin,
             sbatch_bin,
             srun_bin,
@@ -135,7 +147,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
-            spec::preflight(context, strict, verbose, format, json, options.quiet)
+            spec::preflight(context, strict, verbose, format, false, options.quiet)
         }
         Commands::Inspect {
             file,
@@ -149,7 +161,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             squeue_bin,
             sacct_bin,
             format,
-            json,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
@@ -169,7 +180,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 dependencies_format,
                 job_id,
                 format,
-                json,
+                false,
             )
         }
         Commands::Config {
@@ -181,7 +192,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             spec::config(context, format, variables, show_values)
         }
-        Commands::Schema => print_schema(),
+        Commands::Schema { kind } => print_schema(kind),
         Commands::Plan {
             file,
             strict_env,
@@ -235,6 +246,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             );
             if let Some(command) = command {
                 return run_doctor_subcommand(command, options, binary_overrides, format);
+            }
+            if cluster_report || mpi_smoke || fabric_smoke {
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: doctor flag-based interface is deprecated; use 'doctor cluster-report', 'doctor mpi-smoke', 'doctor fabric-smoke', or 'doctor readiness' subcommands instead"
+                );
             }
             if mpi_smoke && fabric_smoke {
                 bail!("doctor --mpi-smoke cannot be combined with --fabric-smoke");
@@ -304,19 +321,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             weather::weather(format, &binaries)
         }
         Commands::Up {
-            file,
+            launch,
             script_out,
             sbatch_bin,
             srun_bin,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
             squeue_bin,
             sacct_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
             local,
             allow_resume_changes,
             resume_diff_only,
@@ -326,7 +336,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             queue_warn_after,
             watch_mode,
             hold_on_exit,
-            no_tui,
             format,
         } => {
             if format.is_some() && !detach && !dry_run {
@@ -352,24 +361,23 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
-                    ("--enroot-bin", &enroot_bin),
+                    ("--enroot-bin", &launch.enroot_bin),
                     ("--sbatch-bin", &sbatch_bin),
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
+                    ("--apptainer-bin", &launch.apptainer_bin),
+                    ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
-            let context = resolve_command_context(options, file, binary_overrides)?;
-            let watch_mode = resolve_watch_mode(watch_mode, no_tui)?;
+            let context = resolve_command_context(options, launch.file, binary_overrides)?;
             runtime::up(
                 context,
                 script_out,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
+                launch.keep_failed_prep,
+                launch.skip_prepare,
+                launch.force_rebuild,
+                launch.no_preflight,
                 local,
                 allow_resume_changes,
                 resume_diff_only,
@@ -384,116 +392,95 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             )
         }
         Commands::Test {
-            file,
+            launch,
             local,
             submit,
             time,
-            timeout,
+            wait_timeout,
             script_out,
             sbatch_bin,
             srun_bin,
             squeue_bin,
             sacct_bin,
             scancel_bin,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
             format,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
-                    ("--enroot-bin", &enroot_bin),
+                    ("--enroot-bin", &launch.enroot_bin),
                     ("--sbatch-bin", &sbatch_bin),
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
                     ("--scancel-bin", &scancel_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
+                    ("--apptainer-bin", &launch.apptainer_bin),
+                    ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, launch.file, binary_overrides)?;
             runtime::smoke_test(
                 context,
                 local,
                 submit,
                 time,
-                timeout,
+                wait_timeout,
                 script_out,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
+                launch.keep_failed_prep,
+                launch.skip_prepare,
+                launch.force_rebuild,
+                launch.no_preflight,
                 format,
                 options.quiet,
             )
         }
         Commands::Dev {
-            file,
+            launch,
             watch_paths,
             debounce_ms,
             keep_running,
             script_out,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
-                    ("--enroot-bin", &enroot_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
+                    ("--enroot-bin", &launch.enroot_bin),
+                    ("--apptainer-bin", &launch.apptainer_bin),
+                    ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, launch.file, binary_overrides)?;
             runtime::dev(
                 context,
                 watch_paths,
                 debounce_ms,
                 keep_running,
                 script_out,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
+                launch.keep_failed_prep,
+                launch.skip_prepare,
+                launch.force_rebuild,
+                launch.no_preflight,
                 options.quiet,
             )
         }
         Commands::Tmux {
-            file,
+            launch,
             job_id,
             session,
             tmux_bin,
             no_attach,
             lines,
             script_out,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
-                    ("--enroot-bin", &enroot_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
+                    ("--enroot-bin", &launch.enroot_bin),
+                    ("--apptainer-bin", &launch.apptainer_bin),
+                    ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, launch.file, binary_overrides)?;
             runtime::tmux(
                 context,
                 job_id,
@@ -502,10 +489,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 no_attach,
                 lines,
                 script_out,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
+                launch.keep_failed_prep,
+                launch.skip_prepare,
+                launch.force_rebuild,
+                launch.no_preflight,
                 options.quiet,
             )
         }
@@ -568,7 +555,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             }
         },
         Commands::Germinate {
-            file,
+            launch,
             script_out,
             canary_time,
             metrics_interval,
@@ -581,30 +568,23 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             squeue_bin,
             sacct_bin,
             sstat_bin,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
             dry_run,
             format,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
-                    ("--enroot-bin", &enroot_bin),
+                    ("--enroot-bin", &launch.enroot_bin),
                     ("--sbatch-bin", &sbatch_bin),
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
                     ("--sstat-bin", &sstat_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
+                    ("--apptainer-bin", &launch.apptainer_bin),
+                    ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, launch.file, binary_overrides)?;
             runtime::germinate(
                 context,
                 script_out,
@@ -614,17 +594,17 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 min_cpus,
                 min_mem,
                 min_gpus,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
+                launch.keep_failed_prep,
+                launch.skip_prepare,
+                launch.force_rebuild,
+                launch.no_preflight,
                 dry_run,
                 format,
                 options.quiet,
             )
         }
         Commands::When {
-            file,
+            launch,
             partition,
             free_nodes,
             after_job,
@@ -638,18 +618,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             sinfo_bin,
             squeue_bin,
             sacct_bin,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
             allow_resume_changes,
             detach,
             watch_mode,
             hold_on_exit,
-            no_tui,
             format,
         } => {
             if format.is_some() && !detach {
@@ -695,28 +667,27 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
-                    ("--enroot-bin", &enroot_bin),
+                    ("--enroot-bin", &launch.enroot_bin),
                     ("--sbatch-bin", &sbatch_bin),
                     ("--srun-bin", &srun_bin),
                     ("--sinfo-bin", &sinfo_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
+                    ("--apptainer-bin", &launch.apptainer_bin),
+                    ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
-            let context = resolve_command_context(options, file, binary_overrides)?;
-            let watch_mode = resolve_watch_mode(watch_mode, no_tui)?;
+            let context = resolve_command_context(options, launch.file, binary_overrides)?;
             runtime::when(
                 context,
                 conditions,
                 poll_interval,
                 timeout,
                 script_out,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
+                launch.keep_failed_prep,
+                launch.skip_prepare,
+                launch.force_rebuild,
+                launch.no_preflight,
                 allow_resume_changes,
                 detach,
                 watch_mode,
@@ -726,18 +697,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             )
         }
         Commands::Alloc {
-            file,
+            launch,
             mut command,
             salloc_bin,
             srun_bin,
             scontrol_bin,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
         } => {
             if command.first().is_some_and(|arg| arg == "--") {
                 command.remove(0);
@@ -748,19 +712,19 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--salloc-bin", &salloc_bin),
                     ("--srun-bin", &srun_bin),
                     ("--scontrol-bin", &scontrol_bin),
-                    ("--enroot-bin", &enroot_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
+                    ("--enroot-bin", &launch.enroot_bin),
+                    ("--apptainer-bin", &launch.apptainer_bin),
+                    ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, launch.file, binary_overrides)?;
             runtime::alloc(
                 context,
                 command,
-                keep_failed_prep,
-                skip_prepare,
-                force_rebuild,
-                no_preflight,
+                launch.keep_failed_prep,
+                launch.skip_prepare,
+                launch.force_rebuild,
+                launch.no_preflight,
                 options.quiet,
             )
         }
@@ -768,7 +732,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             file,
             job_id,
             format,
-            json,
             array,
             squeue_bin,
             sacct_bin,
@@ -778,12 +741,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::status(context, job_id, format, json, array)
+            runtime::status(context, job_id, format, false, array)
         }
         Commands::Stats {
             file,
             job_id,
-            json,
             format,
             accounting,
             sstat_bin,
@@ -799,7 +761,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 ],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
-            runtime::stats(context, job_id, json, format, accounting)
+            runtime::stats(context, job_id, false, format, accounting)
         }
         Commands::MetricsProbe {
             duration_seconds,
@@ -809,7 +771,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Score {
             job_id,
             file,
-            json,
             format,
             pue,
             gpu_tdp_w,
@@ -830,7 +791,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             runtime::score(
                 context,
                 job_id,
-                json,
+                false,
                 format,
                 pue,
                 gpu_tdp_w,
@@ -856,12 +817,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             file,
             job_id,
             format,
-            json,
             bundles,
             tarball,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
-            runtime::artifacts(context, job_id, format, json, bundles, tarball)
+            runtime::artifacts(context, job_id, format, false, bundles, tarball)
         }
         Commands::Logs {
             file,
@@ -898,14 +858,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             sacct_bin,
             watch_mode,
             hold_on_exit,
-            no_tui,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             );
             let context = resolve_command_context(options, file, binary_overrides)?;
-            let watch_mode = resolve_watch_mode(watch_mode, no_tui)?;
             runtime::watch(context, job_id, service, lines, watch_mode, hold_on_exit)
         }
         Commands::Replay {
@@ -914,11 +872,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             service,
             speed,
             lines,
-            no_tui,
+            watch_mode,
             format,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
-            runtime::replay(context, job_id, service, speed, lines, no_tui, format)
+            runtime::replay(context, job_id, service, speed, lines, watch_mode, format)
         }
         Commands::Debug {
             file,
@@ -999,7 +957,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             runtime::cancel(context, job_id, purge_cache, format)
         }
         Commands::Run {
-            file,
+            launch,
             args,
             image,
             resources,
@@ -1013,30 +971,23 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             script_out,
             sbatch_bin,
             srun_bin,
-            enroot_bin,
-            apptainer_bin,
-            singularity_bin,
             squeue_bin,
             sacct_bin,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
                 &[
-                    ("--enroot-bin", &enroot_bin),
+                    ("--enroot-bin", &launch.enroot_bin),
                     ("--sbatch-bin", &sbatch_bin),
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
-                    ("--apptainer-bin", &apptainer_bin),
-                    ("--singularity-bin", &singularity_bin),
+                    ("--apptainer-bin", &launch.apptainer_bin),
+                    ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
             if let Some(image) = image {
-                if file.is_some() {
+                if launch.file.is_some() {
                     bail!("run --image cannot be combined with -f/--file or service mode");
                 }
                 ensure_run_image_mode_uses_separator(options)?;
@@ -1055,10 +1006,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                         env,
                     },
                     script_out,
-                    keep_failed_prep,
-                    skip_prepare,
-                    force_rebuild,
-                    no_preflight,
+                    launch.keep_failed_prep,
+                    launch.skip_prepare,
+                    launch.force_rebuild,
+                    launch.no_preflight,
                     local,
                     options.quiet,
                 )
@@ -1087,16 +1038,16 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 if cmd.is_empty() {
                     bail!("run service mode requires a command after the service name");
                 }
-                let context = resolve_command_context(options, file, binary_overrides)?;
+                let context = resolve_command_context(options, launch.file, binary_overrides)?;
                 runtime::run_service(
                     context,
                     service,
                     cmd,
                     script_out,
-                    keep_failed_prep,
-                    skip_prepare,
-                    force_rebuild,
-                    no_preflight,
+                    launch.keep_failed_prep,
+                    launch.skip_prepare,
+                    launch.force_rebuild,
+                    launch.no_preflight,
                     options.quiet,
                 )
             }
@@ -1358,17 +1309,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
         ),
         Commands::Completions { shell } => init::completions(shell),
-    }
-}
-
-fn resolve_watch_mode(watch_mode: WatchMode, no_tui: bool) -> Result<WatchMode> {
-    if no_tui {
-        if watch_mode != WatchMode::Auto {
-            bail!("--no-tui cannot be combined with --watch-mode");
-        }
-        Ok(WatchMode::Line)
-    } else {
-        Ok(watch_mode)
     }
 }
 
@@ -1726,12 +1666,16 @@ fn resolve_binary_overrides(
     overrides
 }
 
-fn print_schema() -> Result<()> {
+fn print_schema(kind: Option<SchemaKind>) -> Result<()> {
+    let json = match kind {
+        Some(SchemaKind::Settings) => hpc_compose::schema::settings_schema_json(),
+        _ => hpc_compose::schema::schema_json(),
+    };
     let mut stdout = io::stdout();
     stdout
-        .write_all(hpc_compose::schema::schema_json().as_bytes())
+        .write_all(json.as_bytes())
         .context("failed to write schema to stdout")?;
-    if !hpc_compose::schema::schema_json().ends_with('\n') {
+    if !json.ends_with('\n') {
         stdout
             .write_all(b"\n")
             .context("failed to write schema newline to stdout")?;

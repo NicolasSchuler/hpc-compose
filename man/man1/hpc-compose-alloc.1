@@ -14,18 +14,6 @@ Request one Slurm allocation using the compose file's top\-level x\-slurm settin
 \fB-f\fR, \fB--file\fR \fIFILE\fR
 Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP
-\fICOMMAND\fR
-Optional command to run inside the allocation after \-\-; defaults to $SHELL \-l.
-.TP
-\fB--salloc\-bin\fR \fIPATH\fR
-Path to the salloc executable. Default: salloc.
-.TP
-\fB--srun\-bin\fR \fIPATH\fR
-Path to the srun executable. Default: srun.
-.TP
-\fB--scontrol\-bin\fR \fIPATH\fR
-Path to the scontrol executable. Default: scontrol.
-.TP
 \fB--enroot\-bin\fR \fIPATH\fR
 Path to the enroot executable. Default: enroot.
 .TP
@@ -39,13 +27,25 @@ Path to the singularity executable. Default: singularity.
 Keep failed preparation state on disk for later inspection.
 .TP
 \fB--skip\-prepare\fR
-Skip image preparation and reuse existing artifacts.
+Skip image import and prepare reuse checks.
 .TP
 \fB--force\-rebuild\fR
-Refresh imported and prepared artifacts before opening the allocation.
+Refresh imported and prepared artifacts before running.
 .TP
 \fB--no\-preflight\fR
-Skip the preflight phase before opening the allocation.
+Skip the preflight phase before running.
+.TP
+\fICOMMAND\fR
+Optional command to run inside the allocation after \-\-; defaults to $SHELL \-l.
+.TP
+\fB--salloc\-bin\fR \fIPATH\fR
+Path to the salloc executable. Default: salloc.
+.TP
+\fB--srun\-bin\fR \fIPATH\fR
+Path to the srun executable. Default: srun.
+.TP
+\fB--scontrol\-bin\fR \fIPATH\fR
+Path to the scontrol executable. Default: scontrol.
 .TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.

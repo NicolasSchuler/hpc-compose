@@ -14,6 +14,27 @@ Launch or attach to a tracked local run and create one tmux pane per service, ea
 \fB-f\fR, \fB--file\fR \fIFILE\fR
 Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP
+\fB--enroot\-bin\fR \fIPATH\fR
+Path to the enroot executable. Default: enroot.
+.TP
+\fB--apptainer\-bin\fR \fIPATH\fR
+Path to the apptainer executable. Default: apptainer.
+.TP
+\fB--singularity\-bin\fR \fIPATH\fR
+Path to the singularity executable. Default: singularity.
+.TP
+\fB--keep\-failed\-prep\fR
+Keep failed preparation state on disk for later inspection.
+.TP
+\fB--skip\-prepare\fR
+Skip image import and prepare reuse checks.
+.TP
+\fB--force\-rebuild\fR
+Refresh imported and prepared artifacts before running.
+.TP
+\fB--no\-preflight\fR
+Skip the preflight phase before running.
+.TP
 \fB--job\-id\fR \fIJOB_ID\fR
 Tracked local job id to attach to instead of launching a new local run.
 .TP
@@ -31,27 +52,6 @@ Number of existing log lines each pane should show before following. Default: 10
 .TP
 \fB--script\-out\fR \fIOUTPUT\fR
 Write the rendered local launcher script to this path when launching.
-.TP
-\fB--enroot\-bin\fR \fIPATH\fR
-Path to the enroot executable. Default: enroot.
-.TP
-\fB--apptainer\-bin\fR \fIPATH\fR
-Path to the apptainer executable. Default: apptainer.
-.TP
-\fB--singularity\-bin\fR \fIPATH\fR
-Path to the singularity executable. Default: singularity.
-.TP
-\fB--keep\-failed\-prep\fR
-Keep failed preparation state on disk for later inspection.
-.TP
-\fB--skip\-prepare\fR
-Skip image preparation and reuse existing artifacts.
-.TP
-\fB--force\-rebuild\fR
-Refresh imported and prepared artifacts before launch.
-.TP
-\fB--no\-preflight\fR
-Skip the preflight phase before launch.
 .TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.

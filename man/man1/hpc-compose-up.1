@@ -14,15 +14,6 @@ Run the normal end\-to\-end workflow: optional preflight, image preparation, scr
 \fB-f\fR, \fB--file\fR \fIFILE\fR
 Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP
-\fB--script\-out\fR \fIOUTPUT\fR
-Write the rendered launcher script to this path before submission or local launch.
-.TP
-\fB--sbatch\-bin\fR \fIPATH\fR
-Path to the sbatch executable. Default: sbatch.
-.TP
-\fB--srun\-bin\fR \fIPATH\fR
-Path to the srun executable. Default: srun.
-.TP
 \fB--enroot\-bin\fR \fIPATH\fR
 Path to the enroot executable. Default: enroot.
 .TP
@@ -32,23 +23,32 @@ Path to the apptainer executable. Default: apptainer.
 \fB--singularity\-bin\fR \fIPATH\fR
 Path to the singularity executable. Default: singularity.
 .TP
+\fB--keep\-failed\-prep\fR
+Keep failed preparation state on disk for later inspection.
+.TP
+\fB--skip\-prepare\fR
+Skip image import and prepare reuse checks.
+.TP
+\fB--force\-rebuild\fR
+Refresh imported and prepared artifacts before running.
+.TP
+\fB--no\-preflight\fR
+Skip the preflight phase before running.
+.TP
+\fB--script\-out\fR \fIOUTPUT\fR
+Write the rendered launcher script to this path before submission or local launch.
+.TP
+\fB--sbatch\-bin\fR \fIPATH\fR
+Path to the sbatch executable. Default: sbatch.
+.TP
+\fB--srun\-bin\fR \fIPATH\fR
+Path to the srun executable. Default: srun.
+.TP
 \fB--squeue\-bin\fR \fIPATH\fR
 Path to the squeue executable. Default: squeue.
 .TP
 \fB--sacct\-bin\fR \fIPATH\fR
 Path to the sacct executable. Default: sacct.
-.TP
-\fB--keep\-failed\-prep\fR
-Keep failed preparation state on disk for later inspection.
-.TP
-\fB--skip\-prepare\fR
-Skip image preparation and reuse existing artifacts.
-.TP
-\fB--force\-rebuild\fR
-Refresh imported and prepared artifacts before submission.
-.TP
-\fB--no\-preflight\fR
-Skip the preflight phase before submission.
 .TP
 \fB--local\fR
 Launch the plan locally with Enroot instead of submitting it to Slurm.

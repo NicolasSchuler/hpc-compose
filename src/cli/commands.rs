@@ -6,7 +6,7 @@ use clap_complete::Shell;
 use super::help::*;
 use super::{
     ColorPolicy, DependencyOutputFormat, ExamplesOutputFormat, HoldOnExit, OutputFormat,
-    StatsOutputFormat, WatchMode,
+    SchemaKind, StatsOutputFormat, WatchMode,
 };
 
 #[derive(Debug, Parser)]
@@ -49,6 +49,92 @@ pub struct Cli {
     pub settings_file: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// Common runtime launch flags shared across `up`, `germinate`, `test`, `dev`,
+/// `tmux`, `when`, `alloc`, and `run`.
+#[derive(Debug, clap::Args)]
+pub struct RuntimeLaunchArgs {
+    #[arg(
+        short = 'f',
+        long,
+        value_name = "FILE",
+        help = FILE_ARG_HELP
+    )]
+    pub file: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "enroot",
+        help_heading = "Tool overrides",
+        help = "Path to the enroot executable"
+    )]
+    pub enroot_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "apptainer",
+        help_heading = "Tool overrides",
+        help = "Path to the apptainer executable"
+    )]
+    pub apptainer_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "singularity",
+        help_heading = "Tool overrides",
+        help = "Path to the singularity executable"
+    )]
+    pub singularity_bin: String,
+    #[arg(
+        long,
+        help = "Keep failed preparation state on disk for later inspection"
+    )]
+    pub keep_failed_prep: bool,
+    #[arg(long, help = "Skip image import and prepare reuse checks")]
+    pub skip_prepare: bool,
+    #[arg(long, help = "Refresh imported and prepared artifacts before running")]
+    pub force_rebuild: bool,
+    #[arg(long, help = "Skip the preflight phase before running")]
+    pub no_preflight: bool,
+}
+
+/// Slurm submission tool overrides shared across `up`, `germinate`, `test`,
+/// `when`, and `run`.
+#[derive(Debug, clap::Args)]
+pub struct SlurmSubmitArgs {
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "sbatch",
+        help_heading = "Tool overrides",
+        help = "Path to the sbatch executable"
+    )]
+    pub sbatch_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "srun",
+        help_heading = "Tool overrides",
+        help = "Path to the srun executable"
+    )]
+    pub srun_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "squeue",
+        help_heading = "Tool overrides",
+        help = "Path to the squeue executable"
+    )]
+    pub squeue_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "sacct",
+        help_heading = "Tool overrides",
+        help = "Path to the sacct executable"
+    )]
+    pub sacct_bin: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -165,10 +251,16 @@ pub enum Commands {
         )]
         keep_failed_prep: bool,
         #[arg(
-            long,
-            help = "Refresh imported and prepared artifacts even when cache entries exist"
+            long = "force-rebuild",
+            help = "Refresh imported and prepared artifacts before running"
         )]
-        force: bool,
+        force_rebuild: bool,
+        #[arg(
+            long = "force",
+            hide = true,
+            help = "Deprecated alias for --force-rebuild"
+        )]
+        force_deprecated: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -192,8 +284,6 @@ pub enum Commands {
         verbose: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
-        #[arg(long, hide = true, conflicts_with = "format")]
-        json: bool,
         #[arg(
             long,
             value_name = "PATH",
@@ -323,8 +413,6 @@ pub enum Commands {
         sacct_bin: String,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
-        #[arg(long, hide = true, conflicts_with = "format")]
-        json: bool,
     },
     #[command(
         display_order = 420,
@@ -354,10 +442,17 @@ pub enum Commands {
     #[command(
         display_order = 470,
         about = "Print the hpc-compose JSON Schema",
-        long_about = "Print the checked-in JSON Schema for compose authoring tools. Rust validation remains the semantic source of truth.",
+        long_about = "Print the checked-in JSON Schema for compose authoring tools (default) or settings.toml authoring tools (--kind settings). Rust validation remains the semantic source of truth.",
         after_help = SCHEMA_HELP
     )]
-    Schema,
+    Schema {
+        #[arg(
+            long,
+            value_name = "KIND",
+            help = "Which schema to print: 'compose' (default) or 'settings'"
+        )]
+        kind: Option<SchemaKind>,
+    },
     #[command(
         display_order = 100,
         about = "Validate and preview a static execution plan",
@@ -570,13 +665,8 @@ pub enum Commands {
         after_help = UP_HELP
     )]
     Up {
-        #[arg(
-            short = 'f',
-            long,
-            value_name = "FILE",
-            help = FILE_ARG_HELP
-        )]
-        file: Option<PathBuf>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
         #[arg(
             long,
             value_name = "OUTPUT",
@@ -602,30 +692,6 @@ pub enum Commands {
         #[arg(
             long,
             value_name = "PATH",
-            default_value = "enroot",
-            help_heading = "Tool overrides",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help_heading = "Tool overrides",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help_heading = "Tool overrides",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
             default_value = "squeue",
             help_heading = "Tool overrides",
             help = "Path to the squeue executable"
@@ -639,20 +705,6 @@ pub enum Commands {
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(
-            long,
-            help = "Refresh imported and prepared artifacts before submission"
-        )]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before submission")]
-        no_preflight: bool,
         #[arg(
             long,
             help = "Launch the plan locally with Enroot instead of submitting it to Slurm",
@@ -705,12 +757,6 @@ pub enum Commands {
         hold_on_exit: HoldOnExit,
         #[arg(
             long,
-            help = "Use line-oriented watch output instead of the terminal UI",
-            hide = true
-        )]
-        no_tui: bool,
-        #[arg(
-            long,
             value_enum,
             value_name = "FORMAT",
             help = "Output format for --detach or --dry-run"
@@ -733,8 +779,8 @@ pub enum Commands {
         long_about = "Submit a minimized Slurm canary allocation, force metrics sampling on, wait for it to finish, then compare observed usage against the original compose request and print right-sizing recommendations."
     )]
     Germinate {
-        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
-        file: Option<PathBuf>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
         #[arg(
             long,
             value_name = "OUTPUT",
@@ -823,44 +869,6 @@ pub enum Commands {
             help = "Path to the sstat executable"
         )]
         sstat_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "enroot",
-            help_heading = "Tool overrides",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help_heading = "Tool overrides",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help_heading = "Tool overrides",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(
-            long,
-            help = "Refresh imported and prepared artifacts before submission"
-        )]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before submission")]
-        no_preflight: bool,
         #[arg(long, help = "Render the canary script without submitting it")]
         dry_run: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
@@ -874,8 +882,8 @@ pub enum Commands {
         after_help = TEST_HELP
     )]
     Test {
-        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
-        file: Option<PathBuf>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
         #[arg(
             long,
             help = "Run the smoke test through the local Pyxis/Enroot supervisor"
@@ -891,12 +899,13 @@ pub enum Commands {
         )]
         time: String,
         #[arg(
-            long,
+            long = "wait-timeout",
+            alias = "timeout",
             value_name = "DURATION",
             default_value = "180s",
             help = "Maximum time to wait for the smoke test to reach a terminal result"
         )]
-        timeout: String,
+        wait_timeout: String,
         #[arg(
             long,
             value_name = "OUTPUT",
@@ -943,41 +952,6 @@ pub enum Commands {
             help = "Path to the scancel executable"
         )]
         scancel_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "enroot",
-            help_heading = "Tool overrides",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help_heading = "Tool overrides",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help_heading = "Tool overrides",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(long, help = "Refresh imported and prepared artifacts before launch")]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before launch")]
-        no_preflight: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -988,10 +962,11 @@ pub enum Commands {
         after_help = DEV_HELP
     )]
     Dev {
-        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
-        file: Option<PathBuf>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
         #[arg(
-            long = "watch-path",
+            long = "watch-paths",
+            alias = "watch-path",
             value_name = "PATH",
             help = "Additional source directory to watch; restarts all services when it changes"
         )]
@@ -1011,41 +986,6 @@ pub enum Commands {
             help = "Write the rendered local launcher script to this path"
         )]
         script_out: Option<PathBuf>,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "enroot",
-            help_heading = "Tool overrides",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help_heading = "Tool overrides",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help_heading = "Tool overrides",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(long, help = "Refresh imported and prepared artifacts before launch")]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before launch")]
-        no_preflight: bool,
     },
     #[command(
         display_order = 116,
@@ -1054,8 +994,8 @@ pub enum Commands {
         after_help = TMUX_HELP
     )]
     Tmux {
-        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
-        file: Option<PathBuf>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
         #[arg(
             long,
             value_name = "JOB_ID",
@@ -1091,56 +1031,16 @@ pub enum Commands {
             help = "Write the rendered local launcher script to this path when launching"
         )]
         script_out: Option<PathBuf>,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "enroot",
-            help_heading = "Tool overrides",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help_heading = "Tool overrides",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help_heading = "Tool overrides",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(long, help = "Refresh imported and prepared artifacts before launch")]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before launch")]
-        no_preflight: bool,
     },
     #[command(
-        display_order = 112,
+        display_order = 117,
         about = "Submit once cluster conditions are met",
         long_about = "Prepare and render the compose job now, then monitor Slurm or local wall-clock conditions in the foreground and submit automatically when every condition is satisfied.",
         after_help = WHEN_HELP
     )]
     When {
-        #[arg(
-            short = 'f',
-            long,
-            value_name = "FILE",
-            help = FILE_ARG_HELP
-        )]
-        file: Option<PathBuf>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
         #[arg(
             long,
             value_name = "PARTITION",
@@ -1235,44 +1135,6 @@ pub enum Commands {
         sacct_bin: String,
         #[arg(
             long,
-            value_name = "PATH",
-            default_value = "enroot",
-            help_heading = "Tool overrides",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help_heading = "Tool overrides",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help_heading = "Tool overrides",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(
-            long,
-            help = "Refresh imported and prepared artifacts before monitoring"
-        )]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before monitoring")]
-        no_preflight: bool,
-        #[arg(
-            long,
             help = "Allow submission even when resume config drift is detected"
         )]
         allow_resume_changes: bool,
@@ -1296,12 +1158,6 @@ pub enum Commands {
         hold_on_exit: HoldOnExit,
         #[arg(
             long,
-            help = "Use line-oriented watch output instead of the terminal UI",
-            hide = true
-        )]
-        no_tui: bool,
-        #[arg(
-            long,
             value_enum,
             value_name = "FORMAT",
             help = "Output format for --detach"
@@ -1315,13 +1171,8 @@ pub enum Commands {
         after_help = ALLOC_HELP
     )]
     Alloc {
-        #[arg(
-            short = 'f',
-            long,
-            value_name = "FILE",
-            help = FILE_ARG_HELP
-        )]
-        file: Option<PathBuf>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
         #[arg(
             value_name = "COMMAND",
             num_args = 0..,
@@ -1354,44 +1205,6 @@ pub enum Commands {
             help = "Path to the scontrol executable"
         )]
         scontrol_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "enroot",
-            help_heading = "Tool overrides",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help_heading = "Tool overrides",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help_heading = "Tool overrides",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(
-            long,
-            help = "Refresh imported and prepared artifacts before opening the allocation"
-        )]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before opening the allocation")]
-        no_preflight: bool,
     },
     #[command(
         display_order = 220,
@@ -1415,8 +1228,6 @@ pub enum Commands {
         job_id: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
-        #[arg(long, hide = true, conflicts_with = "format")]
-        json: bool,
         #[arg(
             long,
             help = "Include Slurm array task rows from squeue --array and sacct --array"
@@ -1459,8 +1270,6 @@ pub enum Commands {
             help = "Tracked Slurm job id to inspect instead of the latest recorded submission"
         )]
         job_id: Option<String>,
-        #[arg(long, hide = true, conflicts_with = "format")]
-        json: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<StatsOutputFormat>,
         #[arg(
@@ -1532,8 +1341,6 @@ pub enum Commands {
             help = FILE_ARG_HELP
         )]
         file: Option<PathBuf>,
-        #[arg(long, hide = true, conflicts_with = "format")]
-        json: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
@@ -1636,8 +1443,6 @@ pub enum Commands {
         job_id: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
-        #[arg(long, hide = true, conflicts_with = "format")]
-        json: bool,
         #[arg(
             long = "bundle",
             value_name = "NAME",
@@ -1799,12 +1604,6 @@ pub enum Commands {
             help = "Keep the watch UI open after terminal states"
         )]
         hold_on_exit: HoldOnExit,
-        #[arg(
-            long,
-            help = "Use line-oriented watch output instead of the terminal UI",
-            hide = true
-        )]
-        no_tui: bool,
     },
     #[command(
         display_order = 215,
@@ -1849,10 +1648,12 @@ pub enum Commands {
         lines: usize,
         #[arg(
             long,
-            help = "Print a static event summary instead of opening the TUI",
-            hide = true
+            value_enum,
+            value_name = "MODE",
+            default_value = "auto",
+            help = "Watch output mode"
         )]
-        no_tui: bool,
+        watch_mode: WatchMode,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -2035,13 +1836,8 @@ pub enum Commands {
         after_help = RUN_HELP
     )]
     Run {
-        #[arg(
-            short = 'f',
-            long,
-            value_name = "FILE",
-            help = FILE_ARG_HELP
-        )]
-        file: Option<PathBuf>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
         #[arg(
             value_name = "ARGS",
             required = true,
@@ -2129,30 +1925,6 @@ pub enum Commands {
         #[arg(
             long,
             value_name = "PATH",
-            default_value = "enroot",
-            help_heading = "Tool overrides",
-            help = "Path to the enroot executable"
-        )]
-        enroot_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "apptainer",
-            help_heading = "Tool overrides",
-            help = "Path to the apptainer executable"
-        )]
-        apptainer_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = "singularity",
-            help_heading = "Tool overrides",
-            help = "Path to the singularity executable"
-        )]
-        singularity_bin: String,
-        #[arg(
-            long,
-            value_name = "PATH",
             default_value = "squeue",
             help_heading = "Tool overrides",
             help = "Path to the squeue executable"
@@ -2166,20 +1938,6 @@ pub enum Commands {
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
-        #[arg(
-            long,
-            help = "Keep failed preparation state on disk for later inspection"
-        )]
-        keep_failed_prep: bool,
-        #[arg(long, help = "Skip image preparation and reuse existing artifacts")]
-        skip_prepare: bool,
-        #[arg(
-            long,
-            help = "Refresh imported and prepared artifacts before submission"
-        )]
-        force_rebuild: bool,
-        #[arg(long, help = "Skip the preflight phase before submission")]
-        no_preflight: bool,
     },
     #[command(
         display_order = 125,
@@ -2475,7 +2233,7 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
-        display_order = 465,
+        display_order = 466,
         about = "Search shipped examples and starter templates",
         long_about = "List, search, and render a coverage table for shipped hpc-compose examples and built-in starter templates.",
         after_help = EXAMPLES_HELP

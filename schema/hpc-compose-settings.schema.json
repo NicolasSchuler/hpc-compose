@@ -1,0 +1,204 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "$id": "https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose-settings.schema.json",
+  "title": "hpc-compose settings",
+  "description": "Settings file for hpc-compose (.hpc-compose/settings.toml). Rust validation remains the semantic source of truth.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Settings schema version. Currently only version 1 is supported."
+    },
+    "default_profile": {
+      "type": "string",
+      "description": "Name of the profile to use when --profile is not given on the command line."
+    },
+    "defaults": {
+      "$ref": "#/definitions/profileDefaults"
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/profileDefaults"
+      },
+      "description": "Named profiles selectable with --profile <name>."
+    },
+    "resource_profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/resourceProfile"
+      },
+      "description": "Reusable Slurm resource defaults referenced from x-slurm.resources in compose files."
+    }
+  },
+  "definitions": {
+    "profileDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "compose_file": {
+          "type": "string",
+          "description": "Default compose file path for this profile."
+        },
+        "env_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional .env files to load, resolved relative to the settings base directory."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Static interpolation variables for this profile."
+        },
+        "binaries": {
+          "$ref": "#/definitions/binaryOverrides"
+        },
+        "cache": {
+          "$ref": "#/definitions/cacheSettings"
+        }
+      }
+    },
+    "binaryOverrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enroot": {
+          "type": "string",
+          "description": "Path to the enroot executable."
+        },
+        "apptainer": {
+          "type": "string",
+          "description": "Path to the apptainer executable."
+        },
+        "singularity": {
+          "type": "string",
+          "description": "Path to the singularity executable."
+        },
+        "salloc": {
+          "type": "string"
+        },
+        "sbatch": {
+          "type": "string"
+        },
+        "srun": {
+          "type": "string"
+        },
+        "scontrol": {
+          "type": "string"
+        },
+        "sinfo": {
+          "type": "string"
+        },
+        "squeue": {
+          "type": "string"
+        },
+        "sacct": {
+          "type": "string"
+        },
+        "sstat": {
+          "type": "string"
+        },
+        "scancel": {
+          "type": "string"
+        },
+        "sshare": {
+          "type": "string"
+        },
+        "sprio": {
+          "type": "string"
+        }
+      }
+    },
+    "cacheSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Shared cache directory visible from both the Slurm submission host and compute nodes."
+        }
+      }
+    },
+    "resourceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "partition": {
+          "type": "string"
+        },
+        "account": {
+          "type": "string"
+        },
+        "qos": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string",
+          "description": "Slurm walltime, e.g. 01:00:00."
+        },
+        "nodes": {
+          "$ref": "#/definitions/positiveInteger"
+        },
+        "ntasks": {
+          "$ref": "#/definitions/positiveInteger"
+        },
+        "ntasks_per_node": {
+          "$ref": "#/definitions/positiveInteger"
+        },
+        "cpus_per_task": {
+          "$ref": "#/definitions/positiveInteger"
+        },
+        "mem": {
+          "type": "string",
+          "description": "Memory request, e.g. 16G."
+        },
+        "gres": {
+          "type": "string"
+        },
+        "gpus": {
+          "$ref": "#/definitions/positiveInteger"
+        },
+        "gpus_per_node": {
+          "$ref": "#/definitions/positiveInteger"
+        },
+        "gpus_per_task": {
+          "$ref": "#/definitions/positiveInteger"
+        },
+        "cpus_per_gpu": {
+          "$ref": "#/definitions/positiveInteger"
+        },
+        "mem_per_gpu": {
+          "type": "string"
+        },
+        "gpu_bind": {
+          "type": "string"
+        },
+        "cpu_bind": {
+          "type": "string"
+        },
+        "mem_bind": {
+          "type": "string"
+        },
+        "distribution": {
+          "type": "string"
+        },
+        "hint": {
+          "type": "string"
+        },
+        "constraint": {
+          "type": "string"
+        }
+      }
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

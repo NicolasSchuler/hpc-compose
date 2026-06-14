@@ -203,6 +203,17 @@ Use these commands and global flags when you want the project-local settings fil
 | `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. |
 | `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
 
+### Lint rules
+
+`hpc-compose lint` emits stable finding codes after validation and planning succeed. Warning-level findings can be promoted to errors with `--strict`; use `--allow-warnings` to keep warning-only results successful.
+
+| Code | Severity | Trigger | Recommendation |
+| --- | --- | --- | --- |
+| `HPC001` | warning | A service uses `depends_on` with `condition: service_started` against an upstream service that has no `readiness` probe. The dependency may fire before the upstream is actually ready. | Add a `readiness` block to the upstream service, or switch to `service_completed_successfully` for one-shot dependencies. |
+| `HPC002` | warning | `x-slurm.mem` gives fewer than 512 MiB or more than 512 GiB per requested CPU. Very low ratios may OOM; very high ratios may queue poorly or violate site policy. | Adjust `x-slurm.mem` or CPU/task counts to land in the expected band. |
+| `HPC003` | warning | A service with `failure_policy.mode: ignore` has a writable mount from a shared cache path. Ignored failures can leave corrupt state for subsequent jobs. | Use a read-only mount, write to job-local scratch, or avoid `mode: ignore` for services that mutate shared state. |
+| `HPC900` | warning | Cluster profile advisory: the site cluster profile (`doctor cluster-report`) detected a runtime-plan mismatch such as a shared-cache path, port-range overlap, or MPI configuration concern. | Inspect the finding message for the specific cluster-level concern and adjust the spec or cluster profile accordingly. |
+
 ## `x-slurm`
 
 These fields live under the top-level `x-slurm` block.
@@ -444,6 +455,20 @@ x-slurm:
 - `stage_out.when` is `always`, `on_success`, or `on_failure`.
 - `${SLURM_JOB_ID}` is preserved in scratch and staging paths for runtime expansion.
 - `burst_buffer.directives` entries are emitted as raw batch-script directives and must start with `#BB ` or `#DW `.
+
+#### Per-service scratch opt-out
+
+When top-level `x-slurm.scratch` is configured, every service receives the scratch mount by default. To exclude an individual service (for example, a sidecar that should not see job-local scratch), set `services.<name>.x-slurm.scratch.enabled: false`:
+
+```yaml
+services:
+  helper:
+    image: busybox
+    command: /bin/true
+    x-slurm:
+      scratch:
+        enabled: false
+```
 
 ### Multi-node placement rules
 
@@ -867,6 +892,7 @@ These fields live under `services.<name>.x-slurm`.
 | `prologue` | string or mapping | omitted | Per-service shell hook run before each launch attempt. String shorthand runs on the host. |
 | `epilogue` | string or mapping | omitted | Per-service shell hook run after each service exit attempt. String shorthand runs on the host. |
 | `hooks` | list of mappings | omitted | Host-side event hooks for failure-policy transitions such as accepted restarts and crash-loop window exhaustion. |
+| `scratch` | mapping | omitted | Per-service scratch opt-out. Set `enabled: false` to exclude a service from the shared scratch mount when top-level `x-slurm.scratch` is configured. |
 | `rendezvous` | mapping | omitted | Provider registration config for cross-job service discovery. |
 
 ### `services.<name>.x-slurm.rendezvous`

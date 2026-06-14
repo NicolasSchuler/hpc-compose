@@ -1,13 +1,9 @@
 use std::fmt::Display;
 use std::path::PathBuf;
 
-#[expect(
-    dead_code,
-    reason = "structured spec diagnostics are being introduced incrementally and not every variant is constructed yet"
-)]
 #[derive(Debug, miette::Diagnostic, thiserror::Error)]
 pub(crate) enum SpecError {
-    #[error("spec must contain a top-level 'services' mapping")]
+    #[error("spec must contain a top-level 'services' or 'steps' mapping")]
     #[diagnostic(
         code(hpc_compose::spec::missing_services),
         help("Add a top-level `services:` key with at least one service definition.")
@@ -21,10 +17,10 @@ pub(crate) enum SpecError {
     )]
     InvalidFieldType { field: String, got: String },
 
-    #[error("service '{service}' uses unsupported key '{key}'")]
+    #[error("{scope} uses unsupported key '{key}'")]
     #[diagnostic(code(hpc_compose::spec::unsupported_key), help("{help_text}"))]
     UnsupportedServiceKey {
-        service: String,
+        scope: String,
         key: String,
         help_text: String,
     },
@@ -85,12 +81,12 @@ pub(crate) enum SpecError {
     ReadinessHealthcheckConflict { service: String },
 
     #[error(
-        "service '{service}' has both 'command' ({form_a}) and 'entrypoint' ({form_b}); they must use the same form"
+        "service '{service}' mixes {form_a}-form entrypoint with multi-line string command; use script or an explicit command list instead"
     )]
     #[diagnostic(
         code(hpc_compose::spec::mixed_command_forms),
         help(
-            "Use either string form for both (`command: \"python app.py\"`) or list form for both (`command: [\"python\", \"app.py\"]`)."
+            "Use either `script:` for multi-line shell, or matching `command`/`entrypoint` forms (both string or both list)."
         )
     )]
     MixedCommandForms {
@@ -114,6 +110,98 @@ pub(crate) enum SpecError {
         help("Use a value of at least 1 second. The default is 5 seconds.")
     )]
     MetricsIntervalTooLow,
+
+    #[error("service '{service}' sets both script and {conflict}; use only one")]
+    #[diagnostic(
+        code(hpc_compose::spec::script_command_conflict),
+        help(
+            "Remove either `script:` or the conflicting `command:`/`entrypoint:` key. `script` is shorthand for `/bin/sh -lc '<script>'`."
+        )
+    )]
+    ScriptCommandConflict { service: String, conflict: String },
+
+    #[error(
+        "service '{service}' sets both x-runtime.prepare and x-enroot.prepare; use only x-runtime.prepare for new specs"
+    )]
+    #[diagnostic(
+        code(hpc_compose::spec::duplicate_prepare_hook),
+        help(
+            "`x-enroot.prepare` is a Pyxis/Enroot compatibility spelling. `x-runtime.prepare` works across all backends."
+        )
+    )]
+    DuplicatePrepareHook { service: String },
+
+    #[error(
+        "service '{service}' uses x-enroot.prepare with runtime.backend={backend}; use x-runtime.prepare for non-Pyxis backends"
+    )]
+    #[diagnostic(
+        code(hpc_compose::spec::enroot_prepare_requires_pyxis),
+        help(
+            "Switch to `x-runtime.prepare` which is backend-agnostic, or set `runtime.backend: pyxis`."
+        )
+    )]
+    EnrootPrepareRequiresPyxis { service: String, backend: String },
+
+    #[error(
+        "depends_on condition for service '{service}' must be 'service_started', 'service_healthy', or 'service_completed_successfully', got '{got}'"
+    )]
+    #[diagnostic(
+        code(hpc_compose::spec::invalid_dependency_condition),
+        help("Use one of the three supported Compose dependency conditions.")
+    )]
+    InvalidDependencyCondition { service: String, got: String },
+
+    #[error("environment list items must use KEY=VALUE syntax")]
+    #[diagnostic(
+        code(hpc_compose::spec::invalid_environment_entry),
+        help(
+            "Each list item under `environment:` must be a `KEY=VALUE` string, or switch to mapping form (`KEY: VALUE`)."
+        )
+    )]
+    InvalidEnvironmentEntry,
+
+    #[error("x-slurm.artifacts must contain at least one source path in paths or bundles")]
+    #[diagnostic(
+        code(hpc_compose::spec::artifacts_no_sources),
+        help("Add at least one entry under `paths:` or define a named `bundles:` entry.")
+    )]
+    ArtifactsNoSources,
+
+    #[error("x-slurm.artifacts.paths must not read from /hpc-compose/job/artifacts")]
+    #[diagnostic(
+        code(hpc_compose::spec::artifacts_reads_export_tree),
+        help(
+            "Artifact collection sources must not read from the export directory itself. Use a different `/hpc-compose/job/` subpath."
+        )
+    )]
+    ArtifactsReadsExportTree,
+
+    #[error("x-slurm.resume.path must be a host path, not a container-visible /hpc-compose path")]
+    #[diagnostic(
+        code(hpc_compose::spec::resume_container_path),
+        help(
+            "Use an absolute host path like `/shared/$USER/runs/my-run` that is visible from both the login node and compute nodes."
+        )
+    )]
+    ResumeContainerPath { path: String },
+
+    #[error(
+        "healthcheck.{field} is not supported; use healthcheck.timeout or explicit readiness instead"
+    )]
+    #[diagnostic(
+        code(hpc_compose::spec::healthcheck_unsupported_field),
+        help(
+            "Only `test`, `timeout`, and `disable` are supported in `healthcheck`. Use the native `readiness` block for interval/retries/start_period semantics."
+        )
+    )]
+    HealthcheckUnsupportedField { service: String, field: String },
+
+    #[error("{field} must not be empty")]
+    #[diagnostic(
+        code(hpc_compose::spec::empty_field),
+        help("Provide a non-empty value or remove the field if it is optional.")
+    )]
+    EmptyField { field: String },
 
     #[error("failed to load compose spec from {}", path.display())]
     #[diagnostic(
@@ -256,7 +344,7 @@ mod tests {
         assert!(invalid_type.diagnostic_source().is_none());
 
         let unsupported = SpecError::UnsupportedServiceKey {
-            service: "api".into(),
+            scope: "service 'api'".into(),
             key: "build".into(),
             help_text: "Use image instead.".into(),
         };

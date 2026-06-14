@@ -11,7 +11,7 @@ This page maps the public `hpc-compose` CLI by workflow. Use [Quickstart](quicks
 | `-f`, `--file <FILE>` | Select the compose file on compose-aware commands | When omitted, `hpc-compose` uses the active context compose file or falls back to `compose.yaml`. |
 | `--color auto|always|never` | Control ANSI color output | Use `--color never` for logs, CI captures, or assistive tooling that should receive plain text. |
 | `--quiet` | Suppress non-essential progress labels | Useful when a wrapper only needs command output and errors. |
-| `--format json` | Machine-readable output | Preferred on non-streaming commands. `--json` remains available only as a compatibility alias on older machine-readable commands. |
+| `--format json` | Machine-readable output | Preferred on non-streaming commands. |
 
 ## Authoring and Setup
 
@@ -72,7 +72,7 @@ hpc-compose completions zsh
 | `doctor mpi-smoke` | Render or run a small MPI probe for one service | Reports requested/advertised MPI types, MPI profile metadata, discovered MPI installs, host MPI binds/env, and rendered `srun`; add `--submit` to consume a Slurm allocation. |
 | `doctor fabric-smoke` | Render or run MPI/NCCL/UCX/OFI smoke probes for one MPI service | Use `--checks auto` or a comma-separated list such as `mpi,nccl`; render-only by default, `--submit` consumes a Slurm allocation. |
 | `weather` | Show advisory live cluster conditions | One-shot dashboard from `sinfo`, `squeue`, optional `sshare`, and optional `sprio`; does not reserve resources or change submission behavior. |
-| `prepare` | Import images and build prepared runtime artifacts | Use `--force` when the base image or prepare inputs changed. |
+| `prepare` | Import images and build prepared runtime artifacts | Use `--force-rebuild` when the base image or prepare inputs changed. |
 | `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. |
 | `up` | Run the one-command launch/watch/logs workflow | Preferred normal run on a real cluster. Uses a spec-scoped `.hpc-compose/locks/*.up.lock` to prevent concurrent `up` races. |
 | `test` | Smoke-test a finite spec end to end | Requires explicit `--local` or `--submit`; every service must start, pass configured readiness, and complete successfully. |
@@ -150,7 +150,7 @@ Useful workflow flags:
 - `--format text|json` is accepted with `--detach` or `--dry-run`.
 - `--watch-queue` waits in line-oriented queue output until the Slurm job reaches `RUNNING`, then opens the normal watch view.
 - `--queue-warn-after <DURATION>` warns once when `--watch-queue` stays `PENDING` longer than the threshold; the default is `10m`, and `0` disables the warning.
-- `--watch-mode auto|tui|line` selects the live output mode. The older `--no-tui` alias still works for compatibility.
+- `--watch-mode auto|tui|line` selects the live output mode.
 - `--hold-on-exit never|failure|always` controls whether the TUI stays open after the job reaches a terminal scheduler state.
 - `--allow-resume-changes` acknowledges an intentional change to resume-coupled config between tracked runs.
 - `--resume-diff-only` prints the resume-sensitive config diff without submitting.
@@ -160,6 +160,30 @@ Useful workflow flags:
 - `--keep-failed-prep` leaves the failed Enroot rootfs behind for inspection.
 - Array jobs (`x-slurm.array`) require `--detach` because live watch/log fan-out is not array-aware yet.
 - Scheduler dependencies from `x-slurm.after_job` and `x-slurm.dependency` are passed as `sbatch --dependency=...`.
+
+#### Tool overrides
+
+Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PATH>` flags to point at non-default executables. This is useful when tools live outside `PATH` or when testing against fake binaries.
+
+| Flag | Default | Accepted by |
+| --- | --- | --- |
+| `--sbatch-bin` | `sbatch` | `up`, `when`, `germinate`, `test`, `run`, `sweep submit`, `preflight`, `debug`, `doctor` |
+| `--srun-bin` | `srun` | `up`, `when`, `alloc`, `germinate`, `test`, `run`, `shell`, `sweep submit`, `preflight`, `debug`, `doctor` |
+| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `debug` |
+| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `debug` |
+| `--salloc-bin` | `salloc` | `alloc` |
+| `--scontrol-bin` | `scontrol` | `alloc`, `sweep submit`, `preflight`, `debug`, `doctor` |
+| `--sinfo-bin` | `sinfo` | `when`, `weather` |
+| `--scancel-bin` | `scancel` | `test`, `cancel`, `down` |
+| `--sstat-bin` | `sstat` | `germinate`, `stats`, `inspect`, `score` |
+| `--sshare-bin` | `sshare` | `weather` |
+| `--sprio-bin` | `sprio` | `weather` |
+| `--enroot-bin` | `enroot` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
+| `--apptainer-bin` | `apptainer` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
+| `--singularity-bin` | `singularity` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
+| `--tmux-bin` | `tmux` | `tmux` |
+
+Settings profiles can also configure these via `[defaults.binaries]` or `[profiles.<name>.binaries]` (see [Runbook](runbook.md)).
 
 ### `germinate` Canary Runs
 
@@ -305,16 +329,16 @@ Useful `test` options:
 
 ```bash
 hpc-compose dev -f examples/dev-python-app.yaml
-hpc-compose dev -f compose.yaml --watch-path ./src --debounce-ms 500
+hpc-compose dev -f compose.yaml --watch-paths ./src --debounce-ms 500
 ```
 
-Directory bind mounts are mapped back to affected services. File mounts, missing paths, container-only paths, cache paths, and non-directory paths are ignored. `--watch-path` adds an explicit directory and restarts all services when it changes. By default, leaving `dev` stops the local supervisor; use `--keep-running` when you want the tracked local job to continue.
+Directory bind mounts are mapped back to affected services. File mounts, missing paths, container-only paths, cache paths, and non-directory paths are ignored. `--watch-paths` adds an explicit directory and restarts all services when it changes. By default, leaving `dev` stops the local supervisor; use `--keep-running` when you want the tracked local job to continue.
 
 Useful `dev` options:
 
 | Option | Use it for |
 | --- | --- |
-| `--watch-path <PATH>` | Add an explicit watch root when mounted source directories cannot be inferred. |
+| `--watch-paths <PATH>` | Add an explicit watch root when mounted source directories cannot be inferred. |
 | `--debounce-ms <N>` | Coalesce rapid file changes before requesting a restart. |
 | `--keep-running` | Leave the local supervisor alive when the watch loop exits. |
 

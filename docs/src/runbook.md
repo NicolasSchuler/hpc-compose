@@ -110,6 +110,14 @@ Use `context` whenever you want to inspect effective compose path, binaries, int
 
 Resource profiles are referenced from YAML with `x-slurm.resources: gpu-small`. They are Slurm resource defaults, not the same thing as the global `--profile` setting selector, and explicit `x-slurm` values in the spec override profile defaults.
 
+An editor schema for `settings.toml` is available:
+
+```bash
+hpc-compose schema --kind settings
+```
+
+For TOML editor integration, point your TOML language server at the published URL `https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose-settings.schema.json`.
+
 ## Choose A Starting Example
 
 The maintained selection guide is [Examples](examples.md). It includes:
@@ -222,7 +230,7 @@ Useful options:
 - `--format text|json` is accepted with `--detach` or `--dry-run`.
 - `--watch-queue` waits in line-oriented queue output until the Slurm job reaches `RUNNING`, then opens the normal watch view.
 - `--queue-warn-after <DURATION>` warns once when `--watch-queue` stays `PENDING` longer than the threshold; the default is `10m`, and `0` disables the warning.
-- `--watch-mode auto|tui|line` selects the live output mode; `--no-tui` is a line-mode alias.
+- `--watch-mode auto|tui|line` selects the live output mode.
 - `--hold-on-exit never|failure|always` controls whether the TUI stays open after the job reaches a terminal scheduler state.
 - `--resume-diff-only` prints resume-sensitive config diffs without launching.
 - `--allow-resume-changes` confirms intentional resume-coupled config drift.
@@ -274,7 +282,7 @@ See [Cluster Profiles](cluster-profiles.md) for generated profile details, site 
 
 ```bash
 hpc-compose prepare -f compose.yaml
-hpc-compose prepare -f compose.yaml --force
+hpc-compose prepare -f compose.yaml --force-rebuild
 ```
 
 Use this when you want to build or refresh prepared images before submission, confirm cache reuse behavior, or debug preparation separately from job submission.
@@ -321,7 +329,7 @@ Use [Cache Management](cache-management.md) for cache reuse and pruning. Use [Tr
 | If you changed... | Typical next step |
 | --- | --- |
 | YAML planning/runtime settings only | `plan --verbose`, then `up` |
-| Base image, `x-runtime.prepare.commands`, or prepare env | `up --force-rebuild`, or `prepare --force` when debugging separately |
+| Base image, `x-runtime.prepare.commands`, or prepare env | `up --force-rebuild`, or `prepare --force-rebuild` when debugging separately |
 | Mounted runtime source under `volumes` | Usually just `up` |
 | Cache entries this plan no longer references | `cache prune --all-unused -f compose.yaml` |
 | `hpc-compose` itself | Expect cache misses on the next `prepare` or `up`, then optionally prune old entries |

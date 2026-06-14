@@ -37,6 +37,8 @@ service order: app
 Rendered script:
 ```
 
+Additional lines (runtime mode, cache dir, allocation geometry, per-service image state) are normal.
+
 Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slurm submission host with the runtime backend your spec selects. If a run fails, start triage with `hpc-compose debug -f compose.yaml --preflight`.
 
 ## Scope

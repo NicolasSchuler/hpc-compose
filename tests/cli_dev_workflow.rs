@@ -663,7 +663,7 @@ fn dev_rejects_missing_watch_path_before_launch() {
         tmpdir.path(),
         &[
             "dev",
-            "--watch-path",
+            "--watch-paths",
             "missing-source",
             "--skip-prepare",
             "--no-preflight",
@@ -676,7 +676,7 @@ fn dev_rejects_missing_watch_path_before_launch() {
         ],
     );
     assert_failure(&output);
-    assert!(stderr_text(&output).contains("dev --watch-path must point to an existing directory"));
+    assert!(stderr_text(&output).contains("dev --watch-paths must point to an existing directory"));
     assert!(!script_out.exists());
     assert!(load_submission_record(&compose, None).is_err());
 }

@@ -27,7 +27,7 @@ hpc-compose debug -f compose.yaml --preflight
 | Anonymous pull or registry warning | Registry credentials are missing or rate limits apply. | Configure credentials before relying on private or rate-limited images. |
 | Services start in the wrong order | Dependency condition or readiness is too weak. | Use `service_healthy` with `readiness`, or `service_completed_successfully` for DAG stages. |
 | No service logs exist | The batch script failed before launching a service. | Use `debug` to see scheduler state, the tracked top-level batch log tail, and missing-log hints. |
-| `dev` reports no watchable source directories | Services only mount files, missing paths, cache paths, or container-only paths. | Mount the source as a host directory or pass `hpc-compose dev --watch-path ./src -f compose.yaml`. |
+| `dev` reports no watchable source directories | Services only mount files, missing paths, cache paths, or container-only paths. | Mount the source as a host directory or pass `hpc-compose dev --watch-paths ./src -f compose.yaml`. |
 | Readiness never passes | Probe target, pattern, host, or dependency timing does not match the real service. | Inspect the service log with `logs --service <name>` and try a finite `hpc-compose test --local` or short `test --submit` spec. |
 | Smoke test times out | The spec is long-running, readiness blocks forever, or the scheduler job never reaches terminal state. | Make the smoke spec finite, lower service readiness timeouts, and use `--format json` to inspect the failed phase and service reason. |
 | `tmux` is unavailable or attach fails | `tmux` is not installed or the shell is non-interactive. | Install `tmux`, pass `--tmux-bin <PATH>`, or create the dashboard with `--no-attach`. |

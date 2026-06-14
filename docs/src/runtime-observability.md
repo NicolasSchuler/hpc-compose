@@ -69,7 +69,7 @@ Use `--hold-on-exit never|failure|always` on `up` or `watch` to control whether 
 
 Use `hpc-compose up --watch-queue` when you want explicit queue polling before the watch view opens. It prints queue state changes, pending reason, and expected start time when Slurm exposes them; `--queue-warn-after <DURATION>` controls the one-time long-pending warning.
 
-Use `--watch-mode line` when you are recording output, using a screen reader, running in CI, or working in a terminal where alternate-screen UIs are inconvenient. The older `--no-tui` alias still works for compatibility. Line mode preserves detailed scheduler and log updates without alternate-screen control codes.
+Use `--watch-mode line` when you are recording output, using a screen reader, running in CI, or working in a terminal where alternate-screen UIs are inconvenient. Line mode preserves detailed scheduler and log updates without alternate-screen control codes.
 
 ## Replay
 

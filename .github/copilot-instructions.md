@@ -11,7 +11,7 @@
 ## High-level architecture
 
 - `src/main.rs` is the only CLI entrypoint. Most commands follow the same pipeline: `ComposeSpec::load` in `src/spec.rs` -> `planner::build_plan` in `src/planner.rs` -> `prepare::build_runtime_plan` in `src/prepare.rs`.
-- `validate` stops after plan construction, `inspect` prints the normalized runtime plan, `render` passes the runtime plan to `render::render_script`, `prepare` runs `prepare_runtime_plan`, and `submit` chains preflight, optional prepare, render, and `sbatch`.
+- `validate` stops after plan construction, `inspect` prints the normalized runtime plan, `render` passes the runtime plan to `render::render_script`, `prepare` runs `prepare_runtime_plan`, and `up` chains preflight, optional prepare, render, and `sbatch`.
 - `src/spec.rs` is the strict schema layer for the supported Compose subset plus the `x-slurm` and `x-enroot` extensions. It rejects unsupported Compose keys up front with explicit messages instead of ignoring them.
 - `src/planner.rs` is the normalization layer. It resolves env vars and relative paths against the compose file directory, normalizes bare image refs like `redis:7` to `docker://redis:7`, topologically orders services from `depends_on`, and collapses `entrypoint`/`command` into `ExecutionSpec`.
 - `src/prepare.rs` and `src/cache.rs` own artifact creation and reuse. Remote images are imported into `cache_dir/base`, prepared images are exported into `cache_dir/prepared`, and adjacent JSON manifests drive reuse, `cache inspect`, and prune behavior.
