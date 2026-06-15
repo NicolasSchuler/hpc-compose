@@ -218,7 +218,7 @@ pub(super) fn parse_healthcheck_argv(items: &[String]) -> Result<Vec<String>> {
             };
             Ok(shell.split_whitespace().map(ToString::to_string).collect())
         }
-        _ => return Err(SpecError::HealthcheckInvalidTest.into()),
+        _ => Err(SpecError::HealthcheckInvalidTest.into()),
     }
 }
 
