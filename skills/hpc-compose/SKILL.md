@@ -1,6 +1,6 @@
 ---
 name: hpc-compose
-description: Help adapt repositories to hpc-compose, a Compose-like launcher for one Slurm allocation with services run through Pyxis/Enroot, Apptainer, Singularity, or host runtimes. Use when Codex is asked to make a repository work with hpc-compose, migrate Docker Compose or Slurm scripts to hpc-compose, author or validate hpc-compose specs, choose HAICORE/NHR@KIT or other cluster settings, configure shared cache/storage, debug hpc-compose preflight/run failures, or prepare a user for a real HPC submission.
+description: Help set up and use hpc-compose, a Compose-like launcher for one Slurm allocation with services run through Pyxis/Enroot, Apptainer, Singularity, or host runtimes. Use when Codex is asked to install or configure hpc-compose for a user's HPC cluster, discover cluster requirements, make a repository work with hpc-compose, migrate Docker Compose or Slurm scripts to hpc-compose, author or validate hpc-compose specs, choose HAICORE/NHR@KIT or other cluster settings, configure shared cache/storage, debug hpc-compose preflight/run failures, or guide a user toward a first real HPC submission.
 ---
 
 # hpc-compose
@@ -13,6 +13,7 @@ Use this skill to turn a repository into an inspectable hpc-compose workflow for
    - Run `scripts/hpc_compose_repo_probe.py <repo>` when useful.
    - Look for `docker-compose*.yml`, `compose*.yaml`, `Dockerfile*`, `*.sbatch`, `requirements.txt`, `pyproject.toml`, `environment.yml`, `package.json`, workflow-engine files, training scripts, model-serving code, and existing README run commands.
 2. Read the relevant references only as needed.
+   - `references/environment-setup.md`: user onboarding, installation, cluster requirement discovery, `setup`, `context`, first smoke plan, and handoff.
    - `references/hpc-compose-workflow.md`: command path, migration rules, templates, verification gates, and troubleshooting.
    - `references/haicore-kit.md`: HAICORE-specific Slurm, GPU, filesystem, Pyxis/Enroot, and cache guidance.
    - `references/cluster-adaptation.md`: general cluster-doc reconnaissance and non-HAICORE adaptation.
@@ -28,6 +29,16 @@ Use this skill to turn a repository into an inspectable hpc-compose workflow for
 6. Treat real Slurm operations as user-approved actions.
    - Ask before `hpc-compose up`, `run`, `test --submit`, `down`, `cancel`, or any command that submits/cancels jobs or consumes allocation quota.
    - On a login node, prefer `hpc-compose debug -f <file> --preflight` and `hpc-compose doctor cluster-report` before first `up`.
+
+## Environment Setup Assistant Workflow
+
+When the user wants help setting up hpc-compose for their own HPC cluster, read `references/environment-setup.md` first. Use that path to:
+
+- Discover the user's cluster, access method, workload, runtime backend, shared filesystem, Slurm account/partition/QOS, and first-run risk tolerance before writing cluster-specific files.
+- Reference the primary manual pages explicitly: Installation, Quickstart, Runbook, Task Guide, Cluster Profiles, Cache Management, Runtime Backends, Troubleshooting, and the site-specific HAICORE guide when applicable.
+- Install or verify the CLI only on appropriate machines, then run safe local checks before cluster checks.
+- Prefer `hpc-compose setup`, `.hpc-compose/settings.toml`, `.env`, and `hpc-compose context --format json` for user-specific paths and profiles.
+- Leave the user with exact login-node commands and a clear boundary between completed setup, unverified cluster assumptions, and any submission that still needs approval.
 
 ## Adaptation Rules
 
