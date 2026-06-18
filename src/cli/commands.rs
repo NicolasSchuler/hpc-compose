@@ -986,6 +986,11 @@ pub enum Commands {
             help = "Write the rendered local launcher script to this path"
         )]
         script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Open the live watch TUI while file-watching restarts services in the background"
+        )]
+        tui: bool,
     },
     #[command(
         display_order = 116,

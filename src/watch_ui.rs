@@ -9,18 +9,23 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::cursor::MoveTo;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+#[cfg(not(test))]
+use crossterm::event::EnableMouseCapture;
+use crossterm::event::{
+    self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{self, Clear, ClearType};
 use hpc_compose::cli::HoldOnExit;
 use hpc_compose::job::{
     PsServiceRow, PsSnapshot, ReplayReport, SchedulerOptions, StatsOptions, StatsSnapshot,
-    SubmissionRecord, WalltimeProgress, WatchOutcome, build_ps_snapshot, build_stats_snapshot,
-    format_walltime_summary, walltime_progress, walltime_progress_percent,
+    SubmissionBackend, SubmissionRecord, WalltimeProgress, WatchOutcome, build_ps_snapshot,
+    build_stats_snapshot, format_walltime_summary, runtime_job_root_for_record, walltime_progress,
+    walltime_progress_percent,
 };
 
 const DATA_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -30,8 +35,96 @@ const DEFAULT_HEIGHT: usize = 30;
 const MIN_TABLE_WIDTH: usize = 58;
 const FORCE_WATCH_UI_ENV: &str = "HPC_COMPOSE_FORCE_WATCH_UI";
 const METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const DATA_REFRESH_ENV: &str = "HPC_COMPOSE_WATCH_REFRESH_MS";
+const METRICS_REFRESH_ENV: &str = "HPC_COMPOSE_WATCH_METRICS_REFRESH_MS";
+const NOTICE_DURATION: Duration = Duration::from_secs(4);
+const WATCH_MOUSE_ENV: &str = "HPC_COMPOSE_WATCH_MOUSE";
+
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 type SharedPanicHook = Arc<Mutex<Option<PanicHook>>>;
+
+/// Resolves a refresh interval with precedence: env override > settings value >
+/// built-in default. Both numeric sources are clamped to `[min_ms, max_ms]`.
+fn resolve_interval(
+    env_name: &str,
+    settings_ms: Option<u64>,
+    default: Duration,
+    min_ms: u64,
+    max_ms: u64,
+) -> Duration {
+    if let Some(from_env) =
+        env_refresh_interval_opt(std::env::var(env_name).ok().as_deref(), min_ms, max_ms)
+    {
+        return from_env;
+    }
+    settings_ms
+        .map(|ms| Duration::from_millis(ms.clamp(min_ms, max_ms)))
+        .unwrap_or(default)
+}
+
+/// Parses a clamped interval from a raw env value, or `None` when unset/invalid.
+fn env_refresh_interval_opt(value: Option<&str>, min_ms: u64, max_ms: u64) -> Option<Duration> {
+    value
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(|ms| Duration::from_millis(ms.clamp(min_ms, max_ms)))
+}
+
+/// Reads a boolean env toggle (`Some(false)` only for `"0"`).
+fn env_bool(name: &str) -> Option<bool> {
+    std::env::var_os(name).map(|value| value != OsStr::new("0"))
+}
+
+/// Resolved watch/replay display preferences threaded into the loops.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WatchPrefs {
+    pub(crate) sort: ServiceSort,
+    pub(crate) wrap: bool,
+    pub(crate) data_refresh: Duration,
+    pub(crate) metrics_refresh: Duration,
+    pub(crate) mouse: bool,
+}
+
+impl Default for WatchPrefs {
+    fn default() -> Self {
+        Self {
+            sort: ServiceSort::Spec,
+            wrap: false,
+            data_refresh: DATA_REFRESH_INTERVAL,
+            metrics_refresh: METRICS_REFRESH_INTERVAL,
+            mouse: false,
+        }
+    }
+}
+
+impl WatchPrefs {
+    /// Resolves prefs from settings, with env vars taking precedence.
+    pub(crate) fn resolve(settings: &hpc_compose::context::WatchSettings) -> Self {
+        Self {
+            sort: match settings.sort.as_deref() {
+                Some("triage") => ServiceSort::Triage,
+                _ => ServiceSort::Spec,
+            },
+            wrap: settings.wrap.unwrap_or(false),
+            data_refresh: resolve_interval(
+                DATA_REFRESH_ENV,
+                settings.refresh_ms,
+                DATA_REFRESH_INTERVAL,
+                100,
+                60_000,
+            ),
+            metrics_refresh: resolve_interval(
+                METRICS_REFRESH_ENV,
+                settings.metrics_refresh_ms,
+                METRICS_REFRESH_INTERVAL,
+                500,
+                600_000,
+            ),
+            mouse: env_bool(WATCH_MOUSE_ENV)
+                .or(settings.mouse)
+                .unwrap_or(false),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatchKey {
@@ -58,18 +151,36 @@ pub(crate) enum WatchKey {
     Quit,
     Help,
     Search,
+    LogSearch,
+    ToggleWrap,
+    CycleSort,
+    Restart,
+    ShowDetail,
+    Yank,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputMode {
     Normal,
+    /// Typing a service-name filter.
     Search,
+    /// Typing a query to find within log content.
+    LogSearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LogViewMode {
     Selected,
     All,
+}
+
+/// Ordering applied to the service table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServiceSort {
+    /// Declaration order from the compose spec (default).
+    Spec,
+    /// Surface problems first: failed, then unhealthy, then the rest.
+    Triage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +194,10 @@ pub(crate) struct ReplayWatchStatus {
     pub(crate) speed: f64,
     pub(crate) paused: bool,
     pub(crate) fidelity: String,
+    /// Timeline bounds and event positions for the scrubber bar.
+    pub(crate) start_unix: u64,
+    pub(crate) end_unix: u64,
+    pub(crate) event_unix: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +215,16 @@ pub(crate) struct WatchModel {
     pub(crate) filter: Option<String>,
     pub(crate) search_buffer: String,
     pub(crate) input_mode: InputMode,
+    /// Active in-log search query; highlights matches in the log pane.
+    pub(crate) log_query: Option<String>,
+    /// When set, wrap long log lines instead of truncating them.
+    pub(crate) log_wrap: bool,
+    /// Ordering applied to the service table.
+    pub(crate) sort_mode: ServiceSort,
+    /// Transient status line (e.g. restart feedback), shown briefly.
+    pub(crate) notice: Option<String>,
+    /// When set, the body shows a detail panel for the selected service.
+    pub(crate) show_detail: bool,
     pub(crate) replay: Option<ReplayWatchStatus>,
 }
 
@@ -120,9 +245,10 @@ struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    fn enter() -> Result<Self> {
+    fn enter(mouse: bool) -> Result<Self> {
         #[cfg(test)]
         {
+            let _ = mouse;
             Ok(Self::new(false))
         }
 
@@ -136,6 +262,9 @@ impl TerminalGuard {
                 crossterm::cursor::Hide
             )
             .context("failed to enter alternate-screen watch UI")?;
+            if mouse {
+                execute!(stdout, EnableMouseCapture).context("failed to enable mouse capture")?;
+            }
             stdout
                 .flush()
                 .context("failed to flush alternate-screen entry")?;
@@ -215,8 +344,11 @@ fn restore_previous_panic_hook(_previous_hook: SharedPanicHook) {}
 
 fn restore_terminal_best_effort() {
     let mut stdout = io::stdout();
+    // DisableMouseCapture is harmless when capture was never enabled, so it is
+    // always sent here (including from the panic hook, which has no state).
     let _ = execute!(
         stdout,
+        DisableMouseCapture,
         crossterm::cursor::Show,
         crossterm::terminal::LeaveAlternateScreen
     );
@@ -286,9 +418,19 @@ pub(crate) fn run_watch_ui(
     initial_service: Option<&str>,
     lines: usize,
     hold_on_exit: HoldOnExit,
+    prefs: WatchPrefs,
 ) -> Result<WatchOutcome> {
-    let guard = TerminalGuard::enter()?;
-    let result = run_watch_ui_loop(record, options, initial_service, lines, hold_on_exit);
+    let guard = TerminalGuard::enter(prefs.mouse)?;
+    let mut events = TerminalEventSource;
+    let result = run_watch_ui_loop(
+        record,
+        options,
+        initial_service,
+        lines,
+        hold_on_exit,
+        &mut events,
+        prefs,
+    );
     drop(guard);
     let result = result?;
     if let Some(command) = result.command_hint {
@@ -302,17 +444,38 @@ pub(crate) fn run_replay_ui(
     initial_service: Option<&str>,
     lines: usize,
     speed: f64,
+    prefs: WatchPrefs,
 ) -> Result<()> {
-    let guard = TerminalGuard::enter()?;
-    let result = run_replay_ui_loop(report, initial_service, lines, speed);
+    let guard = TerminalGuard::enter(prefs.mouse)?;
+    let mut events = TerminalEventSource;
+    let result = run_replay_ui_loop(report, initial_service, lines, speed, &mut events, prefs);
     drop(guard);
-    result
+    result.map(|_| ())
 }
 
 #[derive(Debug)]
 struct WatchLoopResult {
     outcome: WatchOutcome,
     command_hint: Option<String>,
+    /// Service focused when the loop exited, if any matched the active filter.
+    /// Only inspected by tests; production drives behavior off `outcome`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    selected_service: Option<String>,
+}
+
+/// Final UI state captured when a replay loop exits. Lets tests assert on the
+/// state machine without a TTY; production discards it via `map(|_| ())`.
+#[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct ReplayLoopResult {
+    selected_service: Option<String>,
+    filter: Option<String>,
+    log_view_mode: LogViewMode,
+    log_query: Option<String>,
+    log_wrap: bool,
+    sort_mode: ServiceSort,
+    show_detail: bool,
+    playback: ReplayPlaybackState,
 }
 
 fn run_replay_ui_loop(
@@ -320,26 +483,58 @@ fn run_replay_ui_loop(
     initial_service: Option<&str>,
     lines: usize,
     speed: f64,
-) -> Result<()> {
+    events: &mut dyn WatchEventSource,
+    prefs: WatchPrefs,
+) -> Result<ReplayLoopResult> {
     if report.frames.is_empty() {
-        return Ok(());
+        return Ok(ReplayLoopResult {
+            selected_service: None,
+            filter: None,
+            log_view_mode: LogViewMode::Selected,
+            log_query: None,
+            log_wrap: false,
+            sort_mode: ServiceSort::Spec,
+            show_detail: false,
+            playback: ReplayPlaybackState::new(report, speed),
+        });
     }
     let mut playback = ReplayPlaybackState::new(report, speed);
     let mut snapshot = report.frames[playback.frame_index].snapshot.clone();
-    let mut selected_index = initial_selected_index(&snapshot, initial_service)?;
+    let initial_selected_index = initial_selected_index(&snapshot, initial_service)?;
+    let mut filter: Option<String> = None;
+    let mut sort_mode = prefs.sort;
+    let initial_selected_service = snapshot
+        .services
+        .get(initial_selected_index)
+        .map(|row| row.service_name.as_str());
+    let mut selected_index = preserve_selected_index(
+        &snapshot.services,
+        filter.as_deref(),
+        sort_mode,
+        initial_selected_service,
+        initial_selected_index,
+    );
     let (_, height) = terminal_size();
     let mut log_buffer = SelectedLogBuffer::seed(
-        snapshot.services.get(selected_index),
+        selected_effective_service(
+            &snapshot.services,
+            filter.as_deref(),
+            sort_mode,
+            selected_index,
+        ),
         lines,
         log_capacity(height),
     );
     let mut show_help = false;
-    let mut filter: Option<String> = None;
     let mut input_mode = InputMode::Normal;
     let mut search_buffer = String::new();
     let mut log_scroll = 0usize;
     let mut log_view_mode = LogViewMode::Selected;
+    let mut log_query: Option<String> = None;
+    let mut log_wrap = prefs.wrap;
+    let mut show_detail = false;
     let mut last_tick = Instant::now();
+    let mut renderer = FrameRenderer::new();
 
     loop {
         let now = Instant::now();
@@ -355,9 +550,16 @@ fn run_replay_ui_loop(
         }
 
         let frame = &report.frames[playback.frame_index];
+        let selected_name = selected_service_name(
+            &snapshot.services,
+            filter.as_deref(),
+            sort_mode,
+            selected_index,
+        );
         snapshot = frame.snapshot.clone();
-        let effective = filtered_services(&snapshot.services, filter.as_deref());
-        selected_index = clamp_selected_index_raw(&effective, selected_index);
+        let effective = effective_services(&snapshot.services, filter.as_deref(), sort_mode);
+        selected_index =
+            preserve_selected_index_raw(&effective, selected_name.as_deref(), selected_index);
         let (_, height) = terminal_size();
         let resolved = effective.get(selected_index);
         let original_index = resolved.and_then(|row| {
@@ -377,33 +579,46 @@ fn run_replay_ui_loop(
             LogViewMode::All => all_log_lines.clone(),
         };
 
-        render_model(
-            &WatchModel {
-                snapshot: snapshot.clone(),
-                selected_index,
-                walltime_progress: None,
-                log_lines: displayed_log_lines,
-                follow_logs: false,
-                log_scroll,
-                log_view_mode,
-                hold_state: None,
-                metrics_line: frame.metrics_line.clone(),
-                show_help,
-                filter: filter.clone(),
-                search_buffer: search_buffer.clone(),
-                input_mode,
-                replay: Some(ReplayWatchStatus {
-                    cursor_unix: playback.cursor_unix,
-                    speed: playback.speed,
-                    paused: playback.paused,
-                    fidelity: report.fidelity.clone(),
-                }),
-            },
-            terminal_size(),
+        let (frame_width, frame_height) = terminal_size();
+        renderer.render(
+            &render_watch_frame(
+                &WatchModel {
+                    snapshot: snapshot.clone(),
+                    selected_index,
+                    walltime_progress: None,
+                    log_lines: displayed_log_lines,
+                    follow_logs: false,
+                    log_scroll,
+                    log_view_mode,
+                    hold_state: None,
+                    metrics_line: frame.metrics_line.clone(),
+                    show_help,
+                    filter: filter.clone(),
+                    search_buffer: search_buffer.clone(),
+                    input_mode,
+                    log_query: log_query.clone(),
+                    log_wrap,
+                    sort_mode,
+                    notice: None,
+                    show_detail,
+                    replay: Some(ReplayWatchStatus {
+                        cursor_unix: playback.cursor_unix,
+                        speed: playback.speed,
+                        paused: playback.paused,
+                        fidelity: report.fidelity.clone(),
+                        start_unix: report.timeline_start_unix.unwrap_or(0),
+                        end_unix: report.timeline_end_unix.unwrap_or(0),
+                        event_unix: report.events.iter().map(|event| event.at_unix).collect(),
+                    }),
+                },
+                frame_width,
+                frame_height,
+            ),
+            (frame_width, frame_height),
         )?;
 
-        if let Some(event) = read_watch_event(INPUT_POLL_INTERVAL)? {
-            if input_mode == InputMode::Search {
+        if let Some(event) = events.poll_event(INPUT_POLL_INTERVAL, input_mode)? {
+            if input_mode == InputMode::Search || input_mode == InputMode::LogSearch {
                 let key = match event {
                     WatchInput::Search(key) => key,
                     WatchInput::Normal(WatchKey::Quit) => SearchKey::Cancel,
@@ -416,26 +631,60 @@ fn run_replay_ui_loop(
                     }
                     SearchKey::Clear => search_buffer.clear(),
                     SearchKey::Submit => {
-                        filter = if search_buffer.is_empty() {
-                            None
+                        let value = (!search_buffer.is_empty()).then(|| search_buffer.clone());
+                        if input_mode == InputMode::LogSearch {
+                            log_query = value;
                         } else {
-                            Some(search_buffer.clone())
-                        };
+                            filter = value;
+                            selected_index = 0;
+                        }
                         input_mode = InputMode::Normal;
-                        selected_index = 0;
                     }
                     SearchKey::Cancel => {
                         search_buffer.clear();
                         input_mode = InputMode::Normal;
                     }
                 }
+            } else if show_detail && matches!(event, WatchInput::Search(SearchKey::Cancel)) {
+                show_detail = false;
             } else if let WatchInput::Normal(key) = event {
                 match key {
-                    WatchKey::Quit => return Ok(()),
+                    WatchKey::Quit => break,
                     WatchKey::Help => show_help = !show_help,
+                    WatchKey::ShowDetail => show_detail = !show_detail,
                     WatchKey::Search => {
                         input_mode = InputMode::Search;
                         search_buffer = filter.clone().unwrap_or_default();
+                    }
+                    WatchKey::LogSearch => {
+                        input_mode = InputMode::LogSearch;
+                        search_buffer = log_query.clone().unwrap_or_default();
+                    }
+                    WatchKey::ToggleWrap => {
+                        log_wrap = !log_wrap;
+                        log_scroll = 0;
+                    }
+                    WatchKey::CycleSort => {
+                        let current =
+                            effective_services(&snapshot.services, filter.as_deref(), sort_mode)
+                                .get(selected_index)
+                                .map(|row| row.service_name.clone());
+                        sort_mode = match sort_mode {
+                            ServiceSort::Spec => ServiceSort::Triage,
+                            ServiceSort::Triage => ServiceSort::Spec,
+                        };
+                        if let Some(name) = current {
+                            let reordered = effective_services(
+                                &snapshot.services,
+                                filter.as_deref(),
+                                sort_mode,
+                            );
+                            if let Some(index) =
+                                reordered.iter().position(|row| row.service_name == name)
+                            {
+                                selected_index = index;
+                            }
+                        }
                     }
                     WatchKey::TogglePause
                     | WatchKey::SeekBackward
@@ -465,7 +714,8 @@ fn run_replay_ui_loop(
                         playback = apply_replay_key(playback, report, WatchKey::Last);
                     }
                     other => {
-                        let effective = filtered_services(&snapshot.services, filter.as_deref());
+                        let effective =
+                            effective_services(&snapshot.services, filter.as_deref(), sort_mode);
                         selected_index = apply_watch_key(selected_index, effective.len(), other);
                         log_scroll = 0;
                     }
@@ -473,6 +723,20 @@ fn run_replay_ui_loop(
             }
         }
     }
+
+    let selected_service = effective_services(&snapshot.services, filter.as_deref(), sort_mode)
+        .get(selected_index)
+        .map(|row| row.service_name.clone());
+    Ok(ReplayLoopResult {
+        selected_service,
+        filter,
+        log_view_mode,
+        log_query,
+        log_wrap,
+        sort_mode,
+        show_detail,
+        playback,
+    })
 }
 
 fn run_watch_ui_loop(
@@ -481,35 +745,69 @@ fn run_watch_ui_loop(
     initial_service: Option<&str>,
     lines: usize,
     hold_on_exit: HoldOnExit,
+    events: &mut dyn WatchEventSource,
+    prefs: WatchPrefs,
 ) -> Result<WatchLoopResult> {
     let mut snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), options)?;
-    let mut selected_index = initial_selected_index(&snapshot, initial_service)?;
+    let data_refresh = prefs.data_refresh;
+    let metrics_refresh = prefs.metrics_refresh;
+    let mut filter: Option<String> = None;
+    let mut sort_mode = prefs.sort;
+    let initial_selected_index = initial_selected_index(&snapshot, initial_service)?;
+    let initial_selected_service = snapshot
+        .services
+        .get(initial_selected_index)
+        .map(|row| row.service_name.as_str());
+    let mut selected_index = preserve_selected_index(
+        &snapshot.services,
+        filter.as_deref(),
+        sort_mode,
+        initial_selected_service,
+        initial_selected_index,
+    );
     let (_, height) = terminal_size();
     let mut log_buffer = SelectedLogBuffer::seed(
-        snapshot.services.get(selected_index),
+        selected_effective_service(
+            &snapshot.services,
+            filter.as_deref(),
+            sort_mode,
+            selected_index,
+        ),
         lines,
         log_capacity(height),
     );
     let mut all_log_lines = build_all_log_lines(&snapshot, lines, log_capacity(height));
     let mut last_refresh = Instant::now();
     let mut last_metrics_refresh = Instant::now()
-        .checked_sub(METRICS_REFRESH_INTERVAL)
+        .checked_sub(metrics_refresh)
         .unwrap_or_else(Instant::now);
     let mut metrics_line = None;
     let mut show_help = false;
-    let mut filter: Option<String> = None;
     let mut input_mode = InputMode::Normal;
     let mut search_buffer = String::new();
     let mut follow_logs = true;
     let mut log_scroll = 0usize;
     let mut log_view_mode = LogViewMode::Selected;
+    let mut log_query: Option<String> = None;
+    let mut log_wrap = prefs.wrap;
+    let mut notice: Option<String> = None;
+    let mut notice_until: Option<Instant> = None;
+    let mut show_detail = false;
     let mut terminal_outcome: Option<WatchOutcome> = None;
+    let mut renderer = FrameRenderer::new();
 
-    loop {
-        if last_refresh.elapsed() >= DATA_REFRESH_INTERVAL {
+    let (outcome, command_hint) = loop {
+        if last_refresh.elapsed() >= data_refresh {
+            let selected_name = selected_service_name(
+                &snapshot.services,
+                filter.as_deref(),
+                sort_mode,
+                selected_index,
+            );
             snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), options)?;
-            let effective = filtered_services(&snapshot.services, filter.as_deref());
-            selected_index = clamp_selected_index_raw(&effective, selected_index);
+            let effective = effective_services(&snapshot.services, filter.as_deref(), sort_mode);
+            selected_index =
+                preserve_selected_index_raw(&effective, selected_name.as_deref(), selected_index);
             let (_, height) = terminal_size();
             let resolved = effective.get(selected_index);
             let original_index = resolved.and_then(|r| {
@@ -530,7 +828,7 @@ fn run_watch_ui_loop(
             }
             last_refresh = Instant::now();
         }
-        if last_metrics_refresh.elapsed() >= METRICS_REFRESH_INTERVAL {
+        if last_metrics_refresh.elapsed() >= metrics_refresh {
             metrics_line = load_watch_metrics_line(record, options);
             last_metrics_refresh = Instant::now();
         }
@@ -554,12 +852,23 @@ fn run_watch_ui_loop(
             && let Some(outcome) = current_outcome.clone()
         {
             if matches!(outcome, WatchOutcome::Failed(_))
-                && let Some(failed_index) = first_failed_service_index(&snapshot.services)
+                && let Some(failed_service) = first_failed_service_name(&snapshot.services)
             {
                 filter = None;
-                selected_index = failed_index;
+                selected_index = preserve_selected_index(
+                    &snapshot.services,
+                    filter.as_deref(),
+                    sort_mode,
+                    Some(failed_service),
+                    selected_index,
+                );
                 log_buffer.reseed_if_needed(
-                    snapshot.services.get(selected_index),
+                    selected_effective_service(
+                        &snapshot.services,
+                        filter.as_deref(),
+                        sort_mode,
+                        selected_index,
+                    ),
                     lines,
                     log_capacity(terminal_size().1),
                 );
@@ -567,11 +876,14 @@ fn run_watch_ui_loop(
             if should_hold_on_exit(hold_on_exit, &outcome) {
                 terminal_outcome = Some(outcome);
             } else {
-                return Ok(WatchLoopResult {
-                    outcome,
-                    command_hint: None,
-                });
+                break (outcome, None);
             }
+        }
+
+        // Expire a transient notice once its display window has passed.
+        if notice_until.is_some_and(|deadline| Instant::now() >= deadline) {
+            notice = None;
+            notice_until = None;
         }
 
         let displayed_log_lines = match log_view_mode {
@@ -579,30 +891,40 @@ fn run_watch_ui_loop(
             LogViewMode::All => all_log_lines.clone(),
         };
 
-        render_model(
-            &WatchModel {
-                snapshot: snapshot.clone(),
-                selected_index,
-                walltime_progress,
-                log_lines: displayed_log_lines,
-                follow_logs,
-                log_scroll,
-                log_view_mode,
-                hold_state: terminal_outcome.as_ref().map(|outcome| WatchHoldState {
-                    failed: matches!(outcome, WatchOutcome::Failed(_)),
-                }),
-                metrics_line: metrics_line.clone(),
-                show_help,
-                filter: filter.clone(),
-                search_buffer: search_buffer.clone(),
-                input_mode,
-                replay: None,
-            },
-            terminal_size(),
+        let (frame_width, frame_height) = terminal_size();
+        renderer.render(
+            &render_watch_frame(
+                &WatchModel {
+                    snapshot: snapshot.clone(),
+                    selected_index,
+                    walltime_progress,
+                    log_lines: displayed_log_lines,
+                    follow_logs,
+                    log_scroll,
+                    log_view_mode,
+                    hold_state: terminal_outcome.as_ref().map(|outcome| WatchHoldState {
+                        failed: matches!(outcome, WatchOutcome::Failed(_)),
+                    }),
+                    metrics_line: metrics_line.clone(),
+                    show_help,
+                    filter: filter.clone(),
+                    search_buffer: search_buffer.clone(),
+                    input_mode,
+                    log_query: log_query.clone(),
+                    log_wrap,
+                    sort_mode,
+                    notice: notice.clone(),
+                    show_detail,
+                    replay: None,
+                },
+                frame_width,
+                frame_height,
+            ),
+            (frame_width, frame_height),
         )?;
 
-        if let Some(event) = read_watch_event(INPUT_POLL_INTERVAL)? {
-            if input_mode == InputMode::Search {
+        if let Some(event) = events.poll_event(INPUT_POLL_INTERVAL, input_mode)? {
+            if input_mode == InputMode::Search || input_mode == InputMode::LogSearch {
                 let key = match event {
                     WatchInput::Search(key) => key,
                     WatchInput::Normal(WatchKey::Quit) => SearchKey::Cancel,
@@ -617,36 +939,111 @@ fn run_watch_ui_loop(
                         search_buffer.clear();
                     }
                     SearchKey::Submit => {
-                        filter = if search_buffer.is_empty() {
-                            None
+                        let value = (!search_buffer.is_empty()).then(|| search_buffer.clone());
+                        if input_mode == InputMode::LogSearch {
+                            log_query = value;
                         } else {
-                            Some(search_buffer.clone())
-                        };
+                            filter = value;
+                            selected_index = 0;
+                        }
                         input_mode = InputMode::Normal;
-                        selected_index = 0;
                     }
                     SearchKey::Cancel => {
                         search_buffer.clear();
                         input_mode = InputMode::Normal;
                     }
                 }
+            } else if show_detail && matches!(event, WatchInput::Search(SearchKey::Cancel)) {
+                show_detail = false;
             } else if let WatchInput::Normal(key) = event {
                 let held_outcome = terminal_outcome.clone();
                 match key {
                     WatchKey::Quit => {
-                        return Ok(WatchLoopResult {
-                            outcome: held_outcome.unwrap_or_else(|| {
+                        break (
+                            held_outcome.unwrap_or_else(|| {
                                 WatchOutcome::Interrupted(snapshot.scheduler.clone())
                             }),
-                            command_hint: None,
-                        });
+                            None,
+                        );
                     }
                     WatchKey::Help => {
                         show_help = !show_help;
                     }
+                    WatchKey::ShowDetail => {
+                        show_detail = !show_detail;
+                    }
                     WatchKey::Search => {
                         input_mode = InputMode::Search;
                         search_buffer = filter.clone().unwrap_or_default();
+                    }
+                    WatchKey::LogSearch => {
+                        input_mode = InputMode::LogSearch;
+                        search_buffer = log_query.clone().unwrap_or_default();
+                    }
+                    WatchKey::ToggleWrap => {
+                        log_wrap = !log_wrap;
+                        log_scroll = 0;
+                    }
+                    WatchKey::CycleSort => {
+                        let current =
+                            effective_services(&snapshot.services, filter.as_deref(), sort_mode)
+                                .get(selected_index)
+                                .map(|row| row.service_name.clone());
+                        sort_mode = match sort_mode {
+                            ServiceSort::Spec => ServiceSort::Triage,
+                            ServiceSort::Triage => ServiceSort::Spec,
+                        };
+                        // Keep the same service selected across the reorder.
+                        if let Some(name) = current {
+                            let reordered = effective_services(
+                                &snapshot.services,
+                                filter.as_deref(),
+                                sort_mode,
+                            );
+                            if let Some(index) =
+                                reordered.iter().position(|row| row.service_name == name)
+                            {
+                                selected_index = index;
+                            }
+                        }
+                    }
+                    WatchKey::Restart => {
+                        let target =
+                            effective_services(&snapshot.services, filter.as_deref(), sort_mode)
+                                .get(selected_index)
+                                .map(|row| row.service_name.clone());
+                        notice = Some(match target {
+                            None => "restart: no service selected".to_string(),
+                            Some(_) if !restart_supported(record) => {
+                                "restart: only supported for local supervised jobs".to_string()
+                            }
+                            Some(service) => match request_service_restart(record, &service) {
+                                Ok(_) => format!("restart requested: {service}"),
+                                Err(err) => format!("restart failed: {err}"),
+                            },
+                        });
+                        notice_until = Some(Instant::now() + NOTICE_DURATION);
+                    }
+                    WatchKey::Yank => {
+                        let target =
+                            effective_services(&snapshot.services, filter.as_deref(), sort_mode)
+                                .get(selected_index)
+                                .map(|row| row.service_name.clone());
+                        notice = Some(match target {
+                            None => "yank: no service selected".to_string(),
+                            Some(service) => {
+                                let command = command_hint_for_key(
+                                    WatchKey::LogsHint,
+                                    record,
+                                    Some(service.as_str()),
+                                );
+                                match copy_to_clipboard(&command) {
+                                    Ok(()) => format!("copied logs command for {service}"),
+                                    Err(err) => format!("yank failed: {err}"),
+                                }
+                            }
+                        });
+                        notice_until = Some(Instant::now() + NOTICE_DURATION);
                     }
                     WatchKey::TogglePause => {
                         follow_logs = !follow_logs;
@@ -679,17 +1076,18 @@ fn run_watch_ui_loop(
                         let command = command_hint_for_key(
                             key,
                             record,
-                            filtered_services(&snapshot.services, filter.as_deref())
+                            effective_services(&snapshot.services, filter.as_deref(), sort_mode)
                                 .get(selected_index)
                                 .map(|row| row.service_name.as_str()),
                         );
-                        return Ok(WatchLoopResult {
-                            outcome: held_outcome.expect("held outcome checked above"),
-                            command_hint: Some(command),
-                        });
+                        break (
+                            held_outcome.expect("held outcome checked above"),
+                            Some(command),
+                        );
                     }
                     other => {
-                        let effective = filtered_services(&snapshot.services, filter.as_deref());
+                        let effective =
+                            effective_services(&snapshot.services, filter.as_deref(), sort_mode);
                         selected_index = apply_watch_key(selected_index, effective.len(), other);
                         let (_, height) = terminal_size();
                         let resolved = effective.get(selected_index);
@@ -709,7 +1107,16 @@ fn run_watch_ui_loop(
                 }
             }
         }
-    }
+    };
+
+    let selected_service = effective_services(&snapshot.services, filter.as_deref(), sort_mode)
+        .get(selected_index)
+        .map(|row| row.service_name.clone());
+    Ok(WatchLoopResult {
+        outcome,
+        command_hint,
+        selected_service,
+    })
 }
 
 fn force_watch_ui() -> bool {
@@ -750,7 +1157,13 @@ pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: 
         | WatchKey::StatsHint
         | WatchKey::Quit
         | WatchKey::Help
-        | WatchKey::Search => selected_index,
+        | WatchKey::Search
+        | WatchKey::LogSearch
+        | WatchKey::ToggleWrap
+        | WatchKey::CycleSort
+        | WatchKey::Restart
+        | WatchKey::ShowDetail
+        | WatchKey::Yank => selected_index,
     }
 }
 
@@ -846,22 +1259,73 @@ enum WatchInput {
     Search(SearchKey),
 }
 
-fn read_watch_event(timeout: Duration) -> Result<Option<WatchInput>> {
+/// Source of user input for the watch and replay loops.
+///
+/// Production code polls the real terminal through crossterm. Tests inject a
+/// scripted source so the loops' state transitions (navigation, search,
+/// scrolling, replay playback) can be exercised deterministically without a
+/// TTY.
+trait WatchEventSource {
+    /// Returns the next input event, waiting up to `timeout` for one.
+    ///
+    /// `Ok(None)` means no event arrived within the timeout, which lets the
+    /// loop tick its time-based refreshes.
+    fn poll_event(&mut self, timeout: Duration, mode: InputMode) -> Result<Option<WatchInput>>;
+}
+
+/// Live terminal event source backed by crossterm.
+struct TerminalEventSource;
+
+impl WatchEventSource for TerminalEventSource {
+    fn poll_event(&mut self, timeout: Duration, mode: InputMode) -> Result<Option<WatchInput>> {
+        read_watch_event(timeout, mode)
+    }
+}
+
+fn read_watch_event(timeout: Duration, mode: InputMode) -> Result<Option<WatchInput>> {
     if !event::poll(timeout).context("failed to poll watch UI input")? {
         return Ok(None);
     }
     match event::read().context("failed to read watch UI input")? {
-        Event::Key(key) => Ok(map_key_event(key)),
+        Event::Key(key) => Ok(map_key_event(key, mode)),
+        Event::Mouse(mouse) => Ok(map_mouse_event(mouse.kind)),
         _ => Ok(None),
     }
 }
 
-fn map_key_event(key: KeyEvent) -> Option<WatchInput> {
+/// Maps a mouse event to a watch action. Only the scroll wheel is wired (to the
+/// log pane); other mouse events are ignored. Mouse events only arrive when
+/// capture is opted in (see [`watch_mouse_enabled`]).
+fn map_mouse_event(kind: MouseEventKind) -> Option<WatchInput> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(WatchInput::Normal(WatchKey::PageUp)),
+        MouseEventKind::ScrollDown => Some(WatchInput::Normal(WatchKey::PageDown)),
+        _ => None,
+    }
+}
+
+fn map_key_event(key: KeyEvent, mode: InputMode) -> Option<WatchInput> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
         return Some(WatchInput::Normal(WatchKey::Quit));
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('u')) {
         return Some(WatchInput::Search(SearchKey::Clear));
+    }
+
+    // In text-entry modes (service filter, in-log search) every printable key
+    // is query text; only a few keys act as controls. This is what lets a
+    // query contain letters like `a`/`s`/`q` that are action keys in normal
+    // mode.
+    if mode != InputMode::Normal {
+        return match key.code {
+            KeyCode::Enter => Some(WatchInput::Search(SearchKey::Submit)),
+            KeyCode::Esc => Some(WatchInput::Search(SearchKey::Cancel)),
+            KeyCode::Backspace => Some(WatchInput::Search(SearchKey::Backspace)),
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(WatchInput::Search(SearchKey::Char(ch)))
+            }
+            _ => None,
+        };
     }
 
     match key.code {
@@ -886,9 +1350,14 @@ fn map_key_event(key: KeyEvent) -> Option<WatchInput> {
         KeyCode::Char('d') => Some(WatchInput::Normal(WatchKey::DebugHint)),
         KeyCode::Char('l') => Some(WatchInput::Normal(WatchKey::LogsHint)),
         KeyCode::Char('s') => Some(WatchInput::Normal(WatchKey::StatsHint)),
+        KeyCode::Char('f') => Some(WatchInput::Normal(WatchKey::LogSearch)),
+        KeyCode::Char('w') => Some(WatchInput::Normal(WatchKey::ToggleWrap)),
+        KeyCode::Char('o') => Some(WatchInput::Normal(WatchKey::CycleSort)),
+        KeyCode::Char('r') => Some(WatchInput::Normal(WatchKey::Restart)),
+        KeyCode::Char('y') => Some(WatchInput::Normal(WatchKey::Yank)),
         KeyCode::Char('?') => Some(WatchInput::Normal(WatchKey::Help)),
         KeyCode::Char('/') => Some(WatchInput::Normal(WatchKey::Search)),
-        KeyCode::Enter => Some(WatchInput::Search(SearchKey::Submit)),
+        KeyCode::Enter => Some(WatchInput::Normal(WatchKey::ShowDetail)),
         KeyCode::Esc => Some(WatchInput::Search(SearchKey::Cancel)),
         KeyCode::Backspace => Some(WatchInput::Search(SearchKey::Backspace)),
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -901,7 +1370,11 @@ fn map_key_event(key: KeyEvent) -> Option<WatchInput> {
 pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize) -> String {
     let width = width.max(1);
     let height = height.max(1);
-    let effective = filtered_services(&model.snapshot.services, model.filter.as_deref());
+    let effective = effective_services(
+        &model.snapshot.services,
+        model.filter.as_deref(),
+        model.sort_mode,
+    );
     let selected = effective.get(model.selected_index);
     if width < 80 || height < 12 {
         return render_compact_watch_frame(model, &effective, selected.copied(), width, height);
@@ -945,7 +1418,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         fit_line(&title_line, width),
         fit_line(
             &format!(
-                "services: {} | selected: {} | logs: {} {}",
+                "services: {} | selected: {} | logs: {} {}{}",
                 effective.len(),
                 selected_name,
                 log_view_label(model.log_view_mode),
@@ -953,6 +1426,10 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
                     "FOLLOW"
                 } else {
                     "PAUSED"
+                },
+                match model.sort_mode {
+                    ServiceSort::Triage => " | sort: triage",
+                    ServiceSort::Spec => "",
                 }
             ),
             width,
@@ -961,8 +1438,14 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     if let Some(progress) = &model.walltime_progress {
         lines.push(fit_line(&render_walltime_bar(progress, width), width));
     }
+    if let Some(replay) = &model.replay {
+        lines.push(fit_line(&render_replay_scrubber(replay, width), width));
+    }
     if let Some(metrics) = model.metrics_line.as_deref() {
         lines.push(fit_line(metrics, width));
+    }
+    if let Some(notice) = model.notice.as_deref() {
+        lines.push(fit_line(&term::styled_warning(notice), width));
     }
     if let Some(detail) = model.snapshot.scheduler.detail.as_deref() {
         lines.push(fit_line(&format!("note: {detail}"), width));
@@ -977,9 +1460,17 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     lines.push("-".repeat(width));
 
     let mut search_lines = Vec::new();
-    if model.input_mode == InputMode::Search {
+    if model.input_mode == InputMode::Search || model.input_mode == InputMode::LogSearch {
+        let prompt = if model.input_mode == InputMode::LogSearch {
+            "find"
+        } else {
+            "filter"
+        };
         search_lines.push("-".repeat(width));
-        search_lines.push(fit_line(&format!("filter: {}", model.search_buffer), width));
+        search_lines.push(fit_line(
+            &format!("{prompt}: {}", model.search_buffer),
+            width,
+        ));
     }
 
     let mut help_lines = Vec::new();
@@ -990,7 +1481,8 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         help_lines.push(fit_line("  k / Up      previous service", width));
         help_lines.push(fit_line("  g           first service", width));
         help_lines.push(fit_line("  G           last service", width));
-        help_lines.push(fit_line("  /           filter services", width));
+        help_lines.push(fit_line("  /           filter services by name", width));
+        help_lines.push(fit_line("  f           find in logs", width));
         if model.replay.is_some() {
             help_lines.push(fit_line("  Space       pause or play replay", width));
             help_lines.push(fit_line("  +/-         change replay speed", width));
@@ -1008,6 +1500,19 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
             help_lines.push(fit_line("  End         return to live log tail", width));
         }
         help_lines.push(fit_line("  a           toggle selected/all logs", width));
+        help_lines.push(fit_line("  w           toggle log line wrap", width));
+        help_lines.push(fit_line(
+            "  o           cycle service sort (spec/triage)",
+            width,
+        ));
+        if model.replay.is_none() {
+            help_lines.push(fit_line("  r           restart selected service", width));
+        }
+        help_lines.push(fit_line("  Enter       service detail panel", width));
+        help_lines.push(fit_line(
+            "  y           yank logs command to clipboard",
+            width,
+        ));
         help_lines.push(fit_line(
             "  d/l/s       debug/logs/stats command after final state",
             width,
@@ -1017,14 +1522,18 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         help_lines.push("-".repeat(width));
     }
 
-    let footer = if model.input_mode == InputMode::Search {
+    let footer = if model.input_mode == InputMode::Search
+        || model.input_mode == InputMode::LogSearch
+    {
         "Enter apply  Esc cancel  Ctrl-U clear  Backspace delete"
     } else if model.replay.is_some() {
-        "q quit  Space play/pause  +/- speed  Left/Right seek  [/] event  Home/End bounds"
+        "q quit  Space play/pause  +/- speed  Left/Right seek  [/] event  f find  o sort"
     } else if model.hold_state.is_some() {
         "q exit  d debug  l logs  s stats  ? help"
+    } else if model.show_detail {
+        "Enter/Esc back  j/k change service  y yank  q quit"
     } else {
-        "q quit  ? help  / filter  Space pause  a all  PgUp/PgDn scroll  End follow"
+        "q quit  ? help  Enter detail  / filter  f find  a all  w wrap  o sort  r restart  y yank"
     };
     let footer_lines = vec!["-".repeat(width), fit_line(footer, width)];
     let help_budget = height.saturating_sub(lines.len() + search_lines.len() + footer_lines.len());
@@ -1094,9 +1603,16 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     } else {
         String::new()
     };
+    let wrap_note = if model.log_wrap { " WRAP" } else { "" };
+    let search_note = match model.log_query.as_deref() {
+        Some(query) if !query.is_empty() => {
+            format!(" /{query} ({})", count_log_matches(&model.log_lines, query))
+        }
+        _ => String::new(),
+    };
     log_lines.push(fit_line(
         &format!(
-            "{}: {} {}{}",
+            "{}: {} {}{}{}{}",
             term::styled_bold("logs"),
             log_title,
             if model.follow_logs {
@@ -1104,37 +1620,55 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
             } else {
                 "PAUSED"
             },
-            scroll_note
+            wrap_note,
+            scroll_note,
+            search_note
         ),
         log_width,
     ));
     if let Some(path_line) = log_path_line(model.log_view_mode, selected.copied()) {
         log_lines.push(fit_line(&term::styled_dim(&path_line), log_width));
     }
-    let visible_log_lines = visible_log_lines(
-        &model.log_lines,
+    let displayed = expand_log_lines(&model.log_lines, log_width, model.log_wrap);
+    let visible = visible_log_lines(
+        &displayed,
         body_height.saturating_sub(log_lines.len()),
         model.follow_logs,
         model.log_scroll,
     );
-    if visible_log_lines.is_empty() {
+    if visible.is_empty() {
         let empty = empty_log_message(model.log_view_mode, selected.copied());
         log_lines.push(fit_line(&term::styled_dim(empty), log_width));
     }
-    for line in visible_log_lines {
-        log_lines.push(fit_line(line, log_width));
+    for line in visible {
+        log_lines.push(fit_line(
+            &style_log_row(line, model.log_query.as_deref()),
+            log_width,
+        ));
     }
 
     let row_count = body_height;
-    let separator = pane_separator();
-    for row in 0..row_count {
-        let left = table_lines.get(row).map(String::as_str).unwrap_or("");
-        let right = log_lines.get(row).map(String::as_str).unwrap_or("");
-        lines.push(format!(
-            "{} {separator} {}",
-            pad_line(left, table_width),
-            pad_line(right, log_width)
-        ));
+    if let Some(service) = selected.filter(|_| model.show_detail) {
+        let detail = render_service_detail(service, width, row_count);
+        for row in 0..row_count {
+            lines.push(
+                detail
+                    .get(row)
+                    .cloned()
+                    .unwrap_or_else(|| pad_line("", width)),
+            );
+        }
+    } else {
+        let separator = pane_separator();
+        for row in 0..row_count {
+            let left = table_lines.get(row).map(String::as_str).unwrap_or("");
+            let right = log_lines.get(row).map(String::as_str).unwrap_or("");
+            lines.push(format!(
+                "{} {separator} {}",
+                pad_line(left, table_width),
+                pad_line(right, log_width)
+            ));
+        }
     }
 
     lines.extend(search_lines);
@@ -1201,6 +1735,9 @@ fn render_compact_watch_frame(
     if let Some(metrics) = model.metrics_line.as_deref() {
         push_fit_line(&mut lines, width, height, metrics);
     }
+    if let Some(notice) = model.notice.as_deref() {
+        push_fit_line(&mut lines, width, height, &term::styled_warning(notice));
+    }
     if let Some(hold) = model.hold_state {
         push_fit_line(
             &mut lines,
@@ -1216,12 +1753,17 @@ fn render_compact_watch_frame(
     if let Some(filter) = model.filter.as_deref() {
         push_fit_line(&mut lines, width, height, &format!("filter: {filter}"));
     }
-    if model.input_mode == InputMode::Search {
+    if model.input_mode == InputMode::Search || model.input_mode == InputMode::LogSearch {
+        let prompt = if model.input_mode == InputMode::LogSearch {
+            "find input"
+        } else {
+            "filter input"
+        };
         push_fit_line(
             &mut lines,
             width,
             height,
-            &format!("filter input: {}", model.search_buffer),
+            &format!("{prompt}: {}", model.search_buffer),
         );
     }
     if model.show_help {
@@ -1229,67 +1771,88 @@ fn render_compact_watch_frame(
             &mut lines,
             width,
             height,
-            "? help | / filter | Space pause | q quit",
+            "? help | / filter | f find | w wrap | o sort | q quit",
         );
     }
 
-    push_fit_line(&mut lines, width, height, "services:");
-    if effective.is_empty() {
-        push_fit_line(&mut lines, width, height, "  no services match filter");
-    } else {
-        for (index, service) in effective.iter().enumerate() {
-            let marker = if index == model.selected_index {
-                ">"
-            } else {
-                " "
-            };
-            let ready = service.healthy.map(yes_no_short).unwrap_or("-");
-            push_fit_line(
-                &mut lines,
-                width,
-                height,
-                &format!(
-                    "{marker} {} {} ready={ready}",
-                    service.service_name,
-                    styled_state_marker(service_state_label(service))
-                ),
-            );
+    if let Some(detail_service) = selected.filter(|_| model.show_detail) {
+        let budget = height.saturating_sub(lines.len() + 1);
+        for line in render_service_detail(detail_service, width, budget) {
+            push_fit_line(&mut lines, width, height, &line);
         }
-    }
-
-    push_fit_line(
-        &mut lines,
-        width,
-        height,
-        &format!(
-            "logs: {} {}",
-            if model.log_view_mode == LogViewMode::All {
-                "all services"
-            } else {
-                selected_name
-            },
-            if model.follow_logs {
-                "FOLLOW"
-            } else {
-                "PAUSED"
+    } else {
+        push_fit_line(&mut lines, width, height, "services:");
+        if effective.is_empty() {
+            push_fit_line(&mut lines, width, height, "  no services match filter");
+        } else {
+            for (index, service) in effective.iter().enumerate() {
+                let marker = if index == model.selected_index {
+                    ">"
+                } else {
+                    " "
+                };
+                let ready = service.healthy.map(yes_no_short).unwrap_or("-");
+                push_fit_line(
+                    &mut lines,
+                    width,
+                    height,
+                    &format!(
+                        "{marker} {} {} ready={ready}",
+                        service.service_name,
+                        styled_state_marker(service_state_label(service))
+                    ),
+                );
             }
-        ),
-    );
-    if model.log_lines.is_empty() {
+        }
+
+        let compact_search_note = match model.log_query.as_deref() {
+            Some(query) if !query.is_empty() => {
+                format!(" /{query} ({})", count_log_matches(&model.log_lines, query))
+            }
+            _ => String::new(),
+        };
         push_fit_line(
             &mut lines,
             width,
             height,
-            &term::styled_dim(empty_log_message(model.log_view_mode, selected)),
+            &format!(
+                "logs: {} {}{}{}",
+                if model.log_view_mode == LogViewMode::All {
+                    "all services"
+                } else {
+                    selected_name
+                },
+                if model.follow_logs {
+                    "FOLLOW"
+                } else {
+                    "PAUSED"
+                },
+                if model.log_wrap { " WRAP" } else { "" },
+                compact_search_note
+            ),
         );
-    }
-    for line in visible_log_lines(
-        &model.log_lines,
-        height.saturating_sub(lines.len() + 1),
-        model.follow_logs,
-        model.log_scroll,
-    ) {
-        push_fit_line(&mut lines, width, height, line);
+        if model.log_lines.is_empty() {
+            push_fit_line(
+                &mut lines,
+                width,
+                height,
+                &term::styled_dim(empty_log_message(model.log_view_mode, selected)),
+            );
+        }
+        let compact_displayed = expand_log_lines(&model.log_lines, width, model.log_wrap);
+        for line in visible_log_lines(
+            &compact_displayed,
+            height.saturating_sub(lines.len() + 1),
+            model.follow_logs,
+            model.log_scroll,
+        ) {
+            push_fit_line(
+                &mut lines,
+                width,
+                height,
+                &style_log_row(line, model.log_query.as_deref()),
+            );
+        }
     }
     push_fit_line(
         &mut lines,
@@ -1428,6 +1991,223 @@ fn visible_log_lines(
     &lines[start..end]
 }
 
+/// Severity inferred from a log line, used only for color highlighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogSeverity {
+    Error,
+    Warn,
+}
+
+/// Heuristically classifies a log line by severity. Level tokens are matched as
+/// whole words so substrings like `errored` or `forewarn` don't trip it.
+fn log_severity(line: &str) -> Option<LogSeverity> {
+    let lower = line.to_ascii_lowercase();
+    if ["error", "fatal", "panic"]
+        .iter()
+        .any(|word| contains_word(&lower, word))
+    {
+        Some(LogSeverity::Error)
+    } else if ["warn", "warning"]
+        .iter()
+        .any(|word| contains_word(&lower, word))
+    {
+        Some(LogSeverity::Warn)
+    } else {
+        None
+    }
+}
+
+/// Returns true if `needle` starts a word in `haystack` (the preceding
+/// character is non-alphanumeric). `haystack` is assumed already lowercased.
+///
+/// Only the prefix boundary is checked, so inflected forms like `panicked`,
+/// `errored`, and `warnings` are still detected while embedded matches such as
+/// `terror` (containing `error`) are rejected.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let start = from + offset;
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        if before_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// Wraps each case-insensitive `query` occurrence in `row` with highlight
+/// styling. Returns `None` when the row contains no match. ASCII-lowercasing
+/// preserves byte offsets, so the spans map back onto the original `row`.
+fn highlight_matches(row: &str, query: &str) -> Option<String> {
+    if query.is_empty() {
+        return None;
+    }
+    let row_lower = row.to_ascii_lowercase();
+    let query_lower = query.to_ascii_lowercase();
+    if !row_lower.contains(&query_lower) {
+        return None;
+    }
+    let mut out = String::with_capacity(row.len());
+    let mut from = 0;
+    while let Some(offset) = row_lower[from..].find(&query_lower) {
+        let start = from + offset;
+        let end = start + query_lower.len();
+        out.push_str(&row[from..start]);
+        out.push_str(&term::styled_highlight_raw(&row[start..end]));
+        from = end;
+    }
+    out.push_str(&row[from..]);
+    Some(out)
+}
+
+/// Styles a single visible log row. An active search match takes precedence
+/// (keeping nested escape sequences out of the picture); otherwise the row is
+/// colored by inferred severity.
+fn style_log_row(row: &str, query: Option<&str>) -> String {
+    if let Some(query) = query.filter(|query| !query.is_empty())
+        && let Some(highlighted) = highlight_matches(row, query)
+    {
+        return highlighted;
+    }
+    match log_severity(row) {
+        Some(LogSeverity::Error) => term::styled_error_raw(row),
+        Some(LogSeverity::Warn) => term::styled_warning_raw(row),
+        None => row.to_string(),
+    }
+}
+
+/// Expands raw log lines for display, wrapping each to `width` when `wrap` is
+/// set. Log lines are plain text, so character count equals visible width.
+fn expand_log_lines(lines: &[String], width: usize, wrap: bool) -> Vec<String> {
+    if !wrap || width == 0 {
+        return lines.to_vec();
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        for chunk in chars.chunks(width) {
+            out.push(chunk.iter().collect());
+        }
+    }
+    out
+}
+
+/// Counts log lines containing `query` (case-insensitive).
+fn count_log_matches(lines: &[String], query: &str) -> usize {
+    if query.is_empty() {
+        return 0;
+    }
+    let query_lower = query.to_ascii_lowercase();
+    lines
+        .iter()
+        .filter(|line| line.to_ascii_lowercase().contains(&query_lower))
+        .count()
+}
+
+/// Filters services by name and applies the requested ordering. Selection and
+/// rendering both go through this so `selected_index` always lines up with what
+/// is shown.
+fn effective_services<'a>(
+    services: &'a [PsServiceRow],
+    filter: Option<&str>,
+    sort: ServiceSort,
+) -> Vec<&'a PsServiceRow> {
+    let mut effective = filtered_services(services, filter);
+    if sort == ServiceSort::Triage {
+        // Stable sort keeps spec order within each triage rank.
+        effective.sort_by_key(|service| service_triage_rank(service));
+    }
+    effective
+}
+
+fn selected_service_name(
+    services: &[PsServiceRow],
+    filter: Option<&str>,
+    sort: ServiceSort,
+    selected_index: usize,
+) -> Option<String> {
+    effective_services(services, filter, sort)
+        .get(selected_index)
+        .map(|row| row.service_name.clone())
+}
+
+fn selected_effective_service<'a>(
+    services: &'a [PsServiceRow],
+    filter: Option<&str>,
+    sort: ServiceSort,
+    selected_index: usize,
+) -> Option<&'a PsServiceRow> {
+    effective_services(services, filter, sort)
+        .get(selected_index)
+        .copied()
+}
+
+fn preserve_selected_index(
+    services: &[PsServiceRow],
+    filter: Option<&str>,
+    sort: ServiceSort,
+    selected_service: Option<&str>,
+    fallback_index: usize,
+) -> usize {
+    let effective = effective_services(services, filter, sort);
+    preserve_selected_index_raw(&effective, selected_service, fallback_index)
+}
+
+fn preserve_selected_index_raw(
+    services: &[&PsServiceRow],
+    selected_service: Option<&str>,
+    fallback_index: usize,
+) -> usize {
+    if let Some(name) = selected_service
+        && let Some(index) = services.iter().position(|row| row.service_name == name)
+    {
+        return index;
+    }
+    clamp_selected_index_raw(services, fallback_index)
+}
+
+/// Triage rank: failures first, then unhealthy, then everything else.
+fn service_triage_rank(service: &PsServiceRow) -> u8 {
+    if service_matches_failure(service) {
+        0
+    } else if service.healthy == Some(false) {
+        1
+    } else {
+        2
+    }
+}
+
+/// True when the record's backend runs a consumer for dev-control restart
+/// requests (the local Pyxis/Enroot supervisor). Slurm batch jobs do not.
+fn restart_supported(record: &SubmissionRecord) -> bool {
+    record.backend == SubmissionBackend::Local
+}
+
+/// Writes a dev-control restart request for `service`, the same file-based
+/// mechanism `hpc-compose dev` uses for file-watch reloads. Returns the request
+/// path on success.
+fn request_service_restart(record: &SubmissionRecord, service: &str) -> Result<PathBuf> {
+    let request_dir = runtime_job_root_for_record(record)
+        .join("dev-control")
+        .join("restart");
+    fs::create_dir_all(&request_dir)
+        .with_context(|| format!("failed to create {}", request_dir.display()))?;
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = request_dir.join(format!("restart-{}-{millis}.request", std::process::id()));
+    fs::write(&path, format!("{service}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
 fn build_all_log_lines(snapshot: &PsSnapshot, lines: usize, capacity: usize) -> Vec<String> {
     let mut collected = Vec::new();
     for service in &snapshot.services {
@@ -1449,8 +2229,11 @@ fn service_matches_failure(service: &PsServiceRow) -> bool {
                 .is_some_and(|status| status == "exited")
 }
 
-fn first_failed_service_index(services: &[PsServiceRow]) -> Option<usize> {
-    services.iter().position(service_matches_failure)
+fn first_failed_service_name(services: &[PsServiceRow]) -> Option<&str> {
+    services
+        .iter()
+        .find(|service| service_matches_failure(service))
+        .map(|service| service.service_name.as_str())
 }
 
 fn should_hold_on_exit(policy: HoldOnExit, outcome: &WatchOutcome) -> bool {
@@ -1547,6 +2330,47 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+/// Standard base64 encoding with padding. Inlined to avoid a dependency for the
+/// single OSC 52 use site.
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Builds an OSC 52 "set clipboard" escape sequence. Modern terminals (and tmux
+/// with `set-clipboard on`) honor this even over SSH, so it needs no host-side
+/// clipboard tool.
+fn osc52_sequence(text: &str) -> String {
+    format!("\u{1b}]52;c;{}\u{7}", base64_encode(text.as_bytes()))
+}
+
+/// Copies `text` to the system clipboard via OSC 52. The escape is out-of-band
+/// (no cursor movement or visible output), so it is safe to emit mid-frame.
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    let mut stdout = io::stdout();
+    write!(stdout, "{}", osc52_sequence(text)).context("failed to write clipboard sequence")?;
+    stdout.flush().context("failed to flush clipboard sequence")
+}
+
 fn pane_separator() -> &'static str {
     if term::unicode_allowed_raw() {
         "\u{2502}"
@@ -1555,13 +2379,76 @@ fn pane_separator() -> &'static str {
     }
 }
 
-fn render_model(model: &WatchModel, (width, height): (usize, usize)) -> Result<()> {
-    let frame = render_watch_frame(model, width, height);
-    let mut stdout = io::stdout();
-    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))
-        .context("failed to clear watch UI frame")?;
-    write!(stdout, "{frame}").context("failed to write watch UI frame")?;
-    stdout.flush().context("failed to flush watch UI frame")
+/// Incremental terminal renderer.
+///
+/// The watch and replay loops repaint on every input-poll tick (~10 Hz), but
+/// the rendered frame is usually identical between ticks. A naive
+/// `Clear(All)` + full repaint each tick causes visible flicker and, over SSH
+/// (the common HPC case), streams a full screen of bytes continuously for a
+/// static view. This renderer keeps the previously drawn rows and rewrites
+/// only the rows that changed, skipping the write entirely when nothing
+/// changed. Every frame row is padded to the full width (see `fit_line`), so
+/// overwriting a row fully covers its prior content without a screen clear.
+struct FrameRenderer {
+    previous_lines: Vec<String>,
+    last_size: Option<(usize, usize)>,
+    needs_full_redraw: bool,
+}
+
+impl FrameRenderer {
+    fn new() -> Self {
+        Self {
+            previous_lines: Vec::new(),
+            last_size: None,
+            needs_full_redraw: true,
+        }
+    }
+
+    fn render(&mut self, frame: &str, size: (usize, usize)) -> Result<()> {
+        // A resize invalidates every cached row (and the terminal may reflow),
+        // so fall back to a full repaint for that frame.
+        if self.last_size != Some(size) {
+            self.needs_full_redraw = true;
+            self.last_size = Some(size);
+        }
+
+        let lines: Vec<&str> = frame.split('\n').collect();
+        let mut stdout = io::stdout();
+        if self.needs_full_redraw {
+            execute!(stdout, Clear(ClearType::All)).context("failed to clear watch UI frame")?;
+        }
+
+        let mut wrote = self.needs_full_redraw;
+        for (row, line) in lines.iter().enumerate() {
+            let unchanged = !self.needs_full_redraw
+                && self.previous_lines.get(row).map(String::as_str) == Some(*line);
+            if unchanged {
+                continue;
+            }
+            execute!(stdout, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))
+                .context("failed to position watch UI cursor")?;
+            write!(stdout, "{line}").context("failed to write watch UI frame")?;
+            wrote = true;
+        }
+
+        // Wipe rows left over from a previously taller frame (terminal shrank).
+        if self.previous_lines.len() > lines.len() {
+            execute!(
+                stdout,
+                MoveTo(0, lines.len() as u16),
+                Clear(ClearType::FromCursorDown)
+            )
+            .context("failed to clear stale watch UI rows")?;
+            wrote = true;
+        }
+
+        if wrote {
+            stdout.flush().context("failed to flush watch UI frame")?;
+        }
+        self.previous_lines = lines.into_iter().map(str::to_string).collect();
+        self.needs_full_redraw = false;
+        Ok(())
+    }
 }
 
 fn initial_selected_index(snapshot: &PsSnapshot, initial_service: Option<&str>) -> Result<usize> {
@@ -1712,6 +2599,126 @@ fn render_walltime_bar(progress: &WalltimeProgress, width: usize) -> String {
         format!("{}{}", "=".repeat(filled), "-".repeat(bar_width - filled))
     };
     summary.replacen("{}", &bar, 1)
+}
+
+/// Renders a one-line replay timeline scrubber: a track with event ticks and
+/// the playback cursor positioned between the timeline start and end.
+fn render_replay_scrubber(replay: &ReplayWatchStatus, width: usize) -> String {
+    let span = replay.end_unix.saturating_sub(replay.start_unix);
+    let elapsed = replay.cursor_unix.saturating_sub(replay.start_unix);
+    let label = format!("timeline {elapsed}s/{span}s ");
+    let bar_width = width.saturating_sub(visible_width(&label) + 2).clamp(8, 48);
+    let position = |unix: u64| -> usize {
+        if span == 0 {
+            0
+        } else {
+            ((u128::from(unix.saturating_sub(replay.start_unix)) * (bar_width - 1) as u128)
+                / u128::from(span)) as usize
+        }
+        .min(bar_width - 1)
+    };
+    let (track, tick, head) = if term::unicode_allowed_raw() {
+        ('\u{2500}', '\u{2506}', '\u{25cf}')
+    } else {
+        ('-', '|', '#')
+    };
+    let mut cells = vec![track; bar_width];
+    for event in &replay.event_unix {
+        cells[position(*event)] = tick;
+    }
+    cells[position(replay.cursor_unix)] = head;
+    let bar: String = cells.into_iter().collect();
+    format!("{label}[{bar}]")
+}
+
+fn format_duration_secs(secs: u64) -> String {
+    let (minutes, seconds) = (secs / 60, secs % 60);
+    if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Builds the detail-panel lines for one service: the fields the compact table
+/// cannot show. Lines are fit to `width`; at most `height` rows are returned.
+fn render_service_detail(service: &PsServiceRow, width: usize, height: usize) -> Vec<String> {
+    let yes_no = |value: Option<bool>| value.map(yes_no_short).unwrap_or("-").to_string();
+    let text = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_string());
+    let num = |value: Option<i64>| {
+        value
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    };
+
+    let mut rows: Vec<String> = Vec::new();
+    rows.push(term::styled_bold(&format!(
+        "[ {} ]  {}",
+        service.service_name,
+        service_state_label(service)
+    )));
+    rows.push(format!("step        {}", text(&service.step_name)));
+    rows.push(format!(
+        "pid         {}    ready {}",
+        num(service.launcher_pid.map(i64::from)),
+        yes_no(service.healthy)
+    ));
+    rows.push(format!("status      {}", text(&service.status)));
+    rows.push(format!(
+        "exit        {}    completed {}",
+        num(service.last_exit_code.map(i64::from)),
+        yes_no(service.completed_successfully)
+    ));
+    rows.push(format!(
+        "placement   {}   nodes {}   ntasks {} ({}/node)",
+        text(&service.placement_mode),
+        num(service.nodes.map(i64::from)),
+        num(service.ntasks.map(i64::from)),
+        num(service.ntasks_per_node.map(i64::from))
+    ));
+    rows.push(format!("nodelist    {}", text(&service.nodelist)));
+    rows.push(format!(
+        "policy      {}   ready-cfg {}",
+        text(&service.failure_policy_mode),
+        yes_no(service.readiness_configured)
+    ));
+    rows.push(format!(
+        "restarts    {}/{}   window {}s ({} max, {} failed)",
+        num(service.restart_count.map(i64::from)),
+        num(service.max_restarts.map(i64::from)),
+        num(service.window_seconds.map(|v| v as i64)),
+        num(service.max_restarts_in_window.map(i64::from)),
+        num(service.restart_failures_in_window.map(i64::from))
+    ));
+    if let Some(duration) = service.duration_seconds {
+        rows.push(format!("duration    {}", format_duration_secs(duration)));
+    }
+    if let Some(assertions) = &service.assertions {
+        let summary = if !assertions.failures.is_empty() {
+            format!(
+                "{} failed: {}",
+                assertions.failures.len(),
+                assertions.failures.join("; ")
+            )
+        } else {
+            assertions.status.clone().unwrap_or_else(|| {
+                if assertions.configured {
+                    "configured".to_string()
+                } else {
+                    "-".to_string()
+                }
+            })
+        };
+        rows.push(format!("assertions  {summary}"));
+    }
+    rows.push(format!("log         {}", service.path.display()));
+    rows.push(String::new());
+    rows.push(term::styled_dim("Esc/Enter back   j/k change service"));
+
+    rows.into_iter()
+        .take(height)
+        .map(|line| fit_line(&line, width))
+        .collect()
 }
 
 fn terminal_size() -> (usize, usize) {
@@ -2153,6 +3160,11 @@ mod tests {
             filter: None,
             search_buffer: String::new(),
             input_mode: InputMode::Normal,
+            log_query: None,
+            log_wrap: false,
+            sort_mode: ServiceSort::Spec,
+            notice: None,
+            show_detail: false,
             replay: None,
         }
     }
@@ -2230,6 +3242,615 @@ mod tests {
             timeline_start_unix: Some(100),
             timeline_end_unix: Some(110),
         }
+    }
+
+    /// Deterministic event source that replays a scripted sequence of inputs,
+    /// then quits so the watch and replay loops always terminate.
+    struct ScriptedEvents {
+        events: std::collections::VecDeque<WatchInput>,
+    }
+
+    impl ScriptedEvents {
+        fn new(events: impl IntoIterator<Item = WatchInput>) -> Self {
+            Self {
+                events: events.into_iter().collect(),
+            }
+        }
+    }
+
+    impl WatchEventSource for ScriptedEvents {
+        fn poll_event(
+            &mut self,
+            _timeout: Duration,
+            _mode: InputMode,
+        ) -> Result<Option<WatchInput>> {
+            Ok(Some(
+                self.events
+                    .pop_front()
+                    .unwrap_or(WatchInput::Normal(WatchKey::Quit)),
+            ))
+        }
+    }
+
+    fn normal(key: WatchKey) -> WatchInput {
+        WatchInput::Normal(key)
+    }
+
+    #[test]
+    fn frame_renderer_tracks_rows_and_handles_resize() {
+        let mut renderer = FrameRenderer::new();
+        renderer.render("a\nb\nc", (3, 3)).expect("initial paint");
+        assert_eq!(renderer.previous_lines, vec!["a", "b", "c"]);
+
+        // Identical frame: nothing to rewrite, cached rows preserved.
+        renderer.render("a\nb\nc", (3, 3)).expect("identical paint");
+        assert_eq!(renderer.previous_lines.len(), 3);
+
+        // Shorter frame at the same size exercises the trailing-clear branch.
+        renderer.render("a\nb", (3, 3)).expect("shorter paint");
+        assert_eq!(renderer.previous_lines, vec!["a", "b"]);
+
+        // Taller frame grows the cached rows.
+        renderer.render("a\nb\nc\nd", (3, 3)).expect("taller paint");
+        assert_eq!(renderer.previous_lines.len(), 4);
+
+        // A size change forces a full repaint and updates the tracked size.
+        renderer.render("x\ny", (2, 2)).expect("resized paint");
+        assert_eq!(renderer.last_size, Some((2, 2)));
+        assert_eq!(renderer.previous_lines, vec!["x", "y"]);
+    }
+
+    fn search(key: SearchKey) -> WatchInput {
+        WatchInput::Search(key)
+    }
+
+    #[test]
+    fn replay_loop_navigation_selects_service_via_injected_events() {
+        let report = sample_replay_report();
+        let mut events = ScriptedEvents::new([normal(WatchKey::Down), normal(WatchKey::Quit)]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert_eq!(result.selected_service.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn replay_loop_initial_triage_sort_preserves_service_selection() {
+        let report = sample_replay_report();
+        let mut events = ScriptedEvents::new([normal(WatchKey::Quit)]);
+        let result = run_replay_ui_loop(
+            &report,
+            Some("api"),
+            5,
+            1.0,
+            &mut events,
+            WatchPrefs {
+                sort: ServiceSort::Triage,
+                ..WatchPrefs::default()
+            },
+        )
+        .expect("replay loop runs");
+        assert_eq!(result.sort_mode, ServiceSort::Triage);
+        assert_eq!(result.selected_service.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn replay_loop_filter_narrows_to_matching_service() {
+        let report = sample_replay_report();
+        let mut events = ScriptedEvents::new([
+            normal(WatchKey::Search),
+            search(SearchKey::Char('w')),
+            search(SearchKey::Char('o')),
+            search(SearchKey::Submit),
+            normal(WatchKey::Quit),
+        ]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert_eq!(result.filter.as_deref(), Some("wo"));
+        assert_eq!(result.selected_service.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn replay_loop_search_cancel_restores_unfiltered_view() {
+        let report = sample_replay_report();
+        let mut events = ScriptedEvents::new([
+            normal(WatchKey::Search),
+            search(SearchKey::Char('z')),
+            search(SearchKey::Cancel),
+            normal(WatchKey::Quit),
+        ]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert!(result.filter.is_none());
+        assert_eq!(result.selected_service.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn replay_loop_speed_and_pause_keys_update_playback() {
+        let report = sample_replay_report();
+        let mut events = ScriptedEvents::new([
+            normal(WatchKey::SpeedUp),
+            normal(WatchKey::TogglePause),
+            normal(WatchKey::Quit),
+        ]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert_eq!(result.playback.speed, 10.0);
+        assert!(result.playback.paused);
+    }
+
+    #[test]
+    fn replay_loop_event_step_advances_cursor_and_pauses() {
+        let report = sample_replay_report();
+        let mut events = ScriptedEvents::new([normal(WatchKey::NextEvent), normal(WatchKey::Quit)]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert_eq!(result.playback.frame_index, 1);
+        assert_eq!(result.playback.cursor_unix, 110);
+        assert!(result.playback.paused);
+    }
+
+    #[test]
+    fn replay_loop_toggle_all_logs_changes_view_mode() {
+        let report = sample_replay_report();
+        let mut events =
+            ScriptedEvents::new([normal(WatchKey::ToggleAllLogs), normal(WatchKey::Quit)]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert_eq!(result.log_view_mode, LogViewMode::All);
+    }
+
+    #[test]
+    fn replay_loop_empty_report_returns_without_reading_events() {
+        let mut report = sample_replay_report();
+        report.frames.clear();
+        let mut events = ScriptedEvents::new([normal(WatchKey::Quit)]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert!(result.selected_service.is_none());
+    }
+
+    #[test]
+    fn replay_loop_log_search_sets_query_without_touching_filter() {
+        let report = sample_replay_report();
+        let mut events = ScriptedEvents::new([
+            normal(WatchKey::LogSearch),
+            search(SearchKey::Char('e')),
+            search(SearchKey::Char('r')),
+            search(SearchKey::Char('r')),
+            search(SearchKey::Submit),
+            normal(WatchKey::Quit),
+        ]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert_eq!(result.log_query.as_deref(), Some("err"));
+        assert!(result.filter.is_none());
+    }
+
+    #[test]
+    fn replay_loop_toggle_wrap_flips_state() {
+        let report = sample_replay_report();
+        let mut events =
+            ScriptedEvents::new([normal(WatchKey::ToggleWrap), normal(WatchKey::Quit)]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert!(result.log_wrap);
+    }
+
+    #[test]
+    fn replay_loop_cycle_sort_switches_and_preserves_selection() {
+        let report = sample_replay_report();
+        // Select `worker` (unhealthy), then switch to triage order. `worker`
+        // moves to the front but stays selected.
+        let mut events = ScriptedEvents::new([
+            normal(WatchKey::Down),
+            normal(WatchKey::CycleSort),
+            normal(WatchKey::Quit),
+        ]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert_eq!(result.sort_mode, ServiceSort::Triage);
+        assert_eq!(result.selected_service.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn log_severity_classifies_levels_by_word() {
+        assert_eq!(log_severity("[ERROR] boom"), Some(LogSeverity::Error));
+        assert_eq!(log_severity("level=warn retrying"), Some(LogSeverity::Warn));
+        assert_eq!(
+            log_severity("thread 'main' panicked"),
+            Some(LogSeverity::Error)
+        );
+        assert_eq!(log_severity("all systems nominal"), None);
+        // Inflected forms are detected via the prefix boundary.
+        assert_eq!(
+            log_severity("the build errored earlier"),
+            Some(LogSeverity::Error)
+        );
+        // ...but embedded matches like `terror` (contains `error`) are rejected.
+        assert_eq!(log_severity("terror is not a level"), None);
+    }
+
+    #[test]
+    fn highlight_and_count_track_query_matches() {
+        let lines = [
+            "api ok".to_string(),
+            "API ready".to_string(),
+            "db idle".to_string(),
+        ];
+        assert_eq!(count_log_matches(&lines, "api"), 2);
+        assert_eq!(count_log_matches(&lines, ""), 0);
+        assert!(highlight_matches("nothing here", "zzz").is_none());
+        // Highlighting preserves the visible text (only adds styling).
+        let highlighted = highlight_matches("hello WORLD", "world").expect("match present");
+        assert_eq!(strip_ansi_for_snapshot(&highlighted), "hello WORLD");
+    }
+
+    #[test]
+    fn env_refresh_interval_opt_parses_and_clamps() {
+        assert_eq!(env_refresh_interval_opt(None, 100, 60_000), None);
+        assert_eq!(env_refresh_interval_opt(Some("nope"), 100, 60_000), None);
+        // Below the floor and above the ceiling are clamped.
+        assert_eq!(
+            env_refresh_interval_opt(Some("10"), 100, 60_000),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            env_refresh_interval_opt(Some("999999"), 100, 60_000),
+            Some(Duration::from_millis(60_000))
+        );
+        assert_eq!(
+            env_refresh_interval_opt(Some(" 2500 "), 100, 60_000),
+            Some(Duration::from_millis(2500))
+        );
+    }
+
+    #[test]
+    fn watch_prefs_resolve_reads_settings() {
+        use hpc_compose::context::WatchSettings;
+        let prefs = WatchPrefs::resolve(&WatchSettings {
+            sort: Some("triage".into()),
+            wrap: Some(true),
+            refresh_ms: Some(250),
+            metrics_refresh_ms: Some(2000),
+            mouse: Some(true),
+        });
+        assert_eq!(prefs.sort, ServiceSort::Triage);
+        assert!(prefs.wrap);
+        assert_eq!(prefs.data_refresh, Duration::from_millis(250));
+        assert_eq!(prefs.metrics_refresh, Duration::from_millis(2000));
+        assert!(prefs.mouse);
+        // Defaults when unset.
+        let defaults = WatchPrefs::resolve(&WatchSettings::default());
+        assert_eq!(defaults.sort, ServiceSort::Spec);
+        assert!(!defaults.wrap);
+        assert_eq!(defaults.data_refresh, DATA_REFRESH_INTERVAL);
+    }
+
+    #[test]
+    fn expand_log_lines_wraps_only_when_enabled() {
+        let lines = vec!["abcdef".to_string(), "gh".to_string()];
+        assert_eq!(expand_log_lines(&lines, 3, false), lines);
+        assert_eq!(
+            expand_log_lines(&lines, 3, true),
+            vec!["abc".to_string(), "def".to_string(), "gh".to_string()]
+        );
+    }
+
+    #[test]
+    fn replay_scrubber_renders_label_cursor_and_handles_zero_span() {
+        let replay = ReplayWatchStatus {
+            cursor_unix: 105,
+            speed: 1.0,
+            paused: false,
+            fidelity: "best-effort".into(),
+            start_unix: 100,
+            end_unix: 110,
+            event_unix: vec![100, 110],
+        };
+        let bar = render_replay_scrubber(&replay, 80);
+        assert!(bar.contains("timeline 5s/10s"));
+        let visible = strip_ansi_for_snapshot(&bar);
+        // Cursor head is drawn (ASCII `#` or unicode ●).
+        assert!(visible.contains('#') || visible.contains('\u{25cf}'));
+        // A zero-span timeline must not panic.
+        let zero = ReplayWatchStatus {
+            cursor_unix: 100,
+            start_unix: 100,
+            end_unix: 100,
+            event_unix: vec![100],
+            ..replay
+        };
+        let _ = render_replay_scrubber(&zero, 80);
+    }
+
+    #[test]
+    fn render_service_detail_surfaces_table_omitted_fields() {
+        let snapshot = sample_snapshot();
+        let detail = render_service_detail(&snapshot.services[0], 80, 40).join("\n");
+        let visible = strip_ansi_for_snapshot(&detail);
+        assert!(visible.contains("[ api ]"));
+        assert!(visible.contains("pid         4242"));
+        assert!(visible.contains("placement   primary"));
+        assert!(visible.contains("nodelist    node001"));
+        assert!(visible.contains("restarts    1/3"));
+        assert!(visible.contains("Esc/Enter back"));
+    }
+
+    #[test]
+    fn replay_loop_enter_toggles_detail_panel() {
+        let report = sample_replay_report();
+        let mut events =
+            ScriptedEvents::new([normal(WatchKey::ShowDetail), normal(WatchKey::Quit)]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert!(result.show_detail);
+    }
+
+    #[test]
+    fn replay_loop_escape_closes_detail_panel() {
+        let report = sample_replay_report();
+        let mut events = ScriptedEvents::new([
+            normal(WatchKey::ShowDetail),
+            search(SearchKey::Cancel),
+            normal(WatchKey::Quit),
+        ]);
+        let result = run_replay_ui_loop(&report, None, 5, 1.0, &mut events, WatchPrefs::default())
+            .expect("replay loop runs");
+        assert!(!result.show_detail);
+    }
+
+    #[test]
+    fn render_watch_frame_detail_panel_replaces_body() {
+        let model = WatchModel {
+            show_detail: true,
+            ..sample_watch_model()
+        };
+        let frame = render_watch_frame(&model, 100, 24);
+        let visible = strip_ansi_for_snapshot(&frame);
+        // The detail panel is shown instead of the two-pane table/log body.
+        assert!(visible.contains("nodelist    node001"));
+        assert!(!visible.contains("svc              step"));
+    }
+
+    #[test]
+    fn base64_encode_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn osc52_sequence_wraps_base64_payload() {
+        assert_eq!(osc52_sequence("hi"), "\u{1b}]52;c;aGk=\u{7}");
+    }
+
+    #[test]
+    fn effective_services_triage_orders_problems_first() {
+        let snapshot = sample_snapshot();
+        let names = |services: &[&PsServiceRow]| {
+            services
+                .iter()
+                .map(|s| s.service_name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&effective_services(
+                &snapshot.services,
+                None,
+                ServiceSort::Spec
+            )),
+            vec!["api".to_string(), "worker".to_string()]
+        );
+        // `worker` is unhealthy, so triage order surfaces it first.
+        assert_eq!(
+            names(&effective_services(
+                &snapshot.services,
+                None,
+                ServiceSort::Triage
+            )),
+            vec!["worker".to_string(), "api".to_string()]
+        );
+    }
+
+    #[test]
+    fn preserve_selected_index_keeps_service_across_triage_sort() {
+        let snapshot = sample_snapshot();
+        let selected_index = preserve_selected_index(
+            &snapshot.services,
+            None,
+            ServiceSort::Triage,
+            Some("api"),
+            0,
+        );
+        let selected = selected_effective_service(
+            &snapshot.services,
+            None,
+            ServiceSort::Triage,
+            selected_index,
+        )
+        .expect("selected service");
+        assert_eq!(selected.service_name, "api");
+    }
+
+    #[test]
+    fn restart_supported_gates_on_local_backend() {
+        let mut record = sample_snapshot().record;
+        record.backend = SubmissionBackend::Local;
+        assert!(restart_supported(&record));
+        record.backend = SubmissionBackend::Slurm;
+        assert!(!restart_supported(&record));
+    }
+
+    #[test]
+    fn request_service_restart_writes_named_request() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut record = sample_snapshot().record;
+        record.submit_dir = tmpdir.path().to_path_buf();
+        let path = request_service_restart(&record, "api").expect("write request");
+        assert!(path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read request").trim(),
+            "api"
+        );
+        let display = path.to_string_lossy();
+        assert!(display.contains("dev-control"));
+        assert!(display.ends_with(".request"));
+    }
+
+    #[test]
+    fn watch_loop_restart_writes_request_for_local_job() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let local_image = tmpdir.path().join("local.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &compose,
+            format!(
+                "name: demo\nservices:\n  api:\n    image: {img}\n    command: /bin/true\nx-slurm:\n  cache_dir: {cache}\n",
+                img = local_image.display(),
+                cache = tmpdir.path().join("cache").display()
+            ),
+        )
+        .expect("compose");
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let script_path = tmpdir.path().join("job.local.sh");
+        let record = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-watch-restart-123",
+            SubmissionBackend::Local,
+        )
+        .expect("record");
+        write_submission_record(&record).expect("write record");
+        let state_path = state_path_for_record(&record);
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("state dir");
+        }
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "backend": SubmissionBackend::Local,
+                "job_status": "COMPLETED",
+                "job_exit_code": 0,
+                "supervisor_pid": serde_json::Value::Null,
+                "services": []
+            }))
+            .expect("state json"),
+        )
+        .expect("write state");
+
+        let options = SchedulerOptions {
+            squeue_bin: "/definitely/missing-squeue".into(),
+            sacct_bin: "/definitely/missing-sacct".into(),
+        };
+        // HoldOnExit::Always keeps the completed job open so `r` is processed.
+        let mut events = ScriptedEvents::new([normal(WatchKey::Restart), normal(WatchKey::Quit)]);
+        run_watch_ui_loop(
+            &record,
+            &options,
+            None,
+            5,
+            HoldOnExit::Always,
+            &mut events,
+            WatchPrefs::default(),
+        )
+        .expect("watch loop runs");
+
+        let restart_dir = runtime_job_root_for_record(&record)
+            .join("dev-control")
+            .join("restart");
+        let requests: Vec<_> = fs::read_dir(&restart_dir)
+            .expect("restart dir exists")
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert_eq!(requests.len(), 1, "exactly one restart request written");
+    }
+
+    #[test]
+    fn watch_loop_navigates_services_via_injected_events() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let local_image = tmpdir.path().join("local.sqsh");
+        fs::write(&local_image, "sqsh").expect("local image");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(
+            &compose,
+            format!(
+                "name: demo\nservices:\n  api:\n    image: {img}\n    command: /bin/true\n  worker:\n    image: {img}\n    command: /bin/true\nx-slurm:\n  cache_dir: {cache}\n",
+                img = local_image.display(),
+                cache = tmpdir.path().join("cache").display()
+            ),
+        )
+        .expect("compose");
+        let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+        let script_path = tmpdir.path().join("job.local.sh");
+        let record = build_submission_record_with_backend(
+            &compose,
+            tmpdir.path(),
+            &script_path,
+            &runtime_plan,
+            "local-watch-nav-123",
+            SubmissionBackend::Local,
+        )
+        .expect("record");
+        write_submission_record(&record).expect("write record");
+
+        let state_path = state_path_for_record(&record);
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).expect("state dir");
+        }
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "backend": SubmissionBackend::Local,
+                "job_status": "COMPLETED",
+                "job_exit_code": 0,
+                "supervisor_pid": serde_json::Value::Null,
+                "services": []
+            }))
+            .expect("state json"),
+        )
+        .expect("write state");
+
+        let options = SchedulerOptions {
+            squeue_bin: "/definitely/missing-squeue".into(),
+            sacct_bin: "/definitely/missing-sacct".into(),
+        };
+
+        // Resolve the service ordering the snapshot will present so the
+        // assertion is independent of spec iteration order.
+        let snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), &options)
+            .expect("snapshot");
+        assert!(
+            snapshot.services.len() >= 2,
+            "fixture must expose at least two services"
+        );
+        let second_service = snapshot.services[1].service_name.clone();
+
+        // HoldOnExit::Always keeps the completed job's UI open so the down-key
+        // is processed before the quit.
+        let mut events = ScriptedEvents::new([normal(WatchKey::Down), normal(WatchKey::Quit)]);
+        let result = run_watch_ui_loop(
+            &record,
+            &options,
+            None,
+            5,
+            HoldOnExit::Always,
+            &mut events,
+            WatchPrefs::default(),
+        )
+        .expect("watch loop runs");
+
+        assert!(matches!(result.outcome, WatchOutcome::Completed(_)));
+        assert_eq!(
+            result.selected_service.as_deref(),
+            Some(second_service.as_str())
+        );
     }
 
     #[test]
@@ -2316,6 +3937,9 @@ mod tests {
                     speed: 10.0,
                     paused: true,
                     fidelity: "best-effort".into(),
+                    start_unix: 100,
+                    end_unix: 110,
+                    event_unix: vec![100, 110],
                 }),
                 ..sample_watch_model()
             },
@@ -2341,6 +3965,9 @@ mod tests {
                     speed: 1.0,
                     paused: false,
                     fidelity: "best-effort".into(),
+                    start_unix: 100,
+                    end_unix: 110,
+                    event_unix: vec![100, 110],
                 }),
                 ..sample_watch_model()
             },
@@ -2431,13 +4058,54 @@ mod tests {
     #[test]
     fn ctrl_c_maps_to_quit() {
         assert_eq!(
-            map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            map_key_event(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                InputMode::Normal
+            ),
             Some(WatchInput::Normal(WatchKey::Quit))
         );
         assert_eq!(
-            map_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            map_key_event(
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                InputMode::Normal
+            ),
             Some(WatchInput::Search(SearchKey::Clear))
         );
+    }
+
+    #[test]
+    fn map_key_event_is_mode_aware_for_text_entry() {
+        // `q` quits in normal mode but is plain text while typing a query.
+        assert_eq!(
+            map_key_event(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                InputMode::Normal
+            ),
+            Some(WatchInput::Normal(WatchKey::Quit))
+        );
+        for mode in [InputMode::Search, InputMode::LogSearch] {
+            assert_eq!(
+                map_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), mode),
+                Some(WatchInput::Search(SearchKey::Char('q')))
+            );
+            assert_eq!(
+                map_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), mode),
+                Some(WatchInput::Search(SearchKey::Submit))
+            );
+        }
+    }
+
+    #[test]
+    fn map_mouse_event_scrolls_log_pane() {
+        assert_eq!(
+            map_mouse_event(MouseEventKind::ScrollUp),
+            Some(WatchInput::Normal(WatchKey::PageUp))
+        );
+        assert_eq!(
+            map_mouse_event(MouseEventKind::ScrollDown),
+            Some(WatchInput::Normal(WatchKey::PageDown))
+        );
+        assert_eq!(map_mouse_event(MouseEventKind::Moved), None);
     }
 
     #[test]
@@ -2698,25 +4366,33 @@ mod tests {
 
     #[test]
     fn terminal_guard_and_run_watch_ui_cover_interactive_paths() {
-        let guard = TerminalGuard::enter().expect("enter terminal guard");
+        let guard = TerminalGuard::enter(false).expect("enter terminal guard");
         assert!(guard.panic_restore_armed());
         drop(guard);
 
-        render_model(
-            &WatchModel {
-                snapshot: sample_snapshot(),
-                selected_index: 0,
-                walltime_progress: None,
-                log_lines: vec!["line".into()],
-                show_help: false,
-                filter: None,
-                search_buffer: String::new(),
-                input_mode: InputMode::Normal,
-                ..sample_watch_model()
-            },
-            (90, 14),
-        )
-        .expect("render model");
+        let model = WatchModel {
+            snapshot: sample_snapshot(),
+            selected_index: 0,
+            walltime_progress: None,
+            log_lines: vec!["line".into()],
+            show_help: false,
+            filter: None,
+            search_buffer: String::new(),
+            input_mode: InputMode::Normal,
+            ..sample_watch_model()
+        };
+        let mut renderer = FrameRenderer::new();
+        renderer
+            .render(&render_watch_frame(&model, 90, 14), (90, 14))
+            .expect("render frame");
+        // A second identical render exercises the no-change diff path.
+        renderer
+            .render(&render_watch_frame(&model, 90, 14), (90, 14))
+            .expect("render frame again");
+        // A different size forces the resize/full-repaint path.
+        renderer
+            .render(&render_watch_frame(&model, 70, 10), (70, 10))
+            .expect("render frame resized");
 
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let local_image = tmpdir.path().join("local.sqsh");
@@ -2770,6 +4446,7 @@ mod tests {
             None,
             5,
             HoldOnExit::Never,
+            WatchPrefs::default(),
         )
         .expect("run watch ui");
         assert!(matches!(outcome, WatchOutcome::Completed(_)));
@@ -2834,13 +4511,16 @@ mod tests {
                 ..sample_watch_model()
             },
             100,
-            22,
+            28,
         );
         assert!(frame.contains("Keybindings:"));
         assert!(frame.contains("j / Down"));
+        assert!(frame.contains("f           find in logs"));
+        assert!(frame.contains("w           toggle log line wrap"));
+        assert!(frame.contains("o           cycle service sort"));
         assert!(frame.contains("q           quit"));
         assert!(frame.contains("q quit"));
-        assert!(frame.lines().count() <= 22);
+        assert!(frame.lines().count() <= 28);
     }
 
     #[test]
@@ -2858,7 +4538,7 @@ mod tests {
                 ..sample_watch_model()
             },
             100,
-            22,
+            28,
         );
         let lines = canonical_frame_lines(&frame);
 
@@ -2866,7 +4546,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "  /           filter services")
+                .any(|line| line == "  /           filter services by name")
         );
         assert!(lines.iter().any(|line| line == "  q           quit"));
         assert!(lines.last().unwrap_or(&String::new()).contains("q quit"));
@@ -3027,7 +4707,11 @@ mod tests {
         assert_snapshot_line(&lines, 0, "hpc-compose watch | job 12345");
         assert_snapshot_line(&lines, 2, "filter: api");
         assert_snapshot_line(&lines, 3, "filter input: api");
-        assert_snapshot_line(&lines, 4, "? help | / filter | Space pause | q quit");
+        assert_snapshot_line(
+            &lines,
+            4,
+            "? help | / filter | f find | w wrap | o sort | q",
+        );
         assert_snapshot_line(&lines, 6, "> api OK ready=yes");
         assert_eq!(lines.len(), 9);
     }

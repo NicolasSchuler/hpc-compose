@@ -75,17 +75,18 @@ fn watch_with_fallback(
     lines: usize,
     mode: WatchMode,
     hold_on_exit: HoldOnExit,
+    prefs: watch_ui::WatchPrefs,
 ) -> Result<hpc_compose::job::WatchOutcome> {
     match mode {
         WatchMode::Line => return watch_submission(record, service, options, lines),
         WatchMode::Tui => {
-            return watch_ui::run_watch_ui(record, options, service, lines, hold_on_exit)
+            return watch_ui::run_watch_ui(record, options, service, lines, hold_on_exit, prefs)
                 .context("watch UI requested with --watch-mode tui but could not be started");
         }
         WatchMode::Auto => {}
     }
     if watch_ui::can_use_watch_ui() {
-        match watch_ui::run_watch_ui(record, options, service, lines, hold_on_exit) {
+        match watch_ui::run_watch_ui(record, options, service, lines, hold_on_exit, prefs) {
             Ok(outcome) => return Ok(outcome),
             Err(err) => {
                 let _ = writeln!(
@@ -1205,6 +1206,7 @@ fn maybe_watch_slurm_submission(
             100,
             watch_mode,
             hold_on_exit,
+            watch_ui::WatchPrefs::resolve(&context.watch),
         )?,
     )
 }
@@ -1751,6 +1753,7 @@ pub(crate) fn launch(
                     100,
                     watch_mode,
                     hold_on_exit,
+                    watch_ui::WatchPrefs::resolve(&context.watch),
                 )?,
             )?;
         }
@@ -2285,6 +2288,42 @@ fn write_dev_restart_request(control_dir: &Path, services: &BTreeSet<String>) ->
     Ok(path)
 }
 
+/// Detects changes across all dev watch targets once, returning the services to
+/// restart and updating each target's snapshot in place.
+fn detect_dev_changes(targets: &mut [DevWatchTarget]) -> BTreeSet<String> {
+    let mut affected = BTreeSet::new();
+    for target in targets {
+        if let Ok(current) = collect_dev_snapshot(&target.root)
+            && current != target.snapshot
+        {
+            affected.extend(target.services.iter().cloned());
+            target.snapshot = current;
+        }
+    }
+    affected
+}
+
+/// Spawns a background thread that watches the dev source directories and writes
+/// restart requests on change, mirroring the text-mode dev loop. It runs until
+/// [`DEV_SHUTDOWN_REQUESTED`] is set so the foreground watch UI stays in control.
+fn spawn_dev_file_watch(
+    mut targets: Vec<DevWatchTarget>,
+    control_dir: PathBuf,
+    debounce_ms: u64,
+) -> std::thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !DEV_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            let mut affected = detect_dev_changes(&mut targets);
+            if !affected.is_empty() {
+                thread::sleep(Duration::from_millis(debounce_ms));
+                affected.extend(detect_dev_changes(&mut targets));
+                let _ = write_dev_restart_request(&control_dir, &affected);
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    })
+}
+
 #[cfg(unix)]
 extern "C" fn handle_dev_signal(_: libc::c_int) {
     DEV_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
@@ -2311,6 +2350,7 @@ pub(crate) fn dev(
     force_rebuild: bool,
     no_preflight: bool,
     quiet: bool,
+    tui: bool,
 ) -> Result<()> {
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     let prepared = prepare_local_launch(
@@ -2349,6 +2389,35 @@ pub(crate) fn dev(
         squeue_bin: context.binaries.squeue.value.clone(),
         sacct_bin: context.binaries.sacct.value.clone(),
     };
+
+    if tui {
+        // Drive file-watch reloads from a background thread while the live watch
+        // UI runs in the foreground. The in-job supervisor consumes the restart
+        // requests both threads write (auto-reloads here, the `r` key in the UI).
+        let prefs = watch_ui::WatchPrefs::resolve(&context.watch);
+        let watcher = spawn_dev_file_watch(targets, control_dir, debounce_ms);
+        let ui_result = watch_ui::run_watch_ui(
+            &outcome.record,
+            &scheduler_options,
+            None,
+            200,
+            HoldOnExit::Failure,
+            prefs,
+        );
+        DEV_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+        let _ = watcher.join();
+        ui_result?;
+        if !keep_running && let Some(pid) = read_local_supervisor_pid(&outcome.record)? {
+            kill_pid(pid).with_context(|| {
+                format!("failed to stop local dev job {}", outcome.record.job_id)
+            })?;
+            if !quiet {
+                println!("stopped local dev job: {}", outcome.record.job_id);
+            }
+        }
+        return Ok(());
+    }
+
     loop {
         if DEV_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             if !keep_running && let Some(pid) = read_local_supervisor_pid(&outcome.record)? {
@@ -3510,6 +3579,7 @@ pub(crate) fn run_service(
             100,
             WatchMode::Auto,
             HoldOnExit::Failure,
+            watch_ui::WatchPrefs::resolve(&context.watch),
         )?,
     )
 }
@@ -3682,6 +3752,7 @@ pub(crate) fn run_ephemeral(
                 100,
                 WatchMode::Auto,
                 HoldOnExit::Failure,
+                watch_ui::WatchPrefs::resolve(&context.watch),
             )?,
         );
     }
@@ -3738,6 +3809,7 @@ pub(crate) fn run_ephemeral(
             100,
             WatchMode::Auto,
             HoldOnExit::Failure,
+            watch_ui::WatchPrefs::resolve(&context.watch),
         )?,
     )
 }
@@ -4120,6 +4192,7 @@ pub(crate) fn watch(
             lines,
             watch_mode,
             hold_on_exit,
+            watch_ui::WatchPrefs::resolve(&context.watch),
         )?,
     )
 }
@@ -4150,11 +4223,23 @@ pub(crate) fn replay(
         }
         OutputFormat::Text => match watch_mode {
             WatchMode::Line => print_replay_summary(&report),
-            WatchMode::Tui => watch_ui::run_replay_ui(&report, service.as_deref(), lines, speed)
-                .context("replay UI requested with --watch-mode tui but could not be started"),
+            WatchMode::Tui => watch_ui::run_replay_ui(
+                &report,
+                service.as_deref(),
+                lines,
+                speed,
+                watch_ui::WatchPrefs::resolve(&context.watch),
+            )
+            .context("replay UI requested with --watch-mode tui but could not be started"),
             WatchMode::Auto => {
                 if watch_ui::can_use_watch_ui() {
-                    match watch_ui::run_replay_ui(&report, service.as_deref(), lines, speed) {
+                    match watch_ui::run_replay_ui(
+                        &report,
+                        service.as_deref(),
+                        lines,
+                        speed,
+                        watch_ui::WatchPrefs::resolve(&context.watch),
+                    ) {
                         Ok(()) => Ok(()),
                         Err(err) => {
                             let _ = writeln!(
@@ -5526,7 +5611,32 @@ mod tests {
             },
             interpolation_vars: BTreeMap::new(),
             interpolation_var_sources: BTreeMap::new(),
+            watch: Default::default(),
         }
+    }
+
+    #[test]
+    fn detect_dev_changes_reports_modified_targets_once() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let root = tmpdir.path().to_path_buf();
+        fs::write(root.join("a.txt"), "one").expect("write");
+        let snapshot = collect_dev_snapshot(&root).expect("snapshot");
+        let mut targets = vec![DevWatchTarget {
+            root: root.clone(),
+            services: BTreeSet::from(["api".to_string()]),
+            snapshot,
+        }];
+
+        // No change yet.
+        assert!(detect_dev_changes(&mut targets).is_empty());
+
+        // A differently-sized rewrite is detected and the snapshot advances.
+        fs::write(root.join("a.txt"), "modified-content").expect("rewrite");
+        let affected = detect_dev_changes(&mut targets);
+        assert!(affected.contains("api"));
+
+        // The advanced snapshot means a second pass is clean.
+        assert!(detect_dev_changes(&mut targets).is_empty());
     }
 
     #[test]
@@ -6157,6 +6267,7 @@ mod tests {
             5,
             WatchMode::Auto,
             HoldOnExit::Failure,
+            watch_ui::WatchPrefs::default(),
         )
         .expect("watch");
         assert!(matches!(

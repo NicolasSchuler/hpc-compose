@@ -58,14 +58,43 @@ Keybindings:
 | `k`, `Up` | Move to the previous service. |
 | `g` / `G` | Jump to the first or last service. |
 | `/` | Filter services by name; press `Enter` to apply or `Esc` to cancel. |
+| `f` | Find within log content; matches are highlighted and counted in the log header. |
 | `Space` | Pause or resume log following. |
 | `PgUp` / `PgDn` | Scroll the visible log pane while paused. |
 | `End` | Return to live-follow mode at the newest log lines. |
 | `a` | Toggle between the selected service log and all tracked service logs. |
+| `w` | Toggle wrapping of long log lines (otherwise they are truncated). |
+| `o` | Cycle service ordering between spec order and triage (failed, then unhealthy, first). |
+| `r` | Request a restart of the selected service (local supervised jobs; see note below). |
+| `Enter` | Open a detail panel for the selected service (placement, ntasks, nodelist, restart policy, timings, assertions); `Esc`/`Enter` closes and `j`/`k` switches service. |
+| `y` | Copy a ready-to-run `logs` command for the selected service to the system clipboard (OSC 52; works over SSH). |
 | `?` | Toggle in-UI help. |
 | `q` / `Ctrl-C` | Leave the watch view without cancelling the job. |
 
+Log lines are colored by inferred severity: lines mentioning `error`/`fatal`/`panic` show in red and `warn`/`warning` in yellow (subject to the active color policy).
+
 Use `--hold-on-exit never|failure|always` on `up` or `watch` to control whether the final TUI stays open after a terminal scheduler state. When the view is held, press `d`, `l`, or `s` to print the exact `debug`, `logs`, or `stats` command after leaving the alternate screen.
+
+The `r` restart action writes a request consumed by the local Pyxis/Enroot supervisor, the same mechanism `hpc-compose dev` uses for file-watch reloads; it applies to local supervised jobs and is reported as unavailable for Slurm batch jobs. Run `hpc-compose dev --tui` to get this live view during a dev session: file-watching keeps reloading changed services in the background while the watch UI (including `r` for an on-demand restart) runs in the foreground. Without `--tui`, `dev` keeps its line-oriented output, which is friendlier for CI and logs.
+
+The watch and replay views repaint only the rows that change between refreshes, which keeps the display flicker-free and minimizes bytes sent over SSH. Two environment variables tune the live view:
+
+| Variable | Effect |
+| --- | --- |
+| `HPC_COMPOSE_WATCH_REFRESH_MS` | Scheduler/log refresh cadence in milliseconds (default 1000, clamped to 100–60000). |
+| `HPC_COMPOSE_WATCH_METRICS_REFRESH_MS` | Metrics refresh cadence in milliseconds (default 5000, clamped to 500–600000). |
+| `HPC_COMPOSE_WATCH_MOUSE` | Set to a non-zero value to enable mouse capture; the scroll wheel then drives the log pane. Off by default so native terminal text selection keeps working. |
+
+These display preferences can also be set per-project in `.hpc-compose/settings.toml` under a `[watch]` section; environment variables take precedence over the file:
+
+```toml
+[watch]
+sort = "triage"          # spec | triage
+wrap = true
+refresh_ms = 500         # 100–60000
+metrics_refresh_ms = 2000 # 500–600000
+mouse = false
+```
 
 Use `hpc-compose up --watch-queue` when you want explicit queue polling before the watch view opens. It prints queue state changes, pending reason, and expected start time when Slurm exposes them; `--queue-warn-after <DURATION>` controls the one-time long-pending warning.
 
@@ -91,7 +120,9 @@ Replay controls:
 | `Left` / `Right` | Seek backward or forward by five seconds. |
 | `[` / `]` | Jump to the previous or next reconstructed event. |
 | `Home` / `End` | Jump to the first or final replay frame. |
-| `/`, `a`, `PgUp`, `PgDn`, `q` | Same filter, log-pane, scroll, and quit behavior as `watch`. |
+| `/`, `f`, `a`, `w`, `o`, `PgUp`, `PgDn`, `q` | Same filter, find, log-pane, wrap, sort, scroll, and quit behavior as `watch`. |
+
+A timeline scrubber under the header shows the playback cursor and reconstructed event ticks between the start and end of the run.
 
 Replay data sources:
 

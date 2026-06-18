@@ -280,6 +280,16 @@ pub(crate) fn styled_error_raw(text: &str) -> String {
     }
 }
 
+/// Highlights a substring (e.g. a search match) using reverse video, which
+/// stands out regardless of the surrounding foreground color.
+pub(crate) fn styled_highlight_raw(text: &str) -> String {
+    if colors_enabled() {
+        text.reversed().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 pub(crate) fn styled_section_header(text: &str) -> String {
     if colors_enabled() {
         text.bold().to_string()

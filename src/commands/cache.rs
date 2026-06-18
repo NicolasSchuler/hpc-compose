@@ -235,6 +235,7 @@ services:
             },
             interpolation_vars: BTreeMap::new(),
             interpolation_var_sources: BTreeMap::new(),
+            watch: Default::default(),
         }
     }
 

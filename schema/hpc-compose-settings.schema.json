@@ -31,9 +31,42 @@
         "$ref": "#/definitions/resourceProfile"
       },
       "description": "Reusable Slurm resource defaults referenced from x-slurm.resources in compose files."
+    },
+    "watch": {
+      "$ref": "#/definitions/watchSettings"
     }
   },
   "definitions": {
+    "watchSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Watch/replay TUI display defaults. Environment variables and CLI flags still take precedence.",
+      "properties": {
+        "sort": {
+          "type": "string",
+          "enum": ["spec", "triage"],
+          "description": "Default service ordering in the watch view."
+        },
+        "wrap": {
+          "type": "boolean",
+          "description": "Wrap long log lines instead of truncating them."
+        },
+        "refresh_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "description": "Scheduler/log refresh cadence in milliseconds."
+        },
+        "metrics_refresh_ms": {
+          "type": "integer",
+          "minimum": 500,
+          "description": "Metrics refresh cadence in milliseconds."
+        },
+        "mouse": {
+          "type": "boolean",
+          "description": "Enable mouse capture for scroll-wheel log scrolling."
+        }
+      }
+    },
     "profileDefaults": {
       "type": "object",
       "additionalProperties": false,

@@ -2141,6 +2141,10 @@ fn settings_schema_definition_keys_match_exhaustive_catalog() {
                 "constraint",
             ],
         ),
+        (
+            "watchSettings",
+            &["sort", "wrap", "refresh_ms", "metrics_refresh_ms", "mouse"],
+        ),
     ];
 
     for (def_name, expected_keys) in catalog {

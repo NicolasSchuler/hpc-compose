@@ -440,6 +440,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             debounce_ms,
             keep_running,
             script_out,
+            tui,
         } => {
             let binary_overrides = resolve_binary_overrides(
                 options,
@@ -461,6 +462,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 launch.force_rebuild,
                 launch.no_preflight,
                 options.quiet,
+                tui,
             )
         }
         Commands::Tmux {

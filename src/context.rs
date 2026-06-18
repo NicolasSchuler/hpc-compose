@@ -182,6 +182,32 @@ pub struct SettingsProfile {
     pub cache: CacheSettings,
 }
 
+/// Watch/replay TUI display preferences in settings.
+///
+/// Values are stored as primitives (parsed by the watch UI) so this lib type
+/// stays decoupled from the binary's TUI enums. Environment variables and CLI
+/// flags still take precedence over these defaults.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WatchSettings {
+    /// Service ordering: `spec` or `triage`.
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Wrap long log lines instead of truncating.
+    #[serde(default)]
+    pub wrap: Option<bool>,
+    /// Scheduler/log refresh cadence in milliseconds.
+    #[serde(default)]
+    pub refresh_ms: Option<u64>,
+    /// Metrics refresh cadence in milliseconds.
+    #[serde(default)]
+    pub metrics_refresh_ms: Option<u64>,
+    /// Enable mouse capture (scroll-wheel log scrolling).
+    #[serde(default)]
+    pub mouse: Option<bool>,
+}
+
 /// `.hpc-compose/settings.toml` root schema.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,6 +223,8 @@ pub struct Settings {
     pub profiles: BTreeMap<String, SettingsProfile>,
     #[serde(default)]
     pub resource_profiles: BTreeMap<String, ResourceProfile>,
+    #[serde(default)]
+    pub watch: WatchSettings,
 }
 
 impl Default for Settings {
@@ -207,6 +235,7 @@ impl Default for Settings {
             defaults: SettingsDefaults::default(),
             profiles: BTreeMap::new(),
             resource_profiles: BTreeMap::new(),
+            watch: WatchSettings::default(),
         }
     }
 }
@@ -249,6 +278,9 @@ pub struct ResolvedContext {
     pub binaries: ResolvedBinaries,
     pub interpolation_vars: BTreeMap<String, String>,
     pub interpolation_var_sources: BTreeMap<String, ValueSource>,
+    /// Watch/replay TUI display defaults from settings.
+    #[serde(default)]
+    pub watch: WatchSettings,
 }
 
 /// Inputs used when resolving a command context.
@@ -487,6 +519,10 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         binaries,
         interpolation_vars,
         interpolation_var_sources,
+        watch: settings
+            .as_ref()
+            .map(|settings| settings.watch.clone())
+            .unwrap_or_default(),
     })
 }
 
