@@ -299,6 +299,16 @@ fn ci_docs_qa_tools_are_version_pinned() {
             && workflow.contains("pa11y-ci@${PA11Y_CI_VERSION}"),
         "CI should pin pa11y-ci so accessibility checks remain reproducible"
     );
+    assert!(
+        workflow.contains("TYPOS_VERSION: \"1.28.4\"")
+            && workflow.contains("cargo install typos-cli --locked --version"),
+        "CI should pin typos so spell checks remain reproducible"
+    );
+    assert!(
+        workflow.contains("MARKDOWNLINT_CLI2_VERSION: \"0.14.0\"")
+            && workflow.contains("markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"),
+        "CI should pin markdownlint-cli2 so markdown lint remains reproducible"
+    );
 }
 
 #[test]

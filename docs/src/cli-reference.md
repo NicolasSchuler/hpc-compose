@@ -2,6 +2,18 @@
 
 This page maps the public `hpc-compose` CLI by workflow. Use [Quickstart](quickstart.md) for the shortest install-and-run path, [Runbook](runbook.md) for real-cluster operations, and [Spec Reference](spec-reference.md) for YAML field behavior.
 
+## Manual Pages
+
+Every command also ships a Unix man page, generated from the same definitions as this reference:
+
+```bash
+man hpc-compose
+man hpc-compose-up
+man hpc-compose-sweep-submit
+```
+
+Release archives install them under `share/man/man1/`. From a source checkout, regenerate them with `cargo run --features manpage-bin --bin gen-manpages`.
+
 ## Common Flags
 
 | Flag | Use it for | Notes |
@@ -18,7 +30,7 @@ This page maps the public `hpc-compose` CLI by workflow. Use [Quickstart](quicks
 | Command | Use it for | Notes |
 | --- | --- | --- |
 | `new` (alias: `init`) | Generate a starter compose file from a built-in template | Use `--list-templates` and `--describe-template <name>` to inspect templates before writing a file. `--cache-dir` is optional and writes an explicit `x-slurm.cache_dir`. |
-| `examples` | Search shipped examples and starter templates | Use `examples list`, `examples search`, and `examples coverage` to choose a starting spec or generate the docs coverage table. |
+| `examples` | Search and recommend shipped examples and starter templates | Use `examples recommend` for a no-Slurm starting-point chooser, `examples list` or `examples search` to browse, and `examples coverage` to generate the docs coverage table. |
 | `evolve` | Learn spec features through a progressive valid-spec tutorial | Use `--list-lessons`, `--describe-lesson <id>`, and `--until <step>` to inspect or stop at a lesson step. `--format json` requires `--yes`. |
 | `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, binary overrides, and an optional profile cache default. |
 | `context` | Print the resolved execution context | Shows the selected profile, binaries, interpolation vars, runtime paths, and value sources. |
@@ -32,6 +44,8 @@ hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cach
 hpc-compose examples list
 hpc-compose examples list --tag mpi --format json
 hpc-compose examples search 'vllm worker'
+hpc-compose examples recommend 'multi-node training' --tag gpu
+hpc-compose examples recommend --format json
 hpc-compose examples coverage --format markdown
 hpc-compose evolve --list-lessons
 hpc-compose evolve --describe-lesson progressive-complexity
@@ -78,7 +92,7 @@ hpc-compose completions zsh
 | `test` | Smoke-test a finite spec end to end | Requires explicit `--local` or `--submit`; every service must start, pass configured readiness, and complete successfully. |
 | `dev` | Run local hot-reload mode | Watches bind-mounted source directories and restarts affected services through the local supervisor. |
 | `tmux` | Open a multi-pane local service log dashboard | Tails one tracked local service log per pane; tmux does not own service processes. |
-| `germinate` | Submit a one-minute canary and recommend resource settings | Writes `latest-canary.json`, keeps normal `latest.json` untouched, and prints a manual YAML patch. |
+| `germinate` | Submit a short canary (default one minute) and recommend resource settings | Writes `latest-canary.json`, keeps normal `latest.json` untouched, and prints a manual YAML patch. |
 | `sweep submit` | Submit many independent trials from a top-level `sweep` block | Each trial is a tracked Slurm allocation. Use `--dry-run` first and `--max-trials` for intentional fanout above 100. |
 | `when` | Submit after cluster conditions are met | Prepares and renders now, then monitors typed conditions such as idle nodes, prior job completion, or a local time window before calling `sbatch`. |
 | `alloc` | Open an interactive Slurm allocation for iterative service runs | Uses top-level `x-slurm` allocation settings, exports `HPC_COMPOSE_*`, and lets `run SERVICE -- CMD` reuse the active allocation. |
@@ -103,7 +117,7 @@ hpc-compose preflight -f compose.yaml
 hpc-compose doctor cluster-report
 hpc-compose doctor readiness -f compose.yaml --service api
 hpc-compose doctor readiness -f compose.yaml --service api --run
-hpc-compose doctor readiness -f compose.yaml --service api --run --log-file .hpc-compose/12345/logs/api.log
+hpc-compose doctor readiness -f compose.yaml --service api --run --log-file .hpc-compose/<job-id>/logs/api.log
 hpc-compose doctor mpi-smoke -f compose.yaml --service trainer --script-out mpi-smoke.sbatch
 hpc-compose doctor mpi-smoke -f compose.yaml --service trainer --submit
 hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto --script-out fabric-smoke.sbatch
@@ -169,7 +183,7 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | --- | --- | --- |
 | `--sbatch-bin` | `sbatch` | `up`, `when`, `germinate`, `test`, `run`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--srun-bin` | `srun` | `up`, `when`, `alloc`, `germinate`, `test`, `run`, `shell`, `sweep submit`, `preflight`, `debug`, `doctor` |
-| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `debug` |
+| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `debug`, `weather` |
 | `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `debug` |
 | `--salloc-bin` | `salloc` | `alloc` |
 | `--scontrol-bin` | `scontrol` | `alloc`, `sweep submit`, `preflight`, `debug`, `doctor` |
@@ -204,7 +218,7 @@ Useful options:
 - `--dry-run` renders the canary script without calling `sbatch`.
 - `--skip-prepare`, `--force-rebuild`, `--keep-failed-prep`, `--no-preflight`, and `--script-out` match the normal preparation flags.
 
-The command rejects `x-slurm.array` in v1 and never rewrites your compose file automatically. See [Right-Sizing With Canary Runs](canary-runs.md).
+The command rejects `x-slurm.array` and never rewrites your compose file automatically. See [Right-Sizing With Canary Runs](canary-runs.md).
 
 ### `sweep` Hyperparameter Sweeps
 
@@ -246,7 +260,7 @@ hpc-compose sweep list -f train.yaml --format json
 | `-f`, `--file <FILE>` | Select the compose file whose sweep directory should be scanned. |
 | `--format text|json` | Print persisted sweep manifests without querying Slurm. |
 
-See [Hyperparameter Sweeps](sweeps.md) for the `sweep` spec shape, interpolation rules, status categories, and v1 limitations.
+See [Hyperparameter Sweeps](sweeps.md) for the `sweep` spec shape, interpolation rules, status categories, and current limitations.
 
 ### `when` Conditional Submission
 
@@ -258,7 +272,7 @@ hpc-compose when -f compose.yaml --after-job 12345 --after-job-condition afterok
 hpc-compose when -f compose.yaml --between 22:00-06:00
 ```
 
-Conditions are ANDed. `--free-nodes` counts only `idle` rows from `sinfo -h -p <partition> -o "%T|%D"` and requires `--partition` to match `x-slurm.partition`. `--after-job` polls `squeue` first and then `sacct`; `afterok` and `afternotok` fail immediately when the prior job reaches a terminal state that can never satisfy the requested condition. `--between` uses local login-node wall-clock time and supports wraparound windows such as `22:00-06:00`.
+All conditions must hold (logical AND). `--free-nodes` counts only `idle` rows from `sinfo -h -p <partition> -o "%T|%D"` and requires `--partition` to match `x-slurm.partition`. `--after-job` polls `squeue` first and then `sacct`; `afterok` and `afternotok` fail immediately when the prior job reaches a terminal state that can never satisfy the requested condition. `--between` uses local login-node wall-clock time and supports wraparound windows such as `22:00-06:00`.
 
 Useful options:
 
@@ -274,7 +288,7 @@ Example JSON automation:
 hpc-compose when --detach --format json -f compose.yaml --partition gpu8 --free-nodes 4
 ```
 
-V1 has no `x-when` YAML field. Conditional submission is intentionally a CLI workflow layered over the normal compose spec.
+There is no `x-when` YAML field. Conditional submission is intentionally a CLI workflow layered over the normal compose spec.
 
 ### `up --local`
 

@@ -4,6 +4,8 @@ MDBOOK_VERSION := "0.5.2"
 LYCHEE_VERSION := "0.23.0"
 PA11Y_CI_VERSION := "4.0.1"
 ACTIONLINT_VERSION := "1.7.12"
+TYPOS_VERSION := "1.28.4"
+MARKDOWNLINT_CLI2_VERSION := "0.14.0"
 
 _require-tools *tools:
     @missing=0; for tool in {{tools}}; do if ! command -v "$tool" >/dev/null 2>&1; then echo "missing required tool: $tool" >&2; missing=1; fi; done; exit "$missing"
@@ -15,7 +17,8 @@ _require-cargo-subcommands:
 bootstrap-docs-tools: (_require-tools "cargo" "npm")
     cargo install mdbook --locked --version "{{MDBOOK_VERSION}}"
     cargo install lychee --locked --version "{{LYCHEE_VERSION}}"
-    npm install --global "pa11y-ci@{{PA11Y_CI_VERSION}}"
+    cargo install typos-cli --locked --version "{{TYPOS_VERSION}}"
+    npm install --global "pa11y-ci@{{PA11Y_CI_VERSION}}" "markdownlint-cli2@{{MARKDOWNLINT_CLI2_VERSION}}"
 
 clean:
     rm -rf target .tmp coverage htmlcov tarpaulin-report.html lcov.info *.profraw *.profdata
@@ -28,11 +31,14 @@ check: workflow-check
     cargo clippy --all-targets --locked -- -D warnings
     cargo test --locked
 
-docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "curl" "python3")
+docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "typos" "markdownlint-cli2" "curl" "python3")
     mdbook build docs
     RUSTFLAGS="-D warnings" cargo doc --locked --no-deps
     cargo run --locked --features manpage-bin --bin gen-manpages -- --check
-    shopt -s globstar nullglob; lychee --no-progress --fallback-extensions md --exclude-path 'target/mdbook/404\.html$' README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md docs/src/**/*.md target/mdbook/**/*.html
+    typos docs/src README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
+    markdownlint-cli2
+    shopt -s globstar nullglob; lychee --no-progress --fallback-extensions md --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' --exclude-path 'target/mdbook/404\.html$' README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md docs/src/**/*.md target/mdbook/**/*.html
+    python3 scripts/gen_pa11y_urls.py
     python3 -m http.server 3000 --directory target/mdbook >/tmp/hpc-compose-docs-http.log 2>&1 & server_pid=$!; trap 'kill "$server_pid"' EXIT; for _ in $(seq 1 30); do if curl -fsS http://127.0.0.1:3000/ >/dev/null; then break; fi; sleep 1; done; pa11y-ci --config .pa11yci.json
 
 examples-check: (_require-tools "shellcheck")

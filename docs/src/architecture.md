@@ -17,10 +17,12 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 - `cache`: persist cache manifests for imported and prepared images
 - `init`: expose the shipped example templates for `hpc-compose new` plus the legacy `init` alias
 - `schema` and `manpages`: expose the checked-in JSON Schema and generated section-1 manpage flow
-- `commands/spec`: binary-only handlers for `plan`, `validate`, `lint`, `render`, `prepare`, `preflight`, `config`, and `inspect`
-- `commands/runtime`: binary-only handlers for `up`, `debug`, `run`, `status`, `ps`, `watch`, `replay`, `stats`, `artifacts`, `logs`, `down`, `cancel`, and `clean`
-- `commands/cache`: binary-only handlers for cache inspection and pruning
-- `commands/init`: binary-only handlers for `new` / `init`, `setup`, `context`, and `completions`
+- `commands/spec`: static authoring commands such as `plan`, `validate`, `lint`, `render`, `config`, `inspect`, `prepare`, and `preflight`
+- `commands/runtime`: submission, tracked-run, and local-development commands such as `up`, `when`, `run`, `alloc`, `debug`, `status`, `ps`, `watch`, `replay`, `stats`, `logs`, `artifacts`, `down`, `cancel`, `clean`, `dev`, `tmux`, and `test`
+- `commands/cache`: cache inspection and pruning
+- `commands/doctor`, `commands/evolve`, `commands/examples`, `commands/weather`: the `doctor`, `evolve`, `examples`, and `weather` command families
+- `commands/init`: `new` / `init`, `setup`, `context`, and `completions`
+- `commands` (`mod.rs`): parses the CLI and routes every command to its handler module
 - `watch_ui`: terminal UI controller and renderer for `up`, `watch`, and replay playback
 - `output`: binary-only text, JSON, CSV, and JSONL formatting helpers
 
@@ -57,8 +59,20 @@ mdbook build docs
 cargo run --features manpage-bin --bin gen-manpages -- --check
 ```
 
+## Coverage Notes
+
+- Treat `src/spec/mod.rs` as high risk for broad refactors until parser and semantic-validation behavior has more focused coverage. Prefer adding behavior-first tests in `tests/cli_spec.rs` or spec unit tests before moving large validation blocks.
+- Render changes should keep generated-script assertions close to `src/render.rs`. `just examples-check` shellchecks rendered batch scripts, while local launchers are produced through `up/run --local`, so local launcher syntax needs focused render or local dry-run coverage.
+- Runtime command refactors should start with pure helpers that have deterministic unit tests and existing CLI integration filters. Submission, tracking, watching, and process orchestration should stay together until a narrower harness makes a larger move low risk.
+
 ## Documentation split
 
 - Use this mdBook for user-facing workflows, examples, and reference material.
 - Use rustdoc for contributor-facing internals and the library module map.
 - Keep README short and point readers into the book instead of duplicating long-form guidance.
+
+## Related Docs
+
+- [Execution Model](execution-model.md)
+- [Spec Reference](spec-reference.md)
+- [Roadmap](roadmap.md)

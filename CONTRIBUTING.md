@@ -21,14 +21,14 @@ just release-check
 just ci
 ```
 
-The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`actionlint`, `mdbook`, `lychee`, `pa11y-ci`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov`) to be installed locally. `just bootstrap-docs-tools` installs the pinned docs tools (`mdbook`, `lychee`, and `pa11y-ci`); install `actionlint`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov` through your platform package manager or Cargo as appropriate.
+The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`actionlint`, `mdbook`, `lychee`, `pa11y-ci`, `typos`, `markdownlint-cli2`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov`) to be installed locally. `just bootstrap-docs-tools` installs the pinned docs tools (`mdbook`, `lychee`, `typos`, `pa11y-ci`, and `markdownlint-cli2`); install `actionlint`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov` through your platform package manager or Cargo as appropriate.
 
 Quality gates:
 
 | Gate | Command | Use it for |
 | --- | --- | --- |
 | Fast Rust and workflow check | `just check` | GitHub workflow linting, formatting, Clippy, and Rust tests. |
-| Documentation | `just docs-check` | mdBook, rustdoc warnings, manpage drift, links, and accessibility. |
+| Documentation | `just docs-check` | mdBook, rustdoc warnings, manpage drift, spell check, markdown lint, links, and accessibility. |
 | Examples and shell output | `just examples-check` | Shipped spec validation and shellcheck for rendered batch scripts. |
 | Release metadata and coverage | `just release-check` | Release metadata, dependency policy, and coverage thresholds. |
 | Full local CI mirror | `just ci` | All local gates above. |
@@ -61,6 +61,7 @@ python3 scripts/update_homebrew_formula.py \
 - Prefer small, coherent changes over broad refactors.
 - Add or update tests when parser, planner, prepare, render, cache, or tracked-job behavior changes.
 - If a user-facing workflow changes, update the relevant docs in `README.md`, `docs/src/`, and `examples/` together.
+- In docs, describe deliberate limits as present-tense design choices, not version-coupled "v1" limitations. Give every `docs/src/` page a `## Related Docs` (or `## Read Next`) footer, and use `<job-id>` for tracked-job placeholders. `cargo test --test docs_examples` enforces these conventions.
 - When release-facing docs or CLI help change, regenerate checked-in manpages with `cargo run --features manpage-bin --bin gen-manpages` and keep `tests/release_metadata.rs` passing.
 
 ## Examples

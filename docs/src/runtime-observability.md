@@ -39,7 +39,7 @@ hpc-compose diff 12345 12346 -f compose.yaml
 | `stats` | Tracked metrics, Slurm step statistics, and optional accounting rollups. |
 | `inspect --rightsize` | Post-run request-versus-usage recommendations for memory, CPUs, GPUs, and walltime. |
 | `score` | 0-100 post-run efficiency score with GPU, memory, compute-time, and kWh components. |
-| `germinate` | One-minute canary submission that writes `latest-canary.json` and recommends resource settings from fresh metrics. |
+| `germinate` | Short (default one-minute) canary submission that writes `latest-canary.json` and recommends resource settings from fresh metrics. |
 | `sweep status` | Aggregate persisted sweep trials into completed, failed, running, pending, unknown, missing-tracking, and submit-failed counts. |
 | `sweep list` | List prior sweep manifests without querying the scheduler. |
 | `diff` | Compact comparison between two tracked submissions. |
@@ -154,7 +154,7 @@ Use `hpc-compose germinate -f compose.yaml` before a full run when you want a sh
 
 Each submitted trial also writes a normal job record under `.hpc-compose/jobs/<job-id>.json` with `kind: sweep_trial` and a `sweep` metadata block. Sweep-trial records deliberately do not replace normal `latest.json` or `latest-run.json`, so `hpc-compose status`, `watch`, and `logs` continue to target ordinary runs unless you pass an explicit job id.
 
-`hpc-compose sweep status -f compose.yaml --format json` loads the manifest and queries the same scheduler/tracking snapshot code used for ordinary jobs. It reports per-trial state plus aggregate counts for `completed`, `failed`, `running`, `pending`, `unknown`, `missing_tracking`, and `submit_failed`. V1 does not parse metric files or infer the best trial; keep metric summaries in your training output or external experiment tracker.
+`hpc-compose sweep status -f compose.yaml --format json` loads the manifest and queries the same scheduler/tracking snapshot code used for ordinary jobs. It reports per-trial state plus aggregate counts for `completed`, `failed`, `running`, `pending`, `unknown`, `missing_tracking`, and `submit_failed`. hpc-compose does not parse metric files or infer the best trial; keep metric summaries in your training output or external experiment tracker.
 
 ## Diffing Runs
 

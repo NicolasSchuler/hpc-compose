@@ -7,7 +7,8 @@ Use this page when you know what you want to do, but not yet which command or ex
 - Read [Quickstart](quickstart.md).
 - Run `hpc-compose evolve --output compose.yaml` if you want a guided progression from `minimal` through `multi-node-placement`.
 - Run `hpc-compose new --list-templates` if you want to inspect the built-in starter templates before choosing one.
-- Run `hpc-compose examples list` or `hpc-compose examples search 'vllm worker'` if you want to search the broader example coverage map by workflow or tag.
+- Run `hpc-compose examples recommend` for a static, no-Slurm starting-point recommendation with match reasons and safe next commands. Add a workflow description, such as `hpc-compose examples recommend 'vllm worker'`, when you want registry-backed recommendations for a narrower shape.
+- Run `hpc-compose examples list` or `hpc-compose examples search 'vllm worker'` when you want to browse the broader example coverage map by workflow or tag.
 - Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --output compose.yaml`.
 - Before running on a cluster, configure a shared cache with `hpc-compose setup --cache-dir '<shared-cache-dir>'` or explicit `x-slurm.cache_dir`. If you copy a repository example that uses `CACHE_DIR`, override it for your cluster before running.
 - Run `hpc-compose plan -f compose.yaml` before the first real run. Add `--show-script` when you want to inspect the generated launcher without writing a file.

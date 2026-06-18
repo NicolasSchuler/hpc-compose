@@ -44,7 +44,7 @@ hpc-compose germinate -f compose.yaml --format json
 - CPU recommendations use observed CPU demand with conservative headroom and round up.
 - Memory recommendations use the strongest available evidence from sampler rows, `sstat`, and `sacct`, then round to Slurm-friendly units.
 - GPU recommendations shrink only when GPU sampler evidence shows fewer active devices.
-- Walltime is observed but not down-sized from a one-minute canary.
+- Walltime is observed but not down-sized from a short canary run.
 
 ## Caveats
 
@@ -55,3 +55,9 @@ hpc-compose germinate -f compose.yaml --format json
 - Failed, OOM-like, time-limit, malformed-metrics, and missing-metrics cases are reported as diagnostics rather than YAML rewrites.
 
 Start from [`examples/canary-right-size.yaml`](example-source.md#canary-right-size) when you want a small, explicit spec to practice the workflow.
+
+## Related Docs
+
+- [Runtime Observability](runtime-observability.md)
+- [Runbook](runbook.md)
+- [Spec Reference](spec-reference.md)

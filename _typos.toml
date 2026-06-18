@@ -1,0 +1,17 @@
+# Spell-check configuration for hpc-compose docs and prose.
+# https://github.com/crate-ci/typos
+[files]
+extend-exclude = [
+    "*.cast",
+    "Cargo.lock",
+    "docs/brand/**",
+]
+
+[default.extend-identifiers]
+# Product and filesystem names that must not be word-split.
+BeeOND = "BeeOND"
+BEEOND = "BEEOND"
+
+[default.extend-words]
+# Domain vocabulary that looks like a typo but is correct (e.g. HPE MPI).
+hpe = "hpe"

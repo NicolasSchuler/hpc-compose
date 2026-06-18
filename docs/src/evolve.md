@@ -12,7 +12,7 @@ The command is safe to run on a laptop or login node:
 
 ## Canonical Lesson
 
-V1 ships one lesson:
+evolve currently ships one lesson:
 
 ```bash
 hpc-compose evolve --describe-lesson progressive-complexity
@@ -89,8 +89,15 @@ hpc-compose evolve --yes --until readiness --format json --output compose.yaml
 
 ## Non-Goals
 
-- V1 does not mutate arbitrary existing specs.
-- V1 is not a full-screen TUI.
-- V1 does not submit jobs.
+- evolve does not mutate arbitrary existing specs.
+- evolve is not a full-screen TUI.
+- evolve does not submit jobs.
 
 For a fresh single-template scaffold, use [`hpc-compose new`](cli-reference.md#authoring-and-setup). For choosing among the broader runnable examples, use [Examples](examples.md).
+
+## Related Docs
+
+- [Quickstart](quickstart.md)
+- [Examples](examples.md)
+- [CLI Reference](cli-reference.md)
+- [Spec Reference](spec-reference.md)

@@ -670,6 +670,7 @@ fi
         "#!/bin/bash\necho all_reduce_perf ok\n",
     );
     let sbatch = tmpdir.path().join("sbatch");
+    let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &sbatch,
         &format!(
@@ -680,10 +681,11 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path"
+{} "$script_path"
 echo "Submitted batch job 12345"
 "#,
-            tmpdir.path().display()
+            tmpdir.path().display(),
+            bash
         ),
     );
 
@@ -787,6 +789,7 @@ fi
 "#,
     );
     let sbatch = tmpdir.path().join("sbatch");
+    let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &sbatch,
         &format!(
@@ -797,11 +800,12 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path" || job_status=$?
+{} "$script_path" || job_status=$?
 echo "Submitted batch job 12345"
 exit "${{job_status:-1}}"
 "#,
-            tmpdir.path().display()
+            tmpdir.path().display(),
+            bash
         ),
     );
     let output = run_cli(
@@ -919,6 +923,74 @@ fn examples_commands_list_search_and_coverage() {
     let search_text = stdout_text(&search);
     assert!(search_text.contains("vllm-uv-worker"));
     assert!(!search_text.contains("mpi-hello"));
+
+    let recommend = run_cli(
+        tmpdir.path(),
+        &[
+            "examples",
+            "recommend",
+            "multi-node training",
+            "--tag",
+            "gpu",
+        ],
+    );
+    assert_success(&recommend);
+    let recommend_text = stdout_text(&recommend);
+    assert!(recommend_text.contains("Safe authoring path only"));
+    assert!(recommend_text.contains("multi-node-torchrun"));
+    assert!(recommend_text.contains("Why:"));
+    assert!(recommend_text.contains("Prerequisites to review:"));
+    assert!(recommend_text.contains("hpc-compose plan -f compose.yaml"));
+    assert!(!recommend_text.contains("hpc-compose up"));
+
+    let recommend_json = run_cli(
+        tmpdir.path(),
+        &[
+            "examples",
+            "recommend",
+            "vllm worker",
+            "--limit",
+            "1",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&recommend_json);
+    let recommend_payload: Value =
+        serde_json::from_str(&stdout_text(&recommend_json)).expect("recommend json");
+    assert_eq!(
+        recommend_payload["recommendations"][0]["example"]["name"],
+        "vllm-uv-worker"
+    );
+    assert!(
+        recommend_payload["recommendations"][0]["reasons"]
+            .as_array()
+            .expect("reasons array")
+            .iter()
+            .any(|reason| reason.as_str().is_some_and(|value| value.contains("vllm")))
+    );
+    assert!(
+        recommend_payload["recommendations"][0]["prerequisites"]
+            .as_array()
+            .expect("prerequisites array")
+            .iter()
+            .any(|prerequisite| prerequisite
+                .as_str()
+                .is_some_and(|value| value.contains("GPU")))
+    );
+    assert!(
+        recommend_payload["recommendations"][0]["next_commands"]
+            .as_array()
+            .expect("next commands array")
+            .iter()
+            .all(|command| command
+                .as_str()
+                .is_some_and(|value| !value.contains("hpc-compose up")))
+    );
+
+    let invalid_limit = run_cli(tmpdir.path(), &["examples", "recommend", "--limit", "0"]);
+    assert_failure(&invalid_limit);
+    assert!(stderr_text(&invalid_limit).contains("invalid value"));
 
     let coverage = run_cli(
         tmpdir.path(),
@@ -1089,6 +1161,7 @@ exec "$@"
 "#,
     );
     let sbatch = tmpdir.path().join("sbatch");
+    let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &sbatch,
         &format!(
@@ -1099,10 +1172,11 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path"
+{} "$script_path"
 echo "Submitted batch job 12345"
 "#,
-            tmpdir.path().display()
+            tmpdir.path().display(),
+            bash
         ),
     );
 

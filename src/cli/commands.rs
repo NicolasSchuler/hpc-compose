@@ -2387,11 +2387,46 @@ pub enum ExamplesCommands {
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<ExamplesOutputFormat>,
     },
+    #[command(
+        about = "Recommend starting examples for a workflow",
+        long_about = "Recommend shipped examples or starter templates from static registry metadata. This command does not inspect the cluster, contact Slurm, or submit jobs."
+    )]
+    Recommend {
+        #[arg(value_name = "QUERY", help = "Optional workflow description to match")]
+        query: Option<String>,
+        #[arg(
+            long = "tag",
+            value_name = "TAG",
+            help = "Require a matching example tag; repeat to require multiple tags"
+        )]
+        tags: Vec<String>,
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 5,
+            value_parser = parse_recommend_limit,
+            help = "Maximum recommendations to print (1-20)"
+        )]
+        limit: usize,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
     #[command(about = "Print the examples coverage table used by the docs")]
     Coverage {
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<ExamplesOutputFormat>,
     },
+}
+
+fn parse_recommend_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|error| format!("expected a positive integer: {error}"))?;
+    if (1..=20).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 20".to_string())
+    }
 }
 
 #[derive(Debug, Subcommand)]

@@ -260,6 +260,8 @@ Examples:
   hpc-compose examples list
   hpc-compose examples list --tag mpi --format json
   hpc-compose examples search 'vllm worker'
+  hpc-compose examples recommend 'multi-node training' --tag gpu
+  hpc-compose examples recommend --format json
   hpc-compose examples coverage --format markdown";
 
 pub(super) const EVOLVE_HELP: &str = "\
@@ -580,6 +582,8 @@ const EXAMPLES_EXAMPLES: &[&str] = &[
     "hpc-compose examples list",
     "hpc-compose examples list --tag mpi --format json",
     "hpc-compose examples search 'vllm worker'",
+    "hpc-compose examples recommend 'multi-node training' --tag gpu",
+    "hpc-compose examples recommend --format json",
     "hpc-compose examples coverage --format markdown",
 ];
 
@@ -603,6 +607,7 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["examples"] => EXAMPLES_EXAMPLES,
         ["examples", "list"] => EXAMPLES_EXAMPLES,
         ["examples", "search"] => EXAMPLES_EXAMPLES,
+        ["examples", "recommend"] => EXAMPLES_EXAMPLES,
         ["examples", "coverage"] => EXAMPLES_EXAMPLES,
         ["plan"] => PLAN_EXAMPLES,
         ["up"] => UP_EXAMPLES,

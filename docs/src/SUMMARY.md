@@ -40,7 +40,7 @@
 
 - [CLI Reference](cli-reference.md)
 - [Spec Reference](spec-reference.md)
-- [Migration to Spec v2](migration-v2.md)
+- [Glossary](glossary.md)
 - [Example Source](example-source.md)
 
 # Project

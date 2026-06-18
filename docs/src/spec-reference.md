@@ -132,7 +132,7 @@ Rules:
 - `matrix: full` expands the Cartesian product deterministically over sorted parameter names.
 - `matrix.random` must be at least 1 and cannot exceed the total number of combinations.
 - `matrix.seed` is optional. If omitted, `sweep submit` derives a seed from the new sweep id and persists it.
-- `sweep.spec` is rejected in v1; embed the sweep in the same compose file.
+- `sweep.spec` is not supported; embed the sweep in the same compose file.
 
 For each trial, sweep variables override existing interpolation variables from `.env`, environment, settings, or `--env`. These reserved variables are also available:
 
@@ -454,7 +454,7 @@ x-slurm:
 - `mode` is `rsync` or `copy`; `rsync` falls back to `cp -R` when `rsync` is unavailable.
 - `stage_out.when` is `always`, `on_success`, or `on_failure`.
 - `${SLURM_JOB_ID}` is preserved in scratch and staging paths for runtime expansion.
-- `burst_buffer.directives` entries are emitted as raw batch-script directives and must start with `#BB ` or `#DW `.
+- `burst_buffer.directives` entries are emitted as raw batch-script directives and must start with `#BB` or `#DW`.
 
 #### Per-service scratch opt-out
 
@@ -525,7 +525,6 @@ x-slurm:
 ```
 
 Resolved records become generic variables such as `HPC_COMPOSE_RDZV_URL` and name-scoped variables such as `HPC_COMPOSE_RDZV_MODEL_SERVER_URL`.
-  - Collector failures are best-effort and do not fail the batch job.
 
 ### `x-slurm.artifacts`
 
@@ -837,7 +836,7 @@ Rules:
   - recognized `wget --spider` probes against `http://` or `https://` URLs
 - `timeout` maps to `timeout_seconds`.
 - `disable: true` disables readiness for that service.
-- `interval`, `retries`, and `start_period` are parsed but rejected in v1.
+- `interval`, `retries`, and `start_period` are parsed but rejected.
 - HTTP-style healthchecks normalize to `readiness.type: http` with `status_code: 200`.
 
 ## `assert`
@@ -1038,7 +1037,7 @@ services:
   - Rendered as `--mpi=<type>` on the service's `srun` command.
   - `profile` is optional compatibility metadata used for validation, cluster-profile diagnostics, and `doctor mpi-smoke` output. Supported values are `openmpi`, `mpich`, and `intel_mpi`.
   - `profile` does not auto-select or rewrite `type`; use the exact token that your cluster reports through `srun --mpi=list`.
-  - `launcher` defaults to `srun`; v1 rejects other launchers.
+  - `launcher` defaults to `srun`; other launchers are rejected.
   - `implementation` is optional metadata for diagnostics. Supported values are `openmpi`, `mpich`, `intel_mpi`, `mvapich2`, `cray_mpi`, `hpe_mpi`, and `unknown`.
   - When both `profile` and `implementation` are set, they must describe the same MPI family.
   - `expected_ranks`, when set, must match the resolved Slurm task geometry.
@@ -1189,3 +1188,10 @@ These keys are rejected with explicit messages:
 - `deploy`
 
 Any other unknown key at the service level is also rejected.
+
+## Related Docs
+
+- [CLI Reference](cli-reference.md)
+- [Execution Model](execution-model.md)
+- [Examples](examples.md)
+- [Docker Compose Migration](docker-compose-migration.md)

@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -194,6 +195,7 @@ fn cli_reference_documents_accessibility_and_automation_flags() {
         "hpc-compose status -f compose.yaml --format json",
         "hpc-compose doctor readiness -f compose.yaml --service api",
         "hpc-compose examples list --tag mpi --format json",
+        "hpc-compose examples recommend 'multi-node training' --tag gpu",
     ] {
         assert!(
             cli_reference.contains(expected),
@@ -294,13 +296,18 @@ fn support_matrix_reflects_ci_tested_platforms() {
 }
 
 #[test]
-fn ci_docs_link_check_excludes_generated_edit_urls() {
+fn docs_link_checks_exclude_generated_edit_urls() {
     let workflow =
         fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("read justfile");
+    let exclude = "--exclude '^https://github\\.com/NicolasSchuler/hpc-compose/edit/main/'";
     assert!(
-        workflow
-            .contains("--exclude '^https://github\\.com/NicolasSchuler/hpc-compose/edit/main/'"),
-        "lychee should ignore mdBook edit links because GitHub can transiently reject them"
+        workflow.contains(exclude),
+        "CI lychee should ignore mdBook edit links because GitHub can transiently reject them"
+    );
+    assert!(
+        justfile.contains(exclude),
+        "local docs-check lychee should ignore mdBook edit links because GitHub can transiently reject them"
     );
 }
 
@@ -329,5 +336,154 @@ fn runtime_observability_documents_watch_ui_controls_and_line_mode() {
             runtime_observability.contains(expected),
             "runtime observability docs should mention watch UI detail '{expected}'"
         );
+    }
+}
+
+fn docs_src_markdown_files() -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(repo_root().join("docs/src")).expect("read docs/src") {
+        let path = entry.expect("read docs/src entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("doc filename should be UTF-8")
+            .to_string();
+        let content = fs::read_to_string(&path).expect("read doc file");
+        files.push((name, content));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+#[test]
+fn docs_do_not_reference_removed_migration_v2_page() {
+    for (name, content) in docs_src_markdown_files() {
+        assert!(
+            !content.contains("migration-v2"),
+            "{name} references the removed spec-v2 placeholder page (migration-v2.md)"
+        );
+    }
+}
+
+#[test]
+fn docs_avoid_phantom_spec_v2_phrasing() {
+    // Design boundaries are intentional, not temporary "v1" limits awaiting a "v2".
+    // Describe them in the present tense instead (see the CONTRIBUTING docs conventions).
+    for (name, content) in docs_src_markdown_files() {
+        for phrase in ["in v1", "rejected in v1", "V1 "] {
+            assert!(
+                !content.contains(phrase),
+                "{name} uses version-coupled phrasing '{phrase}'; \
+                 describe deliberate boundaries in the present tense"
+            );
+        }
+    }
+}
+
+#[test]
+fn content_pages_have_navigation_footer() {
+    const SKIP: [&str; 4] = [
+        "README.md",
+        "SUMMARY.md",
+        "brand-assets.md",
+        "example-source.md",
+    ];
+    for (name, content) in docs_src_markdown_files() {
+        if SKIP.contains(&name.as_str()) {
+            continue;
+        }
+        assert!(
+            content.contains("## Related Docs") || content.contains("## Read Next"),
+            "{name} should end with a '## Related Docs' (or '## Read Next') navigation footer"
+        );
+    }
+}
+
+#[test]
+fn docs_use_canonical_job_id_placeholder() {
+    for (name, content) in docs_src_markdown_files() {
+        for placeholder in [".hpc-compose/12345/", "{job_id}", "{JOB_ID}", "<JOB_ID>"] {
+            assert!(
+                !content.contains(placeholder),
+                "{name} uses a non-canonical job-id placeholder '{placeholder}'; use <job-id>"
+            );
+        }
+    }
+}
+
+fn collect_bin_flag_commands(
+    command: &clap::Command,
+    prefix: Vec<String>,
+    out: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    for subcommand in command.get_subcommands() {
+        if subcommand.is_hide_set() {
+            continue;
+        }
+        let mut path = prefix.clone();
+        path.push(subcommand.get_name().to_string());
+        let path_str = path.join(" ");
+        for arg in subcommand.get_arguments() {
+            if arg.is_hide_set() {
+                continue;
+            }
+            if let Some(long) = arg.get_long().filter(|long| long.ends_with("-bin")) {
+                out.entry(format!("--{long}"))
+                    .or_default()
+                    .insert(path_str.clone());
+            }
+        }
+        collect_bin_flag_commands(subcommand, path, out);
+    }
+}
+
+fn parse_tool_override_matrix(cli_reference: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut matrix = BTreeMap::new();
+    for line in cli_reference.lines() {
+        let line = line.trim();
+        if !line.starts_with("| `--") || !line.contains("-bin` |") {
+            continue;
+        }
+        let cols = line
+            .trim_matches('|')
+            .split('|')
+            .map(|col| col.trim())
+            .collect::<Vec<_>>();
+        if cols.len() != 3 {
+            continue;
+        }
+        let flag = cols[0].trim_matches('`').to_string();
+        let commands = cols[2]
+            .split(',')
+            .map(|command| command.trim().trim_matches('`').to_string())
+            .filter(|command| !command.is_empty())
+            .collect::<BTreeSet<_>>();
+        matrix.insert(flag, commands);
+    }
+    matrix
+}
+
+#[test]
+fn tool_override_matrix_matches_cli_reference() {
+    let cli_reference =
+        fs::read_to_string(repo_root().join("docs/src/cli-reference.md")).expect("cli reference");
+    let mut clap_matrix = BTreeMap::new();
+    collect_bin_flag_commands(&build_cli_command_for_test(), Vec::new(), &mut clap_matrix);
+    assert!(
+        !clap_matrix.is_empty(),
+        "expected at least one --*-bin tool override flag in the CLI"
+    );
+    let documented = parse_tool_override_matrix(&cli_reference);
+    for (flag, commands) in &clap_matrix {
+        let doc_commands = documented.get(flag).cloned().unwrap_or_default();
+        for command in commands {
+            assert!(
+                doc_commands.contains(command),
+                "docs/src/cli-reference.md tool-override matrix should list `{command}` under `{flag}`"
+            );
+        }
     }
 }

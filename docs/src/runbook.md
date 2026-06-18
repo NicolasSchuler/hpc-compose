@@ -242,14 +242,14 @@ Array jobs should be submitted with `up --detach`; use `SLURM_ARRAY_TASK_ID` in 
 For conditional submission on a busy partition, use `when`:
 
 ```bash
-hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
+hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4 --poll-interval 120s
 hpc-compose when -f compose.yaml --after-job 12345
 hpc-compose when -f compose.yaml --between 22:00-06:00
 ```
 
 `when` is a foreground monitor. Interrupt it with Ctrl-C to stop waiting before the job is submitted. It runs preflight, image preparation, and script rendering before the wait begins, so submission is immediate once the conditions match; use `--skip-prepare` only when the required runtime artifacts already exist. `--detach` applies after submission: it still waits in the foreground for conditions, then returns after tracking metadata is written instead of opening the watch view.
 
-Idle-node checks are advisory, not reservations. Another user can still submit first, and Slurm may queue the job after `when` calls `sbatch`. Keep polling gentle on shared login nodes: the default `60s` interval is a good starting point, and intervals below `30s` should be reserved for short, intentional watches.
+Idle-node checks are advisory, not reservations. Another user can still submit first, and Slurm may queue the job after `when` calls `sbatch`. Keep polling gentle on shared login nodes: the default `--poll-interval` is `60s` (minimum `5s`); reserve very short intervals for brief, intentional watches.
 
 For interactive development inside one allocation, use `alloc`:
 

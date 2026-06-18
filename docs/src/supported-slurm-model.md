@@ -52,9 +52,16 @@ These capabilities are intentionally outside the product seam.
 | Broad cluster inspection tools such as a full `sinfo` / `sprio` / `sreport` frontend | Out of scope; `weather` is limited to a compact advisory snapshot |
 | Background submit daemons or reservations | Out of scope; `when` is a foreground advisory monitor and does not reserve resources |
 | Dynamic scheduling or bin packing across nodes | Not supported; use explicit `x-slurm.placement` selectors |
-| Heterogeneous jobs and job arrays as first-class workflow concepts | Not supported in v1; sweeps deliberately submit many normal allocations instead of Slurm arrays |
+| Heterogeneous jobs and job arrays as first-class workflow concepts | Not supported; sweeps deliberately submit many normal allocations instead of Slurm arrays |
 | Compose `build`, `ports`, custom networks, `restart`, `deploy` | Not supported |
 
 ## Non-goals
 
 `hpc-compose` should not grow into a generic Slurm administration layer. In particular, it will not broaden into `sacctmgr`, reservation management, federation control, or generic `scontrol` mutation. Those are real Slurm features, but they do not fit the “one application, one allocation, tracked runtime workflow” seam this tool is built around.
+
+## Related Docs
+
+- [Execution Model](execution-model.md)
+- [Runtime Backends](runtime-backends.md)
+- [Running Compose-Style Workflows on Slurm](running-compose-style-workflows-on-slurm.md)
+- [Spec Reference](spec-reference.md)

@@ -71,7 +71,7 @@ For distributed GPU or fabric-sensitive services, render a broader smoke probe:
 hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto --script-out fabric-smoke.sbatch
 ```
 
-`--checks auto` always includes the MPI rank probe, adds NCCL when the selected service requests GPU resources, and collects UCX, OFI, and InfiniBand diagnostics when the corresponding tools are available. Use an explicit list such as `--checks mpi,nccl` when a missing tool should fail the probe instead of being reported as skipped.
+`--checks auto` always includes the MPI rank probe, adds NCCL when the selected service requests GPU resources, and collects UCX, OFI, and InfiniBand diagnostics when the corresponding tools are available. Pass an explicit list such as `--checks mpi,nccl` when a missing tool should fail the probe instead of being reported as skipped; the accepted tokens are `mpi`, `nccl`, `ucx`, and `ofi` (InfiniBand link health is collected as part of `auto` diagnostics, not as a separate token).
 
 ## Related Docs
 

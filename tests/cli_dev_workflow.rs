@@ -132,6 +132,7 @@ services:
     );
     let sbatch_log = tmpdir.path().join("sbatch.log");
     let sbatch = tmpdir.path().join("sbatch-log-run");
+    let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &sbatch,
         &format!(
@@ -143,11 +144,12 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path" >/dev/null 2>&1
+{} "$script_path" >/dev/null 2>&1
 echo "Submitted batch job 12345"
 "#,
             sbatch_log.display(),
-            tmpdir.path().display()
+            tmpdir.path().display(),
+            bash
         ),
     );
     let srun = write_fake_srun(tmpdir.path());

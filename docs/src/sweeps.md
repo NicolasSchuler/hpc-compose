@@ -79,13 +79,13 @@ Normal commands still treat `sweep` as metadata. If `plan`, `up`, or `render` en
 By default, submitted sweeps are capped at 100 trials. Larger matrices fail before calling `sbatch`:
 
 ```bash
-hpc-compose sweep submit -f train.yaml
+hpc-compose sweep submit -f examples/training-sweep.yaml
 ```
 
 Raise the explicit ceiling when the fanout is intentional:
 
 ```bash
-hpc-compose sweep submit -f train.yaml --max-trials 500
+hpc-compose sweep submit -f examples/training-sweep.yaml --max-trials 500
 ```
 
 The guard applies to real submissions. Dry runs can inspect any matrix size.
@@ -105,10 +105,10 @@ The guard applies to real submissions. Dry runs can inspect any matrix size.
 Use JSON for notebooks, dashboards, or CI automation:
 
 ```bash
-hpc-compose sweep submit -f train.yaml --format json
-hpc-compose sweep status -f train.yaml --format json
-hpc-compose sweep status -f train.yaml --sweep-id sweep-123 --format json
-hpc-compose sweep list -f train.yaml --format json
+hpc-compose sweep submit -f examples/training-sweep.yaml --format json
+hpc-compose sweep status -f examples/training-sweep.yaml --format json
+hpc-compose sweep status -f examples/training-sweep.yaml --sweep-id sweep-123 --format json
+hpc-compose sweep list -f examples/training-sweep.yaml --format json
 ```
 
 The JSON includes the sweep id, manifest path, matrix mode, persisted seed, trial variables, job ids, record paths, and per-trial status.
@@ -131,10 +131,17 @@ Sweep state is stored beside normal tracked jobs:
 
 Sweep-trial records have `kind: sweep_trial` and include sweep metadata. They do not update the normal `latest.json` or `latest-run.json` pointers, so `status`, `watch`, and `logs` for ordinary runs keep their existing meaning.
 
-## V1 Limitations
+## Limitations
 
-- Sweeps must be embedded in the same compose file. `sweep.spec` is rejected in v1.
+- Sweeps must be embedded in the same compose file. `sweep.spec` is not supported.
 - Each trial is a separate Slurm allocation. Sweeps are not Slurm arrays.
 - `x-slurm.array` is rejected during `sweep submit`.
 - Trials submit sequentially. If a submission fails, later trials are not submitted and the partial manifest is kept.
 - `sweep status` summarizes scheduler/tracking state only. It does not parse metric files or pick a best trial.
+
+## Related Docs
+
+- [Runtime Observability](runtime-observability.md)
+- [Right-Sizing With Canary Runs](canary-runs.md)
+- [CLI Reference](cli-reference.md)
+- [Spec Reference](spec-reference.md)

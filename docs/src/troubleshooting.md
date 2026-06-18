@@ -51,7 +51,7 @@ If the service is already running, tunneled, or otherwise reachable from the cur
 
 ```bash
 hpc-compose doctor readiness -f compose.yaml --service api --run
-hpc-compose doctor readiness -f compose.yaml --service api --run --log-file .hpc-compose/12345/logs/api.log
+hpc-compose doctor readiness -f compose.yaml --service api --run --log-file .hpc-compose/<job-id>/logs/api.log
 ```
 
 `doctor readiness --run` does not launch services, prepare images, or call Slurm. It only checks the selected readiness target from the current host, which makes it useful before testing a dependent service or while debugging an already tracked run.

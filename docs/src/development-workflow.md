@@ -1,6 +1,6 @@
 # Development Workflow
 
-`test`, `dev`, and `tmux` are the v1 local-development layer. They reuse the same prepare, render, local supervisor, runtime state, and tracking paths as `up`, so a run started by one command remains visible to `status`, `ps`, `logs`, `stats`, `watch`, and `debug`.
+`test`, `dev`, and `tmux` are the local-development command layer. They reuse the same prepare, render, local supervisor, runtime state, and tracking paths as `up`, so a run started by one command remains visible to `status`, `ps`, `logs`, `stats`, `watch`, and `debug`.
 
 ## Smoke-Test Specs
 
@@ -101,3 +101,10 @@ The companion `examples/dev-python-smoke.yaml` keeps the same mounted source pat
 hpc-compose test --local -f examples/dev-python-smoke.yaml
 hpc-compose test --submit --time 00:01:00 -f examples/dev-python-smoke.yaml
 ```
+
+## Related Docs
+
+- [CLI Reference](cli-reference.md)
+- [Troubleshooting](troubleshooting.md)
+- [Examples](examples.md)
+- [Runbook](runbook.md)

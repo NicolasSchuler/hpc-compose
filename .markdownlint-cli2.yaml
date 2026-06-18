@@ -1,0 +1,25 @@
+# markdownlint-cli2 configuration for hpc-compose docs and prose.
+# https://github.com/DavidAnson/markdownlint-cli2
+config:
+  default: true
+  # Long prose and wide reference tables are intentional in this project.
+  MD013: false
+  # Inline HTML is used for the README hero and the docs landing page.
+  MD033: false
+  # Some pages (README) intentionally open with HTML rather than a heading.
+  MD041: false
+  # The same "## Related Docs" footer heading recurs across files by design.
+  MD024:
+    siblings_only: true
+  # Disabled below: false positives on this project's valid GFM / mdBook syntax.
+  MD056: false # pipes inside code spans in table cells are valid GFM but miscounted
+  MD051: false # mdBook custom heading anchors ({ #id }); lychee validates real links
+  MD029: false # ordered lists deliberately interrupted by fenced code blocks
+globs:
+  - "docs/src/**/*.md"
+  - "README.md"
+  - "CONTRIBUTING.md"
+  - "SECURITY.md"
+  - "CODE_OF_CONDUCT.md"
+ignores:
+  - "docs/src/SUMMARY.md" # mdBook part headers intentionally use multiple H1s

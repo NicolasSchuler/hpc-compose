@@ -1489,6 +1489,12 @@ fn run_examples_subcommand(command: ExamplesCommands) -> Result<()> {
     match command {
         ExamplesCommands::List { tag, format } => examples::list(tag, format),
         ExamplesCommands::Search { query, format } => examples::search(query, format),
+        ExamplesCommands::Recommend {
+            query,
+            tags,
+            limit,
+            format,
+        } => examples::recommend(query, tags, limit, format),
         ExamplesCommands::Coverage { format } => examples::coverage(format),
     }
 }

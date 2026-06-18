@@ -356,11 +356,18 @@ services:
             sbatch_called.display()
         ),
     );
-    let path = format!(
-        "{}:{}",
-        tmpdir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let mut path_entries = vec![tmpdir.path().to_path_buf()];
+    let bash_path = test_bash_path();
+    if let Some(bash_dir) = bash_path.parent() {
+        path_entries.push(bash_dir.to_path_buf());
+    }
+    if let Some(existing_path) = std::env::var_os("PATH") {
+        path_entries.extend(std::env::split_paths(&existing_path));
+    }
+    let path = std::env::join_paths(path_entries)
+        .expect("test PATH")
+        .to_string_lossy()
+        .into_owned();
     let output = run_cli_with_env(
         tmpdir.path(),
         &[

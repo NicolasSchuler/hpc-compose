@@ -105,3 +105,10 @@ Recommended default:
 - The <strong>debugging flow</strong> is <code>validate</code>, <code>inspect</code>, <code>preflight</code>, and <code>prepare</code> run separately when you need more visibility.
 
 Read [Runtime Backends](runtime-backends.md) before changing `runtime.backend`, [Runbook](runbook.md) for the operational workflow, [Examples](examples.md) for starting points, and [Spec reference](spec-reference.md) for exact field behavior.
+
+## Related Docs
+
+- [Supported Slurm Model](supported-slurm-model.md)
+- [Runtime Backends](runtime-backends.md)
+- [Running Compose-Style Workflows on Slurm](running-compose-style-workflows-on-slurm.md)
+- [Spec Reference](spec-reference.md)

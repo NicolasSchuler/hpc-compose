@@ -57,6 +57,8 @@ Download the [asciinema-style quickstart demo cast](quickstart-demo.cast) if you
 | tracked job | Metadata under `.hpc-compose/<job-id>/` that lets `status`, `ps`, `watch`, `logs`, `stats`, and `artifacts` reconnect later. |
 | `x-slurm` | The spec section for Slurm settings and hpc-compose runtime extensions. |
 
+See the [Glossary](glossary.md) for the full set of terms.
+
 ## What It Is For
 
 - model serving plus helper services inside one Slurm allocation

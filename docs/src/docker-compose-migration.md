@@ -145,6 +145,13 @@ readiness:
   port: 6379
   timeout_seconds: 30
 
+# HTTP: wait for an endpoint to return an expected status
+readiness:
+  type: http
+  url: http://127.0.0.1:8080/health
+  status_code: 200
+  timeout_seconds: 30
+
 # Log: wait for a pattern in service output
 readiness:
   type: log
@@ -164,7 +171,7 @@ Supported `healthcheck` migration patterns:
 - recognized `curl` probes against `http://` or `https://` URLs
 - recognized `wget --spider` probes against `http://` or `https://` URLs
 
-Still unsupported in v1:
+Still unsupported:
 
 - arbitrary custom command probes
 - `interval`
@@ -238,13 +245,13 @@ The rolling-window fields have no direct Docker Compose equivalent. They exist t
 5. **Remove Compose `restart:`** — use `services.<name>.x-slurm.failure_policy` when you need per-service restart behavior.
 6. **Remove `deploy:`** — Use `x-slurm` for resource allocation.
 7. **Replace service hostnames** — Change any service-name references (e.g. `redis`, `postgres`) to `127.0.0.1` for same-node helpers, or to explicit allocation metadata for distributed runs.
-8. **Replace `healthcheck:`** — Convert to `readiness:` with `type: tcp`, `type: log`, or `type: sleep`.
+8. **Replace `healthcheck:`** — Convert to `readiness:` with `type: tcp`, `type: http`, `type: log`, or `type: sleep`.
 9. **Add `x-slurm:`** — Set `time`, `mem`, `cpus_per_task`, and optionally `gpus`, `partition`, `account`.
 10. **Set cache storage** — Point `x-slurm.cache_dir` or `setup --cache-dir` to shared storage visible from login and compute nodes.
 11. **Validate** — Run `hpc-compose validate -f compose.yaml` to check the converted spec.
 12. **Inspect** — Run `hpc-compose inspect --verbose -f compose.yaml` to confirm the planner understood your intent.
 
-## Related docs
+## Related Docs
 
 - [Execution model](execution-model.md)
 - [Spec reference](spec-reference.md)

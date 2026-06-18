@@ -227,6 +227,42 @@ pub(crate) fn write_script(path: &Path, body: &str) {
     fs::set_permissions(path, perms).expect("chmod");
 }
 
+pub(crate) fn test_bash_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("HPC_COMPOSE_TEST_BASH") {
+        let path = PathBuf::from(path);
+        if bash_supports_associative_arrays(&path) {
+            return path;
+        }
+    }
+    for candidate in [
+        PathBuf::from("/opt/homebrew/bin/bash"),
+        PathBuf::from("/usr/local/bin/bash"),
+        PathBuf::from("bash"),
+        PathBuf::from("/bin/bash"),
+    ] {
+        if bash_supports_associative_arrays(&candidate) {
+            return candidate;
+        }
+    }
+    PathBuf::from("bash")
+}
+
+fn bash_supports_associative_arrays(path: &Path) -> bool {
+    Command::new(path)
+        .arg("-c")
+        .arg("declare -A h=([x]=y); [[ ${h[x]} == y ]]")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+pub(crate) fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub(crate) fn write_fake_enroot(tmpdir: &Path) -> PathBuf {
     let path = tmpdir.join("fake-enroot.sh");
     write_script(
@@ -602,6 +638,7 @@ echo "Submitted batch job 12345"
 
 pub(crate) fn write_fake_sbatch_runs_script(tmpdir: &Path) -> PathBuf {
     let path = tmpdir.join("sbatch-run-script");
+    let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &path,
         &format!(
@@ -612,10 +649,11 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path" >/dev/null 2>&1
+{} "$script_path" >/dev/null 2>&1
 echo "Submitted batch job 12345"
 "#,
-            tmpdir.display()
+            tmpdir.display(),
+            bash
         ),
     );
     path
@@ -623,6 +661,7 @@ echo "Submitted batch job 12345"
 
 pub(crate) fn write_fake_sbatch_runs_script_with_job_output(tmpdir: &Path) -> PathBuf {
     let path = tmpdir.join("sbatch-run-script-with-output");
+    let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &path,
         &format!(
@@ -633,10 +672,11 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path"
+{} "$script_path"
 echo "Submitted batch job 12345"
 "#,
-            tmpdir.display()
+            tmpdir.display(),
+            bash
         ),
     );
     path
@@ -644,6 +684,7 @@ echo "Submitted batch job 12345"
 
 pub(crate) fn write_fake_sbatch_runs_script_ignoring_job_exit(tmpdir: &Path) -> PathBuf {
     let path = tmpdir.join("sbatch-run-script-ignore-exit");
+    let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &path,
         &format!(
@@ -654,10 +695,11 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path" >/dev/null 2>&1 || true
+{} "$script_path" >/dev/null 2>&1 || true
 echo "Submitted batch job 12345"
 "#,
-            tmpdir.display()
+            tmpdir.display(),
+            bash
         ),
     );
     path
@@ -669,6 +711,7 @@ pub(crate) fn write_fake_sbatch_runs_script_with_nodelist(
     job_nodelist: &str,
 ) -> PathBuf {
     let path = tmpdir.join(file_name);
+    let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &path,
         &format!(
@@ -679,11 +722,12 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST='{}'
 export SLURM_SUBMIT_DIR="$PWD"
-bash "$script_path"
+{} "$script_path"
 echo "Submitted batch job 12345"
 "#,
             tmpdir.display(),
-            job_nodelist
+            job_nodelist,
+            bash
         ),
     );
     path

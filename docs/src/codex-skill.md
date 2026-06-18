@@ -1,6 +1,6 @@
 # Codex Skill
 
-This repository ships a Codex skill at `skills/hpc-compose/` for agents that need to help users set up, adapt, validate, and troubleshoot hpc-compose workflows.
+This repository ships an agent skill at `skills/hpc-compose/` — a Codex-compatible skill bundle — for agents that need to help users set up, adapt, validate, and troubleshoot hpc-compose workflows.
 
 Use it when a user asks for tasks such as:
 
@@ -27,7 +27,7 @@ The skill keeps the main trigger and workflow in `SKILL.md`, then uses progressi
 
 ## Using The Skill
 
-Install or copy `skills/hpc-compose/` into the Codex skills directory, typically `$CODEX_HOME/skills/hpc-compose` or `~/.codex/skills/hpc-compose`, then start a fresh Codex session so skill discovery can reload.
+Install or copy `skills/hpc-compose/` into your agent's skills directory. For Codex that is typically `$CODEX_HOME/skills/hpc-compose` or `~/.codex/skills/hpc-compose`; other agent runtimes use their own skills location. Start a fresh agent session so skill discovery can reload.
 
 Example prompt:
 
@@ -57,3 +57,9 @@ Agents using this skill should:
 - prefer hpc-compose static checks before real Slurm submissions
 - ask before commands that submit or cancel jobs or consume allocation quota
 - report observations, hypotheses, recommendations, and open questions when cluster facts remain uncertain
+
+## Related Docs
+
+- [Quickstart](quickstart.md)
+- [Task Guide](task-guide.md)
+- [CLI Reference](cli-reference.md)

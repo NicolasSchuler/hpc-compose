@@ -57,7 +57,7 @@ tar -xzf hpc-compose.tar.gz
 ./hpc-compose --help
 ```
 
-Linux `x86_64` releases use a musl target to avoid common cluster glibc mismatches. Unix release archives also contain `share/man/man1/`.
+Linux `x86_64` releases use a musl target to avoid common cluster glibc mismatches. Unix release archives also contain `share/man/man1/`. See [CLI Reference](cli-reference.md#manual-pages) for browsing the installed man pages.
 
 Windows release archives are zip-only for inspection and checksum parity. The installer script and end-to-end Slurm runtime workflows target Unix-like systems; use Windows primarily through WSL or a remote Linux/macOS authoring environment.
 
@@ -178,3 +178,9 @@ cargo run --locked --features manpage-bin --bin gen-manpages
 cargo test --locked --test release_metadata
 man -l man/man1/hpc-compose.1
 ```
+
+## Related Docs
+
+- [Support Matrix](support-matrix.md)
+- [Quickstart](quickstart.md)
+- [Runtime Backends](runtime-backends.md)

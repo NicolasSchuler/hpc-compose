@@ -1,6 +1,6 @@
 //! Example metadata used by CLI discovery and documentation coverage.
 
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
 /// How a shipped example can be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -71,6 +71,230 @@ impl ExampleInfo {
                 || self.tags.iter().any(|tag| tag.contains(term))
         })
     }
+
+    /// Static prerequisites shown by the recommendation flow.
+    #[must_use]
+    pub fn prerequisites(&self) -> &'static [&'static str] {
+        if self.name == "minimal-batch" {
+            return &[
+                "hpc-compose CLI for validate/plan; no Slurm contact is needed for authoring",
+                "Linux Slurm login node plus a supported runtime backend before any real up run",
+            ];
+        }
+        if self.has_tag("rendezvous") {
+            return &[
+                "Shared cache or storage visible to every job that publishes or resolves rendezvous data",
+                "Run provider and client jobs only from a supported Linux Slurm submission host",
+            ];
+        }
+        if self.has_tag("gpu") || self.has_tag("llm") || self.has_tag("model-serving") {
+            return &[
+                "GPU-capable Slurm target when the example requests accelerators",
+                "Model, dataset, and cache paths adjusted to shared storage before cluster submission",
+            ];
+        }
+        if self.has_tag("mpi") || self.has_tag("fabric") || self.has_tag("host-mpi") {
+            return &[
+                "Site MPI, PMIx, and fabric settings checked before cluster submission",
+                "Multi-node or MPI-capable Slurm allocation when the example requests it",
+            ];
+        }
+        if self.category == "distributed" {
+            return &[
+                "Multi-node Slurm allocation support for examples that span nodes",
+                "Framework rendezvous and fabric environment adapted to the target cluster",
+            ];
+        }
+        if self.has_tag("workflow") || self.has_tag("bridge") {
+            return &[
+                "Workflow engine command available inside the selected image or runtime environment",
+                "Inputs, outputs, and cache paths adjusted to shared storage before cluster submission",
+            ];
+        }
+        if self.has_tag("training") || self.has_tag("resume") || self.has_tag("artifacts") {
+            return &[
+                "Dataset, checkpoint, and artifact paths adjusted to shared storage",
+                "Resource requests reviewed with plan/preflight before any real submission",
+            ];
+        }
+        if self.has_tag("dev") || self.has_tag("test") {
+            return &[
+                "Source paths in volumes adjusted to the checkout you want to iterate on",
+                "Use local plan/test commands before submitting any long-running cluster job",
+            ];
+        }
+        &[
+            "hpc-compose CLI for validate/plan; no Slurm contact is needed for authoring",
+            "Shared cache path configured before any real cluster submission",
+        ]
+    }
+}
+
+/// A ranked example recommendation with the explanation and safe next commands.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExampleRecommendation {
+    /// Existing registry metadata for the recommended example.
+    pub example: ExampleInfo,
+    /// Relative score used only to sort recommendations.
+    pub score: u16,
+    /// Human-readable reasons this example matched the request.
+    pub reasons: Vec<String>,
+    /// Static prerequisites to review before moving from authoring to a real run.
+    pub prerequisites: &'static [&'static str],
+    /// Commands that stay in the safe authoring path and do not submit to Slurm.
+    pub next_commands: Vec<String>,
+}
+
+/// Returns ranked example recommendations for an optional free-text query and tags.
+#[must_use]
+pub fn recommend_examples(
+    query: Option<&str>,
+    required_tags: &[String],
+    limit: usize,
+) -> Vec<ExampleRecommendation> {
+    let query = query.unwrap_or_default().trim();
+    let terms = recommendation_terms(query);
+    let required_tags = required_tags
+        .iter()
+        .map(|tag| normalize(tag))
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    let has_user_filter = !terms.is_empty() || !required_tags.is_empty();
+
+    let mut ranked = examples()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, example)| {
+            score_recommendation(*example, index, &terms, &required_tags, has_user_filter).map(
+                |(score, reasons)| ExampleRecommendation {
+                    example: *example,
+                    score,
+                    reasons,
+                    prerequisites: example.prerequisites(),
+                    next_commands: next_authoring_commands(example),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.example.name.cmp(right.example.name))
+    });
+    ranked.truncate(limit);
+    ranked
+}
+
+fn score_recommendation(
+    example: ExampleInfo,
+    index: usize,
+    terms: &[String],
+    required_tags: &[String],
+    has_user_filter: bool,
+) -> Option<(u16, Vec<String>)> {
+    let mut score = 0;
+    let mut reasons = BTreeSet::new();
+
+    for required_tag in required_tags {
+        let matched_tag = example
+            .tags
+            .iter()
+            .find(|tag| normalize(tag) == *required_tag)?;
+        score += 20;
+        reasons.insert(format!("has required tag `{matched_tag}`"));
+    }
+
+    for term in terms {
+        let mut matched_term = false;
+        if let Some(tag) = example
+            .tags
+            .iter()
+            .find(|tag| normalize(tag).contains(term))
+        {
+            score += 12;
+            matched_term = true;
+            reasons.insert(format!("tag `{tag}` matched `{term}`"));
+        }
+        if normalize(example.name).contains(term) || normalize(example.path).contains(term) {
+            score += 8;
+            matched_term = true;
+            reasons.insert(format!("example id or path matched `{term}`"));
+        }
+        if normalize(example.category).contains(term) {
+            score += 6;
+            matched_term = true;
+            reasons.insert(format!("category `{}` matched `{term}`", example.category));
+        }
+        if normalize(example.demonstrates).contains(term)
+            || normalize(example.start_when).contains(term)
+        {
+            score += 4;
+            matched_term = true;
+            reasons.insert(format!("description matched `{term}`"));
+        }
+        if example
+            .prerequisites()
+            .iter()
+            .any(|prerequisite| normalize(prerequisite).contains(term))
+        {
+            score += 3;
+            matched_term = true;
+            reasons.insert(format!("prerequisites mention `{term}`"));
+        }
+        if !matched_term {
+            return None;
+        }
+    }
+
+    if !has_user_filter {
+        let default_rank = default_recommendation_rank(example.name)?;
+        score += 100 - u16::from(default_rank);
+        reasons.insert("default safe authoring starter".to_string());
+        reasons.insert(example.start_when.to_string());
+    } else if reasons.is_empty() {
+        return None;
+    }
+
+    score += (examples().len().saturating_sub(index)) as u16;
+    Some((score, reasons.into_iter().collect()))
+}
+
+fn recommendation_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(normalize)
+        .filter(|term| !term.is_empty())
+        .collect()
+}
+
+fn normalize(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn default_recommendation_rank(name: &str) -> Option<u8> {
+    match name {
+        "minimal-batch" => Some(1),
+        "app-redis-worker" => Some(2),
+        "llm-curl-workflow-workdir" => Some(3),
+        "training-resume" => Some(4),
+        "multi-node-mpi" => Some(5),
+        _ => None,
+    }
+}
+
+fn next_authoring_commands(example: &ExampleInfo) -> Vec<String> {
+    let mut commands = match example.availability {
+        ExampleAvailability::BuiltInTemplate => vec![format!(
+            "hpc-compose new --template {} --name my-app --output compose.yaml",
+            example.name
+        )],
+        ExampleAvailability::RepositoryFile => vec![format!("cp {} compose.yaml", example.path)],
+    };
+    commands.push("hpc-compose plan -f compose.yaml".to_string());
+    commands.push("hpc-compose plan --show-script -f compose.yaml".to_string());
+    commands
 }
 
 /// Returns all shipped examples in display order.
@@ -464,5 +688,23 @@ mod tests {
         let vllm = find_example("vllm-uv-worker").expect("vllm example");
         assert!(vllm.matches_query("vllm worker"));
         assert!(!vllm.matches_query("vllm mpi"));
+    }
+
+    #[test]
+    fn recommendations_default_and_require_query_matches() {
+        let default = recommend_examples(None, &[], 5);
+        assert_eq!(default[0].example.name, "minimal-batch");
+        assert!(
+            default[0]
+                .next_commands
+                .iter()
+                .all(|command| !command.contains("hpc-compose up"))
+        );
+
+        let no_cross_match = recommend_examples(Some("vllm"), &["mpi".to_string()], 5);
+        assert!(
+            no_cross_match.is_empty(),
+            "query terms and required tags should both narrow recommendations"
+        );
     }
 }

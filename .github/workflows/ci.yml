@@ -18,6 +18,8 @@ env:
   LYCHEE_VERSION: "0.23.0"
   PA11Y_CI_VERSION: "4.0.1"
   ACTIONLINT_VERSION: "1.7.12"
+  TYPOS_VERSION: "1.28.4"
+  MARKDOWNLINT_CLI2_VERSION: "0.14.0"
 
 jobs:
   workflow-lint:
@@ -73,10 +75,17 @@ jobs:
       - name: Install docs QA tools
         run: |
           cargo install lychee --locked --version "${LYCHEE_VERSION}"
-          npm install --global "pa11y-ci@${PA11Y_CI_VERSION}"
+          cargo install typos-cli --locked --version "${TYPOS_VERSION}"
+          npm install --global "pa11y-ci@${PA11Y_CI_VERSION}" "markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"
 
       - name: Build mdBook docs
         run: mdbook build docs
+
+      - name: Spell check docs
+        run: typos docs/src README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
+
+      - name: Lint markdown
+        run: markdownlint-cli2
 
       - name: Build rustdoc
         run: cargo doc --locked --no-deps
@@ -101,6 +110,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/gen_pa11y_urls.py
           python3 -m http.server 3000 --directory target/mdbook >/tmp/hpc-compose-docs-http.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid"' EXIT

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use hpc_compose::cli::ExamplesOutputFormat;
-use hpc_compose::examples::{ExampleInfo, examples};
+use hpc_compose::cli::{ExamplesOutputFormat, OutputFormat};
+use hpc_compose::examples::{ExampleInfo, ExampleRecommendation, examples, recommend_examples};
 use hpc_compose::term;
 use serde::Serialize;
 
@@ -24,6 +24,21 @@ pub(crate) fn search(query: String, format: Option<ExamplesOutputFormat>) -> Res
 
 pub(crate) fn coverage(format: Option<ExamplesOutputFormat>) -> Result<()> {
     print_examples(examples(), format.unwrap_or(ExamplesOutputFormat::Markdown))
+}
+
+pub(crate) fn recommend(
+    query: Option<String>,
+    tags: Vec<String>,
+    limit: usize,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let recommendations = recommend_examples(query.as_deref(), &tags, limit);
+    print_recommendations(
+        query.as_deref(),
+        &tags,
+        &recommendations,
+        format.unwrap_or(OutputFormat::Text),
+    )
 }
 
 fn print_examples(entries: &[ExampleInfo], format: ExamplesOutputFormat) -> Result<()> {
@@ -69,6 +84,93 @@ fn print_text(entries: &[ExampleInfo]) {
     }
 }
 
+fn print_recommendations(
+    query: Option<&str>,
+    tags: &[String],
+    recommendations: &[ExampleRecommendation],
+    format: OutputFormat,
+) -> Result<()> {
+    match format {
+        OutputFormat::Text => {
+            print_recommendations_text(query, tags, recommendations);
+        }
+        OutputFormat::Json => {
+            #[derive(Serialize)]
+            struct Output<'a> {
+                query: Option<&'a str>,
+                required_tags: &'a [String],
+                safe_authoring_note: &'static str,
+                recommendations: &'a [ExampleRecommendation],
+            }
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&Output {
+                    query,
+                    required_tags: tags,
+                    safe_authoring_note: "Recommendation commands only copy or scaffold a spec and run static plan checks; they do not contact Slurm.",
+                    recommendations,
+                })?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_recommendations_text(
+    query: Option<&str>,
+    tags: &[String],
+    recommendations: &[ExampleRecommendation],
+) {
+    let label = recommendation_label(query, tags);
+    println!("{}", term::styled_section_header(&label));
+    println!(
+        "Safe authoring path only: these commands copy or scaffold a spec and run plan checks without contacting Slurm."
+    );
+    println!();
+
+    if recommendations.is_empty() {
+        println!("No examples matched. Try `hpc-compose examples list` or broaden the query.");
+        return;
+    }
+
+    for (index, recommendation) in recommendations.iter().enumerate() {
+        let example = recommendation.example;
+        println!(
+            "{}. {} ({}, {})",
+            index + 1,
+            term::styled_bold(example.name),
+            example.availability.label(),
+            example.path
+        );
+        println!("   Demonstrates: {}", example.demonstrates);
+        println!("   Start when: {}", example.start_when);
+        println!("   Why: {}", recommendation.reasons.join("; "));
+        println!(
+            "   Prerequisites to review: {}",
+            recommendation.prerequisites.join("; ")
+        );
+        println!("   Safe next commands:");
+        for command in &recommendation.next_commands {
+            println!("     {command}");
+        }
+        println!();
+    }
+}
+
+fn recommendation_label(query: Option<&str>, tags: &[String]) -> String {
+    let query = query.unwrap_or_default().trim();
+    match (query.is_empty(), tags.is_empty()) {
+        (true, true) => "Recommended starting examples".to_string(),
+        (false, true) => format!("Recommended examples for `{query}`"),
+        (true, false) => format!("Recommended examples for tags `{}`", tags.join("`, `")),
+        (false, false) => format!(
+            "Recommended examples for `{query}` with tags `{}`",
+            tags.join("`, `")
+        ),
+    }
+}
+
 fn markdown_table(entries: &[ExampleInfo]) -> String {
     let mut out = String::new();
     out.push_str(
@@ -106,7 +208,34 @@ mod tests {
     }
 
     #[test]
+    fn coverage_table_matches_examples_doc() {
+        let generated = markdown_table(examples());
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/src/examples.md"),
+        )
+        .expect("read docs/src/examples.md");
+        assert!(
+            doc.contains(&generated),
+            "docs/src/examples.md coverage table is out of sync with the example registry; \
+             regenerate it with `hpc-compose examples coverage --format markdown`"
+        );
+    }
+
+    #[test]
     fn markdown_output_accepts_list_entries() {
         assert!(print_examples(&examples()[0..1], ExamplesOutputFormat::Markdown).is_ok());
+    }
+
+    #[test]
+    fn recommendation_text_contains_safe_authoring_commands() {
+        let recommendations = recommend_examples(Some("vllm worker"), &[], 2);
+        assert!(print_recommendations(None, &[], &recommendations, OutputFormat::Text).is_ok());
+        assert_eq!(recommendations[0].example.name, "vllm-uv-worker");
+        assert!(
+            recommendations[0]
+                .next_commands
+                .iter()
+                .any(|command| command.contains("hpc-compose plan -f compose.yaml"))
+        );
     }
 }

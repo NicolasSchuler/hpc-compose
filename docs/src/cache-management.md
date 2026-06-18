@@ -71,7 +71,7 @@ hpc-compose rendezvous list --cache-dir "$CACHE_DIR"
 hpc-compose rendezvous prune --cache-dir "$CACHE_DIR"
 ```
 
-Provider cleanup removes `latest.json` only when the finishing job still owns it, so an older provider cannot erase a newer provider's record.
+Provider cleanup is owner-safe: an older provider cannot erase a newer record. See [Cross-Job Rendezvous](cross-job-rendezvous.md) for the full TTL and ownership rules.
 
 ## After Upgrading
 
