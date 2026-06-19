@@ -860,15 +860,6 @@ struct LocalLaunchOutcome {
     submit_output: output::SubmitOutput,
 }
 
-/// Resolved secret values for redacting the persisted config snapshot. Secrets
-/// are not per-trial, so the context's set is correct for sweep snapshots too.
-fn snapshot_secret_values(context: &ResolvedContext) -> BTreeSet<String> {
-    crate::redaction::secret_value_set(
-        &context.interpolation_vars,
-        &context.interpolation_var_sources,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn prepare_local_launch<F>(
     context: &ResolvedContext,
@@ -893,8 +884,13 @@ where
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
+    let effective_config_yaml = output::effective_config_yaml(
+        &effective_config,
+        &crate::redaction::secret_value_set(
+            &context.interpolation_vars,
+            &context.interpolation_var_sources,
+        ),
+    )?;
     let runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1270,8 +1266,13 @@ where
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
+    let effective_config_yaml = output::effective_config_yaml(
+        &effective_config,
+        &crate::redaction::secret_value_set(
+            &context.interpolation_vars,
+            &context.interpolation_var_sources,
+        ),
+    )?;
     let mut runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1548,8 +1549,13 @@ pub(crate) fn launch(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
+    let effective_config_yaml = output::effective_config_yaml(
+        &effective_config,
+        &crate::redaction::secret_value_set(
+            &context.interpolation_vars,
+            &context.interpolation_var_sources,
+        ),
+    )?;
     let runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -2756,8 +2762,13 @@ pub(crate) fn germinate(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
+    let effective_config_yaml = output::effective_config_yaml(
+        &effective_config,
+        &crate::redaction::secret_value_set(
+            &context.interpolation_vars,
+            &context.interpolation_var_sources,
+        ),
+    )?;
     let original_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -5510,8 +5521,13 @@ fn submit_sweep_trial(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
+    let effective_config_yaml = output::effective_config_yaml(
+        &effective_config,
+        &crate::redaction::secret_value_set(
+            &context.interpolation_vars,
+            &context.interpolation_var_sources,
+        ),
+    )?;
     let runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,

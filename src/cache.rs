@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -378,19 +377,16 @@ fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
 }
 
 /// Monotonic counter making each temp manifest name unique within this process.
-static TEMP_MANIFEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// Writes the cache manifest atomically.
 ///
 /// The `cache_dir` lives on a shared cluster filesystem where multiple jobs may
 /// write the same manifest concurrently. A plain `fs::write` truncates then
 /// rewrites in place, so a crash or a concurrent reader can observe a torn,
-/// half-written JSON file that then fails to parse and breaks later runs. To
-/// avoid that torn-write corruption we serialize into a uniquely named temp file
-/// in the *same* directory (so the rename stays within one filesystem and is
-/// atomic on POSIX) and `fs::rename` it over the destination. The temp name uses
-/// the process id plus a per-process atomic counter, which is unique without
-/// relying on clock randomness.
+/// half-written JSON file that then fails to parse and breaks later runs. We
+/// delegate to [`crate::secure_io::write_atomic`], which writes to a unique,
+/// O_EXCL temp file in the same directory and renames it over the destination
+/// (atomic on POSIX, and resistant to symlink/pre-existing-entry attacks in the
+/// shared directory).
 ///
 /// Note: this fixes torn writes for each individual write. It does **not** add
 /// advisory locking, so the read-modify-write `upsert_*` path can still lose an
@@ -399,42 +395,13 @@ static TEMP_MANIFEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = manifest_path_for(artifact);
-    let parent = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
+    }
     let raw =
         serde_json::to_string_pretty(manifest).context("failed to serialize cache manifest")?;
-
-    let counter = TEMP_MANIFEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_name = format!(
-        ".{}.tmp.{}.{counter}",
-        manifest_file_name(&manifest_path),
-        pid()
-    );
-    let temp_path = parent.join(temp_name);
-
-    if let Err(err) = fs::write(&temp_path, &raw) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(err).context(format!("failed to write {}", temp_path.display()));
-    }
-    if let Err(err) = fs::rename(&temp_path, &manifest_path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(err).context(format!("failed to write {}", manifest_path.display()));
-    }
-    Ok(())
-}
-
-/// File name (without directory) used to derive the temp manifest name.
-fn manifest_file_name(manifest_path: &Path) -> String {
-    manifest_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("artifact.sqsh.json")
-        .to_string()
-}
-
-fn pid() -> u32 {
-    std::process::id()
+    crate::secure_io::write_atomic(&manifest_path, raw.as_bytes(), false)
+        .context(format!("failed to write {}", manifest_path.display()))
 }
 
 fn format_env_entry((key, value): &(String, String)) -> String {
