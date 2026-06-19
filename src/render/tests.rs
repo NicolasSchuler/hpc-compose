@@ -1,0 +1,2470 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::OnceLock;
+
+use super::*;
+use crate::cluster::{ClusterProfile, DistributedProfile, RuntimeAvailability};
+use crate::planner::ServicePlacement;
+use crate::spec::{
+    DependencyCondition, MpiConfig, MpiProfile, MpiType, ReadinessSpec, RendezvousRegisterConfig,
+    ResumeConfig, RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig,
+    ServiceAssertSpec, ServiceDependency, ServiceEventHookSpec, ServiceFailurePolicy,
+    ServiceHookContext, ServiceHookEvent, ServiceHookSpec, ServiceRendezvousConfig,
+    ServiceScratchConfig, ServiceSlurmConfig, SlurmConfig, StageInConfig, StageMode,
+    StageOutConfig, StageOutWhen,
+};
+
+fn runtime_service() -> RuntimeService {
+    RuntimeService {
+        name: "worker".into(),
+        runtime_image: PathBuf::from("/shared/cache/worker.sqsh"),
+        execution: ExecutionSpec::Exec(vec!["/bin/app".into(), "--port".into(), "8080".into()]),
+        environment: vec![("A".into(), "B".into())],
+        volumes: vec!["/shared/data:/data".into()],
+        working_dir: Some("/workspace".into()),
+        depends_on: Vec::new(),
+        readiness: Some(ReadinessSpec::Tcp {
+            host: Some("127.0.0.1".into()),
+            port: 8080,
+            timeout_seconds: Some(20),
+        }),
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::LocalSqsh(PathBuf::from("/shared/cache/worker.sqsh")),
+    }
+}
+
+fn assert_render_contract(plan: &RuntimePlan) {
+    let script = render_script(plan).expect("script");
+    assert_bash_syntax(&script);
+    assert_eq!(
+        script.matches("  register_service ").count(),
+        plan.ordered_services.len(),
+        "rendered script should register each planned service exactly once"
+    );
+    for array in [
+        "SERVICE_PIDS",
+        "SERVICE_NAMES",
+        "SERVICE_STEP_NAMES",
+        "SERVICE_LOG_PATHS",
+        "SERVICE_HEALTHY",
+        "SERVICE_COMPLETED_SUCCESSFULLY",
+        "SERVICE_READINESS_CONFIGURED",
+        "SERVICE_FAILURE_POLICY_MODE",
+        "SERVICE_MAX_RESTARTS",
+        "SERVICE_BACKOFF_SECONDS",
+        "SERVICE_WINDOW_SECONDS",
+        "SERVICE_MAX_RESTARTS_IN_WINDOW",
+        "SERVICE_RESTART_COUNT",
+        "SERVICE_RESTART_FAILURES_IN_WINDOW",
+        "SERVICE_RESTART_FAILURE_TIMESTAMPS",
+        "SERVICE_LAST_EXIT_CODE",
+        "SERVICE_STARTED_AT",
+        "SERVICE_FINISHED_AT",
+        "SERVICE_FIRST_FAILURE_AT",
+        "SERVICE_FIRST_FAILURE_EXIT_CODE",
+        "SERVICE_FIRST_FAILURE_NODE",
+        "SERVICE_FIRST_FAILURE_RANK",
+        "SERVICE_PLACEMENT_MODE",
+        "SERVICE_STEP_NODES",
+        "SERVICE_STEP_NTASKS",
+        "SERVICE_STEP_NTASKS_PER_NODE",
+        "SERVICE_STEP_NODELIST",
+        "SERVICE_HOST_EPILOGUE_SCRIPTS",
+        "SERVICE_HOST_EPILOGUE_RAN",
+        "SERVICE_EVENT_HOOK_MANIFESTS",
+        "SERVICE_LAUNCH_FNS",
+        "SERVICE_DEPENDENTS",
+    ] {
+        assert!(
+            script.contains(&format!("{array}=()")),
+            "missing {array} initialization"
+        );
+        assert!(
+            script.contains(&format!("{array}+=(")),
+            "missing {array} append in register_service"
+        );
+    }
+}
+
+fn assert_bash_syntax(script: &str) {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let script_path = tmpdir.path().join("rendered.sbatch");
+    fs::write(&script_path, script).expect("write rendered script");
+    let output = Command::new(bash_executable())
+        .arg("-n")
+        .arg(&script_path)
+        .output()
+        .expect("bash -n");
+    assert!(
+        output.status.success(),
+        "rendered script failed bash -n\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn bash_executable() -> &'static std::path::Path {
+    static BASH: OnceLock<PathBuf> = OnceLock::new();
+    BASH.get_or_init(resolve_test_bash).as_path()
+}
+
+fn resolve_test_bash() -> PathBuf {
+    if let Some(path) = std::env::var_os("HPC_COMPOSE_TEST_BASH") {
+        let path = PathBuf::from(path);
+        if bash_supports_associative_arrays(&path) {
+            return path;
+        }
+    }
+    for candidate in [
+        PathBuf::from("/opt/homebrew/bin/bash"),
+        PathBuf::from("/usr/local/bin/bash"),
+        PathBuf::from("bash"),
+        PathBuf::from("/bin/bash"),
+    ] {
+        if bash_supports_associative_arrays(&candidate) {
+            return candidate;
+        }
+    }
+    PathBuf::from("bash")
+}
+
+fn bash_supports_associative_arrays(path: &std::path::Path) -> bool {
+    Command::new(path)
+        .arg("-c")
+        .arg("declare -A h=([x]=y); [[ ${h[x]} == y ]]")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn embedded_local_srun_shim(script: &str) -> &str {
+    let heredoc_start = "cat > \"$HPC_COMPOSE_LOCAL_BIN_DIR/srun\" <<'HPC_COMPOSE_LOCAL_SRUN'\n";
+    let body = script
+        .split_once(heredoc_start)
+        .expect("local launcher should write srun shim")
+        .1;
+    body.split_once("\nHPC_COMPOSE_LOCAL_SRUN\n")
+        .expect("local launcher should terminate srun shim heredoc")
+        .0
+}
+
+fn write_executable(path: &std::path::Path, body: &str) {
+    fs::write(path, body).expect("write script");
+    let mut perms = fs::metadata(path).expect("meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).expect("chmod");
+}
+
+fn write_fake_runtime_srun(tmpdir: &std::path::Path) {
+    let srun = tmpdir.join("srun");
+    write_executable(
+        &srun,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+container_mounts=""
+for arg in "$@"; do
+  case "$arg" in
+    --container-mounts=*)
+      container_mounts="${arg#--container-mounts=}"
+      ;;
+  esac
+done
+job_mount=""
+IFS=',' read -r -a mount_items <<< "$container_mounts"
+for mount in "${mount_items[@]}"; do
+  host="${mount%%:*}"
+  dest="${mount#*:}"
+  if [[ "$dest" == "/hpc-compose/job" ]]; then
+    job_mount="$host"
+  fi
+done
+printf 'resume_dir=%s attempt=%s is_resume=%s\n' "${HPC_COMPOSE_RESUME_DIR:-}" "${HPC_COMPOSE_ATTEMPT:-}" "${HPC_COMPOSE_IS_RESUME:-}"
+printf 'node_meta=%s|%s|%s|%s\n' "${HPC_COMPOSE_PRIMARY_NODE:-}" "${HPC_COMPOSE_NODE_COUNT:-}" "${HPC_COMPOSE_NODELIST:-}" "${HPC_COMPOSE_NODELIST_FILE:-}"
+printf 'service_node_meta=%s|%s|%s|%s\n' "${HPC_COMPOSE_SERVICE_PRIMARY_NODE:-}" "${HPC_COMPOSE_SERVICE_NODE_COUNT:-}" "${HPC_COMPOSE_SERVICE_NODELIST:-}" "${HPC_COMPOSE_SERVICE_NODELIST_FILE:-}"
+if [[ -n "$job_mount" ]]; then
+  mkdir -p "$job_mount/checkpoints"
+  printf 'checkpoint %s\n' "${HPC_COMPOSE_ATTEMPT:-missing}" > "$job_mount/checkpoints/checkpoint-${HPC_COMPOSE_ATTEMPT:-missing}.txt"
+fi
+"#,
+    );
+    write_fake_scontrol(tmpdir);
+}
+
+fn write_fake_runtime_srun_with_dependency_restart(tmpdir: &std::path::Path) {
+    let srun = tmpdir.join("srun");
+    write_executable(
+        &srun,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+job_name=""
+for arg in "$@"; do
+  case "$arg" in
+    --job-name=*)
+      job_name="${arg#--job-name=}"
+      break
+      ;;
+  esac
+done
+state_root="${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/fake-runtime-srun"
+mkdir -p "$state_root"
+key="$(printf '%s' "$job_name" | tr -c 'A-Za-z0-9._-' '_')"
+count_file="$state_root/${key}.count"
+count=0
+if [[ -f "$count_file" ]]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+echo "$count" > "$count_file"
+case "$job_name" in
+  hpc-compose:api)
+    if (( count == 1 )); then
+      exit 41
+    fi
+    sleep 2
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+    );
+    write_fake_scontrol(tmpdir);
+}
+
+fn write_fake_runtime_srun_exit_sequence(
+    tmpdir: &std::path::Path,
+    service_name: &str,
+    exits: &[i32],
+) {
+    let srun = tmpdir.join("srun");
+    let mut exit_cases = String::new();
+    for (index, code) in exits.iter().enumerate() {
+        exit_cases.push_str(&format!("    {}) exit {code} ;;\n", index + 1));
+    }
+    let fallback_exit = exits.last().copied().unwrap_or(0);
+    write_executable(
+        &srun,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+if [[ "${{1:-}}" == "--help" ]]; then
+  echo "usage: srun --container-image=IMAGE"
+  exit 0
+fi
+job_name=""
+for arg in "$@"; do
+  case "$arg" in
+    --job-name=*)
+      job_name="${{arg#--job-name=}}"
+      break
+      ;;
+  esac
+done
+state_root="${{SLURM_SUBMIT_DIR:-$PWD}}/.hpc-compose/fake-runtime-srun"
+mkdir -p "$state_root"
+key="$(printf '%s' "$job_name" | tr -c 'A-Za-z0-9._-' '_')"
+count_file="$state_root/${{key}}.count"
+count=0
+if [[ -f "$count_file" ]]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+echo "$count" > "$count_file"
+if [[ "$job_name" == {} ]]; then
+  case "$count" in
+{}    *) exit {} ;;
+  esac
+fi
+exit 0
+"#,
+            shell_quote(&format!("hpc-compose:{service_name}")),
+            exit_cases,
+            fallback_exit
+        ),
+    );
+    write_fake_scontrol(tmpdir);
+}
+
+fn write_fake_scontrol(tmpdir: &std::path::Path) {
+    let scontrol = tmpdir.join("scontrol");
+    write_executable(
+        &scontrol,
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "show" && "${2:-}" == "hostnames" ]]; then
+  if [[ $# -ge 3 ]]; then
+    raw="${3//,/ }"
+    for host in $raw; do
+      printf '%s\n' "$host"
+    done
+  fi
+  exit 0
+fi
+echo "unsupported scontrol invocation" >&2
+exit 1
+"#,
+    );
+}
+
+fn run_rendered_script_output(
+    tmpdir: &std::path::Path,
+    script_path: &std::path::Path,
+    restart_count: u32,
+) -> std::process::Output {
+    let mut path = std::ffi::OsString::from(tmpdir.as_os_str());
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    Command::new(bash_executable())
+        .arg(script_path)
+        .current_dir(tmpdir)
+        .env("PATH", path)
+        .env("SLURM_JOB_ID", "12345")
+        .env("SLURM_JOB_NODELIST", "node01")
+        .env("SLURMD_NODENAME", "node01")
+        .env("SLURM_SUBMIT_DIR", tmpdir)
+        .env("SLURM_RESTART_COUNT", restart_count.to_string())
+        .output()
+        .expect("run rendered script")
+}
+
+fn run_rendered_script(
+    tmpdir: &std::path::Path,
+    script_path: &std::path::Path,
+    restart_count: u32,
+) {
+    let output = run_rendered_script_output(tmpdir, script_path, restart_count);
+    assert!(
+        output.status.success(),
+        "script failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn exec_form_preserves_argv() {
+    let service = runtime_service();
+    let argv = execution_argv(&service.execution, service.working_dir.as_deref());
+    assert_eq!(argv[0], "/bin/sh");
+    assert_eq!(argv[5], "/bin/app");
+    assert_eq!(argv[6], "--port");
+    assert_eq!(argv[7], "8080");
+}
+
+#[test]
+fn local_launcher_strips_sbatch_and_keeps_shims_shell_syntax_valid() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            time: Some("00:10:00".into()),
+            mem: Some("4G".into()),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_local_script_with_options(
+        &plan,
+        "local job 1",
+        "/opt/enroot/bin/enroot",
+        &LocalRenderOptions { dev_reload: true },
+    )
+    .expect("local launcher");
+    assert_bash_syntax(&script);
+    assert_bash_syntax(embedded_local_srun_shim(&script));
+    assert!(script.starts_with("#!/bin/bash\nset -euo pipefail\n"));
+    assert!(!script.lines().any(|line| line.starts_with("#SBATCH ")));
+    assert!(script.contains("export SLURM_JOB_ID='local job 1'"));
+    assert!(script.contains("export HPC_COMPOSE_BACKEND_OVERRIDE=\"local\""));
+    assert!(script.contains("export HPC_COMPOSE_DEV_CONTROL_DIR="));
+    assert!(script.contains("export HPC_COMPOSE_LOCAL_ENROOT_BIN='/opt/enroot/bin/enroot'"));
+    assert!(script.contains("cat > \"$HPC_COMPOSE_LOCAL_BIN_DIR/srun\""));
+    assert!(script.contains("exec \"$enroot_bin\" start"));
+}
+
+#[test]
+fn render_uses_prepared_paths_and_readiness() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            time: Some("00:10:00".into()),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("/shared/cache/worker.sqsh"));
+    assert!(script.contains("wait_for_tcp"));
+    assert!(script.contains("/bin/app"));
+    assert!(script.contains("--container-image='/shared/cache/worker.sqsh'"));
+    assert!(script.contains("--container-env=A"));
+    assert!(script.contains("build_pyxis_mounts"));
+    assert!(script.contains("$JOB_TMP:/hpc-compose/job"));
+    assert!(script.contains("STATE_FILE=\"$JOB_TMP/state.json\""));
+    assert!(script.contains("write_state_file"));
+    assert!(script.contains("/scratch:/scratch"));
+    assert!(script.contains("/usr/lib64/slurm/libslurmfull.so"));
+    assert!(script.contains("/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog"));
+}
+
+#[test]
+fn render_contract_holds_for_single_service_dependency_and_distributed_plans() {
+    let single = RuntimePlan {
+        name: "single".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+    assert_render_contract(&single);
+
+    let mut provider = runtime_service();
+    provider.name = "api".into();
+    provider.readiness = Some(ReadinessSpec::Sleep { seconds: 1 });
+    let mut client = runtime_service();
+    client.name = "client".into();
+    client.depends_on = vec![ServiceDependency {
+        name: "api".into(),
+        condition: DependencyCondition::ServiceHealthy,
+        implicit: false,
+    }];
+    client.readiness = None;
+    let dependency = RuntimePlan {
+        name: "dependency".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![provider, client],
+    };
+    assert_render_contract(&dependency);
+
+    let mut distributed = runtime_service();
+    distributed.name = "trainer".into();
+    distributed.placement = ServicePlacement {
+        mode: crate::planner::ServicePlacementMode::Distributed,
+        nodes: 2,
+        ntasks: Some(4),
+        ntasks_per_node: Some(2),
+        node_indices: Some(vec![0, 1]),
+        ..ServicePlacement::default()
+    };
+    distributed.slurm.mpi = Some(MpiConfig {
+        mpi_type: MpiType::new("pmix").expect("mpi type"),
+        profile: Some(MpiProfile::Openmpi),
+        implementation: None,
+        launcher: crate::spec::MpiLauncher::Srun,
+        expected_ranks: None,
+        host_mpi: None,
+    });
+    distributed.readiness = Some(ReadinessSpec::Sleep { seconds: 1 });
+    let distributed_plan = RuntimePlan {
+        name: "distributed".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            metrics: Some(crate::spec::MetricsConfig {
+                enabled: Some(true),
+                interval_seconds: Some(5),
+                collectors: vec![MetricsCollector::Slurm],
+            }),
+            artifacts: Some(crate::spec::ArtifactsConfig {
+                collect: ArtifactCollectPolicy::Always,
+                export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                paths: vec!["/hpc-compose/job/metrics/**".into()],
+                bundles: BTreeMap::new(),
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![distributed],
+    };
+    assert_render_contract(&distributed_plan);
+}
+
+#[test]
+fn render_includes_http_readiness_helper() {
+    let mut service = runtime_service();
+    service.readiness = Some(ReadinessSpec::Http {
+        url: "http://127.0.0.1:8080/health".into(),
+        status_code: 200,
+        timeout_seconds: Some(30),
+    });
+    let plan = RuntimePlan {
+        name: "http-test".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("wait_for_http()"));
+    assert!(script.contains("curl --silent"));
+    assert!(
+        script.contains("wait_for_http \"$pid\" \"$name\" 'http://127.0.0.1:8080/health' 200 30")
+    );
+}
+
+#[test]
+fn render_apptainer_backend_uses_host_runtime_wrapper() {
+    let mut service = runtime_service();
+    service.runtime_image = PathBuf::from("/shared/cache/worker.sif");
+    service.source = crate::planner::ImageSource::LocalSif(service.runtime_image.clone());
+    service.volumes = vec!["/shared/data:/data:ro".into()];
+    let plan = RuntimePlan {
+        name: "apptainer-demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Apptainer,
+            gpu: RuntimeGpuPolicy::Nvidia,
+        },
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("local -a runtime_cmd=('apptainer' 'exec')"));
+    assert!(script.contains("runtime_cmd+=(--nv)"));
+    assert!(script.contains("runtime_cmd+=(--bind \"$runtime_mounts\")"));
+    assert!(script.contains("/shared/cache/worker.sif"));
+    assert!(!script.contains("--container-image="));
+    assert!(!script.contains("--container-env="));
+}
+
+#[test]
+fn render_apptainer_and_singularity_honor_binary_overrides() {
+    let mut service = runtime_service();
+    service.runtime_image = PathBuf::from("/shared/cache/worker.sif");
+    service.source = crate::planner::ImageSource::LocalSif(service.runtime_image.clone());
+
+    let apptainer_plan = RuntimePlan {
+        name: "apptainer-demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Apptainer,
+            gpu: RuntimeGpuPolicy::Auto,
+        },
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service.clone()],
+    };
+    let script = render_script_with_options(
+        &apptainer_plan,
+        &RenderOptions {
+            apptainer_bin: "/opt/site/bin/apptainer".into(),
+            singularity_bin: "/opt/site/bin/singularity".into(),
+            cluster_profile: None,
+        },
+    )
+    .expect("script");
+    assert!(script.contains("local -a runtime_cmd=('/opt/site/bin/apptainer' 'exec')"));
+
+    let singularity_plan = RuntimePlan {
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Singularity,
+            gpu: RuntimeGpuPolicy::Auto,
+        },
+        ordered_services: vec![service],
+        ..apptainer_plan
+    };
+    let script = render_script_with_options(
+        &singularity_plan,
+        &RenderOptions {
+            apptainer_bin: "/opt/site/bin/apptainer".into(),
+            singularity_bin: "/opt/site/bin/singularity".into(),
+            cluster_profile: None,
+        },
+    )
+    .expect("script");
+    assert!(script.contains("local -a runtime_cmd=('/opt/site/bin/singularity' 'exec')"));
+}
+
+#[test]
+fn render_scratch_staging_and_burst_buffer_directives() {
+    let plan = RuntimePlan {
+        name: "scratch-demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            scratch: Some(ScratchConfig {
+                scope: crate::spec::ScratchScope::Shared,
+                base: "/scratch/jobs".into(),
+                mount: "/scratch".into(),
+                cleanup: ScratchCleanupPolicy::OnSuccess,
+            }),
+            stage_in: vec![StageInConfig {
+                from: "/shared/input".into(),
+                to: "/scratch/input".into(),
+                mode: StageMode::Rsync,
+            }],
+            stage_out: vec![StageOutConfig {
+                from: "/scratch/output".into(),
+                to: "/shared/output/${SLURM_JOB_ID}".into(),
+                when: StageOutWhen::Always,
+                mode: StageMode::Copy,
+            }],
+            burst_buffer: Some(crate::spec::BurstBufferConfig {
+                directives: vec!["#BB create_persistent name=data capacity=100G".into()],
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("#BB create_persistent name=data capacity=100G"));
+    assert!(script.contains("SCRATCH_HOST_PATH=\"$SCRATCH_BASE/${SLURM_JOB_ID}\""));
+    assert!(script.contains("append_unique_mount \"$SCRATCH_HOST_PATH:$SCRATCH_CONTAINER_PATH\""));
+    assert!(script.contains(
+            "  local HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\"\n  runtime_mounts=$(build_pyxis_mounts \"${service_mounts[@]}\")"
+        ));
+    assert!(!script.contains(
+            "HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\" runtime_mounts=$(build_pyxis_mounts"
+        ));
+    assert!(script.contains("STAGE_IN_FROM=('/shared/input')"));
+    assert!(script.contains("STAGE_OUT_TO=('/shared/output/${SLURM_JOB_ID}')"));
+    assert!(script.contains("stage_in_paths"));
+    assert!(script.contains("stage_out_paths \"$code\" || stage_out_status=$?"));
+    assert!(script.contains("if (( stage_out_status == 0 ));"));
+    assert!(script.contains("cleanup_scratch \"$code\" || true"));
+}
+
+#[test]
+fn render_scratch_without_staging_defines_cleanup_helpers() {
+    let plan = RuntimePlan {
+        name: "scratch-only".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            scratch: Some(ScratchConfig {
+                scope: crate::spec::ScratchScope::Shared,
+                base: "/scratch/jobs".into(),
+                mount: "/scratch".into(),
+                cleanup: ScratchCleanupPolicy::Always,
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("init_scratch()"));
+    assert!(script.contains("cleanup_scratch()"));
+    assert!(script.contains("cleanup_scratch \"$code\" || true"));
+}
+
+#[test]
+fn render_host_runtime_exposes_host_scratch_path_to_service_env() {
+    let mut service = runtime_service();
+    service.source = crate::planner::ImageSource::Host;
+    service.runtime_image = PathBuf::new();
+    let plan = RuntimePlan {
+        name: "host-scratch".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Host,
+            ..RuntimeConfig::default()
+        },
+        slurm: SlurmConfig {
+            scratch: Some(ScratchConfig {
+                scope: crate::spec::ScratchScope::Shared,
+                base: "/scratch/jobs".into(),
+                mount: "/work".into(),
+                cleanup: ScratchCleanupPolicy::Always,
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_HOST_PATH"));
+    assert!(!script.contains("HPC_COMPOSE_SCRATCH_DIR=$SCRATCH_CONTAINER_PATH"));
+    assert!(script.contains("local -a runtime_cmd=(\"${service_cmd[@]}\")"));
+}
+
+#[test]
+fn render_service_scratch_disabled_resolves_to_runtime_disabled_flag() {
+    let mut service = runtime_service();
+    service.slurm.scratch = Some(ServiceScratchConfig {
+        enabled: Some(false),
+    });
+    let plan = RuntimePlan {
+        name: "scratch-disabled".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            scratch: Some(ScratchConfig {
+                scope: crate::spec::ScratchScope::Shared,
+                base: "/scratch/jobs".into(),
+                mount: "/scratch".into(),
+                cleanup: ScratchCleanupPolicy::Always,
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("  local scratch_enabled=0\n"));
+    assert!(script.contains("HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\""));
+}
+
+#[test]
+fn render_node_local_multi_node_scratch_initializes_every_node() {
+    let plan = RuntimePlan {
+        name: "node-local-scratch".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            scratch: Some(ScratchConfig {
+                scope: crate::spec::ScratchScope::NodeLocal,
+                base: "/scratch/jobs".into(),
+                mount: "/scratch".into(),
+                cleanup: ScratchCleanupPolicy::Always,
+            }),
+            stage_in: vec![StageInConfig {
+                from: "/shared/input".into(),
+                to: "/scratch/input".into(),
+                mode: StageMode::Copy,
+            }],
+            stage_out: vec![StageOutConfig {
+                from: "/scratch/output".into(),
+                to: "/shared/output".into(),
+                when: StageOutWhen::Always,
+                mode: StageMode::Copy,
+            }],
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("SCRATCH_SCOPE='node_local'"));
+    assert!(script.contains(
+            "srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash -lc \"$command\" bash \"$SCRATCH_HOST_PATH\""
+        ));
+    assert!(script.contains(
+            "srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash \"$stage_in_node_script\" \"$SCRATCH_CONTAINER_PATH\" \"$SCRATCH_HOST_PATH\""
+        ));
+    assert!(script.contains(
+            "srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash \"$stage_out_node_script\" \"$exit_code\" \"$SCRATCH_CONTAINER_PATH\" \"$SCRATCH_HOST_PATH\""
+        ));
+}
+
+#[test]
+fn shell_form_uses_sh_lc() {
+    let argv = execution_argv(&ExecutionSpec::Shell("echo hi".into()), None);
+    assert_eq!(argv, vec!["/bin/sh", "-lc", "echo hi"]);
+}
+
+#[test]
+fn image_default_services_enable_container_entrypoint() {
+    let service = RuntimeService {
+        name: "redis".into(),
+        runtime_image: PathBuf::from("/shared/cache/redis.sqsh"),
+        execution: ExecutionSpec::ImageDefault,
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::LocalSqsh(PathBuf::from("/shared/cache/redis.sqsh")),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("'--container-entrypoint'"));
+}
+
+#[test]
+fn render_covers_optional_slurm_fields_and_setup_lines() {
+    let service = RuntimeService {
+        name: "logger".into(),
+        runtime_image: PathBuf::from("/shared/cache/logger.sqsh"),
+        execution: ExecutionSpec::Shell("echo ready".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: Some(ReadinessSpec::Log {
+            pattern: "ready".into(),
+            timeout_seconds: None,
+        }),
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig {
+            cpus_per_task: Some(3),
+            gpus: Some(2),
+            gres: None,
+            extra_srun_args: vec!["--mpi=none".into()],
+            failure_policy: None,
+            ..ServiceSlurmConfig::default()
+        },
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            partition: Some("gpu".into()),
+            account: Some("proj".into()),
+            qos: Some("normal".into()),
+            time: Some("01:00:00".into()),
+            cpus_per_task: Some(8),
+            mem: Some("32G".into()),
+            gres: Some("gpu:a100:1".into()),
+            constraint: Some("a100".into()),
+            output: Some("job.out".into()),
+            error: Some("job.err".into()),
+            chdir: Some("/work".into()),
+            setup: vec!["module load enroot".into()],
+            submit_args: vec!["--mail-type=END".into()],
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+    let script = render_script(&plan).expect("script");
+    for expected in [
+        "#SBATCH --partition=gpu",
+        "#SBATCH --account=proj",
+        "#SBATCH --qos=normal",
+        "#SBATCH --time=01:00:00",
+        "#SBATCH --cpus-per-task=8",
+        "#SBATCH --mem=32G",
+        "#SBATCH --gres=gpu:a100:1",
+        "#SBATCH --constraint=a100",
+        "#SBATCH --output=job.out",
+        "#SBATCH --error=job.err",
+        "#SBATCH --chdir=/work",
+        "#SBATCH --mail-type=END",
+        "module load enroot",
+        "wait_for_log",
+        "--mpi=none",
+        "--gpus=2",
+    ] {
+        assert!(script.contains(expected), "missing {expected}");
+    }
+    let time_pos = script.find("#SBATCH --time=01:00:00").expect("time");
+    let strict_pos = script.find("set -euo pipefail").expect("strict mode");
+    assert!(
+        time_pos < strict_pos,
+        "SBATCH header must precede shell commands"
+    );
+}
+
+#[test]
+fn render_gres_takes_precedence_over_gpus_at_allocation_and_service_levels() {
+    let service = RuntimeService {
+        name: "trainer".into(),
+        runtime_image: PathBuf::from("/shared/cache/trainer.sqsh"),
+        execution: ExecutionSpec::Exec(vec!["python".into(), "train.py".into()]),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig {
+            gpus: Some(8),
+            gres: Some("gpu:h100:4".into()),
+            ..ServiceSlurmConfig::default()
+        },
+        prepare: None,
+        source: crate::planner::ImageSource::LocalSqsh(PathBuf::from("/shared/cache/trainer.sqsh")),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            gpus: Some(8),
+            gres: Some("gpu:h100:4".into()),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("#SBATCH --gres=gpu:h100:4"));
+    assert!(!script.contains("#SBATCH --gpus=8"));
+
+    let args = display_srun_command(&plan.ordered_services[0]);
+    assert!(args.contains(&"--gres=gpu:h100:4".to_string()));
+    assert!(!args.contains(&"--gpus=8".to_string()));
+}
+
+#[test]
+fn render_gres_precedence_preserves_gpu_subresource_directives() {
+    let mut service = runtime_service();
+    service.name = "trainer".into();
+    service.slurm = ServiceSlurmConfig {
+        gpus: Some(8),
+        gres: Some("gpu:h100:4".into()),
+        gpus_per_node: Some(2),
+        gpus_per_task: Some(1),
+        ..ServiceSlurmConfig::default()
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            gpus: Some(8),
+            gres: Some("gpu:h100:4".into()),
+            gpus_per_node: Some(2),
+            gpus_per_task: Some(1),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    for expected in [
+        "#SBATCH --gres=gpu:h100:4",
+        "#SBATCH --gpus-per-node=2",
+        "#SBATCH --gpus-per-task=1",
+    ] {
+        assert!(script.contains(expected), "missing {expected}");
+    }
+    assert!(!script.contains("#SBATCH --gpus=8"));
+
+    let args = display_srun_command(&plan.ordered_services[0]);
+    assert!(args.contains(&"--gres=gpu:h100:4".to_string()));
+    assert!(args.contains(&"--gpus-per-node=2".to_string()));
+    assert!(args.contains(&"--gpus-per-task=1".to_string()));
+    assert!(!args.contains(&"--gpus=8".to_string()));
+}
+
+#[test]
+fn display_srun_command_shows_partition_indices_and_excludes() {
+    let mut service = runtime_service();
+    service.placement = ServicePlacement {
+        mode: ServicePlacementMode::Partitioned,
+        nodes: 3,
+        ntasks: Some(3),
+        ntasks_per_node: None,
+        pin_to_primary_node: false,
+        node_indices: Some(vec![2, 4, 5]),
+        exclude_indices: vec![3, 6],
+        allow_overlap: false,
+    };
+
+    let display = display_srun_command(&service);
+    assert!(display.contains(&"--nodelist=<allocation-indices:2,4,5>".to_string()));
+    assert!(display.contains(&"--exclude=<allocation-indices:3,6>".to_string()));
+
+    let actual = build_srun_command(&service);
+    assert!(
+        actual
+            .iter()
+            .all(|arg| !arg.contains("<allocation-indices:"))
+    );
+}
+
+#[test]
+fn render_rendezvous_registration_serializes_configured_metadata() {
+    let mut service = runtime_service();
+    service.name = "api".into();
+    service.readiness = None;
+    service.slurm.rendezvous = Some(ServiceRendezvousConfig {
+        register: Some(RendezvousRegisterConfig {
+            name: "api".into(),
+            port: 8080,
+            protocol: Some("http".into()),
+            path: Some("/ready".into()),
+            ttl_seconds: Some(60),
+            metadata: BTreeMap::from([
+                ("role".into(), "api".into()),
+                ("version".into(), "v1".into()),
+            ]),
+        }),
+    });
+    let plan = RuntimePlan {
+        name: "rdzv".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(
+        script.contains(
+            "SERVICE_RDZV_METADATA_JSON[rdzv_index]='{\"role\":\"api\",\"version\":\"v1\"}'"
+        ),
+        "{script}"
+    );
+    assert!(script.contains("\"metadata\": $metadata_json"));
+    assert!(!script.contains("\"metadata\": {}"));
+}
+
+#[test]
+fn render_emits_host_and_container_hook_lifecycle() {
+    let mut service = runtime_service();
+    service.name = "trainer".into();
+    service.slurm.prologue = Some(ServiceHookSpec {
+        context: ServiceHookContext::Host,
+        script: "echo host-prologue \"$HPC_COMPOSE_SERVICE_NAME\"".into(),
+    });
+    service.slurm.epilogue = Some(ServiceHookSpec {
+        context: ServiceHookContext::Container,
+        script: "echo container-epilogue \"$HPC_COMPOSE_SERVICE_EXIT_CODE\"".into(),
+    });
+    let plan = RuntimePlan {
+        name: "hooks".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("HOOKS_DIR=\"$JOB_TMP/hooks\""));
+    assert!(script.contains("trainer.host-prologue.sh"));
+    assert!(script.contains("trainer.container-epilogue.sh"));
+    assert!(script.contains("trainer.container-wrapper.sh"));
+    assert!(script.contains("run_host_hook \"$host_prologue_script\""));
+    assert!(script.contains("service_cmd=(\"/bin/sh\" \"$container_wrapper\""));
+    assert!(script.contains("HPC_COMPOSE_SERVICE_LOG=/hpc-compose/job/logs/trainer.log"));
+    assert!(script.contains(">>\"$logfile\" 2>&1\n"));
+    assert!(script.contains("    ) &"));
+}
+
+#[test]
+fn readiness_and_argv_helpers_cover_remaining_branches() {
+    let mut out = String::new();
+    let sleep_service = RuntimeService {
+        name: "sleepy".into(),
+        runtime_image: PathBuf::from("/tmp/sleepy.sqsh"),
+        execution: ExecutionSpec::Shell("echo hi".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: Some(ReadinessSpec::Sleep { seconds: 3 }),
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+    };
+    render_readiness_wait(&mut out, &sleep_service);
+    assert!(out.contains("wait_for_sleep \"$pid\" \"$name\" 3"));
+
+    let mut out = String::new();
+    let tcp_default_service = RuntimeService {
+        readiness: Some(ReadinessSpec::Tcp {
+            host: None,
+            port: 9000,
+            timeout_seconds: None,
+        }),
+        ..sleep_service.clone()
+    };
+    render_readiness_wait(&mut out, &tcp_default_service);
+    assert!(out.contains("'127.0.0.1' 9000 60"));
+
+    let mut out = String::new();
+    let http_service = RuntimeService {
+        readiness: Some(ReadinessSpec::Http {
+            url: "http://127.0.0.1:8080/health".into(),
+            status_code: 200,
+            timeout_seconds: Some(30),
+        }),
+        ..sleep_service.clone()
+    };
+    render_readiness_wait(&mut out, &http_service);
+    assert!(out.contains("wait_for_http"));
+    assert!(out.contains("'http://127.0.0.1:8080/health'"));
+    assert!(out.contains("200 30"));
+
+    let mut out = String::new();
+    let http_default_service = RuntimeService {
+        readiness: Some(ReadinessSpec::Http {
+            url: "http://localhost:5000/ready".into(),
+            status_code: 200,
+            timeout_seconds: None,
+        }),
+        ..sleep_service.clone()
+    };
+    render_readiness_wait(&mut out, &http_default_service);
+    assert!(out.contains("200 60"));
+
+    assert_eq!(
+        execution_argv(&ExecutionSpec::ImageDefault, None),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        execution_argv(&ExecutionSpec::Exec(vec!["python".into()]), None),
+        vec!["python".to_string()]
+    );
+    assert_eq!(
+        execution_argv(&ExecutionSpec::Shell("echo hi".into()), Some("/work"))[2],
+        "cd \"$1\" && shift && exec /bin/sh -lc \"$1\""
+    );
+}
+
+#[test]
+fn build_srun_command_and_string_helpers_cover_remaining_cases() {
+    let service = RuntimeService {
+        name: "redis/service".into(),
+        runtime_image: PathBuf::from("/shared/cache/redis.sqsh"),
+        execution: ExecutionSpec::ImageDefault,
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig {
+            cpus_per_task: Some(2),
+            gpus: None,
+            gres: Some("gpu:1".into()),
+            extra_srun_args: vec!["--exclusive".into()],
+            failure_policy: None,
+            ..ServiceSlurmConfig::default()
+        },
+        prepare: None,
+        source: crate::planner::ImageSource::LocalSqsh(PathBuf::from("/shared/cache/redis.sqsh")),
+    };
+    let args = build_srun_command(&service);
+    assert!(args.contains(&"--container-entrypoint".to_string()));
+    assert!(args.contains(&"--job-name=hpc-compose:redis_x2f_service".to_string()));
+    assert!(args.contains(&"--cpus-per-task=2".to_string()));
+    assert!(args.contains(&"--gres=gpu:1".to_string()));
+    assert!(args.contains(&"--exclusive".to_string()));
+
+    assert_eq!(
+        bash_array_literal(&["a".into(), "b c".into()]),
+        "('a' 'b c')"
+    );
+    assert_eq!(service_token("redis/service"), "redis_x2f_service");
+    assert_eq!(service_token("redis_service"), "redis_x5f_service");
+    assert_eq!(
+        service_step_name("redis/service"),
+        "hpc-compose:redis_x2f_service"
+    );
+    assert_eq!(shell_quote(""), "''");
+    assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
+}
+
+#[test]
+fn render_mpi_service_emits_srun_flag_hostfile_and_env_passthrough() {
+    let mut service = runtime_service();
+    service.name = "mpi".into();
+    service.slurm.mpi = Some(MpiConfig {
+        mpi_type: MpiType::new("pmix").expect("mpi type"),
+        profile: Some(MpiProfile::Openmpi),
+        implementation: None,
+        launcher: Default::default(),
+        expected_ranks: None,
+        host_mpi: None,
+    });
+    service.placement = ServicePlacement {
+        mode: ServicePlacementMode::Distributed,
+        nodes: 2,
+        ntasks: None,
+        ntasks_per_node: Some(4),
+        pin_to_primary_node: false,
+        node_indices: None,
+        exclude_indices: Vec::new(),
+        allow_overlap: false,
+    };
+    let plan = RuntimePlan {
+        name: "mpi-demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service.clone()],
+    };
+
+    let args = build_srun_command(&service);
+    assert!(args.contains(&"--mpi=pmix".to_string()));
+    let container_env = args
+        .iter()
+        .find(|arg| arg.starts_with("--container-env="))
+        .expect("container env");
+    assert!(container_env.contains("HPC_COMPOSE_MPI_HOSTFILE"));
+    assert!(container_env.contains("HPC_COMPOSE_MPI_IMPLEMENTATION"));
+    assert!(container_env.contains("HPC_COMPOSE_MPI_PROFILE"));
+    assert!(container_env.contains("HPC_COMPOSE_MPI_TYPE"));
+    assert!(container_env.contains("PMIX_RANK"));
+    assert!(container_env.contains("PMI_RANK"));
+    assert!(container_env.contains("SLURM_PROCID"));
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("MPI_HOSTFILE_DIR=\"$ALLOCATION_DIR/mpi-hostfiles\""));
+    assert!(script.contains("write_mpi_hostfile()"));
+    assert!(script.contains("local mpi_hostfile=\"$MPI_HOSTFILE_DIR/mpi.hostfile\""));
+    assert!(script.contains("write_mpi_hostfile \"$mpi_hostfile\" \"$service_nodelist\" '4'"));
+    assert!(script.contains("launch_env+=(\"HPC_COMPOSE_MPI_HOSTFILE=$mpi_hostfile_container\")"));
+    assert!(script.contains("launch_env+=(\"HPC_COMPOSE_MPI_TYPE=$mpi_type\")"));
+    assert!(script.contains("HPC_COMPOSE_MPI_PROFILE=openmpi"));
+    assert!(script.contains("HPC_COMPOSE_MPI_IMPLEMENTATION=openmpi"));
+}
+
+#[test]
+fn distributed_env_derives_nproc_from_overrides_gpu_and_tasks() {
+    let mut service = runtime_service();
+    service.placement = ServicePlacement {
+        mode: ServicePlacementMode::Distributed,
+        nodes: 2,
+        ntasks: None,
+        ntasks_per_node: Some(3),
+        pin_to_primary_node: false,
+        node_indices: None,
+        exclude_indices: Vec::new(),
+        allow_overlap: false,
+    };
+    let slurm = SlurmConfig::default();
+
+    service.slurm.gres = Some("gpu:a100:4".into());
+    assert_eq!(derive_nproc_per_node(&service, &slurm), 4);
+
+    service.slurm.gres = None;
+    service.slurm.gpus = Some(8);
+    assert_eq!(derive_nproc_per_node(&service, &slurm), 4);
+
+    service.slurm.gpus = None;
+    assert_eq!(derive_nproc_per_node(&service, &slurm), 3);
+
+    service
+        .environment
+        .push(("HPC_COMPOSE_DIST_NPROC_PER_NODE".into(), "6".into()));
+    service.slurm.gpus_per_node = Some(4);
+    assert_eq!(derive_nproc_per_node(&service, &slurm), 6);
+
+    assert_eq!(parse_gres_gpu_count("gpu:tesla:8"), Some(8));
+    assert_eq!(parse_gres_gpu_count("gres/gpu:h100:2"), Some(2));
+    assert_eq!(parse_gres_gpu_count("gpu"), Some(1));
+    assert_eq!(parse_gres_gpu_count("cpu:4"), None);
+}
+
+#[test]
+fn render_distributed_service_emits_helpers_and_profile_env() {
+    let mut service = runtime_service();
+    service.name = "trainer".into();
+    service.environment = vec![("NCCL_DEBUG".into(), "INFO".into())];
+    service.placement = ServicePlacement {
+        mode: ServicePlacementMode::Distributed,
+        nodes: 2,
+        ntasks: None,
+        ntasks_per_node: Some(1),
+        pin_to_primary_node: false,
+        node_indices: None,
+        exclude_indices: Vec::new(),
+        allow_overlap: false,
+    };
+    service.slurm.gpus_per_node = Some(4);
+    let profile = ClusterProfile {
+        schema_version: 1,
+        generated_at_unix: None,
+        slurm_version: None,
+        mpi_types: Vec::new(),
+        mpi_installations: Vec::new(),
+        partitions: Vec::new(),
+        qos: Vec::new(),
+        gpu_models: Vec::new(),
+        runtimes: RuntimeAvailability::default(),
+        shared_cache_paths: Vec::new(),
+        distributed: DistributedProfile {
+            rdzv_port: None,
+            rdzv_port_base: Some(31_000),
+            rdzv_port_span: Some(17),
+            env: BTreeMap::from([
+                ("FI_PROVIDER".into(), "efa".into()),
+                ("NCCL_DEBUG".into(), "WARN".into()),
+                ("UCX_TLS".into(), "rc,cuda_copy,cuda_ipc".into()),
+            ]),
+        },
+        ..ClusterProfile::default()
+    };
+    let plan = RuntimePlan {
+        name: "dist-demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service.clone()],
+    };
+
+    let script = render_script_with_options(
+        &plan,
+        &RenderOptions {
+            cluster_profile: Some(profile.clone()),
+            ..RenderOptions::default()
+        },
+    )
+    .expect("script");
+    assert!(script.contains("DIST_HOSTFILE_DIR=\"$ALLOCATION_DIR/distributed-hostfiles\""));
+    assert!(script.contains("local dist_nproc_per_node=4"));
+    assert!(script.contains("hpc_compose_dist_port '' 31000 17 0"));
+    assert!(
+        script.contains("HPC_COMPOSE_DIST_RDZV_ENDPOINT=$service_primary_node:$dist_master_port")
+    );
+    assert!(script.contains(
+        "write_mpi_hostfile \"$dist_hostfile\" \"$service_nodelist\" \"$dist_nproc_per_node\""
+    ));
+    assert!(script.contains("export HPC_COMPOSE_DIST_NODE_RANK="));
+    assert!(script.contains("FI_PROVIDER=efa"));
+    assert!(script.contains("UCX_TLS=rc,cuda_copy,cuda_ipc"));
+    assert!(!script.contains("NCCL_DEBUG=WARN"));
+
+    let srun_args = build_srun_command_for_backend(&service, crate::spec::RuntimeBackend::Pyxis);
+    let container_env = srun_args
+        .iter()
+        .find(|arg| arg.starts_with("--container-env="))
+        .expect("container env");
+    assert!(container_env.contains("SLURM_LOCALID"));
+    assert!(container_env.contains("SLURM_NODEID"));
+    assert!(container_env.contains("SLURM_PROCID"));
+
+    let env_names = distributed_environment_names_for_service(&service, Some(&profile));
+    assert!(env_names.contains(&"HPC_COMPOSE_DIST_WORLD_SIZE".to_string()));
+    assert!(env_names.contains(&"FI_PROVIDER".to_string()));
+    assert!(env_names.contains(&"UCX_TLS".to_string()));
+    assert!(!env_names.contains(&"NCCL_DEBUG".to_string()));
+}
+
+#[test]
+fn render_image_default_distributed_service_uses_task_prolog_for_rank_helpers() {
+    let mut service = runtime_service();
+    service.name = "default-entrypoint".into();
+    service.execution = ExecutionSpec::ImageDefault;
+    service.working_dir = None;
+    service.placement = ServicePlacement {
+        mode: ServicePlacementMode::Distributed,
+        nodes: 2,
+        ntasks: None,
+        ntasks_per_node: Some(2),
+        pin_to_primary_node: false,
+        node_indices: None,
+        exclude_indices: Vec::new(),
+        allow_overlap: false,
+    };
+    let plan = RuntimePlan {
+        name: "dist-default".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("default_x2d_entrypoint.dist-rank-prolog.sh"));
+    assert!(script.contains("srun_cmd+=(\"--task-prolog=$dist_rank_task_prolog\")"));
+    assert!(script.contains("export HPC_COMPOSE_DIST_NODE_RANK="));
+    assert!(script.contains("export HPC_COMPOSE_DIST_LOCAL_RANK="));
+    assert!(script.contains("export HPC_COMPOSE_DIST_GLOBAL_RANK="));
+    assert!(script.contains("'--container-entrypoint'"));
+}
+
+#[test]
+fn render_multi_node_script_emits_allocation_metadata_and_geometry() {
+    let mut helper = runtime_service();
+    helper.name = "bootstrap".into();
+    helper.readiness = Some(ReadinessSpec::Log {
+        pattern: "ready".into(),
+        timeout_seconds: Some(5),
+    });
+    helper.placement = ServicePlacement {
+        mode: ServicePlacementMode::PrimaryNode,
+        nodes: 1,
+        ntasks: Some(1),
+        ntasks_per_node: None,
+        pin_to_primary_node: true,
+        node_indices: None,
+        exclude_indices: Vec::new(),
+        allow_overlap: true,
+    };
+
+    let mut distributed = runtime_service();
+    distributed.name = "trainer".into();
+    distributed.readiness = Some(ReadinessSpec::Sleep { seconds: 1 });
+    distributed.placement = ServicePlacement {
+        mode: ServicePlacementMode::Distributed,
+        nodes: 2,
+        ntasks: None,
+        ntasks_per_node: Some(4),
+        pin_to_primary_node: false,
+        node_indices: None,
+        exclude_indices: Vec::new(),
+        allow_overlap: false,
+    };
+
+    let plan = RuntimePlan {
+        name: "multi-node".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            ntasks_per_node: Some(4),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![helper.clone(), distributed.clone()],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("#SBATCH --nodes=2"));
+    assert!(script.contains("#SBATCH --ntasks-per-node=4"));
+    assert!(script.contains("PRIMARY_NODE_FILE=\"$ALLOCATION_DIR/primary_node\""));
+    assert!(script.contains("NODELIST_FILE=\"$ALLOCATION_DIR/nodes.txt\""));
+    assert!(script.contains("HPC_COMPOSE_NODELIST_FILE=\"/hpc-compose/job/allocation/nodes.txt\""));
+    assert!(script.contains("scontrol show hostnames \"$SLURM_JOB_NODELIST\""));
+    assert!(
+        display_srun_command(&helper)
+            .iter()
+            .any(|arg| arg == "--nodelist=$HPC_COMPOSE_PRIMARY_NODE")
+    );
+    assert!(
+        !display_srun_command(&distributed)
+            .iter()
+            .any(|arg| arg.starts_with("--nodelist="))
+    );
+}
+
+#[test]
+fn rendered_single_node_script_derives_allocation_metadata_without_scontrol() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_fake_runtime_srun(tmpdir.path());
+    fs::remove_file(tmpdir.path().join("scontrol")).expect("remove scontrol");
+
+    let plan = RuntimePlan {
+        name: "single-node".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![RuntimeService {
+            execution: ExecutionSpec::Shell("echo single-node".into()),
+            environment: Vec::new(),
+            working_dir: None,
+            readiness: None,
+            ..runtime_service()
+        }],
+    };
+    let script = render_script(&plan).expect("script");
+    let script_path = tmpdir.path().join("single-node.sbatch");
+    write_executable(&script_path, &script);
+
+    run_rendered_script(tmpdir.path(), &script_path, 0);
+
+    let log =
+        fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/logs/worker.log")).expect("log");
+    assert!(log.contains("node_meta=node01|1|node01|/hpc-compose/job/allocation/nodes.txt"));
+}
+
+#[test]
+fn render_uses_distinct_internal_ids_for_punctuation_variants() {
+    let mk_service = |name: &str| RuntimeService {
+        name: name.into(),
+        runtime_image: PathBuf::from(format!("/shared/cache/{name}.sqsh")),
+        execution: ExecutionSpec::Shell("echo hi".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: Some(ReadinessSpec::Log {
+            pattern: "ready".into(),
+            timeout_seconds: Some(5),
+        }),
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![mk_service("api.v1"), mk_service("api_v1")],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("launch_api_x2e_v1()"));
+    assert!(script.contains("launch_api_x5f_v1()"));
+    assert!(script.contains("$LOG_DIR/api_x2e_v1.log"));
+    assert!(script.contains("$LOG_DIR/api_x5f_v1.log"));
+    assert!(script.contains("'--job-name=hpc-compose:api_x2e_v1'"));
+    assert!(script.contains("'--job-name=hpc-compose:api_x5f_v1'"));
+}
+
+#[test]
+fn top_level_gpu_branch_and_unreachable_working_dir_guard_are_covered() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            gpus: Some(4),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![RuntimeService {
+            name: "svc".into(),
+            runtime_image: PathBuf::from("/shared/cache/svc.sqsh"),
+            execution: ExecutionSpec::Shell("echo hi".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        }],
+    };
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("#SBATCH --gpus=4"));
+
+    let panic =
+        std::panic::catch_unwind(|| execution_argv(&ExecutionSpec::ImageDefault, Some("/work")));
+    assert!(panic.is_err());
+}
+
+#[test]
+fn render_waits_only_on_declared_dependencies() {
+    let provider = RuntimeService {
+        name: "a".into(),
+        runtime_image: PathBuf::from("/shared/cache/a.sqsh"),
+        execution: ExecutionSpec::Shell("echo a".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: Some(ReadinessSpec::Log {
+            pattern: "ready".into(),
+            timeout_seconds: Some(30),
+        }),
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+    };
+    let unrelated = RuntimeService {
+        name: "b".into(),
+        runtime_image: PathBuf::from("/shared/cache/b.sqsh"),
+        execution: ExecutionSpec::Shell("echo b".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+    };
+    let dependent = RuntimeService {
+        name: "c".into(),
+        runtime_image: PathBuf::from("/shared/cache/c.sqsh"),
+        execution: ExecutionSpec::Shell("echo c".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: vec![ServiceDependency {
+            name: "a".into(),
+            condition: DependencyCondition::ServiceHealthy,
+            implicit: false,
+        }],
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![provider, unrelated, dependent],
+    };
+
+    let script = render_script(&plan).expect("script");
+    let launch_a = script.find("launch_a\n").expect("launch a");
+    let launch_b = script.find("launch_b\n").expect("launch b");
+    let wait_a = script
+        .find("wait_for_service_healthy 'a' 'c' wait_until_a_ready")
+        .expect("healthy wait");
+    let launch_c = script.find("launch_c\n").expect("launch c");
+    assert!(launch_a < launch_b);
+    assert!(launch_b < wait_a);
+    assert!(wait_a < launch_c);
+    let started_check = script
+        .find("wait_for_service_started \"$dependency\" \"$target\" || return 1")
+        .expect("started check");
+    let healthy_cache = script
+        .find("if [[ \"${SERVICE_HEALTHY[index]:-0}\" == \"1\" ]]")
+        .expect("healthy cache");
+    assert!(started_check < healthy_cache);
+    assert!(script.contains("\"healthy\":"));
+}
+
+#[test]
+fn render_supports_completed_dependency_and_binding_flags() {
+    let preprocess = RuntimeService {
+        name: "preprocess".into(),
+        runtime_image: PathBuf::from("/shared/cache/preprocess.sqsh"),
+        execution: ExecutionSpec::Shell("echo preprocess".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://alpine:3.20".into()),
+    };
+    let trainer = RuntimeService {
+        name: "trainer".into(),
+        runtime_image: PathBuf::from("/shared/cache/trainer.sqsh"),
+        execution: ExecutionSpec::Shell("echo trainer".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: vec![ServiceDependency {
+            name: "preprocess".into(),
+            condition: DependencyCondition::ServiceCompletedSuccessfully,
+            implicit: false,
+        }],
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig {
+            gpus_per_task: Some(1),
+            cpus_per_gpu: Some(8),
+            gpu_bind: Some("closest".into()),
+            cpu_bind: Some("cores".into()),
+            mpi: Some(MpiConfig {
+                mpi_type: MpiType::new("pmix_v4").expect("mpi type"),
+                profile: None,
+                implementation: None,
+                launcher: Default::default(),
+                expected_ranks: None,
+                host_mpi: None,
+            }),
+            ..ServiceSlurmConfig::default()
+        },
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://ubuntu:24.04".into()),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            gpus_per_node: Some(4),
+            mem_per_gpu: Some("40G".into()),
+            distribution: Some("block:block".into()),
+            hint: Some("nomultithread".into()),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![preprocess, trainer],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("#SBATCH --gpus-per-node=4"));
+    assert!(script.contains("#SBATCH --mem-per-gpu=40G"));
+    assert!(script.contains("#SBATCH --distribution=block:block"));
+    assert!(script.contains("#SBATCH --hint=nomultithread"));
+    assert!(script.contains("wait_for_service_completed_successfully 'preprocess' 'trainer'"));
+    assert!(script.contains("\"completed_successfully\":"));
+    let srun = display_srun_command(&plan.ordered_services[1]).join(" ");
+    assert!(srun.contains("--gpus-per-task=1"));
+    assert!(srun.contains("--cpus-per-gpu=8"));
+    assert!(srun.contains("--gpu-bind=closest"));
+    assert!(srun.contains("--cpu-bind=cores"));
+    assert!(srun.contains("--mpi=pmix_v4"));
+}
+
+#[test]
+fn render_includes_failure_policy_arrays_and_restart_handlers() {
+    let restart_service = RuntimeService {
+        name: "api".into(),
+        runtime_image: PathBuf::from("/shared/cache/api.sqsh"),
+        execution: ExecutionSpec::Shell("echo api".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: None,
+        assertions: None,
+        failure_policy: crate::spec::ServiceFailurePolicy {
+            mode: ServiceFailureMode::RestartOnFailure,
+            max_restarts: 3,
+            backoff_seconds: 5,
+            window_seconds: 60,
+            max_restarts_in_window: 3,
+        },
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+    };
+    let ignore_service = RuntimeService {
+        name: "worker".into(),
+        runtime_image: PathBuf::from("/shared/cache/worker.sqsh"),
+        execution: ExecutionSpec::Shell("echo worker".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: None,
+        assertions: None,
+        failure_policy: crate::spec::ServiceFailurePolicy {
+            mode: ServiceFailureMode::Ignore,
+            max_restarts: 0,
+            backoff_seconds: 0,
+            window_seconds: 0,
+            max_restarts_in_window: 0,
+        },
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://python:3.11-slim".into()),
+    };
+    let dependent = RuntimeService {
+        name: "client".into(),
+        runtime_image: PathBuf::from("/shared/cache/client.sqsh"),
+        execution: ExecutionSpec::Shell("echo client".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: vec![ServiceDependency {
+            name: "api".into(),
+            condition: DependencyCondition::ServiceStarted,
+            implicit: false,
+        }],
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://alpine:3".into()),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![restart_service, ignore_service, dependent],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("SERVICE_FAILURE_POLICY_MODE=()"));
+    assert!(script.contains("SERVICE_MAX_RESTARTS=()"));
+    assert!(script.contains("SERVICE_BACKOFF_SECONDS=()"));
+    assert!(script.contains("SERVICE_WINDOW_SECONDS=()"));
+    assert!(script.contains("SERVICE_MAX_RESTARTS_IN_WINDOW=()"));
+    assert!(script.contains("SERVICE_RESTART_COUNT=()"));
+    assert!(script.contains("SERVICE_RESTART_FAILURES_IN_WINDOW=()"));
+    assert!(script.contains("SERVICE_RESTART_FAILURE_TIMESTAMPS=()"));
+    assert!(script.contains("SERVICE_LAST_EXIT_CODE=()"));
+    assert!(script.contains("json_number_array()"));
+    assert!(script.contains("\"failure_policy_mode\""));
+    assert!(script.contains("\"restart_count\""));
+    assert!(script.contains("\"max_restarts\""));
+    assert!(script.contains("\"window_seconds\""));
+    assert!(script.contains("\"max_restarts_in_window\""));
+    assert!(script.contains("\"restart_failures_in_window\""));
+    assert!(script.contains("\"restart_failure_timestamps\""));
+    assert!(script.contains("\"last_exit_code\""));
+    assert!(script.contains("prune_restart_window()"));
+    assert!(script.contains("handle_service_exit()"));
+    assert!(script.contains("mode=${SERVICE_FAILURE_POLICY_MODE[index]:-fail_job}"));
+    assert!(script.contains("if [[ \"$mode\" == \"ignore\" ]]"));
+    assert!(script.contains("if [[ \"$mode\" == \"restart_on_failure\" ]]"));
+    assert!(script.contains("local window_seconds=${SERVICE_WINDOW_SECONDS[index]:-0}"));
+    assert!(
+        script.contains("local max_restarts_in_window=${SERVICE_MAX_RESTARTS_IN_WINDOW[index]:-0}")
+    );
+    assert!(script.contains(
+        "local restart_failures_in_window=${SERVICE_RESTART_FAILURES_IN_WINDOW[index]:-0}"
+    ));
+    assert!(script.contains("SERVICE_RESTART_COUNT[index]=\"$next_restart\""));
+    assert!(script.contains("local launch_fn=${SERVICE_LAUNCH_FNS[index]:-}"));
+    assert!(script.contains("local index=${SERVICE_INDEX_BY_NAME[\"$name\"]:-}"));
+    assert!(script.contains("emit_dependency_failure_diagnostic()"));
+    assert!(script.contains("Service '$failed_service' is required by:"));
+    assert!(script.contains("'restart_on_failure' 3 5 60 3"));
+    assert!(script.contains("'ignore' 0 0 0 0"));
+}
+
+#[test]
+fn render_metrics_sampler_when_enabled() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            metrics: Some(crate::spec::MetricsConfig {
+                enabled: Some(true),
+                interval_seconds: Some(3),
+                collectors: vec![MetricsCollector::Gpu, MetricsCollector::Slurm],
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("METRICS_DIR=\"$JOB_TMP/metrics\""));
+    assert!(script.contains("start_metrics_sampler"));
+    assert!(script.contains("metrics_sampler_loop"));
+    assert!(script.contains("nvidia-smi --query-gpu="));
+    assert!(script.contains("sstat --allsteps --jobs \"$SLURM_JOB_ID\""));
+    assert!(script.contains("stop_metrics_sampler"));
+    assert!(script.contains("GPU_COLLECTOR_ENABLED=1"));
+    assert!(script.contains("SLURM_COLLECTOR_ENABLED=1"));
+    assert!(script.contains("sample_gpu_metrics_all_nodes"));
+    assert!(script.contains("--ntasks-per-node=1 --exact --overlap bash \"$script_path\""));
+    assert!(script.contains("METRICS_DIAGNOSTICS_DIR=\"$METRICS_DIR/diagnostics\""));
+    assert!(script.contains("nvidia-smi topo -m"));
+}
+
+#[test]
+fn render_structured_software_env_before_setup_and_service_launch() {
+    let mut service = runtime_service();
+    service.slurm.software_env = crate::spec::SoftwareEnvConfig {
+        modules: crate::spec::ModuleEnvSpec {
+            purge: false,
+            load: vec!["netcdf/4.9".into()],
+        },
+        spack: None,
+        env: BTreeMap::from([("OMP_NUM_THREADS".into(), "8".into())]),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            setup: vec!["echo setup".into()],
+            software_env: crate::spec::SoftwareEnvConfig {
+                modules: crate::spec::ModuleEnvSpec {
+                    purge: true,
+                    load: vec!["cuda/12.4".into()],
+                },
+                spack: Some(crate::spec::SpackEnvSpec {
+                    view: "/shared/spack/views/ml".into(),
+                }),
+                env: BTreeMap::from([
+                    ("HDF5_USE_FILE_LOCKING".into(), "FALSE".into()),
+                    ("OMP_NUM_THREADS".into(), "2".into()),
+                ]),
+            },
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    let top_level = script
+        .find("hpc_compose_module purge")
+        .expect("top-level x-env");
+    let setup = script.find("echo setup").expect("setup");
+    assert!(top_level < setup);
+    assert!(script.contains("hpc_compose_module load 'cuda/12.4'"));
+    assert!(script.contains("hpc_compose_module load 'netcdf/4.9'"));
+    assert!(script.contains("if [[ -d '/shared/spack/views/ml'/bin ]]; then export PATH='/shared/spack/views/ml'/bin:\"$PATH\"; fi"));
+    assert!(
+        script
+            .contains("local -a software_env=('HDF5_USE_FILE_LOCKING=FALSE' 'OMP_NUM_THREADS=8')")
+    );
+    assert!(script.contains("HDF5_USE_FILE_LOCKING"));
+    assert!(script.contains("OMP_NUM_THREADS"));
+}
+
+#[test]
+fn render_artifact_collection_helpers_when_enabled() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            artifacts: Some(crate::spec::ArtifactsConfig {
+                collect: ArtifactCollectPolicy::OnFailure,
+                export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                paths: vec![
+                    "/hpc-compose/job/metrics/**".into(),
+                    "/hpc-compose/job/checkpoints/*.pt".into(),
+                ],
+                bundles: BTreeMap::new(),
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("ARTIFACTS_DIR=\"$JOB_TMP/artifacts\""));
+    assert!(script.contains("ARTIFACTS_MANIFEST_FILE=\"$ARTIFACTS_DIR/manifest.json\""));
+    assert!(script.contains("ARTIFACTS_COLLECT_POLICY='on_failure'"));
+    assert!(script.contains("ARTIFACT_BUNDLE_NAMES=('default')"));
+    assert!(script.contains("ARTIFACT_PATTERN_BUNDLES=('default' 'default')"));
+    assert!(script.contains("ARTIFACT_SOURCE_PATTERNS=('/hpc-compose/job/metrics/**' '/hpc-compose/job/checkpoints/*.pt')"));
+    assert!(script.contains("collect_artifacts \"$code\" || true"));
+    assert!(script.contains("host_pattern=\"$JOB_TMP${declared_pattern#/hpc-compose/job}\""));
+    assert!(script.contains("container_match=\"/hpc-compose/job${matched#\"$JOB_TMP\"}\""));
+    assert!(script.contains("write_artifact_bundles_json"));
+}
+
+#[test]
+fn render_service_assertions_in_cleanup_before_artifacts() {
+    let mut service = runtime_service();
+    service.assertions = Some(ServiceAssertSpec {
+        exit_code: Some(0),
+        artifacts_contain: Some("model/*.pt".into()),
+        max_duration_seconds: Some(7200),
+    });
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            artifacts: Some(crate::spec::ArtifactsConfig {
+                collect: ArtifactCollectPolicy::Always,
+                export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                paths: vec!["/hpc-compose/job/model/*.pt".into()],
+                bundles: BTreeMap::new(),
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("SERVICE_ASSERT_EXIT_CODES=()"));
+    assert!(script.contains("evaluate_assertions || assertion_status=$?"));
+    assert!(
+        script.contains(
+            "SERVICE_ASSERT_ARTIFACT_PATTERNS[assert_index]='/hpc-compose/job/model/*.pt'"
+        )
+    );
+    assert!(script.contains("SERVICE_ASSERT_MAX_DURATIONS[assert_index]='7200'"));
+    let assertions_pos = script
+        .find("evaluate_assertions || assertion_status=$?")
+        .expect("assertions");
+    let artifacts_pos = script
+        .find("collect_artifacts \"$code\" || true")
+        .expect("artifacts");
+    assert!(assertions_pos < artifacts_pos);
+}
+
+#[test]
+fn render_resume_helpers_when_enabled() {
+    let mut plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+    plan.slurm.resume = Some(ResumeConfig {
+        path: "/shared/runs/demo".into(),
+    });
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("RESUME_ENABLED=1"));
+    assert!(script.contains("JOB_TMP=\"$JOB_ROOT/attempts/$ATTEMPT\""));
+    assert!(script.contains("append_unique_mount \"$RESUME_HOST_PATH:$RESUME_CONTAINER_PATH\""));
+    assert!(script.contains("launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")"));
+    assert!(script.contains("launch_env+=(\"HPC_COMPOSE_ATTEMPT=$ATTEMPT\")"));
+    assert!(script.contains("launch_env+=(\"HPC_COMPOSE_IS_RESUME=$IS_RESUME\")"));
+    assert!(script.contains("update_latest_runtime_links"));
+    assert!(script.contains("write_resume_metadata"));
+}
+
+#[test]
+fn rendered_resume_script_preserves_prior_attempts_and_updates_latest_links() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_fake_runtime_srun(tmpdir.path());
+    let resume_dir = tmpdir.path().join("resume");
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            artifacts: Some(crate::spec::ArtifactsConfig {
+                collect: ArtifactCollectPolicy::Always,
+                export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                paths: vec!["/hpc-compose/job/checkpoints/**".into()],
+                bundles: BTreeMap::new(),
+            }),
+            resume: Some(ResumeConfig {
+                path: resume_dir.display().to_string(),
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![RuntimeService {
+            execution: ExecutionSpec::Shell("echo resume".into()),
+            environment: Vec::new(),
+            working_dir: None,
+            readiness: None,
+            ..runtime_service()
+        }],
+    };
+    let script = render_script(&plan).expect("script");
+    let script_path = tmpdir.path().join("resume.sbatch");
+    write_executable(&script_path, &script);
+
+    run_rendered_script(tmpdir.path(), &script_path, 0);
+    run_rendered_script(tmpdir.path(), &script_path, 1);
+
+    let job_root = tmpdir.path().join(".hpc-compose/12345");
+    let attempt0_log = job_root.join("attempts/0/logs/worker.log");
+    let attempt1_log = job_root.join("attempts/1/logs/worker.log");
+    assert!(attempt0_log.exists());
+    assert!(attempt1_log.exists());
+    assert!(
+        fs::read_to_string(&attempt0_log)
+            .expect("attempt0 log")
+            .contains("resume_dir=/hpc-compose/resume attempt=0 is_resume=0")
+    );
+    assert!(
+        fs::read_to_string(&attempt1_log)
+            .expect("attempt1 log")
+            .contains("resume_dir=/hpc-compose/resume attempt=1 is_resume=1")
+    );
+
+    assert_eq!(
+        fs::read_link(job_root.join("logs")).expect("logs symlink"),
+        job_root.join("attempts/1/logs")
+    );
+    assert_eq!(
+        fs::read_link(job_root.join("artifacts")).expect("artifacts symlink"),
+        job_root.join("attempts/1/artifacts")
+    );
+    assert_eq!(
+        fs::read_link(job_root.join("state.json")).expect("state symlink"),
+        job_root.join("attempts/1/state.json")
+    );
+
+    assert!(
+        job_root
+            .join("attempts/0/artifacts/payload/checkpoints/checkpoint-0.txt")
+            .exists()
+    );
+    assert!(
+        job_root
+            .join("attempts/1/artifacts/payload/checkpoints/checkpoint-1.txt")
+            .exists()
+    );
+
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(job_root.join("state.json")).expect("state"))
+            .expect("state json");
+    assert_eq!(state["attempt"], 1);
+    assert_eq!(state["is_resume"], true);
+    assert_eq!(state["resume_dir"], resume_dir.display().to_string());
+
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(job_root.join("artifacts/manifest.json")).expect("manifest"),
+    )
+    .expect("manifest json");
+    assert_eq!(manifest["schema_version"], 3);
+    assert_eq!(manifest["attempt"], 1);
+    assert_eq!(manifest["is_resume"], true);
+    assert_eq!(manifest["resume_dir"], resume_dir.display().to_string());
+}
+
+#[test]
+fn rendered_resume_script_detects_existing_resume_metadata() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_fake_runtime_srun(tmpdir.path());
+    let resume_dir = tmpdir.path().join("resume");
+    fs::create_dir_all(resume_dir.join("_hpc-compose")).expect("resume meta dir");
+    fs::write(
+            resume_dir.join("_hpc-compose/latest.json"),
+            r#"{"schema_version":1,"compose_name":"demo","job_id":"old","attempt":7,"updated_at":"2026-04-05T10:00:00Z"}"#,
+        )
+        .expect("seed metadata");
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            resume: Some(ResumeConfig {
+                path: resume_dir.display().to_string(),
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![RuntimeService {
+            execution: ExecutionSpec::Shell("echo resume".into()),
+            environment: Vec::new(),
+            working_dir: None,
+            readiness: None,
+            ..runtime_service()
+        }],
+    };
+    let script = render_script(&plan).expect("script");
+    let script_path = tmpdir.path().join("resume-detect.sbatch");
+    write_executable(&script_path, &script);
+
+    run_rendered_script(tmpdir.path(), &script_path, 0);
+    let log = fs::read_to_string(
+        tmpdir
+            .path()
+            .join(".hpc-compose/12345/attempts/0/logs/worker.log"),
+    )
+    .expect("log");
+    assert!(log.contains("is_resume=1"));
+}
+
+#[test]
+fn rendered_script_restarts_failed_dependency_before_healthy_dependents_launch() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_fake_runtime_srun_with_dependency_restart(tmpdir.path());
+    let provider = RuntimeService {
+        name: "api".into(),
+        runtime_image: PathBuf::from("/shared/cache/api.sqsh"),
+        execution: ExecutionSpec::Shell("echo api".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: Vec::new(),
+        readiness: Some(ReadinessSpec::Sleep { seconds: 1 }),
+        assertions: None,
+        failure_policy: ServiceFailurePolicy {
+            mode: ServiceFailureMode::RestartOnFailure,
+            max_restarts: 1,
+            backoff_seconds: 1,
+            window_seconds: 60,
+            max_restarts_in_window: 1,
+        },
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+    };
+    let client = RuntimeService {
+        name: "client".into(),
+        runtime_image: PathBuf::from("/shared/cache/client.sqsh"),
+        execution: ExecutionSpec::Shell("echo client".into()),
+        environment: Vec::new(),
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: vec![ServiceDependency {
+            name: "api".into(),
+            condition: DependencyCondition::ServiceHealthy,
+            implicit: false,
+        }],
+        readiness: None,
+        assertions: None,
+        failure_policy: ServiceFailurePolicy::default(),
+        placement: ServicePlacement::default(),
+        slurm: ServiceSlurmConfig::default(),
+        prepare: None,
+        source: crate::planner::ImageSource::Remote("docker://alpine:3".into()),
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![provider, client],
+    };
+    let script = render_script(&plan).expect("script");
+    let script_path = tmpdir.path().join("restart-dependency.sbatch");
+    write_executable(&script_path, &script);
+
+    run_rendered_script(tmpdir.path(), &script_path, 0);
+
+    assert_eq!(
+        fs::read_to_string(
+            tmpdir
+                .path()
+                .join(".hpc-compose/fake-runtime-srun/hpc-compose_api.count"),
+        )
+        .expect("api count")
+        .trim(),
+        "2"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            tmpdir
+                .path()
+                .join(".hpc-compose/fake-runtime-srun/hpc-compose_client.count"),
+        )
+        .expect("client count")
+        .trim(),
+        "1"
+    );
+
+    let state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/state.json")).expect("state"),
+    )
+    .expect("state json");
+    let api = state["services"]
+        .as_array()
+        .expect("services")
+        .iter()
+        .find(|service| service["service_name"] == "api")
+        .expect("api");
+    assert_eq!(api["restart_count"], 1);
+    assert_eq!(api["window_seconds"], 60);
+    assert_eq!(api["max_restarts_in_window"], 1);
+    assert_eq!(api["restart_failures_in_window"], 1);
+    assert_eq!(
+        api["restart_failure_timestamps"]
+            .as_array()
+            .expect("timestamps")
+            .len(),
+        1
+    );
+    assert!(
+        api["restart_failure_timestamps"]
+            .as_array()
+            .expect("timestamps")
+            .iter()
+            .all(|value| value.as_u64().is_some())
+    );
+}
+
+#[test]
+fn rendered_script_runs_host_hooks_on_each_restart_attempt() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_fake_runtime_srun_with_dependency_restart(tmpdir.path());
+    let service = RuntimeService {
+            name: "api".into(),
+            runtime_image: PathBuf::from("/shared/cache/api.sqsh"),
+            execution: ExecutionSpec::Shell("echo api".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 1,
+                backoff_seconds: 1,
+                window_seconds: 60,
+                max_restarts_in_window: 1,
+            },
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig {
+                prologue: Some(ServiceHookSpec {
+                    context: ServiceHookContext::Host,
+                    script: "printf 'prologue:%s\\n' \"$HPC_COMPOSE_SERVICE_NAME\" >> \"$SLURM_SUBMIT_DIR/hooks.log\"".into(),
+                }),
+                epilogue: Some(ServiceHookSpec {
+                    context: ServiceHookContext::Host,
+                    script: "printf 'epilogue:%s\\n' \"$HPC_COMPOSE_SERVICE_EXIT_CODE\" >> \"$SLURM_SUBMIT_DIR/hooks.log\"".into(),
+                }),
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+    let script = render_script(&plan).expect("script");
+    let script_path = tmpdir.path().join("hooks-restart.sbatch");
+    write_executable(&script_path, &script);
+
+    run_rendered_script(tmpdir.path(), &script_path, 0);
+
+    let hooks = fs::read_to_string(tmpdir.path().join("hooks.log")).expect("hooks log");
+    assert_eq!(
+        hooks.lines().collect::<Vec<_>>(),
+        vec!["prologue:api", "epilogue:41", "prologue:api", "epilogue:0"]
+    );
+}
+
+#[test]
+fn rendered_script_runs_restart_event_hooks_best_effort() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_fake_runtime_srun_with_dependency_restart(tmpdir.path());
+    let service = RuntimeService {
+            name: "api".into(),
+            runtime_image: PathBuf::from("/shared/cache/api.sqsh"),
+            execution: ExecutionSpec::Shell("echo api".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 1,
+                backoff_seconds: 0,
+                window_seconds: 60,
+                max_restarts_in_window: 1,
+            },
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig {
+                hooks: vec![ServiceEventHookSpec {
+                    on: ServiceHookEvent::Restart,
+                    context: ServiceHookContext::Host,
+                    script: "printf 'restart:%s:%s:%s:%s/%s:%s\\n' \"$HPC_COMPOSE_HOOK_PHASE\" \"$HPC_COMPOSE_SERVICE_NAME\" \"$HPC_COMPOSE_SERVICE_EXIT_CODE\" \"$HPC_COMPOSE_RESTART_COUNT\" \"$HPC_COMPOSE_MAX_RESTARTS\" \"$HPC_COMPOSE_ATTEMPT\" >> \"$SLURM_SUBMIT_DIR/events.log\"\nexit 9".into(),
+                }],
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+    let script = render_script(&plan).expect("script");
+    let script_path = tmpdir.path().join("restart-event-hook.sbatch");
+    write_executable(&script_path, &script);
+
+    run_rendered_script(tmpdir.path(), &script_path, 0);
+
+    let events = fs::read_to_string(tmpdir.path().join("events.log")).expect("events log");
+    assert_eq!(
+        events.lines().collect::<Vec<_>>(),
+        vec!["restart:restart:api:41:1/1:0"]
+    );
+    let service_log = fs::read_to_string(tmpdir.path().join(".hpc-compose/12345/logs/api.log"))
+        .expect("service log");
+    assert!(service_log.contains("Event hook 'restart' for service 'api' exited with status 9"));
+}
+
+#[test]
+fn rendered_script_runs_window_exhausted_hook_once() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_fake_runtime_srun_exit_sequence(tmpdir.path(), "loopy", &[41, 42]);
+    let service = RuntimeService {
+            name: "loopy".into(),
+            runtime_image: PathBuf::from("/shared/cache/loopy.sqsh"),
+            execution: ExecutionSpec::Shell("echo loopy".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy {
+                mode: ServiceFailureMode::RestartOnFailure,
+                max_restarts: 5,
+                backoff_seconds: 0,
+                window_seconds: 60,
+                max_restarts_in_window: 1,
+            },
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig {
+                hooks: vec![ServiceEventHookSpec {
+                    on: ServiceHookEvent::WindowExhausted,
+                    context: ServiceHookContext::Host,
+                    script: "printf 'window:%s:%s:%s:%s/%s\\n' \"$HPC_COMPOSE_HOOK_PHASE\" \"$HPC_COMPOSE_SERVICE_NAME\" \"$HPC_COMPOSE_SERVICE_EXIT_CODE\" \"$HPC_COMPOSE_RESTART_FAILURES_IN_WINDOW\" \"$HPC_COMPOSE_MAX_RESTARTS_IN_WINDOW\" >> \"$SLURM_SUBMIT_DIR/events.log\"".into(),
+                }],
+                ..ServiceSlurmConfig::default()
+            },
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://redis:7".into()),
+        };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+    let script = render_script(&plan).expect("script");
+    let script_path = tmpdir.path().join("window-event-hook.sbatch");
+    write_executable(&script_path, &script);
+
+    let output = run_rendered_script_output(tmpdir.path(), &script_path, 0);
+    assert!(
+        !output.status.success(),
+        "script unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = fs::read_to_string(tmpdir.path().join("events.log")).expect("events log");
+    assert_eq!(
+        events.lines().collect::<Vec<_>>(),
+        vec!["window:window_exhausted:loopy:42:1/1"]
+    );
+}
+
+#[test]
+fn render_omits_metrics_sampler_when_disabled() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(!script.contains("METRICS_DIR=\"$JOB_TMP/metrics\""));
+    assert!(!script.contains("start_metrics_sampler"));
+    assert!(!script.contains("metrics_sampler_loop"));
+}

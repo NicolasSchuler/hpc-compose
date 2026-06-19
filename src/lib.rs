@@ -39,7 +39,7 @@ extern crate self as hpc_compose;
 
 pub mod cache;
 pub mod cli;
-pub mod cluster;
+pub(crate) mod cluster;
 /// CLI command orchestration used by the binary entrypoint.
 pub mod commands;
 pub mod context;
@@ -48,24 +48,27 @@ pub mod evolve;
 pub mod examples;
 pub mod init;
 pub mod job;
-pub mod lint;
+pub(crate) mod lint;
+pub(crate) mod lint_fix;
 pub mod manpages;
 pub(crate) mod output;
 pub(crate) mod path_util;
 pub mod planner;
-pub mod preflight;
+pub(crate) mod preflight;
 pub mod prepare;
 pub(crate) mod progress;
 pub(crate) mod readiness_util;
+pub(crate) mod redaction;
 pub mod render;
 pub mod rendezvous;
-pub mod schema;
+pub(crate) mod schema;
 pub mod spec;
 pub(crate) mod spec_error;
+pub(crate) mod suggest;
 pub(crate) mod term;
 pub(crate) mod tracked_paths;
 pub(crate) mod watch_ui;
-pub mod weather;
+pub(crate) mod weather;
 pub(crate) mod when;
 
 /// Converts a CLI failure into a rendered diagnostic report while preserving

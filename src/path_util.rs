@@ -37,6 +37,21 @@ pub fn normalize_path(path: PathBuf) -> PathBuf {
     normalized
 }
 
+/// Filesystem roots that are typically node-local and therefore unsafe for
+/// data that must be visible from both the login node and compute nodes.
+///
+/// `lint` (authoring-time) and `preflight`/`planner` (submission-time) share
+/// this single list so their advice never drifts apart.
+pub(crate) const NODE_LOCAL_ROOTS: &[&str] = &["/tmp", "/var/tmp", "/private/tmp", "/dev/shm"];
+
+/// Returns `true` when *path* lives under one of the [`NODE_LOCAL_ROOTS`].
+pub(crate) fn is_node_local_path(path: &str) -> bool {
+    let path = Path::new(path);
+    NODE_LOCAL_ROOTS
+        .iter()
+        .any(|root| path == Path::new(root) || path.starts_with(root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

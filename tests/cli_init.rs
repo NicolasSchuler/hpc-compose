@@ -48,7 +48,8 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
     );
     assert_success(&inspect_json);
     let inspect_json_stdout = stdout_text(&inspect_json);
-    assert!(inspect_json_stdout.contains("super-secret"));
+    assert!(!inspect_json_stdout.contains("super-secret"));
+    assert!(inspect_json_stdout.contains("<redacted>"));
     assert!(inspect_json_stdout.contains("hi-from-dotenv"));
 
     let preflight_json = run_cli(

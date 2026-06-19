@@ -73,10 +73,11 @@ pub use record::{
     build_cleanup_report, build_submission_record, build_submission_record_with_backend,
     build_submission_record_with_backend_and_options, build_submission_record_with_options,
     clean_all_except_latest, clean_by_age, find_submission_record_in_repo, jobs_dir_for,
-    latest_canary_record_path_for, latest_record_path_for, latest_run_record_path_for,
-    load_submission_record, log_dir_for_record, metadata_root_for, persist_submission_record,
-    remove_submission_record, run_cleanup_report, runtime_job_root_for_record, scan_job_inventory,
-    scan_job_records, state_path_for_record, write_submission_record,
+    latest_canary_record_path_for, latest_notebook_record_path_for, latest_record_path_for,
+    latest_run_record_path_for, load_submission_record, log_dir_for_record, metadata_root_for,
+    persist_submission_record, remove_submission_record, run_cleanup_report,
+    runtime_job_root_for_record, scan_job_inventory, scan_job_records, state_path_for_record,
+    write_submission_record,
 };
 pub use replay::{
     ReplayArtifactPaths, ReplayEvent, ReplayEventKind, ReplayFrame, ReplayReport,

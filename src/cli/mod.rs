@@ -20,6 +20,15 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Interactive server preset for the `notebook` command.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum NotebookKindArg {
+    /// JupyterLab notebook server.
+    Jupyter,
+    /// VS Code remote tunnel (`code tunnel`).
+    Vscode,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum ExamplesOutputFormat {
     Text,

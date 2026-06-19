@@ -943,3 +943,395 @@ services:
     assert!(!sbatch_log.exists());
     assert!(!tmpdir.path().join(".hpc-compose/sweeps").exists());
 }
+
+fn write_objective_sweep_compose(root: &Path, cache_dir: &Path) -> PathBuf {
+    let compose = root.join("train-obj.yaml");
+    fs::write(
+        &compose,
+        format!(
+            r#"
+name: sweep-obj-train
+x-slurm:
+  cache_dir: {}
+  time: "00:01:00"
+sweep:
+  parameters:
+    lr: [0.001, 0.01]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'final loss=([0-9.]+)'
+services:
+  trainer:
+    image: docker://python:3.11
+    command: ["python", "train.py", "--lr", "${{lr}}"]
+"#,
+            cache_dir.display()
+        ),
+    )
+    .expect("write objective sweep compose");
+    compose
+}
+
+#[test]
+fn sweep_objective_omitted_group_does_not_serialize_zero() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_objective_sweep_compose(tmpdir.path(), cache.path());
+
+    let dry_run = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dry-run",
+            "--no-preflight",
+            "--skip-prepare",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&dry_run);
+    let payload: Value = serde_json::from_str(&stdout_text(&dry_run)).expect("dry-run JSON output");
+    assert_eq!(
+        payload["manifest"]["objective"]["direction"],
+        Value::from("minimize")
+    );
+    assert_eq!(
+        payload["manifest"]["objective"]["group"],
+        Value::Null,
+        "default capture group should be schema-defaulted, not serialized as zero"
+    );
+}
+
+#[test]
+fn sweep_objective_rejects_zero_group() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = tmpdir.path().join("train-obj-zero-group.yaml");
+    fs::write(
+        &compose,
+        format!(
+            r#"
+name: sweep-obj-bad
+x-slurm:
+  cache_dir: {}
+  time: "00:01:00"
+sweep:
+  parameters:
+    lr: [0.001]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'final loss=([0-9.]+)'
+    group: 0
+services:
+  trainer:
+    image: docker://python:3.11
+    command: ["python", "train.py", "--lr", "${{lr}}"]
+"#,
+            cache.path().display()
+        ),
+    )
+    .expect("write bad objective sweep compose");
+
+    let dry_run = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dry-run",
+            "--no-preflight",
+            "--skip-prepare",
+            "--format",
+            "json",
+        ],
+    );
+    assert_failure(&dry_run);
+    assert!(
+        stderr_text(&dry_run).contains("sweep.objective.group must be at least 1"),
+        "expected objective group validation failure:\n{}",
+        stderr_text(&dry_run)
+    );
+}
+
+fn completed_squeue_sacct(dir: &Path) -> (PathBuf, PathBuf) {
+    let squeue = dir.join("squeue-completed");
+    write_script(
+        &squeue,
+        r#"#!/bin/bash
+set -euo pipefail
+echo "COMPLETED"
+"#,
+    );
+    let sacct = dir.join("sacct-completed");
+    write_script(
+        &sacct,
+        r#"#!/bin/bash
+set -euo pipefail
+format_string=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--format" ]]; then format_string="$arg"; fi
+  prev="$arg"
+done
+echo "COMPLETED|Unknown|Unknown|None"
+"#,
+    );
+    (squeue, sacct)
+}
+
+#[test]
+fn sweep_observe_parses_log_objectives_and_ranks_best() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_objective_sweep_compose(tmpdir.path(), cache.path());
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 20000);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    // Write an objective line into each trial's tracked service log.
+    let manifest_path = tmpdir.path().join(".hpc-compose/sweeps/latest.json");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let job_ids = manifest["trials"]
+        .as_array()
+        .expect("trials")
+        .iter()
+        .map(|t| t["job_id"].as_str().expect("job id").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(job_ids.len(), 2);
+    // job 20000 -> loss 0.5, job 20001 -> loss 0.1 (lower is better).
+    let losses = ["0.5", "0.1"];
+    for (job_id, loss) in job_ids.iter().zip(losses.iter()) {
+        let record_path = tmpdir
+            .path()
+            .join(format!(".hpc-compose/jobs/{job_id}.json"));
+        let record: Value =
+            serde_json::from_str(&fs::read_to_string(&record_path).expect("record"))
+                .expect("record json");
+        let log_path = PathBuf::from(
+            record["service_logs"]["trainer"]
+                .as_str()
+                .expect("trainer log path"),
+        );
+        fs::create_dir_all(log_path.parent().expect("log parent")).expect("log dir");
+        fs::write(&log_path, format!("epoch done\nfinal loss={loss}\n")).expect("write log");
+    }
+
+    let (squeue, sacct) = completed_squeue_sacct(tmpdir.path());
+    let observe = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "observe",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&observe);
+    let payload: Value = serde_json::from_str(&stdout_text(&observe)).expect("observe json");
+    assert_eq!(payload["objective_configured"], Value::from(true));
+    // best objective must be the lower loss (0.1).
+    assert_eq!(payload["best_objective"], Value::from("0.1"));
+    let best = payload["best_trial"].as_str().expect("best trial");
+    let best_loss = payload["trials"]
+        .as_array()
+        .expect("trials")
+        .iter()
+        .find(|t| t["trial_id"].as_str() == Some(best))
+        .and_then(|t| t["objective"].as_str())
+        .expect("best objective value");
+    assert_eq!(best_loss, "0.1");
+
+    // The persisted manifest must carry the best trial.
+    let manifest_after: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest after"))
+            .expect("manifest json after");
+    assert_eq!(manifest_after["best_trial"], payload["best_trial"]);
+}
+
+#[test]
+fn sweep_observe_without_objective_is_a_noop_warning() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    // Reuse the non-objective sweep compose helper.
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.01"]);
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 30000);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let manifest_path = tmpdir.path().join(".hpc-compose/sweeps/latest.json");
+    let manifest_before = fs::read_to_string(&manifest_path).expect("manifest before observe");
+
+    let (squeue, sacct) = completed_squeue_sacct(tmpdir.path());
+    let observe = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "observe",
+            "-f",
+            compose.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&observe);
+    assert!(stdout_text(&observe).contains("no sweep.objective configured"));
+    let manifest_after = fs::read_to_string(&manifest_path).expect("manifest after observe");
+    assert_eq!(
+        manifest_after, manifest_before,
+        "observe without sweep.objective should not mutate the manifest"
+    );
+}
+
+#[test]
+fn sweep_stop_requires_yes_flag() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.01"]);
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 40000);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let (squeue, sacct) = completed_squeue_sacct(tmpdir.path());
+    let stop = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "stop",
+            "-f",
+            compose.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--scancel-bin",
+            "scancel",
+        ],
+    );
+    assert_failure(&stop);
+    assert!(stderr_text(&stop).contains("--yes not set"));
+}
+
+#[test]
+fn sweep_stop_with_yes_records_stop_on_manifest() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.01"]);
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 50000);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let scancel = tmpdir.path().join("scancel-log");
+    write_script(
+        &scancel,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+echo "$@" >> '{}'
+"#,
+            tmpdir.path().join("scancel-calls.log").display()
+        ),
+    );
+    let (squeue, sacct) = completed_squeue_sacct(tmpdir.path());
+    let stop = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "stop",
+            "-f",
+            compose.to_str().expect("path"),
+            "--yes",
+            "--reason",
+            "objective threshold met",
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_success(&stop);
+    let stop_payload: Value = serde_json::from_str(&stdout_text(&stop)).expect("sweep stop json");
+    assert_eq!(stop_payload["cancelled_count"], Value::from(0));
+    assert_eq!(stop_payload["skipped_count"], Value::from(1));
+    assert_eq!(
+        stop_payload["stop_reason"],
+        Value::from("objective threshold met")
+    );
+    // All trials were reported COMPLETED, so none get cancelled; the manifest
+    // still records the stop.
+    let manifest_path = tmpdir.path().join(".hpc-compose/sweeps/latest.json");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert!(manifest["stopped_at"].as_u64().is_some());
+    assert_eq!(
+        manifest["stop_reason"],
+        Value::from("objective threshold met")
+    );
+}

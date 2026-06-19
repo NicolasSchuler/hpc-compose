@@ -39,6 +39,11 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/app-redis-worker.yaml"),
     },
     Template {
+        name: "jupyter",
+        description: "Tracked JupyterLab notebook server on a GPU allocation with log readiness.",
+        body: include_str!("../examples/jupyter.yaml"),
+    },
+    Template {
         name: "llm-curl-workflow",
         description: "GPU-backed LLM service with a dependent curl client.",
         body: include_str!("../examples/llm-curl-workflow.yaml"),

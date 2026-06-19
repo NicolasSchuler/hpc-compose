@@ -1,0 +1,30 @@
+name: jupyter
+
+x-slurm:
+  job_name: jupyter
+  time: "08:00:00"
+  mem: 16G
+  cpus_per_task: 4
+  gpus: 1
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  notebook:
+    image: jupyter/scipy-notebook:latest
+    working_dir: /workspace
+    volumes:
+      - ./project:/workspace
+    command:
+      - jupyter
+      - lab
+      - --no-browser
+      - --ip=0.0.0.0
+      - --port
+      - "8888"
+      - --ServerApp.token
+      - ${JUPYTER_TOKEN:-change-me}
+      - --ServerApp.allow_remote_access
+      - "True"
+    readiness:
+      type: log
+      pattern: '/lab\?token='

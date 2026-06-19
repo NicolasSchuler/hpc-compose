@@ -50,6 +50,14 @@ Source: `examples/fairseq-preprocess.yaml`
 {{#include ../../examples/fairseq-preprocess.yaml}}
 ```
 
+## Jupyter
+
+Source: `examples/jupyter.yaml`
+
+```yaml
+{{#include ../../examples/jupyter.yaml}}
+```
+
 ## Llama App
 
 Source: `examples/llama-app.yaml`

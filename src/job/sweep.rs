@@ -1,8 +1,8 @@
 use super::*;
-use crate::spec::{SweepConfig, SweepMatrix};
+use crate::spec::{SweepConfig, SweepMatrix, SweepObjective};
 
 /// Schema version for persisted sweep manifests.
-pub const SWEEP_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const SWEEP_MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// One generated sweep trial before submission.
 #[allow(missing_docs)]
@@ -36,6 +36,16 @@ pub struct SweepManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<String>,
     pub total_combinations: usize,
+    /// Snapshot of the sweep objective, if configured, used by `sweep observe`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<SweepObjective>,
+    /// Trial id of the best trial observed so far, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_trial: Option<String>,
+    #[serde(default)]
+    pub stopped_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     pub trials: Vec<SweepManifestTrial>,
 }
 
@@ -55,6 +65,13 @@ pub struct SweepManifestTrial {
     pub submitted_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submit_error: Option<String>,
+    /// Objective value parsed by `sweep observe`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<u64>,
 }
 
 /// Builds a collision-resistant, human-readable sweep id.
@@ -331,6 +348,7 @@ mod tests {
                 ),
             ]),
             matrix: SweepMatrix::Full,
+            objective: None,
         }
     }
 

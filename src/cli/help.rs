@@ -35,6 +35,8 @@ pub(super) const LINT_HELP: &str = "\
 Examples:
   hpc-compose lint -f compose.yaml
   hpc-compose lint -f compose.yaml --allow-warnings
+  hpc-compose lint -f compose.yaml --fix
+  hpc-compose lint -f compose.yaml --fix --dry-run
   hpc-compose lint -f compose.yaml --format json";
 
 pub(super) const RENDER_HELP: &str = "\
@@ -144,6 +146,17 @@ Examples:
   hpc-compose sweep list -f train.yaml
   hpc-compose sweep list -f train.yaml --format json";
 
+pub(super) const SWEEP_OBSERVE_HELP: &str = "\
+Examples:
+  hpc-compose sweep observe -f train.yaml
+  hpc-compose sweep observe -f train.yaml --format json
+  hpc-compose sweep observe -f train.yaml --watch --stop-when 'objective < 0.05'";
+
+pub(super) const SWEEP_STOP_HELP: &str = "\
+Examples:
+  hpc-compose sweep stop -f train.yaml
+  hpc-compose sweep stop -f train.yaml --yes --reason 'objective threshold met'";
+
 pub(super) const WHEN_HELP: &str = "\
 Examples:
   hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
@@ -247,6 +260,15 @@ Examples:
   hpc-compose shell --image docker://ubuntu:24.04
   hpc-compose shell --image docker://nvidia/cuda:12.4.1-base-ubuntu22.04 --gpus 1
   hpc-compose shell --image docker://python:3.12 --resources cpu-small";
+
+pub(super) const NOTEBOOK_HELP: &str = "\
+Examples:
+  hpc-compose notebook --kind jupyter --gpus 1 --volume ./project:/workspace
+  hpc-compose notebook --kind jupyter --local --volume ./src:/workspace
+  hpc-compose notebook --kind vscode --image ghcr.io/example/code:1 --gpus 1
+  hpc-compose notebook --dry-run --script-out notebook.sbatch
+  hpc-compose notebook --follow --kind jupyter
+Stop the server with the management command printed after launch.";
 
 pub(super) const NEW_HELP: &str = "\
 Examples:

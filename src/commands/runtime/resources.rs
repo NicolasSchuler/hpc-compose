@@ -79,36 +79,49 @@ pub(super) fn build_ephemeral_runtime_plan(
     options: &ResourceCliOptions,
 ) -> Result<RuntimePlan> {
     let environment = EnvironmentSpec::Map(parse_env_entries(&options.env)?);
+    let service = ServiceSpec {
+        image: Some(image),
+        command: Some(CommandSpec::Vec(command)),
+        entrypoint: None,
+        script: None,
+        environment,
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: DependsOnSpec::None,
+        readiness: None,
+        healthcheck: None,
+        assertions: None,
+        software_env: SoftwareEnvConfig::default(),
+        slurm: ServiceSlurmConfig::default(),
+        runtime: ServiceRuntimeConfig::default(),
+        enroot: ServiceEnrootConfig::default(),
+    };
+    build_synthetic_service_plan(context, "hpc-compose-run", "run", service, options)
+}
+
+/// Builds a runtime plan for a single synthetic service, used by `run
+/// --image` and `notebook`. The compose spec is constructed in memory from
+/// *job_name*, the per-service *service_name*, the supplied [`ServiceSpec`],
+/// and resource flags; no compose file is required on disk.
+pub(crate) fn build_synthetic_service_plan(
+    context: &ResolvedContext,
+    job_name: &str,
+    service_name: &str,
+    service: ServiceSpec,
+    options: &ResourceCliOptions,
+) -> Result<RuntimePlan> {
     let mut services = BTreeMap::new();
-    services.insert(
-        "run".to_string(),
-        ServiceSpec {
-            image: Some(image),
-            command: Some(CommandSpec::Vec(command)),
-            entrypoint: None,
-            script: None,
-            environment,
-            volumes: Vec::new(),
-            working_dir: None,
-            depends_on: DependsOnSpec::None,
-            readiness: None,
-            healthcheck: None,
-            assertions: None,
-            software_env: SoftwareEnvConfig::default(),
-            slurm: ServiceSlurmConfig::default(),
-            runtime: ServiceRuntimeConfig::default(),
-            enroot: ServiceEnrootConfig::default(),
-        },
-    );
+    services.insert(service_name.to_string(), service);
     let spec = ComposeSpec {
-        name: Some("hpc-compose-run".to_string()),
+        name: Some(job_name.to_string()),
         runtime: RuntimeConfig::default(),
         software_env: SoftwareEnvConfig::default(),
-        slurm: slurm_from_resource_options("hpc-compose-run", options)?,
+        slurm: slurm_from_resource_options(job_name, options)?,
         sweep: None,
+        secrets: BTreeMap::new(),
         services,
     };
-    let synthetic_path = context.cwd.join("hpc-compose-run.yaml");
+    let synthetic_path = context.cwd.join(format!("{job_name}.yaml"));
     let plan = build_plan_with_options(
         &synthetic_path,
         spec,

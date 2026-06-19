@@ -144,7 +144,26 @@ For each trial, sweep variables override existing interpolation variables from `
 
 Normal commands do not expand the sweep matrix. If the runnable spec contains `${lr}` with no default, ordinary `plan`, `up`, and `render` still fail unless `lr` is provided. Use defaults such as `${lr:-0.001}` when the base spec should remain runnable, or use `hpc-compose sweep submit --dry-run` to validate sweep-only variables.
 
-`hpc-compose sweep submit` rejects `x-slurm.array`, because every sweep trial is already its own allocation. See [Hyperparameter Sweeps](sweeps.md) for manifests, status aggregation, and examples.
+`hpc-compose sweep submit` rejects `x-slurm.array`, because every sweep trial is already its own allocation. See [Hyperparameter Sweeps](sweeps.md) for manifests, status aggregation, objective ranking via `sweep observe`, and early termination via `sweep stop`.
+
+## `secrets`
+
+`secrets` maps secret names to local `file:` or `env:` sources. Each value is resolved into the interpolation map tagged as a secret, so `${name}` works in `environment:` and is **redacted** in `config`/`context`/inspect output regardless of its name.
+
+```yaml
+secrets:
+  hf_token:
+    file: ./secrets/hf.txt
+  db_password:
+    env: DB_PASSWORD
+services:
+  app:
+    image: redis:7
+    environment:
+      HF_TOKEN: ${hf_token}
+```
+
+See [Secrets](secrets.md) for the full redaction model, resolution order, and what is deferred (Vault/KMS, `/run/secrets` file mounts).
 
 ## `x-env`
 
@@ -200,7 +219,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, `--cache-dir`, and `--default-profile`. |
 | `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, referenced interpolation vars, runtime paths, and value sources; supports `--format json`. Sensitive-looking interpolation values are redacted unless `--show-values` is passed. |
 | `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
-| `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. |
+| `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. Auto-fixable findings can be applied with `--fix` (preview with `--fix --dry-run`). |
 | `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
 
 ### Lint rules
@@ -212,7 +231,21 @@ Use these commands and global flags when you want the project-local settings fil
 | `HPC001` | warning | A service uses `depends_on` with `condition: service_started` against an upstream service that has no `readiness` probe. The dependency may fire before the upstream is actually ready. | Add a `readiness` block to the upstream service, or switch to `service_completed_successfully` for one-shot dependencies. |
 | `HPC002` | warning | `x-slurm.mem` gives fewer than 512 MiB or more than 512 GiB per requested CPU. Very low ratios may OOM; very high ratios may queue poorly or violate site policy. | Adjust `x-slurm.mem` or CPU/task counts to land in the expected band. |
 | `HPC003` | warning | A service with `failure_policy.mode: ignore` has a writable mount from a shared cache path. Ignored failures can leave corrupt state for subsequent jobs. | Use a read-only mount, write to job-local scratch, or avoid `mode: ignore` for services that mutate shared state. |
+| `HPC004` | warning | `x-slurm.cache_dir` resolves under a node-local root (`/tmp`, `/var/tmp`, `/private/tmp`, `/dev/shm`). Compute nodes typically cannot see these paths, so the cache is rebuilt every job. | Point `x-slurm.cache_dir` at shared storage visible from both login and compute nodes. Advisory only; `--fix` will not rewrite paths. |
+| `HPC005` | warning | A service `volumes` host path lives under a node-local root. The mount will be missing or empty on compute nodes. | Move the host path under shared storage, or use job-local scratch. Advisory only; `--fix` will not rewrite paths. |
+| `HPC006` | warning (fixable) | A `depends_on` edge has no explicit `condition:` (list-form `depends_on: [name]`, or mapping form with the `condition:` key omitted). The implicit `service_started` default is easy to misread. | Make the condition explicit. `hpc-compose lint --fix` writes the current default for you, preserving comments and formatting everywhere else. |
 | `HPC900` | warning | Cluster profile advisory: the site cluster profile (`doctor cluster-report`) detected a runtime-plan mismatch such as a shared-cache path, port-range overlap, or MPI configuration concern. | Inspect the finding message for the specific cluster-level concern and adjust the spec or cluster profile accordingly. |
+
+#### Auto-fixable findings
+
+`hpc-compose lint --fix` applies every fixable finding directly to the compose file. Today only `HPC006` (implicit `depends_on` condition) is auto-fixable, because the rewrite is deterministic and semantics-preserving: the implicit `service_started` default is written out verbatim, so the rendered Slurm script is byte-identical.
+
+```bash
+hpc-compose lint -f compose.yaml --fix --dry-run   # preview the diff
+hpc-compose lint -f compose.yaml --fix              # apply in place
+```
+
+The rewriter edits only the located `depends_on` block; comments, blank lines, and author formatting elsewhere are preserved byte-for-byte. A safety gate re-parses and re-plans the file after each run; if anything fails to reload the original file is restored. Path findings (`HPC004`, `HPC005`) are intentionally not auto-fixed because the correct replacement is cluster-specific.
 
 ## `x-slurm`
 

@@ -25,13 +25,13 @@ use hpc_compose::job::{
     build_status_snapshot_with_array, build_submission_record_with_backend_and_options,
     build_submission_record_with_options, expand_sweep_with_limit, export_artifacts,
     find_submission_record_in_repo, generate_sweep_id, interpolation_vars_for_sweep_trial,
-    jobs_dir_for, latest_canary_record_path_for, latest_record_path_for,
-    latest_run_record_path_for, load_submission_record, load_sweep_manifest, metadata_root_for,
-    parse_log_since_duration, print_logs, remove_submission_record, run_cleanup_report,
-    runtime_job_root_for_record, scan_job_inventory, scan_job_records, scan_sweep_manifests,
-    serialize_metrics_probe_report, state_path_for_record, sweep_manifest_path_for,
-    validate_metrics_probe_options, wait_for_job_start, watch_submission, write_submission_record,
-    write_sweep_manifest,
+    jobs_dir_for, latest_canary_record_path_for, latest_notebook_record_path_for,
+    latest_record_path_for, latest_run_record_path_for, load_submission_record,
+    load_sweep_manifest, metadata_root_for, parse_log_since_duration, print_logs,
+    remove_submission_record, run_cleanup_report, runtime_job_root_for_record, scan_job_inventory,
+    scan_job_records, scan_sweep_manifests, serialize_metrics_probe_report, state_path_for_record,
+    sweep_manifest_path_for, validate_metrics_probe_options, wait_for_job_start, watch_submission,
+    write_submission_record, write_sweep_manifest,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, ServicePlacementMode, apply_resource_profile_defaults,
@@ -57,13 +57,20 @@ use sha2::{Digest, Sha256};
 
 use crate::output;
 use crate::progress::{PrepareProgress, ProgressReporter};
+use crate::term;
 use crate::watch_ui;
 
+pub(crate) mod notebook;
 mod resources;
+pub(crate) use notebook::NotebookKind;
+use notebook::{
+    NotebookArgs, build_connection, build_notebook_service_spec, build_server_command,
+    generate_token, preset_for, readiness_spec, resolve_image,
+};
 pub(crate) use resources::ResourceCliOptions;
 use resources::{
-    build_ephemeral_runtime_plan, parse_env_entries, push_slurm_salloc_options,
-    push_slurm_srun_options, slurm_from_resource_options,
+    build_ephemeral_runtime_plan, build_synthetic_service_plan, parse_env_entries,
+    push_slurm_salloc_options, push_slurm_srun_options, slurm_from_resource_options,
 };
 
 static DEV_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -105,6 +112,7 @@ fn latest_record_path(record: &SubmissionRecord) -> PathBuf {
         SubmissionKind::Main => latest_record_path_for(&record.compose_file),
         SubmissionKind::Run => latest_run_record_path_for(&record.compose_file),
         SubmissionKind::Canary => latest_canary_record_path_for(&record.compose_file),
+        SubmissionKind::Notebook => latest_notebook_record_path_for(&record.compose_file),
         SubmissionKind::SweepTrial => {
             jobs_dir_for(&record.compose_file).join(format!("{}.json", record.job_id))
         }
@@ -3865,6 +3873,351 @@ pub(crate) fn shell(
     Ok(())
 }
 
+fn default_notebook_script_path(cwd: &Path, local: bool) -> PathBuf {
+    if local {
+        cwd.join("hpc-compose-notebook.local.sh")
+    } else {
+        cwd.join("hpc-compose-notebook.sbatch")
+    }
+}
+
+/// Best-effort fully-qualified hostname of the current host, used as the SSH
+/// jump host in the Jupyter tunnel hint. Returns `None` when it cannot be
+/// determined so the hint degrades to a placeholder.
+fn current_hostname() -> Option<String> {
+    if let Some(name) = env::var_os("HOSTNAME")
+        && !name.is_empty()
+        && name.to_string_lossy() != "127.0.0.1"
+    {
+        return Some(name.to_string_lossy().into_owned());
+    }
+    Command::new("hostname")
+        .arg("-f")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+/// Polls the notebook service log until *pattern* matches or *timeout* elapses.
+///
+/// Returns the full log text at match time so the caller can scrape the
+/// connection URL. Reuses the same regex-on-log approach as
+/// `readiness_util::wait_for_log`.
+fn wait_for_notebook_log(log_path: &Path, pattern: &str, timeout: Duration) -> Result<String> {
+    let regex = regex::Regex::new(pattern)
+        .with_context(|| format!("notebook readiness pattern '{pattern}' is not a valid regex"))?;
+    let started = Instant::now();
+    loop {
+        match fs::read_to_string(log_path) {
+            Ok(content) if regex.is_match(&content) => return Ok(content),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => bail!("failed to read notebook log {}: {err}", log_path.display()),
+        }
+        if started.elapsed() >= timeout {
+            bail!(
+                "notebook did not become ready within {}s; inspect the log at {} and the tracked job with `hpc-compose status`",
+                timeout.as_secs(),
+                log_path.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn print_notebook_connection(connection: &notebook::NotebookConnection) {
+    println!();
+    println!("{}", term::styled_section_header("Notebook ready"));
+    println!(
+        "{}",
+        term::styled_success(&format!("Open: {}", connection.url))
+    );
+    if let Some(hint) = connection.tunnel_hint.as_deref() {
+        println!();
+        println!("{}", hint);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn notebook(
+    context: ResolvedContext,
+    nb_args: NotebookArgs,
+    resource_options: ResourceCliOptions,
+    script_out: Option<PathBuf>,
+    ready_timeout: Duration,
+    follow: bool,
+    dry_run: bool,
+    keep_failed_prep: bool,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    local: bool,
+    quiet: bool,
+) -> Result<()> {
+    let preset = preset_for(nb_args.kind);
+    let image = resolve_image(&nb_args, &preset)?;
+    let token = nb_args.token.clone().unwrap_or_else(generate_token);
+    let command = build_server_command(&nb_args, &token);
+    let readiness = readiness_spec(&preset);
+    let service = build_notebook_service_spec(&nb_args, &image, command.clone(), readiness);
+    let job_name = format!("hpc-compose-notebook-{}", preset.kind.as_str());
+    let runtime_plan =
+        build_synthetic_service_plan(&context, &job_name, "notebook", service, &resource_options)?;
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+    let file = context.cwd.join(format!("{job_name}.yaml"));
+
+    if local {
+        ensure_local_submit_supported(&runtime_plan)?;
+        warn_local_ignored_scheduler_settings(&runtime_plan);
+    } else {
+        ensure_batch_submission_supported(&runtime_plan, false, local)?;
+    }
+    let cluster_profile = if local {
+        None
+    } else {
+        load_discovered_cluster_profile(&context)?
+    };
+
+    let progress = ProgressReporter::new(!quiet);
+    // --dry-run is a static preview: skip preflight and image preparation so
+    // it works without a runtime backend or network access.
+    if !dry_run && !no_preflight {
+        let report = progress.run_checked_result(
+            "Running preflight checks",
+            || {
+                Ok::<_, anyhow::Error>(run_preflight(
+                    &runtime_plan,
+                    &PreflightOptions {
+                        enroot_bin: context.binaries.enroot.value.clone(),
+                        apptainer_bin: context.binaries.apptainer.value.clone(),
+                        singularity_bin: context.binaries.singularity.value.clone(),
+                        sbatch_bin: context.binaries.sbatch.value.clone(),
+                        srun_bin: context.binaries.srun.value.clone(),
+                        scontrol_bin: context.binaries.scontrol.value.clone(),
+                        require_submit_tools: !local,
+                        skip_prepare,
+                        cluster_profile: cluster_profile.clone(),
+                    },
+                ))
+            },
+            |report| report.has_errors(),
+        )?;
+        if !quiet || report.has_errors() {
+            output::print_report(&report, false);
+        }
+        if report.has_errors() {
+            bail!("preflight failed; fix the reported errors before launching the notebook");
+        }
+    }
+
+    if !dry_run && !skip_prepare {
+        let prepare_progress = PrepareProgress::new(&runtime_plan, !quiet);
+        let summary = progress.run_result("Preparing runtime artifacts", || {
+            prepare_runtime_plan(
+                &runtime_plan,
+                &PrepareOptions {
+                    enroot_bin: context.binaries.enroot.value.clone(),
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    keep_failed_prep,
+                    force_rebuild,
+                },
+            )
+        })?;
+        prepare_progress.finish_from_summary(&summary);
+        if !quiet {
+            output::print_prepare_summary(&summary);
+        }
+    }
+
+    let local_job_id = local.then(generate_local_job_id);
+    let script = progress.run_result("Rendering notebook script", || {
+        if let Some(job_id) = local_job_id.as_deref() {
+            render_local_script(&runtime_plan, job_id, &context.binaries.enroot.value)
+        } else {
+            render_script_with_options(
+                &runtime_plan,
+                &RenderOptions {
+                    apptainer_bin: context.binaries.apptainer.value.clone(),
+                    singularity_bin: context.binaries.singularity.value.clone(),
+                    cluster_profile,
+                },
+            )
+        }
+    })?;
+    let script_path =
+        script_out.unwrap_or_else(|| default_notebook_script_path(&context.cwd, local));
+    fs::write(&script_path, script).with_context(|| {
+        format!(
+            "failed to write rendered script to {}",
+            script_path.display()
+        )
+    })?;
+
+    if dry_run {
+        println!(
+            "{}",
+            term::styled_success(&format!(
+                "rendered notebook launcher: {}",
+                script_path.display()
+            ))
+        );
+        return Ok(());
+    }
+
+    let record_options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::Notebook,
+        service_name: Some("notebook".to_string()),
+        command_override: Some(command),
+        requested_walltime: requested_walltime(&runtime_plan),
+        slurm_array: runtime_plan.slurm.array.clone(),
+        sweep: None,
+        config_snapshot_yaml: None,
+        cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+    };
+
+    let scheduler_options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+
+    // Submit -----------------------------------------------------------------
+    let record = if local {
+        let record = build_submission_record_with_backend_and_options(
+            &file,
+            &submit_dir,
+            &script_path,
+            &runtime_plan,
+            local_job_id
+                .as_deref()
+                .context("missing synthetic local job id")?,
+            SubmissionBackend::Local,
+            &record_options,
+        )?;
+        write_submission_record(&record)
+            .context("failed to persist tracking metadata for local notebook")?;
+        let supervisor_pid =
+            match spawn_local_supervisor(&submit_dir, &script_path, &record.batch_log) {
+                Ok(pid) => pid,
+                Err(err) => {
+                    rollback_local_tracking(&record, None);
+                    return Err(err);
+                }
+            };
+        if let Err(err) = write_local_runtime_state_stub(&record, &runtime_plan, supervisor_pid) {
+            rollback_local_tracking(&record, Some(supervisor_pid));
+            return Err(err);
+        }
+        print_local_launch_details(&record, &runtime_plan, &script_path);
+        record
+    } else {
+        let output_result = progress.run_result("Submitting notebook job to Slurm", || {
+            Command::new(&context.binaries.sbatch.value)
+                .args(sbatch_cli_args(&runtime_plan))
+                .arg(&script_path)
+                .output()
+                .with_context(|| format!("failed to execute '{}'", context.binaries.sbatch.value))
+        })?;
+        if !output_result.status.success() {
+            bail!(
+                "sbatch failed: {}",
+                String::from_utf8_lossy(&output_result.stderr).trim()
+            );
+        }
+        let stdout = String::from_utf8_lossy(&output_result.stdout);
+        print!("{stdout}");
+        output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
+        let Some(job_id) = output::extract_job_id(stdout.trim()) else {
+            bail!(
+                "sbatch output did not include a numeric Slurm job id; cannot track the notebook"
+            );
+        };
+        let record = build_submission_record_with_options(
+            &file,
+            &submit_dir,
+            &script_path,
+            &runtime_plan,
+            job_id,
+            &record_options,
+        )?;
+        write_submission_record(&record)?;
+        // Wait until the allocation is RUNNING before polling the log.
+        wait_for_job_start(&record, &scheduler_options, None)?;
+        record
+    };
+
+    output::print_submit_summary_box(
+        &runtime_plan,
+        &record.job_id,
+        &script_path,
+        Some(&latest_record_path(&record)),
+    );
+
+    // Readiness gate --------------------------------------------------------
+    let log_path = record
+        .service_logs
+        .get("notebook")
+        .with_context(|| "tracked notebook service log path was not recorded")?;
+    println!(
+        "{}",
+        term::styled_dim(&format!(
+            "waiting for notebook to become ready (timeout {}s)...",
+            ready_timeout.as_secs()
+        ))
+    );
+    let log_text = wait_for_notebook_log(log_path, preset.readiness_log_pattern, ready_timeout)?;
+
+    let (compute_node, login_node) = if local {
+        (None, None)
+    } else {
+        let snapshot = build_status_snapshot(&file, Some(&record.job_id), &scheduler_options)?;
+        let compute = snapshot
+            .services
+            .iter()
+            .find(|row| row.service_name == "notebook")
+            .and_then(|row| row.nodelist.clone())
+            .and_then(|nodes| nodes.split(',').next().map(str::to_string));
+        (compute, current_hostname())
+    };
+    let connection = build_connection(
+        &nb_args,
+        &preset,
+        &token,
+        &log_text,
+        compute_node.as_deref(),
+        login_node.as_deref(),
+        local,
+    )?;
+    print_notebook_connection(&connection);
+    println!(
+        "{}",
+        term::styled_dim(&format!(
+            "manage with: `hpc-compose status -f {}` / `hpc-compose cancel -f {}`",
+            file.display(),
+            file.display()
+        ))
+    );
+
+    if follow {
+        return output::finish_watch(
+            &record,
+            watch_with_fallback(
+                &record,
+                &scheduler_options,
+                Some("notebook"),
+                100,
+                WatchMode::Auto,
+                HoldOnExit::Failure,
+                watch_ui::WatchPrefs::resolve(&context.watch),
+            )?,
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn status(
     context: ResolvedContext,
     job_id: Option<String>,
@@ -4987,6 +5340,10 @@ pub(crate) fn sweep_submit(
         matrix: expansion.matrix.clone(),
         seed: expansion.seed.clone(),
         total_combinations: expansion.total_combinations,
+        objective: sweep.objective.clone(),
+        best_trial: None,
+        stopped_at: None,
+        stop_reason: None,
         trials: expansion
             .trials
             .iter()
@@ -4999,6 +5356,9 @@ pub(crate) fn sweep_submit(
                 record_path: None,
                 submitted_at: None,
                 submit_error: None,
+                objective: None,
+                objective_error: None,
+                observed_at: None,
             })
             .collect(),
     };
@@ -5471,6 +5831,453 @@ fn format_sweep_variables(vars: &BTreeMap<String, String>) -> String {
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Parses one trial's objective value from its tracked log or artifacts.
+///
+/// Returns `Ok(Some(value))` on success, `Ok(None)` when the trial is not yet
+/// terminal or has no parseable objective, and `Err` only on unexpected IO.
+fn parse_trial_objective(
+    trial: &SweepManifestTrial,
+    manifest: &SweepManifest,
+    options: &SchedulerOptions,
+) -> Result<Option<f64>> {
+    let Some(job_id) = trial.job_id.as_deref() else {
+        return Ok(None);
+    };
+    let objective = match manifest.objective.as_ref() {
+        Some(objective) => objective,
+        None => return Ok(None),
+    };
+    let snapshot = build_status_snapshot(&manifest.compose_file, Some(job_id), options)?;
+    if !snapshot.scheduler.terminal {
+        return Ok(None);
+    }
+    if let Some(pattern) = &objective.log_pattern {
+        let re = regex::Regex::new(pattern).with_context(|| {
+            format!("sweep.objective.log_pattern '{pattern}' is not a valid regex")
+        })?;
+        let group = objective.group as usize;
+        for service in &snapshot.services {
+            let Some(log_path) = &service.log_path else {
+                continue;
+            };
+            let Ok(text) = fs::read_to_string(log_path) else {
+                continue;
+            };
+            if let Some(captures) = re.captures(&text)
+                && let Some(matched) = captures.get(group)
+                && let Ok(value) = matched.as_str().parse::<f64>()
+            {
+                return Ok(Some(value));
+            }
+        }
+        return Ok(None);
+    }
+    // json_path source: read from the trial job's artifact tree.
+    if let (Some(json_rel), Some(field)) = (&objective.json_path, &objective.json_field) {
+        let record_path = trial.record_path.as_deref().with_context(|| {
+            format!(
+                "trial {} has no record path for json objective",
+                trial.trial_id
+            )
+        })?;
+        let record_dir = record_path.parent().unwrap_or_else(|| Path::new("."));
+        let job_root = crate::tracked_paths::runtime_job_root(record_dir, job_id);
+        let artifacts_dir = crate::tracked_paths::latest_artifacts_dir(&job_root);
+        let json_path = artifacts_dir.join(json_rel);
+        if let Ok(text) = fs::read_to_string(&json_path)
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(num) = value.get(field).and_then(|v| v.as_f64())
+        {
+            return Ok(Some(num));
+        }
+        return Ok(None);
+    }
+    Ok(None)
+}
+
+/// Selects the best trial id from observed objectives given the direction.
+fn best_trial_id(
+    trials: &[SweepManifestTrial],
+    direction: hpc_compose::spec::ObjectiveDirection,
+) -> Option<String> {
+    let scored = trials.iter().filter_map(|t| {
+        t.objective
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|value| (value, &t.trial_id))
+    });
+    match direction {
+        hpc_compose::spec::ObjectiveDirection::Minimize => scored
+            .min_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, id)| id.clone()),
+        hpc_compose::spec::ObjectiveDirection::Maximize => scored
+            .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, id)| id.clone()),
+    }
+}
+
+/// One comparison operator for `--stop-when` evaluation.
+type StopOperator = (&'static str, fn(f64, f64) -> bool);
+
+fn evaluate_stop_condition(expr: &str, best: Option<f64>) -> Result<bool> {
+    let expr = expr.trim();
+    let operators: &[StopOperator] = &[
+        ("<=", |a, b| a <= b),
+        (">=", |a, b| a >= b),
+        ("<", |a, b| a < b),
+        (">", |a, b| a > b),
+    ];
+    let Some(rest) = expr.strip_prefix("objective") else {
+        bail!("--stop-when must look like `objective < 0.05` or `objective >= 0.9` (got '{expr}')")
+    };
+    let rest = rest.trim();
+    for (op, cmp) in operators {
+        if let Some(threshold_str) = rest.strip_prefix(op) {
+            let threshold: f64 = threshold_str.trim().parse().with_context(|| {
+                format!(
+                    "--stop-when threshold '{}' is not a number",
+                    threshold_str.trim()
+                )
+            })?;
+            return Ok(best.is_some_and(|value| cmp(value, threshold)));
+        }
+    }
+    bail!("--stop-when must look like `objective < 0.05` or `objective >= 0.9` (got '{expr}')");
+}
+
+#[derive(Debug, Serialize)]
+struct SweepObserveOutput {
+    sweep_id: String,
+    objective_configured: bool,
+    best_trial: Option<String>,
+    best_objective: Option<String>,
+    trials: Vec<SweepObserveTrial>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SweepObserveTrial {
+    trial_id: String,
+    index: usize,
+    variables: BTreeMap<String, String>,
+    job_id: Option<String>,
+    status: String,
+    objective: Option<String>,
+    objective_error: Option<String>,
+}
+
+pub(crate) fn sweep_observe(
+    context: ResolvedContext,
+    sweep_id: Option<String>,
+    watch: bool,
+    stop_when: Option<String>,
+    poll_interval: Duration,
+    timeout: Option<Duration>,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let scheduler_options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+    let output_format = output::resolve_output_format(format, false);
+    let deadline = timeout
+        .filter(|t| *t > Duration::ZERO)
+        .map(|t| Instant::now() + t);
+    loop {
+        let mut manifest = load_sweep_manifest(&context.compose_file.value, sweep_id.as_deref())?;
+        let objective_configured = manifest.objective.is_some();
+        let now = unix_timestamp_now_for_command();
+
+        let direction = manifest
+            .objective
+            .as_ref()
+            .map(|o| o.direction)
+            .unwrap_or(hpc_compose::spec::ObjectiveDirection::Minimize);
+
+        // Pass 1 (immutable): compute each trial's status and parsed objective.
+        let mut results: Vec<(String, Option<f64>, Option<String>)> = Vec::new();
+        for trial in &manifest.trials {
+            let status = status_for_sweep_trial(&manifest, trial, &scheduler_options);
+            let status_label = status.status.clone();
+            let (parsed, error) = match parse_trial_objective(trial, &manifest, &scheduler_options)
+            {
+                Ok(Some(value)) => (Some(value), None),
+                Ok(None) => (None, None),
+                Err(err) => (None, Some(format!("{err:#}"))),
+            };
+            results.push((status_label, parsed, error));
+        }
+
+        let mut trial_outputs = Vec::new();
+        let best_objective = if objective_configured {
+            // Pass 2 (mutable): write objective state back into the manifest.
+            for (trial, (status_label, parsed, error)) in manifest.trials.iter_mut().zip(results) {
+                trial.objective = parsed.map(|v| v.to_string());
+                trial.objective_error = error.clone();
+                trial.observed_at = Some(now);
+                trial_outputs.push(SweepObserveTrial {
+                    trial_id: trial.trial_id.clone(),
+                    index: trial.index,
+                    variables: trial.variables.clone(),
+                    job_id: trial.job_id.clone(),
+                    status: status_label,
+                    objective: trial.objective.clone(),
+                    objective_error: error,
+                });
+            }
+            manifest.best_trial = best_trial_id(&manifest.trials, direction);
+            let best_objective = manifest.best_trial.as_ref().and_then(|id| {
+                manifest
+                    .trials
+                    .iter()
+                    .find(|t| &t.trial_id == id)
+                    .and_then(|t| t.objective.clone())
+            });
+            write_sweep_manifest(&manifest)?;
+            best_objective
+        } else {
+            for (trial, (status_label, _parsed, _error)) in manifest.trials.iter().zip(results) {
+                trial_outputs.push(SweepObserveTrial {
+                    trial_id: trial.trial_id.clone(),
+                    index: trial.index,
+                    variables: trial.variables.clone(),
+                    job_id: trial.job_id.clone(),
+                    status: status_label,
+                    objective: None,
+                    objective_error: None,
+                });
+            }
+            None
+        };
+
+        let report = SweepObserveOutput {
+            sweep_id: manifest.sweep_id.clone(),
+            objective_configured,
+            best_trial: manifest.best_trial.clone(),
+            best_objective: best_objective.clone(),
+            trials: trial_outputs,
+        };
+        match output_format {
+            OutputFormat::Text => print_sweep_observe_output(&report, direction),
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .context("failed to serialize sweep observe output")?
+                );
+            }
+        }
+
+        if !watch {
+            return Ok(());
+        }
+        // --watch --stop-when: stop the sweep when the condition is met.
+        if let Some(expr) = stop_when.as_deref() {
+            let best_value = best_objective
+                .as_deref()
+                .and_then(|s| s.parse::<f64>().ok());
+            if evaluate_stop_condition(expr, best_value)? {
+                if output_format == OutputFormat::Text {
+                    println!(
+                        "{}",
+                        term::styled_success(&format!(
+                            "stop condition '{expr}' met; stopping sweep {}",
+                            manifest.sweep_id
+                        ))
+                    );
+                }
+                let reason = format!("stop-when condition '{expr}' satisfied");
+                let report = sweep_stop_inner(
+                    &context,
+                    sweep_id.as_deref(),
+                    true,
+                    Some(reason),
+                    output_format == OutputFormat::Text,
+                )?;
+                if output_format == OutputFormat::Text {
+                    print_sweep_stop_output(&report);
+                }
+                return Ok(());
+            }
+        }
+        if let Some(deadline) = deadline
+            && Instant::now() >= deadline
+        {
+            bail!("sweep observe --watch timed out before --stop-when was satisfied");
+        }
+        thread::sleep(poll_interval);
+    }
+}
+
+fn print_sweep_observe_output(
+    report: &SweepObserveOutput,
+    direction: hpc_compose::spec::ObjectiveDirection,
+) {
+    println!("sweep: {}", report.sweep_id);
+    if !report.objective_configured {
+        println!(
+            "{}",
+            term::styled_warning("no sweep.objective configured; nothing to observe")
+        );
+        return;
+    }
+    println!(
+        "direction: {}",
+        match direction {
+            hpc_compose::spec::ObjectiveDirection::Minimize => "minimize",
+            hpc_compose::spec::ObjectiveDirection::Maximize => "maximize",
+        }
+    );
+    if let Some(best) = &report.best_trial {
+        let label = report.best_objective.as_deref().unwrap_or("?");
+        println!("best: {} (objective={})", best, label);
+    }
+    // Rank: best first.
+    let mut ranked = report.trials.clone();
+    ranked.sort_by(|a, b| {
+        let av = a.objective.as_deref().and_then(|s| s.parse::<f64>().ok());
+        let bv = b.objective.as_deref().and_then(|s| s.parse::<f64>().ok());
+        match (av, bv) {
+            (Some(a), Some(b)) => match direction {
+                hpc_compose::spec::ObjectiveDirection::Minimize => a.partial_cmp(&b),
+                hpc_compose::spec::ObjectiveDirection::Maximize => b.partial_cmp(&a),
+            }
+            .unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    for trial in &ranked {
+        let objective = trial.objective.as_deref().unwrap_or("-");
+        println!(
+            "  {} status={} objective={} {}",
+            trial.trial_id,
+            trial.status,
+            objective,
+            format_sweep_variables(&trial.variables)
+        );
+        if let Some(error) = &trial.objective_error {
+            println!("    objective_error: {error}");
+        }
+    }
+}
+
+pub(crate) fn sweep_stop(
+    context: ResolvedContext,
+    sweep_id: Option<String>,
+    yes: bool,
+    reason: Option<String>,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let output_format = output::resolve_output_format(format, false);
+    let report = sweep_stop_inner(
+        &context,
+        sweep_id.as_deref(),
+        yes,
+        reason,
+        output_format == OutputFormat::Text,
+    )?;
+    match output_format {
+        OutputFormat::Text => print_sweep_stop_output(&report),
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .context("failed to serialize sweep stop output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct SweepStopOutput {
+    sweep_id: String,
+    cancelled_count: usize,
+    skipped_count: usize,
+    cancelled_trials: Vec<String>,
+    skipped_trials: Vec<String>,
+    stopped_at: u64,
+    stop_reason: String,
+}
+
+fn sweep_stop_inner(
+    context: &ResolvedContext,
+    sweep_id: Option<&str>,
+    yes: bool,
+    reason: Option<String>,
+    print_confirmation_hint: bool,
+) -> Result<SweepStopOutput> {
+    let scheduler_options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+    let mut manifest = load_sweep_manifest(&context.compose_file.value, sweep_id)?;
+    if !yes {
+        if print_confirmation_hint {
+            println!(
+                "About to cancel all non-terminal trials of sweep {} ({}). Re-run with --yes to proceed.",
+                manifest.sweep_id,
+                manifest.trials.len()
+            );
+        }
+        bail!("--yes not set; refusing to cancel sweep trials");
+    }
+    let mut cancelled = Vec::new();
+    let mut skipped = Vec::new();
+    for trial in &manifest.trials {
+        let Some(job_id) = trial.job_id.as_deref() else {
+            skipped.push(trial.trial_id.clone());
+            continue;
+        };
+        let status = status_for_sweep_trial(&manifest, trial, &scheduler_options);
+        let terminal = matches!(
+            status.status.as_str(),
+            "completed" | "failed" | "submit_failed"
+        );
+        if terminal {
+            skipped.push(trial.trial_id.clone());
+            continue;
+        }
+        match output::cancel_job(job_id, &context.binaries.scancel.value) {
+            Ok(()) => cancelled.push(trial.trial_id.clone()),
+            Err(err) => {
+                skipped.push(trial.trial_id.clone());
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: failed to cancel trial {} (job {}): {err}",
+                    trial.trial_id,
+                    job_id
+                );
+            }
+        }
+    }
+    let now = unix_timestamp_now_for_command();
+    manifest.stopped_at = Some(now);
+    manifest.stop_reason = reason.or_else(|| Some("manual sweep stop".to_string()));
+    let stop_reason = manifest
+        .stop_reason
+        .clone()
+        .unwrap_or_else(|| "manual sweep stop".to_string());
+    write_sweep_manifest(&manifest)?;
+    Ok(SweepStopOutput {
+        sweep_id: manifest.sweep_id,
+        cancelled_count: cancelled.len(),
+        skipped_count: skipped.len(),
+        cancelled_trials: cancelled,
+        skipped_trials: skipped,
+        stopped_at: now,
+        stop_reason,
+    })
+}
+
+fn print_sweep_stop_output(report: &SweepStopOutput) {
+    println!(
+        "stopped sweep {}: {} trial(s) cancelled, {} skipped",
+        report.sweep_id, report.cancelled_count, report.skipped_count
+    );
 }
 
 fn unix_timestamp_now_for_command() -> u64 {

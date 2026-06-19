@@ -180,6 +180,17 @@ pub enum Commands {
             help = "Exit successfully when only warning-level findings are present"
         )]
         allow_warnings: bool,
+        #[arg(
+            long,
+            help = "Apply every auto-fixable finding to the compose file in place"
+        )]
+        fix: bool,
+        #[arg(
+            long,
+            requires = "fix",
+            help = "With --fix, print a unified diff of the proposed changes without writing"
+        )]
+        dry_run: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -434,8 +445,7 @@ pub enum Commands {
         variables: bool,
         #[arg(
             long,
-            requires = "variables",
-            help = "Show sensitive-looking interpolation values instead of redacting them"
+            help = "Show sensitive values (secret-sourced or sensitive-named) instead of redacting them, in both the effective config and --variables output"
         )]
         show_values: bool,
     },
@@ -1986,6 +1996,141 @@ pub enum Commands {
         srun_bin: String,
     },
     #[command(
+        display_order = 126,
+        about = "Launch a tracked JupyterLab or VS Code notebook server",
+        long_about = "Submit a long-running, tracked interactive server (JupyterLab or VS Code `code tunnel`) as a single-service Slurm job, wait for it to become ready, and print the connection URL. Use --local to run on the current host through the local supervisor. Manage the session with `hpc-compose status` and stop it with `hpc-compose cancel`.",
+        after_help = NOTEBOOK_HELP
+    )]
+    Notebook {
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = super::NotebookKindArg::Jupyter,
+            value_name = "KIND",
+            help = "Interactive server preset"
+        )]
+        kind: super::NotebookKindArg,
+        #[arg(
+            long,
+            value_name = "IMAGE",
+            help = "Container image override (required for --kind vscode)"
+        )]
+        image: Option<String>,
+        #[arg(
+            long,
+            value_name = "PORT",
+            default_value_t = 8888,
+            help = "Jupyter port (ignored for --kind vscode)"
+        )]
+        port: u16,
+        #[arg(
+            long,
+            value_name = "TOKEN",
+            help = "Jupyter auth token; a random token is generated when omitted"
+        )]
+        token: Option<String>,
+        #[arg(
+            long = "volume",
+            value_name = "HOST:CONTAINER",
+            help = "Additional host:container mount; may be passed multiple times"
+        )]
+        volumes: Vec<String>,
+        #[arg(long, value_name = "PATH", help = "Container working directory")]
+        working_dir: Option<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            default_value = "hpc-compose",
+            help = "VS Code tunnel name"
+        )]
+        tunnel_name: String,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            default_value = "10m",
+            help = "Give up waiting for the notebook to become ready after this duration"
+        )]
+        ready_timeout: String,
+        #[arg(
+            long,
+            help = "Stream service logs after readiness instead of detaching"
+        )]
+        follow: bool,
+        #[arg(long, help = "Render the launcher script without submitting")]
+        dry_run: bool,
+        #[arg(
+            value_name = "ARGS",
+            num_args = 0..,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "Extra argv forwarded to the server command after --"
+        )]
+        args: Vec<String>,
+        #[command(flatten)]
+        launch: RuntimeLaunchArgs,
+        #[arg(long, value_name = "NAME", help = "Settings resource profile to apply")]
+        resources: Option<String>,
+        #[arg(long, value_name = "TIME", help = "Slurm time limit")]
+        time: Option<String>,
+        #[arg(long, value_name = "MEM", help = "Slurm memory request")]
+        mem: Option<String>,
+        #[arg(long, value_name = "N", help = "Slurm CPUs per task")]
+        cpus_per_task: Option<u32>,
+        #[arg(long, value_name = "N", help = "Slurm GPU count")]
+        gpus: Option<u32>,
+        #[arg(long, value_name = "PARTITION", help = "Slurm partition")]
+        partition: Option<String>,
+        #[arg(
+            long = "env",
+            value_name = "KEY=VALUE",
+            help = "Environment variable to pass into the notebook container"
+        )]
+        env: Vec<String>,
+        #[arg(
+            long,
+            help = "Run on the current host through the local Pyxis-compatible launcher"
+        )]
+        local: bool,
+        #[arg(
+            long,
+            value_name = "OUTPUT",
+            help = "Write the rendered launcher script to this path"
+        )]
+        script_out: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sbatch",
+            help_heading = "Tool overrides",
+            help = "Path to the sbatch executable"
+        )]
+        sbatch_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "srun",
+            help_heading = "Tool overrides",
+            help = "Path to the srun executable"
+        )]
+        srun_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help_heading = "Tool overrides",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help_heading = "Tool overrides",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+    },
+    #[command(
         display_order = 10,
         about = "Write a starter compose file from a built-in template",
         long_about = "Write a starter compose specification from a built-in template, or list and describe the available templates without writing a file. Use --cache-dir when the generated spec should pin an explicit shared cache directory.",
@@ -2728,5 +2873,122 @@ pub enum SweepCommands {
         file: Option<PathBuf>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Parse and rank trial objectives for one sweep",
+        long_about = "Read each terminal trial's objective (from a log regex or JSON artifact), write it back to the sweep manifest, and print a ranked table. With --watch --stop-when, poll until the objective condition is met and then stop the sweep.",
+        after_help = SWEEP_OBSERVE_HELP
+    )]
+    Observe {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Sweep id to observe; defaults to the latest sweep"
+        )]
+        sweep_id: Option<String>,
+        #[arg(
+            long,
+            help = "Poll until a terminal trial satisfies --stop-when, then stop the sweep"
+        )]
+        watch: bool,
+        #[arg(
+            long,
+            value_name = "EXPR",
+            requires = "watch",
+            help = "Stop condition, e.g. `objective < 0.05` or `objective > 0.9` (matches the sweep.objective.direction)"
+        )]
+        stop_when: Option<String>,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            default_value = "30s",
+            requires = "watch",
+            help = "Polling interval for --watch"
+        )]
+        poll_interval: String,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            requires = "watch",
+            help = "Give up watching after this duration; 0s watches without a deadline"
+        )]
+        timeout: Option<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help_heading = "Tool overrides",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help_heading = "Tool overrides",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scancel",
+            help_heading = "Tool overrides",
+            help = "Path to the scancel executable (used by --watch --stop-when)"
+        )]
+        scancel_bin: String,
+    },
+    #[command(
+        about = "Cancel all non-terminal trials of one sweep",
+        long_about = "Cancel every still-running or pending trial in a sweep via scancel and record the stop on the manifest. Use after `sweep observe` to realize early termination once an objective threshold is met.",
+        after_help = SWEEP_STOP_HELP
+    )]
+    Stop {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Sweep id to stop; defaults to the latest sweep"
+        )]
+        sweep_id: Option<String>,
+        #[arg(long, help = "Skip the interactive confirmation prompt")]
+        yes: bool,
+        #[arg(
+            long,
+            value_name = "REASON",
+            help = "Free-form stop reason recorded on the manifest"
+        )]
+        reason: Option<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help_heading = "Tool overrides",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help_heading = "Tool overrides",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scancel",
+            help_heading = "Tool overrides",
+            help = "Path to the scancel executable"
+        )]
+        scancel_bin: String,
     },
 }
