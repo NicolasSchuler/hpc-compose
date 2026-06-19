@@ -369,7 +369,7 @@ fn spec_version_accepts_v1_and_rejects_mismatches() {
     let message = err.to_string();
     assert!(message.contains("unsupported hpc-compose spec version '2'"));
     assert!(message.contains("steps was renamed to services in v2"));
-    assert!(message.contains("docs/migration-v2.md"));
+    assert!(message.contains("docs/src/docker-compose-migration.md"));
 
     let compose_version = write_spec(
         tmpdir.path(),
@@ -3929,8 +3929,76 @@ services:
     assert!(err.to_string().contains("x-slurm.after_job"));
 }
 
+#[test]
+fn slurm_time_limit_accepts_valid_forms() {
+    assert_eq!(parse_slurm_time_limit("30").expect("MM"), 30 * 60);
+    assert_eq!(parse_slurm_time_limit("01:30").expect("MM:SS"), 90);
+    assert_eq!(parse_slurm_time_limit("01:30:00").expect("HH:MM:SS"), 5_400);
+    assert_eq!(
+        parse_slurm_time_limit("2-00:00:00").expect("D-HH:MM:SS"),
+        2 * 86_400
+    );
+    assert_eq!(
+        parse_slurm_time_limit("1-12").expect("D-HH"),
+        86_400 + 12 * 3_600
+    );
+    // Leading field is unbounded: large minutes (MM) and large hours (HH:MM:SS).
+    assert_eq!(parse_slurm_time_limit("90").expect("MM > 59"), 90 * 60);
+    assert_eq!(
+        parse_slurm_time_limit("100:00:00").expect("HH > 23"),
+        100 * 3_600
+    );
+}
+
+#[test]
+fn slurm_time_limit_rejects_out_of_range_components() {
+    // Seconds out of range in MM:SS.
+    let err = parse_slurm_time_limit("00:90").expect_err("00:90");
+    assert!(err.to_string().contains("0-59"), "unexpected error: {err}");
+    // Minutes out of range in HH:MM:SS.
+    let err = parse_slurm_time_limit("1:90:00").expect_err("1:90:00");
+    assert!(err.to_string().contains("0-59"), "unexpected error: {err}");
+    // Seconds out of range in HH:MM:SS.
+    assert!(parse_slurm_time_limit("01:00:60").is_err());
+    // Hours out of range once a day prefix carries the magnitude.
+    assert!(parse_slurm_time_limit("1-24:00:00").is_err());
+    assert!(parse_slurm_time_limit("1-24").is_err());
+}
+
+#[test]
+fn memory_bytes_parser_handles_units_decimals_and_sentinels() {
+    assert_eq!(parse_memory_bytes("1048576"), Some(1_048_576));
+    assert_eq!(parse_memory_bytes("512M"), Some(512 * 1_024 * 1_024));
+    assert_eq!(parse_memory_bytes("2GiB"), Some(2 * GIB));
+    assert_eq!(parse_memory_bytes("1.5G"), Some(1_610_612_736));
+    // sacct sentinels and empty values map to None.
+    assert_eq!(parse_memory_bytes("unknown"), None);
+    assert_eq!(parse_memory_bytes("UNKNOWN"), None);
+    assert_eq!(parse_memory_bytes("   "), None);
+    // Unsupported units and missing magnitudes are rejected.
+    assert_eq!(parse_memory_bytes("4Gc"), None);
+    assert_eq!(parse_memory_bytes("G"), None);
+    // Integer and decimal forms of the same size round-trip to the same bytes.
+    assert_eq!(parse_memory_bytes("2G"), parse_memory_bytes("2.0G"));
+    // Saturates instead of overflowing.
+    assert_eq!(parse_memory_bytes("99999999999P"), Some(u64::MAX));
+}
+
 proptest! {
     #![proptest_config(prop_config())]
+
+    #[test]
+    fn property_memory_bytes_parser_is_total(
+        value in string_regex("[0-9]{0,6}(\\.[0-9]{0,3})?\\s*[KMGTPkmgtpiIbB]{0,3}")
+            .expect("memory regex")
+    ) {
+        // The parser must be total: never panic, regardless of the input shape.
+        let parsed = parse_memory_bytes(&value);
+        // Re-parsing a successfully parsed integer byte count is idempotent.
+        if let Some(bytes) = parsed {
+            prop_assert_eq!(parse_memory_bytes(&bytes.to_string()), Some(bytes));
+        }
+    }
 
     #[test]
     fn property_rejects_unsupported_root_keys(

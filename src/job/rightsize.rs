@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::prepare::{RuntimePlan, RuntimeService};
-use crate::spec::parse_slurm_time_limit;
+use crate::spec::{GIB, parse_memory_bytes, parse_slurm_time_limit};
 
 use super::StatsOptions;
 use super::accounting::{AccountingRow, AccountingSnapshot, build_accounting_snapshot};
@@ -18,7 +18,6 @@ use super::stats::{
     probe_step_stats, step_from_slurm_sample_row,
 };
 
-const GIB: u64 = 1_024 * 1_024 * 1_024;
 const MEMORY_HEADROOM_PERCENT: f64 = 1.25;
 const MEMORY_ABSOLUTE_HEADROOM_BYTES: u64 = 2 * GIB;
 const CPU_HEADROOM_PERCENT: f64 = 1.25;
@@ -772,29 +771,6 @@ fn observed_elapsed_seconds(accounting: &AccountingSnapshot) -> Option<u64> {
         .iter()
         .filter_map(|row| row.elapsed_raw_seconds)
         .max()
-}
-
-fn parse_memory_bytes(raw: &str) -> Option<u64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
-        return None;
-    }
-    let number_end = trimmed
-        .char_indices()
-        .find_map(|(index, ch)| (!ch.is_ascii_digit()).then_some(index))
-        .unwrap_or(trimmed.len());
-    let value = trimmed[..number_end].parse::<u64>().ok()?;
-    let unit = trimmed[number_end..].trim().to_ascii_uppercase();
-    let multiplier = match unit.as_str() {
-        "" | "B" => 1,
-        "K" | "KB" | "KIB" => 1_024,
-        "M" | "MB" | "MIB" => 1_024_u64.pow(2),
-        "G" | "GB" | "GIB" => GIB,
-        "T" | "TB" | "TIB" => 1_024_u64.pow(4),
-        "P" | "PB" | "PIB" => 1_024_u64.pow(5),
-        _ => return None,
-    };
-    Some(value.saturating_mul(multiplier))
 }
 
 fn parse_u64(raw: Option<&str>) -> Option<u64> {

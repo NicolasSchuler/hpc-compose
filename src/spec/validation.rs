@@ -509,7 +509,7 @@ fn spec_version_label(value: &Value) -> Result<String> {
 
 fn migration_hint_for_version(version: &str) -> &'static str {
     if version == "2" {
-        return "steps was renamed to services in v2 - see docs/migration-v2.md";
+        return "steps was renamed to services in v2 - see docs/src/docker-compose-migration.md";
     }
     if looks_like_docker_compose_version(version) {
         return "Top-level `version` is the hpc-compose schema version, not a Docker Compose version. Use `version: \"1\"` or omit `version` after migrating; see docs/docker-compose-migration.md.";

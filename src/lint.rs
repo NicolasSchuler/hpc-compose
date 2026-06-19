@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cluster::ClusterProfile;
 use crate::domain::{MountParts, split_mount_parts};
-use crate::planner::{Plan, cache_path_policy_issue};
+use crate::planner::{ImageSource, Plan, cache_path_policy_issue};
 use crate::prepare::RuntimePlan;
-use crate::spec::{DependencyCondition, ScratchScope, ServiceFailureMode};
+use crate::spec::{DependencyCondition, ScratchScope, ServiceFailureMode, parse_memory_bytes};
 
 const LOW_MEMORY_PER_CPU_BYTES: u64 = 512 * 1_024 * 1_024;
 const HIGH_MEMORY_PER_CPU_BYTES: u64 = 512 * 1_024 * 1_024 * 1_024;
@@ -117,6 +117,7 @@ pub fn lint_plan(
     lint_ignore_shared_writes(plan, runtime_plan, cluster_profile, &mut findings);
     lint_cache_path_policy(runtime_plan, &mut findings);
     lint_node_local_volumes(runtime_plan, &mut findings);
+    lint_image_reproducibility(runtime_plan, &mut findings);
     if let Some(profile) = cluster_profile {
         for warning in profile.validate_runtime_plan(runtime_plan) {
             findings.push(LintFinding {
@@ -236,6 +237,58 @@ fn lint_node_local_volumes(runtime_plan: &RuntimePlan, findings: &mut Vec<LintFi
             ));
         }
     }
+}
+
+/// HPC007: a remote container image referenced by a mutable or imprecise tag
+/// (`:latest`, or no tag at all) instead of being pinned to an immutable
+/// `@sha256:` digest. Advisory: pinning is reproducibility hygiene, and the
+/// correct digest is environment-specific, so this is not auto-fixable.
+fn lint_image_reproducibility(runtime_plan: &RuntimePlan, findings: &mut Vec<LintFinding>) {
+    for service in &runtime_plan.ordered_services {
+        let ImageSource::Remote(reference) = &service.source else {
+            // Local `.sqsh`/`.sif` artifacts and host runtime are already
+            // file-pinned; only remote registry references can drift.
+            continue;
+        };
+        if image_reference_is_reproducible(reference) {
+            continue;
+        }
+        findings.push(LintFinding::warning(
+            "HPC007",
+            format!(
+                "service '{}' uses image '{}' which relies on a mutable or missing tag",
+                service.name, reference
+            ),
+            Some(service.name.clone()),
+            Some(format!("services.{}.image", service.name)),
+            "Pin the image by digest (e.g. repo/name@sha256:...), or at least an explicit non-`latest` version tag, for reproducible runs. This finding is advisory; `lint --fix` will not rewrite image references.",
+        ));
+    }
+}
+
+/// Returns `true` when a remote image reference is reproducible enough to skip
+/// the HPC007 warning: it is either pinned to an immutable `@sha256:` digest or
+/// carries an explicit, non-`latest` tag. A `:latest` tag or a missing tag both
+/// count as unpinned.
+fn image_reference_is_reproducible(reference: &str) -> bool {
+    // Strip the transport scheme (`docker://`, `dockerd://`, `podman://`, …)
+    // and any Enroot registry separator so we inspect the image path itself.
+    let path = reference
+        .split_once("://")
+        .map_or(reference, |(_scheme, rest)| rest);
+    let path = path.rsplit('#').next().unwrap_or(path);
+    // A digest pin is the gold standard and is always reproducible.
+    if path.contains("@sha256:") {
+        return true;
+    }
+    // A tag lives after the last ':' that follows the final '/', so a registry
+    // port like `host:5000/repo` is not mistaken for a tag.
+    let last_segment = path.rsplit('/').next().unwrap_or(path);
+    let Some((_name, tag)) = last_segment.rsplit_once(':') else {
+        // No tag at all -> implicitly `:latest`, so not reproducible.
+        return false;
+    };
+    !tag.is_empty() && !tag.eq_ignore_ascii_case("latest")
 }
 
 fn lint_memory_cpu_ratio(plan: &Plan, findings: &mut Vec<LintFinding>) {
@@ -371,31 +424,6 @@ fn service_scratch_enabled(service: &crate::prepare::RuntimeService) -> bool {
         .unwrap_or(true)
 }
 
-fn parse_memory_bytes(raw: &str) -> Option<u64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let split_at = trimmed
-        .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
-        .unwrap_or(trimmed.len());
-    let (number, unit) = trimmed.split_at(split_at);
-    if number.is_empty() {
-        return None;
-    }
-    let value = number.parse::<f64>().ok()?;
-    let multiplier = match unit.trim().to_ascii_uppercase().as_str() {
-        "" | "B" => 1_u64,
-        "K" | "KB" | "KIB" => 1_024,
-        "M" | "MB" | "MIB" => 1_024_u64.pow(2),
-        "G" | "GB" | "GIB" => 1_024_u64.pow(3),
-        "T" | "TB" | "TIB" => 1_024_u64.pow(4),
-        "P" | "PB" | "PIB" => 1_024_u64.pow(5),
-        _ => return None,
-    };
-    Some((value * multiplier as f64) as u64)
-}
-
 fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -424,5 +452,85 @@ mod tests {
         assert_eq!(parse_memory_bytes("1.5G"), Some(1_610_612_736));
         assert_eq!(parse_memory_bytes("2GiB"), Some(2 * 1_024 * 1_024 * 1_024));
         assert_eq!(parse_memory_bytes("4Gc"), None);
+    }
+
+    #[test]
+    fn hpc007_lint_emits_warning_only_for_mutable_images() {
+        use std::path::PathBuf;
+
+        use crate::prepare::{RuntimePlan, RuntimeService};
+        use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig};
+
+        fn service(name: &str, source: ImageSource) -> RuntimeService {
+            RuntimeService {
+                name: name.into(),
+                runtime_image: PathBuf::from("/cache/x.sqsh"),
+                execution: crate::planner::ExecutionSpec::ImageDefault,
+                environment: Vec::new(),
+                volumes: Vec::new(),
+                working_dir: None,
+                depends_on: Vec::new(),
+                readiness: None,
+                assertions: None,
+                failure_policy: ServiceFailurePolicy::default(),
+                placement: crate::planner::ServicePlacement::default(),
+                slurm: ServiceSlurmConfig::default(),
+                prepare: None,
+                source,
+            }
+        }
+
+        let runtime_plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: PathBuf::from("/cache"),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: crate::spec::SlurmConfig::default(),
+            ordered_services: vec![
+                service("mutable", ImageSource::Remote("docker://foo:latest".into())),
+                service(
+                    "pinned",
+                    ImageSource::Remote(
+                        "docker://foo@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .into(),
+                    ),
+                ),
+                service("local", ImageSource::LocalSqsh(PathBuf::from("/img.sqsh"))),
+            ],
+        };
+
+        let mut findings = Vec::new();
+        lint_image_reproducibility(&runtime_plan, &mut findings);
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.code, "HPC007");
+        assert_eq!(finding.level, LintLevel::Warning);
+        assert_eq!(finding.service.as_deref(), Some("mutable"));
+    }
+
+    #[test]
+    fn hpc007_flags_mutable_or_missing_image_tags() {
+        // `:latest` and missing tags are mutable -> HPC007.
+        assert!(!image_reference_is_reproducible("docker://foo:latest"));
+        assert!(!image_reference_is_reproducible("docker://foo"));
+        assert!(!image_reference_is_reproducible("foo:LATEST"));
+        // Explicit version tags and digests are reproducible -> no HPC007.
+        assert!(image_reference_is_reproducible("docker://foo:1.2.3"));
+        assert!(image_reference_is_reproducible(
+            "docker://foo@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        // A registry port must not be mistaken for a tag.
+        assert!(!image_reference_is_reproducible(
+            "docker://registry.example:5000/foo"
+        ));
+        assert!(image_reference_is_reproducible(
+            "docker://registry.example:5000/foo:1.0"
+        ));
+        // Enroot's `#` registry separator is stripped before tag inspection.
+        assert!(!image_reference_is_reproducible(
+            "docker://registry.example#proj/app:latest"
+        ));
+        assert!(image_reference_is_reproducible(
+            "docker://registry.example#proj/app:2.0"
+        ));
     }
 }
