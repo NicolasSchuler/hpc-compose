@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::time_util;
+
 const RENDEZVOUS_DIR_NAME: &str = "rendezvous";
 const LATEST_FILE_NAME: &str = "latest.json";
 const RECORD_SCHEMA_VERSION: u32 = 1;
@@ -61,10 +63,7 @@ pub struct RendezvousPruneReport {
 /// Returns the current Unix timestamp in seconds.
 #[must_use]
 pub fn unix_timestamp_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+    time_util::unix_timestamp_now()
 }
 
 /// Validates a rendezvous name accepted in spec and CLI inputs.

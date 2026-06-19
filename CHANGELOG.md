@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.46] - 2026-06-19
+
 ### Added
 
 - macOS authoring guidance surfaced in `doctor`, `preflight`, and `up` so authors
@@ -25,6 +27,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Documentation now lists the full case-insensitive substring set that triggers
   name-based redaction, and documents the `test` command's canonical
   `--wait-timeout` flag (alias `--timeout`).
+- Breaking CLI history is now explicit: the former top-level submit workflow is
+  documented as the canonical `up` command (`submit` -> `up`) so release notes do
+  not hide the rename.
 - Release automation pushes the Homebrew formula refresh branch with
   `--force-with-lease` instead of `--force`.
 

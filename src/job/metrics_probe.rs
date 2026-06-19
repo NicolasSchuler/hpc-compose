@@ -4,10 +4,12 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+
+use crate::time_util::unix_timestamp_now;
 
 const NVML_LIBRARY_NAME: &str = "libnvidia-ml.so.1";
 const NVML_SUCCESS: i32 = 0;
@@ -149,10 +151,7 @@ pub fn build_metrics_probe_report(options: MetricsProbeOptions) -> Result<Metric
 
     Ok(MetricsProbeReport {
         schema_version: 1,
-        generated_at_unix: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        generated_at_unix: unix_timestamp_now(),
         duration_seconds: options.duration_seconds,
         capabilities: MetricsProbeCapabilities {
             perf_event_open: perf_capability,

@@ -136,145 +136,89 @@ pub(crate) fn build_synthetic_service_plan(
 }
 
 pub(super) fn push_slurm_srun_options(args: &mut Vec<String>, slurm: &SlurmConfig) {
-    args.push(format!(
-        "--job-name={}",
-        slurm.job_name.as_deref().unwrap_or("hpc-compose-shell")
-    ));
-    if let Some(nodes) = slurm.nodes {
-        args.push(format!("--nodes={nodes}"));
-    }
-    if let Some(ntasks) = slurm.ntasks.or(Some(1)) {
-        args.push(format!("--ntasks={ntasks}"));
-    }
-    if let Some(ntasks_per_node) = slurm.ntasks_per_node {
-        args.push(format!("--ntasks-per-node={ntasks_per_node}"));
-    }
-    if let Some(partition) = &slurm.partition {
-        args.push(format!("--partition={partition}"));
-    }
-    if let Some(account) = &slurm.account {
-        args.push(format!("--account={account}"));
-    }
-    if let Some(qos) = &slurm.qos {
-        args.push(format!("--qos={qos}"));
-    }
-    if let Some(time) = &slurm.time {
-        args.push(format!("--time={time}"));
-    }
-    if let Some(cpus) = slurm.cpus_per_task {
-        args.push(format!("--cpus-per-task={cpus}"));
-    }
-    if let Some(mem) = &slurm.mem {
-        args.push(format!("--mem={mem}"));
-    }
-    if let Some(gres) = &slurm.gres {
-        args.push(format!("--gres={gres}"));
-    } else if let Some(gpus) = slurm.gpus {
-        args.push(format!("--gpus={gpus}"));
-    }
-    if let Some(gpus_per_node) = slurm.gpus_per_node {
-        args.push(format!("--gpus-per-node={gpus_per_node}"));
-    }
-    if let Some(gpus_per_task) = slurm.gpus_per_task {
-        args.push(format!("--gpus-per-task={gpus_per_task}"));
-    }
-    if let Some(cpus_per_gpu) = slurm.cpus_per_gpu {
-        args.push(format!("--cpus-per-gpu={cpus_per_gpu}"));
-    }
-    if let Some(mem_per_gpu) = &slurm.mem_per_gpu {
-        args.push(format!("--mem-per-gpu={mem_per_gpu}"));
-    }
-    if let Some(gpu_bind) = &slurm.gpu_bind {
-        args.push(format!("--gpu-bind={gpu_bind}"));
-    }
-    if let Some(cpu_bind) = &slurm.cpu_bind {
-        args.push(format!("--cpu-bind={cpu_bind}"));
-    }
-    if let Some(mem_bind) = &slurm.mem_bind {
-        args.push(format!("--mem-bind={mem_bind}"));
-    }
-    if let Some(distribution) = &slurm.distribution {
-        args.push(format!("--distribution={distribution}"));
-    }
-    if let Some(hint) = &slurm.hint {
-        args.push(format!("--hint={hint}"));
-    }
-    if let Some(constraint) = &slurm.constraint {
-        args.push(format!("--constraint={constraint}"));
-    }
+    push_common_slurm_options(args, slurm, "hpc-compose-shell", Some(1));
 }
 
 pub(super) fn push_slurm_salloc_options(args: &mut Vec<String>, slurm: &SlurmConfig) {
-    args.push(format!(
-        "--job-name={}",
-        slurm.job_name.as_deref().unwrap_or("hpc-compose-alloc")
-    ));
-    if let Some(nodes) = slurm.nodes {
-        args.push(format!("--nodes={nodes}"));
-    }
-    if let Some(ntasks) = slurm.ntasks {
-        args.push(format!("--ntasks={ntasks}"));
-    }
-    if let Some(ntasks_per_node) = slurm.ntasks_per_node {
-        args.push(format!("--ntasks-per-node={ntasks_per_node}"));
-    }
-    if let Some(partition) = &slurm.partition {
-        args.push(format!("--partition={partition}"));
-    }
-    if let Some(account) = &slurm.account {
-        args.push(format!("--account={account}"));
-    }
-    if let Some(qos) = &slurm.qos {
-        args.push(format!("--qos={qos}"));
-    }
-    if let Some(time) = &slurm.time {
-        args.push(format!("--time={time}"));
-    }
-    if let Some(cpus) = slurm.cpus_per_task {
-        args.push(format!("--cpus-per-task={cpus}"));
-    }
-    if let Some(mem) = &slurm.mem {
-        args.push(format!("--mem={mem}"));
-    }
-    if let Some(gres) = &slurm.gres {
-        args.push(format!("--gres={gres}"));
-    } else if let Some(gpus) = slurm.gpus {
-        args.push(format!("--gpus={gpus}"));
-    }
-    if let Some(gpus_per_node) = slurm.gpus_per_node {
-        args.push(format!("--gpus-per-node={gpus_per_node}"));
-    }
-    if let Some(gpus_per_task) = slurm.gpus_per_task {
-        args.push(format!("--gpus-per-task={gpus_per_task}"));
-    }
-    if let Some(cpus_per_gpu) = slurm.cpus_per_gpu {
-        args.push(format!("--cpus-per-gpu={cpus_per_gpu}"));
-    }
-    if let Some(mem_per_gpu) = &slurm.mem_per_gpu {
-        args.push(format!("--mem-per-gpu={mem_per_gpu}"));
-    }
-    if let Some(gpu_bind) = &slurm.gpu_bind {
-        args.push(format!("--gpu-bind={gpu_bind}"));
-    }
-    if let Some(cpu_bind) = &slurm.cpu_bind {
-        args.push(format!("--cpu-bind={cpu_bind}"));
-    }
-    if let Some(mem_bind) = &slurm.mem_bind {
-        args.push(format!("--mem-bind={mem_bind}"));
-    }
-    if let Some(distribution) = &slurm.distribution {
-        args.push(format!("--distribution={distribution}"));
-    }
-    if let Some(hint) = &slurm.hint {
-        args.push(format!("--hint={hint}"));
-    }
-    if let Some(constraint) = &slurm.constraint {
-        args.push(format!("--constraint={constraint}"));
-    }
+    push_common_slurm_options(args, slurm, "hpc-compose-alloc", None);
     if let Some(dependency) = slurm.dependency_cli_value() {
         args.push(format!("--dependency={dependency}"));
     }
     args.extend(slurm.submit_args.iter().cloned());
+}
+
+fn push_common_slurm_options(
+    args: &mut Vec<String>,
+    slurm: &SlurmConfig,
+    default_job_name: &str,
+    default_ntasks: Option<u32>,
+) {
+    args.push(format!(
+        "--job-name={}",
+        slurm.job_name.as_deref().unwrap_or(default_job_name)
+    ));
+    if let Some(nodes) = slurm.nodes {
+        args.push(format!("--nodes={nodes}"));
+    }
+    if let Some(ntasks) = slurm.ntasks.or(default_ntasks) {
+        args.push(format!("--ntasks={ntasks}"));
+    }
+    if let Some(ntasks_per_node) = slurm.ntasks_per_node {
+        args.push(format!("--ntasks-per-node={ntasks_per_node}"));
+    }
+    if let Some(partition) = &slurm.partition {
+        args.push(format!("--partition={partition}"));
+    }
+    if let Some(account) = &slurm.account {
+        args.push(format!("--account={account}"));
+    }
+    if let Some(qos) = &slurm.qos {
+        args.push(format!("--qos={qos}"));
+    }
+    if let Some(time) = &slurm.time {
+        args.push(format!("--time={time}"));
+    }
+    if let Some(cpus) = slurm.cpus_per_task {
+        args.push(format!("--cpus-per-task={cpus}"));
+    }
+    if let Some(mem) = &slurm.mem {
+        args.push(format!("--mem={mem}"));
+    }
+    if let Some(gres) = &slurm.gres {
+        args.push(format!("--gres={gres}"));
+    } else if let Some(gpus) = slurm.gpus {
+        args.push(format!("--gpus={gpus}"));
+    }
+    if let Some(gpus_per_node) = slurm.gpus_per_node {
+        args.push(format!("--gpus-per-node={gpus_per_node}"));
+    }
+    if let Some(gpus_per_task) = slurm.gpus_per_task {
+        args.push(format!("--gpus-per-task={gpus_per_task}"));
+    }
+    if let Some(cpus_per_gpu) = slurm.cpus_per_gpu {
+        args.push(format!("--cpus-per-gpu={cpus_per_gpu}"));
+    }
+    if let Some(mem_per_gpu) = &slurm.mem_per_gpu {
+        args.push(format!("--mem-per-gpu={mem_per_gpu}"));
+    }
+    if let Some(gpu_bind) = &slurm.gpu_bind {
+        args.push(format!("--gpu-bind={gpu_bind}"));
+    }
+    if let Some(cpu_bind) = &slurm.cpu_bind {
+        args.push(format!("--cpu-bind={cpu_bind}"));
+    }
+    if let Some(mem_bind) = &slurm.mem_bind {
+        args.push(format!("--mem-bind={mem_bind}"));
+    }
+    if let Some(distribution) = &slurm.distribution {
+        args.push(format!("--distribution={distribution}"));
+    }
+    if let Some(hint) = &slurm.hint {
+        args.push(format!("--hint={hint}"));
+    }
+    if let Some(constraint) = &slurm.constraint {
+        args.push(format!("--constraint={constraint}"));
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use super::*;
 use crate::spec::{SweepConfig, SweepMatrix, SweepObjective};
+use crate::time_util::unix_timestamp_millis;
 
 /// Schema version for persisted sweep manifests.
 pub const SWEEP_MANIFEST_SCHEMA_VERSION: u32 = 2;
@@ -77,11 +78,7 @@ pub struct SweepManifestTrial {
 /// Builds a collision-resistant, human-readable sweep id.
 #[must_use]
 pub fn generate_sweep_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("sweep-{millis}-{}", std::process::id())
+    format!("sweep-{}-{}", unix_timestamp_millis(), std::process::id())
 }
 
 /// Expands an embedded sweep config into deterministic trial variables.

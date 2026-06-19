@@ -2011,14 +2011,29 @@ fn wait_for_smoke_terminal(
 
 fn cancel_smoke_timeout(context: &ResolvedContext, record: &SubmissionRecord) {
     if record.backend == SubmissionBackend::Local {
-        if let Ok(Some(pid)) = read_local_supervisor_pid(record) {
-            let _ = kill_pid(pid);
+        if let Ok(Some(pid)) = read_local_supervisor_pid(record)
+            && let Err(err) = kill_pid(pid)
+        {
+            eprintln!(
+                "warning: smoke test timed out but failed to stop local supervisor pid {pid}: {err}"
+            );
         }
         return;
     }
-    let _ = Command::new(&context.binaries.scancel.value)
+    match Command::new(&context.binaries.scancel.value)
         .arg(&record.job_id)
-        .status();
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!(
+            "warning: smoke test timed out but scancel exited with {status} for job {}",
+            record.job_id
+        ),
+        Err(err) => eprintln!(
+            "warning: smoke test timed out but failed to run scancel for job {}: {err}",
+            record.job_id
+        ),
+    }
 }
 
 fn print_smoke_output(output_format: OutputFormat, report: &SmokeTestOutput) -> Result<()> {

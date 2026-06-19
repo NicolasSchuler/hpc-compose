@@ -3,6 +3,7 @@ use super::scheduler::{
 };
 use super::*;
 use crate::term;
+use crate::time_util::system_time_to_unix;
 use regex::Regex;
 
 /// Final outcome returned by `watch_submission`.
@@ -634,12 +635,6 @@ pub fn parse_queue_warn_after_duration(raw: &str) -> Result<Option<u64>> {
         );
     }
     Ok((total > 0).then_some(total))
-}
-
-fn system_time_to_unix(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs())
 }
 
 #[cfg(test)]

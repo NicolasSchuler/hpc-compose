@@ -4,13 +4,13 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::planner::{ImageSource, PreparedImageSpec, registry_host_for_remote};
 use crate::prepare::{RuntimePlan, RuntimeService, base_image_path_for_backend};
+use crate::time_util::{SECONDS_PER_DAY, unix_timestamp_now};
 
 /// The kind of artifact tracked in the cache manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,30 +71,15 @@ pub fn upsert_base_manifest(
     source: &ImageSource,
     cache_key: &str,
 ) -> Result<CacheEntryManifest> {
-    let mut manifest =
-        load_manifest_if_exists(artifact_path)?.unwrap_or_else(|| CacheEntryManifest {
-            kind: CacheEntryKind::Base,
-            artifact_path: artifact_path.display().to_string(),
-            service_names: Vec::new(),
-            cache_key: cache_key.to_string(),
-            source_image: image_source_string(source),
-            registry: parse_remote_registry(source),
-            prepare_commands: Vec::new(),
-            prepare_env: Vec::new(),
-            prepare_root: None,
-            prepare_mounts: Vec::new(),
-            force_rebuild_due_to_mounts: false,
-            created_at: unix_timestamp_now(),
-            last_used_at: unix_timestamp_now(),
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-        });
-    merge_service_name(&mut manifest.service_names, service_name);
-    manifest.last_used_at = unix_timestamp_now();
-    manifest.artifact_path = artifact_path.display().to_string();
-    manifest.cache_key = cache_key.to_string();
-    manifest.source_image = image_source_string(source);
-    manifest.registry = parse_remote_registry(source);
-    manifest.tool_version = env!("CARGO_PKG_VERSION").to_string();
+    let mut manifest = load_manifest_if_exists(artifact_path)?
+        .unwrap_or_else(|| new_base_manifest(artifact_path, source, cache_key));
+    refresh_manifest_common(
+        &mut manifest,
+        artifact_path,
+        service_name,
+        source,
+        cache_key,
+    );
     write_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -112,35 +97,16 @@ pub fn upsert_prepared_manifest(
     cache_key: &str,
     prepare: &PreparedImageSpec,
 ) -> Result<CacheEntryManifest> {
-    let mut manifest =
-        load_manifest_if_exists(artifact_path)?.unwrap_or_else(|| CacheEntryManifest {
-            kind: CacheEntryKind::Prepared,
-            artifact_path: artifact_path.display().to_string(),
-            service_names: Vec::new(),
-            cache_key: cache_key.to_string(),
-            source_image: image_source_string(source),
-            registry: parse_remote_registry(source),
-            prepare_commands: prepare.commands.clone(),
-            prepare_env: prepare.env.iter().map(format_env_entry).collect(),
-            prepare_root: Some(prepare.root),
-            prepare_mounts: prepare.mounts.clone(),
-            force_rebuild_due_to_mounts: prepare.force_rebuild,
-            created_at: unix_timestamp_now(),
-            last_used_at: unix_timestamp_now(),
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-        });
-    merge_service_name(&mut manifest.service_names, service_name);
-    manifest.last_used_at = unix_timestamp_now();
-    manifest.artifact_path = artifact_path.display().to_string();
-    manifest.cache_key = cache_key.to_string();
-    manifest.source_image = image_source_string(source);
-    manifest.registry = parse_remote_registry(source);
-    manifest.prepare_commands = prepare.commands.clone();
-    manifest.prepare_env = prepare.env.iter().map(format_env_entry).collect();
-    manifest.prepare_root = Some(prepare.root);
-    manifest.prepare_mounts = prepare.mounts.clone();
-    manifest.force_rebuild_due_to_mounts = prepare.force_rebuild;
-    manifest.tool_version = env!("CARGO_PKG_VERSION").to_string();
+    let mut manifest = load_manifest_if_exists(artifact_path)?
+        .unwrap_or_else(|| new_prepared_manifest(artifact_path, source, cache_key, prepare));
+    refresh_manifest_common(
+        &mut manifest,
+        artifact_path,
+        service_name,
+        source,
+        cache_key,
+    );
+    refresh_prepare_metadata(&mut manifest, prepare);
     write_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -243,7 +209,7 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
 /// Returns an error when cache manifests cannot be scanned or when a stale
 /// manifest or artifact cannot be removed.
 pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult> {
-    let cutoff = unix_timestamp_now().saturating_sub(age_days.saturating_mul(24 * 60 * 60));
+    let cutoff = unix_timestamp_now().saturating_sub(age_days.saturating_mul(SECONDS_PER_DAY));
     let manifests = scan_cache(cache_dir)?;
     let mut removed = Vec::new();
     for manifest in manifests {
@@ -408,6 +374,65 @@ fn format_env_entry((key, value): &(String, String)) -> String {
     format!("{key}={value}")
 }
 
+fn new_base_manifest(
+    artifact_path: &Path,
+    source: &ImageSource,
+    cache_key: &str,
+) -> CacheEntryManifest {
+    CacheEntryManifest {
+        kind: CacheEntryKind::Base,
+        artifact_path: artifact_path.display().to_string(),
+        service_names: Vec::new(),
+        cache_key: cache_key.to_string(),
+        source_image: image_source_string(source),
+        registry: parse_remote_registry(source),
+        prepare_commands: Vec::new(),
+        prepare_env: Vec::new(),
+        prepare_root: None,
+        prepare_mounts: Vec::new(),
+        force_rebuild_due_to_mounts: false,
+        created_at: unix_timestamp_now(),
+        last_used_at: unix_timestamp_now(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+fn new_prepared_manifest(
+    artifact_path: &Path,
+    source: &ImageSource,
+    cache_key: &str,
+    prepare: &PreparedImageSpec,
+) -> CacheEntryManifest {
+    let mut manifest = new_base_manifest(artifact_path, source, cache_key);
+    manifest.kind = CacheEntryKind::Prepared;
+    refresh_prepare_metadata(&mut manifest, prepare);
+    manifest
+}
+
+fn refresh_manifest_common(
+    manifest: &mut CacheEntryManifest,
+    artifact_path: &Path,
+    service_name: &str,
+    source: &ImageSource,
+    cache_key: &str,
+) {
+    merge_service_name(&mut manifest.service_names, service_name);
+    manifest.last_used_at = unix_timestamp_now();
+    manifest.artifact_path = artifact_path.display().to_string();
+    manifest.cache_key = cache_key.to_string();
+    manifest.source_image = image_source_string(source);
+    manifest.registry = parse_remote_registry(source);
+    manifest.tool_version = env!("CARGO_PKG_VERSION").to_string();
+}
+
+fn refresh_prepare_metadata(manifest: &mut CacheEntryManifest, prepare: &PreparedImageSpec) {
+    manifest.prepare_commands = prepare.commands.clone();
+    manifest.prepare_env = prepare.env.iter().map(format_env_entry).collect();
+    manifest.prepare_root = Some(prepare.root);
+    manifest.prepare_mounts = prepare.mounts.clone();
+    manifest.force_rebuild_due_to_mounts = prepare.force_rebuild;
+}
+
 fn merge_service_name(service_names: &mut Vec<String>, service_name: &str) {
     if service_names
         .iter()
@@ -417,13 +442,6 @@ fn merge_service_name(service_names: &mut Vec<String>, service_name: &str) {
     }
     service_names.push(service_name.to_string());
     service_names.sort();
-}
-
-fn unix_timestamp_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]

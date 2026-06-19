@@ -346,14 +346,20 @@ fn restore_terminal_best_effort() {
     let mut stdout = io::stdout();
     // DisableMouseCapture is harmless when capture was never enabled, so it is
     // always sent here (including from the panic hook, which has no state).
-    let _ = execute!(
+    if let Err(err) = execute!(
         stdout,
         DisableMouseCapture,
         crossterm::cursor::Show,
         crossterm::terminal::LeaveAlternateScreen
-    );
-    let _ = terminal::disable_raw_mode();
-    let _ = stdout.flush();
+    ) {
+        eprintln!("warning: failed to restore alternate-screen terminal state: {err}");
+    }
+    if let Err(err) = terminal::disable_raw_mode() {
+        eprintln!("warning: failed to disable raw terminal mode: {err}");
+    }
+    if let Err(err) = stdout.flush() {
+        eprintln!("warning: failed to flush terminal restore output: {err}");
+    }
 }
 
 impl SelectedLogBuffer {

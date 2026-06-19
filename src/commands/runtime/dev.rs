@@ -198,7 +198,12 @@ fn spawn_dev_file_watch(
             if !affected.is_empty() {
                 thread::sleep(Duration::from_millis(debounce_ms));
                 affected.extend(detect_dev_changes(&mut targets));
-                let _ = write_dev_restart_request(&control_dir, &affected);
+                if let Err(err) = write_dev_restart_request(&control_dir, &affected) {
+                    eprintln!(
+                        "warning: failed to write dev restart request in {}: {err}",
+                        control_dir.display()
+                    );
+                }
             }
             thread::sleep(Duration::from_millis(250));
         }

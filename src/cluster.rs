@@ -5,17 +5,18 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::context::ResolvedBinaries;
+use crate::mpi_util::advertised_mpi_types;
 use crate::preflight::{Item, Level, Report};
 use crate::prepare::RuntimePlan;
 use crate::spec::{
     MpiImplementation, MpiProfile, RuntimeBackend, ScratchScope, parse_slurm_time_limit,
 };
+use crate::time_util::unix_timestamp_now;
 
 /// Relative location of the generated cluster profile.
 pub const CLUSTER_PROFILE_RELATIVE_PATH: &str = ".hpc-compose/cluster.toml";
@@ -1271,43 +1272,6 @@ fn pmi_library_search_dirs(binaries: &ResolvedBinaries) -> Vec<PathBuf> {
     dirs
 }
 
-fn advertised_mpi_types(output: &str) -> Vec<String> {
-    let mut values = output
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '+')))
-        .filter(|token| mpi_advertised_token_looks_useful(token))
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    values.sort();
-    values
-}
-
-fn mpi_advertised_token_looks_useful(token: &str) -> bool {
-    if token.is_empty() || token.starts_with('-') {
-        return false;
-    }
-    let lower = token.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "mpi"
-            | "plugin"
-            | "plugins"
-            | "type"
-            | "types"
-            | "are"
-            | "available"
-            | "specific"
-            | "version"
-            | "versions"
-    ) {
-        return false;
-    }
-    token
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
-}
-
 fn collect_gpu_models(partitions: &[PartitionProfile]) -> Vec<String> {
     let mut models = BTreeSet::new();
     for partition in partitions {
@@ -1437,13 +1401,6 @@ fn plan_requests_gpu(plan: &RuntimePlan) -> bool {
 
 fn contains_gpu(value: &str) -> bool {
     value.to_ascii_lowercase().contains("gpu")
-}
-
-fn unix_timestamp_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]

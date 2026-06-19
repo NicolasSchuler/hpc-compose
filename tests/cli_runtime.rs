@@ -60,7 +60,7 @@ fn wait_for_service_assertion_status(
 }
 
 #[test]
-fn submit_command_runs_end_to_end_with_fake_tools() {
+fn up_command_runs_end_to_end_with_fake_tools() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
     let cache_dir = cache_root.path().to_path_buf();

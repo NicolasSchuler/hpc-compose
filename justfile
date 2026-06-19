@@ -51,6 +51,6 @@ release-check: _require-cargo-subcommands
     cargo test --locked --test release_metadata
     cargo deny check
     cargo llvm-cov --workspace --locked --no-report
-    cargo llvm-cov report --json --summary-only --locked --ignore-filename-regex 'commands/|output/mod\.rs|watch_ui\.rs|term\.rs|progress\.rs|manpages\.rs|main\.rs|cli/|job/model\.rs' --fail-under-lines 92 --fail-under-regions 91 --fail-under-functions 88
+    cargo llvm-cov report --json --summary-only --locked --ignore-filename-regex '(^|/)commands/mod\.rs$|(^|/)cli/commands\.rs$|(^|/)main\.rs$|(^|/)job/model\.rs$' --fail-under-lines 87 --fail-under-regions 87 --fail-under-functions 85
 
 ci: check docs-check examples-check release-check

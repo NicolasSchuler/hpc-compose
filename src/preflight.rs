@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::cluster::{ClusterProfile, MpiInstallationProfile, mpi_type_compatible_with_profile};
+use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description};
 use crate::planner::{
     ExecutionSpec, ImageSource, cache_path_policy_issue, registry_host_for_remote,
 };
@@ -729,14 +730,6 @@ fn check_mpi_support(
     }
 }
 
-fn preferred_mpi_type_description(profile: MpiProfile) -> &'static str {
-    match profile {
-        MpiProfile::Openmpi => "pmix/pmix_v* or pmi2",
-        MpiProfile::Mpich => "pmi2 or pmix/pmix_v*",
-        MpiProfile::IntelMpi => "pmi2",
-    }
-}
-
 fn profile_mpi_type_remediation(profile: MpiProfile) -> &'static str {
     match profile {
         MpiProfile::Openmpi => {
@@ -792,42 +785,6 @@ fn host_mpi_remediation_snippet(install: &MpiInstallationProfile) -> String {
         }
     }
     lines.join("\n")
-}
-
-fn advertised_mpi_types(output: &str) -> Vec<String> {
-    let mut values = output
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '+')))
-        .filter(|token| mpi_advertised_token_looks_useful(token))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    values.sort();
-    values.dedup();
-    values
-}
-
-fn mpi_advertised_token_looks_useful(token: &str) -> bool {
-    if token.is_empty() || token.starts_with('-') {
-        return false;
-    }
-    let lower = token.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "mpi"
-            | "plugin"
-            | "plugins"
-            | "type"
-            | "types"
-            | "are"
-            | "available"
-            | "specific"
-            | "version"
-            | "versions"
-    ) {
-        return false;
-    }
-    token
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
 }
 
 fn check_cache_path_policy(report: &mut Report, plan: &RuntimePlan) {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::time_util::unix_timestamp_now;
 
 const DEFAULT_SWEEP_MAX_TRIALS: usize = 100;
 
@@ -66,7 +67,7 @@ pub(crate) fn sweep_submit(
         .parent()
         .context("sweep manifest path has no parent")?
         .to_path_buf();
-    let submitted_at = unix_timestamp_now_for_command();
+    let submitted_at = unix_timestamp_now();
     let mut manifest = SweepManifest {
         schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
         sweep_id: sweep_id.clone(),
@@ -728,7 +729,7 @@ pub(crate) fn sweep_observe(
     loop {
         let mut manifest = load_sweep_manifest(&context.compose_file.value, sweep_id.as_deref())?;
         let objective_configured = manifest.objective.is_some();
-        let now = unix_timestamp_now_for_command();
+        let now = unix_timestamp_now();
 
         let direction = manifest
             .objective
@@ -995,7 +996,7 @@ fn sweep_stop_inner(
             }
         }
     }
-    let now = unix_timestamp_now_for_command();
+    let now = unix_timestamp_now();
     manifest.stopped_at = Some(now);
     manifest.stop_reason = reason.or_else(|| Some("manual sweep stop".to_string()));
     let stop_reason = manifest
@@ -1019,11 +1020,4 @@ fn print_sweep_stop_output(report: &SweepStopOutput) {
         "stopped sweep {}: {} trial(s) cancelled, {} skipped",
         report.sweep_id, report.cancelled_count, report.skipped_count
     );
-}
-
-fn unix_timestamp_now_for_command() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

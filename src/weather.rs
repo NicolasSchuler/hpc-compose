@@ -4,13 +4,13 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::Path;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::cluster::{ClusterProfile, discover_cluster_profile_path, load_cluster_profile};
 use crate::context::ResolvedBinaries;
+use crate::time_util::unix_timestamp_now;
 
 #[derive(Debug, Clone)]
 pub struct WeatherOptions<'a> {
@@ -700,13 +700,6 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
     let doy = (153 * month_adjusted + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     Some(i64::from(era) * 146_097 + i64::from(doe) - 719_468)
-}
-
-fn unix_timestamp_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

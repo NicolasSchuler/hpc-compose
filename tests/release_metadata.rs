@@ -1,7 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use serde_json::Value as JsonValue;
 use toml::{Table, Value};
 
 fn repo_root() -> &'static Path {
@@ -27,6 +29,58 @@ fn cargo_package_string(key: &str) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("Cargo package {key} should be a string"))
         .to_string()
+}
+
+fn homebrew_formula_version() -> String {
+    let formula =
+        fs::read_to_string(repo_root().join("Formula/hpc-compose.rb")).expect("read formula");
+    formula
+        .lines()
+        .map(str::trim)
+        .find_map(|line| {
+            line.strip_prefix("version \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .unwrap_or_else(|| panic!("Formula/hpc-compose.rb should declare version \"...\""))
+        .to_string()
+}
+
+fn rust_string_array_const(source: &str, name: &str) -> BTreeSet<String> {
+    let marker = format!("const {name}: &[&str] = &[");
+    let start = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing {name} allow-list"))
+        + marker.len();
+    let rest = &source[start..];
+    let end = rest
+        .find("];")
+        .unwrap_or_else(|| panic!("{name} allow-list should end with ];"));
+    rest[..end]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+fn json_object_keys(schema: &JsonValue, pointer: &str) -> BTreeSet<String> {
+    schema
+        .pointer(pointer)
+        .unwrap_or_else(|| panic!("schema missing {pointer}"))
+        .as_object()
+        .unwrap_or_else(|| panic!("schema {pointer} should be an object"))
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn git_tracks_path(path: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_root())
+        .args(["ls-files", "--error-unmatch", path])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn workflow_files() -> Vec<PathBuf> {
@@ -94,6 +148,110 @@ fn release_metadata_matches_cargo_package_version() {
         manpage.contains(&format!("hpc\\-compose {version}")),
         "checked-in manpage should match Cargo.toml version {version}"
     );
+}
+
+#[test]
+fn homebrew_formula_matches_cargo_package_version() {
+    let version = cargo_package_string("version");
+    let formula =
+        fs::read_to_string(repo_root().join("Formula/hpc-compose.rb")).expect("read formula");
+    assert_eq!(
+        homebrew_formula_version(),
+        version,
+        "Homebrew formula version should match Cargo.toml"
+    );
+    assert!(
+        formula.contains(&format!("/releases/download/v{version}/")),
+        "Homebrew formula URLs should point at v{version} release assets"
+    );
+    assert!(
+        formula.contains(&format!(
+            "hpc-compose-v{version}-aarch64-apple-darwin.tar.gz"
+        )),
+        "Homebrew formula should reference the current arm64 macOS tarball"
+    );
+    assert!(
+        formula.contains(&format!(
+            "hpc-compose-v{version}-x86_64-apple-darwin.tar.gz"
+        )),
+        "Homebrew formula should reference the current x86_64 macOS tarball"
+    );
+}
+
+#[test]
+fn changelog_documents_current_release_and_submit_to_up_rename() {
+    let version = cargo_package_string("version");
+    let changelog =
+        fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("read CHANGELOG.md");
+    assert!(
+        changelog.contains(&format!("## [{version}]")),
+        "CHANGELOG.md should contain a release entry for v{version}"
+    );
+    assert!(
+        changelog.contains("submit` -> `up") || changelog.contains("submit -> up"),
+        "CHANGELOG.md should document the submit-to-up breaking rename"
+    );
+}
+
+#[test]
+fn schema_allowed_keys_match_spec_validation_allowlists() {
+    let validation =
+        fs::read_to_string(repo_root().join("src/spec/validation.rs")).expect("read validation.rs");
+    let schema: JsonValue = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("schema/hpc-compose.schema.json"))
+            .expect("read schema"),
+    )
+    .expect("parse schema");
+
+    assert_eq!(
+        json_object_keys(&schema, "/properties"),
+        rust_string_array_const(&validation, "ROOT_ALLOWED_KEYS"),
+        "root schema properties should match ROOT_ALLOWED_KEYS"
+    );
+    assert_eq!(
+        json_object_keys(&schema, "/definitions/service/properties"),
+        rust_string_array_const(&validation, "SERVICE_ALLOWED_KEYS"),
+        "service schema properties should match SERVICE_ALLOWED_KEYS"
+    );
+}
+
+#[test]
+fn root_generated_sbatch_artifacts_stay_out_of_the_repo() {
+    let artifact = repo_root().join("hpc-compose-run.sbatch");
+    assert!(
+        !(artifact.exists() && git_tracks_path("hpc-compose-run.sbatch")),
+        "generated root hpc-compose-run.sbatch artifact should not exist as a tracked file"
+    );
+    let gitignore = fs::read_to_string(repo_root().join(".gitignore")).expect("read .gitignore");
+    assert!(
+        gitignore.lines().any(|line| line.trim() == "/*.sbatch"),
+        ".gitignore should ignore generated root-level sbatch scripts"
+    );
+}
+
+#[test]
+fn coverage_gate_ignores_only_declarative_shells() {
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("read justfile");
+    assert!(
+        justfile.contains(
+            "--ignore-filename-regex '(^|/)commands/mod\\.rs$|(^|/)cli/commands\\.rs$|(^|/)main\\.rs$|(^|/)job/model\\.rs$'"
+        ),
+        "coverage gate should only ignore thin declarative shell files"
+    );
+    for broad_pattern in [
+        "commands/|",
+        "output/mod\\.rs",
+        "watch_ui\\.rs",
+        "term\\.rs",
+        "progress\\.rs",
+        "manpages\\.rs",
+        "cli/|",
+    ] {
+        assert!(
+            !justfile.contains(broad_pattern),
+            "coverage gate should not broadly ignore {broad_pattern}"
+        );
+    }
 }
 
 #[test]

@@ -3,6 +3,7 @@ use super::runtime_state::{
     active_restart_failures_in_window, load_runtime_state, runtime_state_by_service,
 };
 use super::*;
+use crate::time_util::system_time_to_unix;
 
 /// Live walltime progress derived from a tracked job record and scheduler diagnostics.
 #[allow(missing_docs)]
@@ -967,15 +968,8 @@ pub(crate) fn stats_unavailable_reason(scheduler: &SchedulerStatus) -> String {
     }
 }
 
-pub(super) fn system_time_to_unix(value: SystemTime) -> Option<u64> {
-    value
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs())
-}
-
 pub(crate) fn unix_timestamp_now() -> u64 {
-    system_time_to_unix(SystemTime::now()).unwrap_or(0)
+    crate::time_util::unix_timestamp_now()
 }
 
 fn probe_status_components(

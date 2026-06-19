@@ -9,13 +9,13 @@
 //! channel. The binary entrypoint downcasts it and exits with the preserved
 //! code instead of rendering a diagnostic.
 
-use std::error::Error;
-use std::fmt;
+use thiserror::Error;
 
 /// An error carrying a specific process exit code to propagate to the caller's
 /// shell. Construct it at a site where a child process exited nonzero and that
 /// status is meaningful to the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("command exited with status {0}")]
 pub struct ExitCodeError(pub i32);
 
 impl ExitCodeError {
@@ -25,11 +25,3 @@ impl ExitCodeError {
         self.0
     }
 }
-
-impl fmt::Display for ExitCodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "command exited with status {}", self.0)
-    }
-}
-
-impl Error for ExitCodeError {}

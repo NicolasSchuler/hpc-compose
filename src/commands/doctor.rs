@@ -27,7 +27,9 @@ use hpc_compose::render::{
 };
 use hpc_compose::spec::{MpiProfile, ServiceFailurePolicy, SlurmConfig};
 
+use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description, resolved_rank_count};
 use crate::output::{self, common as output_common};
+use crate::time_util::unix_timestamp_millis;
 
 pub(crate) fn doctor(
     format: Option<OutputFormat>,
@@ -775,14 +777,6 @@ fn mpi_profile_warnings(
     warnings
 }
 
-fn preferred_mpi_type_description(profile: MpiProfile) -> &'static str {
-    match profile {
-        MpiProfile::Openmpi => "pmix/pmix_v* or pmi2",
-        MpiProfile::Mpich => "pmi2 or pmix/pmix_v*",
-        MpiProfile::IntelMpi => "pmi2",
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 struct MpiSmokeSubmitResult {
     success: bool,
@@ -1227,19 +1221,6 @@ fn mpi_expected_ranks(service: &RuntimeService) -> u32 {
         .unwrap_or_else(|| resolved_rank_count(service))
 }
 
-fn resolved_rank_count(service: &RuntimeService) -> u32 {
-    service
-        .placement
-        .ntasks
-        .or_else(|| {
-            service
-                .placement
-                .ntasks_per_node
-                .map(|per_node| per_node * service.placement.nodes)
-        })
-        .unwrap_or(1)
-}
-
 fn mpi_smoke_shell(expected_ranks: u32) -> String {
     format!(
         r#"expected_ranks={expected_ranks}
@@ -1458,42 +1439,6 @@ run_ofi_smoke_check() {{
     body
 }
 
-fn advertised_mpi_types(output: &str) -> Vec<String> {
-    let mut values = output
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '+')))
-        .filter(|token| mpi_advertised_token_looks_useful(token))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    values.sort();
-    values.dedup();
-    values
-}
-
-fn mpi_advertised_token_looks_useful(token: &str) -> bool {
-    if token.is_empty() || token.starts_with('-') {
-        return false;
-    }
-    let lower = token.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "mpi"
-            | "plugin"
-            | "plugins"
-            | "type"
-            | "types"
-            | "are"
-            | "available"
-            | "specific"
-            | "version"
-            | "versions"
-    ) {
-        return false;
-    }
-    token
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
-}
-
 fn gpu_resources_requested(service: &RuntimeService, plan: &RuntimePlan) -> bool {
     service.slurm.gpus.is_some()
         || service.slurm.gres.as_deref().is_some_and(|value| {
@@ -1550,13 +1495,6 @@ fn temp_smoke_script_path(kind: &str) -> PathBuf {
         std::process::id(),
         unix_timestamp_millis()
     ))
-}
-
-fn unix_timestamp_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
 }
 
 fn run_sbatch_wait(
