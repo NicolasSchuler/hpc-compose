@@ -5957,6 +5957,54 @@ fn cancel_local_record_without_state_reports_not_running_and_removes_tracking() 
 }
 
 #[test]
+fn cancel_local_record_with_stale_pid_reports_not_running_and_removes_tracking() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+    let mut record = build_submission_record_with_backend_and_options(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("local.sh"),
+        &plan,
+        "local-stale-pid",
+        SubmissionBackend::Local,
+        &SubmissionRecordBuildOptions::default(),
+    )
+    .expect("record");
+    record.submitted_at = 1;
+    write_submission_record(&record).expect("write record");
+    let state_path = state_path_for_record(&record);
+    fs::create_dir_all(state_path.parent().expect("state parent")).expect("state dir");
+    fs::write(&state_path, r#"{"supervisor_pid":999999999}"#).expect("state");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "local-stale-pid",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("cancel json");
+    assert_eq!(payload["job_id"], Value::from("local-stale-pid"));
+    assert_eq!(payload["cancelled"], Value::from(false));
+    assert_eq!(payload["tracking_removed"], Value::from(true));
+    assert!(
+        !tmpdir
+            .path()
+            .join(".hpc-compose/jobs/local-stale-pid.json")
+            .exists()
+    );
+}
+
+#[test]
 fn tracked_job_resolution_rejects_duplicate_job_ids_without_file() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     for project in ["alpha", "beta"] {

@@ -717,6 +717,14 @@ fn write_local_runtime_state_stub(
 }
 
 fn kill_pid(pid: u32) -> Result<()> {
+    if kill_pid_if_running(pid)? {
+        Ok(())
+    } else {
+        bail!("failed to signal pid {pid}: No such process")
+    }
+}
+
+fn kill_pid_if_running(pid: u32) -> Result<bool> {
     #[cfg(unix)]
     {
         if pid == 0 || pid > i32::MAX as u32 {
@@ -726,10 +734,14 @@ fn kill_pid(pid: u32) -> Result<()> {
         // Use libc directly so invalid test PIDs cannot be reinterpreted by `/bin/kill`.
         let status = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         if status == 0 {
-            return Ok(());
+            return Ok(true);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(false);
         }
 
-        let detail = std::io::Error::last_os_error().to_string();
+        let detail = err.to_string();
         if detail.is_empty() {
             bail!("failed to signal pid {pid}");
         }
@@ -744,11 +756,14 @@ fn kill_pid(pid: u32) -> Result<()> {
             .output()
             .context("failed to execute 'kill'")?;
         if output.status.success() {
-            return Ok(());
+            return Ok(true);
         }
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let detail = if !stderr.is_empty() { stderr } else { stdout };
+        if detail.contains("No such process") {
+            return Ok(false);
+        }
         if detail.is_empty() {
             bail!("failed to signal pid {pid}");
         }
@@ -5130,9 +5145,8 @@ pub(crate) fn cancel(
     {
         let record = record.as_ref().expect("checked above");
         let cancelled = if let Some(pid) = read_local_supervisor_pid(record)? {
-            kill_pid(pid)
-                .with_context(|| format!("failed to cancel local job {resolved_job_id}"))?;
-            true
+            kill_pid_if_running(pid)
+                .with_context(|| format!("failed to cancel local job {resolved_job_id}"))?
         } else {
             false
         };
