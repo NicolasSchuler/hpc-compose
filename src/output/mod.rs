@@ -3200,6 +3200,16 @@ fn print_watch_final_summary(record: &hpc_compose::job::SubmissionRecord, outcom
     if let Some(service) = failed_service_hint(record) {
         println!("  failed service: {service}");
     }
+    if let Some(remediation) = crate::terminal_state::interpret(state) {
+        println!("  what this means: {}", remediation.message);
+        if remediation.suggest_rightsize {
+            println!(
+                "  rightsize: hpc-compose inspect --rightsize -f {} --job-id {}",
+                shell_quote(&record.compose_file.display().to_string()),
+                shell_quote(&record.job_id)
+            );
+        }
+    }
     println!(
         "  debug: hpc-compose debug -f {} --job-id {}",
         shell_quote(&record.compose_file.display().to_string()),

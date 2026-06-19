@@ -3391,6 +3391,9 @@ pub(crate) fn alloc(
         .status()
         .with_context(|| format!("failed to execute '{}'", context.binaries.salloc.value))?;
     if !status.success() {
+        if let Some(code) = status.code() {
+            return Err(crate::exit::ExitCodeError(code).into());
+        }
         bail!("salloc failed with status {status}");
     }
     Ok(())
@@ -3549,6 +3552,9 @@ pub(crate) fn run_service(
             .status()
             .with_context(|| format!("failed to execute '{}'", script_path.display()))?;
         if !status.success() {
+            if let Some(code) = status.code() {
+                return Err(crate::exit::ExitCodeError(code).into());
+            }
             bail!("in-allocation run failed with status {status}");
         }
         return Ok(());
@@ -3896,6 +3902,9 @@ pub(crate) fn shell(
         .status()
         .with_context(|| format!("failed to execute '{}'", context.binaries.srun.value))?;
     if !status.success() {
+        if let Some(code) = status.code() {
+            return Err(crate::exit::ExitCodeError(code).into());
+        }
         bail!("srun failed with status {status}");
     }
     Ok(())

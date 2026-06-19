@@ -177,6 +177,12 @@ impl Report {
             blocker_label, warn_label, ctx_label, passed_label
         )];
 
+        if crate::platform::is_macos() && grouped.summary.blockers > 0 {
+            lines.push(
+                "note: macOS is an authoring-only platform; missing Slurm/Enroot runtime tools are expected here. Run from a Linux Slurm login node.".to_string(),
+            );
+        }
+
         render_section(
             &mut lines,
             "Blockers",
