@@ -342,7 +342,7 @@ Useful `test` options:
 | `--local` | Run the finite smoke spec through the local supervisor. |
 | `--submit` | Submit the finite smoke spec to Slurm; required before any scheduler submission happens. |
 | `--time <TIME>` | Override Slurm wall time for `--submit`; defaults to `00:01:00`. |
-| `--timeout <DURATION>` | Stop waiting and best-effort cancel/cleanup after the timeout; defaults to `180s`. |
+| `--wait-timeout <DURATION>` (alias `--timeout`) | Stop waiting and best-effort cancel/cleanup after the timeout; defaults to `180s`. |
 | `--format json` | Emit phase status, job id, script path, per-service results, and failure reason for automation. |
 
 `dev` is local-only and watches host directories from service `volumes`:
@@ -434,7 +434,7 @@ hpc-compose logs -f compose.yaml --grep 'error|oom' --since 30m
 hpc-compose status -f compose.yaml --format json
 ```
 
-`context` and `config --variables` intentionally scope interpolation variables to names referenced by the compose file. Values whose names look secret-bearing, such as `TOKEN`, `PASSWORD`, `SECRET`, `API_KEY`, or `PRIVATE_KEY`, are shown as `<redacted>` by default; add `--show-values` only in trusted local diagnostics.
+`context` and `config --variables` intentionally scope interpolation variables to names referenced by the compose file. Values whose names look secret-bearing are shown as `<redacted>` by default; add `--show-values` only in trusted local diagnostics. A name triggers redaction when, after upper-casing, it **contains** any of these case-insensitive substrings: `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`, `AUTH`, `COOKIE`, `SESSION`, `BEARER`. Because the test is a substring match, names such as `SESSION_DIR` or `AUTH_MODE` also match.
 
 ## Tracked Runtime
 

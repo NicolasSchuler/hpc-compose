@@ -2,6 +2,7 @@
 name = "hpc-compose"
 version = "0.1.45"
 edition = "2024"
+rust-version = "1.85"
 autobins = false
 default-run = "hpc-compose"
 license = "MIT"
@@ -53,6 +54,7 @@ tempfile = "3.23.0"
 
 [profile.release]
 opt-level = "s"
+strip = "symbols"
 
 [package.metadata.deb]
 maintainer = "Nicolas Schuler"

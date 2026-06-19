@@ -4,7 +4,19 @@ For normal use, install from a published GitHub Release. Build from source when 
 
 ## Install From A Published Release
 
-Pick the release tag you want from the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page and pin it:
+### Latest release (zero edits)
+
+The quickest path needs no version substitution. When `HPC_COMPOSE_VERSION` is unset, the installer resolves the latest published GitHub Release tag automatically and downloads the matching asset:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+```
+
+This runs the moving `install.sh` from `main`, but it always installs from a published `releases/download/<tag>/...` asset (never unreleased `main`).
+
+### Pinned release (reproducible / recommended for clusters)
+
+For reproducible installs across a shared cluster, pin the exact release tag from the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page so every machine lands on the same build:
 
 ```bash
 RELEASE_TAG=vX.Y.Z

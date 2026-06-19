@@ -15,11 +15,11 @@ Please do not open public issues for suspected vulnerabilities.
 
 Preferred channel:
 
-- Use GitHub's private vulnerability reporting for this repository if it is enabled.
+- Use [GitHub private vulnerability reporting](https://github.com/NicolasSchuler/hpc-compose/security/advisories/new) for this repository. This routes the report directly to maintainers through GitHub's coordinated-disclosure workflow and is the most reliable path even as the maintainer set changes.
 
 Fallback:
 
-- Contact the maintainer privately through the contact details listed on the repository owner's GitHub profile before public disclosure.
+- If private reporting is unavailable to you, contact a maintainer privately through the contact details listed on the repository owner's GitHub profile before any public disclosure. Use this only as a backup to the channel above.
 
 Please include:
 
@@ -30,6 +30,8 @@ Please include:
 
 ## Disclosure process
 
-- I will acknowledge receipt as quickly as possible.
-- I will validate the report, assess impact, and work on a fix or mitigation.
+- We aim to acknowledge receipt as quickly as possible.
+- The report is validated, its impact assessed, and a fix or mitigation prepared.
 - Public disclosure should wait until a fix, mitigation, or clear operator guidance is available.
+
+See [GOVERNANCE.md](GOVERNANCE.md) for how maintenance is shared and how additional maintainers can be added.
