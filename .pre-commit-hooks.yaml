@@ -1,0 +1,15 @@
+- id: hpc-compose-validate
+  name: hpc-compose validate
+  description: Validate the project compose file with hpc-compose (fails on any spec error).
+  entry: hpc-compose validate -f compose.yaml
+  language: system
+  pass_filenames: false
+  files: ^compose\.(yaml|yml)$
+
+- id: hpc-compose-lint
+  name: hpc-compose lint
+  description: Lint the project compose file with hpc-compose (warnings allowed; use hpc-compose-validate for strict CI).
+  entry: hpc-compose lint -f compose.yaml --allow-warnings
+  language: system
+  pass_filenames: false
+  files: ^compose\.(yaml|yml)$

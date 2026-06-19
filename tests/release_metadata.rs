@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -374,4 +375,61 @@ fn just_clean_preserves_local_runtime_state() {
         !clean_recipe.contains(".hpc-compose"),
         "just clean must not delete .hpc-compose runtime/config state"
     );
+}
+
+#[test]
+fn pre_commit_hooks_file_advertises_validate_and_lint() {
+    let hooks = fs::read_to_string(repo_root().join(".pre-commit-hooks.yaml"))
+        .expect("read .pre-commit-hooks.yaml");
+    let parsed: Vec<BTreeMap<String, serde_norway::Value>> =
+        serde_norway::from_str(&hooks).expect("parse .pre-commit-hooks.yaml");
+    let ids = parsed
+        .iter()
+        .filter_map(|hook| hook.get("id").and_then(serde_norway::Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec!["hpc-compose-validate", "hpc-compose-lint"],
+        ".pre-commit-hooks.yaml must be a list of the shipped hook entries"
+    );
+    for expected in [
+        "id: hpc-compose-validate",
+        "id: hpc-compose-lint",
+        "language: system",
+        "pass_filenames: false",
+        "hpc-compose validate -f compose.yaml",
+        "hpc-compose lint -f compose.yaml",
+        "files: ^compose\\.(yaml|yml)$",
+    ] {
+        assert!(
+            hooks.contains(expected),
+            ".pre-commit-hooks.yaml should declare '{expected}'"
+        );
+    }
+}
+
+#[test]
+fn reusable_lint_workflow_exists_and_is_sha_pinned() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/hpc-compose-lint.yml"))
+        .expect("read reusable lint workflow");
+    assert!(
+        workflow.contains("on:") && workflow.contains("workflow_call:"),
+        "reusable workflow must be callable"
+    );
+    assert!(
+        workflow.contains("hpc-compose validate") && workflow.contains("hpc-compose lint"),
+        "reusable workflow must run validate and lint"
+    );
+    // Reuse the same SHA-pinning rule as every other workflow.
+    for (line_index, line) in workflow.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(reference) = trimmed.strip_prefix("uses: ") {
+            assert!(
+                is_sha_pinned_action_reference(reference),
+                "hpc-compose-lint.yml:{} must pin actions by SHA, found '{}'",
+                line_index + 1,
+                reference
+            );
+        }
+    }
 }
