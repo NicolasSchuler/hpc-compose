@@ -76,10 +76,10 @@ hpc-compose completions zsh
 | --- | --- | --- |
 | `plan` | Validate and preview the static runtime plan | Recommended before every first run. `--show-script` prints the generated launcher to stdout without writing a file; `--explain` adds actionable cache, resume, preflight, and next-command hints. |
 | `validate` | Check YAML shape and field validation | Add `--strict-env` when interpolation fallbacks should fail. |
-| `lint` | Run stricter opinionated static checks | Flags risky-but-valid specs such as weak dependency readiness, unusual memory/CPU ratios, and ignored services that can write shared paths. Warnings fail by default; add `--allow-warnings` to make warning-only results successful. |
+| `lint` | Run stricter opinionated static checks | Flags risky-but-valid specs such as weak dependency readiness, unusual memory/CPU ratios, ignored services that can write shared paths, node-local cache or volume paths, and implicit `depends_on` conditions. Warnings fail by default; add `--allow-warnings` to make warning-only results successful. Pass `--fix` to apply auto-fixable findings in place (preview with `--fix --dry-run`). |
 | `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. `config --variables` reports only interpolation variables referenced by the compose file and redacts sensitive-looking names unless `--show-values` is passed. |
 | `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. The same schema is published with the docs site for YAML Language Server and SchemaStore consumption. Rust validation remains the semantic source of truth. |
-| `inspect` | View the normalized runtime plan | `--verbose` can reveal resolved secrets and final mount mappings. Add `--dependencies` for a service DAG in text, DOT, or JSON form. |
+| `inspect` | View the normalized runtime plan | `--verbose` shows resolved argv and final mount mappings with secret values redacted. Add `--dependencies` for a service DAG in text, DOT, or JSON form. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. |
 | `doctor cluster-report` | Generate a best-effort cluster capability profile | Writes `.hpc-compose/cluster.toml` by default; use `--out -` to print the TOML profile. |
 | `doctor readiness` | Explain or run one service readiness probe from the current host | Does not start services or submit jobs. Use `--run` only against an already reachable endpoint, tracked log, tunnel, or login-node-visible service. |
@@ -98,6 +98,7 @@ hpc-compose completions zsh
 | `alloc` | Open an interactive Slurm allocation for iterative service runs | Uses top-level `x-slurm` allocation settings, exports `HPC_COMPOSE_*`, and lets `run SERVICE -- CMD` reuse the active allocation. |
 | `run` | Launch a one-off command | Service mode uses an existing compose service. Image mode uses `--image IMAGE -- CMD` and builds an ephemeral one-service plan. |
 | `shell` | Open an interactive Pyxis shell | Thin wrapper around `srun --pty --container-image=<image> bash -l`. |
+| `notebook` | Launch a tracked JupyterLab or VS Code notebook server | Submits a single-service Slurm job (or `--local`), waits for readiness, and prints the connection URL plus an SSH tunnel hint for Jupyter. Stop with `hpc-compose cancel`. |
 
 ```bash
 hpc-compose plan -f compose.yaml
@@ -106,6 +107,8 @@ hpc-compose plan --show-script -f compose.yaml
 hpc-compose validate -f compose.yaml
 hpc-compose lint -f compose.yaml
 hpc-compose lint -f compose.yaml --allow-warnings
+hpc-compose lint -f compose.yaml --fix
+hpc-compose lint -f compose.yaml --fix --dry-run
 hpc-compose lint -f compose.yaml --format json
 hpc-compose config -f compose.yaml
 hpc-compose config -f compose.yaml --variables
@@ -149,6 +152,9 @@ hpc-compose alloc -f compose.yaml
 hpc-compose run app -- python -m smoke_test
 hpc-compose run --image docker://python:3.12 --resources cpu-small -- python -V
 hpc-compose shell --image docker://ubuntu:24.04
+hpc-compose notebook --kind jupyter --gpus 1 --volume ./project:/workspace
+hpc-compose notebook --kind vscode --image ghcr.io/example/code:1 --gpus 1
+hpc-compose notebook --local --kind jupyter
 ```
 
 ### Editor Schema
@@ -181,20 +187,20 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 
 | Flag | Default | Accepted by |
 | --- | --- | --- |
-| `--sbatch-bin` | `sbatch` | `up`, `when`, `germinate`, `test`, `run`, `sweep submit`, `preflight`, `debug`, `doctor` |
-| `--srun-bin` | `srun` | `up`, `when`, `alloc`, `germinate`, `test`, `run`, `shell`, `sweep submit`, `preflight`, `debug`, `doctor` |
-| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `debug`, `weather` |
-| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `debug` |
+| `--sbatch-bin` | `sbatch` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `sweep submit`, `preflight`, `debug`, `doctor` |
+| `--srun-bin` | `srun` | `up`, `when`, `alloc`, `germinate`, `test`, `run`, `notebook`, `shell`, `sweep submit`, `preflight`, `debug`, `doctor` |
+| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `sweep observe`, `sweep stop`, `debug`, `weather` |
+| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `sweep observe`, `sweep stop`, `debug` |
 | `--salloc-bin` | `salloc` | `alloc` |
 | `--scontrol-bin` | `scontrol` | `alloc`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--sinfo-bin` | `sinfo` | `when`, `weather` |
-| `--scancel-bin` | `scancel` | `test`, `cancel`, `down` |
+| `--scancel-bin` | `scancel` | `test`, `cancel`, `down`, `sweep observe`, `sweep stop` |
 | `--sstat-bin` | `sstat` | `germinate`, `stats`, `inspect`, `score` |
 | `--sshare-bin` | `sshare` | `weather` |
 | `--sprio-bin` | `sprio` | `weather` |
-| `--enroot-bin` | `enroot` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
-| `--apptainer-bin` | `apptainer` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
-| `--singularity-bin` | `singularity` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
+| `--enroot-bin` | `enroot` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
+| `--apptainer-bin` | `apptainer` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
+| `--singularity-bin` | `singularity` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
 | `--tmux-bin` | `tmux` | `tmux` |
 
 Settings profiles can also configure these via `[defaults.binaries]` or `[profiles.<name>.binaries]` (see [Runbook](runbook.md)).
@@ -402,6 +408,18 @@ hpc-compose shell --image IMAGE [--resources NAME] [--time T] [--mem M] [--cpus-
 ```
 
 It calls `srun --pty` directly with Pyxis `--container-image` and defaults to `bash -l`. It does not render an sbatch script or create tracked job metadata.
+
+`notebook` launches a tracked interactive server:
+
+```bash
+hpc-compose notebook [--kind jupyter|vscode] [--image IMAGE] [--port N] [--token TOKEN]
+                     [--volume HOST:CONTAINER]... [--working-dir PATH] [--tunnel-name NAME]
+                     [--ready-timeout DURATION] [--follow] [--dry-run] [--local] [-- ARGS...]
+                     [--resources NAME] [--time T] [--mem M] [--cpus-per-task N] [--gpus N]
+                     [--partition P] [--env K=V]
+```
+
+It synthesizes a one-service compose job from the preset, runs the normal preflight/prepare/render path, submits (or launches locally with `--local`), waits for a log readiness signal, then prints the connection URL — a localhost Jupyter URL plus an SSH tunnel hint for Jupyter on Slurm, or the scraped `vscode.dev` link for VS Code. The session is a tracked job of kind `notebook` (see [Notebook Sessions](notebook.md)); stop it with `hpc-compose cancel`. `--kind vscode` requires `--image` because no universal default `code` image is shipped.
 
 ## Accessible and Automation-Friendly Output
 

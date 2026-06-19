@@ -52,6 +52,7 @@ Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slur
 - Pyxis/Enroot, Apptainer, Singularity, or host runtime backends
 - finite spec smoke tests plus local `dev` and `tmux` workflows for single-host authoring
 - one-off `run --image ... -- <cmd>` jobs and direct `shell --image ...` sessions
+- tracked `notebook` sessions launching JupyterLab or VS Code on a compute node
 - tracked logs, state, metrics, artifacts, cache entries, and follow-up commands
 
 It does not aim to be a full Docker Compose runtime. Unsupported Compose features include `build:`, `ports`, custom Docker networks, `deploy`, and dynamic scheduler-style placement across arbitrary nodes.

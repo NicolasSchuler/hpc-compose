@@ -10,6 +10,7 @@ use hpc_compose::job::{
     metadata_root_for,
 };
 use hpc_compose::lint::{LintFinding, LintLevel};
+use hpc_compose::lint_fix::{self, AppliedFix};
 use hpc_compose::planner::ImageSource;
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{PrepareOptions, RuntimePlan, build_runtime_plan, prepare_runtime_plan};
@@ -80,13 +81,18 @@ struct LintOutput {
     compose_file: PathBuf,
     warning_count: usize,
     error_count: usize,
+    fixable_count: usize,
     findings: Vec<LintFinding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    applied_fixes: Vec<AppliedFix>,
 }
 
 pub(crate) fn lint(
     context: ResolvedContext,
     strict_env: bool,
     allow_warnings: bool,
+    fix: bool,
+    dry_run: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let (plan, runtime_plan) =
@@ -108,18 +114,82 @@ pub(crate) fn lint(
     }
     let cluster_profile = load_discovered_cluster_profile(&context)?;
     let findings = hpc_compose::lint::lint_plan(&plan, &runtime_plan, cluster_profile.as_ref());
-    let warning_count = findings
+    let fixable_count = findings.iter().filter(|f| f.fix.is_some()).count();
+
+    let mut displayed_findings = findings;
+    let mut applied_fixes: Vec<AppliedFix> = Vec::new();
+    let mut dry_run_diff: Option<String> = None;
+
+    if fix && fixable_count > 0 {
+        let original_text = fs::read_to_string(&context.compose_file.value).with_context(|| {
+            format!(
+                "failed to read {} for --fix",
+                context.compose_file.value.display()
+            )
+        })?;
+        let fixable: Vec<_> = displayed_findings
+            .iter()
+            .filter_map(|finding| finding.fix.clone())
+            .collect();
+        let (new_text, applied) = lint_fix::apply_fixes(&original_text, &fixable)
+            .context("lint --fix could not apply a fix safely")?;
+        applied_fixes = applied;
+        if dry_run {
+            dry_run_diff = Some(lint_fix::unified_diff(&original_text, &new_text));
+        } else {
+            fs::write(&context.compose_file.value, &new_text).with_context(|| {
+                format!(
+                    "failed to write fixes to {}",
+                    context.compose_file.value.display()
+                )
+            })?;
+            // Safety gate: reload the spec to confirm the rewrite is still
+            // valid and to refresh findings. Roll back on any failure.
+            let reload = output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+                &context.compose_file.value,
+                &context.interpolation_vars,
+                Some(&context.cache_dir.value),
+                &context.resource_profiles,
+            );
+            match reload {
+                Ok((plan2, runtime_plan2)) => {
+                    let findings_after = hpc_compose::lint::lint_plan(
+                        &plan2,
+                        &runtime_plan2,
+                        cluster_profile.as_ref(),
+                    );
+                    displayed_findings = findings_after;
+                }
+                Err(err) => {
+                    fs::write(&context.compose_file.value, &original_text).with_context(|| {
+                        format!(
+                            "failed to restore original compose file after --fix validation failure at {}",
+                            context.compose_file.value.display()
+                        )
+                    })?;
+                    bail!(
+                        "lint --fix produced a spec that failed to reload; restored the original file. Error: {err:#}"
+                    );
+                }
+            }
+        }
+    }
+
+    let warning_count = displayed_findings
         .iter()
         .filter(|finding| finding.level == LintLevel::Warning)
         .count();
-    let error_count = findings
+    let error_count = displayed_findings
         .iter()
         .filter(|finding| finding.level == LintLevel::Error)
         .count();
     let passed = error_count == 0 && (allow_warnings || warning_count == 0);
 
     match output_common::resolve_output_format(format, false) {
-        OutputFormat::Text => print_lint_findings(&findings, passed),
+        OutputFormat::Text => {
+            print_lint_findings(&displayed_findings, passed);
+            print_fix_summary(fix, dry_run, &applied_fixes, dry_run_diff.as_deref());
+        }
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -128,7 +198,9 @@ pub(crate) fn lint(
                     compose_file: plan.spec_path,
                     warning_count,
                     error_count,
-                    findings,
+                    fixable_count,
+                    findings: displayed_findings,
+                    applied_fixes,
                 })
                 .context("failed to serialize lint output")?
             );
@@ -141,6 +213,47 @@ pub(crate) fn lint(
         );
     }
     Ok(())
+}
+
+fn print_fix_summary(fix: bool, dry_run: bool, applied: &[AppliedFix], diff: Option<&str>) {
+    if !fix {
+        return;
+    }
+    if dry_run {
+        if let Some(diff) = diff {
+            println!();
+            println!(
+                "{}",
+                term::styled_section_header("Proposed changes (--dry-run):")
+            );
+            print!("{diff}");
+        } else {
+            println!();
+            println!(
+                "{}",
+                term::styled_success("lint --fix: no changes proposed")
+            );
+        }
+        return;
+    }
+    if applied.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "{}",
+        term::styled_success(&format!(
+            "Applied {} fix(es) to the compose file:",
+            applied.len()
+        ))
+    );
+    for fix in applied {
+        println!("- {} [{}]: {}", fix.service, fix.code, fix.description);
+    }
+    println!(
+        "{}",
+        term::styled_dim("re-run `hpc-compose lint -f <file>` to confirm remaining findings")
+    );
 }
 
 fn print_lint_findings(findings: &[LintFinding], passed: bool) {
@@ -622,30 +735,40 @@ pub(crate) fn inspect(
         }
         return Ok(());
     }
+    let secret_values = crate::redaction::secret_value_set(
+        &context.interpolation_vars,
+        &context.interpolation_var_sources,
+    );
+    let redacted_runtime_plan =
+        crate::redaction::redacted_runtime_plan(&runtime_plan, &secret_values, false);
+
     match output_common::resolve_output_format(format, json) {
         OutputFormat::Text => {
             if tree {
-                output_spec::print_plan_inspect_tree(&plan, &runtime_plan)
+                output_spec::print_plan_inspect_tree(&plan, &redacted_runtime_plan)
                     .context("failed to write tree output")?;
             } else if verbose {
                 let cluster_profile = load_discovered_cluster_profile(&context)?;
                 if cluster_profile.is_some() {
                     output_spec::print_plan_inspect_verbose_with_profile(
                         &plan,
-                        &runtime_plan,
+                        &redacted_runtime_plan,
                         cluster_profile.as_ref(),
                     )
                     .context("failed to write inspect output")?;
                 } else {
-                    output_spec::print_plan_inspect_verbose(&plan, &runtime_plan)
+                    output_spec::print_plan_inspect_verbose(&plan, &redacted_runtime_plan)
                         .context("failed to write inspect output")?;
                 }
             } else {
-                output_spec::print_plan_inspect(&runtime_plan)
+                output_spec::print_plan_inspect(&redacted_runtime_plan)
                     .context("failed to write inspect output")?;
             }
         }
         OutputFormat::Json => {
+            let runtime_plan =
+                crate::redaction::redacted_json_value(&runtime_plan, &secret_values, false)
+                    .context("failed to serialize inspect output")?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&runtime_plan)
@@ -662,12 +785,23 @@ pub(crate) fn config(
     variables: bool,
     show_values: bool,
 ) -> Result<()> {
-    let config = output_common::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+    let mut config = output_common::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
         Some(&context.cache_dir.value),
         &context.resource_profiles,
     )?;
+    // Redact sensitive service env values before any output. Secrets declared
+    // via the top-level `secrets:` block (ValueSource::Secret) and any value
+    // matching a resolved secret are hidden unless --show-values is passed.
+    let secret_values = crate::redaction::secret_value_set(
+        &context.interpolation_vars,
+        &context.interpolation_var_sources,
+    );
+    for service in config.services.values_mut() {
+        service.environment =
+            crate::redaction::redact_env_map(&service.environment, &secret_values, show_values);
+    }
     let output_format = output_common::resolve_output_format(format, false);
     if variables {
         let referenced =
@@ -698,12 +832,22 @@ pub(crate) fn config(
     }
     match output_format {
         OutputFormat::Text => {
-            print!("{}", output_common::effective_config_yaml(&config)?);
+            let redacted_config =
+                crate::redaction::redacted_yaml_value(&config, &secret_values, show_values)
+                    .context("failed to serialize config output")?;
+            print!(
+                "{}",
+                serde_norway::to_string(&redacted_config)
+                    .context("failed to serialize config output")?
+            );
         }
         OutputFormat::Json => {
+            let redacted_config =
+                crate::redaction::redacted_json_value(&config, &secret_values, show_values)
+                    .context("failed to serialize config output")?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&config)
+                serde_json::to_string_pretty(&redacted_config)
                     .context("failed to serialize config output")?
             );
         }
@@ -1029,6 +1173,7 @@ fn scoped_interpolation_vars(
     std::collections::BTreeMap<String, String>,
     std::collections::BTreeMap<String, ValueSource>,
 ) {
+    let secret_values = crate::redaction::secret_value_set(vars, sources);
     let mut scoped_vars = std::collections::BTreeMap::new();
     let mut scoped_sources = std::collections::BTreeMap::new();
     for key in referenced {
@@ -1036,35 +1181,12 @@ fn scoped_interpolation_vars(
             continue;
         };
         let source = sources.get(key).copied().unwrap_or(ValueSource::Builtin);
-        let value = if show_values || !looks_sensitive_env_name(key) {
-            value.clone()
-        } else {
-            "<redacted>".to_string()
-        };
-        scoped_vars.insert(key.clone(), value);
+        let redacted =
+            crate::redaction::redact_value(key, value, Some(source), &secret_values, show_values);
+        scoped_vars.insert(key.clone(), redacted);
         scoped_sources.insert(key.clone(), source);
     }
     (scoped_vars, scoped_sources)
-}
-
-fn looks_sensitive_env_name(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    [
-        "SECRET",
-        "TOKEN",
-        "PASSWORD",
-        "PASSWD",
-        "API_KEY",
-        "ACCESS_KEY",
-        "PRIVATE_KEY",
-        "CREDENTIAL",
-        "AUTH",
-        "COOKIE",
-        "SESSION",
-        "BEARER",
-    ]
-    .iter()
-    .any(|needle| upper.contains(needle))
 }
 
 fn load_discovered_cluster_profile(

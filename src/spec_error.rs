@@ -147,9 +147,13 @@ pub(crate) enum SpecError {
     )]
     #[diagnostic(
         code(hpc_compose::spec::invalid_dependency_condition),
-        help("Use one of the three supported Compose dependency conditions.")
+        help("{help_text}")
     )]
-    InvalidDependencyCondition { service: String, got: String },
+    InvalidDependencyCondition {
+        service: String,
+        got: String,
+        help_text: String,
+    },
 
     #[error("environment list items must use KEY=VALUE syntax")]
     #[diagnostic(

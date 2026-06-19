@@ -10,10 +10,11 @@ For background on Slurm allocations, `sbatch`, `srun`, Pyxis, and Enroot, see [S
 hpc-compose validate -f compose.yaml
 hpc-compose validate -f compose.yaml --strict-env
 hpc-compose plan --verbose -f compose.yaml
+hpc-compose lint --fix --dry-run -f compose.yaml
 hpc-compose debug -f compose.yaml --preflight
 ```
 
-`plan --verbose` can print resolved environment values and final mount mappings. Treat its output as sensitive when the spec contains secrets. `debug` is read-only unless `--preflight` is passed; with `--preflight`, it reruns prerequisite checks and includes those findings in the triage report.
+`plan --verbose` can print resolved environment values and final mount mappings. Treat its output as sensitive when the spec contains secrets. `validate` and `lint` emit "Did you mean ..." suggestions for misspelled service keys and dependency conditions. `lint --fix --dry-run` previews auto-fixes (for example, making an implicit `depends_on` condition explicit) without writing. `debug` is read-only unless `--preflight` is passed; with `--preflight`, it reruns prerequisite checks and includes those findings in the triage report.
 
 ## Common Symptoms
 

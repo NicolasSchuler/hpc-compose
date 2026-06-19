@@ -44,6 +44,9 @@ pub enum ValueSource {
     Builtin,
     /// Process environment variable.
     ProcessEnv,
+    /// A value resolved through the top-level `secrets:` block (file or env).
+    /// Always treated as sensitive for redaction regardless of its name.
+    Secret,
 }
 
 /// A resolved value and where it came from.
@@ -502,6 +505,11 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         interpolation_var_sources.insert(key.clone(), ValueSource::ProcessEnv);
         interpolation_vars.insert(key, value);
     }
+    let resolved_secrets = resolve_compose_secrets(&compose_file.value, &interpolation_vars)?;
+    for (name, value) in resolved_secrets {
+        interpolation_var_sources.insert(name.clone(), ValueSource::Secret);
+        interpolation_vars.insert(name, value);
+    }
 
     let resolved_settings_base_dir = settings_path.as_deref().map(settings_base_dir);
 
@@ -814,6 +822,53 @@ fn apply_env_map(
         vars.insert(key.clone(), value.clone());
         sources.insert(key.clone(), source);
     }
+}
+
+/// Resolves the compose file's top-level `secrets:` block into a map of
+/// name → value, so the caller can merge them tagged [`ValueSource::Secret`].
+///
+/// `file:` sources are read relative to the compose file directory; `env:`
+/// sources read the named variable from `lookup_vars` (the interpolation map
+/// built so far, which already includes process env).
+fn resolve_compose_secrets(
+    compose_file: &Path,
+    lookup_vars: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    // Tolerate spec parse failures here: a broken spec is reported by the
+    // normal load path, and secrets cannot be resolved without a parseable
+    // file. Only secret-specific errors (missing file/env) propagate.
+    let Ok(secrets) = hpc_compose::spec::ComposeSpec::load_secrets(compose_file) else {
+        return Ok(BTreeMap::new());
+    };
+    let compose_dir = compose_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let mut resolved = BTreeMap::new();
+    for (name, spec) in &secrets {
+        let value = if let Some(file_rel) = &spec.file {
+            let path = resolve_string_path(file_rel, &compose_dir);
+            let raw = fs::read_to_string(&path).with_context(|| {
+                format!(
+                    "secret '{name}' file '{}' could not be read",
+                    path.display()
+                )
+            })?;
+            raw.trim().to_string()
+        } else if let Some(env_name) = &spec.env {
+            lookup_vars
+                .get(env_name)
+                .with_context(|| {
+                    format!("secret '{name}' references env var '{env_name}' which is not set")
+                })?
+                .clone()
+        } else {
+            // SecretSpec::validate enforces one-of; unreachable for a valid spec.
+            continue;
+        };
+        resolved.insert(name.clone(), value);
+    }
+    Ok(resolved)
 }
 
 fn settings_base_dir(path: &Path) -> PathBuf {

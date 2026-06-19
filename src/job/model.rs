@@ -64,6 +64,8 @@ pub enum SubmissionKind {
     Canary,
     /// One trial submitted by `sweep submit`.
     SweepTrial,
+    /// A tracked interactive notebook server submitted by `notebook`.
+    Notebook,
 }
 
 /// Sweep metadata attached to a trial submission record.

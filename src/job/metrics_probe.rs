@@ -1210,4 +1210,374 @@ mod tests {
         );
         assert!(measurement.is_none());
     }
+
+    #[test]
+    fn nvml_probe_with_mock_library_reports_devices_events_and_processes() {
+        struct MockLoader;
+        struct MockLibrary;
+
+        impl DynamicLibraryLoader for MockLoader {
+            fn open(&self, _name: &CStr) -> std::result::Result<Box<dyn DynamicLibrary>, String> {
+                Ok(Box::new(MockLibrary))
+            }
+        }
+
+        impl DynamicLibrary for MockLibrary {
+            unsafe fn symbol(&self, name: &str) -> std::result::Result<*mut libc::c_void, String> {
+                match name {
+                    "nvmlInit_v2" => Ok(mock_nvml_init as *const () as *mut libc::c_void),
+                    "nvmlShutdown" => Ok(mock_nvml_shutdown as *const () as *mut libc::c_void),
+                    "nvmlDeviceGetCount_v2" => {
+                        Ok(mock_nvml_device_get_count as *const () as *mut libc::c_void)
+                    }
+                    "nvmlDeviceGetHandleByIndex_v2" => {
+                        Ok(mock_nvml_device_get_handle_by_index as *const () as *mut libc::c_void)
+                    }
+                    "nvmlDeviceGetUtilizationRates" => Ok(mock_nvml_device_get_utilization_rates
+                        as *const ()
+                        as *mut libc::c_void),
+                    "nvmlDeviceGetMemoryInfo" => {
+                        Ok(mock_nvml_device_get_memory_info as *const () as *mut libc::c_void)
+                    }
+                    "nvmlDeviceGetPowerUsage" => {
+                        Ok(mock_nvml_device_get_power_usage as *const () as *mut libc::c_void)
+                    }
+                    "nvmlDeviceGetComputeRunningProcesses_v3" => {
+                        Ok(mock_nvml_device_get_compute_running_processes as *const ()
+                            as *mut libc::c_void)
+                    }
+                    "nvmlEventSetCreate" => {
+                        Ok(mock_nvml_event_set_create as *const () as *mut libc::c_void)
+                    }
+                    "nvmlDeviceRegisterEvents" => {
+                        Ok(mock_nvml_device_register_events as *const () as *mut libc::c_void)
+                    }
+                    "nvmlEventSetFree" => {
+                        Ok(mock_nvml_event_set_free as *const () as *mut libc::c_void)
+                    }
+                    _ => Err(format!("missing symbol {name}")),
+                }
+            }
+        }
+
+        let (capability, measurement) = probe_nvml_with_loader(&MockLoader);
+
+        assert!(capability.available);
+        assert_eq!(capability.device_count, Some(2));
+        assert_eq!(
+            capability.supported_event_mask,
+            Some(NVML_EVENT_TYPE_XID_CRITICAL_ERROR)
+        );
+        assert_eq!(
+            capability.supported_event_names,
+            vec!["xid_critical_error".to_string()]
+        );
+        let devices = measurement.expect("measurement").devices;
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].index, 0);
+        assert_eq!(devices[0].utilization_gpu_percent, Some(17));
+        assert_eq!(devices[0].utilization_memory_percent, Some(23));
+        assert_eq!(devices[0].memory_used_bytes, Some(256));
+        assert_eq!(devices[0].memory_total_bytes, Some(1024));
+        assert_eq!(devices[0].power_draw_mw, Some(55_000));
+        assert_eq!(devices[0].process_count, Some(2));
+        assert!(devices[0].note.is_none());
+        assert_eq!(devices[1].index, 1);
+        assert!(
+            devices[1]
+                .note
+                .as_deref()
+                .expect("handle note")
+                .contains("nvmlDeviceGetHandleByIndex_v2 returned 42")
+        );
+    }
+
+    #[test]
+    fn nvml_probe_reports_required_symbol_and_init_failures() {
+        struct MissingShutdownLoader;
+        struct InitFailureLoader;
+        struct MissingShutdownLibrary;
+        struct InitFailureLibrary;
+
+        impl DynamicLibraryLoader for MissingShutdownLoader {
+            fn open(&self, _name: &CStr) -> std::result::Result<Box<dyn DynamicLibrary>, String> {
+                Ok(Box::new(MissingShutdownLibrary))
+            }
+        }
+
+        impl DynamicLibrary for MissingShutdownLibrary {
+            unsafe fn symbol(&self, name: &str) -> std::result::Result<*mut libc::c_void, String> {
+                match name {
+                    "nvmlInit_v2" => Ok(mock_nvml_init as *const () as *mut libc::c_void),
+                    _ => Err(format!("missing symbol {name}")),
+                }
+            }
+        }
+
+        impl DynamicLibraryLoader for InitFailureLoader {
+            fn open(&self, _name: &CStr) -> std::result::Result<Box<dyn DynamicLibrary>, String> {
+                Ok(Box::new(InitFailureLibrary))
+            }
+        }
+
+        impl DynamicLibrary for InitFailureLibrary {
+            unsafe fn symbol(&self, name: &str) -> std::result::Result<*mut libc::c_void, String> {
+                match name {
+                    "nvmlInit_v2" => Ok(mock_nvml_init_failure as *const () as *mut libc::c_void),
+                    "nvmlShutdown" => Ok(mock_nvml_shutdown as *const () as *mut libc::c_void),
+                    "nvmlDeviceGetCount_v2" => {
+                        Ok(mock_nvml_device_get_count as *const () as *mut libc::c_void)
+                    }
+                    "nvmlDeviceGetHandleByIndex_v2" => {
+                        Ok(mock_nvml_device_get_handle_by_index as *const () as *mut libc::c_void)
+                    }
+                    _ => Err(format!("missing symbol {name}")),
+                }
+            }
+        }
+
+        let (missing_capability, missing_measurement) =
+            probe_nvml_with_loader(&MissingShutdownLoader);
+        assert!(!missing_capability.available);
+        assert!(
+            missing_capability
+                .note
+                .as_deref()
+                .expect("missing symbol note")
+                .contains("missing symbol nvmlShutdown")
+        );
+        assert!(missing_measurement.is_none());
+
+        let (init_capability, init_measurement) = probe_nvml_with_loader(&InitFailureLoader);
+        assert!(!init_capability.available);
+        assert_eq!(
+            init_capability.note.as_deref(),
+            Some("nvmlInit_v2 returned 13")
+        );
+        assert!(init_measurement.is_none());
+    }
+
+    #[test]
+    fn nvml_process_count_covers_error_and_resize_paths() {
+        let mut note = Vec::new();
+        assert_eq!(
+            probe_nvml_process_count(
+                mock_nvml_processes_count_only,
+                std::ptr::null_mut(),
+                &mut note
+            ),
+            Some(3)
+        );
+        assert!(note.is_empty());
+
+        assert_eq!(
+            probe_nvml_process_count(
+                mock_nvml_processes_empty_resize,
+                std::ptr::null_mut(),
+                &mut note
+            ),
+            Some(0)
+        );
+        assert!(note.is_empty());
+
+        assert_eq!(
+            probe_nvml_process_count(
+                mock_nvml_processes_hard_failure,
+                std::ptr::null_mut(),
+                &mut note
+            ),
+            None
+        );
+        assert!(
+            note.iter()
+                .any(|entry| entry.contains("nvmlDeviceGetComputeRunningProcesses returned 99"))
+        );
+
+        note.clear();
+        assert_eq!(
+            probe_nvml_process_count(
+                mock_nvml_processes_second_failure,
+                std::ptr::null_mut(),
+                &mut note
+            ),
+            None
+        );
+        assert!(
+            note.iter()
+                .any(|entry| entry.contains("nvmlDeviceGetComputeRunningProcesses returned 77"))
+        );
+    }
+
+    #[test]
+    fn tracepoint_probe_uses_available_events_or_readable_id() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let root = tmpdir.path();
+        let id_path = root.join("events/block/block_rq_complete/id");
+        fs::create_dir_all(id_path.parent().expect("id parent")).expect("tracepoint dir");
+        fs::write(&id_path, "123\n").expect("id");
+
+        let listed = probe_tracepoint(root, "syscalls:sys_enter_read\n", "syscalls/sys_enter_read");
+        assert!(listed.available);
+        assert_eq!(listed.id, None);
+        assert!(listed.note.is_none());
+
+        let id_only = probe_tracepoint(root, "", "block/block_rq_complete");
+        assert!(id_only.available);
+        assert_eq!(id_only.id, Some(123));
+        assert!(id_only.note.is_none());
+
+        let missing = probe_tracepoint(root, "", "net/net_dev_queue");
+        assert!(!missing.available);
+        assert!(missing.note.as_deref().expect("note").contains("not found"));
+    }
+
+    unsafe extern "C" fn mock_nvml_init() -> i32 {
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_init_failure() -> i32 {
+        13
+    }
+
+    unsafe extern "C" fn mock_nvml_shutdown() -> i32 {
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_device_get_count(count: *mut libc::c_uint) -> i32 {
+        unsafe {
+            *count = 2;
+        }
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_device_get_handle_by_index(
+        index: libc::c_uint,
+        handle: *mut NvmlDevice,
+    ) -> i32 {
+        if index == 0 {
+            unsafe {
+                *handle = std::ptr::dangling_mut::<libc::c_void>();
+            }
+            NVML_SUCCESS
+        } else {
+            42
+        }
+    }
+
+    unsafe extern "C" fn mock_nvml_device_get_utilization_rates(
+        _handle: NvmlDevice,
+        utilization: *mut NvmlUtilization,
+    ) -> i32 {
+        unsafe {
+            (*utilization).gpu = 17;
+            (*utilization).memory = 23;
+        }
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_device_get_memory_info(
+        _handle: NvmlDevice,
+        memory: *mut NvmlMemory,
+    ) -> i32 {
+        unsafe {
+            (*memory).total = 1024;
+            (*memory).used = 256;
+        }
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_device_get_power_usage(
+        _handle: NvmlDevice,
+        power: *mut libc::c_uint,
+    ) -> i32 {
+        unsafe {
+            *power = 55_000;
+        }
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_device_get_compute_running_processes(
+        _handle: NvmlDevice,
+        count: *mut libc::c_uint,
+        processes: *mut NvmlProcessInfo,
+    ) -> i32 {
+        unsafe {
+            if processes.is_null() {
+                *count = 2;
+                NVML_ERROR_INSUFFICIENT_SIZE
+            } else {
+                (*processes).pid = 123;
+                *count = 2;
+                NVML_SUCCESS
+            }
+        }
+    }
+
+    unsafe extern "C" fn mock_nvml_event_set_create(event_set: *mut NvmlEventSet) -> i32 {
+        unsafe {
+            *event_set = std::ptr::dangling_mut::<libc::c_void>();
+        }
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_device_register_events(
+        _handle: NvmlDevice,
+        mask: u64,
+        _event_set: NvmlEventSet,
+    ) -> i32 {
+        if mask == NVML_EVENT_TYPE_XID_CRITICAL_ERROR {
+            NVML_SUCCESS
+        } else {
+            1
+        }
+    }
+
+    unsafe extern "C" fn mock_nvml_event_set_free(_event_set: NvmlEventSet) -> i32 {
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_processes_count_only(
+        _handle: NvmlDevice,
+        count: *mut libc::c_uint,
+        _processes: *mut NvmlProcessInfo,
+    ) -> i32 {
+        unsafe {
+            *count = 3;
+        }
+        NVML_SUCCESS
+    }
+
+    unsafe extern "C" fn mock_nvml_processes_empty_resize(
+        _handle: NvmlDevice,
+        count: *mut libc::c_uint,
+        _processes: *mut NvmlProcessInfo,
+    ) -> i32 {
+        unsafe {
+            *count = 0;
+        }
+        NVML_ERROR_INSUFFICIENT_SIZE
+    }
+
+    unsafe extern "C" fn mock_nvml_processes_hard_failure(
+        _handle: NvmlDevice,
+        _count: *mut libc::c_uint,
+        _processes: *mut NvmlProcessInfo,
+    ) -> i32 {
+        99
+    }
+
+    unsafe extern "C" fn mock_nvml_processes_second_failure(
+        _handle: NvmlDevice,
+        count: *mut libc::c_uint,
+        processes: *mut NvmlProcessInfo,
+    ) -> i32 {
+        unsafe {
+            if processes.is_null() {
+                *count = 1;
+                NVML_ERROR_INSUFFICIENT_SIZE
+            } else {
+                77
+            }
+        }
+    }
 }

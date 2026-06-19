@@ -96,6 +96,11 @@ pub fn latest_canary_record_path_for(spec_path: &Path) -> PathBuf {
     tracked_paths::latest_canary_record_path_for(spec_path)
 }
 
+/// Returns the path to the "latest tracked notebook job" record file.
+pub fn latest_notebook_record_path_for(spec_path: &Path) -> PathBuf {
+    tracked_paths::latest_notebook_record_path_for(spec_path)
+}
+
 /// Builds and persists a new submission record for a submitted job.
 pub fn persist_submission_record(
     spec_path: &Path,
@@ -244,6 +249,7 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
         SubmissionKind::Main => latest_record_path_for(&record.compose_file),
         SubmissionKind::Run => latest_run_record_path_for(&record.compose_file),
         SubmissionKind::Canary => latest_canary_record_path_for(&record.compose_file),
+        SubmissionKind::Notebook => latest_notebook_record_path_for(&record.compose_file),
         SubmissionKind::SweepTrial => return Ok(()),
     };
     write_json(&latest_path, record)?;
@@ -530,6 +536,8 @@ fn build_inventory_entries_for_metadata_root(
     let latest_run_job_id = resolved_latest_job_id(metadata_root, &records, SubmissionKind::Run);
     let latest_canary_job_id =
         resolved_latest_job_id(metadata_root, &records, SubmissionKind::Canary);
+    let latest_notebook_job_id =
+        resolved_latest_job_id(metadata_root, &records, SubmissionKind::Notebook);
     let mut inventory = Vec::with_capacity(records.len());
     for (record_path, record) in records {
         let runtime_job_root = tracked_paths::runtime_job_root(&record.submit_dir, &record.job_id);
@@ -553,6 +561,9 @@ fn build_inventory_entries_for_metadata_root(
                 SubmissionKind::Run => latest_run_job_id.as_deref() == Some(record.job_id.as_str()),
                 SubmissionKind::Canary => {
                     latest_canary_job_id.as_deref() == Some(record.job_id.as_str())
+                }
+                SubmissionKind::Notebook => {
+                    latest_notebook_job_id.as_deref() == Some(record.job_id.as_str())
                 }
                 SubmissionKind::SweepTrial => false,
             },
@@ -598,6 +609,9 @@ fn read_latest_pointer_job_id(metadata_root: &Path, kind: SubmissionKind) -> Opt
         SubmissionKind::Main => metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME),
         SubmissionKind::Run => metadata_root.join(tracked_paths::RUN_LATEST_RECORD_FILE_NAME),
         SubmissionKind::Canary => metadata_root.join(tracked_paths::CANARY_LATEST_RECORD_FILE_NAME),
+        SubmissionKind::Notebook => {
+            metadata_root.join(tracked_paths::NOTEBOOK_LATEST_RECORD_FILE_NAME)
+        }
         SubmissionKind::SweepTrial => return None,
     };
     read_json::<SubmissionRecord>(&latest_path)
@@ -621,6 +635,9 @@ fn resolved_latest_job_id(
         SubmissionKind::Main => metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME),
         SubmissionKind::Run => metadata_root.join(tracked_paths::RUN_LATEST_RECORD_FILE_NAME),
         SubmissionKind::Canary => metadata_root.join(tracked_paths::CANARY_LATEST_RECORD_FILE_NAME),
+        SubmissionKind::Notebook => {
+            metadata_root.join(tracked_paths::NOTEBOOK_LATEST_RECORD_FILE_NAME)
+        }
         SubmissionKind::SweepTrial => return None,
     };
     if latest_path.exists()
@@ -754,6 +771,7 @@ fn repair_latest_record_for_kind(
         SubmissionKind::Main => latest_record_path_for(compose_file),
         SubmissionKind::Run => latest_run_record_path_for(compose_file),
         SubmissionKind::Canary => latest_canary_record_path_for(compose_file),
+        SubmissionKind::Notebook => latest_notebook_record_path_for(compose_file),
         SubmissionKind::SweepTrial => return Ok(()),
     };
     if let Some(latest) = records

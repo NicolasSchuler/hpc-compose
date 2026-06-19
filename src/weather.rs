@@ -1,5 +1,4 @@
 //! Advisory live cluster weather probes.
-#![allow(missing_docs)]
 
 use std::collections::BTreeMap;
 use std::env;
@@ -267,6 +266,11 @@ pub fn collect_weather(options: &WeatherOptions<'_>) -> Result<WeatherReport> {
     })
 }
 
+/// Public-ish convenience wrapper around [`parse_sinfo`] returning the parsed
+/// nodes and maintenance notes as a tuple. Currently exercised only by tests
+/// (the production weather flow calls [`parse_sinfo`] directly), but kept
+/// available for future internal callers and external integration tests.
+#[allow(dead_code)]
 pub fn parse_sinfo_nodes(raw: &str) -> (NodeSummary, Vec<MaintenanceNote>) {
     let parsed = parse_sinfo(raw);
     (parsed.nodes, parsed.maintenance)

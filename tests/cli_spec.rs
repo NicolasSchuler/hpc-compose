@@ -408,6 +408,244 @@ services:
 }
 
 #[test]
+fn lint_reports_node_local_cache_and_volume_findings() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+x-slurm:
+  cache_dir: /tmp/hpc-compose-cache
+services:
+  app:
+    image: redis:7
+    volumes:
+      - /tmp/data:/data
+"#,
+    );
+
+    let lint = run_cli(
+        tmpdir.path(),
+        &["lint", "-f", compose.to_str().expect("path")],
+    );
+    let stdout = stdout_text(&lint);
+    assert!(
+        stdout.contains("HPC004") && stdout.contains("cache_dir"),
+        "expected HPC004 in stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("HPC005") && stdout.contains("/tmp/data"),
+        "expected HPC005 in stdout:\n{stdout}"
+    );
+    // Advisory rules must not be auto-fixable.
+    let lint_json = run_cli(
+        tmpdir.path(),
+        &[
+            "lint",
+            "-f",
+            compose.to_str().expect("path"),
+            "--allow-warnings",
+            "--format",
+            "json",
+        ],
+    );
+    let payload: Value = serde_json::from_str(&stdout_text(&lint_json)).expect("lint json");
+    let fixable = payload["fixable_count"].as_u64().unwrap_or(0);
+    assert_eq!(fixable, 0, "node-local findings must not be fixable");
+}
+
+#[test]
+fn lint_fix_makes_depends_on_condition_explicit_and_preserves_comments() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        "# top-level comment\nx-slurm:\n  cache_dir: ./cache\nservices:\n  # service comment\n  app: # inline\n    image: redis:7\n    depends_on:\n      - redis\n  redis:\n    image: redis:7\n",
+    );
+
+    // Dry-run must not modify the file but must propose the change.
+    let dry = run_cli(
+        tmpdir.path(),
+        &[
+            "lint",
+            "-f",
+            compose.to_str().expect("path"),
+            "--fix",
+            "--dry-run",
+        ],
+    );
+    let dry_stdout = stdout_text(&dry);
+    assert!(
+        dry_stdout.contains("+        condition: service_started"),
+        "dry-run diff should propose condition line:\n{dry_stdout}"
+    );
+    // File unchanged.
+    let after_dry = fs::read_to_string(&compose).expect("read after dry-run");
+    assert!(
+        after_dry.contains("- redis"),
+        "dry-run must not rewrite the file"
+    );
+
+    // Real fix writes the file. --allow-warnings keeps the exit code clean
+    // because HPC001 (readiness mismatch) is advisory and stays after the fix.
+    let fix = run_cli(
+        tmpdir.path(),
+        &[
+            "lint",
+            "-f",
+            compose.to_str().expect("path"),
+            "--fix",
+            "--allow-warnings",
+        ],
+    );
+    assert_success(&fix);
+    let fix_stdout = stdout_text(&fix);
+    assert!(
+        fix_stdout.contains("Applied 1 fix(es)"),
+        "expected applied summary:\n{fix_stdout}"
+    );
+
+    let after = fs::read_to_string(&compose).expect("read after fix");
+    assert!(
+        after.contains("redis:\n        condition: service_started"),
+        "expected explicit condition after fix:\n{after}"
+    );
+    // Comments outside the rewritten block survive byte-for-byte.
+    assert!(after.contains("# top-level comment"));
+    assert!(after.contains("# service comment"));
+    assert!(after.contains("# inline"));
+
+    // Re-running lint should no longer report HPC006 for this edge.
+    let again = run_cli(
+        tmpdir.path(),
+        &[
+            "lint",
+            "-f",
+            compose.to_str().expect("path"),
+            "--allow-warnings",
+            "--format",
+            "json",
+        ],
+    );
+    let payload: Value = serde_json::from_str(&stdout_text(&again)).expect("lint json");
+    let codes = payload["findings"]
+        .as_array()
+        .map(|findings| {
+            findings
+                .iter()
+                .filter_map(|finding| finding["code"].as_str().map(ToString::to_string))
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        !codes.contains("HPC006"),
+        "HPC006 should be resolved after --fix; remaining codes: {codes:?}"
+    );
+}
+
+#[test]
+fn lint_fix_is_noop_when_nothing_is_fixable() {
+    // A spec whose only findings are advisory (node-local cache/volume) has no
+    // fixable edges, so --fix must not rewrite the file or print a summary.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        "x-slurm:\n  cache_dir: /tmp/hpc-compose-cache\nservices:\n  app:\n    image: redis:7\n    volumes:\n      - /tmp/data:/data\n",
+    );
+    let before = fs::read_to_string(&compose).expect("read before");
+
+    let fix = run_cli(
+        tmpdir.path(),
+        &[
+            "lint",
+            "-f",
+            compose.to_str().expect("path"),
+            "--fix",
+            "--allow-warnings",
+        ],
+    );
+    assert_success(&fix);
+    let fix_stdout = stdout_text(&fix);
+    assert!(
+        !fix_stdout.contains("Applied"),
+        "no fix should be applied when nothing is fixable:\n{fix_stdout}"
+    );
+    let after = fs::read_to_string(&compose).expect("read after");
+    assert_eq!(
+        before, after,
+        "compose file must be unchanged when no fixes apply"
+    );
+}
+
+#[test]
+fn validate_suggests_dependency_condition_typo() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: redis:7
+    depends_on:
+      redis:
+        condition: service_start
+  redis:
+    image: redis:7
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    let combined = format!("{}\n{}", stdout_text(&validate), stderr_text(&validate));
+    // miette may wrap the help text across lines, so check the pieces.
+    assert!(
+        combined.contains("Did you") && combined.contains("service_started"),
+        "expected a did-you-mean suggestion for the typo:\n{combined}"
+    );
+}
+
+#[test]
+fn validate_suggests_unknown_service_key_typo() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: redis:7
+    comand: /bin/true
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    let combined = format!("{}\n{}", stdout_text(&validate), stderr_text(&validate));
+    assert!(
+        combined.contains("Did you") && combined.contains("command"),
+        "expected a did-you-mean suggestion for the unknown key:\n{combined}"
+    );
+}
+
+#[test]
 fn render_emits_array_directive_and_forwards_array_environment() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");
@@ -1711,8 +1949,8 @@ fn schema_root_and_service_keys_match_parser_whitelists() {
     let value = load_schema_json();
 
     let root_keys: BTreeSet<&str> = [
-        "extends", "name", "modules", "runtime", "services", "steps", "sweep", "version", "x-env",
-        "x-slurm",
+        "extends", "name", "modules", "runtime", "secrets", "services", "steps", "sweep",
+        "version", "x-env", "x-slurm",
     ]
     .into_iter()
     .collect();
@@ -1899,7 +2137,7 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
         ("runtime", &["backend", "gpu"]),
         ("serviceRuntime", &["prepare"]),
         ("serviceEnroot", &["prepare"]),
-        ("sweep", &["parameters", "matrix"]),
+        ("sweep", &["parameters", "matrix", "objective"]),
     ];
 
     for (def_name, expected_keys) in catalog {
@@ -2210,4 +2448,222 @@ fn rendered_minimal_batch_keeps_stable_header_section() {
     );
     assert!(script.contains("local -a service_cmd=('/bin/sh' '-lc'"));
     assert!(script.contains("register_service 'app'"));
+}
+
+#[test]
+fn secrets_from_file_resolve_and_are_redacted_in_config() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    fs::write(tmpdir.path().join("token.txt"), "hf-secret-value-123\n").expect("secret file");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: secrets-demo
+x-slurm:
+  cache_dir: {}
+secrets:
+  hf_token:
+    file: ./token.txt
+services:
+  app:
+    image: redis:7
+    environment:
+      HF_TOKEN: ${{hf_token}}
+      MODEL: llama
+    command: ["/bin/sh", "-lc", "echo prefix-${{hf_token}}"]
+"#,
+            cache_root.path().display()
+        ),
+    );
+
+    // validate must accept the secrets block and resolve ${hf_token}.
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&validate);
+
+    // config must redact the secret-sourced value but keep benign values.
+    let config = run_cli(
+        tmpdir.path(),
+        &["config", "-f", compose.to_str().expect("path")],
+    );
+    let config_stdout = stdout_text(&config);
+    assert!(
+        config_stdout.contains("HF_TOKEN: <redacted>"),
+        "secret value must be redacted in config:\n{config_stdout}"
+    );
+    assert!(
+        config_stdout.contains("MODEL: llama"),
+        "benign value must remain:\n{config_stdout}"
+    );
+    assert!(
+        !config_stdout.contains("hf-secret-value-123"),
+        "raw secret value must never appear:\n{config_stdout}"
+    );
+    assert!(
+        config_stdout.contains("echo prefix-<redacted>"),
+        "secret interpolation outside environment must be redacted:\n{config_stdout}"
+    );
+
+    let config_json = run_cli(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&config_json);
+    let config_json_stdout = stdout_text(&config_json);
+    assert!(
+        !config_json_stdout.contains("hf-secret-value-123"),
+        "config JSON must not leak raw secret values:\n{config_json_stdout}"
+    );
+    let config_payload: Value =
+        serde_json::from_str(&config_json_stdout).expect("config json redacted");
+    assert_eq!(
+        config_payload["services"]["app"]["environment"]["HF_TOKEN"],
+        Value::from("<redacted>")
+    );
+    assert_eq!(
+        config_payload["services"]["app"]["command"][2],
+        Value::from("echo prefix-<redacted>")
+    );
+
+    let inspect_json = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&inspect_json);
+    let inspect_json_stdout = stdout_text(&inspect_json);
+    assert!(
+        !inspect_json_stdout.contains("hf-secret-value-123"),
+        "inspect JSON must not leak raw secret values:\n{inspect_json_stdout}"
+    );
+    assert!(
+        inspect_json_stdout.contains("echo prefix-<redacted>"),
+        "runtime plan command should redact secret interpolation:\n{inspect_json_stdout}"
+    );
+
+    let inspect_verbose = run_cli(
+        tmpdir.path(),
+        &[
+            "inspect",
+            "-f",
+            compose.to_str().expect("path"),
+            "--verbose",
+        ],
+    );
+    assert_success(&inspect_verbose);
+    let inspect_verbose_stdout = stdout_text(&inspect_verbose);
+    assert!(
+        !inspect_verbose_stdout.contains("hf-secret-value-123"),
+        "inspect verbose text must not leak raw secret values:\n{inspect_verbose_stdout}"
+    );
+    assert!(
+        inspect_verbose_stdout.contains("echo prefix-<redacted>"),
+        "inspect verbose command should redact secret interpolation:\n{inspect_verbose_stdout}"
+    );
+
+    // --show-values must reveal the secret for operators who opt in.
+    let revealed = run_cli(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--show-values",
+        ],
+    );
+    assert!(stdout_text(&revealed).contains("HF_TOKEN: hf-secret-value-123"));
+    assert!(stdout_text(&revealed).contains("echo prefix-hf-secret-value-123"));
+}
+
+#[test]
+fn secrets_from_env_resolve_via_process_env() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: secrets-env-demo
+x-slurm:
+  cache_dir: {}
+secrets:
+  db_password:
+    env: DB_PASSWORD
+services:
+  app:
+    image: redis:7
+    environment:
+      DB_PASSWORD: ${{db_password}}
+    command: /bin/true
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let validate = run_cli_with_env(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+        &[("DB_PASSWORD", "s3cret")],
+    );
+    assert_success(&validate);
+    let config = run_cli_with_env(
+        tmpdir.path(),
+        &["config", "-f", compose.to_str().expect("path")],
+        &[("DB_PASSWORD", "s3cret")],
+    );
+    let config_stdout = stdout_text(&config);
+    assert!(config_stdout.contains("DB_PASSWORD: <redacted>"));
+    assert!(!config_stdout.contains("s3cret"));
+}
+
+#[test]
+fn secrets_reject_when_both_file_and_env_set() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    fs::write(tmpdir.path().join("tok.txt"), "x\n").expect("secret file");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: secrets-bad
+x-slurm:
+  cache_dir: {}
+secrets:
+  bad:
+    file: ./tok.txt
+    env: SOME_VAR
+services:
+  app:
+    image: redis:7
+    command: /bin/true
+"#,
+            cache_root.path().display()
+        ),
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    let combined = format!("{}\n{}", stdout_text(&validate), stderr_text(&validate));
+    assert!(
+        combined.contains("exactly one of 'file' or 'env'"),
+        "expected one-of validation error:\n{combined}"
+    );
 }

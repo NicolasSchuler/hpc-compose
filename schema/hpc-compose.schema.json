@@ -85,6 +85,10 @@
     },
     "sweep": {
       "$ref": "#/definitions/sweep"
+    },
+    "secrets": {
+      "$ref": "#/definitions/secrets",
+      "description": "Named secrets resolved from local files or environment variables. Each value feeds the interpolation map as a secret and is redacted in config/context output."
     }
   },
   "definitions": {
@@ -201,6 +205,20 @@
         { "type": "string" }
       ]
     },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/secretSource" },
+      "description": "Map of secret name to source. Each value is resolved into the interpolation map tagged as a secret."
+    },
+    "secretSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Exactly one of 'file' or 'env' must be set. 'file' reads the secret from a file relative to the compose directory; 'env' reads a named environment variable.",
+      "properties": {
+        "file": { "type": "string" },
+        "env": { "type": "string" }
+      }
+    },
     "sweep": {
       "type": "object",
       "additionalProperties": false,
@@ -224,9 +242,44 @@
         },
         "matrix": {
           "$ref": "#/definitions/sweepMatrix"
+        },
+        "objective": {
+          "$ref": "#/definitions/sweepObjective",
+          "description": "Optional objective parsed from terminal trials by `sweep observe` and used by `sweep stop --stop-when`."
         }
       },
       "description": "Embedded hyperparameter sweep metadata consumed by hpc-compose sweep submit/status/list. sweep.spec is intentionally unsupported in v1."
+    },
+    "sweepObjective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction"],
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": ["minimize", "maximize"],
+          "description": "Whether lower or higher objective values are better."
+        },
+        "log_pattern": {
+          "type": "string",
+          "description": "Regex matched against the trial's primary service log; capture group `group` is parsed as a float."
+        },
+        "group": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Capture group index for log_pattern (1-based)."
+        },
+        "json_path": {
+          "type": "string",
+          "description": "Artifact-collected JSON file whose json_field holds the objective."
+        },
+        "json_field": {
+          "type": "string",
+          "description": "Field to read from json_path. Required when json_path is set."
+        }
+      },
+      "description": "Set exactly one of log_pattern or json_path."
     },
     "sweepParameterValue": {
       "oneOf": [

@@ -4,11 +4,15 @@ use anyhow::{Context, Result, bail};
 use serde_norway::{Mapping, Value};
 
 use crate::spec_error::SpecError;
+use crate::suggest;
+use crate::tracked_paths::{
+    JOB_CONTAINER_DIR, is_under_job_container_dir, under_job_container_dir,
+};
 
 const SUPPORTED_SPEC_VERSION: &str = "1";
 const ROOT_ALLOWED_KEYS: &[&str] = &[
-    "extends", "name", "modules", "runtime", "services", "steps", "sweep", "version", "x-env",
-    "x-slurm",
+    "extends", "name", "modules", "runtime", "secrets", "services", "steps", "sweep", "version",
+    "x-env", "x-slurm",
 ];
 const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "extends",
@@ -71,10 +75,10 @@ pub(super) fn validate_service_assert_artifact_pattern(value: &str, field: &str)
     let normalized = if value.starts_with('/') {
         value.to_string()
     } else {
-        format!("/hpc-compose/job/{value}")
+        under_job_container_dir(value)
     };
-    if normalized != "/hpc-compose/job" && !normalized.starts_with("/hpc-compose/job/") {
-        bail!("{field} must be relative or rooted under /hpc-compose/job");
+    if !is_under_job_container_dir(&normalized) {
+        bail!("{field} must be relative or rooted under {JOB_CONTAINER_DIR}");
     }
     if normalized.split('/').any(|part| part == "..") {
         bail!("{field} must not contain '..' path components");
@@ -596,10 +600,16 @@ fn validate_mapping_keys(scope: &str, mapping: &Mapping, allowed: &[&str]) -> Re
                 "deploy is not supported; this tool targets one Slurm allocation, not a long-running orchestrator"
             }
             other => {
+                let help_text = match suggest::nearest_default(other, allowed) {
+                    Some(s) => {
+                        format!("See the spec reference for supported keys. Did you mean \"{s}\"?")
+                    }
+                    None => "See the spec reference for supported keys.".to_string(),
+                };
                 return Err(SpecError::UnsupportedServiceKey {
                     scope: scope.to_string(),
                     key: other.to_string(),
-                    help_text: "See the spec reference for supported keys.".into(),
+                    help_text,
                 }
                 .into());
             }

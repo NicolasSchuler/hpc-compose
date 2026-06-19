@@ -29,19 +29,20 @@
     "http://127.0.0.1:3000/haicore-guide.html",
     "http://127.0.0.1:3000/index.html",
     "http://127.0.0.1:3000/installation.html",
+    "http://127.0.0.1:3000/notebook.html",
     "http://127.0.0.1:3000/quickstart.html",
     "http://127.0.0.1:3000/roadmap.html",
     "http://127.0.0.1:3000/runbook.html",
     "http://127.0.0.1:3000/running-compose-style-workflows-on-slurm.html",
     "http://127.0.0.1:3000/runtime-backends.html",
     "http://127.0.0.1:3000/runtime-observability.html",
+    "http://127.0.0.1:3000/secrets.html",
     "http://127.0.0.1:3000/slurm-container-basics.html",
     "http://127.0.0.1:3000/spec-reference.html",
     "http://127.0.0.1:3000/support-matrix.html",
     "http://127.0.0.1:3000/supported-slurm-model.html",
     "http://127.0.0.1:3000/sweeps.html",
     "http://127.0.0.1:3000/task-guide.html",
-    "http://127.0.0.1:3000/toc.html",
     "http://127.0.0.1:3000/troubleshooting.html"
   ]
 }

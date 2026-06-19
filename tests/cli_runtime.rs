@@ -5612,6 +5612,207 @@ fn shell_rejects_invalid_env_before_srun() {
 }
 
 #[test]
+fn notebook_dry_run_renders_jupyter_launcher_without_submitting() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let script_out = tmpdir.path().join("notebook.sbatch");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "--kind",
+            "jupyter",
+            "--gpus",
+            "1",
+            "--volume",
+            "./project:/workspace",
+            "--dry-run",
+            "--no-preflight",
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    assert!(
+        script_out.exists(),
+        "dry-run should write the launcher script"
+    );
+    let script = fs::read_to_string(&script_out).expect("read script");
+    assert!(
+        script.contains("jupyter") && script.contains("lab"),
+        "rendered script should launch jupyter lab:\n{script}"
+    );
+    assert!(
+        script.contains("--ServerApp.token"),
+        "rendered script should pass the generated token:\n{script}"
+    );
+    // Dry-run must not create any tracking metadata.
+    assert!(
+        !tmpdir
+            .path()
+            .join(".hpc-compose/latest-notebook.json")
+            .exists()
+    );
+}
+
+#[test]
+fn notebook_dry_run_renders_vscode_command_when_image_supplied() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let script_out = tmpdir.path().join("notebook.sbatch");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "--kind",
+            "vscode",
+            "--image",
+            "ghcr.io/example/code:1",
+            "--tunnel-name",
+            "my-tunnel",
+            "--dry-run",
+            "--no-preflight",
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    let script = fs::read_to_string(&script_out).expect("read script");
+    assert!(
+        script.contains("code") && script.contains("tunnel"),
+        "vscode script should run `code tunnel`:\n{script}"
+    );
+    assert!(
+        script.contains("my-tunnel"),
+        "vscode script should embed the tunnel name:\n{script}"
+    );
+}
+
+#[test]
+fn notebook_vscode_requires_explicit_image() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "--kind",
+            "vscode",
+            "--dry-run",
+            "--no-preflight",
+        ],
+    );
+    assert_failure(&output);
+    let combined = format!("{}\n{}", stdout_text(&output), stderr_text(&output));
+    assert!(
+        combined.contains("requires --image"),
+        "vscode without --image should fail clearly:\n{combined}"
+    );
+}
+
+#[test]
+fn notebook_rejects_file_flag() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        "name: demo\nservices:\n  app:\n    image: redis:7\n    command: /bin/true\n",
+    );
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dry-run",
+            "--no-preflight",
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("does not accept -f/--file"));
+}
+
+#[test]
+fn notebook_rejects_invalid_ready_timeout() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "--ready-timeout",
+            "not-a-duration",
+            "--dry-run",
+            "--no-preflight",
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--ready-timeout"));
+}
+
+#[test]
+fn notebook_local_submits_and_tracks_then_bails_on_readiness_timeout() {
+    // Notebook reuses the local supervisor path; with a fake enroot that does
+    // not print a Jupyter URL, the readiness gate must time out cleanly while
+    // still having written a tracked notebook record.
+    if std::env::consts::OS != "linux" {
+        return;
+    }
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let enroot = write_fake_enroot(tmpdir.path());
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "--kind",
+            "jupyter",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "--ready-timeout",
+            "1s",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+        ],
+    );
+    // Readiness cannot be reached, so the command fails.
+    assert_failure(&output);
+    let combined = format!("{}\n{}", stdout_text(&output), stderr_text(&output));
+    assert!(
+        combined.contains("did not become ready"),
+        "expected a readiness-timeout message:\n{combined}"
+    );
+    // The notebook record must still have been tracked.
+    let latest = tmpdir.path().join(".hpc-compose/latest-notebook.json");
+    assert!(latest.exists(), "notebook record should be tracked");
+    let record: Value =
+        serde_json::from_str(&fs::read_to_string(&latest).expect("latest notebook"))
+            .expect("latest notebook json");
+    assert_eq!(record["kind"], Value::from("notebook"));
+    assert_eq!(record["backend"], Value::from("local"));
+    assert_eq!(record["service_name"], Value::from("notebook"));
+
+    // `cancel` must stop the orphaned local supervisor and clean up.
+    let cancel = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            record["compose_file"]
+                .as_str()
+                .expect("compose_file")
+                .parse::<std::path::PathBuf>()
+                .expect("path")
+                .to_str()
+                .expect("path"),
+            "--yes",
+        ],
+    );
+    assert_success(&cancel);
+}
+
+#[test]
 fn cancel_without_job_id_targets_newest_run_record() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -5751,6 +5952,54 @@ fn cancel_local_record_without_state_reports_not_running_and_removes_tracking() 
         !tmpdir
             .path()
             .join(".hpc-compose/jobs/local-missing-state.json")
+            .exists()
+    );
+}
+
+#[test]
+fn cancel_local_record_with_stale_pid_reports_not_running_and_removes_tracking() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let plan = runtime_plan(&compose);
+    let mut record = build_submission_record_with_backend_and_options(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("local.sh"),
+        &plan,
+        "local-stale-pid",
+        SubmissionBackend::Local,
+        &SubmissionRecordBuildOptions::default(),
+    )
+    .expect("record");
+    record.submitted_at = 1;
+    write_submission_record(&record).expect("write record");
+    let state_path = state_path_for_record(&record);
+    fs::create_dir_all(state_path.parent().expect("state parent")).expect("state dir");
+    fs::write(&state_path, r#"{"supervisor_pid":999999999}"#).expect("state");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "local-stale-pid",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("cancel json");
+    assert_eq!(payload["job_id"], Value::from("local-stale-pid"));
+    assert_eq!(payload["cancelled"], Value::from(false));
+    assert_eq!(payload["tracking_removed"], Value::from(true));
+    assert!(
+        !tmpdir
+            .path()
+            .join(".hpc-compose/jobs/local-stale-pid.json")
             .exists()
     );
 }

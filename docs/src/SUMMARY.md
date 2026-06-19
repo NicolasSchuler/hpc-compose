@@ -26,6 +26,8 @@
 
 - [Runbook](runbook.md)
 - [Development Workflow](development-workflow.md)
+- [Notebook Sessions](notebook.md)
+- [Secrets](secrets.md)
 - [Troubleshooting](troubleshooting.md)
 - [Cluster Profiles](cluster-profiles.md)
 - [HAICORE Guide](haicore-guide.md)

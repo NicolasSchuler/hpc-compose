@@ -352,6 +352,15 @@ const EXAMPLES: &[ExampleInfo] = &[
         tags: &["test", "python", "dev", "finite"],
     },
     ExampleInfo {
+        name: "jupyter",
+        path: "examples/jupyter.yaml",
+        availability: ExampleAvailability::BuiltInTemplate,
+        category: "interactive",
+        demonstrates: "Tracked JupyterLab notebook server with log readiness on a GPU allocation.",
+        start_when: "You want an interactive notebook on a compute node; pair with `hpc-compose notebook`.",
+        tags: &["notebook", "jupyter", "gpu", "interactive"],
+    },
+    ExampleInfo {
         name: "app-redis-worker",
         path: "examples/app-redis-worker.yaml",
         availability: ExampleAvailability::BuiltInTemplate,

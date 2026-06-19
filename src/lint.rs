@@ -1,12 +1,10 @@
 //! Opinionated static lint checks for hpc-compose specs.
 
-use std::path::Path;
-
 use serde::{Deserialize, Serialize};
 
 use crate::cluster::ClusterProfile;
 use crate::domain::{MountParts, split_mount_parts};
-use crate::planner::Plan;
+use crate::planner::{Plan, cache_path_policy_issue};
 use crate::prepare::RuntimePlan;
 use crate::spec::{DependencyCondition, ScratchScope, ServiceFailureMode};
 
@@ -21,6 +19,26 @@ pub enum LintLevel {
     Warning,
     /// Finding severe enough to reject a spec.
     Error,
+}
+
+/// A machine-readable remediation that `lint --fix` can apply to the source
+/// compose file.
+///
+/// Only findings whose fix is deterministic and semantics-preserving carry a
+/// [`SuggestedFix`]; everything else stays advisory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SuggestedFix {
+    /// Rewrite a `depends_on` edge so its condition is explicit instead of
+    /// relying on the implicit `service_started` default.
+    DependsOnCondition {
+        /// Service that owns the `depends_on` block.
+        service: String,
+        /// Dependency edge whose condition should be made explicit.
+        dependency: String,
+        /// Condition to write into the source file.
+        condition: String,
+    },
 }
 
 /// One stable lint finding emitted by `hpc-compose lint`.
@@ -41,6 +59,9 @@ pub struct LintFinding {
     /// Suggested remediation, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<String>,
+    /// Machine-readable fix `lint --fix` can apply, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<SuggestedFix>,
 }
 
 impl LintFinding {
@@ -58,6 +79,26 @@ impl LintFinding {
             service,
             field,
             recommendation: Some(recommendation.into()),
+            fix: None,
+        }
+    }
+
+    fn warning_with_fix(
+        code: &str,
+        message: impl Into<String>,
+        service: Option<String>,
+        field: Option<String>,
+        recommendation: impl Into<String>,
+        fix: SuggestedFix,
+    ) -> Self {
+        Self {
+            level: LintLevel::Warning,
+            code: code.to_string(),
+            message: message.into(),
+            service,
+            field,
+            recommendation: Some(recommendation.into()),
+            fix: Some(fix),
         }
     }
 }
@@ -71,8 +112,11 @@ pub fn lint_plan(
 ) -> Vec<LintFinding> {
     let mut findings = Vec::new();
     lint_dependency_readiness(plan, &mut findings);
+    lint_implicit_dependency_condition(plan, &mut findings);
     lint_memory_cpu_ratio(plan, &mut findings);
     lint_ignore_shared_writes(plan, runtime_plan, cluster_profile, &mut findings);
+    lint_cache_path_policy(runtime_plan, &mut findings);
+    lint_node_local_volumes(runtime_plan, &mut findings);
     if let Some(profile) = cluster_profile {
         for warning in profile.validate_runtime_plan(runtime_plan) {
             findings.push(LintFinding {
@@ -82,6 +126,7 @@ pub fn lint_plan(
                 service: None,
                 field: None,
                 recommendation: warning.remediation,
+                fix: None,
             });
         }
     }
@@ -113,6 +158,81 @@ fn lint_dependency_readiness(plan: &Plan, findings: &mut Vec<LintFinding>) {
                 Some(service.name.clone()),
                 Some(format!("services.{}.depends_on.{}", service.name, dependency.name)),
                 "Add readiness to the upstream service or use service_completed_successfully for one-shot dependencies.",
+            ));
+        }
+    }
+}
+
+/// HPC006: `depends_on` edges whose condition is implicit (list-form or
+/// mapping form without an explicit `condition:` key). The fix makes the
+/// implicit `service_started` default explicit, which is semantics-preserving.
+fn lint_implicit_dependency_condition(plan: &Plan, findings: &mut Vec<LintFinding>) {
+    for service in &plan.ordered_services {
+        for dependency in &service.depends_on {
+            if !dependency.implicit {
+                continue;
+            }
+            let condition = match dependency.condition {
+                DependencyCondition::ServiceStarted => "service_started",
+                DependencyCondition::ServiceHealthy => "service_healthy",
+                DependencyCondition::ServiceCompletedSuccessfully => {
+                    "service_completed_successfully"
+                }
+            };
+            findings.push(LintFinding::warning_with_fix(
+                "HPC006",
+                format!(
+                    "service '{}' depends on '{}' without an explicit condition; it currently resolves to '{}'",
+                    service.name, dependency.name, condition
+                ),
+                Some(service.name.clone()),
+                Some(format!("services.{}.depends_on.{}", service.name, dependency.name)),
+                "Make the condition explicit so author intent is unambiguous. `lint --fix` writes the current default for you.",
+                SuggestedFix::DependsOnCondition {
+                    service: service.name.clone(),
+                    dependency: dependency.name.clone(),
+                    condition: condition.to_string(),
+                },
+            ));
+        }
+    }
+}
+
+/// HPC004: `x-slurm.cache_dir` resolves under a node-local root. Advisory:
+/// the right replacement is cluster-specific, so this is not auto-fixable.
+fn lint_cache_path_policy(runtime_plan: &RuntimePlan, findings: &mut Vec<LintFinding>) {
+    if let Some(issue) = cache_path_policy_issue(&runtime_plan.cache_dir) {
+        findings.push(LintFinding::warning(
+            "HPC004",
+            issue,
+            None,
+            Some("x-slurm.cache_dir".to_string()),
+            "Set x-slurm.cache_dir to a shared workspace or another filesystem visible from both login and compute nodes. This finding is advisory; `lint --fix` will not rewrite paths.",
+        ));
+    }
+}
+
+/// HPC005: a service volume whose host side lives under a node-local root.
+/// Advisory: the right replacement is cluster-specific, so this is not
+/// auto-fixable.
+fn lint_node_local_volumes(runtime_plan: &RuntimePlan, findings: &mut Vec<LintFinding>) {
+    for service in &runtime_plan.ordered_services {
+        for mount in &service.volumes {
+            let Some((host, _container, _mode)) = split_mount(mount) else {
+                continue;
+            };
+            if !crate::path_util::is_node_local_path(host) {
+                continue;
+            }
+            findings.push(LintFinding::warning(
+                "HPC005",
+                format!(
+                    "service '{}' mounts host path '{}' which is typically node-local and not visible from compute nodes",
+                    service.name, host
+                ),
+                Some(service.name.clone()),
+                Some(format!("services.{}.volumes", service.name)),
+                "Move the host path under shared storage visible from both login and compute nodes, or use job-local scratch. This finding is advisory; `lint --fix` will not rewrite paths.",
             ));
         }
     }
@@ -231,20 +351,14 @@ fn split_mount(value: &str) -> Option<(&str, &str, Option<&str>)> {
 
 fn host_looks_shared(host: &str, shared_roots: &[String]) -> bool {
     if shared_roots.is_empty() {
-        return !is_node_local_path(host);
+        return !crate::path_util::is_node_local_path(host);
     }
     shared_roots.iter().any(|root| path_is_under(host, root))
 }
 
-fn is_node_local_path(path: &str) -> bool {
-    path_is_under(path, "/tmp")
-        || path_is_under(path, "/var/tmp")
-        || path_is_under(path, "/dev/shm")
-}
-
 fn path_is_under(path: &str, root: &str) -> bool {
-    let path = Path::new(path);
-    let root = Path::new(root);
+    let path = std::path::Path::new(path);
+    let root = std::path::Path::new(root);
     path == root || path.starts_with(root)
 }
 

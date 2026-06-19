@@ -131,13 +131,52 @@ Sweep state is stored beside normal tracked jobs:
 
 Sweep-trial records have `kind: sweep_trial` and include sweep metadata. They do not update the normal `latest.json` or `latest-run.json` pointers, so `status`, `watch`, and `logs` for ordinary runs keep their existing meaning.
 
+## Objectives and Early Termination
+
+Declare an `objective` block to have `sweep observe` parse a metric from each terminal trial, rank trials, and record the best on the manifest:
+
+```yaml
+sweep:
+  parameters: { lr: [0.001, 0.01, 0.1] }
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'final loss=([0-9.]+)'
+```
+
+The trial workload prints the metric to its service log (e.g. `final loss=0.034`). Two parse sources are supported (set exactly one):
+
+- `log_pattern`: a regex against the trial's primary service log; capture group `group` (default 1) is parsed as a float.
+- `json_path` + `json_field`: read a JSON field from the trial's artifact-collected tree.
+
+```bash
+hpc-compose sweep observe -f train.yaml             # parse + rank + print best
+hpc-compose sweep observe -f train.yaml --format json
+```
+
+Early termination stops the sweep once a threshold is met. Use `--watch --stop-when` to poll and auto-stop:
+
+```bash
+hpc-compose sweep observe -f train.yaml --watch --stop-when 'objective < 0.05' --poll-interval 30s
+```
+
+Or stop manually after inspecting `sweep observe` output:
+
+```bash
+hpc-compose sweep stop -f train.yaml --yes --reason 'objective threshold met'
+```
+
+`sweep stop` cancels every non-terminal trial via `scancel` and records the stop on the manifest. `--stop-when` uses a tiny grammar: `objective < N`, `objective <= N`, `objective > N`, or `objective >= N`, evaluated against the best observed value.
+
+> Bayesian/adaptive trial selection is intentionally out of scope for v1. The objective writeback, ranking, and stop machinery here are the foundation any future optimizer would build on.
+
 ## Limitations
 
 - Sweeps must be embedded in the same compose file. `sweep.spec` is not supported.
 - Each trial is a separate Slurm allocation. Sweeps are not Slurm arrays.
 - `x-slurm.array` is rejected during `sweep submit`.
 - Trials submit sequentially. If a submission fails, later trials are not submitted and the partial manifest is kept.
-- `sweep status` summarizes scheduler/tracking state only. It does not parse metric files or pick a best trial.
+- `sweep status` summarizes scheduler/tracking state; use `sweep observe` to parse and rank objectives.
 
 ## Related Docs
 

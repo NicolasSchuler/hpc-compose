@@ -8,6 +8,7 @@ pub(crate) const SWEEPS_DIR_NAME: &str = "sweeps";
 pub(crate) const LATEST_RECORD_FILE_NAME: &str = "latest.json";
 pub(crate) const RUN_LATEST_RECORD_FILE_NAME: &str = "latest-run.json";
 pub(crate) const CANARY_LATEST_RECORD_FILE_NAME: &str = "latest-canary.json";
+pub(crate) const NOTEBOOK_LATEST_RECORD_FILE_NAME: &str = "latest-notebook.json";
 pub(crate) const SWEEP_LATEST_RECORD_FILE_NAME: &str = "latest.json";
 pub(crate) const SWEEP_MANIFEST_FILE_NAME: &str = "sweep.json";
 pub(crate) const ATTEMPTS_DIR_NAME: &str = "attempts";
@@ -21,6 +22,34 @@ pub(crate) const ALLOCATION_DIR_NAME: &str = "allocation";
 pub(crate) const PRIMARY_NODE_FILE_NAME: &str = "primary_node";
 pub(crate) const NODELIST_FILE_NAME: &str = "nodes.txt";
 pub(crate) const RESUME_METADATA_DIR_NAME: &str = "_hpc-compose";
+
+// In-container path vocabulary. These paths live inside the runtime container
+// under the reserved `/hpc-compose/job` mount destination. The base directory
+// is the single source of truth referenced by the spec validator, the planner
+// (which forbids users from overriding it as a mount), the artifact path
+// normalizer, and the rendered batch script's bind-mount spec.
+pub(crate) const JOB_CONTAINER_DIR: &str = "/hpc-compose/job";
+
+/// Returns `true` if `path` equals [`JOB_CONTAINER_DIR`] or is nested beneath it.
+///
+/// Used by spec validation to gate artifact and assertion paths: users may
+/// pass either the bare mount destination or any path beneath it, but not a
+/// sibling like `/hpc-compose/jobevil` that happens to share a string prefix.
+#[must_use]
+pub(crate) fn is_under_job_container_dir(path: &str) -> bool {
+    path == JOB_CONTAINER_DIR
+        || path
+            .strip_prefix(JOB_CONTAINER_DIR)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Joins `sub` under [`JOB_CONTAINER_DIR`], normalizing any leading slashes on
+/// `sub` so that both `"hooks"` and `"/hooks"` produce `/hpc-compose/job/hooks`.
+#[must_use]
+pub(crate) fn under_job_container_dir(sub: &str) -> String {
+    let trimmed = sub.trim_start_matches('/');
+    format!("{JOB_CONTAINER_DIR}/{trimmed}")
+}
 
 #[must_use]
 pub(crate) fn metadata_root_for(spec_path: &Path) -> PathBuf {
@@ -69,6 +98,11 @@ pub(crate) fn latest_run_record_path_for(spec_path: &Path) -> PathBuf {
 #[must_use]
 pub(crate) fn latest_canary_record_path_for(spec_path: &Path) -> PathBuf {
     metadata_root_for(spec_path).join(CANARY_LATEST_RECORD_FILE_NAME)
+}
+
+#[must_use]
+pub(crate) fn latest_notebook_record_path_for(spec_path: &Path) -> PathBuf {
+    metadata_root_for(spec_path).join(NOTEBOOK_LATEST_RECORD_FILE_NAME)
 }
 
 #[must_use]
@@ -171,6 +205,10 @@ mod tests {
         assert_eq!(
             latest_canary_record_path_for(spec_path),
             Path::new("/tmp/project/.hpc-compose/latest-canary.json")
+        );
+        assert_eq!(
+            latest_notebook_record_path_for(spec_path),
+            Path::new("/tmp/project/.hpc-compose/latest-notebook.json")
         );
     }
 
