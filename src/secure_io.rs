@@ -41,11 +41,14 @@ pub fn write(
             opts.mode(0o600);
         }
         let mut file = opts.open(path)?;
+        if restricted {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(contents.as_ref())?;
         // Force the mode even if the file pre-existed with looser permissions,
         // since OpenOptions::mode only applies on creation.
         if restricted {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
         Ok(())
     }

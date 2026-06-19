@@ -977,7 +977,8 @@ fn available_bytes(path: &Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let probe_path = path.ancestors().find(|candidate| candidate.exists())?;
+    let c_path = CString::new(probe_path.as_os_str().as_bytes()).ok()?;
     // SAFETY: `statvfs` only reads the NUL-terminated path and writes into the
     // zeroed struct; we check the return code before using any field.
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -1577,6 +1578,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let avail = available_bytes(dir.path()).expect("statvfs available bytes");
         assert!(avail > 0, "expected a positive available-bytes reading");
+        let missing_cache = dir.path().join("cache").join("future");
+        assert!(
+            available_bytes(&missing_cache).is_some_and(|bytes| bytes > 0),
+            "missing cache dirs should probe the nearest existing ancestor"
+        );
         // A normal test filesystem has far more than the low-space threshold,
         // so the check must add no item (it warns only when space is low).
         let mut report = Report { items: Vec::new() };

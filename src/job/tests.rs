@@ -1698,6 +1698,31 @@ fn scan_job_records_returns_all_tracked_jobs() {
 }
 
 #[test]
+fn write_submission_record_uses_owner_only_permissions() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose_path = tmpdir.path().join("compose.yaml");
+    fs::write(&compose_path, "").expect("write");
+    let plan = runtime_plan(tmpdir.path());
+
+    let record = build_submission_record(
+        &compose_path,
+        tmpdir.path(),
+        &tmpdir.path().join("job.sbatch"),
+        &plan,
+        "111",
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write");
+
+    let record_path = jobs_dir_for(&compose_path).join("111.json");
+    let latest_path = latest_record_path_for(&compose_path);
+    for path in [record_path, latest_path] {
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} should be owner-only", path.display());
+    }
+}
+
+#[test]
 fn clean_all_except_latest_preserves_latest() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose_path = tmpdir.path().join("compose.yaml");

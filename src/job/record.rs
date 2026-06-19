@@ -494,12 +494,25 @@ fn scan_inventory_recursive(
         return Ok(());
     }
 
-    for entry in fs::read_dir(root).context(format!("failed to read {}", root.display()))? {
-        let entry = entry?;
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).context(format!("failed to read {}", root.display())),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).context(format!("failed to read entry under {}", root.display()));
+            }
+        };
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .context(format!("failed to stat {}", path.display()))?;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).context(format!("failed to stat {}", path.display())),
+        };
         if !file_type.is_dir() {
             continue;
         }

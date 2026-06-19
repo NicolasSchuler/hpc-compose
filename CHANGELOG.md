@@ -11,9 +11,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 - macOS authoring guidance surfaced in `doctor`, `preflight`, and `up` so authors
   understand which commands are runtime-supported versus authoring-only.
-- A minimum supported Rust version (`rust-version = "1.85"`) is declared so older
+- A minimum supported Rust version (`rust-version = "1.88"`) is declared so older
   toolchains fail with a clear error instead of an obscure edition-2024 build error.
-- A CI `msrv` job that builds against the pinned `1.85` toolchain.
+- A CI `msrv` job that builds against the pinned `1.88` toolchain.
 
 ### Changed
 

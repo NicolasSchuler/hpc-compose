@@ -2,7 +2,7 @@
 name = "hpc-compose"
 version = "0.1.45"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 autobins = false
 default-run = "hpc-compose"
 license = "MIT"
@@ -30,7 +30,7 @@ required-features = ["manpage-bin"]
 anyhow = "1.0.100"
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4"
-comfy-table = "7"
+comfy-table = "=7.2.1"
 crossterm = "0.29"
 flate2 = "1.1.5"
 hex = "0.4.3"
