@@ -46,7 +46,15 @@ $ hpc-compose config -f compose.yaml
       MODEL: llama
 ```
 
-Name-based redaction (e.g. `API_KEY`, `PASSWORD`, `TOKEN`) also still applies to any sensitive-named value. Pass `--show-values` on `config` or `context` to reveal secrets when you have a legitimate need:
+Name-based redaction also still applies to any sensitive-named value, even when it was not declared as a secret. A name triggers redaction when (after upper-casing) it **contains** any of these substrings:
+
+```text
+SECRET   TOKEN     PASSWORD   PASSWD
+API_KEY  ACCESS_KEY  PRIVATE_KEY  CREDENTIAL
+AUTH     COOKIE    SESSION    BEARER
+```
+
+Matching is a case-insensitive substring test, so names such as `SESSION_DIR`, `AUTH_MODE`, or `MY_API_KEY_PATH` are redacted too. Pass `--show-values` on `config` or `context` to reveal secrets when you have a legitimate need:
 
 ```bash
 hpc-compose config -f compose.yaml --show-values
@@ -54,6 +62,10 @@ hpc-compose context   # shows interpolation vars, secrets tagged (Secret) and re
 ```
 
 The raw secret value never appears in `config`, `context`, or `inspect` output by default. `inspect` does not expose a `--show-values` escape hatch; use `config --show-values` or `context --show-values` for trusted local diagnostics.
+
+## Secrets at rest
+
+Redaction only governs *diagnostic* output. The rendered Slurm script and the persisted job state can carry **resolved** secret values, because the environment is materialized so the job can run. These files are written owner-only (mode `0600`); even so, keep secret-bearing compose specs, rendered scripts, and tracked state under a non-group-readable directory (for example a private cache or scratch path), and avoid committing them to shared or version-controlled locations.
 
 ## Resolution order
 

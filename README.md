@@ -59,7 +59,16 @@ It does not aim to be a full Docker Compose runtime. Unsupported Compose feature
 
 ## Install
 
-For normal use, install from a published GitHub Release and pin the release tag:
+The fastest path installs the most recent published release with no edits. The
+script resolves the latest GitHub Release tag for you and downloads the matching
+asset into `~/.local/bin` by default:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+```
+
+For reproducible installs (recommended for shared clusters), pin a specific
+release tag so every run resolves the exact same asset:
 
 ```bash
 RELEASE_TAG=vX.Y.Z
@@ -67,7 +76,7 @@ curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEA
   | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
 ```
 
-Replace `vX.Y.Z` with the release tag shown on the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page. The installer downloads the matching release asset and installs `hpc-compose` into `~/.local/bin` by default.
+Replace `vX.Y.Z` with the release tag shown on the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page. Fetching `install.sh` from `main` runs the moving script, but it still installs from a published `releases/download/<tag>/...` asset, not unreleased `main`; pin `HPC_COMPOSE_VERSION` when you need every machine to land on the same build.
 
 Other install paths:
 
