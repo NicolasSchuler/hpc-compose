@@ -73,6 +73,17 @@ use resources::{
     push_slurm_salloc_options, push_slurm_srun_options, slurm_from_resource_options,
 };
 
+/// Bundle of the four preparation-related flags shared across the runtime
+/// launch command family (`up`, `germinate`, `test`, `dev`, `tmux`, `when`,
+/// `alloc`, `run`, and the internal `launch`/prepare helpers).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PrepareFlags {
+    pub keep_failed_prep: bool,
+    pub skip_prepare: bool,
+    pub force_rebuild: bool,
+    pub no_preflight: bool,
+}
+
 static DEV_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn watch_with_fallback(
@@ -860,14 +871,10 @@ struct LocalLaunchOutcome {
     submit_output: output::SubmitOutput,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn prepare_local_launch<F>(
     context: &ResolvedContext,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     output_format: OutputFormat,
     quiet: bool,
     dev_reload: bool,
@@ -876,6 +883,12 @@ fn prepare_local_launch<F>(
 where
     F: FnOnce(&RuntimePlan) -> Result<()>,
 {
+    let PrepareFlags {
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+    } = flags;
     let file = context.compose_file.value.clone();
     let effective_config =
         output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -1239,10 +1252,7 @@ fn prepare_slurm_submission<F>(
     context: &ResolvedContext,
     script_out: Option<PathBuf>,
     time_override: Option<String>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     watch: bool,
     allow_resume_changes: bool,
     output_format: OutputFormat,
@@ -1252,6 +1262,12 @@ fn prepare_slurm_submission<F>(
 where
     F: FnOnce(&RuntimePlan) -> Result<()>,
 {
+    let PrepareFlags {
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+    } = flags;
     let file = context.compose_file.value.clone();
     let effective_config =
         output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -1406,10 +1422,7 @@ pub(crate) fn when(
     poll_interval: std::time::Duration,
     timeout: Option<std::time::Duration>,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     allow_resume_changes: bool,
     detach: bool,
     watch_mode: WatchMode,
@@ -1423,10 +1436,7 @@ pub(crate) fn when(
         &context,
         script_out,
         None,
-        keep_failed_prep,
-        skip_prepare,
-        force_rebuild,
-        no_preflight,
+        flags,
         !detach,
         allow_resume_changes,
         output_format,
@@ -1513,10 +1523,7 @@ fn condition_descriptions(conditions: &WhenConditions) -> Vec<String> {
 pub(crate) fn launch(
     context: ResolvedContext,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     watch: bool,
     watch_queue: bool,
     queue_warn_after_seconds: Option<u64>,
@@ -1529,6 +1536,12 @@ pub(crate) fn launch(
     hold_on_exit: HoldOnExit,
     quiet: bool,
 ) -> Result<()> {
+    let PrepareFlags {
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+    } = flags;
     let file = context.compose_file.value.clone();
     let effective_config =
         output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -1808,10 +1821,7 @@ pub(crate) fn launch(
 pub(crate) fn up(
     context: ResolvedContext,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     local: bool,
     allow_resume_changes: bool,
     resume_diff_only: bool,
@@ -1828,10 +1838,7 @@ pub(crate) fn up(
     launch(
         context,
         script_out,
-        keep_failed_prep,
-        skip_prepare,
-        force_rebuild,
-        no_preflight,
+        flags,
         !detach,
         watch_queue,
         queue_warn_after_seconds,
@@ -2020,10 +2027,7 @@ pub(crate) fn smoke_test(
     time: String,
     wait_timeout: String,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
@@ -2046,10 +2050,7 @@ pub(crate) fn smoke_test(
         let prepared = prepare_local_launch(
             &context,
             script_out,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
+            flags,
             output_format,
             quiet,
             false,
@@ -2066,10 +2067,7 @@ pub(crate) fn smoke_test(
             &context,
             script_out,
             Some(time),
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
+            flags,
             false,
             false,
             output_format,
@@ -2368,10 +2366,7 @@ pub(crate) fn dev(
     debounce_ms: u64,
     keep_running: bool,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     quiet: bool,
     tui: bool,
 ) -> Result<()> {
@@ -2379,10 +2374,7 @@ pub(crate) fn dev(
     let prepared = prepare_local_launch(
         &context,
         script_out,
-        keep_failed_prep,
-        skip_prepare,
-        force_rebuild,
-        no_preflight,
+        flags,
         OutputFormat::Text,
         quiet,
         true,
@@ -2653,10 +2645,7 @@ pub(crate) fn tmux(
     no_attach: bool,
     lines: usize,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     quiet: bool,
 ) -> Result<()> {
     let record = if let Some(job_id) = job_id {
@@ -2667,10 +2656,7 @@ pub(crate) fn tmux(
         let prepared = prepare_local_launch(
             &context,
             script_out,
-            keep_failed_prep,
-            skip_prepare,
-            force_rebuild,
-            no_preflight,
+            flags,
             OutputFormat::Text,
             quiet,
             false,
@@ -2711,14 +2697,17 @@ pub(crate) fn germinate(
     min_cpus: u32,
     min_mem: String,
     min_gpus: u32,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     dry_run: bool,
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
+    let PrepareFlags {
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+    } = flags;
     if metrics_interval == 0 {
         bail!("germinate --metrics-interval must be at least 1");
     }
@@ -3283,12 +3272,15 @@ pub(crate) fn rendezvous_prune(cache_dir: PathBuf, format: Option<OutputFormat>)
 pub(crate) fn alloc(
     context: ResolvedContext,
     command: Vec<String>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     quiet: bool,
 ) -> Result<()> {
+    let PrepareFlags {
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+    } = flags;
     let runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -3383,18 +3375,20 @@ pub(crate) fn alloc(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_service(
     context: ResolvedContext,
     service_name: String,
     command: Vec<String>,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     quiet: bool,
 ) -> Result<()> {
+    let PrepareFlags {
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+    } = flags;
     let file = context.compose_file.value.clone();
     let progress = ProgressReporter::new(!quiet);
     let active_allocation_job_id = active_allocation_job_id();
@@ -3614,13 +3608,16 @@ pub(crate) fn run_ephemeral(
     command: Vec<String>,
     resource_options: ResourceCliOptions,
     script_out: Option<PathBuf>,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     local: bool,
     quiet: bool,
 ) -> Result<()> {
+    let PrepareFlags {
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+    } = flags;
     if image.trim().is_empty() {
         bail!("run --image requires a non-empty image");
     }
@@ -3965,13 +3962,16 @@ pub(crate) fn notebook(
     ready_timeout: Duration,
     follow: bool,
     dry_run: bool,
-    keep_failed_prep: bool,
-    skip_prepare: bool,
-    force_rebuild: bool,
-    no_preflight: bool,
+    flags: PrepareFlags,
     local: bool,
     quiet: bool,
 ) -> Result<()> {
+    let PrepareFlags {
+        keep_failed_prep,
+        skip_prepare,
+        force_rebuild,
+        no_preflight,
+    } = flags;
     let preset = preset_for(nb_args.kind);
     let image = resolve_image(&nb_args, &preset)?;
     let token = nb_args.token.clone().unwrap_or_else(generate_token);
@@ -6629,10 +6629,12 @@ mod tests {
         launch(
             context_for(&local_compose, tmpdir.path()),
             Some(tmpdir.path().join("job.sbatch")),
-            false,
-            true,
-            false,
-            true,
+            PrepareFlags {
+                keep_failed_prep: false,
+                skip_prepare: true,
+                force_rebuild: false,
+                no_preflight: true,
+            },
             false,
             false,
             None,
@@ -6649,10 +6651,12 @@ mod tests {
         launch(
             context_for(&local_compose, tmpdir.path()),
             Some(tmpdir.path().join("job.json.sbatch")),
-            false,
-            true,
-            false,
-            true,
+            PrepareFlags {
+                keep_failed_prep: false,
+                skip_prepare: true,
+                force_rebuild: false,
+                no_preflight: true,
+            },
             false,
             false,
             None,
@@ -6738,10 +6742,12 @@ mod tests {
         let submit_err = launch(
             sbatch_context,
             Some(tmpdir.path().join("submit-fail.sbatch")),
-            false,
-            true,
-            false,
-            true,
+            PrepareFlags {
+                keep_failed_prep: false,
+                skip_prepare: true,
+                force_rebuild: false,
+                no_preflight: true,
+            },
             false,
             false,
             None,
