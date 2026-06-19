@@ -739,6 +739,18 @@ fn run_replay_ui_loop(
     })
 }
 
+/// Returns whether the live walltime progress changed since the last render.
+///
+/// The watch loop wakes far more often (~10x/sec) than the walltime bar
+/// advances (once per second), so this gate lets idle wake-ups skip rebuilding
+/// the frame while still repainting on each real progress tick.
+fn walltime_changed(
+    previous: &Option<WalltimeProgress>,
+    current: &Option<WalltimeProgress>,
+) -> bool {
+    previous != current
+}
+
 fn run_watch_ui_loop(
     record: &SubmissionRecord,
     options: &SchedulerOptions,
@@ -795,9 +807,18 @@ fn run_watch_ui_loop(
     let mut show_detail = false;
     let mut terminal_outcome: Option<WatchOutcome> = None;
     let mut renderer = FrameRenderer::new();
+    // Redraw gate: the loop wakes every `INPUT_POLL_INTERVAL` (~100ms) but the
+    // frame only changes on a data/metrics refresh, a key/mouse/resize event, a
+    // notice change, or the per-second walltime tick. Skipping the snapshot
+    // clone + frame formatting on idle wake-ups avoids ~10x/sec of redundant
+    // work. The first iteration always renders.
+    let mut dirty = true;
+    let mut last_walltime: Option<WalltimeProgress> = None;
+    let mut last_render_size: Option<(usize, usize)> = None;
 
     let (outcome, command_hint) = loop {
         if last_refresh.elapsed() >= data_refresh {
+            dirty = true;
             let selected_name = selected_service_name(
                 &snapshot.services,
                 filter.as_deref(),
@@ -829,7 +850,11 @@ fn run_watch_ui_loop(
             last_refresh = Instant::now();
         }
         if last_metrics_refresh.elapsed() >= metrics_refresh {
-            metrics_line = load_watch_metrics_line(record, options);
+            let refreshed = load_watch_metrics_line(record, options);
+            if refreshed != metrics_line {
+                metrics_line = refreshed;
+                dirty = true;
+            }
             last_metrics_refresh = Instant::now();
         }
         let walltime_progress = walltime_progress(
@@ -838,6 +863,12 @@ fn run_watch_ui_loop(
             snapshot.queue_diagnostics.as_ref(),
             current_unix_timestamp(),
         );
+        // The walltime bar advances once per second; treat any change to it as a
+        // reason to repaint even when no other input arrived.
+        if walltime_changed(&last_walltime, &walltime_progress) {
+            dirty = true;
+            last_walltime = walltime_progress.clone();
+        }
         let current_outcome = terminal_outcome.clone().or_else(|| {
             snapshot.scheduler.terminal.then(|| {
                 if snapshot.scheduler.failed {
@@ -851,6 +882,9 @@ fn run_watch_ui_loop(
         if terminal_outcome.is_none()
             && let Some(outcome) = current_outcome.clone()
         {
+            // Reaching a terminal state changes the header/footer/selection, so
+            // force a repaint regardless of any other trigger this iteration.
+            dirty = true;
             if matches!(outcome, WatchOutcome::Failed(_))
                 && let Some(failed_service) = first_failed_service_name(&snapshot.services)
             {
@@ -884,46 +918,60 @@ fn run_watch_ui_loop(
         if notice_until.is_some_and(|deadline| Instant::now() >= deadline) {
             notice = None;
             notice_until = None;
+            dirty = true;
         }
 
-        let displayed_log_lines = match log_view_mode {
-            LogViewMode::Selected => log_buffer.lines.clone(),
-            LogViewMode::All => all_log_lines.clone(),
-        };
+        // A real terminal resize (no input event) must still trigger a repaint.
+        let frame_size = terminal_size();
+        if last_render_size != Some(frame_size) {
+            dirty = true;
+        }
 
-        let (frame_width, frame_height) = terminal_size();
-        renderer.render(
-            &render_watch_frame(
-                &WatchModel {
-                    snapshot: snapshot.clone(),
-                    selected_index,
-                    walltime_progress,
-                    log_lines: displayed_log_lines,
-                    follow_logs,
-                    log_scroll,
-                    log_view_mode,
-                    hold_state: terminal_outcome.as_ref().map(|outcome| WatchHoldState {
-                        failed: matches!(outcome, WatchOutcome::Failed(_)),
-                    }),
-                    metrics_line: metrics_line.clone(),
-                    show_help,
-                    filter: filter.clone(),
-                    search_buffer: search_buffer.clone(),
-                    input_mode,
-                    log_query: log_query.clone(),
-                    log_wrap,
-                    sort_mode,
-                    notice: notice.clone(),
-                    show_detail,
-                    replay: None,
-                },
-                frame_width,
-                frame_height,
-            ),
-            (frame_width, frame_height),
-        )?;
+        if dirty {
+            let displayed_log_lines = match log_view_mode {
+                LogViewMode::Selected => log_buffer.lines.clone(),
+                LogViewMode::All => all_log_lines.clone(),
+            };
+
+            let (frame_width, frame_height) = frame_size;
+            renderer.render(
+                &render_watch_frame(
+                    &WatchModel {
+                        snapshot: snapshot.clone(),
+                        selected_index,
+                        walltime_progress,
+                        log_lines: displayed_log_lines,
+                        follow_logs,
+                        log_scroll,
+                        log_view_mode,
+                        hold_state: terminal_outcome.as_ref().map(|outcome| WatchHoldState {
+                            failed: matches!(outcome, WatchOutcome::Failed(_)),
+                        }),
+                        metrics_line: metrics_line.clone(),
+                        show_help,
+                        filter: filter.clone(),
+                        search_buffer: search_buffer.clone(),
+                        input_mode,
+                        log_query: log_query.clone(),
+                        log_wrap,
+                        sort_mode,
+                        notice: notice.clone(),
+                        show_detail,
+                        replay: None,
+                    },
+                    frame_width,
+                    frame_height,
+                ),
+                (frame_width, frame_height),
+            )?;
+            last_render_size = Some(frame_size);
+            dirty = false;
+        }
 
         if let Some(event) = events.poll_event(INPUT_POLL_INTERVAL, input_mode)? {
+            // Any handled input may change the view, selection, scroll, filter,
+            // or notice; conservatively repaint on the next iteration.
+            dirty = true;
             if input_mode == InputMode::Search || input_mode == InputMode::LogSearch {
                 let key = match event {
                     WatchInput::Search(key) => key,
