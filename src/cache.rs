@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -376,17 +377,64 @@ fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
     path.with_file_name(artifact_filename)
 }
 
+/// Monotonic counter making each temp manifest name unique within this process.
+static TEMP_MANIFEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Writes the cache manifest atomically.
+///
+/// The `cache_dir` lives on a shared cluster filesystem where multiple jobs may
+/// write the same manifest concurrently. A plain `fs::write` truncates then
+/// rewrites in place, so a crash or a concurrent reader can observe a torn,
+/// half-written JSON file that then fails to parse and breaks later runs. To
+/// avoid that torn-write corruption we serialize into a uniquely named temp file
+/// in the *same* directory (so the rename stays within one filesystem and is
+/// atomic on POSIX) and `fs::rename` it over the destination. The temp name uses
+/// the process id plus a per-process atomic counter, which is unique without
+/// relying on clock randomness.
+///
+/// Note: this fixes torn writes for each individual write. It does **not** add
+/// advisory locking, so the read-modify-write `upsert_*` path can still lose an
+/// update under concurrent writers (a known follow-up); the manifest that lands
+/// is always a complete, valid one.
 fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = manifest_path_for(artifact);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-    }
+    let parent = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
+
     let raw =
         serde_json::to_string_pretty(manifest).context("failed to serialize cache manifest")?;
-    fs::write(&manifest_path, raw)
-        .context(format!("failed to write {}", manifest_path.display()))?;
+
+    let counter = TEMP_MANIFEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_name = format!(
+        ".{}.tmp.{}.{counter}",
+        manifest_file_name(&manifest_path),
+        pid()
+    );
+    let temp_path = parent.join(temp_name);
+
+    if let Err(err) = fs::write(&temp_path, &raw) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err).context(format!("failed to write {}", temp_path.display()));
+    }
+    if let Err(err) = fs::rename(&temp_path, &manifest_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err).context(format!("failed to write {}", manifest_path.display()));
+    }
     Ok(())
+}
+
+/// File name (without directory) used to derive the temp manifest name.
+fn manifest_file_name(manifest_path: &Path) -> String {
+    manifest_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact.sqsh.json")
+        .to_string()
+}
+
+fn pid() -> u32 {
+    std::process::id()
 }
 
 fn format_env_entry((key, value): &(String, String)) -> String {
@@ -463,6 +511,63 @@ mod tests {
         assert_eq!(manifest.kind, CacheEntryKind::Prepared);
         assert!(manifest.service_names.contains(&"svc".to_string()));
         assert_eq!(manifest.registry.as_deref(), Some("registry.scc.kit.edu"));
+    }
+
+    #[test]
+    fn concurrent_writes_never_produce_torn_manifest() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let artifact = Arc::new(tmpdir.path().join("shared.sqsh"));
+        fs::write(artifact.as_ref(), "x").expect("artifact");
+        let source = ImageSource::Remote("docker://redis:7".into());
+
+        // Many threads hammer the same manifest path; an atomic rename guarantees
+        // every reader (and the final state) always sees a complete JSON file.
+        let mut handles = Vec::new();
+        for index in 0..16 {
+            let artifact = Arc::clone(&artifact);
+            let source = source.clone();
+            handles.push(thread::spawn(move || {
+                for round in 0..20 {
+                    upsert_base_manifest(
+                        &artifact,
+                        &format!("svc-{index}-{round}"),
+                        &source,
+                        "shared-key",
+                    )
+                    .expect("upsert");
+                    // Concurrently read the manifest back; with a non-atomic write
+                    // this would intermittently observe a torn, unparseable file.
+                    if manifest_path_for(&artifact).exists() {
+                        read_manifest(&artifact).expect("manifest parses cleanly");
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread");
+        }
+
+        let manifest = read_manifest(&artifact).expect("final manifest parses");
+        assert_eq!(manifest.kind, CacheEntryKind::Base);
+        assert_eq!(manifest.cache_key, "shared-key");
+        assert_eq!(manifest.registry.as_deref(), Some("registry-1.docker.io"));
+        assert!(!manifest.service_names.is_empty());
+
+        // No temp files should be left behind in the cache dir.
+        let leftovers: Vec<_> = fs::read_dir(tmpdir.path())
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.contains(".tmp."))
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "stray temp manifests: {leftovers:?}");
     }
 
     #[test]
