@@ -2,8 +2,8 @@
 """Regenerate the pa11y-ci URL list from the built mdBook site.
 
 Keeps `.pa11yci.json` accessibility coverage in sync with `docs/src/SUMMARY.md`
-automatically: every rendered page (except mdBook's 404/print helpers) is checked,
-so newly added pages are covered without hand-editing the URL list.
+automatically: every rendered content page is checked, while mdBook helper pages
+such as the sidebar table of contents are skipped.
 
 Run after `mdbook build docs`.
 """
@@ -16,7 +16,7 @@ import sys
 BUILD_DIR = "target/mdbook"
 CONFIG = ".pa11yci.json"
 BASE_URL = "http://127.0.0.1:3000"
-SKIP = {"404.html", "print.html"}
+SKIP = {"404.html", "print.html", "toc.html"}
 
 
 def main() -> int:
