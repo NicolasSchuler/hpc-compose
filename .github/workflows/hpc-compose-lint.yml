@@ -1,0 +1,57 @@
+name: hpc-compose lint
+
+# Reusable workflow that installs a pinned hpc-compose release and validates
+# and lints a compose file. Consumer repos can call it with:
+#
+#   jobs:
+#     hpc-compose:
+#       uses: NicolasSchuler/hpc-compose/.github/workflows/hpc-compose-lint.yml@v0.1.45
+#       with:
+#         compose-file: compose.yaml
+#         version: v0.1.45
+#         strict: true
+#
+# Pin `version` (and the `uses:` ref) to a release tag.
+
+on:
+  workflow_call:
+    inputs:
+      compose-file:
+        description: Path to the compose file to validate and lint.
+        required: false
+        default: compose.yaml
+        type: string
+      version:
+        description: Pinned hpc-compose release tag to install (e.g. v0.1.45).
+        required: false
+        default: v0.1.45
+        type: string
+      strict:
+        description: When true, lint warnings fail the job (no --allow-warnings).
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  hpc-compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+
+      - name: Install hpc-compose
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${{ inputs.version }}/install.sh" \
+            | env HPC_COMPOSE_VERSION="${{ inputs.version }}" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate
+        run: hpc-compose validate -f "${{ inputs.compose-file }}"
+
+      - name: Lint
+        run: |
+          if [ "${{ inputs.strict }}" = "true" ]; then
+            hpc-compose lint -f "${{ inputs.compose-file }}"
+          else
+            hpc-compose lint -f "${{ inputs.compose-file }}" --allow-warnings
+          fi

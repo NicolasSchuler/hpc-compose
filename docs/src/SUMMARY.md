@@ -13,6 +13,7 @@
 - [Spec Metamorphosis](evolve.md)
 - [Task Guide](task-guide.md)
 - [Docker Compose Migration](docker-compose-migration.md)
+- [CI Integration](ci-integration.md)
 
 # Understand the Model
 
