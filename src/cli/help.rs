@@ -17,10 +17,10 @@ Debug failed run:
 
 Workflow groups:
   Start:          new, evolve, setup, context
-  Plan/Run:       plan, up, when, alloc, run
-  Develop/Test:   test, dev, tmux
+  Plan/Run:       plan, up, when, alloc, run, shell, germinate
+  Develop/Test:   test, dev, tmux, notebook
   Observe/Debug:  weather, doctor, debug, watch, replay, status, logs, ps, stats, score, diff, artifacts, sweep
-  Maintain:       cache, jobs, clean, down, cancel
+  Maintain:       cache, jobs, clean, down, cancel, rendezvous
   Advanced:       examples, validate, lint, inspect, config, render, prepare, preflight, schema, completions
 
 Use `hpc-compose help <command>` for command details.";
