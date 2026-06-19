@@ -3720,6 +3720,54 @@ pub fn parse_short_duration(raw: &str) -> Result<u64> {
     validation::parse_duration_seconds(raw)
 }
 
+/// One gibibyte in bytes, shared by every memory-size parser and formatter.
+pub(crate) const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+/// Parses a memory-size string (`512M`, `1.5G`, `2GiB`, `1048576`, …) into a
+/// byte count.
+///
+/// This is the single shared implementation used by the linter and the
+/// `job` accounting/rightsize/scoring code so they all agree on units and edge
+/// cases. It accepts an optional decimal magnitude, the `B`/`K`/`M`/`G`/`T`/`P`
+/// suffixes (with `B`/`iB` variants), and a bare byte count. The Slurm `sacct`
+/// literal `unknown` (any case) and the empty string map to `None`. All
+/// arithmetic saturates, so the function is total and never panics or overflows.
+#[must_use]
+pub(crate) fn parse_memory_bytes(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
+    let number_end = trimmed
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_ascii_digit() && ch != '.').then_some(index))
+        .unwrap_or(trimmed.len());
+    let number = &trimmed[..number_end];
+    if number.is_empty() {
+        return None;
+    }
+    let magnitude = number.parse::<f64>().ok()?;
+    if !magnitude.is_finite() || magnitude < 0.0 {
+        return None;
+    }
+    let multiplier = match trimmed[number_end..].trim().to_ascii_uppercase().as_str() {
+        "" | "B" => 1_u64,
+        "K" | "KB" | "KIB" => 1_024,
+        "M" | "MB" | "MIB" => 1_024_u64.pow(2),
+        "G" | "GB" | "GIB" => GIB,
+        "T" | "TB" | "TIB" => 1_024_u64.pow(4),
+        "P" | "PB" | "PIB" => 1_024_u64.pow(5),
+        _ => return None,
+    };
+    // Multiply in f64 to honor decimals, then clamp into u64 saturatingly.
+    let bytes = magnitude * multiplier as f64;
+    if bytes >= u64::MAX as f64 {
+        Some(u64::MAX)
+    } else {
+        Some(bytes as u64)
+    }
+}
+
 /// Parses a Slurm-style walltime string into seconds.
 ///
 /// Supports `MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, and
@@ -3735,6 +3783,7 @@ pub fn parse_slurm_time_limit(input: &str) -> Result<u64> {
         bail!("time limit must not be empty");
     }
 
+    let has_days = input.contains('-');
     let (days, rest) = if let Some((days, rest)) = input.split_once('-') {
         (
             parse_walltime_component(days, "days")?,
@@ -3748,6 +3797,7 @@ pub fn parse_slurm_time_limit(input: &str) -> Result<u64> {
         .split(':')
         .map(|part| parse_walltime_component(part, "time component"))
         .collect::<Result<Vec<_>>>()?;
+    validate_walltime_ranges(&parts, has_days, input)?;
     let seconds = match parts.as_slice() {
         [minutes] => minutes.saturating_mul(60),
         [minutes, seconds] => minutes.saturating_mul(60).saturating_add(*seconds),
@@ -3778,6 +3828,40 @@ fn parse_walltime_component(input: &str, label: &str) -> Result<u64> {
     input
         .parse::<u64>()
         .with_context(|| format!("invalid {label} value '{input}'"))
+}
+
+/// Validates the range of each `:`-separated time component.
+///
+/// The leading component (minutes for bare time-of-day forms, or hours when a
+/// `D-` day prefix is present) is left unbounded to match Slurm, which only
+/// allows a large value in the most-significant position. Every minutes and
+/// seconds field must be 0-59, and when days are present the hours field is
+/// bounded to 0-23.
+fn validate_walltime_ranges(parts: &[u64], has_days: bool, input: &str) -> Result<()> {
+    // Position of fields, from least to most significant, depends on length:
+    //   [MM], [MM, SS], [HH, MM, SS]; a leading `D-` shifts HH out of the
+    //   unbounded slot because days then carry the unbounded magnitude.
+    let bad = match (parts, has_days) {
+        // Bare minutes (`MM`) — leading field, unbounded.
+        ([_minutes], false) => false,
+        // Days plus bare hours (`D-HH`) — hours bounded, days unbounded.
+        ([hours], true) => *hours > 23,
+        // `MM:SS` — minutes leading and unbounded, seconds bounded.
+        ([_minutes, seconds], false) => *seconds > 59,
+        // `D-HH:MM` — hours and minutes bounded, days unbounded.
+        ([hours, minutes], true) => *hours > 23 || *minutes > 59,
+        // `HH:MM:SS` — hours leading and unbounded, minutes/seconds bounded.
+        ([_hours, minutes, seconds], false) => *minutes > 59 || *seconds > 59,
+        // `D-HH:MM:SS` — hours/minutes/seconds bounded, days unbounded.
+        ([hours, minutes, seconds], true) => *hours > 23 || *minutes > 59 || *seconds > 59,
+        _ => false,
+    };
+    if bad {
+        bail!(
+            "minutes and seconds must be 0-59 (and hours 0-23 with a day prefix) in time limit '{input}'"
+        );
+    }
+    Ok(())
 }
 
 fn normalize_notify_events(events: &[NotifyEvent]) -> Vec<NotifyEvent> {

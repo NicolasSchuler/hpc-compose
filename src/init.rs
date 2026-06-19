@@ -406,10 +406,21 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
 #[must_use]
 pub fn next_commands(output: &Path) -> Vec<String> {
     let path = output.display().to_string();
-    vec![
-        format!("hpc-compose plan -f {path}"),
-        format!("hpc-compose up -f {path}"),
-    ]
+    if crate::platform::is_macos() {
+        // macOS is authoring-only: keep the user on safe static commands and
+        // flag that `up` must run on a Linux Slurm login node, matching the
+        // README's Safe First Path.
+        vec![
+            format!("hpc-compose plan -f {path}"),
+            format!("hpc-compose plan --show-script -f {path}"),
+            format!("hpc-compose up -f {path}   # run from a Linux Slurm login node"),
+        ]
+    } else {
+        vec![
+            format!("hpc-compose plan -f {path}"),
+            format!("hpc-compose up -f {path}"),
+        ]
+    }
 }
 
 fn prompt(
@@ -500,13 +511,28 @@ mod tests {
     #[test]
     fn cache_dir_placeholder_and_next_commands_match_expected_defaults() {
         assert_eq!(cache_dir_placeholder(), "<shared-cache-dir>");
-        assert_eq!(
-            next_commands(Path::new("/tmp/demo.yaml")),
-            vec![
-                "hpc-compose plan -f /tmp/demo.yaml",
-                "hpc-compose up -f /tmp/demo.yaml",
-            ]
-        );
+        let commands = next_commands(Path::new("/tmp/demo.yaml"));
+        assert_eq!(commands[0], "hpc-compose plan -f /tmp/demo.yaml");
+        if cfg!(target_os = "macos") {
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| c.contains("plan --show-script -f /tmp/demo.yaml"))
+            );
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| c.starts_with("hpc-compose up -f /tmp/demo.yaml"))
+            );
+        } else {
+            assert_eq!(
+                commands,
+                vec![
+                    "hpc-compose plan -f /tmp/demo.yaml",
+                    "hpc-compose up -f /tmp/demo.yaml",
+                ]
+            );
+        }
     }
 
     #[test]

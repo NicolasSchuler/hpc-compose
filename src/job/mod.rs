@@ -128,13 +128,12 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     }
     let serialized =
         serde_json::to_vec_pretty(value).context("failed to serialize job metadata")?;
-    let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, &serialized).context(format!("failed to write {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path).context(format!(
-        "failed to rename {} to {}",
-        tmp_path.display(),
-        path.display()
-    ))
+    // Atomic, owner-only write via a per-writer unique temp file + rename, so
+    // concurrent runs on a shared filesystem never publish (or observe) a torn
+    // record, do not collide on a fixed `*.json.tmp` name, and do not expose
+    // potentially sensitive command/sweep/config metadata to other users.
+    crate::secure_io::write_atomic(path, &serialized, true)
+        .context(format!("failed to write {}", path.display()))
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {

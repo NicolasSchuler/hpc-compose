@@ -1015,18 +1015,11 @@ mod tests {
             .contains("missing required field 'step_id'")
         );
 
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let sstat_fail = tmpdir.path().join("fake-sstat.sh");
-        fs::write(&sstat_fail, "#!/bin/sh\nexit 1\n").expect("script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&sstat_fail).expect("metadata").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&sstat_fail, perms).expect("chmod");
-        }
-        let sstat_err = probe_step_stats("123", sstat_fail.to_string_lossy().as_ref())
-            .expect_err("sstat failure");
+        let false_bin = ["/usr/bin/false", "/bin/false"]
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+            .unwrap_or("false");
+        let sstat_err = probe_step_stats("123", false_bin).expect_err("sstat failure");
         assert!(sstat_err.to_string().contains("sstat failed for job 123"));
     }
 }

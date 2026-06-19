@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::prepare::RuntimePlan;
-use crate::spec::parse_slurm_time_limit;
+use crate::spec::{GIB, parse_memory_bytes, parse_slurm_time_limit};
 
 use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
 use super::model::{SubmissionBackend, SubmissionRecord};
@@ -19,7 +19,6 @@ use super::stats::{
     step_from_slurm_sample_row,
 };
 
-const GIB: u64 = 1_024 * 1_024 * 1_024;
 const GPU_ACTIVE_UTILIZATION_PERCENT: f64 = 5.0;
 const GPU_ACTIVE_MEMORY_MIB: u64 = 512;
 const CPU_ACTIVE_SECONDS: u64 = 1;
@@ -1108,29 +1107,6 @@ fn tres_memory_bytes(values: &BTreeMap<String, String>) -> Option<u64> {
         .and_then(|value| parse_memory_bytes(value))
 }
 
-fn parse_memory_bytes(raw: &str) -> Option<u64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
-        return None;
-    }
-    let number_end = trimmed
-        .char_indices()
-        .find_map(|(index, ch)| (!ch.is_ascii_digit()).then_some(index))
-        .unwrap_or(trimmed.len());
-    let value = trimmed[..number_end].parse::<u64>().ok()?;
-    let unit = trimmed[number_end..].trim().to_ascii_uppercase();
-    let multiplier = match unit.as_str() {
-        "" | "B" => 1,
-        "K" | "KB" | "KIB" => 1_024,
-        "M" | "MB" | "MIB" => 1_024_u64.pow(2),
-        "G" | "GB" | "GIB" => GIB,
-        "T" | "TB" | "TIB" => 1_024_u64.pow(4),
-        "P" | "PB" | "PIB" => 1_024_u64.pow(5),
-        _ => return None,
-    };
-    Some(value.saturating_mul(multiplier))
-}
-
 fn parse_slurm_duration_seconds(raw: &str) -> Option<u64> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
@@ -1140,6 +1116,7 @@ fn parse_slurm_duration_seconds(raw: &str) -> Option<u64> {
         return Some(seconds);
     }
     let without_fraction = trimmed.split('.').next().unwrap_or(trimmed);
+    let has_days = without_fraction.contains('-');
     let (days, time) = match without_fraction.split_once('-') {
         Some((days, time)) => (days.parse::<u64>().ok()?, time),
         None => (0, without_fraction),
@@ -1148,6 +1125,19 @@ fn parse_slurm_duration_seconds(raw: &str) -> Option<u64> {
         .split(':')
         .map(|part| part.parse::<u64>().ok())
         .collect::<Option<Vec<_>>>()?;
+    // Mirror the spec walltime range rules so utilization math agrees with the
+    // validator: minutes and seconds are 0-59, and the hours field is bounded to
+    // 0-23 whenever a day prefix carries the unbounded magnitude.
+    let out_of_range = match (parts.as_slice(), has_days) {
+        ([_minutes, seconds], false) => *seconds > 59,
+        ([hours, minutes], true) => *hours > 23 || *minutes > 59,
+        ([_hours, minutes, seconds], false) => *minutes > 59 || *seconds > 59,
+        ([hours, minutes, seconds], true) => *hours > 23 || *minutes > 59 || *seconds > 59,
+        _ => false,
+    };
+    if out_of_range {
+        return None;
+    }
     let seconds = match parts.as_slice() {
         [minutes, seconds] => minutes.saturating_mul(60).saturating_add(*seconds),
         [hours, minutes, seconds] => hours

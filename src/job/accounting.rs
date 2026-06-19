@@ -4,6 +4,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use crate::spec::parse_memory_bytes;
+
 use super::model::{SubmissionBackend, SubmissionRecord};
 use super::scheduler::{command_unavailable_detail, command_unavailable_error};
 use super::stats::{find_tres_value, parse_tres_map};
@@ -313,29 +315,6 @@ fn parse_slurm_accounting_duration(raw: &str) -> Option<u64> {
         _ => return None,
     };
     Some(days.saturating_mul(86_400).saturating_add(seconds))
-}
-
-fn parse_memory_bytes(raw: &str) -> Option<u64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
-        return None;
-    }
-    let number_end = trimmed
-        .char_indices()
-        .find_map(|(index, ch)| (!ch.is_ascii_digit()).then_some(index))
-        .unwrap_or(trimmed.len());
-    let value = trimmed[..number_end].parse::<u64>().ok()?;
-    let unit = trimmed[number_end..].trim().to_ascii_uppercase();
-    let multiplier = match unit.as_str() {
-        "" | "B" => 1,
-        "K" | "KB" | "KIB" => 1_024,
-        "M" | "MB" | "MIB" => 1_024_u64.pow(2),
-        "G" | "GB" | "GIB" => 1_024_u64.pow(3),
-        "T" | "TB" | "TIB" => 1_024_u64.pow(4),
-        "P" | "PB" | "PIB" => 1_024_u64.pow(5),
-        _ => return None,
-    };
-    Some(value.saturating_mul(multiplier))
 }
 
 fn optional_string(raw: &str) -> Option<String> {

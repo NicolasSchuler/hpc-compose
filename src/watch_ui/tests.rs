@@ -274,6 +274,29 @@ fn search(key: SearchKey) -> WatchInput {
 }
 
 #[test]
+fn walltime_changed_gates_idle_redraws() {
+    let progress = |elapsed| {
+        Some(WalltimeProgress {
+            original: "00:10:00".into(),
+            elapsed_seconds: elapsed,
+            total_seconds: 600,
+            remaining_seconds: 600 - elapsed,
+        })
+    };
+
+    // No walltime in either state: nothing to repaint for.
+    assert!(!walltime_changed(&None, &None));
+    // Walltime appears (job started running): repaint.
+    assert!(walltime_changed(&None, &progress(300)));
+    // Walltime disappears (job left RUNNING): repaint.
+    assert!(walltime_changed(&progress(300), &None));
+    // Same second, same progress: idle wake-up, skip the rebuild.
+    assert!(!walltime_changed(&progress(300), &progress(300)));
+    // Progress advanced by a second: repaint.
+    assert!(walltime_changed(&progress(300), &progress(301)));
+}
+
+#[test]
 fn replay_loop_navigation_selects_service_via_injected_events() {
     let report = sample_replay_report();
     let mut events = ScriptedEvents::new([normal(WatchKey::Down), normal(WatchKey::Quit)]);

@@ -224,7 +224,7 @@ Use these commands and global flags when you want the project-local settings fil
 
 ### Lint rules
 
-`hpc-compose lint` emits stable finding codes after validation and planning succeed. Warning-level findings can be promoted to errors with `--strict`; use `--allow-warnings` to keep warning-only results successful.
+`hpc-compose lint` emits stable finding codes after validation and planning succeed. Warning-level findings fail the command by default; pass `--allow-warnings` to downgrade them to advisory so a warning-only run still succeeds.
 
 | Code | Severity | Trigger | Recommendation |
 | --- | --- | --- | --- |

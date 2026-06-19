@@ -29,11 +29,9 @@ pub fn log_file_name_for_service(value: &str) -> String {
 }
 
 pub(super) fn shell_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-    let escaped = value.replace('\'', "'\"'\"'");
-    format!("'{escaped}'")
+    // Delegate to the single canonical, property-tested quoter so the
+    // security-critical render path cannot drift from it.
+    crate::shell_quote::quote(value)
 }
 
 pub(super) fn flag(value: bool) -> &'static str {

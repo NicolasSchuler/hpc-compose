@@ -376,6 +376,22 @@ fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
     path.with_file_name(artifact_filename)
 }
 
+/// Monotonic counter making each temp manifest name unique within this process.
+/// Writes the cache manifest atomically.
+///
+/// The `cache_dir` lives on a shared cluster filesystem where multiple jobs may
+/// write the same manifest concurrently. A plain `fs::write` truncates then
+/// rewrites in place, so a crash or a concurrent reader can observe a torn,
+/// half-written JSON file that then fails to parse and breaks later runs. We
+/// delegate to [`crate::secure_io::write_atomic`], which writes to a unique,
+/// O_EXCL temp file in the same directory and renames it over the destination
+/// (atomic on POSIX, and resistant to symlink/pre-existing-entry attacks in the
+/// shared directory).
+///
+/// Note: this fixes torn writes for each individual write. It does **not** add
+/// advisory locking, so the read-modify-write `upsert_*` path can still lose an
+/// update under concurrent writers (a known follow-up); the manifest that lands
+/// is always a complete, valid one.
 fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = manifest_path_for(artifact);
@@ -384,9 +400,8 @@ fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     }
     let raw =
         serde_json::to_string_pretty(manifest).context("failed to serialize cache manifest")?;
-    fs::write(&manifest_path, raw)
-        .context(format!("failed to write {}", manifest_path.display()))?;
-    Ok(())
+    crate::secure_io::write_atomic(&manifest_path, raw.as_bytes(), false)
+        .context(format!("failed to write {}", manifest_path.display()))
 }
 
 fn format_env_entry((key, value): &(String, String)) -> String {
@@ -463,6 +478,63 @@ mod tests {
         assert_eq!(manifest.kind, CacheEntryKind::Prepared);
         assert!(manifest.service_names.contains(&"svc".to_string()));
         assert_eq!(manifest.registry.as_deref(), Some("registry.scc.kit.edu"));
+    }
+
+    #[test]
+    fn concurrent_writes_never_produce_torn_manifest() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let artifact = Arc::new(tmpdir.path().join("shared.sqsh"));
+        fs::write(artifact.as_ref(), "x").expect("artifact");
+        let source = ImageSource::Remote("docker://redis:7".into());
+
+        // Many threads hammer the same manifest path; an atomic rename guarantees
+        // every reader (and the final state) always sees a complete JSON file.
+        let mut handles = Vec::new();
+        for index in 0..16 {
+            let artifact = Arc::clone(&artifact);
+            let source = source.clone();
+            handles.push(thread::spawn(move || {
+                for round in 0..20 {
+                    upsert_base_manifest(
+                        &artifact,
+                        &format!("svc-{index}-{round}"),
+                        &source,
+                        "shared-key",
+                    )
+                    .expect("upsert");
+                    // Concurrently read the manifest back; with a non-atomic write
+                    // this would intermittently observe a torn, unparseable file.
+                    if manifest_path_for(&artifact).exists() {
+                        read_manifest(&artifact).expect("manifest parses cleanly");
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread");
+        }
+
+        let manifest = read_manifest(&artifact).expect("final manifest parses");
+        assert_eq!(manifest.kind, CacheEntryKind::Base);
+        assert_eq!(manifest.cache_key, "shared-key");
+        assert_eq!(manifest.registry.as_deref(), Some("registry-1.docker.io"));
+        assert!(!manifest.service_names.is_empty());
+
+        // No temp files should be left behind in the cache dir.
+        let leftovers: Vec<_> = fs::read_dir(tmpdir.path())
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.contains(".tmp."))
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "stray temp manifests: {leftovers:?}");
     }
 
     #[test]

@@ -1900,6 +1900,13 @@ fn run_capture(bin: &str, args: &[&str]) -> Option<String> {
 }
 
 fn print_doctor_report(report: &Report) {
+    if crate::platform::is_macos() {
+        println!("  macOS detected: this is an authoring-only platform.");
+        println!("    Slurm/Enroot runtime tools are expected to be absent here; run runtime");
+        println!(
+            "    commands (up/doctor/preflight) from a Linux Slurm login node. See the Support Matrix."
+        );
+    }
     let grouped = report.grouped();
     for item in &grouped.passed_checks {
         println!("  {} {}", crate::term::symbol_ok(), item.message);

@@ -62,6 +62,12 @@ fn print_examples(entries: &[ExampleInfo], format: ExamplesOutputFormat) -> Resu
 }
 
 fn print_text(entries: &[ExampleInfo]) {
+    if entries.is_empty() {
+        println!(
+            "No examples matched. Try `hpc-compose examples list` or `hpc-compose examples recommend <description>`."
+        );
+        return;
+    }
     for category in ["basics", "llm", "training", "distributed", "workflow"] {
         let grouped = entries
             .iter()

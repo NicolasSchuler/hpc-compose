@@ -330,8 +330,22 @@ pub(crate) fn load_effective_config_with_interpolation_vars_cache_default_and_re
     spec.effective_config(&plan.cache_dir, &normalized_policies)
 }
 
-pub(crate) fn effective_config_yaml(config: &EffectiveComposeConfig) -> Result<String> {
-    serde_norway::to_string(config).context("failed to serialize effective config as yaml")
+/// Serializes the effective config as YAML for the persisted job-state
+/// snapshot (and `diff` comparisons), redacting resolved secret values first.
+///
+/// The snapshot is written to `.hpc-compose/` on a shared filesystem, so it
+/// must not carry cleartext secrets — `config`/`context`/`inspect` already
+/// redact the same struct on display, and this keeps the at-rest copy
+/// consistent. Pass the secret value set from
+/// [`crate::redaction::secret_value_set`] so values referenced under benign
+/// env names are caught in addition to name-based redaction.
+pub(crate) fn effective_config_yaml(
+    config: &EffectiveComposeConfig,
+    secret_values: &std::collections::BTreeSet<String>,
+) -> Result<String> {
+    let value = crate::redaction::redacted_yaml_value(config, secret_values, false)
+        .context("failed to redact effective config for snapshot")?;
+    serde_norway::to_string(&value).context("failed to serialize effective config as yaml")
 }
 
 #[allow(dead_code)]
@@ -3185,6 +3199,16 @@ fn print_watch_final_summary(record: &hpc_compose::job::SubmissionRecord, outcom
     println!("  final state: {state} ({label})");
     if let Some(service) = failed_service_hint(record) {
         println!("  failed service: {service}");
+    }
+    if let Some(remediation) = crate::terminal_state::interpret(state) {
+        println!("  what this means: {}", remediation.message);
+        if remediation.suggest_rightsize {
+            println!(
+                "  rightsize: hpc-compose inspect --rightsize -f {} --job-id {}",
+                shell_quote(&record.compose_file.display().to_string()),
+                shell_quote(&record.job_id)
+            );
+        }
     }
     println!(
         "  debug: hpc-compose debug -f {} --job-id {}",

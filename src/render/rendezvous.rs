@@ -98,9 +98,12 @@ register_service_rendezvous_by_index() {
   local token
   token=$(printf '%s-%s' "$SLURM_JOB_ID" "$service_name" | tr -c 'A-Za-z0-9_.-' '_')
   local record="$dir/$token.json"
-  local latest_tmp="$dir/latest.json.tmp"
+  # Unique per-writer temp names so concurrent multi-node registrations to the
+  # same rendezvous name never share (and clobber) a temp file mid-write.
+  local record_tmp="$dir/.$token.$$.tmp"
+  local latest_tmp="$dir/.latest.$token.$$.tmp"
   mkdir -p "$dir"
-  cat > "$record.tmp" <<HPC_COMPOSE_RDZV_JSON
+  cat > "$record_tmp" <<HPC_COMPOSE_RDZV_JSON
 {
   "schema_version": 1,
   "name": "$(json_escape "$rdzv_name")",
@@ -117,7 +120,7 @@ register_service_rendezvous_by_index() {
   "metadata": $metadata_json
 }
 HPC_COMPOSE_RDZV_JSON
-  mv "$record.tmp" "$record"
+  mv "$record_tmp" "$record"
   cp "$record" "$latest_tmp"
   mv "$latest_tmp" "$dir/latest.json"
   SERVICE_RDZV_REGISTERED[index]="1"

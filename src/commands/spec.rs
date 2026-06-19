@@ -516,10 +516,19 @@ fn build_plan_hints(runtime_plan: &RuntimePlan, cluster_warnings: &[String]) -> 
             });
         }
     }
-    hints.push(PlanHint {
-        level: "next",
-        message: "next command: hpc-compose up -f <compose.yaml>".to_string(),
-    });
+    if crate::platform::is_macos() {
+        hints.push(PlanHint {
+            level: "next",
+            message: "next: inspect with `hpc-compose plan --show-script -f <compose.yaml>`; \
+                run `hpc-compose up` from a Linux Slurm login node (macOS is authoring-only)"
+                .to_string(),
+        });
+    } else {
+        hints.push(PlanHint {
+            level: "next",
+            message: "next command: hpc-compose up -f <compose.yaml>".to_string(),
+        });
+    }
     hints
 }
 

@@ -18,10 +18,12 @@ The repository ships a `.pre-commit-hooks.yaml` defining two local hooks that ru
 
 Add this repo to your `.pre-commit-config.yaml`:
 
+Replace `vX.Y.Z` below with the latest release tag from the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page.
+
 ```yaml
 repos:
   - repo: https://github.com/NicolasSchuler/hpc-compose
-    rev: v0.1.45  # pin to a release tag
+    rev: vX.Y.Z  # pin to a release tag
     hooks:
       - id: hpc-compose-validate
       - id: hpc-compose-lint
@@ -42,15 +44,15 @@ By default the hooks run when `compose.yaml` is staged. To point at a different 
 
 ### Reusable workflow
 
-The simplest integration calls the maintained reusable workflow, which installs a pinned release and runs validate + lint:
+The simplest integration calls the maintained reusable workflow, which installs a pinned release and runs validate + lint. Replace `vX.Y.Z` with the latest release tag from the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page:
 
 ```yaml
 jobs:
   hpc-compose:
-    uses: NicolasSchuler/hpc-compose/.github/workflows/hpc-compose-lint.yml@v0.1.45
+    uses: NicolasSchuler/hpc-compose/.github/workflows/hpc-compose-lint.yml@vX.Y.Z
     with:
       compose-file: compose.yaml
-      version: v0.1.45
+      version: vX.Y.Z
       strict: true
 ```
 
@@ -58,7 +60,7 @@ Set `strict: true` to fail on lint warnings, or `strict: false` (default) to all
 
 ### Inline snippet
 
-For repos that prefer an inline step:
+For repos that prefer an inline step. Replace `vX.Y.Z` with the latest release tag from the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page:
 
 ```yaml
 jobs:
@@ -69,8 +71,8 @@ jobs:
       - name: Install hpc-compose
         run: |
           set -euo pipefail
-          curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/v0.1.45/install.sh" \
-            | env HPC_COMPOSE_VERSION="v0.1.45" sh
+          curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/vX.Y.Z/install.sh" \
+            | env HPC_COMPOSE_VERSION="vX.Y.Z" sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: hpc-compose validate -f compose.yaml
       - run: hpc-compose lint -f compose.yaml --allow-warnings
@@ -78,7 +80,7 @@ jobs:
 
 ## GitLab CI
 
-GitLab runners typically do not provide `hpc-compose`, so install it inside the job first:
+GitLab runners typically do not provide `hpc-compose`, so install it inside the job first. Replace `vX.Y.Z` with the latest release tag from the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page:
 
 ```yaml
 hpc-compose-lint:
@@ -86,7 +88,7 @@ hpc-compose-lint:
   rules:
     - changes: [compose.yaml]
   variables:
-    HPC_COMPOSE_VERSION: v0.1.45
+    HPC_COMPOSE_VERSION: vX.Y.Z
   before_script:
     - apk add --no-cache curl ca-certificates
     - |

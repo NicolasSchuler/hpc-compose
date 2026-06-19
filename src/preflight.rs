@@ -177,6 +177,12 @@ impl Report {
             blocker_label, warn_label, ctx_label, passed_label
         )];
 
+        if crate::platform::is_macos() && grouped.summary.blockers > 0 {
+            lines.push(
+                "note: macOS is an authoring-only platform; missing Slurm/Enroot runtime tools are expected here. Run from a Linux Slurm login node.".to_string(),
+            );
+        }
+
         render_section(
             &mut lines,
             "Blockers",
@@ -290,6 +296,7 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
 
     check_cache_path_policy(&mut report, plan);
     check_cache_dir_access(&mut report, &plan.cache_dir);
+    check_disk_space(&mut report, &plan.cache_dir);
     check_local_and_mount_paths(&mut report, plan);
     check_resume_path(&mut report, plan);
     check_registry_credentials(&mut report, plan);
@@ -962,6 +969,56 @@ fn check_local_and_mount_paths(report: &mut Report, plan: &RuntimePlan) {
     }
 }
 
+/// Available bytes for an unprivileged user on the filesystem holding `path`,
+/// or `None` when it cannot be determined (unsupported platform / error).
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)] // statvfs field widths vary across platforms
+fn available_bytes(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let probe_path = path.ancestors().find(|candidate| candidate.exists())?;
+    let c_path = CString::new(probe_path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `statvfs` only reads the NUL-terminated path and writes into the
+    // zeroed struct; we check the return code before using any field.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    // f_bavail = blocks available to unprivileged users; f_frsize = fragment size.
+    (stat.f_bavail as u64).checked_mul(stat.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+fn available_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Warns when the cache filesystem is low on space. Quota/no-space exhaustion is
+/// a common HPC failure mode that otherwise surfaces only as a confusing tar or
+/// enroot error mid-run. Stays silent when space is ample so it adds no noise.
+fn check_disk_space(report: &mut Report, cache_dir: &Path) {
+    const LOW_SPACE_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+    let Some(avail) = available_bytes(cache_dir) else {
+        return;
+    };
+    if avail < LOW_SPACE_THRESHOLD {
+        let gib = avail as f64 / (1024.0 * 1024.0 * 1024.0);
+        report.items.push(Item {
+            level: Level::Warn,
+            message: format!(
+                "cache filesystem at '{}' has only {gib:.1} GiB available",
+                cache_dir.display()
+            ),
+            remediation: Some(
+                "Image import and artifact writes can exhaust this; free space, raise your quota, or point x-slurm.cache_dir at a filesystem with more room before submitting."
+                    .to_string(),
+            ),
+        });
+    }
+}
+
 fn check_resume_path(report: &mut Report, plan: &RuntimePlan) {
     let Some(resume_dir) = plan.slurm.resume_dir() else {
         return;
@@ -1514,6 +1571,28 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_space_reports_available_and_stays_quiet_when_ample() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let avail = available_bytes(dir.path()).expect("statvfs available bytes");
+        assert!(avail > 0, "expected a positive available-bytes reading");
+        let missing_cache = dir.path().join("cache").join("future");
+        assert!(
+            available_bytes(&missing_cache).is_some_and(|bytes| bytes > 0),
+            "missing cache dirs should probe the nearest existing ancestor"
+        );
+        // A normal test filesystem has far more than the low-space threshold,
+        // so the check must add no item (it warns only when space is low).
+        let mut report = Report { items: Vec::new() };
+        check_disk_space(&mut report, dir.path());
+        assert!(
+            report.items.is_empty(),
+            "ample-space check should be silent, got: {:?}",
+            report.items
+        );
+    }
     use crate::cluster::{MpiInstallationProfile, RuntimeAvailability};
     use crate::planner::{
         ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement, ServicePlacementMode,

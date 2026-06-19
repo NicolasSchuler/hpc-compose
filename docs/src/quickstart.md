@@ -6,7 +6,13 @@ If Slurm terms such as `sbatch`, `srun`, allocation, job step, Pyxis, or Enroot 
 
 ## 1. Install The CLI
 
-For normal use, install from the latest published [GitHub Release](https://github.com/NicolasSchuler/hpc-compose/releases) and pin the tag you selected:
+The fastest path installs the most recent published [GitHub Release](https://github.com/NicolasSchuler/hpc-compose/releases) with no edits; the script resolves the latest tag for you:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
+```
+
+For reproducible installs (recommended for shared clusters), pin the tag instead:
 
 ```bash
 RELEASE_TAG=vX.Y.Z
