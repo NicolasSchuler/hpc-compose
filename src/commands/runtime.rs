@@ -860,6 +860,15 @@ struct LocalLaunchOutcome {
     submit_output: output::SubmitOutput,
 }
 
+/// Resolved secret values for redacting the persisted config snapshot. Secrets
+/// are not per-trial, so the context's set is correct for sweep snapshots too.
+fn snapshot_secret_values(context: &ResolvedContext) -> BTreeSet<String> {
+    crate::redaction::secret_value_set(
+        &context.interpolation_vars,
+        &context.interpolation_var_sources,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_local_launch<F>(
     context: &ResolvedContext,
@@ -884,7 +893,8 @@ where
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let effective_config_yaml =
+        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
     let runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -968,7 +978,7 @@ where
         )
     })?;
     let script_path = script_out.unwrap_or_else(|| output::default_local_script_path(&file));
-    fs::write(&script_path, script).with_context(|| {
+    crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
             script_path.display()
@@ -1260,7 +1270,8 @@ where
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let effective_config_yaml =
+        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
     let mut runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1359,7 +1370,7 @@ where
         )
     })?;
     let script_path = script_out.unwrap_or_else(|| output::default_script_path(&file));
-    fs::write(&script_path, script).with_context(|| {
+    crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
             script_path.display()
@@ -1537,7 +1548,8 @@ pub(crate) fn launch(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let effective_config_yaml =
+        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
     let runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1664,7 +1676,7 @@ pub(crate) fn launch(
             output::default_script_path(&file)
         }
     });
-    fs::write(&script_path, script).with_context(|| {
+    crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
             script_path.display()
@@ -2744,7 +2756,8 @@ pub(crate) fn germinate(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let effective_config_yaml =
+        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
     let original_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -2830,7 +2843,7 @@ pub(crate) fn germinate(
         )
     })?;
     let script_path = script_out.unwrap_or_else(|| default_canary_script_path(&file));
-    fs::write(&script_path, script).with_context(|| {
+    crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered canary script to {}",
             script_path.display()
@@ -3496,7 +3509,7 @@ pub(crate) fn run_service(
         })
     })?;
     let script_path = script_out.unwrap_or_else(|| default_run_script_path(&file, &service_name));
-    fs::write(&script_path, script).with_context(|| {
+    crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
             script_path.display()
@@ -3712,7 +3725,7 @@ pub(crate) fn run_ephemeral(
     })?;
     let script_path =
         script_out.unwrap_or_else(|| default_ephemeral_run_script_path(&context.cwd, local));
-    fs::write(&script_path, script).with_context(|| {
+    crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
             script_path.display()
@@ -4065,7 +4078,7 @@ pub(crate) fn notebook(
     })?;
     let script_path =
         script_out.unwrap_or_else(|| default_notebook_script_path(&context.cwd, local));
-    fs::write(&script_path, script).with_context(|| {
+    crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
             script_path.display()
@@ -5488,7 +5501,8 @@ fn submit_sweep_trial(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml = output::effective_config_yaml(&effective_config)?;
+    let effective_config_yaml =
+        output::effective_config_yaml(&effective_config, &snapshot_secret_values(&context))?;
     let runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,
@@ -5562,7 +5576,7 @@ fn submit_sweep_trial(
             },
         )
     })?;
-    fs::write(script_path, script).with_context(|| {
+    crate::secure_io::write(script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
             script_path.display()
