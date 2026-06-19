@@ -24,7 +24,11 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// owner-only `0o600` permissions on Unix, so secret-bearing artifacts are not
 /// readable by other users on shared filesystems. On non-Unix targets
 /// `restricted` has no effect.
-pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>, restricted: bool) -> io::Result<()> {
+pub fn write(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+    restricted: bool,
+) -> io::Result<()> {
     let path = path.as_ref();
     #[cfg(unix)]
     {
