@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.47] - 2026-06-20
+
 ### Added
 
 - `x-slurm.runtime_root`: optional override for the per-job runtime-state

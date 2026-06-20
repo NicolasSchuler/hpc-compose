@@ -45,6 +45,27 @@ fn homebrew_formula_version() -> String {
         .to_string()
 }
 
+fn parse_version_triplet(version: &str) -> (u64, u64, u64) {
+    let mut parts = version.split('.');
+    let major = parts
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("invalid major version in {version}"));
+    let minor = parts
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("invalid minor version in {version}"));
+    let patch = parts
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("invalid patch version in {version}"));
+    assert!(
+        parts.next().is_none(),
+        "version {version} should have exactly three components"
+    );
+    (major, minor, patch)
+}
+
 fn rust_string_array_const(source: &str, name: &str) -> BTreeSet<String> {
     let marker = format!("const {name}: &[&str] = &[");
     let start = source
@@ -151,30 +172,37 @@ fn release_metadata_matches_cargo_package_version() {
 }
 
 #[test]
-fn homebrew_formula_matches_cargo_package_version() {
+fn homebrew_formula_tracks_published_release_or_pending_refresh() {
     let version = cargo_package_string("version");
+    let formula_version = homebrew_formula_version();
     let formula =
         fs::read_to_string(repo_root().join("Formula/hpc-compose.rb")).expect("read formula");
-    assert_eq!(
-        homebrew_formula_version(),
-        version,
-        "Homebrew formula version should match Cargo.toml"
+
+    let cargo_triplet = parse_version_triplet(&version);
+    let formula_triplet = parse_version_triplet(&formula_version);
+    let formula_is_current = formula_version == version;
+    let formula_is_previous_patch = formula_triplet.0 == cargo_triplet.0
+        && formula_triplet.1 == cargo_triplet.1
+        && formula_triplet.2 + 1 == cargo_triplet.2;
+    assert!(
+        formula_is_current || formula_is_previous_patch,
+        "Homebrew formula version {formula_version} should match Cargo.toml {version} or lag by exactly one patch while release automation opens the checksum-refresh PR"
     );
     assert!(
-        formula.contains(&format!("/releases/download/v{version}/")),
-        "Homebrew formula URLs should point at v{version} release assets"
+        formula.contains(&format!("/releases/download/v{formula_version}/")),
+        "Homebrew formula URLs should point at v{formula_version} release assets"
     );
     assert!(
         formula.contains(&format!(
-            "hpc-compose-v{version}-aarch64-apple-darwin.tar.gz"
+            "hpc-compose-v{formula_version}-aarch64-apple-darwin.tar.gz"
         )),
-        "Homebrew formula should reference the current arm64 macOS tarball"
+        "Homebrew formula should reference the arm64 macOS tarball for its declared version"
     );
     assert!(
         formula.contains(&format!(
-            "hpc-compose-v{version}-x86_64-apple-darwin.tar.gz"
+            "hpc-compose-v{formula_version}-x86_64-apple-darwin.tar.gz"
         )),
-        "Homebrew formula should reference the current x86_64 macOS tarball"
+        "Homebrew formula should reference the x86_64 macOS tarball for its declared version"
     );
 }
 
