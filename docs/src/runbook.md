@@ -1,4 +1,4 @@
-# Runbook
+# Operate a Real Cluster Run
 
 This runbook is the normal real-cluster flow for adapting a `hpc-compose` spec on a supported Linux Slurm submission host.
 
@@ -27,17 +27,22 @@ Make sure you have:
 
 Backend-specific requirements are listed in [Runtime Backends](runtime-backends.md). Cluster profile generation and MPI smoke probes are covered in [Cluster Profiles](cluster-profiles.md).
 
-## Normal Progression
+## The Operational Spine
 
-For a new spec on a real cluster:
+For a new spec on a real cluster, work the numbered steps below in order:
 
-1. Choose a starter from [Examples](examples.md), or run `hpc-compose new --template <name> --name my-app --output compose.yaml`.
-2. Run `hpc-compose setup` once if you want compose path, env files, env vars, and binary overrides stored in a project-local settings file.
-3. Run `hpc-compose context --format json` to verify resolved values and sources.
-4. Set or confirm the resolved cache directory, then adjust cluster-specific resource settings.
-5. Run `hpc-compose plan -f compose.yaml` and `hpc-compose plan --verbose -f compose.yaml` while adapting the file.
-6. Run `hpc-compose up -f compose.yaml` for the normal cluster run.
-7. If it fails, start with `hpc-compose debug -f compose.yaml --preflight`, then use [Troubleshooting](troubleshooting.md) and break out `preflight`, `prepare`, `render`, `status`, `ps`, `watch`, `stats`, or `logs` separately.
+1. Choose a starter from [Examples](examples.md), or run `hpc-compose new --template <name> --name my-app --output compose.yaml`. See [Choose A Starting Example](#choose-a-starting-example).
+2. Run `hpc-compose setup` once and verify resolved values with `hpc-compose context --format json`. See [Project-Local Settings](#project-local-settings).
+3. Choose the cache directory early. See [Choose A Cache Directory Early](#1-choose-a-cache-directory-early).
+4. Adapt the example and adjust cluster-specific resource settings. See [Adapt The Example](#2-adapt-the-example).
+5. Validate the spec. See [Validate The Spec](#3-validate-the-spec).
+6. Plan the run. See [Plan The Run](#4-plan-the-run).
+7. Launch with `up`. See [Normal Run: Use `up`](#5-normal-run-use-up).
+8. When debugging cluster readiness, prepare, or rendering, break out `preflight`, `prepare`, and `render` separately. See steps [6](#6-run-preflight-when-debugging-cluster-readiness)–[8](#8-render-the-batch-script).
+9. Inspect the tracked run. See [Inspect A Tracked Run](#9-inspect-a-tracked-run).
+10. Manage cache and old state. See [Manage Cache And Old State](#10-manage-cache-and-old-state).
+
+If a run fails, start with `hpc-compose debug -f compose.yaml --preflight`, then follow the First Triage flow in [Troubleshooting](troubleshooting.md).
 
 For a minimal cluster smoke test from a checkout, set `CACHE_DIR` to shared storage and run `scripts/cluster_smoke.sh`. It validates, preflights, and renders by default; set `HPC_COMPOSE_SMOKE_SUBMIT=1` only when you intentionally want it to launch the smoke job.
 
@@ -258,7 +263,7 @@ hpc-compose alloc -f compose.yaml
 hpc-compose run app -- python -m pytest
 ```
 
-Inside the allocation shell, `run SERVICE -- CMD` reuses the active allocation with `srun` instead of submitting a new `sbatch` job. `alloc` exports `HPC_COMPOSE_*` metadata for the compose file, cache directory, runtime backend, and allocated nodes.
+Inside the allocation shell, `run SERVICE -- CMD` reuses the active allocation with `srun` instead of submitting a new `sbatch` job. `alloc` exports `HPC_COMPOSE_*` metadata for the compose file, cache directory, runtime backend, and allocated nodes. For interactive notebook sessions inside an allocation, see [Notebook](notebook.md).
 
 ## 6. Run Preflight When Debugging Cluster Readiness
 
@@ -310,19 +315,11 @@ hpc-compose logs -f compose.yaml --service app --follow
 hpc-compose stats -f compose.yaml --format jsonl
 ```
 
-For a failed run, a practical investigation path is `hpc-compose jobs list`, then `hpc-compose replay -f compose.yaml --job-id <job-id>` to find the failure moment, then `debug`, `logs`, or `stats` for deeper evidence. Use [Runtime Observability](runtime-observability.md) for tracked state, replay, logs, metrics, and machine-readable output. Use [Artifacts and Resume](artifacts-and-resume.md) for artifact bundles and resume-aware attempts.
+Use [Runtime Observability](runtime-observability.md) for tracked state, replay, logs, metrics, and machine-readable output. For a failed run, start with the First Triage flow in [Troubleshooting](troubleshooting.md#first-triage). Use [Artifacts and Resume](artifacts-and-resume.md) for artifact bundles and resume-aware attempts.
 
 ## 10. Manage Cache And Old State
 
-```bash
-hpc-compose cache list
-hpc-compose cache inspect -f compose.yaml
-hpc-compose cache prune --all-unused -f compose.yaml
-hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
-hpc-compose clean -f compose.yaml --age 7 --dry-run
-```
-
-Use [Cache Management](cache-management.md) for cache reuse and pruning. Use [Troubleshooting](troubleshooting.md#clean-old-tracked-runs) before deleting tracked job directories.
+[Cache Management](cache-management.md) owns cache inspection, pruning, and cleanup of old tracked runs (`cache prune`, `jobs list --disk-usage`, `clean --age`). For first triage of a failed run, see [Troubleshooting](troubleshooting.md#first-triage).
 
 ## What Changed And What Should I Run?
 
@@ -336,12 +333,9 @@ Use [Cache Management](cache-management.md) for cache reuse and pruning. Use [Tr
 
 ## Related Docs
 
-- [Quickstart](quickstart.md)
-- [Examples](examples.md)
-- [Runtime Backends](runtime-backends.md)
-- [Troubleshooting](troubleshooting.md)
-- [Cluster Profiles](cluster-profiles.md)
-- [Runtime Observability](runtime-observability.md)
-- [Cache Management](cache-management.md)
-- [Artifacts and Resume](artifacts-and-resume.md)
-- [Spec Reference](spec-reference.md)
+- [Monitor a Run](runtime-observability.md)
+- [Manage the Cache and Clean Up](cache-management.md)
+- [Troubleshoot a Failed Run](troubleshooting.md)
+- [Develop and Smoke-Test Locally](development-workflow.md)
+- [Onboard a Cluster Site](cluster-profiles.md)
+- [Notebook](notebook.md)

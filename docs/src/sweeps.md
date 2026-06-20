@@ -1,4 +1,4 @@
-# Hyperparameter Sweeps
+# Run Hyperparameter Sweeps
 
 `hpc-compose sweep` turns one compose file with an embedded `sweep` block into many independent tracked Slurm jobs. Each trial is a normal `sbatch` submission with its own allocation, rendered script, job record, and scheduler state. The sweep manifest ties those jobs together for listing and aggregate status.
 
@@ -168,7 +168,7 @@ hpc-compose sweep stop -f train.yaml --yes --reason 'objective threshold met'
 
 `sweep stop` cancels every non-terminal trial via `scancel` and records the stop on the manifest. `--stop-when` uses a tiny grammar: `objective < N`, `objective <= N`, `objective > N`, or `objective >= N`, evaluated against the best observed value.
 
-> Bayesian/adaptive trial selection is intentionally out of scope for v1. The objective writeback, ranking, and stop machinery here are the foundation any future optimizer would build on.
+> Bayesian/adaptive trial selection is intentionally out of scope. The objective writeback, ranking, and stop machinery here are the foundation any future optimizer would build on.
 
 ## Limitations
 
@@ -180,7 +180,7 @@ hpc-compose sweep stop -f train.yaml --yes --reason 'objective threshold met'
 
 ## Related Docs
 
+- [Right-Size With Canary Runs](canary-runs.md)
 - [Runtime Observability](runtime-observability.md)
-- [Right-Sizing With Canary Runs](canary-runs.md)
 - [CLI Reference](cli-reference.md)
 - [Spec Reference](spec-reference.md)

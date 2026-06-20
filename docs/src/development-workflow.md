@@ -1,4 +1,4 @@
-# Development Workflow
+# Develop and Smoke-Test Locally
 
 `test`, `dev`, and `tmux` are the local-development command layer. They reuse the same prepare, render, local supervisor, runtime state, and tracking paths as `up`, so a run started by one command remains visible to `status`, `ps`, `logs`, `stats`, `watch`, and `debug`.
 
@@ -15,7 +15,7 @@ hpc-compose test --submit --format json -f compose.smoke.yaml
 `test` requires exactly one execution mode:
 
 - `--local` runs the rendered local supervisor on the current host.
-- `--submit` calls `sbatch`; it defaults to `--time 00:01:00` and `--timeout 180s`.
+- `--submit` calls `sbatch`; it defaults to `--time 00:01:00` and `--timeout 180s`. This is a real-scheduler operation that consumes an allocation, so it needs explicit user approval before running.
 
 A smoke test passes only when every service:
 
@@ -104,7 +104,8 @@ hpc-compose test --submit --time 00:01:00 -f examples/dev-python-smoke.yaml
 
 ## Related Docs
 
+- [Operate a Real Cluster Run](runbook.md)
+- [Monitor a Run](runtime-observability.md)
+- [Troubleshoot a Failed Run](troubleshooting.md)
+- [Manage the Cache and Clean Up](cache-management.md)
 - [CLI Reference](cli-reference.md)
-- [Troubleshooting](troubleshooting.md)
-- [Examples](examples.md)
-- [Runbook](runbook.md)

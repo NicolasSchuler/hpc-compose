@@ -63,5 +63,7 @@ Use [Runtime Backends](runtime-backends.md), [Runbook](runbook.md), and [Executi
 ## Related Docs
 
 - [Installation](installation.md)
+- [Quickstart](quickstart.md)
+- [Why hpc-compose](why-hpc-compose.md)
 - [Runtime Backends](runtime-backends.md)
 - [Runbook](runbook.md)

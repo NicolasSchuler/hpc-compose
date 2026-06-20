@@ -1,4 +1,4 @@
-# Running Compose-Style Multi-Service Workflows on Slurm
+# Why hpc-compose
 
 This is the canonical explainer for `hpc-compose`.
 
@@ -28,37 +28,15 @@ This is especially common in research ML and HPC-adjacent work where one job may
 
 Docker Compose is good at expressing a small multi-service application on one machine. Slurm solves a different problem: scheduling one batch allocation onto shared cluster resources.
 
-That mismatch shows up in exactly the features `hpc-compose` leaves out:
+That mismatch is why `hpc-compose` leaves several Compose features out by design. See [Slurm Capability Scope](slurm-capability-scope.md) for the exact unsupported-features list.
 
-- `ports`
-- custom `networks`
-- Compose `restart`
-- `deploy`
-- broad runtime compatibility with arbitrary Compose features
-
-Those omissions are deliberate. The point is not to emulate all of Compose on a cluster. The point is to keep a familiar authoring shape for the subset that maps cleanly to one Slurm job.
+The omissions are deliberate. The point is not to emulate all of Compose on a cluster. The point is to keep a familiar authoring shape for the subset that maps cleanly to one Slurm job.
 
 ## The Narrow Execution Model
 
-`hpc-compose` keeps the execution model explicit:
+`hpc-compose` keeps the execution model explicit: a compose-like spec is planned and rendered on the submission host into one batch script, which Slurm runs as one allocation. See [Execution Model](execution-model.md) for the full spec->sbatch->srun pipeline.
 
-```text
-compose-like spec
-      |
-      +--> plan / validate / render on the submission host
-      |
-      +--> one generated batch script
-                |
-                v
-          one Slurm allocation
-                |
-                +--> primary-node helper services
-                +--> optional allocation-wide distributed service
-                +--> optional explicitly partitioned service steps
-                +--> shared /hpc-compose/job scratch for coordination
-```
-
-This gives you a few important properties:
+That explicitness gives you a few important properties:
 
 - one inspectable unit of submission
 - one obvious place to look when the job fails
@@ -108,7 +86,7 @@ If that list rules out your workload, that is not a failure of the tool. It is t
 
 ## Read Next
 
-- [Quickstart](quickstart.md)
-- [Examples](examples.md)
+- [Slurm and Container Basics](slurm-container-basics.md)
+- [Runtime Backends](runtime-backends.md)
 - [Execution Model](execution-model.md)
-- [Supported Slurm Model](supported-slurm-model.md)
+- [Slurm Capability Scope](slurm-capability-scope.md)

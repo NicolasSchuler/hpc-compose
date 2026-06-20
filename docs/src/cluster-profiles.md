@@ -1,4 +1,4 @@
-# Cluster Profiles
+# Onboard a Cluster Site
 
 Cluster profiles let `validate` and `preflight` compare a spec against site-specific Slurm, runtime, MPI, storage, and policy hints.
 
@@ -75,8 +75,8 @@ hpc-compose doctor fabric-smoke -f compose.yaml --service trainer --checks auto 
 
 ## Related Docs
 
-- [Runbook](runbook.md)
-- [HAICORE Guide](haicore-guide.md)
+- [HAICORE@KIT Guide](haicore-guide.md)
+- [Operate a Real Cluster Run](runbook.md)
+- [Troubleshoot a Failed Run](troubleshooting.md)
 - [Runtime Backends](runtime-backends.md)
-- [Troubleshooting](troubleshooting.md)
 - [Spec Reference](spec-reference.md#servicesnamex-slurmmpi)

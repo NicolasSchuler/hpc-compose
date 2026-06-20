@@ -10,14 +10,15 @@
     }
   },
   "urls": [
+    "http://127.0.0.1:3000/ai-agent-setup.html",
     "http://127.0.0.1:3000/architecture.html",
     "http://127.0.0.1:3000/artifacts-and-resume.html",
     "http://127.0.0.1:3000/brand-assets.html",
     "http://127.0.0.1:3000/cache-management.html",
     "http://127.0.0.1:3000/canary-runs.html",
+    "http://127.0.0.1:3000/ci-integration.html",
     "http://127.0.0.1:3000/cli-reference.html",
     "http://127.0.0.1:3000/cluster-profiles.html",
-    "http://127.0.0.1:3000/codex-skill.html",
     "http://127.0.0.1:3000/cross-job-rendezvous.html",
     "http://127.0.0.1:3000/development-workflow.html",
     "http://127.0.0.1:3000/docker-compose-migration.html",
@@ -25,6 +26,7 @@
     "http://127.0.0.1:3000/example-source.html",
     "http://127.0.0.1:3000/examples.html",
     "http://127.0.0.1:3000/execution-model.html",
+    "http://127.0.0.1:3000/files-and-directories.html",
     "http://127.0.0.1:3000/glossary.html",
     "http://127.0.0.1:3000/haicore-guide.html",
     "http://127.0.0.1:3000/index.html",
@@ -33,16 +35,16 @@
     "http://127.0.0.1:3000/quickstart.html",
     "http://127.0.0.1:3000/roadmap.html",
     "http://127.0.0.1:3000/runbook.html",
-    "http://127.0.0.1:3000/running-compose-style-workflows-on-slurm.html",
     "http://127.0.0.1:3000/runtime-backends.html",
     "http://127.0.0.1:3000/runtime-observability.html",
     "http://127.0.0.1:3000/secrets.html",
+    "http://127.0.0.1:3000/slurm-capability-scope.html",
     "http://127.0.0.1:3000/slurm-container-basics.html",
     "http://127.0.0.1:3000/spec-reference.html",
     "http://127.0.0.1:3000/support-matrix.html",
-    "http://127.0.0.1:3000/supported-slurm-model.html",
     "http://127.0.0.1:3000/sweeps.html",
     "http://127.0.0.1:3000/task-guide.html",
-    "http://127.0.0.1:3000/troubleshooting.html"
+    "http://127.0.0.1:3000/troubleshooting.html",
+    "http://127.0.0.1:3000/why-hpc-compose.html"
   ]
 }

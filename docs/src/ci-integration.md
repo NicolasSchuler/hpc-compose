@@ -1,16 +1,14 @@
-# CI Integration
+# Wire Up CI
 
 `hpc-compose` ships fast, authoring-time commands (`validate`, `lint`) that are well-suited to pre-commit hooks and CI. This page covers three drop-in integrations: a [pre-commit](https://pre-commit.com) hook, a reusable GitHub Actions workflow, and a GitLab CI snippet.
 
-All integrations require the `hpc-compose` binary to be installed first (see [Installation](installation.md)):
+All integrations require the `hpc-compose` binary to be installed first. The latest installer is:
 
 ```bash
-RELEASE_TAG=vX.Y.Z
-curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
-  | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
+curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
 ```
 
-Pin `RELEASE_TAG` to a release from the [GitHub Releases](https://github.com/NicolasSchuler/hpc-compose/releases) page.
+For pinned tags, checksum verification, and other install variants, see [Installation](installation.md). The CI snippets below pin a release tag for reproducible runs.
 
 ## Pre-commit
 
@@ -107,10 +105,11 @@ hpc-compose-lint:
 - **pre-commit / local:** `lint --allow-warnings` (fast feedback, advisory).
 - **CI (merge gate):** `lint` without `--allow-warnings`, or `strict: true` (enforce).
 
-See [Spec Reference](spec-reference.md) for the full lint rule table and [Notebook Sessions](notebook.md), [Troubleshooting](troubleshooting.md) for related workflows.
+See [Spec Reference](spec-reference.md) for the full lint rule table and [Troubleshooting](troubleshooting.md) for related workflows.
 
 ## Related Docs
 
-- [Spec Reference](spec-reference.md)
-- [CLI Reference](cli-reference.md)
+- [Run a Notebook or IDE Session](notebook.md)
+- [Use Secrets](secrets.md)
 - [Installation](installation.md)
+- [Spec Reference](spec-reference.md)

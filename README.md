@@ -100,7 +100,16 @@ Installer availability is not the same as full runtime support. Check the [Suppo
 - [Troubleshooting](docs/src/troubleshooting.md)
 - [CLI Reference](docs/src/cli-reference.md)
 - [Spec Reference](docs/src/spec-reference.md)
-- [Codex Skill](docs/src/codex-skill.md)
+
+## Set Up With an AI Agent
+
+You can ask any LLM agent (Claude, Codex, Copilot, Cursor) to set up hpc-compose on your cluster. Point it at the published machine-readable map first, which carries a curated doc index, a safety contract (which commands are static-safe vs. which submit Slurm jobs), and the canonical spec conventions:
+
+- Agent entry map: [`docs/src/llms.txt`](docs/src/llms.txt), served at `https://nicolasschuler.github.io/hpc-compose/llms.txt`
+- Walkthrough and copy-paste prompt: [Set Up With an AI Agent](docs/src/ai-agent-setup.md)
+- Drop-in skill bundle: [`skills/hpc-compose/SKILL.md`](skills/hpc-compose/SKILL.md)
+
+Agents author and statically verify a spec (`validate`, `plan --show-script`, `inspect`) before any real run, and ask before submitting jobs.
 
 ## Feedback
 

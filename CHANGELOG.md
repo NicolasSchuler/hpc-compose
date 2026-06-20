@@ -7,6 +7,46 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- `x-slurm.runtime_root`: optional override for the per-job runtime-state
+  directory (`<runtime_root>/<job-id>/{logs,metrics,state.json,artifacts}`),
+  defaulting to `<submit_dir>/.hpc-compose`. Resolved to an absolute path at
+  submit time and rejected by `preflight` when it points at node-local storage.
+- `x-slurm.cleanup.runtime_cache` (`never` | `on_success` | `always`, default
+  `never`): controls whether the batch teardown trap removes the per-job enroot
+  runtime cache.
+- New "Files and Directories" documentation page describing the metadata,
+  runtime, and cache directory layouts, the path-affecting environment
+  variables, and the cleanup scope of each command.
+
+### Changed
+
+- The rendered `JOB_ROOT` is now baked as a resolved absolute path at submit
+  time instead of relying on `${SLURM_SUBMIT_DIR:-$PWD}` at job runtime, so a
+  job's runtime state no longer depends on `$SLURM_SUBMIT_DIR` being set and
+  shared-visible. Dry-run previews keep the portable form.
+- The default batch-log location moved from `slurm-%j.out` in the submit
+  directory to `<runtime_root>/logs/hpc-compose-%j.out` (created host-side
+  before submission). Set `x-slurm.output` to override.
+- `x-slurm.output` / `x-slurm.error` now reject parent-directory (`..`)
+  traversal and whitespace-only patterns in addition to the existing
+  line-break / null-byte checks.
+- `jobs clean` and `down` now also reap the hpc-compose-managed default batch
+  log, the per-job enroot runtime cache (`<cache_dir>/runtime/<job-id>`), and
+  the rendezvous records the job owns; `cache prune` removes now-empty parent
+  directories (never the cache root).
+- Concurrent cache-manifest updates are serialized with a best-effort advisory
+  lock, closing a lost-update window on shared filesystems.
+
+### Fixed
+
+- `jobs` latest-pointer repair now also repairs the tracked notebook pointer.
+- The prepare-time enroot environment now exports `ENROOT_TEMP_PATH` so scratch
+  lands on the cache filesystem instead of the node's default `/tmp`.
+- GPU metric samples reuse a stable per-node directory instead of accumulating
+  one directory per sampling interval.
+
 ## [0.1.46] - 2026-06-19
 
 ### Added

@@ -1,4 +1,4 @@
-# Example Source
+# Full Example Specs
 
 This appendix embeds the runnable repository example YAML files directly from `examples/`.
 

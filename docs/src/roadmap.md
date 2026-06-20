@@ -1,4 +1,4 @@
-# Roadmap
+# Roadmap and Non-Goals
 
 This roadmap is intentionally short. `hpc-compose` is not trying to become a general-purpose orchestrator.
 
@@ -24,5 +24,7 @@ If your workflow falls outside this roadmap, that is useful feedback. Open an [a
 
 ## Related Docs
 
-- [Architecture for Contributors](architecture.md)
+- [Full Example Specs](example-source.md)
+- [Glossary](glossary.md)
 - [Support Matrix](support-matrix.md)
+- [Architecture for Contributors](architecture.md)

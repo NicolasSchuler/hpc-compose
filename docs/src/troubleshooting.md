@@ -1,4 +1,4 @@
-# Troubleshooting
+# Troubleshoot a Failed Run
 
 Use this page when the safe authoring path worked but the first real cluster run failed.
 
@@ -75,19 +75,13 @@ hpc-compose up --dry-run -f compose.yaml
 
 ## Clean Old Tracked Runs
 
-Tracked job metadata and logs accumulate in `.hpc-compose/`. Preview cleanup before deleting:
-
-```bash
-hpc-compose jobs list --disk-usage
-hpc-compose clean -f compose.yaml --age 7 --dry-run
-hpc-compose clean -f compose.yaml --age 7
-```
+Cleaning up accumulated tracked job metadata and logs is covered in [Manage the Cache and Clean Up](cache-management.md#clean-up-old-tracked-runs).
 
 ## Related Docs
 
-- [Quickstart](quickstart.md#7-if-the-first-cluster-run-fails)
+- [Operate a Real Cluster Run](runbook.md)
+- [Monitor a Run](runtime-observability.md)
+- [Manage the Cache and Clean Up](cache-management.md)
+- [Develop and Smoke-Test Locally](development-workflow.md)
 - [Slurm And Container Basics](slurm-container-basics.md)
-- [HAICORE Guide](haicore-guide.md)
-- [Runbook](runbook.md)
-- [Cluster Profiles](cluster-profiles.md)
-- [Runtime Observability](runtime-observability.md)
+- [HAICORE@KIT Guide](haicore-guide.md)

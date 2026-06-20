@@ -1,6 +1,6 @@
-# Artifacts And Resume
+# Artifacts and Resume
 
-Artifacts are collected after a run for export and provenance. Resume state is the canonical live state a later attempt should load. Keep those roles separate.
+Artifacts are collected after a run for export and provenance. Resume state is the canonical live checkpoint a later attempt loads on restart. Keep those roles separate: exported checkpoints are retrieval output, while the shared resume path is what a restarted run reads first.
 
 ## Artifact Export
 
@@ -29,8 +29,8 @@ When `x-slurm.resume` is enabled, `hpc-compose`:
 
 - mounts the shared resume path into every service at `/hpc-compose/resume`
 - injects `HPC_COMPOSE_RESUME_DIR`, `HPC_COMPOSE_ATTEMPT`, and `HPC_COMPOSE_IS_RESUME`
-- writes attempt-specific runtime outputs under `.hpc-compose/<jobid>/attempts/<attempt>/`
-- keeps `.hpc-compose/<jobid>/{logs,metrics,artifacts,state.json}` pointed at the latest attempt for compatibility
+- writes attempt-specific runtime outputs under `.hpc-compose/<job-id>/attempts/<attempt>/`
+- keeps `.hpc-compose/<job-id>/{logs,metrics,artifacts,state.json}` pointed at the latest attempt for compatibility
 
 Use the shared resume directory for the canonical checkpoint a restarted run should load next. Treat exported artifacts as retrieval and provenance output after the attempt finishes, not as the primary live resume source.
 
@@ -44,6 +44,7 @@ hpc-compose artifacts -f compose.yaml
 
 ## Related Docs
 
-- [Examples](examples.md)
-- [Spec Reference](spec-reference.md#x-slurmartifacts)
+- [Connect Jobs Across Allocations](cross-job-rendezvous.md)
 - [Runtime Observability](runtime-observability.md)
+- [Spec Reference](spec-reference.md#x-slurmartifacts)
+- [Examples](examples.md)

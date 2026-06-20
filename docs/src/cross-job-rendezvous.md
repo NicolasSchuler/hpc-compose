@@ -1,6 +1,6 @@
-# Cross-Job Rendezvous
+# Connect Jobs Across Allocations
 
-`hpc-compose` rendezvous lets independent Slurm jobs coordinate through the shared cache directory. A provider job registers an address under `<cache_dir>/rendezvous/<name>/latest.json`; a later client job resolves that record and receives stable `HPC_COMPOSE_RDZV_*` environment variables.
+`hpc-compose` cross-job rendezvous lets independent Slurm jobs coordinate through the shared cache directory. A provider job registers an address under `<cache_dir>/rendezvous/<name>/latest.json`; a later client job resolves that record and receives stable `HPC_COMPOSE_RDZV_*` environment variables.
 
 This is same-cluster shared-storage discovery. It does not create DNS, tunnels, authentication, authorization, or a service mesh. Use it only inside a same-user or trusted shared-project cache boundary.
 
@@ -73,7 +73,7 @@ See [`examples/rendezvous-model-server.yaml`](example-source.md#rendezvous-model
 
 ## Related Docs
 
+- [Artifacts and Resume](artifacts-and-resume.md)
 - [Cache Management](cache-management.md)
-- [Runtime Observability](runtime-observability.md)
 - [Spec Reference](spec-reference.md)
 - [Examples](examples.md)
