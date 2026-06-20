@@ -3738,6 +3738,73 @@ fn slurm_config_rejects_newlines_in_sbatch_fields() {
 }
 
 #[test]
+fn cleanup_runtime_cache_policy_parses_and_defaults_to_never() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    let default_path = write_spec(
+        tmpdir.path(),
+        "services:\n  app:\n    image: app:latest\n    command: run\n",
+    );
+    let spec = ComposeSpec::load(&default_path).expect("load default");
+    assert_eq!(
+        spec.slurm.cleanup.runtime_cache,
+        RuntimeCacheCleanupPolicy::Never
+    );
+
+    let path = write_spec(
+        tmpdir.path(),
+        "x-slurm:\n  cleanup:\n    runtime_cache: on_success\nservices:\n  app:\n    image: app:latest\n    command: run\n",
+    );
+    let spec = ComposeSpec::load(&path).expect("load on_success");
+    assert_eq!(
+        spec.slurm.cleanup.runtime_cache,
+        RuntimeCacheCleanupPolicy::OnSuccess
+    );
+
+    let bad = write_spec(
+        tmpdir.path(),
+        "x-slurm:\n  cleanup:\n    bogus: true\nservices:\n  app:\n    image: app:latest\n    command: run\n",
+    );
+    assert!(
+        ComposeSpec::load(&bad).is_err(),
+        "unknown key under x-slurm.cleanup must be rejected"
+    );
+}
+
+#[test]
+fn slurm_config_validates_output_error_log_patterns() {
+    // Valid relative and absolute patterns with specifiers are accepted.
+    for value in ["logs/%x-%j.out", "/shared/logs/%x-%j.out", "%j.out"] {
+        let config = SlurmConfig {
+            output: Some(value.to_string()),
+            ..SlurmConfig::default()
+        };
+        assert!(
+            config.validate().is_ok(),
+            "expected '{value}' to be accepted"
+        );
+    }
+
+    // Literal `..` traversal is rejected before or after Slurm specifiers.
+    for value in ["../escape/%j.out", "%j/../../escape.out"] {
+        let config = SlurmConfig {
+            output: Some(value.to_string()),
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("traversal in output");
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    // Empty error pattern is rejected.
+    let config = SlurmConfig {
+        error: Some("   ".to_string()),
+        ..SlurmConfig::default()
+    };
+    let err = config.validate().expect_err("empty error");
+    assert!(err.to_string().contains("x-slurm.error"));
+}
+
+#[test]
 fn slurm_resource_counts_must_be_positive() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     for (name, body, needle) in [

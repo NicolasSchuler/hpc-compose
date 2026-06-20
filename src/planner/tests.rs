@@ -486,6 +486,14 @@ fn cache_dir_policy_flags_tmp() {
 }
 
 #[test]
+fn runtime_root_policy_flags_node_local_override() {
+    let issue = runtime_root_policy_issue(Path::new("/tmp/runs")).expect("issue");
+    assert!(issue.contains("not shared"));
+    assert!(issue.contains("x-slurm.runtime_root"));
+    assert!(runtime_root_policy_issue(Path::new("/shared/runs")).is_none());
+}
+
+#[test]
 fn registry_host_defaults_to_docker_hub_for_bare_refs() {
     assert_eq!(
         registry_host_for_remote("docker://redis:7"),

@@ -18,7 +18,16 @@ pub struct SubmissionRecord {
     pub submit_dir: PathBuf,
     pub script_path: PathBuf,
     pub cache_dir: PathBuf,
+    /// Resolved `x-slurm.runtime_root` override (the parent of `<job_id>/`).
+    /// `None` when the default `<submit_dir>/.hpc-compose` layout is used;
+    /// readers fall back to that default via `runtime_job_root_for_record`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_root: Option<PathBuf>,
     pub batch_log: PathBuf,
+    /// True when `batch_log` is the hpc-compose-owned default path and can be
+    /// removed by tracked-job cleanup. False for user-pinned `x-slurm.output`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub batch_log_managed: bool,
     pub service_logs: BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub artifact_export_dir: Option<String>,
@@ -118,6 +127,10 @@ fn default_submission_backend() -> SubmissionBackend {
 
 fn default_submission_kind() -> SubmissionKind {
     SubmissionKind::Main
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]

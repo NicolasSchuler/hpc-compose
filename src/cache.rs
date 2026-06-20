@@ -49,6 +49,10 @@ pub struct CachePruneResult {
     pub removed: Vec<PathBuf>,
 }
 
+/// How long [`with_manifest_lock`] waits for the advisory lock before degrading
+/// to a lock-free read-modify-write (so a dead holder can never wedge the CLI).
+const MANIFEST_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Returns the JSON manifest path stored next to an artifact file.
 #[must_use]
 pub fn manifest_path_for(artifact_path: &Path) -> PathBuf {
@@ -57,6 +61,45 @@ pub fn manifest_path_for(artifact_path: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("artifact.sqsh");
     artifact_path.with_file_name(format!("{filename}.json"))
+}
+
+/// Path of the sidecar advisory-lock file for an artifact's manifest
+/// (`<manifest>.lock`). Kept separate from the manifest so the manifest itself
+/// is still replaced via atomic rename, and excluded from [`scan_cache`] by its
+/// non-`.json` extension.
+fn manifest_lock_path_for(artifact_path: &Path) -> PathBuf {
+    let manifest_path = manifest_path_for(artifact_path);
+    let mut name = manifest_path
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".lock");
+    manifest_path.with_file_name(name)
+}
+
+/// Runs a manifest read-modify-write `f` under an exclusive advisory lock on the
+/// manifest's sidecar `.lock` file.
+///
+/// The cache dir is a shared cluster filesystem where multiple jobs may upsert
+/// the same manifest concurrently. [`write_manifest`] already makes each
+/// individual write atomic, but the surrounding load-modify-write can still lose
+/// an update (two writers both load `N` service names, each appends one, the
+/// later write clobbers the earlier). Serializing the whole sequence under the
+/// lock closes that window on filesystems where `flock` works. It is
+/// best-effort: see [`crate::secure_io::with_flock`] for the
+/// degrade-on-unsupported / degrade-on-timeout semantics (no cross-node
+/// guarantee on NFS-without-lockd or Lustre-without-`-o flock`).
+fn with_manifest_lock<T>(artifact_path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock_path = manifest_lock_path_for(artifact_path);
+    if let Some(parent) = lock_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    crate::secure_io::with_flock(
+        &lock_path,
+        crate::secure_io::LockKind::Exclusive,
+        MANIFEST_LOCK_TIMEOUT,
+        f,
+    )
 }
 
 /// Creates or updates the manifest for an imported base image.
@@ -71,17 +114,19 @@ pub fn upsert_base_manifest(
     source: &ImageSource,
     cache_key: &str,
 ) -> Result<CacheEntryManifest> {
-    let mut manifest = load_manifest_if_exists(artifact_path)?
-        .unwrap_or_else(|| new_base_manifest(artifact_path, source, cache_key));
-    refresh_manifest_common(
-        &mut manifest,
-        artifact_path,
-        service_name,
-        source,
-        cache_key,
-    );
-    write_manifest(&manifest)?;
-    Ok(manifest)
+    with_manifest_lock(artifact_path, || {
+        let mut manifest = load_manifest_if_exists(artifact_path)?
+            .unwrap_or_else(|| new_base_manifest(artifact_path, source, cache_key));
+        refresh_manifest_common(
+            &mut manifest,
+            artifact_path,
+            service_name,
+            source,
+            cache_key,
+        );
+        write_manifest(&manifest)?;
+        Ok(manifest)
+    })
 }
 
 /// Creates or updates the manifest for a prepared runtime image.
@@ -97,18 +142,20 @@ pub fn upsert_prepared_manifest(
     cache_key: &str,
     prepare: &PreparedImageSpec,
 ) -> Result<CacheEntryManifest> {
-    let mut manifest = load_manifest_if_exists(artifact_path)?
-        .unwrap_or_else(|| new_prepared_manifest(artifact_path, source, cache_key, prepare));
-    refresh_manifest_common(
-        &mut manifest,
-        artifact_path,
-        service_name,
-        source,
-        cache_key,
-    );
-    refresh_prepare_metadata(&mut manifest, prepare);
-    write_manifest(&manifest)?;
-    Ok(manifest)
+    with_manifest_lock(artifact_path, || {
+        let mut manifest = load_manifest_if_exists(artifact_path)?
+            .unwrap_or_else(|| new_prepared_manifest(artifact_path, source, cache_key, prepare));
+        refresh_manifest_common(
+            &mut manifest,
+            artifact_path,
+            service_name,
+            source,
+            cache_key,
+        );
+        refresh_prepare_metadata(&mut manifest, prepare);
+        write_manifest(&manifest)?;
+        Ok(manifest)
+    })
 }
 
 /// Refreshes the `last_used_at` timestamp for an existing manifest.
@@ -118,11 +165,13 @@ pub fn upsert_prepared_manifest(
 /// Returns an error when an existing manifest cannot be read or the refreshed
 /// manifest cannot be written back to disk.
 pub fn touch_manifest(artifact_path: &Path) -> Result<()> {
-    let Some(mut manifest) = load_manifest_if_exists(artifact_path)? else {
-        return Ok(());
-    };
-    manifest.last_used_at = unix_timestamp_now();
-    write_manifest(&manifest)
+    with_manifest_lock(artifact_path, || {
+        let Some(mut manifest) = load_manifest_if_exists(artifact_path)? else {
+            return Ok(());
+        };
+        manifest.last_used_at = unix_timestamp_now();
+        write_manifest(&manifest)
+    })
 }
 
 /// Reads the manifest stored next to an artifact path.
@@ -217,7 +266,7 @@ pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult>
         if last > cutoff {
             continue;
         }
-        remove_manifest_and_artifact(&manifest)?;
+        remove_manifest_and_artifact(cache_dir, &manifest)?;
         removed.push(PathBuf::from(&manifest.artifact_path));
     }
     Ok(CachePruneResult { removed })
@@ -238,7 +287,7 @@ pub fn prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePru
         if referenced.contains(&artifact) {
             continue;
         }
-        remove_manifest_and_artifact(&manifest)?;
+        remove_manifest_and_artifact(cache_dir, &manifest)?;
         removed.push(artifact);
     }
     Ok(CachePruneResult { removed })
@@ -300,7 +349,7 @@ pub fn parse_remote_registry(source: &ImageSource) -> Option<String> {
     Some(registry_host_for_remote(remote))
 }
 
-fn remove_manifest_and_artifact(manifest: &CacheEntryManifest) -> Result<()> {
+fn remove_manifest_and_artifact(cache_dir: &Path, manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = manifest_path_for(artifact);
     if artifact.exists() {
@@ -310,7 +359,46 @@ fn remove_manifest_and_artifact(manifest: &CacheEntryManifest) -> Result<()> {
         fs::remove_file(&manifest_path)
             .context(format!("failed to remove {}", manifest_path.display()))?;
     }
+    // The whole entry is going away, so reap its advisory-lock sidecar too.
+    // Best-effort: a concurrent upsert recreating it is benign (it re-locks a
+    // fresh file), and a leftover lock is harmless if removal races.
+    let _ = fs::remove_file(manifest_lock_path_for(artifact));
+    prune_empty_parents(cache_dir, artifact.parent());
     Ok(())
+}
+
+/// Collision-safe removal of now-empty parent dirs after an artifact entry is
+/// reaped. Walks upward from `start` calling `rmdir` (never recursive), stops at
+/// (and never removes) `cache_dir`, and swallows `DirectoryNotEmpty`/`NotFound`
+/// so a concurrent writer repopulating a dir, or a racing reaper, is benign
+/// (TOCTOU-safe: we rely on rmdir's atomic empty-check, not a prior is_empty).
+fn prune_empty_parents(cache_dir: &Path, start: Option<&Path>) {
+    let cache_dir = crate::path_util::normalize_path(cache_dir.to_path_buf());
+    let mut current = match start {
+        Some(path) => crate::path_util::normalize_path(path.to_path_buf()),
+        None => return,
+    };
+    loop {
+        if current == cache_dir || !current.starts_with(&cache_dir) {
+            return;
+        }
+        match fs::remove_dir(&current) {
+            Ok(()) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                return;
+            }
+            Err(_) => return,
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return,
+        }
+    }
 }
 
 fn image_source_string(source: &ImageSource) -> String {
@@ -354,10 +442,11 @@ fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
 /// (atomic on POSIX, and resistant to symlink/pre-existing-entry attacks in the
 /// shared directory).
 ///
-/// Note: this fixes torn writes for each individual write. It does **not** add
-/// advisory locking, so the read-modify-write `upsert_*` path can still lose an
-/// update under concurrent writers (a known follow-up); the manifest that lands
-/// is always a complete, valid one.
+/// Note: this makes each individual write atomic. The surrounding
+/// read-modify-write in the `upsert_*`/`touch_manifest` path is serialized
+/// separately by [`with_manifest_lock`] to also close the lost-update window
+/// (best-effort where `flock` is supported); the manifest that lands is always a
+/// complete, valid one regardless.
 fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = manifest_path_for(artifact);
@@ -553,6 +642,65 @@ mod tests {
             })
             .collect();
         assert!(leftovers.is_empty(), "stray temp manifests: {leftovers:?}");
+    }
+
+    // The advisory lock around the read-modify-write must serialize concurrent
+    // upserts so that EVERY distinct service name survives. Without the lock,
+    // interleaved load/modify/write sequences silently drop names. (Proves
+    // local-FS behavior only; flock may be a no-op on some networked mounts.)
+    #[test]
+    fn concurrent_upserts_do_not_lose_service_names() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let artifact = Arc::new(tmpdir.path().join("shared.sqsh"));
+        fs::write(artifact.as_ref(), "x").expect("artifact");
+        let source = ImageSource::Remote("docker://redis:7".into());
+
+        const WRITERS: usize = 24;
+        let mut handles = Vec::new();
+        for index in 0..WRITERS {
+            let artifact = Arc::clone(&artifact);
+            let source = source.clone();
+            handles.push(thread::spawn(move || {
+                upsert_base_manifest(&artifact, &format!("svc-{index:02}"), &source, "shared-key")
+                    .expect("upsert");
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread");
+        }
+
+        let manifest = read_manifest(&artifact).expect("final manifest");
+        let expected: Vec<String> = (0..WRITERS).map(|i| format!("svc-{i:02}")).collect();
+        assert_eq!(
+            manifest.service_names, expected,
+            "every concurrent upsert's service name must survive (no lost updates)"
+        );
+    }
+
+    #[test]
+    fn prune_empty_parents_stops_at_cache_root_and_nonempty_dirs() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache = tmpdir.path();
+
+        // An empty nested chain is removed entirely, but never the cache root.
+        let nested = cache.join("base/registry/img");
+        fs::create_dir_all(&nested).expect("nested");
+        prune_empty_parents(cache, Some(&nested));
+        assert!(!nested.exists());
+        assert!(!cache.join("base/registry").exists());
+        assert!(!cache.join("base").exists());
+        assert!(cache.exists(), "cache root must never be removed");
+
+        // A non-empty parent halts the walk.
+        let occupied = cache.join("keep/here");
+        fs::create_dir_all(&occupied).expect("occupied");
+        fs::write(cache.join("keep/file"), "x").expect("file");
+        prune_empty_parents(cache, Some(&occupied));
+        assert!(!occupied.exists());
+        assert!(cache.join("keep").exists(), "non-empty parent kept");
     }
 
     #[test]

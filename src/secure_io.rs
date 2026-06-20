@@ -146,6 +146,113 @@ fn unique_temp_path(path: &Path, attempt: u32) -> PathBuf {
     }
 }
 
+/// Advisory-lock mode for [`with_flock`].
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub enum LockKind {
+    /// Shared (read) lock — multiple holders may coexist.
+    Shared,
+    /// Exclusive (write) lock — at most one holder.
+    Exclusive,
+}
+
+/// Runs `f` while holding an advisory `flock(2)` lock on the sidecar file
+/// `lock_path`, then releases the lock.
+///
+/// `lock_path` must be a dedicated lock file (e.g. `<manifest>.json.lock`),
+/// never the data file itself: callers that replace their data file via atomic
+/// rename would otherwise lock a soon-discarded inode. The lock file is created
+/// if absent and is intentionally **never removed** — unlinking it would let a
+/// concurrent process lock a different inode and defeat the mutual exclusion.
+///
+/// The lock is **advisory and best-effort**:
+/// * Acquisition is non-blocking with bounded retry up to `timeout`. If the
+///   lock cannot be taken in time, `f` runs anyway *without* the lock rather
+///   than hanging — a dead holder on a misbehaving filesystem must not wedge
+///   the CLI.
+/// * On platforms or filesystems where `flock` is unsupported (`ENOTSUP`,
+///   `EOPNOTSUPP`, `ENOLCK` — common on some NFS/Lustre mounts) the lock is
+///   skipped and `f` runs lock-free.
+/// * The lock is released when the descriptor is dropped, including on panic or
+///   process death, so it never leaks a stale lock.
+///
+/// Because `flock` is local-only on many network filesystems, this NARROWS but
+/// does not eliminate a cross-node lost-update window; treat it as best effort,
+/// not a cross-node guarantee.
+///
+/// `f` may return any error type; `with_flock` never substitutes an error of its
+/// own (every lock failure degrades to running `f` directly), so the closure's
+/// `Result` flows straight through.
+pub fn with_flock<T, E>(
+    lock_path: &Path,
+    kind: LockKind,
+    timeout: std::time::Duration,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).write(true).create(true);
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        // If we cannot even open the lock file (e.g. an unwritable directory),
+        // degrade to a lock-free run rather than failing the caller's work.
+        let file = match opts.open(lock_path) {
+            Ok(file) => file,
+            Err(_) => return f(),
+        };
+
+        let op = match kind {
+            LockKind::Shared => libc::LOCK_SH,
+            LockKind::Exclusive => libc::LOCK_EX,
+        };
+        let fd = file.as_raw_fd();
+        let start = std::time::Instant::now();
+        let mut locked = false;
+        loop {
+            // SAFETY: `fd` is a valid descriptor owned by `file` for the whole
+            // duration of this call.
+            let rc = unsafe { libc::flock(fd, op | libc::LOCK_NB) };
+            if rc == 0 {
+                locked = true;
+                break;
+            }
+            match io::Error::last_os_error().raw_os_error() {
+                // Held by someone else: retry with backoff until the deadline,
+                // then degrade to a lock-free run.
+                Some(code) if code == libc::EWOULDBLOCK => {
+                    if start.elapsed() >= timeout {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                // flock unsupported on this filesystem/platform, or any other
+                // error: skip locking entirely rather than fail the operation.
+                _ => break,
+            }
+        }
+
+        let result = f();
+
+        if locked {
+            // SAFETY: same valid descriptor. Best-effort explicit unlock; the
+            // drop below would release it regardless.
+            unsafe { libc::flock(fd, libc::LOCK_UN) };
+        }
+        drop(file);
+        result
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (lock_path, kind, timeout);
+        f()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +286,72 @@ mod tests {
         write(&path, b"secret", true).expect("write");
         let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "restricted write must be owner-only");
+    }
+
+    #[test]
+    fn with_flock_runs_closure_and_retains_lock_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = dir.path().join("x.lock");
+        let value = with_flock(
+            &lock,
+            LockKind::Exclusive,
+            std::time::Duration::from_secs(1),
+            || Ok::<_, std::io::Error>(42),
+        )
+        .expect("with_flock");
+        assert_eq!(value, 42);
+        assert!(
+            lock.exists(),
+            "lock file is created and intentionally retained"
+        );
+    }
+
+    // Proves the exclusive lock serializes a concurrent read-modify-write on the
+    // LOCAL filesystem. It deliberately proves nothing about NFS/Lustre, where
+    // flock may be local-only or unsupported (see `with_flock` docs).
+    #[cfg(unix)]
+    #[test]
+    fn with_flock_serializes_concurrent_writers() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let counter = Arc::new(dir.path().join("counter"));
+        let lock = Arc::new(dir.path().join("counter.lock"));
+        fs::write(&*counter, "0").expect("seed");
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                let lock = Arc::clone(&lock);
+                std::thread::spawn(move || {
+                    with_flock(
+                        &lock,
+                        LockKind::Exclusive,
+                        std::time::Duration::from_secs(10),
+                        || {
+                            let current: u64 = fs::read_to_string(&*counter)?
+                                .trim()
+                                .parse()
+                                .expect("parse counter");
+                            // Widen the race window so a missing lock corrupts it.
+                            std::thread::yield_now();
+                            fs::write(&*counter, (current + 1).to_string())?;
+                            Ok::<(), std::io::Error>(())
+                        },
+                    )
+                    .expect("with_flock");
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("join");
+        }
+
+        let total: u64 = fs::read_to_string(&*counter)
+            .expect("read")
+            .trim()
+            .parse()
+            .expect("parse");
+        assert_eq!(total, 8, "exclusive flock must serialize read-modify-write");
     }
 }

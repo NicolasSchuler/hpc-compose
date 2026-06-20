@@ -2030,6 +2030,8 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
                 "after_job",
                 "dependency",
                 "cache_dir",
+                "runtime_root",
+                "cleanup",
                 "scratch",
                 "stage_in",
                 "stage_out",
@@ -2043,6 +2045,7 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
                 "rendezvous",
             ],
         ),
+        ("cleanup", &["runtime_cache"]),
         (
             "serviceSlurm",
             &[
@@ -2211,6 +2214,11 @@ fn schema_enum_values_match_rust_variants() {
             "scratch.cleanup",
             value["definitions"]["scratch"]["properties"]["cleanup"]["enum"].clone(),
             &["always", "on_success", "never"],
+        ),
+        (
+            "cleanup.runtime_cache",
+            value["definitions"]["cleanup"]["properties"]["runtime_cache"]["enum"].clone(),
+            &["never", "on_success", "always"],
         ),
         // stage enums
         (

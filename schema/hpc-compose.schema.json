@@ -365,6 +365,8 @@
           "enum": ["singleton"]
         },
         "cache_dir": { "type": "string" },
+        "runtime_root": { "type": "string" },
+        "cleanup": { "$ref": "#/definitions/cleanup" },
         "scratch": { "$ref": "#/definitions/scratch" },
         "stage_in": {
           "type": "array",
@@ -404,6 +406,17 @@
           "type": "string",
           "enum": ["always", "on_success", "never"],
           "default": "always"
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runtime_cache": {
+          "type": "string",
+          "enum": ["never", "on_success", "always"],
+          "default": "never"
         }
       }
     },

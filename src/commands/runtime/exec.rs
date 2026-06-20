@@ -223,6 +223,10 @@ pub(crate) fn run_service(
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
                 cluster_profile,
+                runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                    &context.cwd,
+                    runtime_plan.slurm.runtime_root.as_deref(),
+                )),
             },
         )?;
         Ok::<_, anyhow::Error>(if active_allocation_job_id.is_some() {
@@ -280,6 +284,7 @@ pub(crate) fn run_service(
         return Ok(());
     }
 
+    super::ensure_default_batch_log_dir(&submit_dir, &runtime_plan)?;
     let output_result = progress.run_result("Submitting run job to Slurm", || {
         Command::new(&context.binaries.sbatch.value)
             .args(sbatch_cli_args(&runtime_plan))
@@ -440,7 +445,18 @@ pub(crate) fn run_ephemeral(
     let local_job_id = local.then(generate_local_job_id);
     let script = progress.run_result("Rendering run script", || {
         if let Some(job_id) = local_job_id.as_deref() {
-            render_local_script(&runtime_plan, job_id, &context.binaries.enroot.value)
+            render_local_script_with_options(
+                &runtime_plan,
+                job_id,
+                &context.binaries.enroot.value,
+                &LocalRenderOptions {
+                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                        &context.cwd,
+                        runtime_plan.slurm.runtime_root.as_deref(),
+                    )),
+                    ..LocalRenderOptions::default()
+                },
+            )
         } else {
             render_script_with_options(
                 &runtime_plan,
@@ -448,6 +464,10 @@ pub(crate) fn run_ephemeral(
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
                     cluster_profile,
+                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                        &context.cwd,
+                        runtime_plan.slurm.runtime_root.as_deref(),
+                    )),
                 },
             )
         }
@@ -522,6 +542,7 @@ pub(crate) fn run_ephemeral(
         );
     }
 
+    super::ensure_default_batch_log_dir(&submit_dir, &runtime_plan)?;
     let output_result = progress.run_result("Submitting run job to Slurm", || {
         Command::new(&context.binaries.sbatch.value)
             .args(sbatch_cli_args(&runtime_plan))
@@ -799,7 +820,18 @@ pub(crate) fn notebook(
     let local_job_id = local.then(generate_local_job_id);
     let script = progress.run_result("Rendering notebook script", || {
         if let Some(job_id) = local_job_id.as_deref() {
-            render_local_script(&runtime_plan, job_id, &context.binaries.enroot.value)
+            render_local_script_with_options(
+                &runtime_plan,
+                job_id,
+                &context.binaries.enroot.value,
+                &LocalRenderOptions {
+                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                        &context.cwd,
+                        runtime_plan.slurm.runtime_root.as_deref(),
+                    )),
+                    ..LocalRenderOptions::default()
+                },
+            )
         } else {
             render_script_with_options(
                 &runtime_plan,
@@ -807,6 +839,10 @@ pub(crate) fn notebook(
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
                     cluster_profile,
+                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                        &context.cwd,
+                        runtime_plan.slurm.runtime_root.as_deref(),
+                    )),
                 },
             )
         }
@@ -877,6 +913,7 @@ pub(crate) fn notebook(
         print_local_launch_details(&record, &runtime_plan, &script_path);
         record
     } else {
+        super::ensure_default_batch_log_dir(&submit_dir, &runtime_plan)?;
         let output_result = progress.run_result("Submitting notebook job to Slurm", || {
             Command::new(&context.binaries.sbatch.value)
                 .args(sbatch_cli_args(&runtime_plan))

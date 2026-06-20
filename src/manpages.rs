@@ -25,8 +25,8 @@ const FILES_SECTION: &[(&str, &str)] = &[
         "Default rendered batch script path written by up or run when --script-out is not set.",
     ),
     (
-        "${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/",
-        "Tracked job metadata, logs, metrics, and artifact state written after submission.",
+        "<submit-dir>/.hpc-compose/",
+        "Default runtime root: tracked job metadata plus per-job logs, metrics, state.json, and artifact state under <job-id>/. Resolved to an absolute path at submit time and overridable with x-slurm.runtime_root.",
     ),
     (
         "~/.cache/hpc-compose",
@@ -52,7 +52,7 @@ const ENVIRONMENT_SECTION: &[(&str, &str)] = &[
     ),
     (
         "SLURM_SUBMIT_DIR",
-        "Used by rendered jobs when resolving the tracked runtime directory on the host.",
+        "Fallback base for the tracked runtime directory in dry-run previews; real submissions bake the resolved absolute runtime root into the script.",
     ),
     (
         "SLURM_JOB_ID",

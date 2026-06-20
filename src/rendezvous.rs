@@ -343,6 +343,55 @@ pub fn deregister_if_owner(cache_dir: &Path, name: &str, job_id: &str) -> Result
     Ok(true)
 }
 
+/// Reaps every rendezvous record under `cache_dir` owned by `job_id`: removes
+/// each per-name record file (including `latest.json`) whose `job_id` and
+/// `cache_dir` match. Other jobs' records and live `latest.json` pointers are
+/// left intact (owner-guarded). Used by `down`/`cancel` so a job's historical
+/// `<token>.json` records do not accumulate until TTL expiry.
+///
+/// # Errors
+///
+/// Returns an error only when the rendezvous root cannot be traversed;
+/// individual unparseable record files are skipped.
+pub fn reap_job_records(cache_dir: &Path, job_id: &str) -> Result<Vec<PathBuf>> {
+    let root = root_dir(cache_dir);
+    let mut removed = Vec::new();
+    if !root.is_dir() {
+        return Ok(removed);
+    }
+    for entry in
+        fs::read_dir(&root).with_context(|| format!("failed to read {}", root.display()))?
+    {
+        let entry = entry?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", entry.path().display()))?
+            .is_dir()
+        {
+            continue;
+        }
+        for file in fs::read_dir(entry.path())
+            .with_context(|| format!("failed to read {}", entry.path().display()))?
+        {
+            let file = file?;
+            let path = file.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(record) = read_json::<RendezvousRecord>(&path) else {
+                continue;
+            };
+            if record.cache_dir == cache_dir && record.job_id == job_id {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+                removed.push(path);
+            }
+        }
+    }
+    removed.sort();
+    Ok(removed)
+}
+
 impl RendezvousRecord {
     /// Returns true if `now` falls outside the record TTL.
     #[must_use]
@@ -498,6 +547,28 @@ mod tests {
         assert!(resolve(dir.path(), "model", 11).expect("resolve").is_some());
         assert!(deregister_if_owner(dir.path(), "model", "101").expect("owner"));
         assert!(resolve(dir.path(), "model", 11).expect("resolve").is_none());
+    }
+
+    #[test]
+    fn reap_job_records_removes_only_owned_records() {
+        let dir = tempdir().expect("tempdir");
+        let first = build_record(dir.path(), request("model", "101", 60), 10).expect("first");
+        let second = build_record(dir.path(), request("model", "102", 60), 11).expect("second");
+        register(dir.path(), &first).expect("register first");
+        register(dir.path(), &second).expect("register second");
+
+        // Reaping 101 removes only its records; 102 and the live latest survive.
+        let removed = reap_job_records(dir.path(), "101").expect("reap 101");
+        assert!(!removed.is_empty());
+        let latest = resolve(dir.path(), "model", 12)
+            .expect("resolve")
+            .expect("record");
+        assert_eq!(latest.job_id, "102");
+
+        // Reaping 102 (the current latest owner) removes its records and latest.
+        let removed = reap_job_records(dir.path(), "102").expect("reap 102");
+        assert!(!removed.is_empty());
+        assert!(resolve(dir.path(), "model", 13).expect("resolve").is_none());
     }
 
     #[test]

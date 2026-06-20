@@ -12,6 +12,7 @@ use crate::cluster::{ClusterProfile, MpiInstallationProfile, mpi_type_compatible
 use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description};
 use crate::planner::{
     ExecutionSpec, ImageSource, cache_path_policy_issue, registry_host_for_remote,
+    runtime_root_policy_issue,
 };
 use crate::prepare::RuntimePlan;
 use crate::readiness_util::readiness_uses_implicit_localhost;
@@ -296,6 +297,7 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
     }
 
     check_cache_path_policy(&mut report, plan);
+    check_runtime_root_policy(&mut report, plan);
     check_cache_dir_access(&mut report, &plan.cache_dir);
     check_disk_space(&mut report, &plan.cache_dir);
     check_local_and_mount_paths(&mut report, plan);
@@ -785,6 +787,33 @@ fn host_mpi_remediation_snippet(install: &MpiInstallationProfile) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn check_runtime_root_policy(report: &mut Report, plan: &RuntimePlan) {
+    // Only an explicit x-slurm.runtime_root override is policed; the default
+    // <submit_dir>/.hpc-compose layout is governed by the submission environment.
+    let Some(raw) = plan.slurm.runtime_root.as_deref() else {
+        return;
+    };
+    let resolved = env::current_dir()
+        .map(|cwd| crate::path_util::absolute_path(Path::new(raw), &cwd))
+        .unwrap_or_else(|_| PathBuf::from(raw));
+    if let Some(issue) = runtime_root_policy_issue(&resolved) {
+        report.items.push(Item {
+            level: Level::Error,
+            message: issue,
+            remediation: Some("Set x-slurm.runtime_root to a shared workspace or another filesystem visible from both login and compute nodes.".to_string()),
+        });
+    } else {
+        report.items.push(Item {
+            level: Level::Ok,
+            message: format!(
+                "runtime root passes shared-path policy: {}",
+                resolved.display()
+            ),
+            remediation: None,
+        });
+    }
 }
 
 fn check_cache_path_policy(report: &mut Report, plan: &RuntimePlan) {

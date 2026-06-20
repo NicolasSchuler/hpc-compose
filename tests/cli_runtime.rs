@@ -1512,7 +1512,10 @@ fn status_and_logs_commands_use_submission_metadata() {
     fs::create_dir_all(&log_dir).expect("log dir");
     let log_path = log_dir.join(log_file_name_for_service("app"));
     fs::write(&log_path, "alpha\nbeta\n").expect("log");
-    let batch_log = tmpdir.path().join("slurm-12345.out");
+    let batch_log = tmpdir
+        .path()
+        .join(".hpc-compose/logs/hpc-compose-12345.out");
+    fs::create_dir_all(batch_log.parent().expect("batch log dir")).expect("batch log dir");
     fs::write(&batch_log, "batch-line\n").expect("batch log");
 
     let status = run_cli(
@@ -1561,12 +1564,9 @@ fn status_and_logs_commands_use_submission_metadata() {
     assert_eq!(value["record"]["job_id"], Value::from("12345"));
     assert_eq!(value["scheduler"]["state"], Value::from("COMPLETED"));
     assert!(value.get("queue_diagnostics").is_none());
-    assert!(
-        value["record"]["batch_log"]
-            .as_str()
-            .unwrap_or_default()
-            .ends_with("slurm-12345.out")
-    );
+    let batch_log_value = value["record"]["batch_log"].as_str().unwrap_or_default();
+    assert!(batch_log_value.contains("/.hpc-compose/logs/"));
+    assert!(batch_log_value.ends_with("hpc-compose-12345.out"));
 
     let logs = run_cli(
         tmpdir.path(),
@@ -6351,7 +6351,11 @@ fn debug_reports_missing_and_failed_tracked_runs() {
         "service start\nservice boom\n",
     )
     .expect("service log");
-    fs::write(tmpdir.path().join("slurm-12345.out"), "batch fail\n").expect("batch log");
+    let batch_log = tmpdir
+        .path()
+        .join(".hpc-compose/logs/hpc-compose-12345.out");
+    fs::create_dir_all(batch_log.parent().expect("batch log dir")).expect("batch log dir");
+    fs::write(&batch_log, "batch fail\n").expect("batch log");
 
     let squeue_state = tmpdir.path().join("debug-squeue.state");
     let sacct_state = tmpdir.path().join("debug-sacct.state");

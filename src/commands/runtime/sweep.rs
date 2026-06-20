@@ -181,6 +181,10 @@ fn validate_sweep_trial_plan(
             apptainer_bin: context.binaries.apptainer.value.clone(),
             singularity_bin: context.binaries.singularity.value.clone(),
             cluster_profile,
+            runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                &context.cwd,
+                runtime_plan.slurm.runtime_root.as_deref(),
+            )),
         },
     )?;
     Ok(())
@@ -287,6 +291,10 @@ fn submit_sweep_trial(
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
                 cluster_profile,
+                runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                    &context.cwd,
+                    runtime_plan.slurm.runtime_root.as_deref(),
+                )),
             },
         )
     })?;

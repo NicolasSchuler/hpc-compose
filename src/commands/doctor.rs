@@ -126,6 +126,7 @@ pub(crate) fn doctor_mpi_smoke(
             apptainer_bin: context.binaries.apptainer.value.clone(),
             singularity_bin: context.binaries.singularity.value.clone(),
             cluster_profile,
+            runtime_root: None,
         },
     )?;
 
@@ -344,6 +345,7 @@ pub(crate) fn doctor_fabric_smoke(
             apptainer_bin: context.binaries.apptainer.value.clone(),
             singularity_bin: context.binaries.singularity.value.clone(),
             cluster_profile,
+            runtime_root: None,
         },
     )?;
 
@@ -1568,11 +1570,9 @@ fn read_smoke_service_log(
     let Some(job_id) = parse_submitted_job_id(sbatch_stdout) else {
         return Ok(None);
     };
-    let path = cwd
-        .join(".hpc-compose")
-        .join(job_id)
-        .join("logs")
-        .join(log_file_name_for_service(service_name));
+    let path =
+        crate::tracked_paths::latest_logs_dir(&crate::tracked_paths::runtime_job_root(cwd, job_id))
+            .join(log_file_name_for_service(service_name));
     match fs::read_to_string(&path) {
         Ok(contents) => Ok(Some(contents)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),

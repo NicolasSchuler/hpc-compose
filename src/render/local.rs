@@ -1,8 +1,9 @@
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use anyhow::Result;
 
-use super::{render_script, shell_quote};
+use super::{RenderOptions, render_script_with_options, shell_quote};
 use crate::prepare::RuntimePlan;
 use crate::tracked_paths;
 
@@ -11,6 +12,11 @@ use crate::tracked_paths;
 pub struct LocalRenderOptions {
     /// Enables the development control directory consumed by the local supervisor.
     pub dev_reload: bool,
+    /// Resolved absolute runtime root (the parent of `<job_id>/`) baked into the
+    /// launcher so its `JOB_ROOT` and supervisor directories match the
+    /// submission record under an `x-slurm.runtime_root` override. `None` keeps
+    /// the default `$SLURM_SUBMIT_DIR/.hpc-compose` layout.
+    pub runtime_root: Option<PathBuf>,
 }
 
 /// Renders a local launcher script that reuses the normal runtime orchestration.
@@ -25,7 +31,16 @@ pub fn render_local_script_with_options(
     enroot_bin: &str,
     options: &LocalRenderOptions,
 ) -> Result<String> {
-    let base = render_script(plan)?;
+    // Thread the resolved runtime root so the local launcher's baked JOB_ROOT
+    // (and the supervisor dirs below) match the submission record exactly,
+    // including under an x-slurm.runtime_root override.
+    let base = render_script_with_options(
+        plan,
+        &RenderOptions {
+            runtime_root: options.runtime_root.clone(),
+            ..RenderOptions::default()
+        },
+    )?;
     let body = strip_sbatch_directives(&base);
     let mut out = String::new();
     out.push_str("#!/bin/bash\n");
@@ -46,20 +61,28 @@ pub fn render_local_script_with_options(
         shell_quote(enroot_bin)
     )
     .expect("String write is infallible");
-    if options.dev_reload {
-        writeln!(
+    // Base of the per-job runtime root, kept in lockstep with the body's baked
+    // JOB_ROOT and the submission record so both an x-slurm.runtime_root override
+    // and the default layout resolve the supervisor dirs to the tracked location.
+    match options.runtime_root.as_deref() {
+        Some(runtime_root) => writeln!(
             out,
-            "export HPC_COMPOSE_DEV_CONTROL_DIR=\"$SLURM_SUBMIT_DIR/{}/${{SLURM_JOB_ID}}/dev-control\"",
+            "HPC_COMPOSE_LOCAL_JOB_ROOT={}/\"${{SLURM_JOB_ID}}\"",
+            shell_quote(&runtime_root.display().to_string())
+        ),
+        None => writeln!(
+            out,
+            "HPC_COMPOSE_LOCAL_JOB_ROOT=\"$SLURM_SUBMIT_DIR/{}/${{SLURM_JOB_ID}}\"",
             tracked_paths::METADATA_DIR_NAME
-        )
-        .expect("String write is infallible");
+        ),
     }
-    writeln!(
-        out,
-        "HPC_COMPOSE_LOCAL_BIN_DIR=\"$SLURM_SUBMIT_DIR/{}/${{SLURM_JOB_ID}}/.local-bin\"",
-        tracked_paths::METADATA_DIR_NAME
-    )
     .expect("String write is infallible");
+    if options.dev_reload {
+        out.push_str(
+            "export HPC_COMPOSE_DEV_CONTROL_DIR=\"$HPC_COMPOSE_LOCAL_JOB_ROOT/dev-control\"\n",
+        );
+    }
+    out.push_str("HPC_COMPOSE_LOCAL_BIN_DIR=\"$HPC_COMPOSE_LOCAL_JOB_ROOT/.local-bin\"\n");
     out.push_str("mkdir -p \"$HPC_COMPOSE_LOCAL_BIN_DIR\"\n");
     out.push_str("cat > \"$HPC_COMPOSE_LOCAL_BIN_DIR/srun\" <<'HPC_COMPOSE_LOCAL_SRUN'\n");
     out.push_str(render_local_srun_shim());

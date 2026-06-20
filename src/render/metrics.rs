@@ -236,7 +236,10 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  [[ \"$GPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
     out.push_str("  local sampled_at\n");
     out.push_str("  sampled_at=$(metrics_timestamp)\n");
-    out.push_str("  local sample_root=\"$METRICS_DIR/gpu-node-samples/$sampled_at\"\n");
+    // Stable per-job scratch dir reused every interval: cleared then recreated
+    // in place so the transient per-node sample files do not accumulate one
+    // directory per sample tick. Cumulative data still lands in $GPU_METRICS_FILE.
+    out.push_str("  local sample_root=\"$METRICS_DIR/gpu-node-samples\"\n");
     out.push_str("  rm -rf \"$sample_root\"\n");
     out.push_str("  mkdir -p \"$sample_root\"\n");
     out.push_str("  local script_path\n");
