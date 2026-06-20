@@ -12,12 +12,16 @@ This page is intentionally complete. If you are new, start with [Quickstart](qui
 | Shared templates and overrides | [`extends`](#extends) |
 | Runtime backend choice | [`runtime`](#runtime) and [Runtime Backends](runtime-backends.md) |
 | Slurm allocation settings | [`x-slurm`](#x-slurm) |
+| Resource profiles | [Resource profiles](#resource-profiles) |
 | Hyperparameter sweeps | [`sweep`](#sweep) and [Hyperparameter Sweeps](sweeps.md) |
+| Secrets | [`secrets`](#secrets) and [Secrets](secrets.md) |
 | Service command, image, env, and mounts | [Service fields](#service-fields), [Image rules](#image-rules), [`command` and `entrypoint`](#command-and-entrypoint), [`environment`](#environment), [`volumes`](#volumes) |
 | Startup ordering | [`depends_on`](#depends_on), [`readiness`](#readiness), and [`healthcheck`](#healthcheck) |
+| Post-run contracts | [`assert`](#assert) |
 | Multi-node placement and MPI | [Multi-node placement rules](#multi-node-placement-rules), [`services.<name>.x-slurm.placement`](#servicesnamex-slurmplacement), and [`services.<name>.x-slurm.mpi`](#servicesnamex-slurmmpi) |
 | Prepared images | [`x-runtime.prepare` and `x-enroot.prepare`](#x-runtimeprepare-and-x-enrootprepare) |
 | Metrics, artifacts, and resume | [`x-slurm.metrics`](#x-slurmmetrics), [`x-slurm.artifacts`](#x-slurmartifacts), and [`x-slurm.resume`](#x-slurmresume) |
+| Runtime env vars in services | [Allocation metadata inside services](#allocation-metadata-inside-services) |
 | Unsupported Compose features | [Unsupported Compose keys](#unsupported-compose-keys) |
 
 ## Top-level shape
@@ -208,44 +212,9 @@ Rules:
 - `spack.view` prepends `bin`, `lib`, `lib64`, and Python site-package paths only when those directories exist.
 - Modules and Spack views are host-side setup. Container filesystem visibility still requires explicit `volumes`, `x-slurm.mpi.host_mpi.bind_paths`, or other site-specific binds.
 
-## Settings-aware command table
+## Settings and lint commands
 
-Use these commands and global flags when you want the project-local settings file (`.hpc-compose/settings.toml`) to remember compose path, env files, env vars, and binary overrides.
-
-| Command or flag | Purpose | Notes |
-| --- | --- | --- |
-| `--profile <NAME>` | Select the profile from settings | Global flag; applies to every subcommand. |
-| `--settings-file <PATH>` | Use an explicit settings file | Global flag; bypasses upward auto-discovery of `.hpc-compose/settings.toml`. |
-| `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, `--cache-dir`, and `--default-profile`. |
-| `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, referenced interpolation vars, runtime paths, and value sources; supports `--format json`. Sensitive-looking interpolation values are redacted unless `--show-values` is passed. |
-| `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
-| `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. Auto-fixable findings can be applied with `--fix` (preview with `--fix --dry-run`). |
-| `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
-
-### Lint rules
-
-`hpc-compose lint` emits stable finding codes after validation and planning succeed. Warning-level findings fail the command by default; pass `--allow-warnings` to downgrade them to advisory so a warning-only run still succeeds.
-
-| Code | Severity | Trigger | Recommendation |
-| --- | --- | --- | --- |
-| `HPC001` | warning | A service uses `depends_on` with `condition: service_started` against an upstream service that has no `readiness` probe. The dependency may fire before the upstream is actually ready. | Add a `readiness` block to the upstream service, or switch to `service_completed_successfully` for one-shot dependencies. |
-| `HPC002` | warning | `x-slurm.mem` gives fewer than 512 MiB or more than 512 GiB per requested CPU. Very low ratios may OOM; very high ratios may queue poorly or violate site policy. | Adjust `x-slurm.mem` or CPU/task counts to land in the expected band. |
-| `HPC003` | warning | A service with `failure_policy.mode: ignore` has a writable mount from a shared cache path. Ignored failures can leave corrupt state for subsequent jobs. | Use a read-only mount, write to job-local scratch, or avoid `mode: ignore` for services that mutate shared state. |
-| `HPC004` | warning | `x-slurm.cache_dir` resolves under a node-local root (`/tmp`, `/var/tmp`, `/private/tmp`, `/dev/shm`). Compute nodes typically cannot see these paths, so the cache is rebuilt every job. | Point `x-slurm.cache_dir` at shared storage visible from both login and compute nodes. Advisory only; `--fix` will not rewrite paths. |
-| `HPC005` | warning | A service `volumes` host path lives under a node-local root. The mount will be missing or empty on compute nodes. | Move the host path under shared storage, or use job-local scratch. Advisory only; `--fix` will not rewrite paths. |
-| `HPC006` | warning (fixable) | A `depends_on` edge has no explicit `condition:` (list-form `depends_on: [name]`, or mapping form with the `condition:` key omitted). The implicit `service_started` default is easy to misread. | Make the condition explicit. `hpc-compose lint --fix` writes the current default for you, preserving comments and formatting everywhere else. |
-| `HPC900` | warning | Cluster profile advisory: the site cluster profile (`doctor cluster-report`) detected a runtime-plan mismatch such as a shared-cache path, port-range overlap, or MPI configuration concern. | Inspect the finding message for the specific cluster-level concern and adjust the spec or cluster profile accordingly. |
-
-#### Auto-fixable findings
-
-`hpc-compose lint --fix` applies every fixable finding directly to the compose file. Today only `HPC006` (implicit `depends_on` condition) is auto-fixable, because the rewrite is deterministic and semantics-preserving: the implicit `service_started` default is written out verbatim, so the rendered Slurm script is byte-identical.
-
-```bash
-hpc-compose lint -f compose.yaml --fix --dry-run   # preview the diff
-hpc-compose lint -f compose.yaml --fix              # apply in place
-```
-
-The rewriter edits only the located `depends_on` block; comments, blank lines, and author formatting elsewhere are preserved byte-for-byte. A safety gate re-parses and re-plans the file after each run; if anything fails to reload the original file is restored. Path findings (`HPC004`, `HPC005`) are intentionally not auto-fixed because the correct replacement is cluster-specific.
+CLI behavior for the settings-aware commands (`--profile`, `--settings-file`, `setup`, `context`, `validate --strict-env`, `lint`, `schema`) and the full lint-rule table (`HPC001`-`HPC900`, including auto-fix) now lives in [CLI Reference](cli-reference.md): see [Settings-aware commands](cli-reference.md#settings-aware-commands) and [Lint rules](cli-reference.md#lint-rules). This page describes only the YAML these commands operate on.
 
 ## `x-slurm`
 
@@ -283,6 +252,8 @@ These fields live under the top-level `x-slurm` block.
 | `after_job` | string or mapping | omitted | Scheduler dependency on a prior job id. String shorthand means `afterany:<id>`; mapping supports `{ id, condition }`. |
 | `dependency` | string | omitted | Currently supports `singleton`, combined with `after_job` when both are set. |
 | `cache_dir` | string | settings profile, settings defaults, then `$HOME/.cache/hpc-compose` | Must resolve to shared storage visible from the login node and the compute nodes. |
+| `runtime_root` | string | `<submit_dir>/.hpc-compose` | Directory that holds per-job runtime state (`<runtime_root>/<job_id>/{logs,metrics,state.json,artifacts}`). Relative values resolve against the submit directory. Must be visible from both login and compute nodes; node-local overrides are rejected by preflight. |
+| `cleanup` | mapping | omitted | Teardown cleanup policy. `cleanup.runtime_cache` (`never` \| `on_success` \| `always`, default `never`) controls whether the batch teardown trap removes the per-job enroot runtime cache. |
 | `scratch` | mapping | omitted | Optional scratch path mounted into services and exposed as `HPC_COMPOSE_SCRATCH_DIR`. |
 | `stage_in` | list of mappings | omitted | Copy or rsync host paths before services launch. |
 | `stage_out` | list of mappings | omitted | Copy or rsync paths during teardown, optionally by outcome. |
@@ -436,6 +407,17 @@ dir = "/cluster/shared/hpc-compose-cache"
 [profiles.dev.cache]
 dir = "/cluster/shared/dev-hpc-compose-cache"
 ```
+
+### `x-slurm.runtime_root`
+
+- Shape: string
+- Default: `<submit_dir>/.hpc-compose`, where `<submit_dir>` is the directory you submit from.
+- Notes:
+  - Holds per-job runtime state at `<runtime_root>/<job_id>/` (`logs/`, `metrics/`, `state.json`, `artifacts/`).
+  - Relative paths resolve against the submit directory; absolute paths are used as-is.
+  - The resolved path is baked into the rendered `JOB_ROOT`, so a running job does not depend on `$SLURM_SUBMIT_DIR` being set or shared-visible.
+  - Set an override to relocate bulky runtime state (for example, onto a shared scratch project space) while submission metadata stays next to the compose file.
+  - An override under `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` is rejected by `preflight` because it would not be visible from the compute nodes. The default layout is governed by the submission directory and is not policed here.
 
 ## `runtime`
 
@@ -1225,6 +1207,7 @@ Any other unknown key at the service level is also rejected.
 ## Related Docs
 
 - [CLI Reference](cli-reference.md)
-- [Execution Model](execution-model.md)
+- [Glossary](glossary.md)
+- [Full Example Specs](example-source.md)
+- [Roadmap and Non-Goals](roadmap.md)
 - [Examples](examples.md)
-- [Docker Compose Migration](docker-compose-migration.md)

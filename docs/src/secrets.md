@@ -1,4 +1,4 @@
-# Secrets
+# Use Secrets
 
 `hpc-compose` resolves named secrets from local files or environment variables and feeds them into the interpolation map as first-class, redacted values. This keeps secrets out of the rendered batch script's `environment:` block authoring surface and ensures they are hidden in `config`/`context`/inspect output.
 
@@ -73,12 +73,13 @@ Secrets are resolved after process environment variables and declared with the `
 
 ## What is not included
 
-This v1 ships local `file:` and `env:` sources only. Backend integrations (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager) are intentionally deferred — they would require either shelling out to the `vault`/`gcloud` CLIs or adding a client crate, which conflicts with the project's minimal-dependency stance. You can bridge to them today by writing the fetched value into a file or exporting it as an environment variable, then referencing it through `secrets:`.
+hpc-compose ships local `file:` and `env:` sources only. Backend integrations (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager) are intentionally deferred — they would require either shelling out to the `vault`/`gcloud` CLIs or adding a client crate, which conflicts with the project's minimal-dependency stance. You can bridge to them today by writing the fetched value into a file or exporting it as an environment variable, then referencing it through `secrets:`.
 
 File-mount injection to `/run/secrets/<name>` (Docker Compose semantics) is also deferred; env-var injection through `environment:` covers the common case.
 
 ## Related Docs
 
+- [Run a Notebook or IDE Session](notebook.md)
+- [Wire Up CI](ci-integration.md)
 - [Spec Reference](spec-reference.md)
-- [CLI Reference](cli-reference.md)
 - [Troubleshooting](troubleshooting.md)

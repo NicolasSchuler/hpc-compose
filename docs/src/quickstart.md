@@ -6,68 +6,25 @@ If Slurm terms such as `sbatch`, `srun`, allocation, job step, Pyxis, or Enroot 
 
 ## 1. Install The CLI
 
-The fastest path installs the most recent published [GitHub Release](https://github.com/NicolasSchuler/hpc-compose/releases) with no edits; the script resolves the latest tag for you:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh
-```
-
-For reproducible installs (recommended for shared clusters), pin the tag instead:
-
-```bash
-RELEASE_TAG=vX.Y.Z
-curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEASE_TAG}/install.sh" \
-  | env HPC_COMPOSE_VERSION="${RELEASE_TAG}" sh
-```
-
-Replace `vX.Y.Z` with the published release tag shown on the release page.
-
-The installer places `hpc-compose` in `~/.local/bin` by default and verifies the release checksum sidecar before installing. Release verification, manual downloads, package-manager installs, and source-checkout builds are covered in [Installation](installation.md).
-
-If your shell does not find the command immediately, add the default install directory to your `PATH`:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-hpc-compose --version
-```
+[Installation](installation.md) is the single owner of install, verify, mirror, and source-build commands. Install the CLI from there, confirm `hpc-compose --version` works, then return here.
 
 ## 2. Learn The Safe Authoring Path First
 
-`plan` is the safe authoring command. It does not call `sbatch`, does not import images, and does not write a script file:
-
-Create a starter spec first:
+The safe authoring path runs entirely on a laptop, workstation, or login node — `new` writes a local starter spec and `plan` is purely static (no `sbatch`, no image import):
 
 ```bash
-hpc-compose new \
-  --template minimal-batch \
-  --name my-app \
-  --output compose.yaml
+hpc-compose new --template minimal-batch --name my-app --output compose.yaml
+hpc-compose plan -f compose.yaml
+hpc-compose plan --show-script -f compose.yaml
 ```
+
+`plan` validates the spec and resolves service order; `plan --show-script` adds the rendered batch script. Run that block first on macOS, a laptop, or any machine where you want to evaluate the authoring model before touching a real cluster. The Overview page covers the same walkthrough with full expected output.
 
 If you want a guided learning path instead of a single starter template, run the Spec Metamorphosis tutorial:
 
 ```bash
 hpc-compose evolve --output compose.yaml
 ```
-
-Then inspect the static plan:
-
-```bash
-hpc-compose plan -f compose.yaml
-hpc-compose plan --show-script -f compose.yaml
-```
-
-Expected output includes:
-
-```text
-spec is valid
-```
-
-```text
-service order: app
-```
-
-This is the right first path on macOS, a laptop, or any machine where you want to evaluate the authoring model before touching a real cluster. The same flow is also available as an [asciinema-style demo cast](quickstart-demo.cast), but the snippets above are the accessible reference output.
 
 The normal workflow to remember is:
 
@@ -138,6 +95,12 @@ Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for `x-slurm.cache_
 
 For Pyxis, `srun --help` should mention `--container-image`.
 
+---
+
+> **Everything above is safe on any machine. Everything below requires a real Slurm submission host.**
+
+The steps up to here only author specs, prepare a cache path, and read static plans. From this point the commands call `sbatch`, `srun`, and the runtime backend, so run them only on a supported Linux Slurm submission host.
+
 ## 6. Submit On A Real Cluster
 
 When you move to a supported Linux submission host, the normal run is:
@@ -193,7 +156,9 @@ target/release/hpc-compose plan --show-script -f examples/minimal-batch.yaml
 
 ## Read Next
 
+- [Installation](installation.md)
 - [Support Matrix](support-matrix.md)
+- [Why hpc-compose](why-hpc-compose.md)
 - [Slurm And Container Basics](slurm-container-basics.md)
 - [Examples](examples.md)
 - [Runtime Backends](runtime-backends.md)

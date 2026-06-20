@@ -1,4 +1,4 @@
-# Execution model
+# Execution Model
 
 This page explains the few runtime rules that matter most when a Compose mental model meets Slurm and HPC runtime backends.
 
@@ -61,10 +61,7 @@ The generated batch script sets three Enroot runtime paths scoped per job under 
 
 These paths are created at batch startup and are available inside the batch script and to tooling that reads Enroot environment variables. They are not injected into service containers.
 
-<div class="callout warning">
-  <p><strong>Warning</strong></p>
-  <p>Do not put the resolved cache directory under <code>/tmp</code>, <code>/var/tmp</code>, <code>/private/tmp</code>, or <code>/dev/shm</code>. Those paths are not safe for login-node prepare plus compute-node reuse.</p>
-</div>
+The cache must live on storage shared between login and compute nodes because `prepare` runs on the login node while services run on compute nodes; node-local `/tmp` fails because each node sees a different filesystem. For the operational list of invalid cache paths and cache configuration, see [Cache Management](cache-management.md).
 
 ## Networking inside the allocation
 
@@ -108,7 +105,7 @@ Read [Runtime Backends](runtime-backends.md) before changing `runtime.backend`, 
 
 ## Related Docs
 
-- [Supported Slurm Model](supported-slurm-model.md)
+- [Why hpc-compose](why-hpc-compose.md)
 - [Runtime Backends](runtime-backends.md)
-- [Running Compose-Style Workflows on Slurm](running-compose-style-workflows-on-slurm.md)
+- [Slurm Capability Scope](slurm-capability-scope.md)
 - [Spec Reference](spec-reference.md)

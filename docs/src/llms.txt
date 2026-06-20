@@ -1,0 +1,71 @@
+# hpc-compose
+
+> hpc-compose compiles a Compose-style multi-service YAML file into ONE inspectable Slurm job — a single allocation and a single sbatch script — for HPC and research-ML workflows. Services run through Pyxis/Enroot, Apptainer, Singularity, or a host runtime. It is designed so an AI agent can set it up on a user's cluster safely, favoring static checks before any real submission.
+
+This file is the agent entry point. If you are an AI agent helping a user adopt hpc-compose, read it first, follow the "Set up with an AI agent" links, and honor the safety contract below. It is served at /llms.txt on the published docs site.
+
+## Safety contract (agents MUST honor)
+
+- Safe anywhere — laptop, workstation, or login node, with no scheduler contact and no quota used:
+  `new`, `validate`, `plan`, `plan --show-script`, `inspect`, `render`, `config`,
+  and the read-only tracked-job commands `status`, `ps`, `logs`, `stats`, `artifacts`, `diff`.
+- Requires EXPLICIT user approval — submits or cancels Slurm jobs, opens an allocation, or consumes quota:
+  `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel`.
+- Never submit, allocate, or cancel a Slurm job unprompted. Author the spec, then verify with the safe
+  static checks (`validate` → `plan --show-script` → `inspect`). Only run a submitting command after the
+  user explicitly approves it, on a supported Linux Slurm submission host.
+- Before a first real run, prefer `hpc-compose debug -f <file> --preflight` and `hpc-compose doctor cluster-report` on the login node.
+
+## Canonical conventions (so you do not author broken specs)
+
+- Prefer `x-runtime.prepare.commands`, the backend-neutral image-preparation key. `x-enroot.prepare` is a valid Pyxis/Enroot compatibility alias and is only accepted when `runtime.backend: pyxis`.
+- The cache dir MUST be storage shared between the login node (where `prepare` runs) and the compute nodes (where services run). Never `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` — they are node-local and are rejected by planning and preflight.
+- Replace Docker Compose `build:` with a base `image:` plus `x-runtime.prepare.commands`. `ports`, `networks` / `network_mode`, `restart`, and `deploy` are not supported. Use `127.0.0.1` for same-node helper services and hpc-compose allocation metadata for distributed services.
+- Machine-readable authoring schema: https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose.schema.json
+
+## Set up with an AI agent (start here)
+
+- [Set Up With an AI Agent](ai-agent-setup.html): agent-agnostic entry point with a copy-paste prompt for any LLM
+- [Agent skill bundle — SKILL.md](https://github.com/NicolasSchuler/hpc-compose/blob/main/skills/hpc-compose/SKILL.md): drop-in skill with the full safe-first workflow (source of truth for the recipe)
+- [Environment setup reference](https://github.com/NicolasSchuler/hpc-compose/blob/main/skills/hpc-compose/references/environment-setup.md): install ladder and cluster discovery
+
+## Core model
+
+- [Overview](https://nicolasschuler.github.io/hpc-compose/index.html): what it is and the safe first path
+- [Why hpc-compose](why-hpc-compose.html): positioning and when not to use it
+- [Execution Model](https://nicolasschuler.github.io/hpc-compose/execution-model.html): the spec→sbatch→srun pipeline, the one-allocation model, networking, and the shared-cache rule
+- [Slurm Capability Scope](slurm-capability-scope.html): what is and is not supported
+- [Runtime Backends](https://nicolasschuler.github.io/hpc-compose/runtime-backends.html): Pyxis/Enroot, Apptainer, Singularity, host
+
+## Install and first run
+
+- [Support Matrix](https://nicolasschuler.github.io/hpc-compose/support-matrix.html): platform support levels — check before assuming a cluster can run end to end
+- [Installation](https://nicolasschuler.github.io/hpc-compose/installation.html)
+- [Quickstart](https://nicolasschuler.github.io/hpc-compose/quickstart.html)
+- [Manage the Cache and Clean Up](https://nicolasschuler.github.io/hpc-compose/cache-management.html): valid cache paths and cleanup
+
+## Author and migrate specs
+
+- [Examples](https://nicolasschuler.github.io/hpc-compose/examples.html): runnable starting specs and how to choose one
+- [Guided Authoring Tutorial](https://nicolasschuler.github.io/hpc-compose/evolve.html): the `evolve` step-by-step walkthrough
+- [Migrate a docker-compose.yaml](https://nicolasschuler.github.io/hpc-compose/docker-compose-migration.html)
+- [Spec Reference](https://nicolasschuler.github.io/hpc-compose/spec-reference.html): every spec field
+- [CLI Reference](https://nicolasschuler.github.io/hpc-compose/cli-reference.html): every command and global flag
+
+## Operate and troubleshoot
+
+- [Operate a Real Cluster Run](https://nicolasschuler.github.io/hpc-compose/runbook.html)
+- [Monitor a Run](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html)
+- [Troubleshoot a Failed Run](https://nicolasschuler.github.io/hpc-compose/troubleshooting.html)
+- [Onboard a Cluster Site](https://nicolasschuler.github.io/hpc-compose/cluster-profiles.html)
+
+## Site playbooks
+
+- [HAICORE@KIT Guide](https://nicolasschuler.github.io/hpc-compose/haicore-guide.html): a worked site example to adapt
+
+## Optional
+
+- [Run Hyperparameter Sweeps](https://nicolasschuler.github.io/hpc-compose/sweeps.html)
+- [Right-Size With Canary Runs](https://nicolasschuler.github.io/hpc-compose/canary-runs.html)
+- [Connect Jobs Across Allocations](https://nicolasschuler.github.io/hpc-compose/cross-job-rendezvous.html)
+- [Artifacts and Resume](https://nicolasschuler.github.io/hpc-compose/artifacts-and-resume.html)

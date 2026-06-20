@@ -9,7 +9,7 @@ Use this reference for hpc-compose command sequencing, spec migration, verificat
 - Examples: https://github.com/NicolasSchuler/hpc-compose/blob/main/docs/src/examples.md
 - Spec reference: https://github.com/NicolasSchuler/hpc-compose/blob/main/docs/src/spec-reference.md
 - Runtime backends: https://github.com/NicolasSchuler/hpc-compose/blob/main/docs/src/runtime-backends.md
-- Supported Slurm model: https://github.com/NicolasSchuler/hpc-compose/blob/main/docs/src/supported-slurm-model.md
+- Slurm capability scope: https://github.com/NicolasSchuler/hpc-compose/blob/main/docs/src/slurm-capability-scope.md
 - Docker Compose migration: https://github.com/NicolasSchuler/hpc-compose/blob/main/docs/src/docker-compose-migration.md
 - Troubleshooting: https://github.com/NicolasSchuler/hpc-compose/blob/main/docs/src/troubleshooting.md
 

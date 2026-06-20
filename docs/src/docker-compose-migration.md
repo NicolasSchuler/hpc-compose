@@ -1,4 +1,4 @@
-# Migrating from Docker Compose
+# Migrate a docker-compose.yaml
 
 This guide helps you convert an existing `docker-compose.yaml` into an `hpc-compose` spec for Slurm clusters using Pyxis/Enroot, Apptainer, Singularity, or host runtimes.
 
@@ -253,7 +253,8 @@ The rolling-window fields have no direct Docker Compose equivalent. They exist t
 
 ## Related Docs
 
-- [Execution model](execution-model.md)
-- [Spec reference](spec-reference.md)
-- [Runbook](runbook.md)
 - [Examples](examples.md)
+- [Guided Authoring Tutorial](evolve.md)
+- [Task Guide](task-guide.md)
+- [Execution Model](execution-model.md)
+- [Spec Reference](spec-reference.md)

@@ -195,4 +195,5 @@ man -l man/man1/hpc-compose.1
 
 - [Support Matrix](support-matrix.md)
 - [Quickstart](quickstart.md)
+- [Why hpc-compose](why-hpc-compose.md)
 - [Runtime Backends](runtime-backends.md)

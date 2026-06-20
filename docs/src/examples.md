@@ -193,9 +193,8 @@ hpc-compose test --submit --time 00:01:00 -f examples/dev-python-smoke.yaml
 
 ## Related Docs
 
-- [Quickstart](quickstart.md)
-- [CLI Reference](cli-reference.md)
-- [Execution Model](execution-model.md)
-- [Runbook](runbook.md)
+- [Guided Authoring Tutorial](evolve.md)
+- [Task Guide](task-guide.md)
+- [Migrate a docker-compose.yaml](docker-compose-migration.md)
 - [Spec Reference](spec-reference.md)
-- [Docker Compose Migration](docker-compose-migration.md)
+- [Runbook](runbook.md)

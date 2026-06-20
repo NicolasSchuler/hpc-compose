@@ -27,30 +27,28 @@ Use this page when you know what you want to do, but not yet which command or ex
 - Replace `build:` with `image:` plus `x-runtime.prepare.commands`.
 - Replace service-name networking with `127.0.0.1` or explicit allocation metadata where appropriate.
 
+## Pick a starting example
+
+- Browse the annotated catalog and chooser in [Examples](examples.md); it owns the per-example filename, tag, and prerequisite map.
+- Run `hpc-compose examples recommend '<workflow description>'` for a registry-backed starting point, e.g. `'multi-service app'`, `'multi-node training'`, `'checkpoint resume training'`, or `'vllm worker'`.
+
 ## Single-node multi-service app
 
-- Start from [app-redis-worker.yaml](example-source.md#app-redis-worker).
-- Add `depends_on` and `readiness` only where ordering really matters.
 - Use [Execution Model](execution-model.md) to confirm which services can rely on localhost.
+- Add `depends_on` and `readiness` only where ordering really matters.
 
 ## Multi-node distributed training
 
-- Start from [multi-node-torchrun.yaml](example-source.md#multi-node-torchrun), [multi-node-deepspeed.yaml](example-source.md#multi-node-deepspeed), [multi-node-accelerate.yaml](example-source.md#multi-node-accelerate), [multi-node-jax.yaml](example-source.md#multi-node-jax), or [multi-node-mpi.yaml](example-source.md#multi-node-mpi).
-- Use [multi-node-horovod.yaml](example-source.md#multi-node-horovod) or [nccl-tests.yaml](example-source.md#nccl-tests) when rank-per-GPU MPI launch is the right shape.
-- Start from [multi-node-partitioned.yaml](example-source.md#multi-node-partitioned) when independent distributed roles need disjoint node ranges or explicit co-location.
-- Start from [ray-symmetric.yaml](example-source.md#ray-symmetric), [dask-scheduler-workers.yaml](example-source.md#dask-scheduler-workers), [spark-standalone.yaml](example-source.md#spark-standalone), or [flux-nested.yaml](example-source.md#flux-nested) when the framework can run inside one Slurm allocation without an autoscaler.
 - Use generated distributed metadata such as `HPC_COMPOSE_DIST_RDZV_ENDPOINT`, `HPC_COMPOSE_DIST_NODE_RANK`, and `HPC_COMPOSE_DIST_NPROC_PER_NODE` instead of Docker-style service discovery.
 - Put cluster-specific NCCL/UCX/OFI fabric variables in `.hpc-compose/cluster.toml` under `[distributed.env]` so specs stay portable.
 
 ## Checkpoint and resume workflows
 
-- Start from [training-checkpoints.yaml](example-source.md#training-checkpoints) when you only need artifact output.
-- Start from [training-resume.yaml](example-source.md#training-resume) when the run should resume from shared storage across retries or later submissions.
+- See [Artifacts and Resume](artifacts-and-resume.md) for the export-vs-resume split.
 - Keep the canonical resume source in `x-slurm.resume.path`, not in exported artifact bundles.
 
 ## LLM serving workflows
 
-- Start from [llm-curl-workflow.yaml](example-source.md#llm-curl-workflow), [llm-curl-workflow-workdir.yaml](example-source.md#llm-curl-workflow-workdir), [llama-uv-worker.yaml](example-source.md#llama-uv-worker), or [vllm-uv-worker.yaml](example-source.md#vllm-uv-worker).
 - Use `volumes` for model directories and fast-changing code.
 - Use `x-runtime.prepare.commands` for slower-changing dependencies.
 
@@ -90,9 +88,8 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 ## Related Docs
 
-- [Support Matrix](support-matrix.md)
-- [CLI Reference](cli-reference.md)
-- [Execution Model](execution-model.md)
-- [Runbook](runbook.md)
 - [Examples](examples.md)
-- [Spec Reference](spec-reference.md)
+- [Guided Authoring Tutorial](evolve.md)
+- [Migrate a docker-compose.yaml](docker-compose-migration.md)
+- [CLI Reference](cli-reference.md)
+- [Runbook](runbook.md)

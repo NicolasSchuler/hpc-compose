@@ -43,7 +43,7 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 `tracked_paths` is the single source of truth for the tracked-job layout shared by `render` and `job`.
 
 - Compose-level metadata lives under `.hpc-compose/` next to the compose file.
-- Per-job runtime state lives under `${SLURM_SUBMIT_DIR}/.hpc-compose/<job-id>/`.
+- Per-job runtime state lives under `<runtime-root>/<job-id>/`, where `<runtime-root>` defaults to `<submit-dir>/.hpc-compose` and can be overridden with `x-slurm.runtime_root`. The renderer resolves this to an absolute path at submit time and bakes it into `JOB_ROOT`, so a running job does not depend on `$SLURM_SUBMIT_DIR`. Records persist an explicit override so later lookups address the same directory.
 - Root-level `logs/`, `metrics/`, `artifacts/`, and `state.json` are the latest-view paths used by status and export commands.
 - Resume-aware runs still write attempt-specific state under `attempts/<attempt>/...`.
 - The batch script updates root-level latest symlinks so contributor-facing tooling can read the most recent attempt without reconstructing shell logic independently.

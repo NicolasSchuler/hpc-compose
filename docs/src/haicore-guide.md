@@ -1,4 +1,4 @@
-# HAICORE Guide
+# HAICORE@KIT Guide
 
 This page collects `hpc-compose` configuration notes for HAICORE@KIT. It is a practical starting point, not a replacement for the official [NHR@KIT HAICORE documentation](https://www.nhr.kit.edu/userdocs/haicore/).
 
@@ -229,8 +229,8 @@ hpc-compose logs -f compose.yaml --follow
 
 ## Read Next
 
+- [Onboard a Cluster Site](cluster-profiles.md)
+- [Operate a Real Cluster Run](runbook.md)
+- [Troubleshoot a Failed Run](troubleshooting.md)
 - [Slurm And Container Basics](slurm-container-basics.md)
-- [Cluster Profiles](cluster-profiles.md)
 - [Runtime Backends](runtime-backends.md)
-- [Runbook](runbook.md)
-- [Troubleshooting](troubleshooting.md)

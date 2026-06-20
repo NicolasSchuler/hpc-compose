@@ -23,7 +23,7 @@ Start with the [Support Matrix](support-matrix.md) before planning a real runtim
 
 ## Safe First Path
 
-These commands are safe from a laptop, workstation, or login node because `new` writes a local starter spec and `plan` is purely static:
+These commands are safe from a laptop, workstation, or login node because `new` writes a local starter spec and `plan` is purely static. It does not call `sbatch`, import images, or write a script file:
 
 ```bash
 hpc-compose new --template minimal-batch --name my-app --output compose.yaml
@@ -31,15 +31,16 @@ hpc-compose plan -f compose.yaml
 hpc-compose plan --show-script -f compose.yaml
 ```
 
-For real cluster runs, configure a cache path visible from both the Slurm submission host and compute nodes, either in `x-slurm.cache_dir`, `hpc-compose setup --cache-dir`, or `[defaults.cache]` / `[profiles.<name>.cache]` settings. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
-
-Expected output includes:
+`plan` validates the spec and resolves service order; `plan --show-script` adds the rendered batch script. Expected output includes:
 
 ```text
 spec is valid
 service order: app
 Rendered script:
+#SBATCH --job-name=my-app
 ```
+
+For real cluster runs, configure a cache path visible from both the Slurm submission host and compute nodes, either in `x-slurm.cache_dir`, `hpc-compose setup --cache-dir`, or `[defaults.cache]` / `[profiles.<name>.cache]` settings. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
 
 Run `hpc-compose up -f compose.yaml` only on a supported Linux Slurm submission host with the runtime backend your spec selects. If it fails, start with `hpc-compose debug -f compose.yaml --preflight`.
 
@@ -79,15 +80,16 @@ Unsupported Compose features include:
 - `deploy`
 - dynamic node bin packing
 
-For exact boundaries, read [Execution Model](execution-model.md), [Supported Slurm Model](supported-slurm-model.md), and [Spec Reference](spec-reference.md).
+For exact boundaries, read [Execution Model](execution-model.md), [Slurm Capability Scope](slurm-capability-scope.md), and [Spec Reference](spec-reference.md).
 
 ## Read Next
 
-1. [Quickstart](quickstart.md) for the shortest safe path.
-2. [Examples](examples.md) to choose a starting spec.
-3. [Runtime Backends](runtime-backends.md) before changing `runtime.backend`.
-4. [Runbook](runbook.md) when adapting a real workload on a cluster.
-5. [Troubleshooting](troubleshooting.md) when the first cluster run fails.
+1. [Why hpc-compose](why-hpc-compose.md) for the problem it solves.
+2. [Quickstart](quickstart.md) for the shortest safe path.
+3. [Examples](examples.md) to choose a starting spec.
+4. [Runtime Backends](runtime-backends.md) before changing `runtime.backend`.
+5. [Runbook](runbook.md) when adapting a real workload on a cluster.
+6. [Troubleshooting](troubleshooting.md) when the first cluster run fails.
 
 ## Reference
 
@@ -95,3 +97,4 @@ For exact boundaries, read [Execution Model](execution-model.md), [Supported Slu
 - [Task Guide](task-guide.md)
 - [CLI Reference](cli-reference.md)
 - [Spec Reference](spec-reference.md)
+- [Roadmap and Non-Goals](roadmap.md)

@@ -6,16 +6,7 @@ It is not a Slurm administration guide. The goal is to explain the vocabulary yo
 
 ## The Short Mental Model
 
-```text
-compose.yaml
-  -> hpc-compose plan/render/up
-  -> generated sbatch script
-  -> sbatch creates one Slurm allocation
-  -> srun launches one or more service steps
-  -> Pyxis/Enroot, Apptainer, Singularity, or host software starts the process
-```
-
-The important point is that `hpc-compose` does not replace Slurm. It writes one inspectable Slurm batch script and uses Slurm to run the planned services inside one allocation.
+The important point is that `hpc-compose` does not replace Slurm. It writes one inspectable Slurm batch script and uses Slurm to run the planned services inside one allocation. For the full spec->sbatch->srun pipeline, see [Execution Model](execution-model.md).
 
 ## Slurm Terms In Plain Language
 
@@ -97,29 +88,7 @@ hpc-compose up -f compose.yaml
 
 ## How YAML Maps To Slurm
 
-| In the spec | In Slurm | Why it matters |
-| --- | --- | --- |
-| Top-level `x-slurm.partition` | `#SBATCH --partition` | Selects the site queue/resource pool. |
-| Top-level `x-slurm.time` | `#SBATCH --time` | Sets the allocation wall-time limit. |
-| Top-level `x-slurm.nodes` | `#SBATCH --nodes` | Reserves the allocation node count. |
-| Top-level `x-slurm.ntasks` | `#SBATCH --ntasks` | Sets the default process/rank count for the allocation. |
-| Top-level `x-slurm.cpus_per_task` | `#SBATCH --cpus-per-task` | Requests CPU threads per task. |
-| Top-level `x-slurm.mem` | `#SBATCH --mem` | Requests memory for scheduling and enforcement. It is not disk space. |
-| Top-level `x-slurm.gres` | `#SBATCH --gres` | Requests generic resources such as GPUs. |
-| Service `x-slurm.ntasks` | `srun --ntasks` | Sets the process/rank count for that service step. |
-| Service `x-slurm.extra_srun_args` | Raw `srun` arguments | Escape hatch for site-specific launch options. |
-
-Prefer first-class fields from [Spec Reference](spec-reference.md) when they exist. Use raw `submit_args` or `extra_srun_args` only for site-specific options that `hpc-compose` does not model directly.
-
-## `sbatch` vs `srun` vs `hpc-compose up`
-
-| Command | What it does |
-| --- | --- |
-| `sbatch job.sbatch` | Submits a batch script and creates a Slurm job when scheduled. |
-| `srun ...` | Launches a job step. Inside an `sbatch` allocation, this starts work on allocated resources. |
-| `hpc-compose render -f compose.yaml --output job.sbatch` | Writes the generated batch script without submitting it. |
-| `hpc-compose up -f compose.yaml` | Runs the normal end-to-end flow and submits through `sbatch`. |
-| `hpc-compose status`, `ps`, `logs`, `watch` | Reconnects to tracked jobs after submission. |
+`hpc-compose` translates top-level and service `x-slurm` fields into `#SBATCH` directives and `srun` arguments. For the exact field-by-field mapping and the full command surface (`sbatch`, `srun`, `render`, `up`, tracked follow-ups), see [Spec Reference](spec-reference.md) and [CLI Reference](cli-reference.md). Prefer first-class fields when they exist; use raw `submit_args` or `extra_srun_args` only for site-specific options that `hpc-compose` does not model directly.
 
 When debugging, inspect the generated script:
 
@@ -135,43 +104,13 @@ hpc-compose debug -f compose.yaml
 
 ## Pyxis And Enroot Basics
 
-Slurm itself is the scheduler. Container support depends on what the cluster installed.
+Slurm itself is the scheduler. Container support depends on what the cluster installed. The default `runtime.backend: pyxis` path uses the Pyxis Slurm plugin plus the Enroot unprivileged runtime, and `hpc-compose` maps each service into a generated `srun --container-*` launch.
 
-For the default `runtime.backend: pyxis` path:
-
-- Pyxis is the Slurm plugin that adds `--container-*` flags to `srun`.
-- Enroot is the unprivileged container image/runtime layer used under Pyxis.
-- An imported image is commonly represented as a cacheable SquashFS artifact such as `.sqsh`.
-- `hpc-compose` maps service image, command, environment, working directory, and volumes into the generated `srun --container-*` launch.
-
-Check Pyxis support on the target login node:
-
-```bash
-srun --help | grep container-image
-hpc-compose preflight -f compose.yaml
-```
-
-If `srun` does not advertise `--container-image`, choose another backend or ask the site how Pyxis is enabled. Enroot being installed is not the same thing as Slurm supporting Pyxis flags.
-
-Other supported runtime paths are covered in [Runtime Backends](runtime-backends.md).
+For the Pyxis support check, the Enroot/Apptainer/Singularity/host tooling differences, and how to choose a backend, see [Runtime Backends](runtime-backends.md).
 
 ## Why Shared Storage Matters
 
-`hpc-compose prepare` can run before the Slurm job starts, but services run later on compute nodes. That means the resolved runtime cache must be visible from both places. You can set it in project settings:
-
-```toml
-[profiles.dev.cache]
-dir = "/cluster/shared/hpc-compose-cache"
-```
-
-Or directly in a spec:
-
-```yaml
-x-slurm:
-  cache_dir: /cluster/shared/hpc-compose-cache
-```
-
-Use a project, work, scratch, or workspace path that your site documents as shared. Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for the resolved cache directory.
+`hpc-compose prepare` can run before the Slurm job starts, but services run later on compute nodes, so the resolved runtime cache must be visible from both places. For why the cache must live on shared storage and the operational cache configuration, see [Execution Model](execution-model.md) and [Cache Management](cache-management.md).
 
 The same rule applies to host paths mounted through `volumes`: the compute node must be able to read the path when the service starts.
 
@@ -197,7 +136,7 @@ Inside a container, `cat /etc/os-release` should describe the container image. O
 | Cache warnings mention local paths | The cache path is not shared between login and compute nodes. | Configure `x-slurm.cache_dir` or `setup --cache-dir` with shared storage. |
 | A GPU job waits longer than expected | The request may be larger than available idle resources. | Check site queue policy and start with the smallest useful request. |
 | More CPUs were requested but only one process appears | `cpus_per_task` adds threads per task; it does not create more tasks. | Use `ntasks` for more processes/ranks, and make the application use them. |
-| Docker Compose `ports` or service DNS do not work | This is one Slurm allocation, not a Docker Compose network. | Use host networking and Slurm/hpc-compose allocation metadata instead. |
+| Docker Compose `ports` or service DNS do not work | This is one Slurm allocation, not a Docker Compose network. | See the networking stance in [Execution Model](execution-model.md). |
 
 ## Further Reading
 
@@ -210,8 +149,7 @@ Inside a container, `cat /etc/os-release` should describe the container image. O
 
 ## Read Next
 
-- [Quickstart](quickstart.md)
-- [Execution Model](execution-model.md)
-- [Supported Slurm Model](supported-slurm-model.md)
+- [Why hpc-compose](why-hpc-compose.md)
 - [Runtime Backends](runtime-backends.md)
-- [Runbook](runbook.md)
+- [Execution Model](execution-model.md)
+- [Slurm Capability Scope](slurm-capability-scope.md)

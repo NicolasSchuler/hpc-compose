@@ -1,6 +1,8 @@
-# Right-Sizing With Canary Runs
+# Right-Size With Canary Runs
 
 `hpc-compose germinate` submits a short Slurm canary for an existing compose spec, forces runtime metrics on, waits for the canary to finish, and prints conservative resource recommendations for the original spec.
+
+> `germinate` is the pre-run probe: it submits a fresh short canary to estimate requests before you commit to a full run. `inspect --rightsize` is the post-run counterpart: it derives recommendations from the metrics a completed tracked run already produced. Use `germinate` when you have no run yet; use `inspect --rightsize` after a real run.
 
 Canaries are short probes, not benchmark truth. They are useful for catching obvious over-requests such as asking for many GPUs when only one device is touched, or requesting far more memory than the process ever approaches during startup. They are not a substitute for full-run profiling when a workload has long warmup, data-dependent memory, lazy model loading, or late training phases.
 
@@ -58,6 +60,7 @@ Start from [`examples/canary-right-size.yaml`](example-source.md#canary-right-si
 
 ## Related Docs
 
+- [Run Hyperparameter Sweeps](sweeps.md)
 - [Runtime Observability](runtime-observability.md)
 - [Runbook](runbook.md)
 - [Spec Reference](spec-reference.md)

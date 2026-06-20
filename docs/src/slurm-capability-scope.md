@@ -1,4 +1,4 @@
-# Supported Slurm Model
+# Slurm Capability Scope
 
 This page makes the `hpc-compose` Slurm boundary explicit. It is a tool for compiling one Compose-like application into one Slurm allocation with one or more `srun` steps. Those steps can use Pyxis/Enroot, Apptainer, Singularity, or host runtime software. It is not a general frontend for the full Slurm command surface.
 
@@ -61,7 +61,7 @@ These capabilities are intentionally outside the product seam.
 
 ## Related Docs
 
+- [Why hpc-compose](why-hpc-compose.md)
 - [Execution Model](execution-model.md)
 - [Runtime Backends](runtime-backends.md)
-- [Running Compose-Style Workflows on Slurm](running-compose-style-workflows-on-slurm.md)
 - [Spec Reference](spec-reference.md)

@@ -1,6 +1,6 @@
-# Cache Management
+# Manage the Cache and Clean Up
 
-The resolved cache directory stores imported and prepared runtime artifacts. It comes from explicit `x-slurm.cache_dir`, then profile/default settings, then `$HOME/.cache/hpc-compose`. For real cluster runs, it must be visible from both the submission host and compute nodes.
+The resolved cache directory stores imported and prepared runtime artifacts. It comes from explicit `x-slurm.cache_dir`, then profile/default settings, then `$HOME/.cache/hpc-compose`. For real cluster runs, it must be visible from both the submission host and compute nodes; see [Execution Model](execution-model.md) for why prepared artifacts must live on shared storage.
 
 ## Choose A Cache Path
 
@@ -58,20 +58,17 @@ hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
 
 ## Rendezvous Records
 
-Cross-job rendezvous uses the same shared cache root:
+Cross-job rendezvous records live under the same shared cache root and are pruned separately (`rendezvous list`, `rendezvous prune`). See [Cross-Job Rendezvous](cross-job-rendezvous.md) for placement, TTL, and ownership rules.
 
-```text
-<cache_dir>/rendezvous/<name>/latest.json
-```
+## Clean Up Old Tracked Runs
 
-These records are small endpoint descriptors, not runtime images. They are pruned separately:
+Tracked job metadata and logs accumulate in `.hpc-compose/`. Preview disk usage and cleanup before deleting:
 
 ```bash
-hpc-compose rendezvous list --cache-dir "$CACHE_DIR"
-hpc-compose rendezvous prune --cache-dir "$CACHE_DIR"
+hpc-compose jobs list --disk-usage
+hpc-compose clean -f compose.yaml --age 7 --dry-run
+hpc-compose clean -f compose.yaml --age 7
 ```
-
-Provider cleanup is owner-safe: an older provider cannot erase a newer record. See [Cross-Job Rendezvous](cross-job-rendezvous.md) for the full TTL and ownership rules.
 
 ## After Upgrading
 
@@ -83,7 +80,9 @@ hpc-compose cache prune --age 0
 
 ## Related Docs
 
-- [Quickstart](quickstart.md#4-pick-and-test-a-cache-directory)
-- [Runbook](runbook.md)
-- [CLI Reference](cli-reference.md#cache-maintenance)
+- [Operate a Real Cluster Run](runbook.md)
+- [Monitor a Run](runtime-observability.md)
+- [Troubleshoot a Failed Run](troubleshooting.md)
+- [Execution Model](execution-model.md)
 - [Cross-Job Rendezvous](cross-job-rendezvous.md)
+- [CLI Reference](cli-reference.md#cache-maintenance)

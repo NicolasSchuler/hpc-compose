@@ -1,4 +1,4 @@
-# Spec Metamorphosis
+# Guided Authoring Tutorial
 
 `hpc-compose evolve` is an interactive authoring tutorial. It starts from a minimal valid spec and progressively rewrites the same output file through increasingly realistic HPC workflow features.
 
@@ -97,7 +97,8 @@ For a fresh single-template scaffold, use [`hpc-compose new`](cli-reference.md#a
 
 ## Related Docs
 
-- [Quickstart](quickstart.md)
 - [Examples](examples.md)
+- [Task Guide](task-guide.md)
+- [Migrate a docker-compose.yaml](docker-compose-migration.md)
 - [CLI Reference](cli-reference.md)
 - [Spec Reference](spec-reference.md)

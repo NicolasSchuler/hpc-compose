@@ -21,7 +21,7 @@ Supporting line:
 - choose one primary link to reuse everywhere:
   - docs overview
   - examples page
-  - or `running-compose-style-workflows-on-slurm.md`
+  - or `why-hpc-compose.md`
 - after publishing, verify the release attestation and one downloaded asset
 - confirm the automatic Homebrew formula PR exists and points at the new macOS tarball checksums
 - confirm docs and install commands still match the published tag

@@ -1,4 +1,6 @@
-# Runtime Observability
+# Monitor a Run
+
+Status, watch, logs.
 
 After a submission, `hpc-compose` records tracked metadata under:
 
@@ -39,9 +41,8 @@ hpc-compose diff 12345 12346 -f compose.yaml
 | `stats` | Tracked metrics, Slurm step statistics, and optional accounting rollups. |
 | `inspect --rightsize` | Post-run request-versus-usage recommendations for memory, CPUs, GPUs, and walltime. |
 | `score` | 0-100 post-run efficiency score with GPU, memory, compute-time, and kWh components. |
-| `germinate` | Short (default one-minute) canary submission that writes `latest-canary.json` and recommends resource settings from fresh metrics. |
-| `sweep status` | Aggregate persisted sweep trials into completed, failed, running, pending, unknown, missing-tracking, and submit-failed counts. |
-| `sweep list` | List prior sweep manifests without querying the scheduler. |
+| `germinate` | Short canary submission; see [Right-Sizing With Canary Runs](canary-runs.md). |
+| `sweep status` / `sweep list` | Inspect sweep trials and manifests; see [Hyperparameter Sweeps](sweeps.md). |
 | `diff` | Compact comparison between two tracked submissions. |
 
 Use `--format json` on non-streaming commands when automation needs stable fields. `stats` also supports `--format csv` and `--format jsonl`.
@@ -177,15 +178,11 @@ Use `hpc-compose inspect --rightsize -f compose.yaml` after a tracked Slurm run 
 
 Use `hpc-compose score <job-id>` after a tracked Slurm run when you want a compact efficiency grade. The score reuses sampler history, `sacct`, `sstat`, and right-sizing recommendations, then reports GPU utilization, memory utilization, active compute-time versus requested walltime, and a best-effort kWh estimate. Energy uses sampled GPU power when available, otherwise falls back to power limits or configured TDP assumptions through `--gpu-tdp-w`, `--cpu-watts-per-core`, and `--pue`; it does not claim carbon intensity or emissions.
 
-Use `hpc-compose germinate -f compose.yaml` before a full run when you want a short canary to gather fresh evidence. Canary runs write `.hpc-compose/latest-canary.json` so normal `up` metadata remains the latest production submission.
+For a short canary run before a full run, use `hpc-compose germinate`; see [Right-Sizing With Canary Runs](canary-runs.md).
 
 ## Sweep Manifests
 
-`hpc-compose sweep submit` stores sweep state under `.hpc-compose/sweeps/<sweep-id>/sweep.json` and refreshes `.hpc-compose/sweeps/latest.json`. The manifest records the matrix mode, persisted random seed, trial ids, trial variables, rendered script paths, job ids, per-trial job record paths, submit times, and any submit error.
-
-Each submitted trial also writes a normal job record under `.hpc-compose/jobs/<job-id>.json` with `kind: sweep_trial` and a `sweep` metadata block. Sweep-trial records deliberately do not replace normal `latest.json` or `latest-run.json`, so `hpc-compose status`, `watch`, and `logs` continue to target ordinary runs unless you pass an explicit job id.
-
-`hpc-compose sweep status -f compose.yaml --format json` loads the manifest and queries the same scheduler/tracking snapshot code used for ordinary jobs. It reports per-trial state plus aggregate counts for `completed`, `failed`, `running`, `pending`, `unknown`, `missing_tracking`, and `submit_failed`. hpc-compose does not parse metric files or infer the best trial; keep metric summaries in your training output or external experiment tracker.
+Sweep submission and monitoring (`sweep submit`, `sweep status`, `sweep list`) are covered in [Hyperparameter Sweeps](sweeps.md). Sweep-trial records do not replace normal `latest.json` or `latest-run.json`, so `hpc-compose status`, `watch`, and `logs` continue to target ordinary runs unless you pass an explicit job id.
 
 ## Diffing Runs
 
@@ -193,8 +190,9 @@ Use `hpc-compose diff <job-id-1> <job-id-2>` to compare two tracked submissions.
 
 ## Related Docs
 
-- [Runbook](runbook.md)
-- [Troubleshooting](troubleshooting.md)
+- [Operate a Real Cluster Run](runbook.md)
+- [Troubleshoot a Failed Run](troubleshooting.md)
+- [Manage the Cache and Clean Up](cache-management.md)
 - [Artifacts and Resume](artifacts-and-resume.md)
 - [Hyperparameter Sweeps](sweeps.md)
 - [Right-Sizing With Canary Runs](canary-runs.md)

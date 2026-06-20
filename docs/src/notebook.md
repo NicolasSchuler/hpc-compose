@@ -1,4 +1,4 @@
-# Notebook Sessions
+# Run a Notebook or IDE Session
 
 `hpc-compose notebook` launches a tracked interactive server — JupyterLab or VS Code (`code tunnel`) — as a single-service Slurm job, waits for it to become ready, and prints the connection URL. The session is a normal tracked job: manage it with `hpc-compose status` and stop it with `hpc-compose cancel`.
 
@@ -71,7 +71,7 @@ For VS Code, `code tunnel` performs GitHub device-flow authentication the first 
 
 ## Related Docs
 
-- [Examples](examples.md)
+- [Use Secrets](secrets.md)
 - [Development Workflow](development-workflow.md)
+- [Examples](examples.md)
 - [CLI Reference](cli-reference.md)
-- [Runbook](runbook.md)
