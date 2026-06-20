@@ -1,8 +1,8 @@
 use super::runtime_state::{ServiceRuntimeStateEntry, ServiceRuntimeStateFile};
 use super::scheduler::{build_log_status, build_scheduler_status};
 use super::*;
+use crate::tracked_paths::SERVICE_EXITS_DIR_NAME;
 
-const SERVICE_EXITS_DIR_NAME: &str = "service-exits";
 const REPLAY_FIDELITY: &str = "best-effort";
 
 /// Reconstructed best-effort replay timeline for one tracked job.
@@ -1077,7 +1077,9 @@ mod tests {
             submit_dir: root.to_path_buf(),
             script_path: root.join("job.sbatch"),
             cache_dir: root.join("cache"),
+            runtime_root: None,
             batch_log: root.join("slurm-12345.out"),
+            batch_log_managed: false,
             service_logs,
             artifact_export_dir: None,
             resume_dir: None,
@@ -1143,7 +1145,7 @@ mod tests {
             "{\"service\":\"app\",\"exit_code\":0,\"at_unix\":120}\n",
         )
         .expect("exit marker");
-        let metrics_dir = job_root.join("metrics");
+        let metrics_dir = job_root.join(tracked_paths::METRICS_DIR_NAME);
         fs::create_dir_all(&metrics_dir).expect("metrics");
         fs::write(
             metrics_dir.join("gpu.jsonl"),
@@ -1233,7 +1235,8 @@ mod tests {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let record = sample_record(tmpdir.path());
         write_record(tmpdir.path(), &record);
-        let metrics_dir = runtime_job_root_for_record(&record).join("metrics");
+        let metrics_dir =
+            runtime_job_root_for_record(&record).join(tracked_paths::METRICS_DIR_NAME);
         fs::create_dir_all(&metrics_dir).expect("metrics");
         fs::write(
             metrics_dir.join("gpu.jsonl"),
@@ -1347,7 +1350,7 @@ mod tests {
         let record = sample_record(tmpdir.path());
         write_record(tmpdir.path(), &record);
         let job_root = runtime_job_root_for_record(&record);
-        let metrics_dir = job_root.join("metrics");
+        let metrics_dir = job_root.join(tracked_paths::METRICS_DIR_NAME);
         fs::create_dir_all(&metrics_dir).expect("metrics");
         fs::write(
             metrics_dir.join("gpu.jsonl"),

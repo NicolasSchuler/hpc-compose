@@ -24,6 +24,14 @@ pub struct JobInventoryEntry {
     pub legacy_runtime_job_root: PathBuf,
     pub legacy_runtime_job_root_present: bool,
     #[serde(default)]
+    pub runtime_cache_dir: PathBuf,
+    #[serde(default)]
+    pub runtime_cache_dir_present: bool,
+    #[serde(default)]
+    pub batch_log: PathBuf,
+    #[serde(default)]
+    pub batch_log_managed: bool,
+    #[serde(default)]
     pub disk_usage_bytes: Option<u64>,
 }
 
@@ -196,8 +204,19 @@ pub fn build_submission_record_with_backend_and_options(
     let compose_file = absolute_path(spec_path)?;
     let submit_dir = absolute_path(submit_dir)?;
     let script_path = absolute_path(script_path)?;
-    let log_dir =
-        tracked_paths::latest_logs_dir(&tracked_paths::runtime_job_root(&submit_dir, job_id));
+    // Persist only an explicit `x-slurm.runtime_root` override (resolved
+    // absolute); `None` means the default `<submit_dir>/.hpc-compose` layout,
+    // which `runtime_job_root_for_record` reconstructs from `submit_dir`.
+    let runtime_root = plan
+        .slurm
+        .runtime_root
+        .as_deref()
+        .map(|raw| crate::path_util::absolute_path(Path::new(raw), &submit_dir));
+    let job_root = match &runtime_root {
+        Some(root) => root.join(job_id),
+        None => tracked_paths::runtime_job_root(&submit_dir, job_id),
+    };
+    let log_dir = tracked_paths::latest_logs_dir(&job_root);
     let service_logs = plan
         .ordered_services
         .iter()
@@ -219,7 +238,9 @@ pub fn build_submission_record_with_backend_and_options(
         submit_dir: submit_dir.clone(),
         script_path,
         cache_dir: plan.cache_dir.clone(),
+        runtime_root,
         batch_log: batch_log_path_for_backend(plan, &submit_dir, job_id, backend),
+        batch_log_managed: plan.slurm.output.is_none(),
         service_logs,
         artifact_export_dir: plan
             .slurm
@@ -257,10 +278,23 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
 }
 
 /// Removes one tracked submission record and repairs the latest pointer.
+///
+/// Also reaps host-side per-job state that the batch teardown trap cannot
+/// (cancelled/crashed jobs never run it): the per-job enroot runtime cache and
+/// this job's owned rendezvous records. Both are job-namespaced / owner-guarded.
 pub fn remove_submission_record(record: &SubmissionRecord) -> Result<()> {
     let record_path = jobs_dir_for(&record.compose_file).join(format!("{}.json", record.job_id));
     remove_path_if_present(&record_path)?;
     remove_path_if_present(&runtime_job_root_for_record(record))?;
+    remove_path_if_present(&tracked_paths::enroot_runtime_job_dir(
+        &record.cache_dir,
+        &record.job_id,
+    ))?;
+    if record.batch_log_managed {
+        remove_path_if_present(&record.batch_log)?;
+    }
+    // Best-effort: never block teardown on a stale/unreadable rendezvous file.
+    let _ = crate::rendezvous::reap_job_records(&record.cache_dir, &record.job_id);
     repair_latest_records(&record.compose_file)
 }
 
@@ -448,6 +482,15 @@ pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<
 }
 
 fn validate_submission_record(record: SubmissionRecord, path: &Path) -> Result<SubmissionRecord> {
+    // Guard teardown/cleanup against a corrupt or hand-tampered record: an empty
+    // job id would collapse the per-job runtime/enroot paths to their shared
+    // parents (e.g. `<cache_dir>/runtime/`), so refuse to use such a record.
+    if record.job_id.trim().is_empty() {
+        bail!(
+            "submission record {} has an empty job id; refusing to use it for tracking/cleanup",
+            path.display()
+        );
+    }
     if record.schema_version > SUBMISSION_SCHEMA_VERSION {
         bail!(
             "submission record {} uses schema version {} but this version of hpc-compose only supports up to {}; please upgrade hpc-compose",
@@ -466,17 +509,19 @@ pub fn log_dir_for_record(record: &SubmissionRecord) -> PathBuf {
         .values()
         .next()
         .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| {
-            tracked_paths::latest_logs_dir(&tracked_paths::runtime_job_root(
-                &record.submit_dir,
-                &record.job_id,
-            ))
-        })
+        .unwrap_or_else(|| tracked_paths::latest_logs_dir(&runtime_job_root_for_record(record)))
 }
 
 /// Returns the tracked runtime root for a submission record.
+///
+/// Records that carry an explicit `runtime_root` override (schema v3+) address
+/// `<runtime_root>/<job_id>`; older records and default-layout records fall back
+/// to `<submit_dir>/.hpc-compose/<job_id>`.
 pub fn runtime_job_root_for_record(record: &SubmissionRecord) -> PathBuf {
-    tracked_paths::runtime_job_root(&record.submit_dir, &record.job_id)
+    match &record.runtime_root {
+        Some(runtime_root) => runtime_root.join(&record.job_id),
+        None => tracked_paths::runtime_job_root(&record.submit_dir, &record.job_id),
+    }
 }
 
 /// Returns the tracked runtime state path for a submission record.
@@ -553,10 +598,18 @@ fn build_inventory_entries_for_metadata_root(
         resolved_latest_job_id(metadata_root, &records, SubmissionKind::Notebook);
     let mut inventory = Vec::with_capacity(records.len());
     for (record_path, record) in records {
-        let runtime_job_root = tracked_paths::runtime_job_root(&record.submit_dir, &record.job_id);
+        let runtime_job_root = runtime_job_root_for_record(&record);
         let legacy_runtime_job_root = metadata_root.join(&record.job_id);
-        let removable_paths =
-            removable_paths_from_paths(&record_path, &runtime_job_root, &legacy_runtime_job_root);
+        let runtime_cache_dir =
+            tracked_paths::enroot_runtime_job_dir(&record.cache_dir, &record.job_id);
+        let batch_log = record.batch_log.clone();
+        let removable_paths = removable_paths_from_paths(
+            &record_path,
+            &runtime_job_root,
+            &legacy_runtime_job_root,
+            &runtime_cache_dir,
+            record.batch_log_managed.then_some(batch_log.as_path()),
+        );
         let disk_usage_bytes = if include_disk_usage {
             Some(size_of_paths(&removable_paths)?)
         } else {
@@ -588,6 +641,10 @@ fn build_inventory_entries_for_metadata_root(
             runtime_job_root,
             legacy_runtime_job_root_present: legacy_runtime_job_root.exists(),
             legacy_runtime_job_root,
+            runtime_cache_dir_present: runtime_cache_dir.exists(),
+            runtime_cache_dir,
+            batch_log,
+            batch_log_managed: record.batch_log_managed,
             disk_usage_bytes,
         });
     }
@@ -690,6 +747,8 @@ fn removable_paths_for_job(job: &JobInventoryEntry) -> Vec<PathBuf> {
         &job.record_path,
         &job.runtime_job_root,
         &job.legacy_runtime_job_root,
+        &job.runtime_cache_dir,
+        job.batch_log_managed.then_some(job.batch_log.as_path()),
     )
 }
 
@@ -697,10 +756,25 @@ fn removable_paths_from_paths(
     record_path: &Path,
     runtime_job_root: &Path,
     legacy_runtime_job_root: &Path,
+    runtime_cache_dir: &Path,
+    managed_batch_log: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
-    for path in [record_path, runtime_job_root, legacy_runtime_job_root] {
+    for path in [
+        record_path,
+        runtime_job_root,
+        legacy_runtime_job_root,
+        runtime_cache_dir,
+    ]
+    .into_iter()
+    .chain(managed_batch_log)
+    {
+        // Tolerate an empty path (e.g. the serde default for an inventory entry
+        // persisted before this field existed) so we never `rm` a bare/relative path.
+        if path.as_os_str().is_empty() {
+            continue;
+        }
         let normalized = crate::path_util::normalize_path(path.to_path_buf());
         if seen.insert(normalized.clone()) {
             out.push(normalized);
@@ -772,7 +846,8 @@ fn repair_latest_records(compose_file: &Path) -> Result<()> {
     let records = scan_job_records(compose_file)?;
     repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Main)?;
     repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Run)?;
-    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Canary)
+    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Canary)?;
+    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Notebook)
 }
 
 fn repair_latest_record_for_kind(
@@ -809,7 +884,8 @@ mod tests {
         let record = PathBuf::from("/tmp/job/42.json");
         let runtime = PathBuf::from("/tmp/job/42");
         let legacy = PathBuf::from("/tmp/job/42");
-        let paths = removable_paths_from_paths(&record, &runtime, &legacy);
+        let cache = PathBuf::from("/tmp/job/42");
+        let paths = removable_paths_from_paths(&record, &runtime, &legacy, &cache, Some(&cache));
         assert_eq!(paths.len(), 2);
     }
 
@@ -818,7 +894,19 @@ mod tests {
         let record = PathBuf::from("/tmp/a/42.json");
         let runtime = PathBuf::from("/tmp/b/42");
         let legacy = PathBuf::from("/tmp/c/42");
-        let paths = removable_paths_from_paths(&record, &runtime, &legacy);
+        let cache = PathBuf::from("/tmp/d/42");
+        let batch = PathBuf::from("/tmp/e/42.out");
+        let paths = removable_paths_from_paths(&record, &runtime, &legacy, &cache, Some(&batch));
+        assert_eq!(paths.len(), 5);
+    }
+
+    #[test]
+    fn removable_paths_skips_empty_runtime_cache_dir() {
+        let record = PathBuf::from("/tmp/a/42.json");
+        let runtime = PathBuf::from("/tmp/b/42");
+        let legacy = PathBuf::from("/tmp/c/42");
+        let cache = PathBuf::new();
+        let paths = removable_paths_from_paths(&record, &runtime, &legacy, &cache, None);
         assert_eq!(paths.len(), 3);
     }
 

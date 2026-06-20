@@ -538,9 +538,12 @@ fn helper_defaults_and_paths_cover_remaining_prepare_helpers() {
     assert_eq!(sanitize_name("svc/name"), "svc_name");
     assert_eq!(image_label(&service.source), "local-image");
     let envs = enroot_env(cache_dir);
-    assert_eq!(envs.len(), 2);
+    assert_eq!(envs.len(), 3);
     assert!(envs[0].1.contains("enroot/cache"));
-    assert!(!envs.iter().any(|(key, _)| key == "ENROOT_TEMP_PATH"));
+    assert!(
+        envs.iter()
+            .any(|(key, value)| key == "ENROOT_TEMP_PATH" && value.contains("enroot/tmp"))
+    );
 }
 
 #[test]

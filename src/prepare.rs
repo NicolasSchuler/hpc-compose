@@ -927,6 +927,13 @@ fn enroot_env(cache_dir: &Path) -> Vec<(String, String)> {
             "ENROOT_DATA_PATH".to_string(),
             cache_dir.join("enroot/data").display().to_string(),
         ),
+        // `create_cache_dirs` already provisions `enroot/tmp`; point enroot at it
+        // so prepare-time scratch lands on the (shared, quota-managed) cache
+        // filesystem instead of the node's default `/tmp`.
+        (
+            "ENROOT_TEMP_PATH".to_string(),
+            cache_dir.join("enroot/tmp").display().to_string(),
+        ),
     ]
 }
 

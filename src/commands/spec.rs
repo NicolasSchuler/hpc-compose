@@ -309,6 +309,7 @@ pub(crate) fn render(
             apptainer_bin: context.binaries.apptainer.value.clone(),
             singularity_bin: context.binaries.singularity.value.clone(),
             cluster_profile,
+            runtime_root: None,
         },
     )?;
     if let Some(path) = output_path.as_ref() {
@@ -399,6 +400,7 @@ pub(crate) fn plan(
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
                 cluster_profile: cluster_profile.clone(),
+                runtime_root: None,
             },
         )?)
     } else {
@@ -941,7 +943,7 @@ pub(crate) fn context(
         current_submit_dir: current_submit_dir.clone(),
         default_script_path: output_common::default_script_path(&context.compose_file.value),
         runtime_job_root_pattern: current_submit_dir
-            .join(".hpc-compose")
+            .join(crate::tracked_paths::METADATA_DIR_NAME)
             .join("{job_id}")
             .display()
             .to_string(),

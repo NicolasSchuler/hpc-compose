@@ -64,6 +64,53 @@ fn write_script(path: &Path, body: &str) {
 }
 
 #[test]
+fn runtime_root_override_is_persisted_and_resolved() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let submit_dir = tmpdir.path();
+
+    // Default layout: no override is persisted, and the runtime job root falls
+    // back to `<submit_dir>/.hpc-compose/<job_id>`.
+    let default_record = build_submission_record(
+        &submit_dir.join("compose.yaml"),
+        submit_dir,
+        &submit_dir.join("job.sbatch"),
+        &runtime_plan(submit_dir),
+        "12345",
+    )
+    .expect("default record");
+    assert_eq!(default_record.schema_version, SUBMISSION_SCHEMA_VERSION);
+    assert_eq!(default_record.runtime_root, None);
+    assert_eq!(
+        runtime_job_root_for_record(&default_record),
+        submit_dir.join(".hpc-compose/12345")
+    );
+
+    // Override: `x-slurm.runtime_root` (relative) resolves against the submit
+    // dir, is persisted, and steers both the runtime job root and service logs.
+    let mut plan = runtime_plan(submit_dir);
+    plan.slurm.runtime_root = Some("shared/runs".into());
+    let record = build_submission_record(
+        &submit_dir.join("compose.yaml"),
+        submit_dir,
+        &submit_dir.join("job.sbatch"),
+        &plan,
+        "12345",
+    )
+    .expect("override record");
+    assert_eq!(record.runtime_root, Some(submit_dir.join("shared/runs")));
+    assert_eq!(
+        runtime_job_root_for_record(&record),
+        submit_dir.join("shared/runs/12345")
+    );
+    assert!(
+        record
+            .service_logs
+            .values()
+            .all(|path| path.starts_with(submit_dir.join("shared/runs/12345")))
+    );
+}
+
+#[test]
 fn submission_records_round_trip() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = tmpdir.path().join("compose.yaml");
@@ -81,7 +128,13 @@ fn submission_records_round_trip() {
     assert!(latest_record_path_for(&compose).exists());
     let loaded = load_submission_record(&compose, None).expect("latest");
     assert_eq!(loaded.job_id, "12345");
-    assert_eq!(loaded.batch_log, tmpdir.path().join("slurm-12345.out"));
+    assert_eq!(
+        loaded.batch_log,
+        tmpdir
+            .path()
+            .join(".hpc-compose/logs/hpc-compose-12345.out")
+    );
+    assert!(loaded.batch_log_managed);
     assert_eq!(
         log_dir_for_record(&loaded),
         tmpdir.path().join(".hpc-compose/12345/logs")
@@ -168,7 +221,9 @@ fn defaults_and_path_helpers_cover_remaining_helpers() {
         submit_dir: tmpdir.path().to_path_buf(),
         script_path: tmpdir.path().join("job.sbatch"),
         cache_dir: tmpdir.path().join("cache"),
+        runtime_root: None,
         batch_log,
+        batch_log_managed: false,
         service_logs: BTreeMap::new(),
         artifact_export_dir: None,
         resume_dir: None,
@@ -233,6 +288,9 @@ fn build_status_snapshot_and_log_selection_cover_additional_paths() {
     .expect("record");
 
     fs::create_dir_all(log_dir_for_record(&record)).expect("log dir");
+    if let Some(parent) = record.batch_log.parent() {
+        fs::create_dir_all(parent).expect("batch log dir");
+    }
     fs::write(&record.batch_log, "batch\n").expect("batch log");
     for path in record.service_logs.values() {
         fs::write(path, "line one\nline two\n").expect("service log");
@@ -389,6 +447,9 @@ fn status_snapshot_tolerates_missing_or_legacy_state_files() {
     )
     .expect("record");
     fs::create_dir_all(log_dir_for_record(&record)).expect("log dir");
+    if let Some(parent) = record.batch_log.parent() {
+        fs::create_dir_all(parent).expect("batch log dir");
+    }
     fs::write(&record.batch_log, "batch\n").expect("batch log");
     for path in record.service_logs.values() {
         fs::write(path, "line one\n").expect("service log");
@@ -637,7 +698,10 @@ fn scheduler_status_grace_modes_cover_recent_submit_and_accounting_gap() {
 fn batch_log_path_uses_default_and_slurm_output() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let default = batch_log_path_for(&runtime_plan(tmpdir.path()), tmpdir.path(), "77");
-    assert_eq!(default, tmpdir.path().join("slurm-77.out"));
+    assert_eq!(
+        default,
+        tmpdir.path().join(".hpc-compose/logs/hpc-compose-77.out")
+    );
 
     let mut plan = runtime_plan(tmpdir.path());
     plan.name = "custom-name".into();
@@ -646,12 +710,58 @@ fn batch_log_path_uses_default_and_slurm_output() {
     assert_eq!(custom, tmpdir.path().join("logs/custom-name-77.out"));
 
     assert_eq!(
-        expand_slurm_filename_pattern("logs/%u-%4j-%%-%x.out", "77", "custom-name", Some("alice")),
+        expand_slurm_filename_pattern(
+            "logs/%u-%4j-%%-%x.out",
+            "77",
+            "custom-name",
+            Some("alice"),
+            false
+        ),
         "logs/alice-0077-%-custom-name.out"
     );
     assert_eq!(
-        expand_slurm_filename_pattern("logs/%u-%j.out", "77", "custom-name", None),
+        expand_slurm_filename_pattern("logs/%u-%j.out", "77", "custom-name", None, false),
         "logs/%u-77.out"
+    );
+    // Glob mode collapses per-task/node specifiers for read-back matching.
+    assert_eq!(
+        expand_slurm_filename_pattern("logs/%x-%j-%t-%N.out", "77", "demo", None, true),
+        "logs/demo-77-*-*.out"
+    );
+    assert_eq!(
+        expand_slurm_filename_pattern("logs/%x-%j-%t-%N.out", "77", "demo", None, false),
+        "logs/demo-77-%t-%N.out"
+    );
+}
+
+#[test]
+fn batch_log_default_honors_runtime_root_override_and_glob() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    // An x-slurm.runtime_root override relocates the default batch log too.
+    let mut plan = runtime_plan(tmpdir.path());
+    plan.slurm.runtime_root = Some("/shared/rt".into());
+    assert_eq!(
+        batch_log_path_for(&plan, tmpdir.path(), "77"),
+        PathBuf::from("/shared/rt/logs/hpc-compose-77.out")
+    );
+
+    // The glob form collapses per-task/node specifiers for read-back matching.
+    let mut globbed = runtime_plan(tmpdir.path());
+    globbed.slurm.output = Some("logs/%x-%j-%N.out".into());
+    assert_eq!(
+        batch_log_glob_for_backend(&globbed, tmpdir.path(), "77", SubmissionBackend::Slurm),
+        tmpdir.path().join("logs/demo-77-*.out")
+    );
+    // The default pattern has no per-task specifier, so the glob == the path.
+    assert_eq!(
+        batch_log_glob_for_backend(
+            &runtime_plan(tmpdir.path()),
+            tmpdir.path(),
+            "77",
+            SubmissionBackend::Slurm
+        ),
+        tmpdir.path().join(".hpc-compose/logs/hpc-compose-77.out")
     );
 }
 
@@ -1986,7 +2096,9 @@ fn cleanup_report_dedupes_paths_and_repairs_latest_pointer() {
         .iter()
         .find(|job| job.inventory.job_id == "500")
         .expect("selected job");
-    assert_eq!(selected.removable_paths.len(), 2);
+    // record json + per-job runtime root (runtime_job_root == legacy here,
+    // deduped) + per-job enroot runtime cache dir + managed default batch log.
+    assert_eq!(selected.removable_paths.len(), 4);
 
     run_cleanup_report(&report).expect("run cleanup");
     let latest = load_submission_record(&compose_path, None).expect("latest after cleanup");
@@ -2001,6 +2113,80 @@ fn cleanup_report_dedupes_paths_and_repairs_latest_pointer() {
     .expect("final cleanup report");
     run_cleanup_report(&final_report).expect("final cleanup");
     assert!(!latest_record_path_for(&compose_path).exists());
+}
+
+#[test]
+fn cleanup_removes_only_managed_default_batch_logs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose_path = tmpdir.path().join("compose.yaml");
+    fs::write(&compose_path, "").expect("write");
+    let now = unix_timestamp_now();
+
+    let mut managed = build_submission_record(
+        &compose_path,
+        tmpdir.path(),
+        &tmpdir.path().join("managed.sbatch"),
+        &runtime_plan(tmpdir.path()),
+        "501",
+    )
+    .expect("managed");
+    managed.submitted_at = now.saturating_sub(10 * 86_400);
+    assert!(managed.batch_log_managed);
+    fs::create_dir_all(managed.batch_log.parent().expect("managed parent"))
+        .expect("managed parent");
+    fs::write(&managed.batch_log, "managed batch\n").expect("managed batch");
+    write_submission_record(&managed).expect("write managed");
+
+    let mut pinned_plan = runtime_plan(tmpdir.path());
+    pinned_plan.slurm.output = Some("custom-batch.out".into());
+    let mut pinned = build_submission_record(
+        &compose_path,
+        tmpdir.path(),
+        &tmpdir.path().join("pinned.sbatch"),
+        &pinned_plan,
+        "502",
+    )
+    .expect("pinned");
+    pinned.submitted_at = now.saturating_sub(10 * 86_400);
+    assert!(!pinned.batch_log_managed);
+    fs::write(&pinned.batch_log, "pinned batch\n").expect("pinned batch");
+    write_submission_record(&pinned).expect("write pinned");
+
+    let report = build_cleanup_report(&compose_path, CleanupMode::Age { age_days: 7 }, true, false)
+        .expect("cleanup report");
+    let managed_job = report
+        .jobs
+        .iter()
+        .find(|job| job.inventory.job_id == "501")
+        .expect("managed job");
+    assert!(
+        managed_job
+            .removable_paths
+            .iter()
+            .any(|path| path == &managed.batch_log),
+        "managed default batch log should be reclaimed"
+    );
+    assert!(
+        managed_job.bytes_reclaimed.unwrap_or(0) >= "managed batch\n".len() as u64,
+        "managed default batch log should be counted in disk usage"
+    );
+
+    let pinned_job = report
+        .jobs
+        .iter()
+        .find(|job| job.inventory.job_id == "502")
+        .expect("pinned job");
+    assert!(
+        !pinned_job
+            .removable_paths
+            .iter()
+            .any(|path| path == &pinned.batch_log),
+        "user-pinned batch log should not be reclaimed"
+    );
+
+    run_cleanup_report(&report).expect("run cleanup");
+    assert!(!managed.batch_log.exists());
+    assert!(pinned.batch_log.exists());
 }
 
 #[test]

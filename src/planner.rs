@@ -1071,6 +1071,22 @@ pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
     None
 }
 
+/// Returns a user-facing issue when a resolved `x-slurm.runtime_root` override
+/// points at a node-local path, which would hide per-job logs and state from
+/// compute nodes. Only explicit overrides are policed; the default
+/// `<submit_dir>/.hpc-compose` layout mirrors the submit directory and is
+/// governed by the submission environment.
+#[must_use]
+pub fn runtime_root_policy_issue(path: &Path) -> Option<String> {
+    if crate::path_util::is_node_local_path(&path.to_string_lossy()) {
+        return Some(format!(
+            "x-slurm.runtime_root resolves to '{}', which is typically node-local and not shared; choose a shared filesystem path so per-job logs and state stay visible from compute nodes",
+            path.display()
+        ));
+    }
+    None
+}
+
 /// Extracts the registry hostname used by a remote image reference.
 #[must_use]
 pub fn registry_host_for_remote(remote: &str) -> String {

@@ -43,8 +43,8 @@ pub(super) use hpc_compose::prepare::{
     PrepareOptions, RuntimePlan, base_image_path_for_backend, prepare_runtime_plan,
 };
 pub(super) use hpc_compose::render::{
-    LocalRenderOptions, RenderOptions, log_file_name_for_service, render_local_script,
-    render_local_script_with_options, render_script_with_options,
+    LocalRenderOptions, RenderOptions, log_file_name_for_service, render_local_script_with_options,
+    render_script_with_options,
 };
 pub(super) use hpc_compose::rendezvous::{self, RendezvousRegisterRequest};
 pub(super) use hpc_compose::spec::{
@@ -681,7 +681,7 @@ fn write_local_runtime_state_stub(
     supervisor_pid: u32,
 ) -> Result<()> {
     let job_root = runtime_job_root_for_record(record);
-    let log_dir = job_root.join("logs");
+    let log_dir = crate::tracked_paths::latest_logs_dir(&job_root);
     fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create {}", log_dir.display()))?;
     let state_path = state_path_for_record(record);
@@ -999,7 +999,13 @@ where
             &runtime_plan,
             &local_job_id,
             &context.binaries.enroot.value,
-            &LocalRenderOptions { dev_reload },
+            &LocalRenderOptions {
+                dev_reload,
+                runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                    &context.cwd,
+                    runtime_plan.slurm.runtime_root.as_deref(),
+                )),
+            },
         )
     })?;
     let script_path = script_out.unwrap_or_else(|| output::default_local_script_path(&file));
@@ -1114,11 +1120,28 @@ struct SlurmSubmitOutcome {
     submit_output: output::SubmitOutput,
 }
 
+/// Pre-creates the default batch-log directory host-side before sbatch. Slurm
+/// opens `--output` before the script body runs, so when the renderer emits the
+/// default `<runtime_root>/logs/hpc-compose-%j.out` (i.e. the user did not pin
+/// `x-slurm.output`), its job-id-free parent must already exist. User-pinned
+/// outputs may point anywhere and are the user's responsibility.
+pub(super) fn ensure_default_batch_log_dir(submit_dir: &Path, plan: &RuntimePlan) -> Result<()> {
+    if plan.slurm.output.is_some() {
+        return Ok(());
+    }
+    let logs_dir =
+        crate::tracked_paths::resolve_runtime_root(submit_dir, plan.slurm.runtime_root.as_deref())
+            .join(crate::tracked_paths::LOGS_DIR_NAME);
+    fs::create_dir_all(&logs_dir)
+        .with_context(|| format!("failed to create {}", logs_dir.display()))
+}
+
 fn submit_prepared_slurm_submission(
     context: &ResolvedContext,
     prepared: &PreparedSlurmSubmission,
     progress: &ProgressReporter,
 ) -> Result<SlurmSubmitOutcome> {
+    ensure_default_batch_log_dir(&prepared.submit_dir, &prepared.runtime_plan)?;
     let output_result = progress.run_result("Submitting job to Slurm", || {
         Command::new(&context.binaries.sbatch.value)
             .args(sbatch_cli_args(&prepared.runtime_plan))
@@ -1399,6 +1422,10 @@ where
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
                 cluster_profile,
+                runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                    &context.cwd,
+                    runtime_plan.slurm.runtime_root.as_deref(),
+                )),
             },
         )
     })?;
@@ -1692,7 +1719,18 @@ pub(crate) fn launch(
 
     let script = progress.run_result("Rendering submission script", || {
         if let Some(job_id) = local_job_id.as_deref() {
-            render_local_script(&runtime_plan, job_id, &context.binaries.enroot.value)
+            render_local_script_with_options(
+                &runtime_plan,
+                job_id,
+                &context.binaries.enroot.value,
+                &LocalRenderOptions {
+                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                        &context.cwd,
+                        runtime_plan.slurm.runtime_root.as_deref(),
+                    )),
+                    ..LocalRenderOptions::default()
+                },
+            )
         } else {
             render_script_with_options(
                 &runtime_plan,
@@ -1700,6 +1738,10 @@ pub(crate) fn launch(
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
                     cluster_profile,
+                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+                        &context.cwd,
+                        runtime_plan.slurm.runtime_root.as_deref(),
+                    )),
                 },
             )
         }

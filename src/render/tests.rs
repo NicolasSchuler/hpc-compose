@@ -385,7 +385,10 @@ fn local_launcher_strips_sbatch_and_keeps_shims_shell_syntax_valid() {
         &plan,
         "local job 1",
         "/opt/enroot/bin/enroot",
-        &LocalRenderOptions { dev_reload: true },
+        &LocalRenderOptions {
+            dev_reload: true,
+            runtime_root: None,
+        },
     )
     .expect("local launcher");
     assert_bash_syntax(&script);
@@ -398,6 +401,40 @@ fn local_launcher_strips_sbatch_and_keeps_shims_shell_syntax_valid() {
     assert!(script.contains("export HPC_COMPOSE_LOCAL_ENROOT_BIN='/opt/enroot/bin/enroot'"));
     assert!(script.contains("cat > \"$HPC_COMPOSE_LOCAL_BIN_DIR/srun\""));
     assert!(script.contains("exec \"$enroot_bin\" start"));
+}
+
+#[test]
+fn local_launcher_bakes_runtime_root_override_into_job_root() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+    let script = render_local_script_with_options(
+        &plan,
+        "local-1",
+        "/opt/enroot/bin/enroot",
+        &LocalRenderOptions {
+            dev_reload: true,
+            runtime_root: Some(PathBuf::from("/shared/runs/.hpc-compose")),
+        },
+    )
+    .expect("local launcher");
+    // The body's JOB_ROOT and the supervisor dirs must all resolve under the
+    // baked override so they match the submission record (no $SLURM_SUBMIT_DIR).
+    assert!(script.contains("JOB_ROOT='/shared/runs/.hpc-compose'/\"${SLURM_JOB_ID}\""));
+    assert!(
+        script
+            .contains("HPC_COMPOSE_LOCAL_JOB_ROOT='/shared/runs/.hpc-compose'/\"${SLURM_JOB_ID}\"")
+    );
+    assert!(script.contains(
+        "export HPC_COMPOSE_DEV_CONTROL_DIR=\"$HPC_COMPOSE_LOCAL_JOB_ROOT/dev-control\""
+    ));
+    assert!(
+        script.contains("HPC_COMPOSE_LOCAL_BIN_DIR=\"$HPC_COMPOSE_LOCAL_JOB_ROOT/.local-bin\"")
+    );
 }
 
 #[test]
@@ -425,6 +462,105 @@ fn render_uses_prepared_paths_and_readiness() {
     assert!(script.contains("/scratch:/scratch"));
     assert!(script.contains("/usr/lib64/slurm/libslurmfull.so"));
     assert!(script.contains("/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog"));
+}
+
+#[test]
+fn job_root_is_baked_literal_when_runtime_root_is_provided() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+
+    // Dry-run preview keeps the portable, machine-independent form so previews
+    // and their snapshots stay stable.
+    let preview = render_script(&plan).expect("preview script");
+    assert!(
+        preview.contains("JOB_ROOT=\"${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}\"")
+    );
+
+    // A real submission bakes the resolved absolute runtime root, so the job
+    // body no longer depends on $SLURM_SUBMIT_DIR being set or shared-visible.
+    let baked = render_script_with_options(
+        &plan,
+        &RenderOptions {
+            runtime_root: Some(PathBuf::from("/home/u/proj/.hpc-compose")),
+            ..RenderOptions::default()
+        },
+    )
+    .expect("baked script");
+    assert!(baked.contains("JOB_ROOT='/home/u/proj/.hpc-compose'/\"${SLURM_JOB_ID}\""));
+    assert!(
+        !baked.contains("SLURM_SUBMIT_DIR:-$PWD"),
+        "baked JOB_ROOT must not fall back to $SLURM_SUBMIT_DIR"
+    );
+}
+
+#[test]
+fn default_output_directive_is_baked_only_for_real_submits() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+
+    // Preview (runtime_root == None): keep Slurm's default, emit no --output.
+    let preview = render_script(&plan).expect("preview script");
+    assert!(!preview.contains("#SBATCH --output="));
+
+    // Real submission: bake a literal --output under the hidden job-id-free dir.
+    let baked = render_script_with_options(
+        &plan,
+        &RenderOptions {
+            runtime_root: Some(PathBuf::from("/home/u/proj/.hpc-compose")),
+            ..RenderOptions::default()
+        },
+    )
+    .expect("baked script");
+    assert!(baked.contains("#SBATCH --output=/home/u/proj/.hpc-compose/logs/hpc-compose-%j.out"));
+
+    let mut path_like_name = plan.clone();
+    path_like_name.name = "team/demo".into();
+    let baked = render_script_with_options(
+        &path_like_name,
+        &RenderOptions {
+            runtime_root: Some(PathBuf::from("/home/u/proj/.hpc-compose")),
+            ..RenderOptions::default()
+        },
+    )
+    .expect("path-like name script");
+    assert!(
+        baked.contains("#SBATCH --output=/home/u/proj/.hpc-compose/logs/hpc-compose-%j.out"),
+        "default output must not include raw job names as path components"
+    );
+}
+
+#[test]
+fn runtime_cache_cleanup_defaults_to_never_and_honors_policy() {
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+    let script = render_script(&plan).expect("script");
+    // Helper is always defined; default policy is a no-op; trap always calls it.
+    assert!(script.contains("cleanup_runtime_cache() {"));
+    assert!(script.contains("RUNTIME_CACHE_CLEANUP_POLICY='never'"));
+    assert!(script.contains("cleanup_runtime_cache \"$code\" || true"));
+    assert!(script.contains(
+        "rm -rf \"${ENROOT_CACHE_PATH:-}\" \"${ENROOT_DATA_PATH:-}\" \"${ENROOT_TEMP_PATH:-}\""
+    ));
+
+    let mut always = plan.clone();
+    always.slurm.cleanup.runtime_cache = crate::spec::RuntimeCacheCleanupPolicy::Always;
+    let script = render_script(&always).expect("always script");
+    assert!(script.contains("RUNTIME_CACHE_CLEANUP_POLICY='always'"));
 }
 
 #[test]
@@ -572,6 +708,7 @@ fn render_apptainer_and_singularity_honor_binary_overrides() {
             apptainer_bin: "/opt/site/bin/apptainer".into(),
             singularity_bin: "/opt/site/bin/singularity".into(),
             cluster_profile: None,
+            runtime_root: None,
         },
     )
     .expect("script");
@@ -591,6 +728,7 @@ fn render_apptainer_and_singularity_honor_binary_overrides() {
             apptainer_bin: "/opt/site/bin/apptainer".into(),
             singularity_bin: "/opt/site/bin/singularity".into(),
             cluster_profile: None,
+            runtime_root: None,
         },
     )
     .expect("script");
@@ -1335,6 +1473,7 @@ fn render_distributed_service_emits_helpers_and_profile_env() {
         &plan,
         &RenderOptions {
             cluster_profile: Some(profile.clone()),
+            runtime_root: None,
             ..RenderOptions::default()
         },
     )

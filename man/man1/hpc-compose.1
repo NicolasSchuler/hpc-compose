@@ -169,8 +169,8 @@ Fallback compose specification file when \-f or \-\-file is omitted and the acti
 \fB<compose\-file\-dir>/hpc\-compose.sbatch\fR
 Default rendered batch script path written by up or run when \-\-script\-out is not set.
 .TP
-\fB${SLURM_SUBMIT_DIR:\-$PWD}/.hpc\-compose/\fR
-Tracked job metadata, logs, metrics, and artifact state written after submission.
+\fB<submit\-dir>/.hpc\-compose/\fR
+Default runtime root: tracked job metadata plus per\-job logs, metrics, state.json, and artifact state under <job\-id>/. Resolved to an absolute path at submit time and overridable with x\-slurm.runtime_root.
 .TP
 \fB~/.cache/hpc\-compose\fR
 Default cache root for imported and prepared image artifacts when x\-slurm.cache_dir is unset.
@@ -189,7 +189,7 @@ Consulted during preflight when checking Enroot configuration discovery.
 Consulted during preflight when checking Enroot configuration discovery.
 .TP
 \fBSLURM_SUBMIT_DIR\fR
-Used by rendered jobs when resolving the tracked runtime directory on the host.
+Fallback base for the tracked runtime directory in dry\-run previews; real submissions bake the resolved absolute runtime root into the script.
 .TP
 \fBSLURM_JOB_ID\fR
 Used in tracked runtime paths and in artifact export directory expansion after submission.

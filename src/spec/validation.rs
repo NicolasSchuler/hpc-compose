@@ -86,6 +86,50 @@ pub(super) fn validate_service_assert_artifact_pattern(value: &str, field: &str)
     Ok(())
 }
 
+/// Validates an `x-slurm.output`/`x-slurm.error` filename pattern. Slurm fills
+/// `%`-specifiers at runtime, so we replace them with a harmless placeholder
+/// before checking literal path components. Rejects empty / whitespace-only
+/// patterns, embedded NULs, and literal `..` traversal. Relative patterns are
+/// allowed (resolved against the submit dir, like Slurm); absolute patterns are
+/// allowed as-is. Intentionally minimal.
+pub(super) fn validate_slurm_log_pattern(value: Option<&str>, field: &str) -> Result<()> {
+    let Some(value) = value else { return Ok(()) };
+    if value.contains('\0') {
+        bail!("{field} must not contain null bytes");
+    }
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    // Replace each Slurm specifier (including optional width, e.g. `%08j`) with
+    // a placeholder path-safe token, while preserving escaped `%%` literals.
+    let mut normalized = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            if matches!(chars.peek(), Some('%')) {
+                chars.next();
+                normalized.push('%');
+                continue;
+            }
+            while matches!(chars.peek(), Some(next) if next.is_ascii_digit()) {
+                chars.next();
+            }
+            if chars.peek().is_some() {
+                chars.next();
+            }
+            normalized.push('x');
+            continue;
+        }
+        normalized.push(ch);
+    }
+    for component in Path::new(&normalized).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            bail!("{field} '{value}' must not use '..' path traversal");
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_slurm_array_spec(value: Option<&str>, field: &str) -> Result<()> {
     let Some(value) = value else { return Ok(()) };
     if value.is_empty() {

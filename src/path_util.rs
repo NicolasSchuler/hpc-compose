@@ -37,6 +37,22 @@ pub fn normalize_path(path: PathBuf) -> PathBuf {
     normalized
 }
 
+/// Builtin default cache directory used when neither the spec nor settings
+/// specify one: `$HOME/.cache/hpc-compose`, falling back to
+/// `./.cache/hpc-compose` when `HOME` is unset.
+///
+/// This is the single source of truth for the builtin default shared by the
+/// context resolver and the output/doctor reporters. It deliberately does NOT
+/// expand a leading `~` or honor `XDG_CACHE_HOME`; callers that need
+/// spec-relative resolution (or the planner's distinct `"~"` literal fallback)
+/// handle that separately.
+pub(crate) fn default_cache_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".cache/hpc-compose")
+}
+
 /// Filesystem roots that are typically node-local and therefore unsafe for
 /// data that must be visible from both the login node and compute nodes.
 ///

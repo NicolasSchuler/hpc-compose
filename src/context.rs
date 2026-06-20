@@ -759,16 +759,9 @@ fn resolve_cache_dir_default(
         };
     }
     ResolvedValue {
-        value: default_cache_dir(),
+        value: crate::path_util::default_cache_dir(),
         source: ValueSource::Builtin,
     }
-}
-
-fn default_cache_dir() -> PathBuf {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".cache/hpc-compose")
 }
 
 fn load_compose_dotenv(

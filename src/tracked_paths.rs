@@ -13,6 +13,7 @@ pub(crate) const SWEEP_LATEST_RECORD_FILE_NAME: &str = "latest.json";
 pub(crate) const SWEEP_MANIFEST_FILE_NAME: &str = "sweep.json";
 pub(crate) const ATTEMPTS_DIR_NAME: &str = "attempts";
 pub(crate) const LOGS_DIR_NAME: &str = "logs";
+pub(crate) const DEFAULT_BATCH_LOG_FILE_PATTERN: &str = "hpc-compose-%j.out";
 pub(crate) const METRICS_DIR_NAME: &str = "metrics";
 pub(crate) const ARTIFACTS_DIR_NAME: &str = "artifacts";
 pub(crate) const ARTIFACT_PAYLOAD_DIR_NAME: &str = "payload";
@@ -22,6 +23,15 @@ pub(crate) const ALLOCATION_DIR_NAME: &str = "allocation";
 pub(crate) const PRIMARY_NODE_FILE_NAME: &str = "primary_node";
 pub(crate) const NODELIST_FILE_NAME: &str = "nodes.txt";
 pub(crate) const RESUME_METADATA_DIR_NAME: &str = "_hpc-compose";
+pub(crate) const SERVICE_EXITS_DIR_NAME: &str = "service-exits";
+pub(crate) const HOOKS_DIR_NAME: &str = "hooks";
+pub(crate) const SERVICE_NODELISTS_DIR_NAME: &str = "service-nodelists";
+pub(crate) const MPI_HOSTFILES_DIR_NAME: &str = "mpi-hostfiles";
+pub(crate) const DISTRIBUTED_HOSTFILES_DIR_NAME: &str = "distributed-hostfiles";
+/// The per-job runtime segment of the enroot cache/data/tmp layout
+/// (`$CACHE_ROOT/runtime/<job_id>/...`). Named to avoid colliding with the
+/// compose-level runtime-state root introduced in later work.
+pub(crate) const ENROOT_RUNTIME_DIR_NAME: &str = "runtime";
 
 // In-container path vocabulary. These paths live inside the runtime container
 // under the reserved `/hpc-compose/job` mount destination. The base directory
@@ -105,9 +115,46 @@ pub(crate) fn latest_notebook_record_path_for(spec_path: &Path) -> PathBuf {
     metadata_root_for(spec_path).join(NOTEBOOK_LATEST_RECORD_FILE_NAME)
 }
 
+/// Returns the directory that holds per-job runtime roots for `submit_dir`:
+/// `<submit_dir>/.hpc-compose`. The per-job runtime root is this joined with the
+/// job id (see [`runtime_job_root`]). This is the default value the renderer
+/// bakes into `JOB_ROOT` so the running job no longer depends on
+/// `$SLURM_SUBMIT_DIR` being set and shared-visible.
+#[must_use]
+pub(crate) fn runtime_root_for(submit_dir: &Path) -> PathBuf {
+    submit_dir.join(METADATA_DIR_NAME)
+}
+
+/// Resolves the per-job runtime root *parent* for a submission: the
+/// `x-slurm.runtime_root` override (resolved against `submit_dir`, absolute
+/// values kept as-is) when set, otherwise the default `<submit_dir>/.hpc-compose`
+/// (see [`runtime_root_for`]). This is the single resolution shared by the
+/// renderer (which bakes it into `JOB_ROOT`) and the submission record (which
+/// persists the override so later lookups address the same directory).
+#[must_use]
+pub(crate) fn resolve_runtime_root(
+    submit_dir: &Path,
+    runtime_root_override: Option<&str>,
+) -> PathBuf {
+    match runtime_root_override {
+        Some(raw) => crate::path_util::absolute_path(Path::new(raw), submit_dir),
+        None => runtime_root_for(submit_dir),
+    }
+}
+
 #[must_use]
 pub(crate) fn runtime_job_root(submit_dir: &Path, job_id: &str) -> PathBuf {
-    submit_dir.join(METADATA_DIR_NAME).join(job_id)
+    runtime_root_for(submit_dir).join(job_id)
+}
+
+/// Returns the per-job enroot runtime directory reaped on cleanup/teardown:
+/// `<cache_dir>/runtime/<job_id>`. This is the parent of the `{cache,data,tmp}`
+/// subdirs the renderer exports as `ENROOT_CACHE_PATH`/`ENROOT_DATA_PATH`/
+/// `ENROOT_TEMP_PATH`. Namespaced by `job_id`, so removing it never touches the
+/// shared cache root.
+#[must_use]
+pub(crate) fn enroot_runtime_job_dir(cache_dir: &Path, job_id: &str) -> PathBuf {
+    cache_dir.join(ENROOT_RUNTIME_DIR_NAME).join(job_id)
 }
 
 #[allow(dead_code)]
@@ -209,6 +256,14 @@ mod tests {
         assert_eq!(
             latest_notebook_record_path_for(spec_path),
             Path::new("/tmp/project/.hpc-compose/latest-notebook.json")
+        );
+    }
+
+    #[test]
+    fn enroot_runtime_job_dir_is_namespaced_by_job_id() {
+        assert_eq!(
+            enroot_runtime_job_dir(Path::new("/cache"), "123"),
+            Path::new("/cache/runtime/123")
         );
     }
 

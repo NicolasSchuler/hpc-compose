@@ -1185,6 +1185,12 @@ fn stdout_entrypoints_cover_public_output_wrappers() {
         runtime_job_root_present: true,
         legacy_runtime_job_root: tmpdir.path().join(".hpc-compose/legacy/12345"),
         legacy_runtime_job_root_present: false,
+        runtime_cache_dir: tmpdir.path().join("cache/runtime/12345"),
+        runtime_cache_dir_present: false,
+        batch_log: tmpdir
+            .path()
+            .join(".hpc-compose/logs/hpc-compose-12345.out"),
+        batch_log_managed: true,
         disk_usage_bytes: Some(2_048),
     };
     let scan = JobInventoryScan {

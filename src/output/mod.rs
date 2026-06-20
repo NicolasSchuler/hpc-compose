@@ -386,11 +386,7 @@ pub(crate) fn default_local_script_path(spec_path: &Path) -> PathBuf {
 }
 
 pub(crate) fn default_cache_dir() -> PathBuf {
-    let home = match env::var_os("HOME") {
-        Some(home) => PathBuf::from(home),
-        None => PathBuf::from("."),
-    };
-    home.join(".cache/hpc-compose")
+    crate::path_util::default_cache_dir()
 }
 
 pub(crate) fn print_report(report: &Report, verbose: bool) {
@@ -2307,7 +2303,11 @@ fn write_plan_inspect_verbose(
 
 fn format_mount_block(runtime: &RuntimeService) -> String {
     let mut mounts = Vec::with_capacity(runtime.volumes.len() + 1);
-    mounts.push("${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}:/hpc-compose/job".into());
+    mounts.push(format!(
+        "${{SLURM_SUBMIT_DIR:-$PWD}}/{}/${{SLURM_JOB_ID}}:{}",
+        crate::tracked_paths::METADATA_DIR_NAME,
+        crate::tracked_paths::JOB_CONTAINER_DIR
+    ));
     mounts.extend(runtime.volumes.iter().cloned());
     format_debug_block("mounts", &mounts)
 }
@@ -3016,7 +3016,7 @@ pub(crate) fn print_submit_details(
     } else {
         for service in &plan.ordered_services {
             println!(
-                "log  service '{}': {}/.hpc-compose/<job-id>/logs/{}.log",
+                "log  service '{}': {}/.hpc-compose/<job-id>/logs/{}",
                 service.name,
                 submit_dir.display(),
                 log_file_name_for_service(&service.name)

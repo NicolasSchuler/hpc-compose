@@ -28,7 +28,7 @@ use validation::{
     validate_artifact_bundle_name, validate_artifact_path, validate_positive_u32,
     validate_resume_path, validate_sbatch_safe_string, validate_sbatch_safe_strings,
     validate_service_assert_artifact_pattern, validate_shell_hook_script,
-    validate_slurm_array_spec, validate_slurm_job_id,
+    validate_slurm_array_spec, validate_slurm_job_id, validate_slurm_log_pattern,
 };
 
 /// Top-level compose file accepted by `hpc-compose`.
@@ -515,6 +515,14 @@ pub struct SlurmConfig {
     pub dependency: Option<JobDependencyMode>,
     #[serde(default)]
     pub cache_dir: Option<String>,
+    /// Optional override for the directory that holds per-job runtime state
+    /// (`<runtime_root>/<job_id>/{logs,metrics,state.json,artifacts}`). Defaults
+    /// to `<submit_dir>/.hpc-compose`. Relative values resolve against the submit
+    /// directory. Must be visible from both login and compute nodes.
+    #[serde(default)]
+    pub runtime_root: Option<String>,
+    #[serde(default)]
+    pub cleanup: CleanupConfig,
     #[serde(default)]
     pub scratch: Option<ScratchConfig>,
     #[serde(default)]
@@ -760,6 +768,38 @@ pub enum ScratchCleanupPolicy {
     OnSuccess,
     /// Leave scratch behind for manual inspection or site cleanup.
     Never,
+}
+
+/// Per-job runtime-cache cleanup policy applied in the batch teardown trap.
+///
+/// Controls whether the rendered `cleanup` trap removes the per-job enroot
+/// runtime dirs (`$ENROOT_CACHE_PATH`/`$ENROOT_DATA_PATH`/`$ENROOT_TEMP_PATH`,
+/// namespaced by `${SLURM_JOB_ID}`). Defaults to `Never` because
+/// cancelled/crashed jobs never run the trap; host-side `clean`/`down` reaping
+/// is the authoritative reclaimer.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCacheCleanupPolicy {
+    /// Leave the per-job runtime cache for host-side reaping (default).
+    #[default]
+    Never,
+    /// Remove the per-job runtime cache only when the job exits successfully.
+    OnSuccess,
+    /// Remove the per-job runtime cache on every trap-reached exit path.
+    Always,
+}
+
+/// Top-level `x-slurm.cleanup` configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupConfig {
+    #[serde(default)]
+    pub runtime_cache: RuntimeCacheCleanupPolicy,
+}
+
+fn is_default_cleanup(cleanup: &CleanupConfig) -> bool {
+    *cleanup == CleanupConfig::default()
 }
 
 /// Top-level scratch configuration.
@@ -1533,6 +1573,10 @@ pub struct EffectiveSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependency: Option<JobDependencyMode>,
     pub cache_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_root: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_cleanup")]
+    pub cleanup: CleanupConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scratch: Option<ScratchConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -2194,6 +2238,8 @@ impl ComposeSpec {
                     }),
                 dependency: self.slurm.dependency,
                 cache_dir: cache_dir.display().to_string(),
+                runtime_root: self.slurm.runtime_root.clone(),
+                cleanup: self.slurm.cleanup.clone(),
                 scratch: self.slurm.scratch.clone(),
                 stage_in: self.slurm.stage_in.clone(),
                 stage_out: self.slurm.stage_out.clone(),
@@ -2649,6 +2695,8 @@ impl SlurmConfig {
         validate_sbatch_safe_string(self.hint.as_deref(), "x-slurm.hint")?;
         validate_sbatch_safe_string(self.output.as_deref(), "x-slurm.output")?;
         validate_sbatch_safe_string(self.error.as_deref(), "x-slurm.error")?;
+        validate_slurm_log_pattern(self.output.as_deref(), "x-slurm.output")?;
+        validate_slurm_log_pattern(self.error.as_deref(), "x-slurm.error")?;
         validate_sbatch_safe_string(self.chdir.as_deref(), "x-slurm.chdir")?;
         validate_slurm_array_spec(self.array.as_deref(), "x-slurm.array")?;
         if let Some(after_job) = &self.after_job {
@@ -2752,6 +2800,7 @@ impl SlurmConfig {
             after_job.interpolate(vars)?;
         }
         interpolate_optional_string(&mut self.cache_dir, vars)?;
+        interpolate_optional_string(&mut self.runtime_root, vars)?;
         if let Some(scratch) = &mut self.scratch {
             scratch.interpolate(vars)?;
         }

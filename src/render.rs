@@ -1,6 +1,7 @@
 //! Batch-script rendering for prepared runtime plans.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use anyhow::Result;
 
@@ -9,8 +10,9 @@ use crate::planner::{ExecutionSpec, ServicePlacementMode};
 use crate::prepare::{RuntimePlan, RuntimeService};
 use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
-    RendezvousRegisterConfig, RuntimeBackend, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchScope,
-    ServiceFailureMode, ServiceHookContext, ServiceHookEvent, SlurmConfig, SoftwareEnvConfig,
+    RendezvousRegisterConfig, RuntimeBackend, RuntimeCacheCleanupPolicy, RuntimeGpuPolicy,
+    ScratchCleanupPolicy, ScratchScope, ServiceFailureMode, ServiceHookContext, ServiceHookEvent,
+    SlurmConfig, SoftwareEnvConfig,
 };
 use crate::tracked_paths;
 
@@ -87,6 +89,13 @@ pub struct RenderOptions {
     pub singularity_bin: String,
     /// Optional cluster profile used only for render-time distributed env wiring.
     pub cluster_profile: Option<ClusterProfile>,
+    /// Resolved absolute *parent* of the per-job runtime root (the directory that
+    /// will contain `<job_id>/`). When set, the rendered `JOB_ROOT` becomes a
+    /// literal absolute path, so the running job no longer depends on
+    /// `$SLURM_SUBMIT_DIR` being set and shared-visible. When `None` (e.g.
+    /// dry-run previews via `inspect`/`spec render`), `JOB_ROOT` keeps the
+    /// portable `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose` form.
+    pub runtime_root: Option<PathBuf>,
 }
 
 impl Default for RenderOptions {
@@ -95,6 +104,7 @@ impl Default for RenderOptions {
             apptainer_bin: "apptainer".to_string(),
             singularity_bin: "singularity".to_string(),
             cluster_profile: None,
+            runtime_root: None,
         }
     }
 }
@@ -398,6 +408,20 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     }
     if let Some(output) = &plan.slurm.output {
         sbatch::push_directive(&mut out, "output", output);
+    } else if let Some(runtime_root) = &options.runtime_root {
+        // Real submissions only: bake a literal absolute --output under a hidden,
+        // job-id-free parent the CLI pre-creates host-side before sbatch (Slurm
+        // opens --output before the script body runs). Keep the basename
+        // independent of raw job names because %x may contain path separators.
+        // Previews (runtime_root == None) keep the Slurm default so committed
+        // example renders stay machine-independent.
+        let default_output = format!(
+            "{}/{}/{}",
+            runtime_root.display(),
+            tracked_paths::LOGS_DIR_NAME,
+            tracked_paths::DEFAULT_BATCH_LOG_FILE_PATTERN
+        );
+        sbatch::push_directive(&mut out, "output", &default_output);
     }
     if let Some(error) = &plan.slurm.error {
         sbatch::push_directive(&mut out, "error", error);
@@ -423,10 +447,19 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("JOB_EXIT_CODE=\"\"\n");
     out.push_str("SUPERVISOR_PID=$$\n");
     out.push_str("RECEIVED_SIGNAL=\"\"\n");
-    out.push_str(&format!(
-        "JOB_ROOT=\"${{SLURM_SUBMIT_DIR:-$PWD}}/{}/${{SLURM_JOB_ID}}\"\n",
-        tracked_paths::METADATA_DIR_NAME
-    ));
+    match &options.runtime_root {
+        // Real submissions bake the resolved absolute runtime root so the job
+        // body never depends on `$SLURM_SUBMIT_DIR` at compute-node runtime.
+        Some(runtime_root) => out.push_str(&format!(
+            "JOB_ROOT={}/\"${{SLURM_JOB_ID}}\"\n",
+            shell_quote(&runtime_root.display().to_string())
+        )),
+        // Dry-run previews keep the portable, machine-independent form.
+        None => out.push_str(&format!(
+            "JOB_ROOT=\"${{SLURM_SUBMIT_DIR:-$PWD}}/{}/${{SLURM_JOB_ID}}\"\n",
+            tracked_paths::METADATA_DIR_NAME
+        )),
+    }
     out.push_str(&format!("RESUME_ENABLED={}\n", flag(resume_enabled)));
     out.push_str(&format!(
         "RESUME_HOST_PATH={}\n",
@@ -473,33 +506,68 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         "NODELIST_FILE=\"$ALLOCATION_DIR/{}\"\n",
         tracked_paths::NODELIST_FILE_NAME
     ));
-    out.push_str("SERVICE_NODELIST_DIR=\"$ALLOCATION_DIR/service-nodelists\"\n");
-    out.push_str(
-        "SERVICE_NODELIST_CONTAINER_DIR=\"/hpc-compose/job/allocation/service-nodelists\"\n",
-    );
+    out.push_str(&format!(
+        "SERVICE_NODELIST_DIR=\"$ALLOCATION_DIR/{}\"\n",
+        tracked_paths::SERVICE_NODELISTS_DIR_NAME
+    ));
+    out.push_str(&format!(
+        "SERVICE_NODELIST_CONTAINER_DIR=\"{}\"\n",
+        tracked_paths::under_job_container_dir(&format!(
+            "{}/{}",
+            tracked_paths::ALLOCATION_DIR_NAME,
+            tracked_paths::SERVICE_NODELISTS_DIR_NAME
+        ))
+    ));
     if mpi_enabled {
-        out.push_str("MPI_HOSTFILE_DIR=\"$ALLOCATION_DIR/mpi-hostfiles\"\n");
-        out.push_str("MPI_HOSTFILE_CONTAINER_DIR=\"/hpc-compose/job/allocation/mpi-hostfiles\"\n");
+        out.push_str(&format!(
+            "MPI_HOSTFILE_DIR=\"$ALLOCATION_DIR/{}\"\n",
+            tracked_paths::MPI_HOSTFILES_DIR_NAME
+        ));
+        out.push_str(&format!(
+            "MPI_HOSTFILE_CONTAINER_DIR=\"{}\"\n",
+            tracked_paths::under_job_container_dir(&format!(
+                "{}/{}",
+                tracked_paths::ALLOCATION_DIR_NAME,
+                tracked_paths::MPI_HOSTFILES_DIR_NAME
+            ))
+        ));
     }
     if distributed_env_enabled {
-        out.push_str("DIST_HOSTFILE_DIR=\"$ALLOCATION_DIR/distributed-hostfiles\"\n");
-        out.push_str(
-            "DIST_HOSTFILE_CONTAINER_DIR=\"/hpc-compose/job/allocation/distributed-hostfiles\"\n",
-        );
+        out.push_str(&format!(
+            "DIST_HOSTFILE_DIR=\"$ALLOCATION_DIR/{}\"\n",
+            tracked_paths::DISTRIBUTED_HOSTFILES_DIR_NAME
+        ));
+        out.push_str(&format!(
+            "DIST_HOSTFILE_CONTAINER_DIR=\"{}\"\n",
+            tracked_paths::under_job_container_dir(&format!(
+                "{}/{}",
+                tracked_paths::ALLOCATION_DIR_NAME,
+                tracked_paths::DISTRIBUTED_HOSTFILES_DIR_NAME
+            ))
+        ));
     }
     out.push_str(&format!(
         "LOG_DIR=\"$JOB_TMP/{}\"\n",
         tracked_paths::LOGS_DIR_NAME
     ));
     if hooks_enabled {
-        out.push_str("HOOKS_DIR=\"$JOB_TMP/hooks\"\n");
-        out.push_str("HOOKS_CONTAINER_DIR=\"/hpc-compose/job/hooks\"\n");
+        out.push_str(&format!(
+            "HOOKS_DIR=\"$JOB_TMP/{}\"\n",
+            tracked_paths::HOOKS_DIR_NAME
+        ));
+        out.push_str(&format!(
+            "HOOKS_CONTAINER_DIR=\"{}\"\n",
+            tracked_paths::under_job_container_dir(tracked_paths::HOOKS_DIR_NAME)
+        ));
     }
     out.push_str(&format!(
         "STATE_FILE=\"$JOB_TMP/{}\"\n",
         tracked_paths::STATE_FILE_NAME
     ));
-    out.push_str("SERVICE_EXIT_MARKER_DIR=\"$JOB_TMP/service-exits\"\n");
+    out.push_str(&format!(
+        "SERVICE_EXIT_MARKER_DIR=\"$JOB_TMP/{}\"\n",
+        tracked_paths::SERVICE_EXITS_DIR_NAME
+    ));
     if artifacts_enabled {
         out.push_str(&format!(
             "ARTIFACTS_DIR=\"$JOB_TMP/{}\"\n",
@@ -552,9 +620,39 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
             })
         ));
     }
-    out.push_str("export ENROOT_CACHE_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/cache\"\n");
-    out.push_str("export ENROOT_DATA_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/data\"\n");
-    out.push_str("export ENROOT_TEMP_PATH=\"$CACHE_ROOT/runtime/${SLURM_JOB_ID}/tmp\"\n");
+    let enroot_runtime = tracked_paths::ENROOT_RUNTIME_DIR_NAME;
+    out.push_str(&format!(
+        "export ENROOT_CACHE_PATH=\"$CACHE_ROOT/{enroot_runtime}/${{SLURM_JOB_ID}}/cache\"\n"
+    ));
+    out.push_str(&format!(
+        "export ENROOT_DATA_PATH=\"$CACHE_ROOT/{enroot_runtime}/${{SLURM_JOB_ID}}/data\"\n"
+    ));
+    out.push_str(&format!(
+        "export ENROOT_TEMP_PATH=\"$CACHE_ROOT/{enroot_runtime}/${{SLURM_JOB_ID}}/tmp\"\n"
+    ));
+    out.push_str(&format!(
+        "RUNTIME_CACHE_CLEANUP_POLICY={}\n",
+        shell_quote(match plan.slurm.cleanup.runtime_cache {
+            RuntimeCacheCleanupPolicy::Always => "always",
+            RuntimeCacheCleanupPolicy::OnSuccess => "on_success",
+            RuntimeCacheCleanupPolicy::Never => "never",
+        })
+    ));
+    // Always defined (the enroot exports above are unconditional); the cleanup
+    // trap calls it on every exit path. Default policy `never` makes it a no-op,
+    // deferring to host-side `clean`/`down` reaping.
+    out.push_str("cleanup_runtime_cache() {\n");
+    out.push_str("  local exit_code=${1:-0}\n");
+    out.push_str("  case \"$RUNTIME_CACHE_CLEANUP_POLICY\" in\n");
+    out.push_str("    never) return 0 ;;\n");
+    out.push_str("    on_success) (( exit_code == 0 )) || return 0 ;;\n");
+    out.push_str("  esac\n");
+    out.push_str("  # Per-job enroot dirs are namespaced by ${SLURM_JOB_ID}; rm -rf is\n");
+    out.push_str("  # scoped to this job and never touches the shared $CACHE_ROOT root.\n");
+    out.push_str(
+        "  rm -rf \"${ENROOT_CACHE_PATH:-}\" \"${ENROOT_DATA_PATH:-}\" \"${ENROOT_TEMP_PATH:-}\"\n",
+    );
+    out.push_str("}\n");
     out.push_str("mkdir -p \"$LOG_DIR\" \"$ALLOCATION_DIR\" \"$SERVICE_NODELIST_DIR\" \"$SERVICE_EXIT_MARKER_DIR\"");
     if hooks_enabled {
         out.push_str(" \"$HOOKS_DIR\"");
@@ -918,7 +1016,14 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("  HPC_COMPOSE_NODE_COUNT=1\n");
         out.push_str("  HPC_COMPOSE_NODELIST=\"$primary_node\"\n");
     }
-    out.push_str("  HPC_COMPOSE_NODELIST_FILE=\"/hpc-compose/job/allocation/nodes.txt\"\n");
+    out.push_str(&format!(
+        "  HPC_COMPOSE_NODELIST_FILE=\"{}\"\n",
+        tracked_paths::under_job_container_dir(&format!(
+            "{}/{}",
+            tracked_paths::ALLOCATION_DIR_NAME,
+            tracked_paths::NODELIST_FILE_NAME
+        ))
+    ));
     out.push_str("  printf '%s\\n' \"${allocation_nodes[@]}\" > \"$NODELIST_FILE\"\n");
     out.push_str("  printf '%s\\n' \"$HPC_COMPOSE_PRIMARY_NODE\" > \"$PRIMARY_NODE_FILE\"\n");
     out.push_str("  ALLOCATION_NODES=(\"${allocation_nodes[@]}\")\n");
@@ -1394,6 +1499,9 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("    cleanup_scratch \"$code\" || true\n");
         out.push_str("  fi\n");
     }
+    // Runs after stage-out/artifacts so outputs persist before the per-job
+    // runtime cache is reaped. No-op unless x-slurm.cleanup.runtime_cache opts in.
+    out.push_str("  cleanup_runtime_cache \"$code\" || true\n");
     out.push_str("  exit \"$code\"\n");
     out.push_str("}\n");
     out.push_str("trap cleanup EXIT\n");
@@ -2083,7 +2191,10 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
     let fn_name = format!("launch_{service_id}");
     let step_name = service_step_name(&service.name);
     let log_file_name = log_file_name_for_service(&service.name);
-    let container_log_path = format!("/hpc-compose/job/logs/{log_file_name}");
+    let container_log_path = tracked_paths::under_job_container_dir(&format!(
+        "{}/{log_file_name}",
+        tracked_paths::LOGS_DIR_NAME
+    ));
     let command_args = execution_argv(&service.execution, service.working_dir.as_deref());
     let distributed = distributed_render_env(
         service,
@@ -2237,15 +2348,17 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
     }
     if has_container_hooks {
         let wrapper_file = hook_file_name(&service_id, "container-wrapper");
+        let hooks_container_dir =
+            tracked_paths::under_job_container_dir(tracked_paths::HOOKS_DIR_NAME);
         let prologue_file = container_prologue.map(|_| {
             format!(
-                "/hpc-compose/job/hooks/{}",
+                "{hooks_container_dir}/{}",
                 hook_file_name(&service_id, "container-prologue")
             )
         });
         let epilogue_file = container_epilogue.map(|_| {
             format!(
-                "/hpc-compose/job/hooks/{}",
+                "{hooks_container_dir}/{}",
                 hook_file_name(&service_id, "container-epilogue")
             )
         });
@@ -2307,7 +2420,11 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
             &distributed_env_wrapper_body(),
         );
         out.push_str(&format!(
-            "  local distributed_env_wrapper=\"/hpc-compose/job/allocation/{wrapper_file}\"\n"
+            "  local distributed_env_wrapper=\"{}\"\n",
+            tracked_paths::under_job_container_dir(&format!(
+                "{}/{wrapper_file}",
+                tracked_paths::ALLOCATION_DIR_NAME
+            ))
         ));
         out.push_str(
             "  service_cmd=(\"/bin/sh\" \"$distributed_env_wrapper\" \"${service_cmd[@]}\")\n",
