@@ -161,6 +161,7 @@ hpc-compose up -f compose.yaml
 hpc-compose up --hold-on-exit always -f compose.yaml
 hpc-compose up --watch-queue --queue-warn-after 15m -f compose.yaml
 hpc-compose up --detach --format json -f compose.yaml
+hpc-compose up --detach --format json --print-endpoints -f compose.yaml
 hpc-compose test --local -f compose.yaml
 hpc-compose test --submit --time 00:01:00 -f compose.yaml
 hpc-compose dev -f examples/dev-python-app.yaml

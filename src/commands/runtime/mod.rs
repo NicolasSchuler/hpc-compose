@@ -1222,6 +1222,8 @@ fn start_prepared_local_launch(prepared: &PreparedLocalLaunch) -> Result<LocalLa
         job_id: Some(record.job_id.clone()),
         tracking_persisted: true,
         tracked_metadata_path: Some(latest_record_path(&record)),
+        endpoints: Vec::new(),
+        next_commands: Vec::new(),
     };
     Ok(LocalLaunchOutcome {
         record,
@@ -1355,6 +1357,8 @@ fn submit_prepared_slurm_submission(
             .as_ref()
             .is_some_and(|(_, persisted)| *persisted),
         tracked_metadata_path,
+        endpoints: Vec::new(),
+        next_commands: Vec::new(),
     };
     Ok(SlurmSubmitOutcome {
         stdout,
@@ -1740,6 +1744,7 @@ pub(crate) fn launch(
     resume_diff_only: bool,
     dry_run: bool,
     format: Option<OutputFormat>,
+    print_endpoints: bool,
     watch_mode: WatchMode,
     hold_on_exit: HoldOnExit,
     quiet: bool,
@@ -1925,6 +1930,14 @@ pub(crate) fn launch(
                 }
             }
             OutputFormat::Json => {
+                let (endpoints, next_commands) = if print_endpoints {
+                    (
+                        output::build_submit_endpoints(&runtime_plan),
+                        output::submit_next_commands(None, backend),
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output::SubmitOutput {
@@ -1939,6 +1952,8 @@ pub(crate) fn launch(
                         job_id: None,
                         tracking_persisted: false,
                         tracked_metadata_path: None,
+                        endpoints,
+                        next_commands,
                     })
                     .context("failed to serialize up output")?
                 );
@@ -1985,6 +2000,17 @@ pub(crate) fn launch(
                 );
             }
             OutputFormat::Json => {
+                let (endpoints, next_commands) = if print_endpoints {
+                    (
+                        output::build_submit_endpoints(&runtime_plan),
+                        output::submit_next_commands(
+                            Some(&record.job_id),
+                            SubmissionBackend::Local,
+                        ),
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output::SubmitOutput {
@@ -1999,6 +2025,8 @@ pub(crate) fn launch(
                         job_id: Some(record.job_id.clone()),
                         tracking_persisted: true,
                         tracked_metadata_path: Some(latest_record_path(&record)),
+                        endpoints,
+                        next_commands,
                     })
                     .context("failed to serialize up output")?
                 );
@@ -2033,7 +2061,14 @@ pub(crate) fn launch(
         record_options,
         output_format,
     };
-    let outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
+    let mut outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
+    if print_endpoints {
+        outcome.submit_output.endpoints = output::build_submit_endpoints(&prepared.runtime_plan);
+        outcome.submit_output.next_commands = output::submit_next_commands(
+            outcome.submit_output.job_id.as_deref(),
+            SubmissionBackend::Slurm,
+        );
+    }
     print_slurm_submit_outcome(&prepared, &outcome)?;
     maybe_watch_slurm_submission(
         &context,
@@ -2061,6 +2096,7 @@ pub(crate) fn up(
     watch_mode: WatchMode,
     hold_on_exit: HoldOnExit,
     format: Option<OutputFormat>,
+    print_endpoints: bool,
     quiet: bool,
 ) -> Result<()> {
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
@@ -2076,6 +2112,7 @@ pub(crate) fn up(
         resume_diff_only,
         dry_run,
         format.or(Some(OutputFormat::Text)),
+        print_endpoints,
         watch_mode,
         hold_on_exit,
         quiet,

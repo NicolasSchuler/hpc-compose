@@ -80,6 +80,9 @@ Keep the watch UI open after terminal states. Default: failure. Possible values:
 \fB--format\fR \fIFORMAT\fR
 Output format for \-\-detach or \-\-dry\-run. Possible values: text, json.
 .TP
+\fB--print\-endpoints\fR
+Include readiness\-derived service endpoints (host/port/url) and suggested next commands in the JSON output (with \-\-detach or \-\-dry\-run).
+.TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.
 .TP
@@ -99,6 +102,7 @@ Print help (see a summary with '\-h').
 hpc\-compose up \-f compose.yaml
 hpc\-compose up \-\-detach \-f compose.yaml
 hpc\-compose up \-\-detach \-\-format json \-f compose.yaml
+hpc\-compose up \-\-detach \-\-format json \-\-print\-endpoints \-f compose.yaml
 hpc\-compose up \-\-dry\-run \-f compose.yaml
 hpc\-compose up \-\-watch\-mode line \-f compose.yaml
 hpc\-compose up \-\-hold\-on\-exit always \-f compose.yaml

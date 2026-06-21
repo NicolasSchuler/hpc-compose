@@ -104,6 +104,119 @@ fn up_command_runs_end_to_end_with_fake_tools() {
 }
 
 #[test]
+fn up_print_endpoints_surfaces_readiness_endpoints_in_json() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().display();
+    let compose = tmpdir.path().join("endpoints.yaml");
+    fs::write(
+        &compose,
+        format!(
+            r#"name: endpoints-test
+x-slurm:
+  cache_dir: {cache_dir}
+  time: "00:10:00"
+services:
+  api:
+    image: docker://python:3.12
+    command: ["true"]
+    readiness:
+      type: tcp
+      port: 8000
+  dash:
+    image: docker://python:3.12
+    command: ["true"]
+    readiness:
+      type: http
+      url: "http://127.0.0.1:6006"
+  worker:
+    image: docker://python:3.12
+    command: ["true"]
+    readiness:
+      type: sleep
+      seconds: 1
+"#
+        ),
+    )
+    .expect("write compose");
+
+    // With --print-endpoints: TCP/HTTP endpoints + next_commands are populated;
+    // Sleep readiness is excluded. Dry-run keeps it static (no scheduler).
+    let out = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--dry-run",
+            "--format",
+            "json",
+            "--print-endpoints",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&out);
+    let json: Value = serde_json::from_str(&stdout_text(&out)).expect("up json");
+    let endpoints = json["endpoints"].as_array().expect("endpoints array");
+    let names: Vec<&str> = endpoints
+        .iter()
+        .filter_map(|e| e["service"].as_str())
+        .collect();
+    assert!(names.contains(&"api"), "tcp endpoint present: {json:#}");
+    assert!(names.contains(&"dash"), "http endpoint present: {json:#}");
+    assert!(
+        !names.contains(&"worker"),
+        "sleep readiness excluded: {json:#}"
+    );
+    let api = endpoints
+        .iter()
+        .find(|e| e["service"] == "api")
+        .expect("api endpoint");
+    assert_eq!(api["port"], 8000);
+    let dash = endpoints
+        .iter()
+        .find(|e| e["service"] == "dash")
+        .expect("dash endpoint");
+    assert_eq!(dash["port"], 6006);
+    assert_eq!(dash["host"], "127.0.0.1");
+    assert_eq!(dash["url"], "http://127.0.0.1:6006");
+    assert!(
+        json["next_commands"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "next_commands non-empty: {json:#}"
+    );
+    assert_eq!(json["submitted"], false);
+    assert!(json["job_id"].is_null());
+
+    // Without --print-endpoints: keys are omitted (default JSON shape unchanged).
+    let plain = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--dry-run",
+            "--format",
+            "json",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&plain);
+    let plain_json: Value = serde_json::from_str(&stdout_text(&plain)).expect("plain json");
+    assert!(
+        plain_json.get("endpoints").is_none(),
+        "endpoints omitted by default: {plain_json:#}"
+    );
+    assert!(
+        plain_json.get("next_commands").is_none(),
+        "next_commands omitted by default: {plain_json:#}"
+    );
+}
+
+#[test]
 fn alloc_exports_hpc_compose_environment_inside_salloc() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_dir = tmpdir.path().join("cache");

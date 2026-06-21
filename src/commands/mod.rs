@@ -338,6 +338,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             watch_mode,
             hold_on_exit,
             format,
+            print_endpoints,
         } => {
             if format.is_some() && !detach && !dry_run {
                 bail!("up --format requires --detach or --dry-run");
@@ -391,6 +392,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 watch_mode,
                 hold_on_exit,
                 format,
+                print_endpoints,
                 options.quiet,
             )
         }

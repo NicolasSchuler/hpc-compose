@@ -33,7 +33,7 @@ use hpc_compose::render::{
     log_file_name_for_service,
 };
 use hpc_compose::spec::{
-    ComposeSpec, DependencyCondition, EffectiveComposeConfig, ServiceDependency,
+    ComposeSpec, DependencyCondition, EffectiveComposeConfig, ReadinessSpec, ServiceDependency,
     parse_slurm_time_limit,
 };
 use hpc_compose::term;
@@ -109,6 +109,101 @@ pub(crate) struct SubmitOutput {
     pub(crate) job_id: Option<String>,
     pub(crate) tracking_persisted: bool,
     pub(crate) tracked_metadata_path: Option<PathBuf>,
+    /// Readiness-derived service endpoints (TCP/HTTP only). Empty unless the
+    /// caller opted in via `--print-endpoints`; omitted from JSON when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) endpoints: Vec<SubmitEndpoint>,
+    /// Suggested follow-up commands. Empty unless opted in; omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) next_commands: Vec<String>,
+}
+
+/// One readiness-derived service endpoint surfaced in `up` output. Descriptive
+/// only — derived statically from the plan's readiness specs, never probed and
+/// never opened.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SubmitEndpoint {
+    pub(crate) service: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) url: Option<String>,
+}
+
+/// Builds the readiness-derived endpoints for a plan. Pure and static: it reads
+/// only `ordered_services[].name` and `.readiness`, matching TCP and HTTP
+/// readiness (Sleep/Log have no port and are skipped). No scheduler contact and
+/// no node discovery — an implicit-localhost TCP readiness yields a `<host>`
+/// placeholder, mirroring the tunnel-hint convention.
+pub(crate) fn build_submit_endpoints(plan: &RuntimePlan) -> Vec<SubmitEndpoint> {
+    plan.ordered_services
+        .iter()
+        .filter_map(|service| match service.readiness.as_ref() {
+            Some(ReadinessSpec::Tcp { port, host, .. }) => Some(SubmitEndpoint {
+                service: service.name.clone(),
+                host: host.clone().unwrap_or_else(|| "<host>".to_string()),
+                port: *port,
+                url: None,
+            }),
+            Some(ReadinessSpec::Http { url, .. }) => {
+                let (host, port) = http_host_port(url);
+                Some(SubmitEndpoint {
+                    service: service.name.clone(),
+                    host,
+                    port,
+                    url: Some(url.clone()),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Suggested next commands after a submission. Only references commands that
+/// exist today; `--job-id` is added to the per-job reads when a job id is known.
+pub(crate) fn submit_next_commands(
+    job_id: Option<&str>,
+    _backend: SubmissionBackend,
+) -> Vec<String> {
+    let target = job_id.map_or(String::new(), |id| format!(" --job-id {id}"));
+    vec![
+        format!("hpc-compose status{target}"),
+        "hpc-compose logs --follow".to_string(),
+        format!("hpc-compose stats{target}"),
+        "hpc-compose down".to_string(),
+    ]
+}
+
+/// Best-effort host+port from an HTTP(S) URL authority. Strips userinfo, handles
+/// IPv6 brackets, and defaults the port to 80/443 by scheme. Self-contained so
+/// the output layer keeps no dependency on the readiness probe module.
+fn http_host_port(url: &str) -> (String, u16) {
+    let default_port = if url.starts_with("https://") { 443 } else { 80 };
+    let placeholder = || ("<host>".to_string(), default_port);
+    let Some((_, after_scheme)) = url.split_once("://") else {
+        return placeholder();
+    };
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    if authority.is_empty() {
+        return placeholder();
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        // IPv6 literal: [::1]:8000
+        let Some(end) = rest.find(']') else {
+            return placeholder();
+        };
+        let host = rest[..end].to_string();
+        let port = rest[end + 1..]
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
+        return (host, port);
+    }
+    match authority.split_once(':') {
+        Some((host, port)) => (host.to_string(), port.parse().unwrap_or(default_port)),
+        None => (authority.to_string(), default_port),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

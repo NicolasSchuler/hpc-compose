@@ -93,6 +93,7 @@ Examples:
   hpc-compose up -f compose.yaml
   hpc-compose up --detach -f compose.yaml
   hpc-compose up --detach --format json -f compose.yaml
+  hpc-compose up --detach --format json --print-endpoints -f compose.yaml
   hpc-compose up --dry-run -f compose.yaml
   hpc-compose up --watch-queue --queue-warn-after 15m -f compose.yaml
   hpc-compose up --watch-mode line -f compose.yaml
@@ -422,6 +423,7 @@ const UP_EXAMPLES: &[&str] = &[
     "hpc-compose up -f compose.yaml",
     "hpc-compose up --detach -f compose.yaml",
     "hpc-compose up --detach --format json -f compose.yaml",
+    "hpc-compose up --detach --format json --print-endpoints -f compose.yaml",
     "hpc-compose up --dry-run -f compose.yaml",
     "hpc-compose up --watch-mode line -f compose.yaml",
     "hpc-compose up --hold-on-exit always -f compose.yaml",

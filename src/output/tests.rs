@@ -1379,6 +1379,7 @@ fn run_command_covers_success_and_error_arms() {
         watch_mode: WatchMode::Auto,
         hold_on_exit: HoldOnExit::Failure,
         format: None,
+        print_endpoints: false,
     })
     .expect_err("sbatch fail");
     assert!(err.to_string().contains("sbatch failed"));
@@ -1409,6 +1410,7 @@ fn run_command_covers_success_and_error_arms() {
         watch_mode: WatchMode::Auto,
         hold_on_exit: HoldOnExit::Failure,
         format: None,
+        print_endpoints: false,
     })
     .expect("submit");
     run_command(Commands::Up {
@@ -1437,6 +1439,7 @@ fn run_command_covers_success_and_error_arms() {
         watch_mode: WatchMode::Auto,
         hold_on_exit: HoldOnExit::Failure,
         format: None,
+        print_endpoints: false,
     })
     .expect("submit without id");
 
@@ -1813,4 +1816,23 @@ fn dot_escape_escapes_graphviz_special_characters() {
     assert_eq!(dot_escape("a\"b"), "a\\\"b");
     assert_eq!(dot_escape("a\\b"), "a\\\\b");
     assert_eq!(dot_escape("a\nb\tc\rd"), "a\\nb\\tc\\rd");
+}
+
+#[test]
+fn http_host_port_handles_scheme_defaults_ipv6_and_userinfo() {
+    assert_eq!(
+        http_host_port("http://node02:9000/health"),
+        ("node02".to_string(), 9000)
+    );
+    assert_eq!(http_host_port("https://x/"), ("x".to_string(), 443));
+    assert_eq!(http_host_port("http://y/"), ("y".to_string(), 80));
+    assert_eq!(
+        http_host_port("http://user:pass@host:1234/p"),
+        ("host".to_string(), 1234)
+    );
+    assert_eq!(
+        http_host_port("http://[::1]:8080/"),
+        ("::1".to_string(), 8080)
+    );
+    assert_eq!(http_host_port("garbage"), ("<host>".to_string(), 80));
 }

@@ -772,6 +772,11 @@ pub enum Commands {
             help = "Output format for --detach or --dry-run"
         )]
         format: Option<OutputFormat>,
+        #[arg(
+            long,
+            help = "Include readiness-derived service endpoints (host/port/url) and suggested next commands in the JSON output (with --detach or --dry-run)"
+        )]
+        print_endpoints: bool,
     },
     #[command(
         display_order = 112,
