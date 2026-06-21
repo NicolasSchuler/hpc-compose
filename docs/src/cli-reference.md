@@ -248,13 +248,13 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | --- | --- | --- |
 | `--sbatch-bin` | `sbatch` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--srun-bin` | `srun` | `up`, `when`, `alloc`, `germinate`, `test`, `run`, `notebook`, `shell`, `sweep submit`, `preflight`, `debug`, `doctor` |
-| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `sweep observe`, `sweep stop`, `debug`, `weather` |
-| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `sweep observe`, `sweep stop`, `debug` |
+| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug`, `weather` |
+| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug` |
 | `--salloc-bin` | `salloc` | `alloc` |
 | `--scontrol-bin` | `scontrol` | `alloc`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--sinfo-bin` | `sinfo` | `when`, `weather` |
 | `--scancel-bin` | `scancel` | `test`, `cancel`, `down`, `sweep observe`, `sweep stop` |
-| `--sstat-bin` | `sstat` | `germinate`, `stats`, `inspect`, `score` |
+| `--sstat-bin` | `sstat` | `germinate`, `stats`, `inspect`, `score`, `sweep results` |
 | `--sshare-bin` | `sshare` | `weather` |
 | `--sprio-bin` | `sprio` | `weather` |
 | `--enroot-bin` | `enroot` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
