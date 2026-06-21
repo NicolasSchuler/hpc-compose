@@ -142,6 +142,13 @@ pub struct SweepObjective {
     /// Field name to read from the JSON file when `json_path` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json_field: Option<String>,
+    /// Name of a sweep parameter (e.g. `nodes`, `model_size`) to use as the
+    /// x-axis for the post-hoc scaling report printed by `sweep observe
+    /// --scaling`. Must name a key under `sweep.parameters` whose values parse
+    /// as `f64`. Purely a report/CLI knob: it is never consumed during
+    /// submission or rendering and the scaling report itself is never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling_axis: Option<String>,
 }
 
 impl SweepObjective {
@@ -242,6 +249,21 @@ impl SweepConfig {
         }
         if let Some(objective) = &self.objective {
             objective.validate()?;
+            if let Some(axis) = &objective.scaling_axis {
+                let Some(values) = self.parameters.get(axis) else {
+                    bail!(
+                        "sweep.objective.scaling_axis '{axis}' must name a sweep parameter, but no such key exists under sweep.parameters"
+                    );
+                };
+                for value in values {
+                    if value.as_str().parse::<f64>().is_err() {
+                        bail!(
+                            "sweep.objective.scaling_axis '{axis}' requires numeric parameter values, but '{}' does not parse as a number",
+                            value.as_str()
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }

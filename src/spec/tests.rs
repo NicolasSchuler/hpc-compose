@@ -565,6 +565,38 @@ services:
 "#,
             "sweep.replicates must be at least 1",
         ),
+        (
+            r#"
+sweep:
+  parameters:
+    lr: [0.1]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'loss=([0-9.]+)'
+    scaling_axis: nodes
+services:
+  app:
+    image: redis:7
+"#,
+            "scaling_axis 'nodes' must name a sweep parameter",
+        ),
+        (
+            r#"
+sweep:
+  parameters:
+    backend: [cpu, gpu]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'loss=([0-9.]+)'
+    scaling_axis: backend
+services:
+  app:
+    image: redis:7
+"#,
+            "scaling_axis 'backend' requires numeric parameter values",
+        ),
     ] {
         let path = write_spec(tmpdir.path(), body);
         let err = ComposeSpec::load(&path).expect_err("invalid sweep");
@@ -625,6 +657,65 @@ services:
     assert_eq!(sweep.replicates, 3);
     assert_eq!(sweep.total_trials().expect("total"), 4);
     assert_eq!(sweep.total_runs().expect("runs"), 12);
+}
+
+#[test]
+fn sweep_objective_scaling_axis_validates_and_round_trips() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    // A scaling_axis naming a real numeric parameter validates and is preserved.
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+name: sweep-scaling
+sweep:
+  parameters:
+    nodes: [1, 2, 4]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'loss=([0-9.]+)'
+    scaling_axis: nodes
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let sweep = ComposeSpec::load(&path)
+        .expect("load scaling sweep")
+        .sweep
+        .expect("sweep config");
+    let objective = sweep.objective.expect("objective");
+    assert_eq!(objective.scaling_axis.as_deref(), Some("nodes"));
+    // The additive field round-trips through serde.
+    let json = serde_json::to_string(&objective).expect("serialize objective");
+    assert!(json.contains("\"scaling_axis\":\"nodes\""));
+
+    // An objective without scaling_axis still validates and omits the field.
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+name: sweep-no-scaling
+sweep:
+  parameters:
+    nodes: [1, 2]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'loss=([0-9.]+)'
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let sweep = ComposeSpec::load(&path)
+        .expect("load no-scaling sweep")
+        .sweep
+        .expect("sweep config");
+    let objective = sweep.objective.expect("objective");
+    assert!(objective.scaling_axis.is_none());
+    let json = serde_json::to_string(&objective).expect("serialize objective");
+    assert!(!json.contains("scaling_axis"));
 }
 
 #[test]

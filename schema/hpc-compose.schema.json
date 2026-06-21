@@ -282,6 +282,10 @@
         "json_field": {
           "type": "string",
           "description": "Field to read from json_path. Required when json_path is set."
+        },
+        "scaling_axis": {
+          "type": "string",
+          "description": "Name of a sweep parameter (e.g. nodes, model_size) to use as the x-axis for the post-hoc scaling report printed by `sweep observe --scaling`. Must name a key under sweep.parameters whose values parse as numbers."
         }
       },
       "description": "Set exactly one of log_pattern or json_path."

@@ -800,6 +800,33 @@ fn parse_trial_objective(
     Ok(None)
 }
 
+/// Returns one trial's observed wall-clock runtime in seconds, mirroring the
+/// terminal-only gating of [`parse_trial_objective`].
+///
+/// Returns `Ok(Some(seconds))` only when the trial is terminal and at least one
+/// tracked service reports a `duration_seconds`; in that case the maximum across
+/// services is used (the trial finishes when its longest service finishes).
+/// Returns `Ok(None)` for trials with no job id, non-terminal trials, or trials
+/// whose services report no duration. No runtime is ever fabricated.
+fn sweep_runtime_seconds(
+    trial: &SweepManifestTrial,
+    manifest: &SweepManifest,
+    options: &SchedulerOptions,
+) -> Result<Option<u64>> {
+    let Some(job_id) = trial.job_id.as_deref() else {
+        return Ok(None);
+    };
+    let snapshot = build_status_snapshot(&manifest.compose_file, Some(job_id), options)?;
+    if !snapshot.scheduler.terminal {
+        return Ok(None);
+    }
+    Ok(snapshot
+        .services
+        .iter()
+        .filter_map(|service| service.duration_seconds)
+        .max())
+}
+
 /// Returns whether this sweep fanned out into replicates (any trial has a
 /// non-zero replicate index). v2 manifests and `replicates: 1` sweeps return
 /// `false`, keeping their output byte-identical to pre-#12 behavior.
@@ -885,6 +912,11 @@ struct SweepObserveOutput {
     /// sweep did not use replicates.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     groups: Vec<SweepConfigGroup>,
+    /// Post-hoc scaling report (objective vs `scaling_axis`). Present only when
+    /// `--scaling` was requested and `sweep.objective.scaling_axis` is set;
+    /// otherwise omitted so the default observe output is byte-unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scaling: Option<ScalingReport>,
     trials: Vec<SweepObserveTrial>,
 }
 
@@ -899,6 +931,172 @@ struct SweepObserveTrial {
     objective_error: Option<String>,
 }
 
+/// Post-hoc descriptive scaling report: the per-config group objective means
+/// plotted against a numeric sweep parameter (`scaling_axis`), summarized with a
+/// log-log least-squares slope and speedup/efficiency relative to a baseline
+/// group. Output-only (never persisted); see `sweep observe --scaling`.
+#[derive(Debug, Clone, Serialize)]
+struct ScalingReport {
+    /// The sweep parameter used as the x-axis.
+    axis: String,
+    /// The objective optimization direction, echoed for interpretation.
+    direction: String,
+    /// One row per config group that has both a numeric axis value and a group
+    /// mean objective, sorted ascending by axis value.
+    points: Vec<ScalingPoint>,
+    /// Least-squares slope of `ln(objective_mean)` vs `ln(axis_value)` over the
+    /// points with positive axis and mean. `None` when fewer than two such
+    /// points exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    loglog_slope: Option<f64>,
+    /// The axis value of the baseline group (the smallest axis value with
+    /// terminal runtime data) used for speedup/efficiency. `None` when no point
+    /// has runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_axis: Option<f64>,
+}
+
+/// One config group's scaling sample: its axis value, group mean objective, and
+/// observed max runtime, plus speedup/efficiency relative to the baseline group.
+#[derive(Debug, Clone, Serialize)]
+struct ScalingPoint {
+    /// The numeric `scaling_axis` value for this group.
+    axis_value: f64,
+    /// The config_key identifying the group.
+    config_key: String,
+    /// The group mean objective (mean over the group's terminal replicates).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objective_mean: Option<f64>,
+    /// The maximum observed runtime (seconds) across the group's trials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_seconds_max: Option<u64>,
+    /// `baseline_runtime / this_runtime`. `None` unless both this point and the
+    /// baseline have runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speedup: Option<f64>,
+    /// `speedup * baseline_axis / axis_value` (parallel efficiency). `None`
+    /// unless `speedup` is defined and `axis_value > 0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    efficiency: Option<f64>,
+    /// Number of replicates contributing to this group's mean.
+    n: usize,
+}
+
+/// Builds the IO-free scaling report from the per-config groups and a
+/// per-group max runtime map.
+///
+/// `axis` names the sweep parameter read from each group's `variables`. Groups
+/// whose axis value does not parse as `f64`, or that have no group mean, are
+/// excluded (no zero-fill). The baseline is the smallest-axis point that has
+/// runtime data; speedup/efficiency are reported relative to it.
+fn build_scaling_report(
+    axis: &str,
+    direction: hpc_compose::spec::ObjectiveDirection,
+    groups: &[SweepConfigGroup],
+    runtime_by_group: &BTreeMap<String, u64>,
+) -> ScalingReport {
+    let mut points: Vec<ScalingPoint> = groups
+        .iter()
+        .filter_map(|group| {
+            let axis_value = group.variables.get(axis)?.parse::<f64>().ok()?;
+            // A group contributes a point only if it has a mean objective; this
+            // also excludes config groups with no terminal/observed objective.
+            group.mean?;
+            Some(ScalingPoint {
+                axis_value,
+                config_key: group.config_key.clone(),
+                objective_mean: group.mean,
+                runtime_seconds_max: runtime_by_group.get(&group.config_key).copied(),
+                speedup: None,
+                efficiency: None,
+                n: group.n,
+            })
+        })
+        .collect();
+    points.sort_by(|a, b| {
+        a.axis_value
+            .partial_cmp(&b.axis_value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Baseline: the smallest-axis point that has runtime data.
+    let baseline = points
+        .iter()
+        .filter(|p| p.runtime_seconds_max.is_some())
+        .min_by(|a, b| {
+            a.axis_value
+                .partial_cmp(&b.axis_value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|p| {
+            (
+                p.axis_value,
+                p.runtime_seconds_max.expect("filtered to Some"),
+            )
+        });
+
+    if let Some((baseline_axis, baseline_runtime)) = baseline {
+        for point in &mut points {
+            if let Some(runtime) = point.runtime_seconds_max
+                && runtime > 0
+            {
+                let speedup = baseline_runtime as f64 / runtime as f64;
+                point.speedup = Some(speedup);
+                if point.axis_value > 0.0 {
+                    point.efficiency = Some(speedup * baseline_axis / point.axis_value);
+                }
+            }
+        }
+    }
+
+    let loglog_slope = loglog_slope(
+        points
+            .iter()
+            .filter_map(|p| p.objective_mean.map(|mean| (p.axis_value, mean))),
+    );
+
+    ScalingReport {
+        axis: axis.to_string(),
+        direction: match direction {
+            hpc_compose::spec::ObjectiveDirection::Minimize => "minimize".to_string(),
+            hpc_compose::spec::ObjectiveDirection::Maximize => "maximize".to_string(),
+        },
+        points,
+        loglog_slope,
+        baseline_axis: baseline.map(|(axis_value, _)| axis_value),
+    }
+}
+
+/// Least-squares slope of `ln(y)` vs `ln(x)` over the `(x, y)` pairs with
+/// `x > 0` and `y > 0`. Returns `None` when fewer than two usable points exist
+/// or when all usable x-values are identical (zero variance).
+fn loglog_slope(points: impl Iterator<Item = (f64, f64)>) -> Option<f64> {
+    let logs: Vec<(f64, f64)> = points
+        .filter(|(x, y)| *x > 0.0 && *y > 0.0)
+        .map(|(x, y)| (x.ln(), y.ln()))
+        .collect();
+    if logs.len() < 2 {
+        return None;
+    }
+    let n = logs.len() as f64;
+    let sum_x: f64 = logs.iter().map(|(x, _)| x).sum();
+    let sum_y: f64 = logs.iter().map(|(_, y)| y).sum();
+    let mean_x = sum_x / n;
+    let mean_y = sum_y / n;
+    let mut numerator = 0.0;
+    let mut denominator = 0.0;
+    for (x, y) in &logs {
+        let dx = x - mean_x;
+        numerator += dx * (y - mean_y);
+        denominator += dx * dx;
+    }
+    if denominator == 0.0 {
+        return None;
+    }
+    Some(numerator / denominator)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sweep_observe(
     context: ResolvedContext,
     sweep_id: Option<String>,
@@ -907,6 +1105,7 @@ pub(crate) fn sweep_observe(
     poll_interval: Duration,
     timeout: Option<Duration>,
     format: Option<OutputFormat>,
+    scaling: bool,
 ) -> Result<()> {
     let scheduler_options = SchedulerOptions {
         squeue_bin: context.binaries.squeue.value.clone(),
@@ -996,12 +1195,48 @@ pub(crate) fn sweep_observe(
             None
         };
 
+        // Post-hoc scaling report (objective vs scaling_axis). Output-only: it
+        // is never persisted and is built only when requested and configured.
+        let scaling_report = if scaling && objective_configured {
+            if let Some(axis) = manifest
+                .objective
+                .as_ref()
+                .and_then(|o| o.scaling_axis.clone())
+            {
+                // Per-group max runtime over terminal trials only (no fabrication).
+                let mut runtime_by_group: BTreeMap<String, u64> = BTreeMap::new();
+                for trial in &manifest.trials {
+                    if let Some(seconds) =
+                        sweep_runtime_seconds(trial, &manifest, &scheduler_options)?
+                    {
+                        runtime_by_group
+                            .entry(trial.config_key.clone())
+                            .and_modify(|max| *max = (*max).max(seconds))
+                            .or_insert(seconds);
+                    }
+                }
+                let (scaling_groups, _trials_by_group) =
+                    config_groups_from_trials(&manifest.trials);
+                Some(build_scaling_report(
+                    &axis,
+                    direction,
+                    &scaling_groups,
+                    &runtime_by_group,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let report = SweepObserveOutput {
             sweep_id: manifest.sweep_id.clone(),
             objective_configured,
             best_trial: manifest.best_trial.clone(),
             best_objective: best_objective.clone(),
             groups,
+            scaling: scaling_report,
             trials: trial_outputs,
         };
         match output_format {
@@ -1086,6 +1321,9 @@ fn print_sweep_observe_output(
         }
     }
     print_sweep_config_groups(&report.groups);
+    if let Some(scaling) = &report.scaling {
+        print_scaling_report(scaling);
+    }
     // Rank: best first.
     let mut ranked = report.trials.clone();
     ranked.sort_by(|a, b| {
@@ -1114,6 +1352,69 @@ fn print_sweep_observe_output(
         if let Some(error) = &trial.objective_error {
             println!("    objective_error: {error}");
         }
+    }
+}
+
+fn print_scaling_report(report: &ScalingReport) {
+    println!(
+        "scaling ({} objective vs {}):",
+        report.direction, report.axis
+    );
+    if report.points.is_empty() {
+        println!(
+            "{}",
+            term::styled_warning(
+                "  no terminal trials with a numeric scaling_axis value and an observed objective"
+            )
+        );
+        return;
+    }
+    if let Some(baseline) = report.baseline_axis {
+        println!("  baseline {}={}", report.axis, format_axis_value(baseline));
+    }
+    for point in &report.points {
+        let mean = point
+            .objective_mean
+            .map(|m| format!("{m:.6}"))
+            .unwrap_or_else(|| "-".to_string());
+        let runtime = point
+            .runtime_seconds_max
+            .map(|s| format!("{s}s"))
+            .unwrap_or_else(|| "-".to_string());
+        let speedup = point
+            .speedup
+            .map(|s| format!("{s:.3}x"))
+            .unwrap_or_else(|| "-".to_string());
+        let efficiency = point
+            .efficiency
+            .map(|e| format!("{:.1}%", e * 100.0))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  {}={} mean={} runtime={} speedup={} efficiency={} (n={})",
+            report.axis,
+            format_axis_value(point.axis_value),
+            mean,
+            runtime,
+            speedup,
+            efficiency,
+            point.n
+        );
+    }
+    match report.loglog_slope {
+        Some(slope) => println!("  log-log slope (objective vs {}): {slope:.4}", report.axis),
+        None => println!(
+            "  log-log slope: insufficient positive points (need >= 2 with axis>0 and objective>0)"
+        ),
+    }
+}
+
+/// Formats a numeric axis value compactly: integral values print without a
+/// trailing `.0` (e.g. `nodes=4`), fractional values keep their precision.
+fn format_axis_value(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
     }
 }
 
@@ -1951,5 +2252,108 @@ mod tests {
             stop_reason: None,
             trials: fanned,
         }));
+    }
+
+    fn scaling_group(
+        config_key: &str,
+        axis: &str,
+        axis_value: &str,
+        mean: Option<f64>,
+        n: usize,
+    ) -> SweepConfigGroup {
+        SweepConfigGroup {
+            config_key: config_key.to_string(),
+            variables: vars(&[(axis, axis_value)]),
+            replicates: n.max(1),
+            mean,
+            std: mean.map(|_| 0.0),
+            n,
+        }
+    }
+
+    #[test]
+    fn loglog_slope_recovers_known_power_law() {
+        // y = 2 * x^-1 -> log-log slope is exactly -1 over clean points.
+        let points = [(1.0, 2.0), (2.0, 1.0), (4.0, 0.5), (8.0, 0.25)];
+        let slope = loglog_slope(points.into_iter()).expect("slope");
+        assert!((slope + 1.0).abs() < 1e-9, "expected ~-1, got {slope}");
+    }
+
+    #[test]
+    fn loglog_slope_needs_two_positive_points() {
+        // A single usable point yields no slope.
+        assert!(loglog_slope([(1.0, 2.0)].into_iter()).is_none());
+        // Non-positive axis/objective values are excluded before fitting.
+        assert!(loglog_slope([(0.0, 2.0), (-1.0, 3.0), (4.0, 0.0)].into_iter()).is_none());
+    }
+
+    #[test]
+    fn build_scaling_report_computes_baseline_speedup_and_efficiency() {
+        let groups = vec![
+            scaling_group("nodes=1", "nodes", "1", Some(8.0), 1),
+            scaling_group("nodes=2", "nodes", "2", Some(4.0), 1),
+            scaling_group("nodes=4", "nodes", "4", Some(2.0), 1),
+        ];
+        let runtime = BTreeMap::from([
+            ("nodes=1".to_string(), 100_u64),
+            ("nodes=2".to_string(), 50_u64),
+            ("nodes=4".to_string(), 25_u64),
+        ]);
+        let report = build_scaling_report(
+            "nodes",
+            hpc_compose::spec::ObjectiveDirection::Minimize,
+            &groups,
+            &runtime,
+        );
+        assert_eq!(report.axis, "nodes");
+        assert_eq!(report.baseline_axis, Some(1.0));
+        // Points are sorted ascending by axis value.
+        let axes: Vec<f64> = report.points.iter().map(|p| p.axis_value).collect();
+        assert_eq!(axes, vec![1.0, 2.0, 4.0]);
+        // Ideal strong scaling -> speedup == nodes, efficiency == 1.0.
+        let four = report
+            .points
+            .iter()
+            .find(|p| p.axis_value == 4.0)
+            .expect("nodes=4 point");
+        assert!((four.speedup.expect("speedup") - 4.0).abs() < 1e-9);
+        assert!((four.efficiency.expect("efficiency") - 1.0).abs() < 1e-9);
+        // objective 8,4,2 vs nodes 1,2,4 is y = 8 * x^-1 -> slope -1.
+        let slope = report.loglog_slope.expect("slope");
+        assert!((slope + 1.0).abs() < 1e-9, "expected ~-1, got {slope}");
+    }
+
+    #[test]
+    fn build_scaling_report_skips_groups_missing_objective_and_baseline_falls_back() {
+        let groups = vec![
+            // Smallest axis has no objective -> excluded from points entirely.
+            scaling_group("nodes=1", "nodes", "1", None, 0),
+            // Has objective but no runtime -> a point, but cannot be the baseline.
+            scaling_group("nodes=2", "nodes", "2", Some(4.0), 1),
+            scaling_group("nodes=4", "nodes", "4", Some(2.0), 1),
+            // Non-numeric axis value -> excluded.
+            scaling_group("nodes=auto", "nodes", "auto", Some(1.0), 1),
+        ];
+        let runtime = BTreeMap::from([("nodes=4".to_string(), 25_u64)]);
+        let report = build_scaling_report(
+            "nodes",
+            hpc_compose::spec::ObjectiveDirection::Minimize,
+            &groups,
+            &runtime,
+        );
+        // Only the two numeric groups with an objective survive.
+        let axes: Vec<f64> = report.points.iter().map(|p| p.axis_value).collect();
+        assert_eq!(axes, vec![2.0, 4.0]);
+        // Baseline falls back to the smallest axis that actually has runtime (nodes=4).
+        assert_eq!(report.baseline_axis, Some(4.0));
+        // The runtime-less point reports no speedup/efficiency (no fabrication).
+        let two = report
+            .points
+            .iter()
+            .find(|p| p.axis_value == 2.0)
+            .expect("nodes=2 point");
+        assert!(two.runtime_seconds_max.is_none());
+        assert!(two.speedup.is_none());
+        assert!(two.efficiency.is_none());
     }
 }

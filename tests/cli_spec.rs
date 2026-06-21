@@ -2266,6 +2266,17 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
             "sweep",
             &["parameters", "matrix", "objective", "replicates"],
         ),
+        (
+            "sweepObjective",
+            &[
+                "direction",
+                "log_pattern",
+                "group",
+                "json_path",
+                "json_field",
+                "scaling_axis",
+            ],
+        ),
     ];
 
     for (def_name, expected_keys) in catalog {
@@ -2282,6 +2293,23 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
             "definition `{def_name}` must have additionalProperties: false"
         );
     }
+}
+
+#[test]
+fn sweep_objective_definition_includes_scaling_axis() {
+    let value = load_schema_json();
+    let scaling_axis = &value["definitions"]["sweepObjective"]["properties"]["scaling_axis"];
+    assert_eq!(
+        scaling_axis["type"],
+        Value::from("string"),
+        "sweepObjective.scaling_axis must be a string property"
+    );
+    assert!(
+        scaling_axis["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("scaling report")),
+        "sweepObjective.scaling_axis must document the scaling report"
+    );
 }
 
 #[test]

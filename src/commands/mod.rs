@@ -574,6 +574,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 poll_interval,
                 timeout,
                 format,
+                scaling,
                 squeue_bin,
                 sacct_bin,
                 scancel_bin,
@@ -607,6 +608,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     std::time::Duration::from_secs(poll),
                     timeout_dur,
                     format,
+                    scaling,
                 )
             }
             SweepCommands::Stop {

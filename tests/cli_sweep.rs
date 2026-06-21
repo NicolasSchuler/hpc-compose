@@ -1335,3 +1335,247 @@ echo "$@" >> '{}'
         Value::from("objective threshold met")
     );
 }
+
+fn write_scaling_sweep_compose(root: &Path, cache_dir: &Path) -> PathBuf {
+    let compose = root.join("scaling.yaml");
+    fs::write(
+        &compose,
+        format!(
+            r#"
+name: sweep-scaling-train
+x-slurm:
+  cache_dir: {}
+  time: "00:01:00"
+sweep:
+  parameters:
+    nodes: [1, 2, 4]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'final loss=([0-9.]+)'
+    scaling_axis: nodes
+services:
+  trainer:
+    image: docker://python:3.11
+    command: ["python", "train.py", "--nodes", "${{nodes}}"]
+"#,
+            cache_dir.display()
+        ),
+    )
+    .expect("write scaling sweep compose");
+    compose
+}
+
+#[test]
+fn sweep_observe_scaling_emits_report_and_skips_non_terminal_trials() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_scaling_sweep_compose(tmpdir.path(), cache.path());
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 40000);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let manifest_path = tmpdir.path().join(".hpc-compose/sweeps/latest.json");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let trials = manifest["trials"].as_array().expect("trials").clone();
+    assert_eq!(trials.len(), 3);
+
+    // Map each trial's nodes value to (objective, runtime). nodes=1 gets a longer
+    // runtime than nodes=2; nodes=4 is intentionally left NON-TERMINAL (no
+    // squeue/sacct COMPLETED + no state.json) and must be skipped by the report.
+    // objective decreases with nodes -> a clean negative log-log slope.
+    for trial in &trials {
+        let job_id = trial["job_id"].as_str().expect("job id");
+        let nodes = trial["variables"]["nodes"].as_str().expect("nodes var");
+        let (loss, runtime) = match nodes {
+            "1" => ("0.8", 100_u64),
+            "2" => ("0.4", 50_u64),
+            // nodes=4 stays non-terminal: write its log/objective but no state +
+            // a pending scheduler so it is excluded from runtime/scaling.
+            "4" => ("0.2", 0),
+            other => panic!("unexpected nodes value {other}"),
+        };
+        let record_path = tmpdir
+            .path()
+            .join(format!(".hpc-compose/jobs/{job_id}.json"));
+        let record: Value =
+            serde_json::from_str(&fs::read_to_string(&record_path).expect("record"))
+                .expect("record json");
+        let log_path = PathBuf::from(
+            record["service_logs"]["trainer"]
+                .as_str()
+                .expect("trainer log path"),
+        );
+        fs::create_dir_all(log_path.parent().expect("log parent")).expect("log dir");
+        fs::write(&log_path, format!("epoch done\nfinal loss={loss}\n")).expect("write log");
+
+        if runtime > 0 {
+            // Terminal trials get a state.json carrying duration_seconds.
+            let state_dir = tmpdir.path().join(format!(".hpc-compose/{job_id}"));
+            fs::create_dir_all(&state_dir).expect("state dir");
+            fs::write(
+                state_dir.join("state.json"),
+                format!(
+                    r#"{{
+  "services": [
+    {{
+      "service_name": "trainer",
+      "step_name": "hpc-compose:trainer",
+      "log_path": "{}",
+      "launch_index": 0,
+      "duration_seconds": {runtime}
+    }}
+  ]
+}}"#,
+                    log_path.display()
+                ),
+            )
+            .expect("state");
+        }
+    }
+
+    // squeue/sacct: COMPLETED only for the terminal job ids (40000, 40001); the
+    // nodes=4 trial (40002) reports RUNNING so it is non-terminal.
+    // Both fakes resolve the job id from the value following `-j` and report the
+    // nodes=4 trial (40002) as RUNNING so it stays non-terminal.
+    let squeue = tmpdir.path().join("squeue-scaling");
+    write_script(
+        &squeue,
+        r#"#!/bin/bash
+set -euo pipefail
+job=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-j" ]]; then job="$arg"; fi
+  prev="$arg"
+done
+case "$job" in
+  *40002*) echo "RUNNING|None|Unknown" ;;
+  *) echo "COMPLETED|None|Unknown" ;;
+esac
+"#,
+    );
+    let sacct = tmpdir.path().join("sacct-scaling");
+    write_script(
+        &sacct,
+        r#"#!/bin/bash
+set -euo pipefail
+job=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-j" ]]; then job="$arg"; fi
+  prev="$arg"
+done
+case "$job" in
+  *40002*) echo "RUNNING|Unknown|Unknown|None" ;;
+  *) echo "COMPLETED|Unknown|Unknown|None" ;;
+esac
+"#,
+    );
+
+    let observe = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "observe",
+            "-f",
+            compose.to_str().expect("path"),
+            "--scaling",
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&observe);
+    let payload: Value = serde_json::from_str(&stdout_text(&observe)).expect("observe json");
+
+    let scaling = &payload["scaling"];
+    assert_eq!(scaling["axis"], Value::from("nodes"));
+    assert_eq!(scaling["direction"], Value::from("minimize"));
+    // baseline is the smallest axis with runtime (nodes=1).
+    assert_eq!(scaling["baseline_axis"], Value::from(1.0));
+
+    let points = scaling["points"].as_array().expect("scaling points");
+    // The non-terminal nodes=4 trial has no objective parsed (not terminal) and
+    // no runtime, so it is excluded: only nodes=1 and nodes=2 remain.
+    let axes: Vec<f64> = points
+        .iter()
+        .map(|p| p["axis_value"].as_f64().expect("axis_value"))
+        .collect();
+    assert_eq!(axes, vec![1.0, 2.0]);
+
+    // nodes=2 doubles the node count and halves runtime -> speedup 2x, efficiency 1.0.
+    let two = points
+        .iter()
+        .find(|p| p["axis_value"].as_f64() == Some(2.0))
+        .expect("nodes=2 point");
+    assert!((two["speedup"].as_f64().expect("speedup") - 2.0).abs() < 1e-9);
+    assert!((two["efficiency"].as_f64().expect("efficiency") - 1.0).abs() < 1e-9);
+    assert_eq!(two["runtime_seconds_max"], Value::from(50));
+
+    // objective 0.8 -> 0.4 over nodes 1 -> 2 is y = 0.8 * x^-1 -> slope -1.
+    let slope = scaling["loglog_slope"].as_f64().expect("loglog_slope");
+    assert!((slope + 1.0).abs() < 1e-9, "expected ~-1, got {slope}");
+}
+
+#[test]
+fn sweep_observe_without_scaling_flag_omits_scaling_key() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_scaling_sweep_compose(tmpdir.path(), cache.path());
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 41000);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let (squeue, sacct) = completed_squeue_sacct(tmpdir.path());
+    let observe = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "observe",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&observe);
+    let payload: Value = serde_json::from_str(&stdout_text(&observe)).expect("observe json");
+    assert!(
+        payload.get("scaling").is_none(),
+        "scaling key must be omitted when --scaling is not passed"
+    );
+}

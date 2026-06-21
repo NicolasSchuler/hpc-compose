@@ -137,6 +137,7 @@ Rules:
 - `matrix.random` must be at least 1 and cannot exceed the total number of combinations.
 - `matrix.seed` is optional. If omitted, `sweep submit` derives a seed from the new sweep id and persists it.
 - `replicates` (optional, default `1`) submits N seeded replicate trials per parameter config. Each replicate is a separate allocation with a deterministic per-replicate seed; `sweep status`/`observe` roll up mean±std(n) per config. The `--max-trials` guard counts combinations × replicates. `replicates: 0` is rejected; `replicates: 1` is byte-identical to a non-replicated sweep (legacy `t000` trial ids). See [Hyperparameter Sweeps](sweeps.md#replicates).
+- `objective` (optional) declares how `sweep observe` parses and ranks each terminal trial. Set `direction` (`minimize`/`maximize`) and exactly one parse source: `log_pattern` (a regex with optional capture `group`, default 1) or `json_path` + `json_field`. Optionally set `objective.scaling_axis` to the name of a numeric sweep parameter (e.g. `nodes`) to enable the read-only `sweep observe --scaling` report; the named parameter must exist under `sweep.parameters` and all its values must parse as numbers (both checked at validate time). See [Scaling Reports](sweeps.md#scaling-reports).
 - `sweep.spec` is not supported; embed the sweep in the same compose file.
 
 For each trial, sweep variables override existing interpolation variables from `.env`, environment, settings, or `--env`. These reserved variables are also available:

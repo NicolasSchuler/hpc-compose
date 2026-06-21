@@ -204,6 +204,43 @@ hpc-compose sweep stop -f train.yaml --yes --reason 'objective threshold met'
 
 > Bayesian/adaptive trial selection is intentionally out of scope. The objective writeback, ranking, and stop machinery here are the foundation any future optimizer would build on.
 
+## Scaling Reports
+
+Set `objective.scaling_axis` to the name of a numeric sweep parameter (for example `nodes` or `model_size`) to enable a post-hoc scaling report:
+
+```yaml
+sweep:
+  parameters:
+    nodes: [1, 2, 4, 8]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'final loss=([0-9.]+)'
+    scaling_axis: nodes
+```
+
+`scaling_axis` must name a key under `sweep.parameters`, and every value of that parameter must parse as a number. Both are checked at validate time (including `sweep submit --dry-run`), so a typo or a non-numeric axis is rejected with a clear message before anything is submitted.
+
+Run `sweep observe --scaling` to print the report alongside the usual ranked table:
+
+```bash
+hpc-compose sweep observe -f train.yaml --scaling
+hpc-compose sweep observe -f train.yaml --scaling --format json
+```
+
+The report pairs each config group's mean objective with its axis value, reports a log-log least-squares slope (`ln(objective)` vs `ln(axis)`), and computes speedup/efficiency relative to a baseline group:
+
+```text
+scaling (minimize objective vs nodes):
+  baseline nodes=1
+  nodes=1 mean=0.800000 runtime=100s speedup=1.000x efficiency=100.0% (n=1)
+  nodes=2 mean=0.400000 runtime=50s speedup=2.000x efficiency=100.0% (n=1)
+  nodes=4 mean=0.200000 runtime=25s speedup=4.000x efficiency=100.0% (n=1)
+  log-log slope (objective vs nodes): -1.0000
+```
+
+The report is purely read-only, post-hoc analysis over the persisted manifest and tracked local state: it reuses the same terminal-only scheduler/runtime probe as `sweep observe` and never opens a new connection. Runtime is taken from the maximum observed service duration of each terminal trial; trials that are non-terminal or report no runtime are skipped rather than zero-filled. The baseline is the smallest-axis group that has runtime data. The report is print/JSON-only and is never written back to the manifest, so omitting `--scaling` leaves observe output byte-identical.
+
 ## Limitations
 
 - Sweeps must be embedded in the same compose file. `sweep.spec` is not supported.

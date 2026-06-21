@@ -3152,6 +3152,11 @@ pub enum SweepCommands {
         format: Option<OutputFormat>,
         #[arg(
             long,
+            help = "Print a post-hoc scaling report (objective vs sweep.objective.scaling_axis: log-log slope + efficiency table) over terminal trials"
+        )]
+        scaling: bool,
+        #[arg(
+            long,
             value_name = "PATH",
             default_value = "squeue",
             help_heading = "Tool overrides",

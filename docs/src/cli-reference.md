@@ -328,6 +328,17 @@ hpc-compose sweep list -f train.yaml --format json
 | `-f`, `--file <FILE>` | Select the compose file whose sweep directory should be scanned. |
 | `--format text|json` | Print persisted sweep manifests without querying Slurm. |
 
+`sweep observe` options:
+
+| Option | Use it for |
+| --- | --- |
+| `-f`, `--file <FILE>` | Select the compose file whose sweep manifest should be observed. |
+| `--sweep-id <ID>` | Observe a specific sweep instead of the latest. |
+| `--watch`, `--stop-when <EXPR>` | Poll until a terminal trial satisfies the objective threshold, then stop the sweep. |
+| `--poll-interval <DURATION>`, `--timeout <DURATION>` | Tune the `--watch` polling cadence and deadline. |
+| `--scaling` | Print a read-only post-hoc scaling report (objective vs `objective.scaling_axis`: log-log slope plus speedup/efficiency over terminal trials). |
+| `--format text|json` | Print the ranked table or a machine-readable payload (the `scaling` block appears only with `--scaling`). |
+
 See [Hyperparameter Sweeps](sweeps.md) for the `sweep` spec shape, interpolation rules, status categories, and current limitations.
 
 ### `when` Conditional Submission
