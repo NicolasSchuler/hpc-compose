@@ -13,9 +13,10 @@ use std::time::Duration;
 use hpc_compose::job::{
     GitProvenance, JobProvenance, SWEEP_MANIFEST_SCHEMA_VERSION, SubmissionBackend, SubmissionKind,
     SubmissionRecord, SubmissionRecordBuildOptions, SweepManifest, SweepManifestTrial,
-    build_submission_record, build_submission_record_with_backend_and_options,
-    build_submission_record_with_options, latest_record_path_for, load_submission_record,
-    state_path_for_record, sweep_manifest_path_for, write_submission_record, write_sweep_manifest,
+    artifact_manifest_path_for_record, artifact_payload_dir_for_record, build_submission_record,
+    build_submission_record_with_backend_and_options, build_submission_record_with_options,
+    latest_record_path_for, load_submission_record, state_path_for_record, sweep_manifest_path_for,
+    write_submission_record, write_sweep_manifest,
 };
 use hpc_compose::render::log_file_name_for_service;
 use serde_json::Value;
@@ -6869,6 +6870,119 @@ services:
         ssh.contains("ControlMaster=auto"),
         "multiplexing present: {ssh}"
     );
+}
+
+#[test]
+fn pull_prints_multiplexed_rsync_line_and_copies_nothing() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().to_path_buf();
+    let compose = project.join("pull.yaml");
+    fs::write(
+        &compose,
+        format!(
+            r#"name: pull-test
+x-slurm:
+  cache_dir: {}
+  time: "00:10:00"
+  artifacts:
+    export_dir: ./results/${{SLURM_JOB_ID}}
+    paths:
+      - /hpc-compose/job/out/**
+services:
+  app:
+    image: docker://python:3.12
+    command: ["true"]
+"#,
+            cache_dir.display()
+        ),
+    )
+    .expect("compose");
+    let plan = runtime_plan(&compose);
+    let script = project.join("pull.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "77777",
+        SubmissionBackend::Slurm,
+        &SubmissionRecordBuildOptions::default(),
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    // No manifest yet -> pull fails with the actionable collection error.
+    let missing = run_cli(
+        &project,
+        &[
+            "pull",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "77777",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(!missing.status.success());
+    assert!(stderr_text(&missing).contains("artifact manifest does not exist"));
+
+    // Write a manifest (default paths + one bundle) plus the payload files.
+    let manifest_path = artifact_manifest_path_for_record(&record);
+    fs::create_dir_all(manifest_path.parent().expect("manifest parent")).expect("manifest dir");
+    fs::write(
+        &manifest_path,
+        r#"{
+  "schema_version": 1,
+  "job_id": "77777",
+  "collect_policy": "always",
+  "collected_at": "2026-01-01T00:00:00Z",
+  "job_outcome": "completed",
+  "copied_relative_paths": ["a.txt", "b.txt"],
+  "bundles": { "ckpt": { "copied_relative_paths": ["c.bin"] } }
+}"#,
+    )
+    .expect("manifest");
+    let payload = artifact_payload_dir_for_record(&record);
+    fs::create_dir_all(&payload).expect("payload dir");
+    fs::write(payload.join("a.txt"), "12345").expect("a"); // 5 bytes
+    fs::write(payload.join("b.txt"), "67890").expect("b"); // 5 bytes
+    fs::write(payload.join("c.bin"), "0123456789").expect("c"); // 10 bytes
+
+    let out = run_cli(
+        &project,
+        &[
+            "pull",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "77777",
+            "--into",
+            "./results",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("pull json");
+    assert_eq!(value["files"].as_u64(), Some(3));
+    assert_eq!(value["bytes"].as_u64(), Some(20));
+    assert_eq!(value["bundles"], serde_json::json!(["ckpt"]));
+    let cmd = value["suggested_command"]
+        .as_str()
+        .expect("suggested_command");
+    assert!(cmd.starts_with("rsync -avz -e 'ssh "), "rsync line: {cmd}");
+    assert!(cmd.contains("ControlMaster=auto"), "multiplexing: {cmd}");
+    assert!(
+        cmd.contains("<login-node>:"),
+        "host placeholder when login_host unset: {cmd}"
+    );
+    assert!(cmd.contains("./results/"), "destination: {cmd}");
+    // Read-only: pull copies nothing, so the local destination is never created.
+    assert!(!project.join("results").exists());
 }
 
 fn results_trial(trial_id: &str, index: usize, vars: &[(&str, &str)]) -> SweepManifestTrial {

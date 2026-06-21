@@ -936,6 +936,15 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             runtime::artifacts(context, job_id, format, false, bundles, tarball)
         }
+        Commands::Pull {
+            file,
+            job_id,
+            into,
+            format,
+        } => {
+            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            runtime::pull(context, job_id, into, format)
+        }
         Commands::Logs {
             file,
             job_id,

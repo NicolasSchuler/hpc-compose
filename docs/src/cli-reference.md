@@ -511,6 +511,7 @@ hpc-compose status -f compose.yaml --format json
 | `score` | Score post-run resource efficiency | Supports positional job ids, `--format json`, `--pue`, `--gpu-tdp-w`, and `--cpu-watts-per-core`. |
 | `diff` | Compare two tracked job submissions | Compact text by default; use `--format json` for full detail. |
 | `artifacts` | Export tracked artifact bundles after a run | Use `--bundle <name>` and `--tarball` when needed. |
+| `pull` | Print the `rsync` command to copy a tracked job's artifacts to a laptop | Resolves the artifact payload directory from tracked state and prints an `rsync` line (with `ControlMaster` multiplexing so an OTP login node prompts once); `--into <DIR>` sets the local destination, `--format json` emits `{bundles, cluster_path, suggested_command, files, bytes}`. Read-only: copies nothing and opens no connection. |
 | `cancel` | Cancel the latest tracked job or an explicit job id | Uses tracked metadata instead of making you retype paths. |
 | `down` | Cancel a tracked job and clean tracked state | Supports `--purge-cache` when the tracked snapshot names concrete cache artifacts. |
 | `jobs list` | Scan the current repo tree for tracked runs | Start here when you need to rediscover an older run. |

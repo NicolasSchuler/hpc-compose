@@ -287,6 +287,14 @@ Examples:
 On an OTP/2FA login node, the printed ssh command reuses one authenticated
 connection (ControlMaster), so you enter the OTP only once.";
 
+pub(super) const PULL_HELP: &str = "\
+Examples:
+  hpc-compose pull -f compose.yaml --into ./results
+  hpc-compose pull --job-id 4815162 --into ./results
+  hpc-compose pull -f compose.yaml --format json
+hpc-compose only prints the rsync command (it copies nothing). The ssh transport
+uses ControlMaster, so an OTP/2FA login node prompts only once.";
+
 pub(super) const NEW_HELP: &str = "\
 Examples:
   hpc-compose new --list-templates

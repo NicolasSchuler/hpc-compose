@@ -1487,6 +1487,30 @@ pub enum Commands {
         tarball: bool,
     },
     #[command(
+        display_order = 261,
+        about = "Resolve a tracked artifact bundle and print an rsync line",
+        long_about = "Resolve a tracked job's artifact payload directory and print the rsync command to copy it to a laptop, with SSH connection multiplexing so an OTP login node prompts only once. Read-only: it never copies anything, opens a connection, or contacts the scheduler.",
+        after_help = PULL_HELP
+    )]
+    Pull {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to pull instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Local destination directory shown in the rsync command (default: .)"
+        )]
+        into: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
         display_order = 230,
         about = "Print tracked service logs",
         long_about = "Print tracked service logs from a previous run. Follow mode tails appended log data as it appears.",
