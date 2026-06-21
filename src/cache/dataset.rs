@@ -295,11 +295,25 @@ pub fn render_hf_stage_command(reference: &HfArtifactRef, dest: &str, cli_bin: &
     out.push_str(&format!("HF_STAGE_TARGET={target}\n"));
     out.push_str(&format!("HF_STAGE_MARKER=\"$HF_STAGE_TARGET/\"{marker}\n"));
     out.push_str("if [ ! -e \"$HF_STAGE_MARKER\" ]; then\n");
-    out.push_str("  mkdir -p \"$HF_STAGE_TARGET\"\n");
+    out.push_str("  mkdir -p \"$(dirname \"$HF_STAGE_TARGET\")\"\n");
+    // flock-serialized (best effort), double-checked, download into a temp dir
+    // and atomically rename into place — so concurrent array/sweep tasks sharing
+    // the filesystem never corrupt the CAS dir and a partial tree is never
+    // observable as complete (the marker is written strictly last).
+    out.push_str("  (\n");
+    out.push_str("    if command -v flock >/dev/null 2>&1; then flock 9; fi\n");
+    out.push_str("    if [ ! -e \"$HF_STAGE_MARKER\" ]; then\n");
+    out.push_str(
+        "      hf_tmp=\"$(mktemp -d \"$(dirname \"$HF_STAGE_TARGET\")/.hf-stage.XXXXXX\")\"\n",
+    );
     out.push_str(&format!(
-        "  {bin} download {repo}{repo_type_flag} --revision {revision} --local-dir \"$HF_STAGE_TARGET\"\n"
+        "      {bin} download {repo}{repo_type_flag} --revision {revision} --local-dir \"$hf_tmp\"\n"
     ));
-    out.push_str("  touch \"$HF_STAGE_MARKER\"\n");
+    out.push_str("      rm -rf \"$HF_STAGE_TARGET\"\n");
+    out.push_str("      mv \"$hf_tmp\" \"$HF_STAGE_TARGET\"\n");
+    out.push_str("      touch \"$HF_STAGE_MARKER\"\n");
+    out.push_str("    fi\n");
+    out.push_str("  ) 9>\"$HF_STAGE_TARGET.lock\"\n");
     out.push_str("fi\n");
     out
 }
@@ -723,7 +737,12 @@ mod tests {
         };
         let model_cmd = render_hf_stage_command(&model, "/shared/cache/models/key", "hf-cli");
         assert!(model_cmd.contains("'hf-cli' download 'org/model' --revision 'abc1234'"));
-        assert!(model_cmd.contains("--local-dir \"$HF_STAGE_TARGET\""));
+        // Downloads into a temp dir, then atomically renames into place under a
+        // best-effort flock so concurrent jobs cannot corrupt the CAS dir.
+        assert!(model_cmd.contains("--local-dir \"$hf_tmp\""));
+        assert!(model_cmd.contains("mktemp -d"));
+        assert!(model_cmd.contains("flock 9"));
+        assert!(model_cmd.contains("mv \"$hf_tmp\" \"$HF_STAGE_TARGET\""));
         assert!(!model_cmd.contains("--repo-type"));
         // Guarded by the completion marker, idempotent.
         assert!(model_cmd.contains(HF_COMPLETE_MARKER));

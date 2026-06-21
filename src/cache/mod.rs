@@ -364,9 +364,17 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
                 // contents may include unrelated `*.json` (e.g. a model
                 // snapshot's `config.json`, or even a data file literally named
                 // `x.dataset.json`) that must not be parsed as a manifest.
-                if !is_staged_input_dir(&path) {
-                    stack.push(path);
+                if is_staged_input_dir(&path) {
+                    // A cluster-side hf:// download leaves only an in-dir
+                    // completion marker (no sibling sidecar); synthesize its
+                    // manifest so `cache list`/`prune` see it. A dir WITH a
+                    // sidecar is listed via that sidecar file below instead.
+                    if let Some(manifest) = staged_input_manifest_from_marker(&path) {
+                        manifests.push(manifest);
+                    }
+                    continue;
                 }
+                stack.push(path);
                 continue;
             }
             let is_manifest = path.extension() == Some(OsStr::new("json"));
@@ -453,6 +461,17 @@ pub fn referenced_artifacts(plan: &RuntimePlan) -> HashSet<PathBuf> {
                 service,
                 plan.runtime.backend,
             ));
+        }
+    }
+    // Staged inputs referenced by an hf:// stage_in must not be reclaimed by
+    // `prune --unused` while a tracked spec still references them. Mirror the
+    // key/dir derivation the renderer uses (render/stage.rs).
+    for entry in &plan.slurm.stage_in {
+        if let Some(hf) = &entry.hf {
+            let kind = hf.as_staged_input_kind();
+            let spec = dataset::StagedInputSpec::new(kind, hf.uri(), Some(hf.revision.clone()));
+            let key = dataset::dataset_cache_key(&spec);
+            referenced.insert(dataset::staged_input_dir(&plan.cache_dir, kind, &key));
         }
     }
     referenced
@@ -606,11 +625,63 @@ fn is_staged_input_sidecar(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether `dir` is a staged-input store directory, detected by the presence of
-/// a sibling `<dir>.dataset.json`/`<dir>.model.json` tracking sidecar.
+/// Whether `dir` is a staged-input store directory, detected by either a
+/// sibling `<dir>.{dataset,model}.json` tracking sidecar (laptop-side store) or
+/// the in-dir [`dataset::HF_COMPLETE_MARKER`] (cluster-side hf:// download).
 fn is_staged_input_dir(dir: &Path) -> bool {
     dataset::sidecar_manifest_path_for_suffix(dir, "dataset").is_file()
         || dataset::sidecar_manifest_path_for_suffix(dir, "model").is_file()
+        || dir.join(dataset::HF_COMPLETE_MARKER).is_file()
+}
+
+/// Synthesizes a cache manifest for a cluster-staged hf:// directory that has
+/// only the in-dir completion marker (no sibling sidecar), so `cache list` and
+/// `prune` track it. Returns `None` for a dir that has a sidecar (it is listed
+/// via that sidecar file instead, avoiding a double count) or that is not a
+/// recognized `datasets`/`models` staged dir.
+fn staged_input_manifest_from_marker(dir: &Path) -> Option<CacheEntryManifest> {
+    if dataset::sidecar_manifest_path_for_suffix(dir, "dataset").is_file()
+        || dataset::sidecar_manifest_path_for_suffix(dir, "model").is_file()
+    {
+        return None;
+    }
+    let marker = dir.join(dataset::HF_COMPLETE_MARKER);
+    if !marker.is_file() {
+        return None;
+    }
+    let kind = match dir.parent().and_then(|p| p.file_name()?.to_str()) {
+        Some("datasets") => CacheEntryKind::Dataset,
+        Some("models") => CacheEntryKind::Model,
+        _ => return None,
+    };
+    let used = fs::metadata(&marker)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    Some(CacheEntryManifest {
+        kind,
+        artifact_path: dir.display().to_string(),
+        service_names: Vec::new(),
+        cache_key: dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string(),
+        source_image: String::new(),
+        registry: None,
+        prepare_commands: Vec::new(),
+        prepare_env: Vec::new(),
+        prepare_root: None,
+        prepare_mounts: Vec::new(),
+        force_rebuild_due_to_mounts: false,
+        created_at: used,
+        last_used_at: used,
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        uri: None,
+        revision: None,
+        content_digest: None,
+    })
 }
 
 fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
@@ -1338,8 +1409,7 @@ mod tests {
         );
         assert!(cache.exists(), "cache root never removed");
 
-        // prune --all-unused removes a staged dir not referenced by the plan
-        // (staged inputs are never in referenced_artifacts today).
+        // prune --all-unused removes a staged dir not referenced by the plan.
         let md_dir = seed_staged(cache, StagedInputKind::Model, "hf://org/llm");
         let plan = RuntimePlan {
             name: "demo".into(),
@@ -1351,6 +1421,60 @@ mod tests {
         let pruned = prune_all_unused(cache, &plan).expect("prune unused");
         assert_eq!(pruned.removed, vec![md_dir.clone()]);
         assert!(!md_dir.exists());
+    }
+
+    #[test]
+    fn prune_all_unused_retains_hf_referenced_staged_dir() {
+        // A staged dir referenced by an hf:// stage_in must survive --all-unused.
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache = tmpdir.path();
+        let referenced = seed_staged(cache, StagedInputKind::Model, "hf://org/keep");
+        let orphan = seed_staged(cache, StagedInputKind::Model, "hf://org/drop");
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: cache.to_path_buf(),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: crate::spec::SlurmConfig {
+                stage_in: vec![crate::spec::StageInConfig {
+                    from: None,
+                    to: "/weights".into(),
+                    mode: crate::spec::StageMode::Copy,
+                    hf: Some(crate::spec::HfStageSource {
+                        repo: "org/keep".into(),
+                        revision: "v1".into(),
+                        kind: crate::spec::HfStageKind::Model,
+                    }),
+                }],
+                ..crate::spec::SlurmConfig::default()
+            },
+            ordered_services: Vec::new(),
+        };
+        let pruned = prune_all_unused(cache, &plan).expect("prune unused");
+        assert_eq!(
+            pruned.removed,
+            vec![orphan.clone()],
+            "only the unreferenced staged dir is reaped"
+        );
+        assert!(referenced.is_dir(), "hf-referenced staged dir retained");
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn scan_cache_lists_cluster_marker_only_staged_dir() {
+        // A cluster-side hf:// download leaves only the in-dir completion marker
+        // (no sibling sidecar); it must still be visible to `cache list`/`prune`.
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache = tmpdir.path();
+        let model_dir = cache.join("models").join("deadbeefcafe0000");
+        fs::create_dir_all(&model_dir).expect("model dir");
+        fs::write(model_dir.join(dataset::HF_COMPLETE_MARKER), b"").expect("marker");
+        // The payload's own config.json must NOT be mistaken for a manifest.
+        fs::write(model_dir.join("config.json"), b"{}").expect("inner config");
+
+        let manifests = scan_cache(cache).expect("scan");
+        assert_eq!(manifests.len(), 1, "one synthesized entry: {manifests:?}");
+        assert_eq!(manifests[0].kind, CacheEntryKind::Model);
+        assert_eq!(manifests[0].artifact_path, model_dir.display().to_string());
     }
 
     #[test]

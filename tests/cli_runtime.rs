@@ -950,12 +950,16 @@ services:
 
     let script = fs::read_to_string(&script_out).expect("rendered script");
     // The download runs inside the allocation with the overridden CLI, pinned
-    // revision, and a CAS --local-dir under the configured cache dir.
+    // revision, into a temp dir that is atomically renamed into the CAS path.
     assert!(
         script.contains(
-            "'/opt/hf/huggingface-cli' download 'meta-llama/Llama-3.1-8B' --revision '0e9e39f249a16976918f6564b8830bc894c89659' --local-dir \"$HF_STAGE_TARGET\""
+            "'/opt/hf/huggingface-cli' download 'meta-llama/Llama-3.1-8B' --revision '0e9e39f249a16976918f6564b8830bc894c89659' --local-dir \"$hf_tmp\""
         ),
         "expected guarded cluster-side huggingface-cli download; got:\n{script}"
+    );
+    assert!(
+        script.contains("mv \"$hf_tmp\" \"$HF_STAGE_TARGET\""),
+        "atomic rename into the CAS dir; got:\n{script}"
     );
     assert!(
         script.contains(&format!("{}/models/", cache_dir.display())),

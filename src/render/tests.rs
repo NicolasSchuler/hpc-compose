@@ -829,12 +829,19 @@ fn hf_stage_in_renders_cluster_side_download_not_a_mount() {
     .expect("script");
 
     // The cluster-side download is emitted with the configured CLI, pinned
-    // revision, and a CAS --local-dir; never as an hf:// mount argument.
+    // revision, and a temp --local-dir; never as an hf:// mount argument.
     assert!(
         script.contains(
-            "'/opt/hf/huggingface-cli' download 'meta-llama/Llama-3.1-8B' --revision 'abc1234def' --local-dir \"$HF_STAGE_TARGET\""
+            "'/opt/hf/huggingface-cli' download 'meta-llama/Llama-3.1-8B' --revision 'abc1234def' --local-dir \"$hf_tmp\""
         ),
         "expected guarded huggingface-cli download line; got:\n{script}"
+    );
+    // Atomic into the CAS path: temp dir + rename under a best-effort flock so
+    // concurrent array/sweep tasks can't corrupt the shared store.
+    assert!(script.contains("flock 9"), "flock-guarded; got:\n{script}");
+    assert!(
+        script.contains("mv \"$hf_tmp\" \"$HF_STAGE_TARGET\""),
+        "atomic rename into the CAS dir; got:\n{script}"
     );
     assert!(
         script.contains("/shared/cache/models/"),
