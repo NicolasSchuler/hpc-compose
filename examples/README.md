@@ -65,6 +65,7 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 - [`training-checkpoints.yaml`](training-checkpoints.yaml)
 - [`training-resume.yaml`](training-resume.yaml)
 - [`training-sweep.yaml`](training-sweep.yaml)
+- [`training-tensorboard.yaml`](training-tensorboard.yaml)
 - [`canary-right-size.yaml`](canary-right-size.yaml)
 
 ## Cross-job rendezvous

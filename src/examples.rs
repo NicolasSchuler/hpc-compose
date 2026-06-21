@@ -478,6 +478,22 @@ const EXAMPLES: &[ExampleInfo] = &[
         tags: &["training", "sweep", "hyperparameters"],
     },
     ExampleInfo {
+        name: "training-tensorboard",
+        path: "examples/training-tensorboard.yaml",
+        availability: ExampleAvailability::RepositoryFile,
+        category: "training",
+        demonstrates: "GPU training writing TensorBoard events to a shared logdir with an HTTP-readiness TensorBoard sidecar.",
+        start_when: "You want a training run with a live TensorBoard sidecar and exported event-file artifacts.",
+        tags: &[
+            "training",
+            "gpu",
+            "tensorboard",
+            "sidecar",
+            "http-readiness",
+            "artifacts",
+        ],
+    },
+    ExampleInfo {
         name: "fairseq-preprocess",
         path: "examples/fairseq-preprocess.yaml",
         availability: ExampleAvailability::BuiltInTemplate,

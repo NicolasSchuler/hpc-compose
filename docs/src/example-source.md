@@ -306,6 +306,14 @@ Source: `examples/training-sweep.yaml`
 {{#include ../../examples/training-sweep.yaml}}
 ```
 
+## Training Tensorboard
+
+Source: `examples/training-tensorboard.yaml`
+
+```yaml
+{{#include ../../examples/training-tensorboard.yaml}}
+```
+
 ## vLLM OpenAI
 
 Source: `examples/vllm-openai.yaml`

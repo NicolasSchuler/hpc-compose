@@ -1,0 +1,79 @@
+# GPU training with a live TensorBoard sidecar.
+#
+# The trainer writes TensorBoard event files to the in-job shared directory
+# /hpc-compose/job/logs; the tensorboard sidecar serves them on port 6006 and
+# is gated by an HTTP readiness probe. Reach it from your laptop with an SSH
+# tunnel, e.g. `ssh -L 6006:<compute-node>:6006 <login-host>`, then open
+# http://127.0.0.1:6006. The event files are exported as tracked artifacts.
+name: training-tensorboard
+
+x-slurm:
+  job_name: training-tensorboard
+  time: "01:00:00"
+  mem: 32G
+  cpus_per_task: 8
+  gpus: 1
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/logs/**
+
+services:
+  trainer:
+    image: pytorch/pytorch:2.3.1-cuda12.1-cudnn9-runtime
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        mkdir -p /hpc-compose/job/logs
+        python - <<'PY'
+        import time
+        from torch.utils.tensorboard import SummaryWriter
+
+        writer = SummaryWriter("/hpc-compose/job/logs")
+        for step in range(100):
+            writer.add_scalar("loss", 1.0 / (step + 1), step)
+            writer.flush()
+            time.sleep(1)
+        writer.close()
+        PY
+        touch /hpc-compose/job/request.done
+    x-runtime:
+      prepare:
+        commands:
+          - pip install --no-cache-dir tensorboard
+    x-slurm:
+      gpus: 1
+      cpus_per_task: 4
+
+  tensorboard:
+    image: python:3.11-slim
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        mkdir -p /hpc-compose/job/logs
+        tensorboard --logdir /hpc-compose/job/logs --host 0.0.0.0 --port 6006 &
+        tb_pid=$$!
+        while [ ! -f /hpc-compose/job/request.done ]; do
+          if ! kill -0 "$$tb_pid" 2>/dev/null; then
+            wait "$$tb_pid"
+            exit $$?
+          fi
+          sleep 5
+        done
+        kill "$$tb_pid" 2>/dev/null || true
+        wait "$$tb_pid" || true
+    readiness:
+      type: http
+      url: http://127.0.0.1:6006
+      timeout_seconds: 300
+    x-runtime:
+      prepare:
+        commands:
+          - pip install --no-cache-dir tensorboard
+    x-slurm:
+      cpus_per_task: 2
