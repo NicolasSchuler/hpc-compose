@@ -3030,10 +3030,15 @@ impl HfStageSource {
     }
 
     fn validate(&self, index: usize) -> Result<()> {
+        // Validate the typed `repo`/`revision` fields directly (not via a
+        // reconstructed `repo@revision` URI) so the exact pair the renderer
+        // emits is the pair that is checked — a repo containing '@' cannot be
+        // re-split into a different repo/revision than what gets downloaded.
         let field = format!("x-slurm.stage_in[{index}].hf");
-        let uri = format!("{}@{}", self.uri(), self.revision);
-        crate::cache::dataset::parse_hf_uri(&uri, self.as_staged_input_kind())
-            .with_context(|| format!("{field} is invalid"))?;
+        crate::cache::dataset::validate_hf_repo(&self.repo)
+            .with_context(|| format!("{field}.repo is invalid"))?;
+        crate::cache::dataset::validate_hf_revision(&self.revision)
+            .with_context(|| format!("{field}.revision is invalid"))?;
         Ok(())
     }
 

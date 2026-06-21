@@ -160,27 +160,9 @@ pub fn parse_hf_uri(raw: &str, kind: StagedInputKind) -> Result<HfArtifactRef> {
 
     let repo = repo.trim();
     let revision = revision.trim();
-
-    let segments: Vec<&str> = repo.split('/').collect();
-    if segments.len() != 2 || segments.iter().any(|s| s.trim().is_empty()) {
-        anyhow::bail!(
-            "{HF_URI_SCHEME} reference '{raw}' must name a repo as 'org/name', got '{repo}'"
-        );
-    }
-    if repo.contains('\0') || revision.contains('\0') {
-        anyhow::bail!("{HF_URI_SCHEME} reference '{raw}' must not contain null bytes");
-    }
-
-    if revision.is_empty() {
-        anyhow::bail!(
-            "{HF_URI_SCHEME} reference '{raw}' must pin a non-empty immutable revision after '@'"
-        );
-    }
-    if is_floating_revision(revision) {
-        anyhow::bail!(
-            "{HF_URI_SCHEME} reference '{raw}' pins floating ref '{revision}'; pin an immutable commit SHA (or an explicit immutable tag) for reproducibility"
-        );
-    }
+    validate_hf_repo(repo).with_context(|| format!("invalid {HF_URI_SCHEME} reference '{raw}'"))?;
+    validate_hf_revision(revision)
+        .with_context(|| format!("invalid {HF_URI_SCHEME} reference '{raw}'"))?;
 
     Ok(HfArtifactRef {
         repo: repo.to_string(),
@@ -189,16 +171,87 @@ pub fn parse_hf_uri(raw: &str, kind: StagedInputKind) -> Result<HfArtifactRef> {
     })
 }
 
-/// Whether a revision token is a well-known floating ref that must be rejected.
+/// Validates a HuggingFace repo id (`org/name`).
 ///
-/// A commit SHA (hex, >= 7 chars) or an explicit version-looking tag is
-/// accepted; the common mutable branch names and `HEAD` are not.
-fn is_floating_revision(revision: &str) -> bool {
-    let lower = revision.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "main" | "master" | "head" | "latest" | "dev"
-    )
+/// Requires exactly two non-empty segments drawn from `[A-Za-z0-9._-]`. The
+/// allowlist deliberately excludes `@`, whitespace, and every shell
+/// metacharacter, so a validated repo is safe to embed in the rendered batch
+/// script and a repo cannot smuggle a second `@rev` past validation.
+///
+/// # Errors
+/// Returns an error when the repo is not exactly `org/name` or contains a
+/// disallowed character.
+pub fn validate_hf_repo(repo: &str) -> Result<()> {
+    let segments: Vec<&str> = repo.split('/').collect();
+    if segments.len() != 2 || segments.iter().any(|s| s.is_empty()) {
+        anyhow::bail!("HuggingFace repo must be 'org/name', got '{repo}'");
+    }
+    if !repo
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        anyhow::bail!(
+            "HuggingFace repo '{repo}' may only contain letters, digits, '-', '_', '.', and a single '/'"
+        );
+    }
+    Ok(())
+}
+
+/// Validates that a revision is an immutable pin.
+///
+/// Accepts only a commit-SHA-shaped hex token (>= 7 hex chars) or an explicit
+/// version-looking tag (`v?N(.N)*` with an optional `-` pre-release suffix of
+/// `[A-Za-z0-9.-]`). Branch names and other floating refs are rejected for
+/// reproducibility, and every accepted shape is free of shell metacharacters by
+/// construction.
+///
+/// # Errors
+/// Returns an error when the revision is empty or not an immutable pin.
+pub fn validate_hf_revision(revision: &str) -> Result<()> {
+    if revision.is_empty() {
+        anyhow::bail!("HuggingFace revision must be a non-empty immutable pin");
+    }
+    if !is_immutable_revision(revision) {
+        anyhow::bail!(
+            "HuggingFace revision '{revision}' is not an immutable pin; use a commit SHA (>= 7 hex chars) or an explicit version tag (e.g. 'v1.2.0'), not a branch/floating ref"
+        );
+    }
+    Ok(())
+}
+
+/// Whether a revision is an immutable pin (commit SHA or explicit version tag).
+fn is_immutable_revision(revision: &str) -> bool {
+    is_commit_sha(revision) || is_version_tag(revision)
+}
+
+/// A commit-SHA-shaped token: all hex, at least 7 chars (short or full SHA).
+fn is_commit_sha(s: &str) -> bool {
+    s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// An explicit version-looking tag: optional `v`, a numeric `N(.N)*` core, and
+/// an optional `-` pre-release suffix of `[A-Za-z0-9.-]`.
+fn is_version_tag(s: &str) -> bool {
+    let core = s.strip_prefix('v').unwrap_or(s);
+    let (numeric, suffix) = match core.split_once('-') {
+        Some((numeric, rest)) => (numeric, Some(rest)),
+        None => (core, None),
+    };
+    if numeric.is_empty()
+        || !numeric.chars().next().is_some_and(|c| c.is_ascii_digit())
+        || !numeric.chars().all(|c| c.is_ascii_digit() || c == '.')
+    {
+        return false;
+    }
+    match suffix {
+        None => true,
+        Some(suffix) => {
+            !suffix.is_empty()
+                && suffix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        }
+    }
 }
 
 /// Renders the guarded, cluster-side `huggingface-cli download` shell step for a
@@ -225,16 +278,19 @@ pub fn render_hf_stage_command(reference: &HfArtifactRef, dest: &str, cli_bin: &
     let target = shell_single_quote(dest);
     let marker = shell_single_quote(HF_COMPLETE_MARKER);
 
+    let kind_word = match reference.kind {
+        StagedInputKind::Dataset => "dataset",
+        StagedInputKind::Model => "model",
+    };
     let mut out = String::new();
+    // Build the progress line from shell-quoted tokens (and a quoted "->" so it
+    // is not a redirection). Never interpolate the raw repo/revision/dest: they
+    // are attacker-controlled compose input. Validation also confines repo and
+    // revision to a shell-safe allowlist, but quote here too (defense in depth).
     out.push_str(&format!(
-        "echo \"Staging in HuggingFace {} {}@{} -> {}\"\n",
-        match reference.kind {
-            StagedInputKind::Dataset => "dataset",
-            StagedInputKind::Model => "model",
-        },
-        reference.repo,
-        reference.revision,
-        dest
+        "echo {} {repo}@{revision} {} {target}\n",
+        shell_single_quote(&format!("Staging in HuggingFace {kind_word}")),
+        shell_single_quote("->"),
     ));
     out.push_str(&format!("HF_STAGE_TARGET={target}\n"));
     out.push_str(&format!("HF_STAGE_MARKER=\"$HF_STAGE_TARGET/\"{marker}\n"));
@@ -612,20 +668,50 @@ mod tests {
             .expect_err("missing rev must error");
         assert!(err.to_string().contains("immutable revision"));
 
-        // Floating refs are hard-rejected.
-        for floating in ["main", "master", "HEAD", "latest", "dev"] {
+        // Floating / branch refs are hard-rejected: the allowlist accepts only
+        // immutable pins, so arbitrary branch names no longer slip through.
+        for floating in [
+            "main",
+            "master",
+            "HEAD",
+            "latest",
+            "dev",
+            "release",
+            "production",
+            "my-feature",
+        ] {
             let raw = format!("hf://org/name@{floating}");
-            let err =
-                parse_hf_uri(&raw, StagedInputKind::Dataset).expect_err("floating ref must error");
+            let err = parse_hf_uri(&raw, StagedInputKind::Dataset)
+                .expect_err("floating/branch ref must error");
             assert!(
-                err.to_string().contains("floating ref"),
-                "floating ref '{floating}' should be rejected"
+                format!("{err:#}").contains("immutable pin"),
+                "branch ref '{floating}' should be rejected: {err:#}"
+            );
+        }
+
+        // Immutable pins are accepted: short and full commit SHAs, version tags.
+        for ok in [
+            "abc1234",
+            "0123456789abcdef0123456789abcdef01234567",
+            "v1.2.0",
+            "1.0",
+            "v2",
+            "v1.0.0-rc.1",
+        ] {
+            let raw = format!("hf://org/name@{ok}");
+            assert!(
+                parse_hf_uri(&raw, StagedInputKind::Model).is_ok(),
+                "immutable revision '{ok}' should be accepted"
             );
         }
 
         // A bad repo shape is rejected.
         assert!(parse_hf_uri("hf://only-one-segment@abc1234", StagedInputKind::Model).is_err());
         assert!(parse_hf_uri("hf://a/b/c@abc1234", StagedInputKind::Model).is_err());
+        // Shell metacharacters in the repo or revision are rejected (the
+        // allowlist closes the injection path before render).
+        assert!(parse_hf_uri("hf://org/n$(id)@abc1234", StagedInputKind::Model).is_err());
+        assert!(parse_hf_uri("hf://org/name@abc1234$(id)", StagedInputKind::Model).is_err());
     }
 
     #[test]
