@@ -19,12 +19,17 @@
 //! --exclude-standard`) so it sees working-tree bytes and honors `.gitignore`
 //! (excluding `.git/`, build output, virtualenvs); it falls back to a plain walk
 //! that skips `.git/` when the tree is not a git repo or git is unavailable.
+//!
+//! A `.hpcignore` at the snapshot root (gitignore/dockerignore-style) excludes
+//! additional paths on top of `.gitignore`, so a tracked file can still be kept
+//! out of the snapshot (e.g. large fixtures, generated docs).
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use crate::cache::dataset::{
@@ -122,11 +127,16 @@ fn enumerate_source(root: &Path) -> Result<Vec<SourceEntry>> {
         Some(rels) => rels,
         None => walk_files(root)?,
     };
+    let ignore = HpcIgnore::load(root);
     let mut entries = Vec::with_capacity(rels.len());
     for rel in rels {
         // Defense in depth: never let an odd path (`..`, absolute) escape the
         // destination directory when the snapshot is copied.
         if !is_safe_rel(&rel) {
+            continue;
+        }
+        // Honor a repo-root .hpcignore (extra excludes on top of .gitignore).
+        if ignore.is_ignored(&rel) {
             continue;
         }
         let abs = root.join(&rel);
@@ -320,6 +330,141 @@ fn symlink_file(_target: &Path, _link: &Path) -> std::io::Result<()> {
     ))
 }
 
+/// A parsed `.hpcignore`: gitignore/dockerignore-style exclusion patterns applied
+/// on top of git's `.gitignore`, so a *tracked* file can still be kept out of the
+/// source snapshot. An absent file yields no rules (the snapshot is unchanged).
+///
+/// Supports `#` comments and blank lines, `!` negation (last matching rule wins),
+/// a trailing `/` (directory only), a leading or internal `/` (root-anchored;
+/// otherwise the pattern matches a path component at any depth), and `*`/`**`/`?`
+/// globs (`**` spans `/`, `*` and `?` do not).
+struct HpcIgnore {
+    rules: Vec<IgnoreRule>,
+}
+
+struct IgnoreRule {
+    regex: Regex,
+    negated: bool,
+    dir_only: bool,
+    anchored: bool,
+}
+
+impl HpcIgnore {
+    /// Loads `<root>/.hpcignore`; a missing or unreadable file yields no rules.
+    fn load(root: &Path) -> Self {
+        let contents = fs::read_to_string(root.join(".hpcignore")).unwrap_or_default();
+        let rules = contents.lines().filter_map(IgnoreRule::parse).collect();
+        HpcIgnore { rules }
+    }
+
+    /// Whether the `/`-separated relative file path is excluded. Each matching
+    /// rule flips the verdict; a `!`-negated rule re-includes (last match wins).
+    fn is_ignored(&self, rel: &str) -> bool {
+        if self.rules.is_empty() {
+            return false;
+        }
+        let components: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
+        let mut ignored = false;
+        for rule in &self.rules {
+            if rule.matches(&components) {
+                ignored = !rule.negated;
+            }
+        }
+        ignored
+    }
+}
+
+impl IgnoreRule {
+    fn parse(raw: &str) -> Option<Self> {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (negated, rest) = match line.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, line),
+        };
+        let dir_only = rest.ends_with('/');
+        let trimmed = rest.trim_end_matches('/');
+        let anchored = trimmed.starts_with('/') || trimmed.contains('/');
+        let pattern = trimmed.trim_start_matches('/');
+        if pattern.is_empty() {
+            return None;
+        }
+        let regex = Regex::new(&glob_to_regex(pattern)).ok()?;
+        Some(IgnoreRule {
+            regex,
+            negated,
+            dir_only,
+            anchored,
+        })
+    }
+
+    /// Matches against a file's path components. Anchored rules test each path
+    /// prefix (root-relative); unanchored rules test each component (basename at
+    /// any depth). A directory-only rule never matches the final (file)
+    /// component — only an ancestor.
+    fn matches(&self, components: &[&str]) -> bool {
+        if components.is_empty() {
+            return false;
+        }
+        let last = components.len() - 1;
+        if self.anchored {
+            for end in 0..components.len() {
+                if self.dir_only && end == last {
+                    continue;
+                }
+                if self.regex.is_match(&components[..=end].join("/")) {
+                    return true;
+                }
+            }
+        } else {
+            for (index, component) in components.iter().enumerate() {
+                if self.dir_only && index == last {
+                    continue;
+                }
+                if self.regex.is_match(component) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Translates a gitignore-style glob into an anchored regex string. `**` spans
+/// path separators; `*` and `?` do not. Other regex metacharacters are escaped.
+fn glob_to_regex(glob: &str) -> String {
+    let chars: Vec<char> = glob.chars().collect();
+    let mut regex = String::from("^");
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '*' => {
+                if chars.get(index + 1) == Some(&'*') {
+                    regex.push_str(".*");
+                    index += 2;
+                    if chars.get(index) == Some(&'/') {
+                        index += 1;
+                    }
+                    continue;
+                }
+                regex.push_str("[^/]*");
+            }
+            '?' => regex.push_str("[^/]"),
+            c => {
+                if ".+()[]{}^$|\\".contains(c) {
+                    regex.push('\\');
+                }
+                regex.push(c);
+            }
+        }
+        index += 1;
+    }
+    regex.push('$');
+    regex
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +638,69 @@ mod tests {
         assert!(!is_safe_rel("a/../../escape"));
         assert!(!is_safe_rel("/abs/path"));
         assert!(!is_safe_rel(""));
+    }
+
+    fn ignore_from(lines: &str) -> HpcIgnore {
+        HpcIgnore {
+            rules: lines.lines().filter_map(IgnoreRule::parse).collect(),
+        }
+    }
+
+    #[test]
+    fn hpcignore_matches_common_patterns() {
+        // Basename glob at any depth.
+        let i = ignore_from("*.log");
+        assert!(i.is_ignored("a/b/c.log"));
+        assert!(i.is_ignored("x.log"));
+        assert!(!i.is_ignored("a/b/c.txt"));
+
+        // Directory (slashless) at any depth.
+        let i = ignore_from("build/");
+        assert!(i.is_ignored("build/out.o"));
+        assert!(i.is_ignored("src/build/out.o"));
+        assert!(!i.is_ignored("buildx"));
+
+        // Root-anchored (leading slash).
+        let i = ignore_from("/secret.txt");
+        assert!(i.is_ignored("secret.txt"));
+        assert!(!i.is_ignored("sub/secret.txt"));
+
+        // Anchored relative path (internal slash).
+        let i = ignore_from("docs/api");
+        assert!(i.is_ignored("docs/api/index.html"));
+        assert!(!i.is_ignored("src/docs/api/x"));
+
+        // Negation re-includes (last match wins).
+        let i = ignore_from("*.log\n!keep.log");
+        assert!(i.is_ignored("debug.log"));
+        assert!(!i.is_ignored("keep.log"));
+
+        // Comments / blanks are skipped; an empty file ignores nothing.
+        let i = ignore_from("# comment\n\n*.tmp");
+        assert!(i.is_ignored("a.tmp"));
+        assert!(!ignore_from("").is_ignored("anything"));
+    }
+
+    #[test]
+    fn stage_source_honors_hpcignore() {
+        let src = tempfile::tempdir().expect("src");
+        let cache = tempfile::tempdir().expect("cache");
+        write(src.path(), "keep.rs", b"keep");
+        write(src.path(), "big/data.bin", b"excluded");
+        write(src.path(), "notes.tmp", b"tmp");
+        write(src.path(), ".hpcignore", b"big/\n*.tmp\n");
+
+        let snap = stage_source(src.path(), cache.path()).expect("stage");
+        assert!(snap.dir.join("keep.rs").exists());
+        assert!(
+            !snap.dir.join("big/data.bin").exists(),
+            "an .hpcignore'd directory is excluded from the snapshot"
+        );
+        assert!(
+            !snap.dir.join("notes.tmp").exists(),
+            "an .hpcignore'd glob is excluded from the snapshot"
+        );
+        // The .hpcignore file itself is a tracked source file and is kept.
+        assert!(snap.dir.join(".hpcignore").exists());
     }
 }

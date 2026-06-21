@@ -146,8 +146,9 @@ modes reuse — without yet changing how a job runs:
 
 ### Deliberately deferred (need maintainer review)
 
-- **`.hpcignore`** — git enumeration already excludes `.git`/`target`/venvs via
-  `.gitignore`; a dockerignore-style extra-exclude matcher is the next increment.
+- **`.hpcignore` — LANDED.** A gitignore/dockerignore-style matcher (`*`/`**`/`?`
+  globs, `!` negation, dir-only, root/basename anchoring) at the snapshot root
+  filters `enumerate_source` on top of `.gitignore`; an absent file is a no-op.
 - **Wiring `stage_source` into the gated submit path — LANDED (record-only).**
   `collect_submit_provenance` now stages via `attach_submit_source_snapshot`, gated
   on `provenance.git.is_some()` (so it is dormant in non-git test tempdirs — zero
