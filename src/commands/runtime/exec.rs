@@ -768,6 +768,15 @@ fn print_notebook_connection(connection: &notebook::NotebookConnection) {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct NotebookDryRunOutput {
+    dry_run: bool,
+    submitted: bool,
+    kind: String,
+    script_path: PathBuf,
+    cache_dir: PathBuf,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn notebook(
     context: ResolvedContext,
@@ -922,13 +931,27 @@ pub(crate) fn notebook(
     })?;
 
     if dry_run {
-        println!(
-            "{}",
-            term::styled_success(&format!(
-                "rendered notebook launcher: {}",
-                script_path.display()
-            ))
-        );
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&NotebookDryRunOutput {
+                    dry_run: true,
+                    submitted: false,
+                    kind: nb_args.kind.as_str().to_string(),
+                    script_path,
+                    cache_dir: runtime_plan.cache_dir,
+                })
+                .context("failed to serialize notebook dry-run output")?
+            );
+        } else {
+            println!(
+                "{}",
+                term::styled_success(&format!(
+                    "rendered notebook launcher: {}",
+                    script_path.display()
+                ))
+            );
+        }
         return Ok(());
     }
 

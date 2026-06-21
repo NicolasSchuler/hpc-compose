@@ -1605,11 +1605,38 @@ fn sweep_variable_columns<'a>(
     columns.into_iter().collect()
 }
 
+fn manifest_trial_interpolation_vars(
+    base: &BTreeMap<String, String>,
+    sweep_id: &str,
+    trial: &SweepManifestTrial,
+) -> BTreeMap<String, String> {
+    let mut vars = base.clone();
+    vars.extend(trial.variables.clone());
+    vars.insert("HPC_COMPOSE_SWEEP_ID".to_string(), sweep_id.to_string());
+    vars.insert(
+        "HPC_COMPOSE_SWEEP_TRIAL".to_string(),
+        trial.trial_id.clone(),
+    );
+    vars.insert(
+        "HPC_COMPOSE_SWEEP_TRIAL_INDEX".to_string(),
+        trial.index.to_string(),
+    );
+    vars.insert(
+        "HPC_COMPOSE_SWEEP_REPLICATE".to_string(),
+        trial.replicate.to_string(),
+    );
+    if let Some(seed) = &trial.seed {
+        vars.insert("HPC_COMPOSE_SWEEP_SEED".to_string(), seed.clone());
+    }
+    vars
+}
+
 /// Loads the per-trial efficiency report (resolves the tracked record + runtime
 /// plan, then builds the score). Static read of tracked state plus the same
 /// terminal-only accounting probe `score` performs.
 fn trial_efficiency_report(
     context: &ResolvedContext,
+    manifest: &SweepManifest,
     trial: &SweepManifestTrial,
     options: &EfficiencyScoreOptions,
 ) -> Result<hpc_compose::job::EfficiencyScoreReport> {
@@ -1619,10 +1646,12 @@ fn trial_efficiency_report(
         .context("trial has no recorded job id")?;
     let record = resolve_tracked_record(context, Some(job_id))?
         .with_context(|| format!("no tracked record for trial job {job_id}"))?;
+    let vars =
+        manifest_trial_interpolation_vars(&context.interpolation_vars, &manifest.sweep_id, trial);
     let plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &record.compose_file,
-            &context.interpolation_vars,
+            &vars,
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
@@ -1672,7 +1701,7 @@ pub(crate) fn sweep_results(
             };
         parsed_by_trial.insert(trial.trial_id.clone(), parsed);
         let (score, energy_kwh) = if want_score || want_energy {
-            match trial_efficiency_report(&context, trial, &score_options) {
+            match trial_efficiency_report(&context, &manifest, trial, &score_options) {
                 Ok(report) => (
                     want_score.then_some(report.score),
                     if want_energy { report.energy_kwh } else { None },
@@ -1886,10 +1915,11 @@ pub(crate) fn score_sweep(
         .trials
         .iter()
         .map(|trial| {
-            let (report, error) = match trial_efficiency_report(&context, trial, &options) {
-                Ok(report) => (Some(report), None),
-                Err(err) => (None, Some(format!("{err:#}"))),
-            };
+            let (report, error) =
+                match trial_efficiency_report(&context, &manifest, trial, &options) {
+                    Ok(report) => (Some(report), None),
+                    Err(err) => (None, Some(format!("{err:#}"))),
+                };
             SweepScoreTrial {
                 trial_id: trial.trial_id.clone(),
                 config_key: trial.config_key.clone(),
@@ -2041,6 +2071,57 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn manifest_trial_interpolation_vars_overlay_trial_and_reserved_values() {
+        let base = vars(&[("LR", "base"), ("KEEP", "yes")]);
+        let trial = SweepManifestTrial {
+            trial_id: "t000r1".into(),
+            index: 3,
+            variables: vars(&[("LR", "0.2"), ("BATCH", "64")]),
+            config_key: "BATCH=64;LR=0.2".into(),
+            replicate: 1,
+            seed: Some("seed-1".into()),
+            script_path: PathBuf::from("t000r1.sbatch"),
+            job_id: None,
+            record_path: None,
+            submitted_at: None,
+            submit_error: None,
+            objective: None,
+            objective_error: None,
+            observed_at: None,
+        };
+
+        let resolved = manifest_trial_interpolation_vars(&base, "sweep-123", &trial);
+
+        assert_eq!(resolved.get("KEEP").map(String::as_str), Some("yes"));
+        assert_eq!(resolved.get("LR").map(String::as_str), Some("0.2"));
+        assert_eq!(resolved.get("BATCH").map(String::as_str), Some("64"));
+        assert_eq!(
+            resolved.get("HPC_COMPOSE_SWEEP_ID").map(String::as_str),
+            Some("sweep-123")
+        );
+        assert_eq!(
+            resolved.get("HPC_COMPOSE_SWEEP_TRIAL").map(String::as_str),
+            Some("t000r1")
+        );
+        assert_eq!(
+            resolved
+                .get("HPC_COMPOSE_SWEEP_TRIAL_INDEX")
+                .map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            resolved
+                .get("HPC_COMPOSE_SWEEP_REPLICATE")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            resolved.get("HPC_COMPOSE_SWEEP_SEED").map(String::as_str),
+            Some("seed-1")
+        );
     }
 
     #[test]

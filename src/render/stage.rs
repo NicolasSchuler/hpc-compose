@@ -371,9 +371,9 @@ pub(super) fn render_hf_stage_in(out: &mut String, plan: &RuntimePlan, huggingfa
         // Materialize the staged artifact into the in-job destination so the
         // service sees it at the spec'd `to` path, reusing the path-copy helper.
         let to = shell_single_quote(&entry.to);
-        out.push_str(&format!(
-            "  stage_copy_path \"$HF_STAGE_TARGET\"/. {to} copy\n"
-        ));
+        out.push_str("  local hf_stage_to\n");
+        out.push_str(&format!("  hf_stage_to=$(scratch_host_path_for {to})\n"));
+        out.push_str("  stage_copy_path \"$HF_STAGE_TARGET\"/. \"$hf_stage_to\" copy\n");
     }
     out.push_str("}\n\n");
 }

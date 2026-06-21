@@ -6072,6 +6072,43 @@ fn notebook_dry_run_renders_jupyter_launcher_without_submitting() {
 }
 
 #[test]
+fn notebook_dry_run_format_json_emits_json_preview() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let script_out = tmpdir.path().join("notebook.sbatch");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "--kind",
+            "jupyter",
+            "--dry-run",
+            "--format",
+            "json",
+            "--no-preflight",
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("dry-run json");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["submitted"], false);
+    assert_eq!(payload["kind"], "jupyter");
+    assert_eq!(payload["script_path"], script_out.display().to_string());
+    assert!(payload["cache_dir"].as_str().is_some());
+    assert!(
+        script_out.exists(),
+        "dry-run json should still write the launcher script"
+    );
+    assert!(
+        !tmpdir
+            .path()
+            .join(".hpc-compose/latest-notebook.json")
+            .exists()
+    );
+}
+
+#[test]
 fn notebook_dry_run_renders_vscode_command_when_image_supplied() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let script_out = tmpdir.path().join("notebook.sbatch");

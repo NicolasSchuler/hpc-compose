@@ -861,6 +861,50 @@ fn hf_stage_in_renders_cluster_side_download_not_a_mount() {
 }
 
 #[test]
+fn hf_stage_in_resolves_scratch_destination_before_copying() {
+    let plan = RuntimePlan {
+        name: "hf-scratch-demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            scratch: Some(ScratchConfig {
+                scope: crate::spec::ScratchScope::Shared,
+                base: "/scratch/jobs".into(),
+                mount: "/scratch".into(),
+                cleanup: ScratchCleanupPolicy::OnSuccess,
+            }),
+            stage_in: vec![StageInConfig {
+                from: None,
+                to: "/scratch/models/llama".into(),
+                mode: StageMode::Rsync,
+                hf: Some(crate::spec::HfStageSource {
+                    repo: "meta-llama/Llama-3.1-8B".into(),
+                    revision: "abc1234def".into(),
+                    kind: crate::spec::HfStageKind::Model,
+                }),
+            }],
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_script(&plan).expect("script");
+
+    assert!(
+        script.contains("hf_stage_to=$(scratch_host_path_for '/scratch/models/llama')"),
+        "hf stage-in destination should use scratch host mapping; got:\n{script}"
+    );
+    assert!(
+        script.contains("stage_copy_path \"$HF_STAGE_TARGET\"/. \"$hf_stage_to\" copy"),
+        "hf stage-in should copy into the resolved destination; got:\n{script}"
+    );
+    assert!(
+        !script.contains("stage_copy_path \"$HF_STAGE_TARGET\"/. '/scratch/models/llama' copy"),
+        "hf stage-in should not copy to the literal scratch container path"
+    );
+}
+
+#[test]
 fn render_scratch_without_staging_defines_cleanup_helpers() {
     let plan = RuntimePlan {
         name: "scratch-only".into(),
