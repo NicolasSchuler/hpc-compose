@@ -248,8 +248,8 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | --- | --- | --- |
 | `--sbatch-bin` | `sbatch` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--srun-bin` | `srun` | `up`, `when`, `alloc`, `germinate`, `test`, `run`, `notebook`, `shell`, `sweep submit`, `preflight`, `debug`, `doctor` |
-| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug`, `weather` |
-| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug` |
+| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `reach`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug`, `weather` |
+| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `reach`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug` |
 | `--salloc-bin` | `salloc` | `alloc` |
 | `--scontrol-bin` | `scontrol` | `alloc`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--sinfo-bin` | `sinfo` | `when`, `weather` |
@@ -503,6 +503,7 @@ hpc-compose status -f compose.yaml --format json
 | `status` | Summarize scheduler state, the top-level batch log, per-service outcomes, and failure-policy state | Prefer `--format json` for automation. Add `--array` to include merged `squeue --array` and `sacct --array` task rows. |
 | `ps` | Show a stable per-service runtime snapshot | Useful when you want a point-in-time view instead of the live TUI. |
 | `watch` | Reconnect to the live watch UI | Falls back to line-oriented output on non-interactive terminals. |
+| `reach` | Print the SSH tunnel to reach a tracked service from a laptop | Resolves the compute node from tracked status and the port from the service's TCP/HTTP readiness, then prints an `ssh -L` command (with `ControlMaster` multiplexing so an OTP login node prompts once) or runs it in the foreground with `--open`. Pass `--port` for services without TCP/HTTP readiness; `--format json` emits `{service, job_id, compute_node, login_host, local_port, remote_port, url, ssh_command}`. |
 | `replay` | Reanimate a tracked job timeline from existing artifacts | Best-effort DVR view built from final state, service-exit markers, metrics JSONL, and logs. Use `--speed` or `--format json` as needed. |
 | `logs` | Print tracked service logs | Add `--follow`, `--grep <pattern>`, or coarse `--since <duration>` as needed. |
 | `inspect --rightsize` | Suggest conservative resource request reductions after a tracked run | Uses tracked `sacct`, `sstat`, and sampler evidence; supports `--job-id` and `--format json`. |

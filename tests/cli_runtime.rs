@@ -6779,6 +6779,98 @@ echo "Submitted batch job 12345"
     assert!(stdout.contains("[app] ready"));
 }
 
+#[test]
+fn reach_prints_multiplexed_tunnel_for_tcp_readiness_service() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().to_path_buf();
+    let compose = project.join("reach.yaml");
+    fs::write(
+        &compose,
+        format!(
+            r#"name: reach-test
+x-slurm:
+  cache_dir: {}
+  time: "00:10:00"
+services:
+  api:
+    image: docker://python:3.12
+    command: ["true"]
+    readiness:
+      type: tcp
+      port: 8000
+"#,
+            cache_dir.display()
+        ),
+    )
+    .expect("compose");
+    let plan = runtime_plan(&compose);
+    let script = project.join("reach.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "55555",
+        SubmissionBackend::Slurm,
+        &SubmissionRecordBuildOptions::default(),
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    // --open + --format json is rejected up front (before any scheduler contact).
+    let bad = run_cli(
+        &project,
+        &[
+            "reach",
+            "api",
+            "-f",
+            compose.to_str().expect("path"),
+            "--open",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(!bad.status.success());
+    assert!(stderr_text(&bad).contains("--open cannot be combined with --format json"));
+
+    // Happy path: JSON with the readiness-derived port and a multiplexed ssh line.
+    // No fake scheduler bins are needed — build_status_snapshot degrades and the
+    // compute node falls back to a placeholder.
+    let out = run_cli(
+        &project,
+        &[
+            "reach",
+            "api",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "55555",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("reach json");
+    assert_eq!(value["service"], Value::from("api"));
+    assert_eq!(value["remote_port"], Value::from(8000));
+    assert_eq!(value["local_port"], Value::from(8000));
+    assert!(
+        value["url"]
+            .as_str()
+            .expect("url")
+            .contains("127.0.0.1:8000")
+    );
+    let ssh = value["ssh_command"].as_str().expect("ssh_command");
+    assert!(ssh.contains("-L 8000:"), "forward present: {ssh}");
+    assert!(
+        ssh.contains("ControlMaster=auto"),
+        "multiplexing present: {ssh}"
+    );
+}
+
 fn results_trial(trial_id: &str, index: usize, vars: &[(&str, &str)]) -> SweepManifestTrial {
     SweepManifestTrial {
         trial_id: trial_id.to_string(),

@@ -667,9 +667,9 @@ fn default_notebook_script_path(cwd: &Path, local: bool) -> PathBuf {
 }
 
 /// Best-effort fully-qualified hostname of the current host, used as the SSH
-/// jump host in the Jupyter tunnel hint. Returns `None` when it cannot be
-/// determined so the hint degrades to a placeholder.
-fn current_hostname() -> Option<String> {
+/// jump host in the Jupyter tunnel hint and `reach`. Returns `None` when it
+/// cannot be determined so the hint degrades to a placeholder.
+pub(crate) fn current_hostname() -> Option<String> {
     if let Some(name) = env::var_os("HOSTNAME")
         && !name.is_empty()
         && name.to_string_lossy() != "127.0.0.1"

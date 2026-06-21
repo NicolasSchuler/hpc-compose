@@ -279,6 +279,14 @@ Examples:
 Set login_host in settings so the tunnel hint names your real SSH login host.
 Stop the server with the management command printed after launch.";
 
+pub(super) const REACH_HELP: &str = "\
+Examples:
+  hpc-compose reach api -f compose.yaml
+  hpc-compose reach api -f compose.yaml --format json
+  hpc-compose reach jupyter --port 8888 --open
+On an OTP/2FA login node, the printed ssh command reuses one authenticated
+connection (ControlMaster), so you enter the OTP only once.";
+
 pub(super) const NEW_HELP: &str = "\
 Examples:
   hpc-compose new --list-templates

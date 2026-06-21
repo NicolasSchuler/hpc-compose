@@ -2414,6 +2414,56 @@ pub enum Commands {
         command: ExamplesCommands,
     },
     #[command(
+        display_order = 225,
+        about = "Print the SSH tunnel to reach a tracked service from a laptop",
+        long_about = "Resolve the SSH port-forward needed to reach a tracked service's TCP/HTTP readiness port from a laptop: the compute node comes from tracked status and the port from the service readiness. Prints the `ssh -L` command (with connection multiplexing so an OTP login node prompts only once), or runs it in the foreground with --open. Read-only; never daemonizes a tunnel.",
+        after_help = REACH_HELP
+    )]
+    Reach {
+        #[arg(
+            value_name = "SERVICE",
+            help = "Service whose readiness port should be forwarded"
+        )]
+        service: String,
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to reach instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "PORT",
+            help = "Override the forwarded port; required for services without TCP/HTTP readiness"
+        )]
+        port: Option<u16>,
+        #[arg(
+            long,
+            help = "Run the port-forward in the foreground (Ctrl-C to stop) instead of printing the command"
+        )]
+        open: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help_heading = "Tool overrides",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help_heading = "Tool overrides",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+    },
+    #[command(
         display_order = 480,
         about = "Generate shell completions",
         long_about = "Generate shell completion scripts for the supported shells.",

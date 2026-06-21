@@ -1519,6 +1519,23 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 format,
             )
         }
+        Commands::Reach {
+            service,
+            file,
+            job_id,
+            port,
+            open,
+            format,
+            squeue_bin,
+            sacct_bin,
+        } => {
+            let context = resolve_ctx(
+                options,
+                file,
+                &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
+            )?;
+            runtime::reach(context, service, job_id, port, open, format)
+        }
         Commands::Completions { shell } => init::completions(shell),
     }
 }

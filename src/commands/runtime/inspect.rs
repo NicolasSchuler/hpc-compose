@@ -467,7 +467,7 @@ fn replay_event_kind_label(kind: hpc_compose::job::ReplayEventKind) -> &'static 
     }
 }
 
-fn tracked_job_hint(job_id: Option<&str>) -> String {
+pub(crate) fn tracked_job_hint(job_id: Option<&str>) -> String {
     match job_id {
         Some(job_id) => format!(
             "tracked job '{job_id}' was not found from this repository; run `hpc-compose jobs list` to inspect known tracked jobs"
