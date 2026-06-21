@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{
-    CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, JobsCommands, OutputFormat,
-    RendezvousCommands, SchemaKind, SweepCommands,
+    CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, ExperimentCommands,
+    JobsCommands, OutputFormat, RendezvousCommands, SchemaKind, SweepCommands,
 };
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
@@ -1551,6 +1551,38 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             )?;
             runtime::reach(context, service, job_id, port, open, format)
         }
+        Commands::Experiment { command } => match command {
+            ExperimentCommands::Show {
+                job_id,
+                file,
+                format,
+                pue,
+                gpu_tdp_w,
+                cpu_watts_per_core,
+                sstat_bin,
+                squeue_bin,
+                sacct_bin,
+            } => {
+                let context = resolve_ctx(
+                    options,
+                    file,
+                    &[
+                        ("--sstat-bin", &sstat_bin),
+                        ("--squeue-bin", &squeue_bin),
+                        ("--sacct-bin", &sacct_bin),
+                    ],
+                )?;
+                runtime::experiment_show(
+                    context,
+                    job_id,
+                    false,
+                    format,
+                    pue,
+                    gpu_tdp_w,
+                    cpu_watts_per_core,
+                )
+            }
+        },
         Commands::Completions { shell } => init::completions(shell),
     }
 }
@@ -2085,5 +2117,55 @@ mod tests {
             ],
         )
         .expect("run cli jobs list");
+    }
+
+    #[test]
+    fn run_cli_dispatches_experiment_show() {
+        // Routes to runtime::experiment_show in a throwaway dir with no tracked
+        // run; the dispatch is proven by the tracked-job hint error (not a
+        // command-not-wired panic), and nothing is submitted or written.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let compose = dir.path().join("compose.yaml");
+        std::fs::write(
+            &compose,
+            "name: dispatch-test\nx-slurm:\n  time: \"00:10:00\"\nservices:\n  app:\n    image: docker://python:3.12\n    command: [\"true\"]\n",
+        )
+        .expect("write compose");
+        let err = run_cli(
+            Cli {
+                color: hpc_compose::cli::ColorPolicy::Auto,
+                quiet: false,
+                profile: None,
+                settings_file: None,
+                command: Commands::Experiment {
+                    command: ExperimentCommands::Show {
+                        job_id: Some("99999".to_string()),
+                        file: Some(compose.clone()),
+                        format: Some(hpc_compose::cli::OutputFormat::Json),
+                        pue: 1.20,
+                        gpu_tdp_w: 300.0,
+                        cpu_watts_per_core: 8.0,
+                        sstat_bin: "sstat".to_string(),
+                        squeue_bin: "squeue".to_string(),
+                        sacct_bin: "sacct".to_string(),
+                    },
+                },
+            },
+            &[
+                OsString::from("hpc-compose"),
+                OsString::from("experiment"),
+                OsString::from("show"),
+                OsString::from("99999"),
+                OsString::from("-f"),
+                OsString::from(compose.as_os_str()),
+                OsString::from("--format"),
+                OsString::from("json"),
+            ],
+        )
+        .expect_err("unknown tracked job should error");
+        assert!(
+            err.to_string().contains("was not found"),
+            "expected tracked-job hint, got: {err}"
+        );
     }
 }

@@ -2500,6 +2500,16 @@ pub enum Commands {
         sacct_bin: String,
     },
     #[command(
+        display_order = 256,
+        about = "Aggregate one tracked run into a single read-only object",
+        long_about = "Read-only aggregation over a single tracked run: combines scheduler status, the post-run efficiency score, the artifact manifest, and submit-time provenance into one object. Static-safe — it contacts the scheduler only as much as `status`/`score` already do (squeue, terminal-only sacct/sstat), never submits, cancels, exports, writes a file, or opens a connection.",
+        after_help = EXPERIMENT_HELP
+    )]
+    Experiment {
+        #[command(subcommand)]
+        command: ExperimentCommands,
+    },
+    #[command(
         display_order = 480,
         about = "Generate shell completions",
         long_about = "Generate shell completion scripts for the supported shells.",
@@ -2853,6 +2863,72 @@ pub enum JobsCommands {
         disk_usage: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
+    },
+}
+
+/// Subcommands for the read-only `experiment` aggregator.
+#[derive(Debug, Subcommand)]
+pub enum ExperimentCommands {
+    #[command(
+        about = "Show one tracked run aggregated into a single object",
+        long_about = "Aggregate a single tracked run's scheduler status, post-run efficiency score, artifact manifest, and submit-time provenance into one read-only object. Defaults to the latest tracked run when no job id is given. Static-safe: contacts the scheduler only as much as `status`/`score` already do and writes nothing.",
+        after_help = EXPERIMENT_SHOW_HELP
+    )]
+    Show {
+        #[arg(
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to aggregate; defaults to the latest tracked run"
+        )]
+        job_id: Option<String>,
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            default_value_t = 1.20,
+            help = "Power usage effectiveness multiplier for the embedded efficiency report"
+        )]
+        pue: f64,
+        #[arg(
+            long,
+            value_name = "WATTS",
+            default_value_t = 300.0,
+            help = "Fallback GPU TDP in watts when sampler power is unavailable"
+        )]
+        gpu_tdp_w: f64,
+        #[arg(
+            long,
+            value_name = "WATTS",
+            default_value_t = 8.0,
+            help = "Fallback CPU watts per allocated core for energy estimates"
+        )]
+        cpu_watts_per_core: f64,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sstat",
+            help_heading = "Tool overrides",
+            help = "Path to the sstat executable"
+        )]
+        sstat_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help_heading = "Tool overrides",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help_heading = "Tool overrides",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
     },
 }
 

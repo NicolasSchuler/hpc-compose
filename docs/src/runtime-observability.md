@@ -178,6 +178,8 @@ Use `hpc-compose inspect --rightsize -f compose.yaml` after a tracked Slurm run 
 
 Use `hpc-compose score <job-id>` after a tracked Slurm run when you want a compact efficiency grade. The score reuses sampler history, `sacct`, `sstat`, and right-sizing recommendations, then reports GPU utilization, memory utilization, active compute-time versus requested walltime, and a best-effort kWh estimate. Energy uses sampled GPU power when available, otherwise falls back to power limits or configured TDP assumptions through `--gpu-tdp-w`, `--cpu-watts-per-core`, and `--pue`; it does not claim carbon intensity or emissions.
 
+Use `hpc-compose experiment show <job-id>` when you want all of that in one read-only object. A single call aggregates scheduler status, the post-run efficiency score, the artifact manifest, and submit-time provenance, so a notebook or experiment tracker can capture one run with one command (`hpc-compose experiment show <job-id> --format json`). It is static-safe: it contacts the scheduler only as much as `status` and `score` already do, writes nothing, and opens no connection. For each service with TCP or HTTP readiness it emits a per-service `ssh -L` tunnel hint, and `next_commands` carries SSH `ControlMaster`/`ControlPath`/`ControlPersist` multiplexing guidance so an OTP/2FA login node prompts you only once. Legacy records without provenance, non-terminal jobs without a complete efficiency report, and runs without an artifact manifest still produce a valid object with those fields omitted.
+
 For a short canary run before a full run, use `hpc-compose germinate`; see [Right-Sizing With Canary Runs](canary-runs.md).
 
 ## Sweep Manifests

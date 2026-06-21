@@ -248,13 +248,13 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | --- | --- | --- |
 | `--sbatch-bin` | `sbatch` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--srun-bin` | `srun` | `up`, `when`, `alloc`, `germinate`, `test`, `run`, `notebook`, `shell`, `sweep submit`, `preflight`, `debug`, `doctor` |
-| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `reach`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug`, `weather` |
-| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `reach`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug` |
+| `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `reach`, `experiment show`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug`, `weather` |
+| `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `reach`, `experiment show`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug` |
 | `--salloc-bin` | `salloc` | `alloc` |
 | `--scontrol-bin` | `scontrol` | `alloc`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--sinfo-bin` | `sinfo` | `when`, `weather` |
 | `--scancel-bin` | `scancel` | `test`, `cancel`, `down`, `sweep observe`, `sweep stop` |
-| `--sstat-bin` | `sstat` | `germinate`, `stats`, `inspect`, `score`, `sweep results` |
+| `--sstat-bin` | `sstat` | `germinate`, `stats`, `inspect`, `score`, `experiment show`, `sweep results` |
 | `--sshare-bin` | `sshare` | `weather` |
 | `--sprio-bin` | `sprio` | `weather` |
 | `--enroot-bin` | `enroot` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
@@ -513,6 +513,8 @@ hpc-compose status -f compose.yaml --format json
 | `ps` | Show a stable per-service runtime snapshot | Useful when you want a point-in-time view instead of the live TUI. |
 | `watch` | Reconnect to the live watch UI | Falls back to line-oriented output on non-interactive terminals. |
 | `reach` | Print the SSH tunnel to reach a tracked service from a laptop | Resolves the compute node from tracked status and the port from the service's TCP/HTTP readiness, then prints an `ssh -L` command (with `ControlMaster` multiplexing so an OTP login node prompts once) or runs it in the foreground with `--open`. Pass `--port` for services without TCP/HTTP readiness; `--format json` emits `{service, job_id, compute_node, login_host, local_port, remote_port, url, ssh_command}`. |
+| `experiment ` | Read-only aggregator for one tracked run | Parent command; the `experiment show` subcommand aggregates a single run into one object. |
+| `experiment show` | Aggregate one tracked run into a single read-only object | Combines scheduler status, the post-run efficiency score, the artifact manifest, and submit-time provenance into one object. `--format json` emits `{job_id, name, state, services[], provenance, results, efficiency, next_commands}`; each service carries `{name, nodelist, status, tunnel_hint}` with an `ssh -L` `ControlMaster` hint for TCP/HTTP readiness. Defaults to the latest tracked run; energy flags (`--pue`, `--gpu-tdp-w`, `--cpu-watts-per-core`) tune the embedded efficiency report. Static-safe: contacts the scheduler only as much as `status`/`score` do, writes nothing, and opens no connection. Example: `hpc-compose experiment show 12345 --format json`. |
 | `replay` | Reanimate a tracked job timeline from existing artifacts | Best-effort DVR view built from final state, service-exit markers, metrics JSONL, and logs. Use `--speed` or `--format json` as needed. |
 | `logs` | Print tracked service logs | Add `--follow`, `--grep <pattern>`, or coarse `--since <duration>` as needed. |
 | `inspect --rightsize` | Suggest conservative resource request reductions after a tracked run | Uses tracked `sacct`, `sstat`, and sampler evidence; supports `--job-id` and `--format json`. |

@@ -296,6 +296,18 @@ Examples:
 hpc-compose only prints the rsync command (it copies nothing). The ssh transport
 uses ControlMaster, so an OTP/2FA login node prompts only once.";
 
+pub(super) const EXPERIMENT_HELP: &str = "\
+Aggregate a single tracked run into one read-only object.";
+
+pub(super) const EXPERIMENT_SHOW_HELP: &str = "\
+Examples:
+  hpc-compose experiment show 12345
+  hpc-compose experiment show -f compose.yaml
+  hpc-compose experiment show 12345 --format json
+Read-only: status + score + artifacts + provenance in one object. The printed
+next_commands carry an ssh ControlMaster hint so an OTP/2FA login node prompts
+only once; nothing is written and no connection is opened.";
+
 pub(super) const NEW_HELP: &str = "\
 Examples:
   hpc-compose new --list-templates

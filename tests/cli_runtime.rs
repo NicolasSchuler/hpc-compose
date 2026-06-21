@@ -7118,6 +7118,149 @@ services:
     assert!(!project.join("results").exists());
 }
 
+#[test]
+fn experiment_show_aggregates_one_object_and_writes_nothing() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().to_path_buf();
+    let compose = project.join("experiment.yaml");
+    fs::write(
+        &compose,
+        format!(
+            r#"name: experiment-test
+x-slurm:
+  cache_dir: {}
+  time: "00:10:00"
+  artifacts:
+    export_dir: ./results/${{SLURM_JOB_ID}}
+    paths:
+      - /hpc-compose/job/out/**
+services:
+  api:
+    image: docker://python:3.12
+    command: ["true"]
+    readiness:
+      type: tcp
+      port: 8000
+  worker:
+    image: docker://python:3.12
+    command: ["true"]
+"#,
+            cache_dir.display()
+        ),
+    )
+    .expect("compose");
+    let plan = runtime_plan(&compose);
+    let script = project.join("experiment.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    // A record carrying provenance exercises the provenance block.
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "44444",
+        SubmissionBackend::Slurm,
+        &SubmissionRecordBuildOptions {
+            provenance: Some(JobProvenance {
+                tool_version: "9.9.9".to_string(),
+                git: Some(GitProvenance {
+                    sha: "deadbeef".to_string(),
+                    dirty: false,
+                    branch: Some("main".to_string()),
+                }),
+                image_refs: std::collections::BTreeMap::new(),
+            }),
+            ..SubmissionRecordBuildOptions::default()
+        },
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    // Write a manifest so `results` is populated by the pure manifest read.
+    let manifest_path = artifact_manifest_path_for_record(&record);
+    fs::create_dir_all(manifest_path.parent().expect("manifest parent")).expect("manifest dir");
+    fs::write(
+        &manifest_path,
+        r#"{
+  "schema_version": 1,
+  "job_id": "44444",
+  "collect_policy": "always",
+  "collected_at": "2026-01-01T00:00:00Z",
+  "job_outcome": "completed",
+  "copied_relative_paths": ["out/metrics.json"]
+}"#,
+    )
+    .expect("manifest");
+
+    // Unknown job id yields the shared tracked-job hint (no scheduler contact).
+    let missing = run_cli(
+        &project,
+        &[
+            "experiment",
+            "show",
+            "00000",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert!(!missing.status.success());
+    assert!(stderr_text(&missing).contains("was not found"));
+
+    // Happy path: one JSON object with the aggregate keys. No fake scheduler
+    // bins are provided, so build_status_snapshot degrades to placeholders.
+    let out = run_cli(
+        &project,
+        &[
+            "experiment",
+            "show",
+            "44444",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("experiment json");
+    assert_eq!(value["job_id"], Value::from("44444"));
+    assert_eq!(value["name"], Value::from("experiment-test"));
+    assert!(value.get("state").is_some(), "state present");
+    // services[] carries per-service rows; the TCP service gets a tunnel hint.
+    let services = value["services"].as_array().expect("services array");
+    assert_eq!(services.len(), 2);
+    let api = services
+        .iter()
+        .find(|service| service["name"] == "api")
+        .expect("api service");
+    let hint = api["tunnel_hint"].as_str().expect("tunnel_hint");
+    assert!(hint.contains("-L 8000:"), "forward present: {hint}");
+    assert!(hint.contains("ControlMaster=auto"), "multiplexing: {hint}");
+    // provenance block round-trips from the record.
+    assert_eq!(value["provenance"]["tool_version"], Value::from("9.9.9"));
+    assert_eq!(value["provenance"]["git"]["sha"], Value::from("deadbeef"));
+    // results came from the pure manifest read.
+    assert_eq!(
+        value["results"]["copied_relative_paths"],
+        serde_json::json!(["out/metrics.json"])
+    );
+    // next_commands names only shipped commands plus the ssh multiplex hint.
+    let next = value["next_commands"].as_array().expect("next_commands");
+    assert!(
+        next.iter()
+            .any(|command| command.as_str().is_some_and(
+                |command| command.starts_with("ssh ") && command.contains("ControlMaster=auto")
+            )),
+        "ssh multiplex hint present in next_commands"
+    );
+
+    // Read-only: the command writes no files and never creates the export dir.
+    assert!(!project.join("results").exists());
+}
+
 fn results_trial(trial_id: &str, index: usize, vars: &[(&str, &str)]) -> SweepManifestTrial {
     SweepManifestTrial {
         trial_id: trial_id.to_string(),

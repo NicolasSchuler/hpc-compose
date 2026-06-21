@@ -9,8 +9,8 @@ mod help;
 
 pub use crate::term::ColorPolicy;
 pub use commands::{
-    CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, JobsCommands,
-    RendezvousCommands, RuntimeLaunchArgs, SweepCommands,
+    CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, ExperimentCommands,
+    JobsCommands, RendezvousCommands, RuntimeLaunchArgs, SweepCommands,
 };
 pub use help::examples_for_path;
 
