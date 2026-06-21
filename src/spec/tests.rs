@@ -595,7 +595,23 @@ services:
   app:
     image: redis:7
 "#,
-            "scaling_axis 'backend' requires numeric parameter values",
+            "scaling_axis 'backend' requires positive, finite numeric values",
+        ),
+        (
+            r#"
+sweep:
+  parameters:
+    nodes: [0, 4]
+  matrix: full
+  objective:
+    direction: minimize
+    log_pattern: 'loss=([0-9.]+)'
+    scaling_axis: nodes
+services:
+  app:
+    image: redis:7
+"#,
+            "scaling_axis 'nodes' requires positive, finite numeric values",
         ),
     ] {
         let path = write_spec(tmpdir.path(), body);

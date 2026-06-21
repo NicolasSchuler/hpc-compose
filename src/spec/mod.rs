@@ -256,11 +256,15 @@ impl SweepConfig {
                     );
                 };
                 for value in values {
-                    if value.as_str().parse::<f64>().is_err() {
-                        bail!(
-                            "sweep.objective.scaling_axis '{axis}' requires numeric parameter values, but '{}' does not parse as a number",
+                    // A scaling axis is a positive scale (nodes/gpus/model_size);
+                    // zero/negative/non-finite values are undefined under the
+                    // log-log slope, so reject them at the validation boundary.
+                    match value.as_str().parse::<f64>() {
+                        Ok(parsed) if parsed.is_finite() && parsed > 0.0 => {}
+                        _ => bail!(
+                            "sweep.objective.scaling_axis '{axis}' requires positive, finite numeric values, but '{}' is not",
                             value.as_str()
-                        );
+                        ),
                     }
                 }
             }

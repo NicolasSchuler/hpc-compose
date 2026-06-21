@@ -1022,10 +1022,12 @@ fn build_scaling_report(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Baseline: the smallest-axis point that has runtime data.
+    // Baseline: the smallest-axis point that has positive runtime data. A 0
+    // baseline runtime would zero every speedup/efficiency; require > 0 to match
+    // the per-point guard below, so absent/zero runtime renders as "-" instead.
     let baseline = points
         .iter()
-        .filter(|p| p.runtime_seconds_max.is_some())
+        .filter(|p| p.runtime_seconds_max.is_some_and(|s| s > 0))
         .min_by(|a, b| {
             a.axis_value
                 .partial_cmp(&b.axis_value)
@@ -1034,7 +1036,7 @@ fn build_scaling_report(
         .map(|p| {
             (
                 p.axis_value,
-                p.runtime_seconds_max.expect("filtered to Some"),
+                p.runtime_seconds_max.expect("filtered to Some > 0"),
             )
         });
 
