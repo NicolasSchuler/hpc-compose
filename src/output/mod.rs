@@ -30,7 +30,7 @@ use hpc_compose::prepare::{
 };
 use hpc_compose::render::{
     display_srun_command_for_backend, distributed_environment_names_for_service, execution_argv,
-    log_file_name_for_service,
+    log_file_name_for_service, parallelism_environment_names_for_service,
 };
 use hpc_compose::spec::{
     ComposeSpec, DependencyCondition, EffectiveComposeConfig, ReadinessSpec, ServiceDependency,
@@ -2432,6 +2432,7 @@ fn format_environment_block(
             runtime,
             cluster_profile,
         ))
+        .chain(parallelism_environment_names_for_service(runtime))
         .collect::<Vec<_>>();
     format_debug_block("environment", &values)
 }

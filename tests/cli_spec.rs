@@ -1276,6 +1276,101 @@ services:
 }
 
 #[test]
+fn config_effective_round_trips_parallelism_at_both_scopes() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "parallelism.yaml",
+        &format!(
+            r#"
+name: parallelism-config
+x-slurm:
+  cache_dir: "{}"
+  nodes: 2
+  gpus_per_node: 2
+  parallelism:
+    tensor: 2
+    pipeline: 2
+services:
+  trainer:
+    image: pytorch:latest
+    command: /train.sh
+    x-slurm:
+      gpus_per_node: 4
+      parallelism:
+        tensor: 4
+        pipeline: 1
+"#,
+            cache_root.path().display()
+        ),
+    );
+
+    let config = run_cli(
+        tmpdir.path(),
+        &[
+            "config",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&config);
+    let value: Value = serde_json::from_str(&stdout_text(&config)).expect("config json");
+    assert_eq!(
+        value["x-slurm"]["parallelism"],
+        serde_json::json!({ "tensor": 2, "pipeline": 2 })
+    );
+    assert_eq!(
+        value["services"]["trainer"]["x-slurm"]["parallelism"],
+        serde_json::json!({ "tensor": 4, "pipeline": 1 })
+    );
+}
+
+#[test]
+fn validate_rejects_parallelism_gpu_mismatch() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_compose(
+        tmpdir.path(),
+        "parallelism-mismatch.yaml",
+        &format!(
+            r#"
+name: parallelism-mismatch
+x-slurm:
+  cache_dir: "{}"
+services:
+  trainer:
+    image: pytorch:latest
+    command: /train.sh
+    x-slurm:
+      nodes: 1
+      gpus_per_node: 2
+      parallelism:
+        tensor: 2
+        pipeline: 2
+"#,
+            cache_root.path().display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert!(
+        !output.status.success(),
+        "validate must fail on a parallelism/GPU mismatch"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("parallelism") && stderr.contains("gpus_per_node"),
+        "expected a scoped parallelism/GPU mismatch diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
 fn mpi_config_is_exposed_in_machine_readable_outputs() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -1930,6 +2025,27 @@ fn schema_matches_new_resource_validation_surface() {
         value["definitions"]["mpi"]["properties"]["expected_ranks"]["$ref"],
         Value::from("#/definitions/positiveInteger")
     );
+    for scope in ["slurm", "serviceSlurm"] {
+        assert_eq!(
+            value["definitions"][scope]["properties"]["parallelism"]["$ref"],
+            Value::from("#/definitions/parallelism"),
+            "{scope} x-slurm.parallelism ref"
+        );
+    }
+    let parallelism = &value["definitions"]["parallelism"];
+    assert_eq!(
+        parallelism["properties"]["tensor"]["$ref"],
+        Value::from("#/definitions/positiveInteger")
+    );
+    assert_eq!(
+        parallelism["properties"]["pipeline"]["$ref"],
+        Value::from("#/definitions/positiveInteger")
+    );
+    assert_eq!(
+        parallelism["required"],
+        serde_json::json!(["tensor", "pipeline"])
+    );
+    assert_eq!(parallelism["additionalProperties"], Value::from(false));
 }
 
 fn load_schema_json() -> Value {
@@ -2043,6 +2159,7 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
                 "setup",
                 "submit_args",
                 "rendezvous",
+                "parallelism",
             ],
         ),
         ("cleanup", &["runtime_cache"]),
@@ -2074,6 +2191,7 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
                 "hooks",
                 "scratch",
                 "rendezvous",
+                "parallelism",
             ],
         ),
         ("scratch", &["scope", "base", "mount", "cleanup"]),
@@ -2112,6 +2230,7 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
             ],
         ),
         ("hostMpi", &["bind_paths", "env"]),
+        ("parallelism", &["tensor", "pipeline"]),
         (
             "failurePolicy",
             &[

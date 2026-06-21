@@ -265,6 +265,28 @@ These fields live under the top-level `x-slurm` block.
 | `setup` | list of strings | omitted | Raw shell lines inserted into the generated batch script before service launches. |
 | `submit_args` | list of strings | omitted | Extra raw Slurm arguments appended as `#SBATCH ...` lines. |
 | `rendezvous` | string, list, or mapping | omitted | Resolve cross-job service records from the shared cache and inject `HPC_COMPOSE_RDZV_*` env vars. |
+| `parallelism` | mapping `{ tensor, pipeline }` | omitted | Descriptive tensor/pipeline geometry. Validation-only: no `#SBATCH`/`srun` flag is emitted. See [`x-slurm.parallelism`](#x-slurmparallelism). |
+
+### `x-slurm.parallelism`
+
+`parallelism` records the tensor (`tensor`) and pipeline (`pipeline`) sizes a job
+intends to use. Both fields are required and must be at least `1`. It is purely
+descriptive: it lowers onto the existing single-`srun`-per-service placement and
+emits **no** extra `#SBATCH` or `srun` flags.
+
+When `gpus_per_node` is set at the same scope, validation cross-checks that
+`tensor * pipeline == nodes * gpus_per_node` (where `nodes` defaults to `1` when
+omitted). A mismatch fails `validate`/`config` with a scoped diagnostic; the
+check is skipped entirely when `gpus_per_node` is not set.
+
+```yaml
+x-slurm:
+  nodes: 2
+  gpus_per_node: 4
+  parallelism:
+    tensor: 4
+    pipeline: 2 # 4 * 2 == 2 * 4
+```
 
 ### Resource profiles
 
@@ -645,6 +667,13 @@ The MPI hostfile is written under `/hpc-compose/job/allocation/mpi-hostfiles/` a
 
 MPI services also forward common PMI, PMIx, and Slurm rank variables into the container through Pyxis `--container-env`, including `PMI_RANK`, `PMI_SIZE`, `PMIX_RANK`, `PMIX_NAMESPACE`, `SLURM_PROCID`, `SLURM_LOCALID`, `SLURM_NODEID`, `SLURM_NTASKS`, and `SLURM_TASKS_PER_NODE`.
 
+Services that configure `services.<name>.x-slurm.parallelism` also receive:
+
+- `HPC_COMPOSE_TP_SIZE` (the declared `tensor` value)
+- `HPC_COMPOSE_PP_SIZE` (the declared `pipeline` value)
+
+These are descriptive literal exports. They are emitted for every service that declares `parallelism`, including single-node services, and are per-service only: a top-level `x-slurm.parallelism` block is validated and shown in `config --effective` but does not by itself export env into services.
+
 ### `gres` and `gpus`
 
 When both `gres` and `gpus` are set at the same level, `gres` takes priority and `gpus` is ignored.
@@ -918,6 +947,7 @@ These fields live under `services.<name>.x-slurm`.
 | `hooks` | list of mappings | omitted | Host-side event hooks for failure-policy transitions such as accepted restarts and crash-loop window exhaustion. |
 | `scratch` | mapping | omitted | Per-service scratch opt-out. Set `enabled: false` to exclude a service from the shared scratch mount when top-level `x-slurm.scratch` is configured. |
 | `rendezvous` | mapping | omitted | Provider registration config for cross-job service discovery. |
+| `parallelism` | mapping `{ tensor, pipeline }` | omitted | Descriptive per-service tensor/pipeline geometry. Validation-only and cross-checked against this service's `gpus_per_node`. See [`x-slurm.parallelism`](#x-slurmparallelism). |
 
 ### `services.<name>.x-slurm.rendezvous`
 

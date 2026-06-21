@@ -9,12 +9,12 @@ use super::*;
 use crate::cluster::{ClusterProfile, DistributedProfile, RuntimeAvailability};
 use crate::planner::ServicePlacement;
 use crate::spec::{
-    DependencyCondition, MpiConfig, MpiProfile, MpiType, ReadinessSpec, RendezvousRegisterConfig,
-    ResumeConfig, RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig,
-    ServiceAssertSpec, ServiceDependency, ServiceEventHookSpec, ServiceFailurePolicy,
-    ServiceHookContext, ServiceHookEvent, ServiceHookSpec, ServiceRendezvousConfig,
-    ServiceScratchConfig, ServiceSlurmConfig, SlurmConfig, StageInConfig, StageMode,
-    StageOutConfig, StageOutWhen,
+    DependencyCondition, MpiConfig, MpiProfile, MpiType, ParallelismConfig, ReadinessSpec,
+    RendezvousRegisterConfig, ResumeConfig, RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy,
+    ScratchConfig, ServiceAssertSpec, ServiceDependency, ServiceEventHookSpec,
+    ServiceFailurePolicy, ServiceHookContext, ServiceHookEvent, ServiceHookSpec,
+    ServiceRendezvousConfig, ServiceScratchConfig, ServiceSlurmConfig, SlurmConfig, StageInConfig,
+    StageMode, StageOutConfig, StageOutWhen,
 };
 
 fn runtime_service() -> RuntimeService {
@@ -2946,4 +2946,72 @@ write_artifact_manifest success "out/a.txt"
         serde_json::json!(["pattern logs/ matched nothing"])
     );
     assert!(value["bundles"].is_object(), "bundles must be an object");
+}
+
+#[test]
+fn render_exports_parallelism_env_for_single_node_service() {
+    // Default placement is single-node (nodes == 1), so the distributed helper
+    // family is NOT emitted; TP/PP must still be exported.
+    let mut service = runtime_service();
+    service.slurm = ServiceSlurmConfig {
+        parallelism: Some(ParallelismConfig {
+            tensor: 2,
+            pipeline: 4,
+        }),
+        ..ServiceSlurmConfig::default()
+    };
+    assert_eq!(service.placement.nodes, 1, "regression: single-node");
+    let plan = RuntimePlan {
+        name: "tp-pp".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+    let script = render_script(&plan).expect("script");
+    assert!(
+        script.contains("launch_env+=(\"HPC_COMPOSE_TP_SIZE=2\")"),
+        "missing TP size export"
+    );
+    assert!(
+        script.contains("launch_env+=(\"HPC_COMPOSE_PP_SIZE=4\")"),
+        "missing PP size export"
+    );
+    // Single-node: must not have brought in the distributed master-addr export.
+    assert!(
+        !script.contains("HPC_COMPOSE_DIST_MASTER_ADDR"),
+        "single-node service should not emit distributed helpers"
+    );
+}
+
+#[test]
+fn render_omits_parallelism_env_when_unset() {
+    let service = runtime_service();
+    let plan = RuntimePlan {
+        name: "no-tp".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+    let script = render_script(&plan).expect("script");
+    assert!(!script.contains("HPC_COMPOSE_TP_SIZE"));
+    assert!(!script.contains("HPC_COMPOSE_PP_SIZE"));
+}
+
+#[test]
+fn parallelism_environment_names_surface_only_when_declared() {
+    let mut service = runtime_service();
+    assert!(parallelism_environment_names_for_service(&service).is_empty());
+    service.slurm.parallelism = Some(ParallelismConfig {
+        tensor: 1,
+        pipeline: 1,
+    });
+    assert_eq!(
+        parallelism_environment_names_for_service(&service),
+        vec![
+            "HPC_COMPOSE_TP_SIZE".to_string(),
+            "HPC_COMPOSE_PP_SIZE".to_string()
+        ]
+    );
 }

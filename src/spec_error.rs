@@ -62,6 +62,32 @@ pub(crate) enum SpecError {
     )]
     ArtifactsInvalidPath { path: String },
 
+    #[error("{scope}.parallelism.{field} must be at least 1")]
+    #[diagnostic(
+        code(hpc_compose::spec::parallelism_non_positive),
+        help("Set `tensor` and `pipeline` to positive integers under `parallelism`.")
+    )]
+    ParallelismNonPositive { scope: String, field: String },
+
+    #[error(
+        "{scope}.parallelism tensor({tensor}) * pipeline({pipeline}) = {product} must equal nodes({nodes}) * gpus_per_node({gpus_per_node}) = {expected}"
+    )]
+    #[diagnostic(
+        code(hpc_compose::spec::parallelism_gpu_mismatch),
+        help(
+            "Adjust `parallelism.tensor`/`parallelism.pipeline` or `nodes`/`gpus_per_node` so that tensor * pipeline equals the total GPU count (nodes * gpus_per_node)."
+        )
+    )]
+    ParallelismGpuMismatch {
+        scope: String,
+        tensor: u32,
+        pipeline: u32,
+        nodes: u32,
+        gpus_per_node: u32,
+        product: u64,
+        expected: u64,
+    },
+
     #[error("x-slurm.resume.path must be an absolute host path, got '{path}'")]
     #[diagnostic(
         code(hpc_compose::spec::resume_relative_path),

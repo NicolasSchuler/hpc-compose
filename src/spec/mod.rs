@@ -25,10 +25,11 @@ use interpolate::{
 use parse::load_raw_spec;
 use validation::{
     parse_duration_seconds, parse_healthcheck_argv, parse_http_probe, parse_nc_probe,
-    validate_artifact_bundle_name, validate_artifact_path, validate_positive_u32,
-    validate_resume_path, validate_sbatch_safe_string, validate_sbatch_safe_strings,
-    validate_service_assert_artifact_pattern, validate_shell_hook_script,
-    validate_slurm_array_spec, validate_slurm_job_id, validate_slurm_log_pattern,
+    validate_artifact_bundle_name, validate_artifact_path, validate_parallelism,
+    validate_positive_u32, validate_resume_path, validate_sbatch_safe_string,
+    validate_sbatch_safe_strings, validate_service_assert_artifact_pattern,
+    validate_shell_hook_script, validate_slurm_array_spec, validate_slurm_job_id,
+    validate_slurm_log_pattern,
 };
 
 /// Top-level compose file accepted by `hpc-compose`.
@@ -545,6 +546,8 @@ pub struct SlurmConfig {
     pub submit_args: Vec<String>,
     #[serde(default)]
     pub rendezvous: Option<RendezvousClientConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<ParallelismConfig>,
 }
 
 /// Top-level client-side cross-job rendezvous discovery config.
@@ -1161,6 +1164,8 @@ pub struct ServiceSlurmConfig {
     pub scratch: Option<ServiceScratchConfig>,
     #[serde(default)]
     pub rendezvous: Option<ServiceRendezvousConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<ParallelismConfig>,
 }
 
 /// Per-service scratch mount override.
@@ -1287,6 +1292,20 @@ pub struct MpiConfig {
     pub expected_ranks: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_mpi: Option<HostMpiConfig>,
+}
+
+/// Descriptive tensor/pipeline parallelism geometry for one Slurm scope.
+///
+/// This is advisory metadata only. It emits no `#SBATCH`/`srun` flag and does
+/// not change allocation or placement; it surfaces as the
+/// `HPC_COMPOSE_TP_SIZE`/`HPC_COMPOSE_PP_SIZE` launch-environment variables and
+/// is cross-checked against `gpus_per_node` at validation time.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelismConfig {
+    pub tensor: u32,
+    pub pipeline: u32,
 }
 
 /// MPI compatibility profile used for validation and diagnostics.
@@ -1599,6 +1618,8 @@ pub struct EffectiveSlurmConfig {
     pub submit_args: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendezvous: Option<RendezvousClientConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<ParallelismConfig>,
 }
 
 /// Stable effective representation of an id-based Slurm dependency.
@@ -1738,6 +1759,8 @@ pub struct EffectiveServiceSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendezvous: Option<ServiceRendezvousConfig>,
     pub failure_policy: EffectiveFailurePolicyConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<ParallelismConfig>,
 }
 
 /// Stable effective `x-runtime` service config.
@@ -2188,6 +2211,7 @@ impl ComposeSpec {
                         failure_policy: EffectiveFailurePolicyConfig::from_policy(
                             &normalized_policy,
                         ),
+                        parallelism: service.slurm.parallelism.clone(),
                     },
                     runtime,
                     enroot,
@@ -2274,6 +2298,7 @@ impl ComposeSpec {
                 setup: self.slurm.setup.clone(),
                 submit_args: self.slurm.submit_args.clone(),
                 rendezvous: self.slurm.rendezvous.clone(),
+                parallelism: self.slurm.parallelism.clone(),
             },
             services,
         })
@@ -2773,6 +2798,12 @@ impl SlurmConfig {
         if let Some(rendezvous) = &self.rendezvous {
             rendezvous.validate()?;
         }
+        validate_parallelism(
+            self.parallelism.as_ref(),
+            self.nodes,
+            self.gpus_per_node,
+            "x-slurm",
+        )?;
         Ok(())
     }
 
@@ -3381,6 +3412,12 @@ impl ServiceSlurmConfig {
         if let Some(rendezvous) = &self.rendezvous {
             rendezvous.validate(service_name)?;
         }
+        validate_parallelism(
+            self.parallelism.as_ref(),
+            self.nodes,
+            self.gpus_per_node,
+            &format!("service '{service_name}' x-slurm"),
+        )?;
         Ok(())
     }
 

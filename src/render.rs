@@ -57,6 +57,12 @@ const DIST_ENV_NAMES: &[&str] = &[
     "HPC_COMPOSE_DIST_HOSTFILE",
 ];
 
+/// Launch-environment names exported for a service declaring
+/// `x-slurm.parallelism`. Kept separate from `DIST_ENV_NAMES` because the
+/// distributed helper family is gated on `nodes > 1`, whereas tensor/pipeline
+/// sizes are emitted for single-node services too.
+const PARALLELISM_ENV_NAMES: &[&str] = &["HPC_COMPOSE_TP_SIZE", "HPC_COMPOSE_PP_SIZE"];
+
 const DIST_SLURM_RANK_ENV_NAMES: &[&str] = &[
     "SLURM_LOCALID",
     "SLURM_NODEID",
@@ -135,6 +141,23 @@ pub fn distributed_environment_names_for_service(
     names.sort();
     names.dedup();
     names
+}
+
+/// Returns the tensor/pipeline parallelism env names a service injects.
+///
+/// Unlike [`distributed_environment_names_for_service`], this is not gated on
+/// `nodes > 1`: `x-slurm.parallelism` exports `HPC_COMPOSE_TP_SIZE`/
+/// `HPC_COMPOSE_PP_SIZE` for single-node services too. Returns an empty vector
+/// when the service does not declare parallelism.
+#[must_use]
+pub fn parallelism_environment_names_for_service(service: &RuntimeService) -> Vec<String> {
+    if service.slurm.parallelism.is_none() {
+        return Vec::new();
+    }
+    PARALLELISM_ENV_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 fn rendezvous_environment_names(names: &[String]) -> Vec<String> {
@@ -2569,6 +2592,19 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
     out.push_str(
         "  launch_env+=(\"HPC_COMPOSE_SERVICE_NODELIST_FILE=$service_nodelist_container\")\n",
     );
+    if let Some(parallelism) = &service.slurm.parallelism {
+        // Descriptive tensor/pipeline sizes. Emitted for single-node services
+        // too, so this lives OUTSIDE the `distributed.enabled` gate. No Slurm
+        // flag is involved; these are literal env exports only.
+        out.push_str(&format!(
+            "  launch_env+=(\"HPC_COMPOSE_TP_SIZE={}\")\n",
+            parallelism.tensor
+        ));
+        out.push_str(&format!(
+            "  launch_env+=(\"HPC_COMPOSE_PP_SIZE={}\")\n",
+            parallelism.pipeline
+        ));
+    }
     if distributed.enabled {
         out.push_str("  launch_env+=(\"HPC_COMPOSE_DIST_MASTER_ADDR=$service_primary_node\")\n");
         out.push_str("  launch_env+=(\"HPC_COMPOSE_DIST_MASTER_PORT=$dist_master_port\")\n");

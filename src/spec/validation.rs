@@ -41,6 +41,57 @@ pub(super) fn validate_positive_u32(value: Option<u32>, field: &str) -> Result<(
     Ok(())
 }
 
+/// Cross-checks a tensor/pipeline parallelism declaration against the GPU geometry.
+///
+/// `tensor` and `pipeline` must each be at least 1. When `gpus_per_node` is set,
+/// `tensor * pipeline` must equal the total GPU count (`nodes * gpus_per_node`),
+/// where `nodes` defaults to 1 when unset at this scope. The product is widened
+/// to `u64` to guard against `u32` overflow. This is descriptive-only: it emits
+/// no Slurm flags and never changes the allocation.
+pub(super) fn validate_parallelism(
+    parallelism: Option<&super::ParallelismConfig>,
+    nodes: Option<u32>,
+    gpus_per_node: Option<u32>,
+    scope: &str,
+) -> Result<()> {
+    let Some(parallelism) = parallelism else {
+        return Ok(());
+    };
+    if parallelism.tensor == 0 {
+        return Err(SpecError::ParallelismNonPositive {
+            scope: scope.to_string(),
+            field: "tensor".to_string(),
+        }
+        .into());
+    }
+    if parallelism.pipeline == 0 {
+        return Err(SpecError::ParallelismNonPositive {
+            scope: scope.to_string(),
+            field: "pipeline".to_string(),
+        }
+        .into());
+    }
+    let Some(gpus_per_node) = gpus_per_node else {
+        return Ok(());
+    };
+    let nodes = nodes.unwrap_or(1);
+    let product = u64::from(parallelism.tensor) * u64::from(parallelism.pipeline);
+    let expected = u64::from(nodes) * u64::from(gpus_per_node);
+    if product != expected {
+        return Err(SpecError::ParallelismGpuMismatch {
+            scope: scope.to_string(),
+            tensor: parallelism.tensor,
+            pipeline: parallelism.pipeline,
+            nodes,
+            gpus_per_node,
+            product,
+            expected,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 pub(super) fn validate_sbatch_safe_string(value: Option<&str>, field: &str) -> Result<()> {
     let Some(value) = value else { return Ok(()) };
     if value.contains('\n') || value.contains('\r') {

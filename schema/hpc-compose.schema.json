@@ -387,7 +387,8 @@
           "items": { "$ref": "#/definitions/lineSafeString" },
           "description": "Raw SBATCH pass-through lines. hpc-compose validates line safety but not Slurm semantics."
         },
-        "rendezvous": { "$ref": "#/definitions/rendezvousClient" }
+        "rendezvous": { "$ref": "#/definitions/rendezvousClient" },
+        "parallelism": { "$ref": "#/definitions/parallelism" }
       }
     },
     "scratch": {
@@ -805,7 +806,8 @@
           "items": { "$ref": "#/definitions/serviceEventHook" }
         },
         "scratch": { "$ref": "#/definitions/serviceScratch" },
-        "rendezvous": { "$ref": "#/definitions/serviceRendezvous" }
+        "rendezvous": { "$ref": "#/definitions/serviceRendezvous" },
+        "parallelism": { "$ref": "#/definitions/parallelism" }
       }
     },
     "serviceScratch": {
@@ -901,6 +903,16 @@
         "expected_ranks": { "$ref": "#/definitions/positiveInteger" },
         "host_mpi": { "$ref": "#/definitions/hostMpi" }
       }
+    },
+    "parallelism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tensor", "pipeline"],
+      "properties": {
+        "tensor": { "$ref": "#/definitions/positiveInteger" },
+        "pipeline": { "$ref": "#/definitions/positiveInteger" }
+      },
+      "description": "Descriptive tensor/pipeline parallelism geometry. Validation-only: no #SBATCH/srun flag is emitted; tensor * pipeline is cross-checked against nodes * gpus_per_node and surfaced as HPC_COMPOSE_TP_SIZE/HPC_COMPOSE_PP_SIZE."
     },
     "hostMpi": {
       "type": "object",

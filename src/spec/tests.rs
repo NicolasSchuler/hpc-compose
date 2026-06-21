@@ -4499,3 +4499,187 @@ fn strict_env_scanner_collects_no_colon_nested_defaults_and_ignores_present_empt
         "present-empty must not be missing: {missing:?}"
     );
 }
+
+#[test]
+fn parallelism_parses_at_both_scopes_and_rejects_unknown_keys() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+name: tp-pp
+x-slurm:
+  nodes: 2
+  gpus_per_node: 2
+  parallelism:
+    tensor: 2
+    pipeline: 2
+services:
+  app:
+    image: redis:7
+    command: run
+    x-slurm:
+      gpus_per_node: 4
+      parallelism:
+        tensor: 4
+        pipeline: 1
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("load parallelism");
+    let top = spec
+        .slurm
+        .parallelism
+        .as_ref()
+        .expect("top-level parallelism");
+    assert_eq!(top.tensor, 2);
+    assert_eq!(top.pipeline, 2);
+    let service = spec
+        .services
+        .get("app")
+        .expect("service")
+        .slurm
+        .parallelism
+        .as_ref()
+        .expect("service parallelism");
+    assert_eq!(service.tensor, 4);
+    assert_eq!(service.pipeline, 1);
+
+    let bad = write_spec(
+        tmpdir.path(),
+        "x-slurm:\n  parallelism:\n    tensor: 1\n    pipeline: 1\n    bogus: 2\nservices:\n  app:\n    image: redis:7\n    command: run\n",
+    );
+    assert!(
+        ComposeSpec::load(&bad).is_err(),
+        "unknown key under parallelism must be rejected"
+    );
+}
+
+#[test]
+fn parallelism_cross_check_passes_skips_and_fails() {
+    // Pass: tensor * pipeline == nodes * gpus_per_node (4 == 4).
+    let ok = SlurmConfig {
+        nodes: Some(2),
+        gpus_per_node: Some(2),
+        parallelism: Some(ParallelismConfig {
+            tensor: 2,
+            pipeline: 2,
+        }),
+        ..SlurmConfig::default()
+    };
+    assert!(ok.validate().is_ok(), "matching geometry should validate");
+
+    // Skip: no gpus_per_node => only positivity is enforced, no product check.
+    let skip = SlurmConfig {
+        nodes: Some(8),
+        gpus_per_node: None,
+        parallelism: Some(ParallelismConfig {
+            tensor: 2,
+            pipeline: 2,
+        }),
+        ..SlurmConfig::default()
+    };
+    assert!(
+        skip.validate().is_ok(),
+        "missing gpus_per_node should skip the product cross-check"
+    );
+
+    // Fail: 4 != 2.
+    let bad = SlurmConfig {
+        nodes: Some(1),
+        gpus_per_node: Some(2),
+        parallelism: Some(ParallelismConfig {
+            tensor: 2,
+            pipeline: 2,
+        }),
+        ..SlurmConfig::default()
+    };
+    let err = bad.validate().expect_err("mismatched geometry");
+    assert!(err.to_string().contains("x-slurm"));
+    assert!(err.to_string().contains("gpus_per_node"));
+    assert!(err.downcast_ref::<SpecError>().is_some_and(|se| {
+        se.code().is_some_and(|c| {
+            c.to_string()
+                .contains("hpc_compose::spec::parallelism_gpu_mismatch")
+        })
+    }));
+}
+
+#[test]
+fn parallelism_service_scope_cross_check_is_scoped_and_defaults_nodes_to_one() {
+    // Service nodes default to 1 when unset: 2 * 1 != 4.
+    let service = ServiceSlurmConfig {
+        gpus_per_node: Some(4),
+        parallelism: Some(ParallelismConfig {
+            tensor: 2,
+            pipeline: 1,
+        }),
+        ..ServiceSlurmConfig::default()
+    };
+    let err = service
+        .validate("trainer")
+        .expect_err("service mismatch with implicit nodes=1");
+    assert!(err.to_string().contains("service 'trainer' x-slurm"));
+
+    // With nodes explicit so 2 * 2 == 1 node would mismatch; set nodes=4 => 4 == 4.
+    let service_ok = ServiceSlurmConfig {
+        nodes: Some(2),
+        gpus_per_node: Some(2),
+        parallelism: Some(ParallelismConfig {
+            tensor: 2,
+            pipeline: 2,
+        }),
+        ..ServiceSlurmConfig::default()
+    };
+    assert!(service_ok.validate("trainer").is_ok());
+}
+
+#[test]
+fn parallelism_rejects_non_positive_axes() {
+    let bad_tensor = SlurmConfig {
+        gpus_per_node: Some(4),
+        parallelism: Some(ParallelismConfig {
+            tensor: 0,
+            pipeline: 1,
+        }),
+        ..SlurmConfig::default()
+    };
+    let err = bad_tensor.validate().expect_err("tensor must be >= 1");
+    assert!(err.to_string().contains("tensor"));
+    assert!(err.downcast_ref::<SpecError>().is_some_and(|se| {
+        se.code().is_some_and(|c| {
+            c.to_string()
+                .contains("hpc_compose::spec::parallelism_non_positive")
+        })
+    }));
+
+    let bad_pipeline = SlurmConfig {
+        parallelism: Some(ParallelismConfig {
+            tensor: 1,
+            pipeline: 0,
+        }),
+        ..SlurmConfig::default()
+    };
+    let err = bad_pipeline.validate().expect_err("pipeline must be >= 1");
+    assert!(err.to_string().contains("pipeline"));
+}
+
+#[test]
+fn parallelism_cross_check_does_not_overflow_u32() {
+    // tensor * pipeline overflows u32 (would panic on u32 mul) but is fine in u64.
+    let config = SlurmConfig {
+        nodes: Some(1),
+        gpus_per_node: Some(1),
+        parallelism: Some(ParallelismConfig {
+            tensor: u32::MAX,
+            pipeline: u32::MAX,
+        }),
+        ..SlurmConfig::default()
+    };
+    // Must not panic; product != expected so it reports a mismatch.
+    let err = config.validate().expect_err("huge product mismatch");
+    assert!(err.downcast_ref::<SpecError>().is_some_and(|se| {
+        se.code().is_some_and(|c| {
+            c.to_string()
+                .contains("hpc_compose::spec::parallelism_gpu_mismatch")
+        })
+    }));
+}
