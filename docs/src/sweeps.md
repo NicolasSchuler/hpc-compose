@@ -69,10 +69,42 @@ Reserved variables are also available:
 | Variable | Value |
 | --- | --- |
 | `HPC_COMPOSE_SWEEP_ID` | The persisted sweep id. |
-| `HPC_COMPOSE_SWEEP_TRIAL` | The stable trial label such as `t000`. |
+| `HPC_COMPOSE_SWEEP_TRIAL` | The stable trial label such as `t000` (or `t000r0` when `replicates` > 1). |
 | `HPC_COMPOSE_SWEEP_TRIAL_INDEX` | Zero-based trial index. |
+| `HPC_COMPOSE_SWEEP_REPLICATE` | Zero-based replicate index within the config (`0` when `replicates: 1`). |
+| `HPC_COMPOSE_SWEEP_SEED` | Deterministic per-replicate seed; present only when `replicates` > 1. |
 
 Normal commands still treat `sweep` as metadata. If `plan`, `up`, or `render` encounters `${lr}` without a default, it fails unless `lr` is provided in the environment or settings. Use defaults such as `${lr:-0.001}` when the base spec should remain runnable, and use `sweep submit --dry-run` as the validation path for missing sweep-only variables.
+
+## Replicates
+
+Set `replicates: N` to submit `N` seeded trials per parameter config. This is sweep sugar for repeating each combination so noise can be averaged out:
+
+```yaml
+sweep:
+  parameters:
+    lr: [0.001, 0.01]
+  matrix: full
+  replicates: 3
+  objective:
+    direction: minimize
+    log_pattern: 'final loss=([0-9.]+)'
+```
+
+With `replicates: 1` (the default) the expansion is byte-identical to a non-replicated sweep: trial ids stay `t000`, `t001`, … and no replicate seed is injected. With `replicates` > 1 each config `c` fans out into `t{c:03}r0` … `t{c:03}r{N-1}` (for example `t000r0`, `t000r1`, `t000r2`), each its own Slurm allocation. The example above submits `2 configs × 3 replicates = 6` trials.
+
+Each replicate gets a deterministic seed exposed as `HPC_COMPOSE_SWEEP_SEED`, derived as the hex SHA-256 digest of `<sweep_id>:<config_key>:<replicate>` (where `config_key` is the `name=value;…` join of the config's sorted variables). Re-expanding the same `sweep` block with the same sweep id always reproduces the same seed, so a training script can feed `HPC_COMPOSE_SWEEP_SEED` to its RNG and recover the same run. `HPC_COMPOSE_SWEEP_REPLICATE` carries the zero-based replicate index.
+
+`sweep status`, `sweep observe`, and `sweep results` group the trials of each config and report a mean±std(n) rollup (population standard deviation, so `n=1` reports `std=0`). Crucially, `best_trial` ranks on the per-config **group mean**, not the single luckiest replicate, and `sweep observe` reports the winning config's mean objective:
+
+```text
+replicate rollup (mean+/-std over n replicates per config):
+  lr=0.001: mean=0.034000 std=0.002160 n=3 (3 replicate(s))
+  lr=0.01:  mean=0.041000 std=0.001414 n=3 (3 replicate(s))
+best config: t000r0 (mean objective=0.034)
+```
+
+The fanout guard below counts materialized runs (`combinations × replicates`), so a 40-config matrix with `replicates: 3` is 120 runs and is rejected without `--max-trials`.
 
 ## Fanout Guard
 
@@ -111,7 +143,7 @@ hpc-compose sweep status -f examples/training-sweep.yaml --sweep-id sweep-123 --
 hpc-compose sweep list -f examples/training-sweep.yaml --format json
 ```
 
-The JSON includes the sweep id, manifest path, matrix mode, persisted seed, trial variables, job ids, record paths, and per-trial status.
+The JSON includes the sweep id, manifest path, matrix mode, persisted seed, trial variables, job ids, record paths, and per-trial status. When the sweep used `replicates`, it also carries a `groups` array with the per-config mean±std(n) rollup.
 
 ## Manifest Layout
 
@@ -128,6 +160,8 @@ Sweep state is stored beside normal tracked jobs:
   jobs/
     <job-id>.json
 ```
+
+With `replicates` > 1 the per-trial scripts are named `t000r0.sbatch`, `t000r1.sbatch`, … (config index plus replicate index) instead of the flat `t000.sbatch`.
 
 Sweep-trial records have `kind: sweep_trial` and include sweep metadata. They do not update the normal `latest.json` or `latest-run.json` pointers, so `status`, `watch`, and `logs` for ordinary runs keep their existing meaning.
 

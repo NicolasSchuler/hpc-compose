@@ -3,6 +3,115 @@ use crate::time_util::unix_timestamp_now;
 
 const DEFAULT_SWEEP_MAX_TRIALS: usize = 100;
 
+/// One per-config rollup row: the replicate objectives of a single parameter
+/// config summarized as mean±std(n). Emitted in the `groups` field of sweep
+/// status/observe/results output.
+#[derive(Debug, Clone, Serialize)]
+struct SweepConfigGroup {
+    config_key: String,
+    variables: BTreeMap<String, String>,
+    replicates: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mean: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    std: Option<f64>,
+    /// Number of replicates with an observed objective contributing to the rollup.
+    n: usize,
+}
+
+/// One (config_key, variables, objective) sample feeding the rollup grouping.
+struct TrialSample<'a> {
+    config_key: &'a str,
+    variables: &'a BTreeMap<String, String>,
+    objective: Option<f64>,
+}
+
+/// Groups trial samples by `config_key` and rolls each group up into a
+/// mean±std(n) row. Groups are sorted by `config_key` for stable output. Each
+/// group's `variables` come from the first trial seen for that config.
+fn build_config_groups(samples: &[TrialSample<'_>]) -> Vec<SweepConfigGroup> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut variables_by_key: BTreeMap<&str, &BTreeMap<String, String>> = BTreeMap::new();
+    let mut total_by_key: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut values_by_key: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    for sample in samples {
+        if !variables_by_key.contains_key(sample.config_key) {
+            order.push(sample.config_key);
+            variables_by_key.insert(sample.config_key, sample.variables);
+        }
+        *total_by_key.entry(sample.config_key).or_insert(0) += 1;
+        if let Some(value) = sample.objective {
+            values_by_key
+                .entry(sample.config_key)
+                .or_default()
+                .push(value);
+        } else {
+            values_by_key.entry(sample.config_key).or_default();
+        }
+    }
+    order.sort_unstable();
+    order
+        .into_iter()
+        .map(|config_key| {
+            let values = values_by_key.get(config_key).cloned().unwrap_or_default();
+            let stats = hpc_compose::job::replicate_rollup(&values);
+            SweepConfigGroup {
+                config_key: config_key.to_string(),
+                variables: variables_by_key
+                    .get(config_key)
+                    .map(|vars| (*vars).clone())
+                    .unwrap_or_default(),
+                replicates: total_by_key.get(config_key).copied().unwrap_or(0),
+                mean: stats.map(|s| s.mean),
+                std: stats.map(|s| s.std),
+                n: stats.map(|s| s.n).unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+/// Selects the best config group's representative trial id by the group MEAN
+/// objective (not the single luckiest replicate), per the optimization
+/// direction. Returns the lowest-id trial of the winning group.
+fn best_config_trial_id(
+    groups: &[SweepConfigGroup],
+    trials_by_group: &BTreeMap<String, Vec<String>>,
+    direction: hpc_compose::spec::ObjectiveDirection,
+) -> Option<String> {
+    let scored = groups
+        .iter()
+        .filter_map(|group| group.mean.map(|mean| (mean, group.config_key.as_str())));
+    let winner =
+        match direction {
+            hpc_compose::spec::ObjectiveDirection::Minimize => scored
+                .min_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
+            hpc_compose::spec::ObjectiveDirection::Maximize => scored
+                .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
+        }
+        .map(|(_, config_key)| config_key)?;
+    trials_by_group
+        .get(winner)
+        .and_then(|ids| ids.iter().min())
+        .cloned()
+}
+
+/// Returns the best config group's MEAN objective by direction. Used to report
+/// the headline objective for a replicated sweep (mean of the winning config).
+fn best_group_mean(
+    groups: &[SweepConfigGroup],
+    direction: hpc_compose::spec::ObjectiveDirection,
+) -> Option<f64> {
+    let means = groups.iter().filter_map(|group| group.mean);
+    match direction {
+        hpc_compose::spec::ObjectiveDirection::Minimize => {
+            means.min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        }
+        hpc_compose::spec::ObjectiveDirection::Maximize => {
+            means.max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct SweepSubmitOutput<'a> {
     dry_run: bool,
@@ -16,6 +125,10 @@ struct SweepStatusOutput {
     compose_file: PathBuf,
     submitted_at: u64,
     summary: BTreeMap<String, usize>,
+    /// Per-config replicate rollup (mean±std(n) over the trial objectives of
+    /// each parameter config). Omitted when no replicates are configured.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<SweepConfigGroup>,
     trials: Vec<SweepStatusTrialOutput>,
 }
 
@@ -87,6 +200,9 @@ pub(crate) fn sweep_submit(
                 trial_id: trial.trial_id.clone(),
                 index: trial.index,
                 variables: trial.variables.clone(),
+                config_key: trial.config_key.clone(),
+                replicate: trial.replicate,
+                seed: trial.seed.clone(),
                 script_path: sweep_root.join(format!("{}.sbatch", trial.trial_id)),
                 job_id: None,
                 record_path: None,
@@ -422,11 +538,20 @@ pub(crate) fn sweep_status(
             output
         })
         .collect::<Vec<_>>();
+    // Roll up persisted objectives per config when the sweep used replicates.
+    // Status does not re-parse objectives; it reuses the values `sweep observe`
+    // recorded on the manifest.
+    let groups = if manifest_uses_replicates(&manifest) {
+        config_groups_from_trials(&manifest.trials).0
+    } else {
+        Vec::new()
+    };
     let report = SweepStatusOutput {
         sweep_id: manifest.sweep_id,
         compose_file: manifest.compose_file,
         submitted_at: manifest.submitted_at,
         summary,
+        groups,
         trials,
     };
     match output::resolve_output_format(format, false) {
@@ -524,6 +649,32 @@ fn categorize_sweep_status(snapshot: &hpc_compose::job::StatusSnapshot) -> Strin
     }
 }
 
+/// Prints the per-config replicate rollup (mean±std(n)) section. No-op when no
+/// groups are present (non-replicated sweeps).
+fn print_sweep_config_groups(groups: &[SweepConfigGroup]) {
+    if groups.is_empty() {
+        return;
+    }
+    println!("replicate rollup (mean+/-std over n replicates per config):");
+    for group in groups {
+        let label = if group.config_key.is_empty() {
+            "(no parameters)".to_string()
+        } else {
+            group.config_key.clone()
+        };
+        match (group.mean, group.std) {
+            (Some(mean), Some(std)) => println!(
+                "  {label}: mean={mean:.6} std={std:.6} n={} ({} replicate(s))",
+                group.n, group.replicates
+            ),
+            _ => println!(
+                "  {label}: no observed objective ({} replicate(s))",
+                group.replicates
+            ),
+        }
+    }
+}
+
 fn print_sweep_status_output(report: &SweepStatusOutput) -> Result<()> {
     println!("sweep: {}", report.sweep_id);
     println!("trials: {}", report.trials.len());
@@ -532,6 +683,7 @@ fn print_sweep_status_output(report: &SweepStatusOutput) -> Result<()> {
         print!(" {status}={count}");
     }
     println!();
+    print_sweep_config_groups(&report.groups);
     for trial in &report.trials {
         let job = trial.job_id.as_deref().unwrap_or("-");
         let scheduler = trial.scheduler_state.as_deref().unwrap_or("-");
@@ -648,25 +800,49 @@ fn parse_trial_objective(
     Ok(None)
 }
 
-/// Selects the best trial id from observed objectives given the direction.
+/// Returns whether this sweep fanned out into replicates (any trial has a
+/// non-zero replicate index). v2 manifests and `replicates: 1` sweeps return
+/// `false`, keeping their output byte-identical to pre-#12 behavior.
+fn manifest_uses_replicates(manifest: &SweepManifest) -> bool {
+    manifest.trials.iter().any(|trial| trial.replicate > 0)
+}
+
+/// Builds the per-config rollup groups and a config_key -> trial ids index for
+/// a set of manifest trials, using each trial's parsed `objective` value.
+fn config_groups_from_trials(
+    trials: &[SweepManifestTrial],
+) -> (Vec<SweepConfigGroup>, BTreeMap<String, Vec<String>>) {
+    let samples: Vec<TrialSample<'_>> = trials
+        .iter()
+        .map(|trial| TrialSample {
+            config_key: trial.config_key.as_str(),
+            variables: &trial.variables,
+            objective: trial
+                .objective
+                .as_deref()
+                .and_then(|value| value.parse::<f64>().ok()),
+        })
+        .collect();
+    let groups = build_config_groups(&samples);
+    let mut trials_by_group: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for trial in trials {
+        trials_by_group
+            .entry(trial.config_key.clone())
+            .or_default()
+            .push(trial.trial_id.clone());
+    }
+    (groups, trials_by_group)
+}
+
+/// Selects the best trial id, ranking by the per-config-group MEAN objective
+/// (never the single luckiest replicate). Returns the lowest-id trial of the
+/// winning config group.
 fn best_trial_id(
     trials: &[SweepManifestTrial],
     direction: hpc_compose::spec::ObjectiveDirection,
 ) -> Option<String> {
-    let scored = trials.iter().filter_map(|t| {
-        t.objective
-            .as_deref()
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|value| (value, &t.trial_id))
-    });
-    match direction {
-        hpc_compose::spec::ObjectiveDirection::Minimize => scored
-            .min_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(_, id)| id.clone()),
-        hpc_compose::spec::ObjectiveDirection::Maximize => scored
-            .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(_, id)| id.clone()),
-    }
+    let (groups, trials_by_group) = config_groups_from_trials(trials);
+    best_config_trial_id(&groups, &trials_by_group, direction)
 }
 
 /// One comparison operator for `--stop-when` evaluation.
@@ -704,6 +880,11 @@ struct SweepObserveOutput {
     objective_configured: bool,
     best_trial: Option<String>,
     best_objective: Option<String>,
+    /// Per-config replicate rollup (mean±std(n)). The best trial is selected by
+    /// the best group MEAN, not the single luckiest replicate. Omitted when the
+    /// sweep did not use replicates.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<SweepConfigGroup>,
     trials: Vec<SweepObserveTrial>,
 }
 
@@ -760,7 +941,9 @@ pub(crate) fn sweep_observe(
             results.push((status_label, parsed, error));
         }
 
+        let uses_replicates = manifest_uses_replicates(&manifest);
         let mut trial_outputs = Vec::new();
+        let mut groups = Vec::new();
         let best_objective = if objective_configured {
             // Pass 2 (mutable): write objective state back into the manifest.
             for (trial, (status_label, parsed, error)) in manifest.trials.iter_mut().zip(results) {
@@ -777,14 +960,25 @@ pub(crate) fn sweep_observe(
                     objective_error: error,
                 });
             }
+            // Best selection ranks on the per-config GROUP MEAN, never the single
+            // luckiest replicate. `best_objective` likewise reports the winning
+            // group's mean when replicates are used.
+            let (computed_groups, _trials_by_group) = config_groups_from_trials(&manifest.trials);
             manifest.best_trial = best_trial_id(&manifest.trials, direction);
-            let best_objective = manifest.best_trial.as_ref().and_then(|id| {
-                manifest
-                    .trials
-                    .iter()
-                    .find(|t| &t.trial_id == id)
-                    .and_then(|t| t.objective.clone())
-            });
+            let best_objective = if uses_replicates {
+                best_group_mean(&computed_groups, direction).map(|mean| mean.to_string())
+            } else {
+                manifest.best_trial.as_ref().and_then(|id| {
+                    manifest
+                        .trials
+                        .iter()
+                        .find(|t| &t.trial_id == id)
+                        .and_then(|t| t.objective.clone())
+                })
+            };
+            if uses_replicates {
+                groups = computed_groups;
+            }
             write_sweep_manifest(&manifest)?;
             best_objective
         } else {
@@ -807,6 +1001,7 @@ pub(crate) fn sweep_observe(
             objective_configured,
             best_trial: manifest.best_trial.clone(),
             best_objective: best_objective.clone(),
+            groups,
             trials: trial_outputs,
         };
         match output_format {
@@ -882,8 +1077,15 @@ fn print_sweep_observe_output(
     );
     if let Some(best) = &report.best_trial {
         let label = report.best_objective.as_deref().unwrap_or("?");
-        println!("best: {} (objective={})", best, label);
+        if report.groups.is_empty() {
+            println!("best: {} (objective={})", best, label);
+        } else {
+            // With replicates, the headline objective is the winning config's
+            // group mean, and `best` is that group's representative trial.
+            println!("best config: {} (mean objective={})", best, label);
+        }
     }
+    print_sweep_config_groups(&report.groups);
     // Rank: best first.
     let mut ranked = report.trials.clone();
     ranked.sort_by(|a, b| {
@@ -1041,6 +1243,10 @@ struct SweepResultsOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     best_trial: Option<String>,
     variable_columns: Vec<String>,
+    /// Per-config replicate rollup (mean±std(n)). The best trial is selected by
+    /// the best group MEAN. Omitted when the sweep did not use replicates.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<SweepConfigGroup>,
     rows: Vec<SweepResultRow>,
 }
 
@@ -1049,6 +1255,11 @@ struct SweepResultRow {
     trial_id: String,
     index: usize,
     variables: BTreeMap<String, String>,
+    /// Stable key grouping replicates of the same parameter config.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    config_key: String,
+    /// Zero-based replicate index within this config.
+    replicate: u32,
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     scheduler_state: Option<String>,
@@ -1140,27 +1351,20 @@ pub(crate) fn sweep_results(
         ..EfficiencyScoreOptions::default()
     };
 
+    let uses_replicates = manifest_uses_replicates(&manifest);
     let mut rows = Vec::new();
-    let mut best: Option<(f64, String)> = None;
+    // Track parsed objectives per trial so best selection can rank on the
+    // per-config GROUP MEAN (not the single luckiest replicate).
+    let mut parsed_by_trial: BTreeMap<String, Option<f64>> = BTreeMap::new();
     for trial in &manifest.trials {
         let status = status_for_sweep_trial(&manifest, trial, &scheduler);
-        let (objective, objective_error) = match parse_trial_objective(trial, &manifest, &scheduler)
-        {
-            Ok(Some(value)) => {
-                if let Some(direction) = direction {
-                    let better = best.as_ref().is_none_or(|(best, _)| match direction {
-                        hpc_compose::spec::ObjectiveDirection::Minimize => value < *best,
-                        hpc_compose::spec::ObjectiveDirection::Maximize => value > *best,
-                    });
-                    if better {
-                        best = Some((value, trial.trial_id.clone()));
-                    }
-                }
-                (Some(value.to_string()), None)
-            }
-            Ok(None) => (None, None),
-            Err(err) => (None, Some(format!("{err:#}"))),
-        };
+        let (parsed, objective, objective_error) =
+            match parse_trial_objective(trial, &manifest, &scheduler) {
+                Ok(Some(value)) => (Some(value), Some(value.to_string()), None),
+                Ok(None) => (None, None, None),
+                Err(err) => (None, None, Some(format!("{err:#}"))),
+            };
+        parsed_by_trial.insert(trial.trial_id.clone(), parsed);
         let (score, energy_kwh) = if want_score || want_energy {
             match trial_efficiency_report(&context, trial, &score_options) {
                 Ok(report) => (
@@ -1176,6 +1380,8 @@ pub(crate) fn sweep_results(
             trial_id: trial.trial_id.clone(),
             index: trial.index,
             variables: trial.variables.clone(),
+            config_key: trial.config_key.clone(),
+            replicate: trial.replicate,
             status: status.status,
             scheduler_state: status.scheduler_state,
             objective,
@@ -1185,14 +1391,37 @@ pub(crate) fn sweep_results(
         });
     }
 
+    // Group the freshly parsed objectives by config for the rollup and for
+    // group-mean best selection.
+    let samples: Vec<TrialSample<'_>> = manifest
+        .trials
+        .iter()
+        .map(|trial| TrialSample {
+            config_key: trial.config_key.as_str(),
+            variables: &trial.variables,
+            objective: parsed_by_trial.get(&trial.trial_id).copied().flatten(),
+        })
+        .collect();
+    let groups = build_config_groups(&samples);
+    let mut trials_by_group: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for trial in &manifest.trials {
+        trials_by_group
+            .entry(trial.config_key.clone())
+            .or_default()
+            .push(trial.trial_id.clone());
+    }
+    let best_trial =
+        direction.and_then(|direction| best_config_trial_id(&groups, &trials_by_group, direction));
+
     let output = SweepResultsOutput {
         sweep_id: manifest.sweep_id,
         objective_direction: direction.map(|direction| match direction {
             hpc_compose::spec::ObjectiveDirection::Minimize => "minimize".to_string(),
             hpc_compose::spec::ObjectiveDirection::Maximize => "maximize".to_string(),
         }),
-        best_trial: best.map(|(_, id)| id),
+        best_trial,
         variable_columns,
+        groups: if uses_replicates { groups } else { Vec::new() },
         rows,
     };
 
@@ -1213,7 +1442,14 @@ pub(crate) fn sweep_results(
 fn sweep_results_csv(output: &SweepResultsOutput) -> String {
     let has_score = output.rows.iter().any(|row| row.score.is_some());
     let has_energy = output.rows.iter().any(|row| row.energy_kwh.is_some());
+    // Only surface replicate columns when the sweep actually fanned out, so
+    // non-replicated sweeps keep their existing CSV header byte-identical.
+    let has_replicates = output.rows.iter().any(|row| row.replicate > 0);
     let mut header = vec!["trial_id".to_string(), "index".to_string()];
+    if has_replicates {
+        header.push("config_key".to_string());
+        header.push("replicate".to_string());
+    }
     header.extend(output.variable_columns.iter().cloned());
     header.push("status".to_string());
     header.push("objective".to_string());
@@ -1235,6 +1471,10 @@ fn sweep_results_csv(output: &SweepResultsOutput) -> String {
             output::csv_field(&row.trial_id),
             output::csv_field(&row.index.to_string()),
         ];
+        if has_replicates {
+            fields.push(output::csv_field(&row.config_key));
+            fields.push(output::csv_field(&row.replicate.to_string()));
+        }
         for column in &output.variable_columns {
             fields.push(output::csv_field(
                 row.variables.get(column).map(String::as_str).unwrap_or(""),
@@ -1264,6 +1504,7 @@ fn print_sweep_results_output(output: &SweepResultsOutput) {
     if let Some(best) = &output.best_trial {
         println!("best trial: {best}");
     }
+    print_sweep_config_groups(&output.groups);
     for row in &output.rows {
         let vars = output
             .variable_columns
@@ -1293,12 +1534,19 @@ fn print_sweep_results_output(output: &SweepResultsOutput) {
 #[derive(Debug, Serialize)]
 struct SweepScoreOutput {
     sweep_id: String,
+    /// Per-config rollup of the efficiency score (mean±std(n)) when the sweep
+    /// used replicates. Omitted otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<SweepConfigGroup>,
     trials: Vec<SweepScoreTrial>,
 }
 
 #[derive(Debug, Serialize)]
 struct SweepScoreTrial {
     trial_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    config_key: String,
+    replicate: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1327,7 +1575,8 @@ pub(crate) fn score_sweep(
         gpu_tdp_w,
         cpu_watts_per_core,
     };
-    let trials = manifest
+    let uses_replicates = manifest_uses_replicates(&manifest);
+    let trials: Vec<SweepScoreTrial> = manifest
         .trials
         .iter()
         .map(|trial| {
@@ -1337,14 +1586,32 @@ pub(crate) fn score_sweep(
             };
             SweepScoreTrial {
                 trial_id: trial.trial_id.clone(),
+                config_key: trial.config_key.clone(),
+                replicate: trial.replicate,
                 job_id: trial.job_id.clone(),
                 report,
                 error,
             }
         })
         .collect();
+    // When the sweep used replicates, roll the efficiency score up per config.
+    let groups = if uses_replicates {
+        let samples: Vec<TrialSample<'_>> = trials
+            .iter()
+            .zip(&manifest.trials)
+            .map(|(scored, trial)| TrialSample {
+                config_key: scored.config_key.as_str(),
+                variables: &trial.variables,
+                objective: scored.report.as_ref().map(|report| f64::from(report.score)),
+            })
+            .collect();
+        build_config_groups(&samples)
+    } else {
+        Vec::new()
+    };
     let output = SweepScoreOutput {
         sweep_id: manifest.sweep_id,
+        groups,
         trials,
     };
     match output::resolve_output_format(format, false) {
@@ -1355,6 +1622,7 @@ pub(crate) fn score_sweep(
         ),
         OutputFormat::Text => {
             println!("sweep {}", output.sweep_id);
+            print_sweep_config_groups(&output.groups);
             for trial in &output.trials {
                 match (&trial.report, &trial.error) {
                     (Some(report), _) => println!(
@@ -1379,6 +1647,9 @@ struct SweepStatsOutput {
 #[derive(Debug, Serialize)]
 struct SweepStatsTrial {
     trial_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    config_key: String,
+    replicate: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1418,6 +1689,8 @@ pub(crate) fn stats_sweep(
             };
             SweepStatsTrial {
                 trial_id: trial.trial_id.clone(),
+                config_key: trial.config_key.clone(),
+                replicate: trial.replicate,
                 job_id: trial.job_id.clone(),
                 snapshot,
                 error,
@@ -1482,6 +1755,27 @@ mod tests {
         assert_eq!(columns, vec!["bs", "lr", "wd"]);
     }
 
+    fn result_row(
+        trial_id: &str,
+        config_key: &str,
+        replicate: u32,
+        objective: &str,
+    ) -> SweepResultRow {
+        SweepResultRow {
+            trial_id: trial_id.to_string(),
+            index: 0,
+            variables: vars(&[("lr", "0.1")]),
+            config_key: config_key.to_string(),
+            replicate,
+            status: "completed".to_string(),
+            scheduler_state: Some("COMPLETED".to_string()),
+            objective: Some(objective.to_string()),
+            objective_error: None,
+            score: None,
+            energy_kwh: None,
+        }
+    }
+
     #[test]
     fn sweep_results_csv_quotes_and_orders_columns() {
         let output = SweepResultsOutput {
@@ -1489,10 +1783,13 @@ mod tests {
             objective_direction: Some("minimize".to_string()),
             best_trial: Some("t000".to_string()),
             variable_columns: vec!["lr".to_string(), "note".to_string()],
+            groups: Vec::new(),
             rows: vec![SweepResultRow {
                 trial_id: "t000".to_string(),
                 index: 0,
                 variables: vars(&[("lr", "0.1"), ("note", "a,b\"c")]),
+                config_key: String::new(),
+                replicate: 0,
                 status: "completed".to_string(),
                 scheduler_state: Some("COMPLETED".to_string()),
                 objective: Some("0.05".to_string()),
@@ -1503,6 +1800,7 @@ mod tests {
         };
         let csv = sweep_results_csv(&output);
         let mut lines = csv.lines();
+        // Non-replicated sweep: header stays byte-identical to pre-#12 output.
         assert_eq!(
             lines.next().unwrap(),
             "\"trial_id\",\"index\",\"lr\",\"note\",\"status\",\"objective\""
@@ -1512,5 +1810,146 @@ mod tests {
             lines.next().unwrap(),
             "\"t000\",\"0\",\"0.1\",\"a,b\"\"c\",\"completed\",\"0.05\""
         );
+    }
+
+    #[test]
+    fn sweep_results_csv_adds_replicate_columns_when_fanned_out() {
+        let output = SweepResultsOutput {
+            sweep_id: "s1".to_string(),
+            objective_direction: Some("minimize".to_string()),
+            best_trial: Some("t000r0".to_string()),
+            variable_columns: vec!["lr".to_string()],
+            groups: Vec::new(),
+            rows: vec![
+                result_row("t000r0", "lr=0.1", 0, "0.05"),
+                result_row("t000r1", "lr=0.1", 1, "0.07"),
+            ],
+        };
+        let csv = sweep_results_csv(&output);
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "\"trial_id\",\"index\",\"config_key\",\"replicate\",\"lr\",\"status\",\"objective\""
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "\"t000r0\",\"0\",\"lr=0.1\",\"0\",\"0.1\",\"completed\",\"0.05\""
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "\"t000r1\",\"0\",\"lr=0.1\",\"1\",\"0.1\",\"completed\",\"0.07\""
+        );
+    }
+
+    fn manifest_trial(
+        trial_id: &str,
+        config_key: &str,
+        replicate: u32,
+        objective: Option<&str>,
+    ) -> SweepManifestTrial {
+        SweepManifestTrial {
+            trial_id: trial_id.to_string(),
+            index: 0,
+            variables: vars(&[("lr", "0.1")]),
+            config_key: config_key.to_string(),
+            replicate,
+            seed: Some("seed".to_string()),
+            script_path: PathBuf::from(format!("/tmp/{trial_id}.sbatch")),
+            job_id: Some("1".to_string()),
+            record_path: None,
+            submitted_at: None,
+            submit_error: None,
+            objective: objective.map(str::to_string),
+            objective_error: None,
+            observed_at: None,
+        }
+    }
+
+    #[test]
+    fn best_trial_ranks_on_group_mean_not_luckiest_replicate() {
+        // Config A: one lucky low replicate (0.01) but a worse MEAN than config B.
+        //   A objectives: 0.01, 0.50 -> mean 0.255
+        //   B objectives: 0.20, 0.20 -> mean 0.200
+        // Minimize: config B wins on mean, even though A has the single best run.
+        let trials = vec![
+            manifest_trial("t000r0", "cfg=a", 0, Some("0.01")),
+            manifest_trial("t000r1", "cfg=a", 1, Some("0.50")),
+            manifest_trial("t001r0", "cfg=b", 0, Some("0.20")),
+            manifest_trial("t001r1", "cfg=b", 1, Some("0.20")),
+        ];
+        let best = best_trial_id(&trials, hpc_compose::spec::ObjectiveDirection::Minimize)
+            .expect("a best trial");
+        // The representative trial of the winning group (config B) is returned,
+        // never the lucky single replicate t000r0.
+        assert_eq!(best, "t001r0");
+        assert_ne!(best, "t000r0");
+
+        // Maximize: the winner flips to the higher-mean config A.
+        let best_max = best_trial_id(&trials, hpc_compose::spec::ObjectiveDirection::Maximize)
+            .expect("a best trial");
+        assert_eq!(best_max, "t000r0");
+    }
+
+    #[test]
+    fn config_groups_roll_up_mean_std_per_config() {
+        let trials = vec![
+            manifest_trial("t000r0", "cfg=a", 0, Some("1.0")),
+            manifest_trial("t000r1", "cfg=a", 1, Some("3.0")),
+            manifest_trial("t001r0", "cfg=b", 0, Some("10.0")),
+        ];
+        let (groups, _) = config_groups_from_trials(&trials);
+        assert_eq!(groups.len(), 2);
+        let a = groups
+            .iter()
+            .find(|g| g.config_key == "cfg=a")
+            .expect("group a");
+        assert_eq!(a.mean, Some(2.0));
+        assert_eq!(a.std, Some(1.0));
+        assert_eq!(a.n, 2);
+        assert_eq!(a.replicates, 2);
+        let b = groups
+            .iter()
+            .find(|g| g.config_key == "cfg=b")
+            .expect("group b");
+        assert_eq!(b.mean, Some(10.0));
+        assert_eq!(b.std, Some(0.0));
+        assert_eq!(b.n, 1);
+    }
+
+    #[test]
+    fn manifest_uses_replicates_detects_fan_out() {
+        let single = vec![manifest_trial("t000", "cfg=a", 0, Some("1.0"))];
+        assert!(!manifest_uses_replicates(&SweepManifest {
+            schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
+            sweep_id: "s".into(),
+            compose_file: PathBuf::from("/tmp/c.yaml"),
+            submitted_at: 0,
+            matrix: "full".into(),
+            seed: None,
+            total_combinations: 1,
+            objective: None,
+            best_trial: None,
+            stopped_at: None,
+            stop_reason: None,
+            trials: single,
+        }));
+        let fanned = vec![
+            manifest_trial("t000r0", "cfg=a", 0, Some("1.0")),
+            manifest_trial("t000r1", "cfg=a", 1, Some("2.0")),
+        ];
+        assert!(manifest_uses_replicates(&SweepManifest {
+            schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
+            sweep_id: "s".into(),
+            compose_file: PathBuf::from("/tmp/c.yaml"),
+            submitted_at: 0,
+            matrix: "full".into(),
+            seed: None,
+            total_combinations: 1,
+            objective: None,
+            best_trial: None,
+            stopped_at: None,
+            stop_reason: None,
+            trials: fanned,
+        }));
     }
 }

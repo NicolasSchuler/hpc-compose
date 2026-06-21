@@ -552,6 +552,19 @@ services:
 "#,
             "only 1 combinations exist",
         ),
+        (
+            r#"
+sweep:
+  parameters:
+    lr: [0.1]
+  matrix: full
+  replicates: 0
+services:
+  app:
+    image: redis:7
+"#,
+            "sweep.replicates must be at least 1",
+        ),
     ] {
         let path = write_spec(tmpdir.path(), body);
         let err = ComposeSpec::load(&path).expect_err("invalid sweep");
@@ -560,6 +573,58 @@ services:
             "expected '{expected}', got {err:#}"
         );
     }
+}
+
+#[test]
+fn sweep_replicates_defaults_to_one_and_counts_runs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    // Omitted replicates defaults to 1; total_runs == total_trials.
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+name: sweep-no-replicates
+sweep:
+  parameters:
+    lr: [0.001, 0.01]
+    batch_size: [32, 64]
+  matrix: full
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let sweep = ComposeSpec::load(&path)
+        .expect("load")
+        .sweep
+        .expect("sweep config");
+    assert_eq!(sweep.replicates, 1);
+    assert_eq!(sweep.total_trials().expect("total"), 4);
+    assert_eq!(sweep.total_runs().expect("runs"), 4);
+
+    // replicates: 3 multiplies the run count but not the combination count.
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+name: sweep-replicates
+sweep:
+  parameters:
+    lr: [0.001, 0.01]
+    batch_size: [32, 64]
+  matrix: full
+  replicates: 3
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let sweep = ComposeSpec::load(&path)
+        .expect("load")
+        .sweep
+        .expect("sweep config");
+    assert_eq!(sweep.replicates, 3);
+    assert_eq!(sweep.total_trials().expect("total"), 4);
+    assert_eq!(sweep.total_runs().expect("runs"), 12);
 }
 
 #[test]

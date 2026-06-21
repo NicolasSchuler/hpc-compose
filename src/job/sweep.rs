@@ -3,7 +3,12 @@ use crate::spec::{SweepConfig, SweepMatrix, SweepObjective};
 use crate::time_util::unix_timestamp_millis;
 
 /// Schema version for persisted sweep manifests.
-pub const SWEEP_MANIFEST_SCHEMA_VERSION: u32 = 2;
+///
+/// v3 added per-trial `config_key`/`replicate`/`seed` fields for `replicates: N`
+/// sweeps. Every new field carries `serde(default)`, so v2 (and older) manifests
+/// still deserialize: missing fields default to an empty `config_key`, replicate
+/// `0`, and no seed.
+pub const SWEEP_MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 /// One generated sweep trial before submission.
 #[allow(missing_docs)]
@@ -12,6 +17,18 @@ pub struct SweepExpansionTrial {
     pub trial_id: String,
     pub index: usize,
     pub variables: BTreeMap<String, String>,
+    /// Stable key identifying the parameter config this trial replicates.
+    ///
+    /// All replicates of the same parameter combination share this key; it is
+    /// used to group replicates for the mean±std(n) rollup.
+    #[serde(default)]
+    pub config_key: String,
+    /// Zero-based replicate index within this config (`0` when replicates == 1).
+    #[serde(default)]
+    pub replicate: u32,
+    /// Deterministic per-replicate seed, present only when replicates > 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
 }
 
 /// Deterministic sweep expansion result.
@@ -57,6 +74,15 @@ pub struct SweepManifestTrial {
     pub trial_id: String,
     pub index: usize,
     pub variables: BTreeMap<String, String>,
+    /// Stable key grouping replicates of the same parameter config.
+    #[serde(default)]
+    pub config_key: String,
+    /// Zero-based replicate index within this config (`0` when replicates == 1).
+    #[serde(default)]
+    pub replicate: u32,
+    /// Deterministic per-replicate seed, present only when replicates > 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
     pub script_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
@@ -101,13 +127,15 @@ pub fn expand_sweep_with_limit(
     max_trials: Option<usize>,
 ) -> Result<SweepExpansion> {
     let total_combinations = config.total_trials()?;
+    let replicates = config.replicates;
+    // The submission guard counts materialized runs (combinations * replicates),
+    // not bare combinations: each replicate is a separate allocation.
+    let total_runs = config.total_runs()?;
     match &config.matrix {
-        SweepMatrix::Full
-            if max_trials.is_some_and(|max_trials| total_combinations > max_trials) =>
-        {
+        SweepMatrix::Full if max_trials.is_some_and(|max_trials| total_runs > max_trials) => {
             let max_trials = max_trials.expect("checked above");
             bail!(
-                "sweep expands to {total_combinations} trials, above the limit of {max_trials}; rerun with --max-trials {total_combinations} or larger to submit intentionally"
+                "sweep expands to {total_runs} runs, above the limit of {max_trials} ({total_combinations} configs x {replicates} replicates); rerun with --max-trials {total_runs} or larger to submit intentionally"
             );
         }
         SweepMatrix::Full => Ok(SweepExpansion {
@@ -115,7 +143,7 @@ pub fn expand_sweep_with_limit(
             matrix: "full".to_string(),
             seed: None,
             total_combinations,
-            trials: assign_trial_ids(full_product_trials(config, sweep_id)),
+            trials: assign_trial_ids(full_product_trials(config, sweep_id), sweep_id, replicates),
         }),
         SweepMatrix::Random { random, seed } => {
             if *random > total_combinations {
@@ -123,11 +151,16 @@ pub fn expand_sweep_with_limit(
                     "sweep.matrix.random requests {random} trials but only {total_combinations} combinations exist"
                 );
             }
+            // `random` bounds the number of sampled configs; the per-config
+            // replicate fan-out then multiplies that into the run count.
+            let sampled_runs = random
+                .checked_mul(replicates as usize)
+                .with_context(|| "sweep run matrix is too large".to_string())?;
             if let Some(max_trials) = max_trials
-                && *random > max_trials
+                && sampled_runs > max_trials
             {
                 bail!(
-                    "sweep expands to {random} sampled trials, above the limit of {max_trials}; rerun with --max-trials {random} or larger to submit intentionally"
+                    "sweep expands to {sampled_runs} runs, above the limit of {max_trials} ({random} sampled configs x {replicates} replicates); rerun with --max-trials {sampled_runs} or larger to submit intentionally"
                 );
             }
             let resolved_seed = seed.clone().unwrap_or_else(|| sweep_id.to_string());
@@ -140,7 +173,7 @@ pub fn expand_sweep_with_limit(
                 matrix: "random".to_string(),
                 seed: Some(resolved_seed),
                 total_combinations,
-                trials: assign_trial_ids(sampled),
+                trials: assign_trial_ids(sampled, sweep_id, replicates),
             })
         }
     }
@@ -167,16 +200,74 @@ fn full_product_trials(config: &SweepConfig, sweep_id: &str) -> Vec<BTreeMap<Str
     trials
 }
 
-fn assign_trial_ids(trials: Vec<BTreeMap<String, String>>) -> Vec<SweepExpansionTrial> {
+/// Materializes expansion trials from base parameter configs, fanning each
+/// config into `replicates` seeded trials.
+///
+/// With `replicates == 1` this is byte-identical to the legacy expansion:
+/// trial ids stay `t{index:03}`, `config_key` is the readable variable join,
+/// `replicate` is `0`, and `seed` is `None`. With `replicates > 1` each config
+/// `c` fans out into `t{c:03}r0..t{c:03}r{N-1}` with a deterministic
+/// per-replicate seed.
+fn assign_trial_ids(
+    configs: Vec<BTreeMap<String, String>>,
+    sweep_id: &str,
+    replicates: u32,
+) -> Vec<SweepExpansionTrial> {
+    let mut trials = Vec::with_capacity(configs.len() * replicates.max(1) as usize);
+    let mut index = 0_usize;
+    for (config_index, variables) in configs.into_iter().enumerate() {
+        let config_key = config_key_for(&variables);
+        for replicate in 0..replicates {
+            let (trial_id, seed) = if replicates <= 1 {
+                // Back-compat: keep the legacy `t000` ids and no per-replicate
+                // seed when no fan-out is requested.
+                (format!("t{config_index:03}"), None)
+            } else {
+                (
+                    format!("t{config_index:03}r{replicate}"),
+                    Some(replicate_seed(sweep_id, &config_key, replicate)),
+                )
+            };
+            trials.push(SweepExpansionTrial {
+                trial_id,
+                index,
+                variables: variables.clone(),
+                config_key: config_key.clone(),
+                replicate,
+                seed,
+            });
+            index += 1;
+        }
+    }
     trials
-        .into_iter()
-        .enumerate()
-        .map(|(index, variables)| SweepExpansionTrial {
-            trial_id: format!("t{index:03}"),
-            index,
-            variables,
-        })
-        .collect()
+}
+
+/// Builds a stable, human-readable key identifying a parameter config.
+///
+/// The variables come from a `BTreeMap`, so they are already sorted by name;
+/// the key is `name=value` pairs joined by `;`. An empty config (no parameters)
+/// yields an empty string. This doubles as the grouped-row display label.
+fn config_key_for(variables: &BTreeMap<String, String>) -> String {
+    variables
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Derives a deterministic per-replicate seed as a hex SHA-256 digest of
+/// `sweep_id:config_key:replicate`.
+///
+/// The same `SweepConfig` + `sweep_id` always produces the same seed for a
+/// given config/replicate, so user training scripts can reproduce it.
+fn replicate_seed(sweep_id: &str, config_key: &str, replicate: u32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(sweep_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(config_key.as_bytes());
+    hasher.update(b":");
+    hasher.update(replicate.to_string().as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn sample_trial_indices(seed: &str, total: usize, count: usize) -> Vec<usize> {
@@ -231,6 +322,13 @@ pub fn interpolation_vars_for_sweep_trial(
         "HPC_COMPOSE_SWEEP_TRIAL_INDEX".to_string(),
         trial.index.to_string(),
     );
+    vars.insert(
+        "HPC_COMPOSE_SWEEP_REPLICATE".to_string(),
+        trial.replicate.to_string(),
+    );
+    if let Some(seed) = &trial.seed {
+        vars.insert("HPC_COMPOSE_SWEEP_SEED".to_string(), seed.clone());
+    }
     vars
 }
 
@@ -346,6 +444,7 @@ mod tests {
             ]),
             matrix: SweepMatrix::Full,
             objective: None,
+            replicates: 1,
         }
     }
 
@@ -411,5 +510,140 @@ mod tests {
                 .map(String::as_str),
             Some("0")
         );
+        // replicates == 1: REPLICATE is 0, no SEED is injected (back-compat).
+        assert_eq!(
+            vars.get("HPC_COMPOSE_SWEEP_REPLICATE").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(vars.get("HPC_COMPOSE_SWEEP_SEED"), None);
+    }
+
+    #[test]
+    fn replicates_fan_out_each_config_with_stable_ids() {
+        let mut config = sweep_config();
+        config.replicates = 3;
+        let expansion = expand_sweep(&config, "sweep-test").expect("expand");
+        // 4 configs x 3 replicates = 12 runs.
+        assert_eq!(expansion.trials.len(), 12);
+        // First config fans out to t000r0..t000r2.
+        assert_eq!(expansion.trials[0].trial_id, "t000r0");
+        assert_eq!(expansion.trials[1].trial_id, "t000r1");
+        assert_eq!(expansion.trials[2].trial_id, "t000r2");
+        // Second config starts at t001r0.
+        assert_eq!(expansion.trials[3].trial_id, "t001r0");
+        assert_eq!(expansion.trials[11].trial_id, "t003r2");
+        // Global index is contiguous across the fan-out.
+        for (expected, trial) in expansion.trials.iter().enumerate() {
+            assert_eq!(trial.index, expected);
+        }
+        // All replicates of one config share a config_key and variables.
+        assert_eq!(
+            expansion.trials[0].config_key,
+            expansion.trials[1].config_key
+        );
+        assert_eq!(
+            expansion.trials[0].config_key,
+            expansion.trials[2].config_key
+        );
+        assert_eq!(expansion.trials[0].variables, expansion.trials[2].variables);
+        assert_ne!(
+            expansion.trials[0].config_key,
+            expansion.trials[3].config_key
+        );
+        assert_eq!(expansion.trials[0].replicate, 0);
+        assert_eq!(expansion.trials[2].replicate, 2);
+    }
+
+    #[test]
+    fn replicates_one_is_byte_identical_to_legacy_expansion() {
+        let mut config = sweep_config();
+        config.replicates = 1;
+        let expansion = expand_sweep(&config, "sweep-test").expect("expand");
+        // Legacy ids and no per-replicate seed are preserved.
+        assert_eq!(expansion.trials.len(), 4);
+        assert_eq!(expansion.trials[0].trial_id, "t000");
+        assert_eq!(expansion.trials[3].trial_id, "t003");
+        for trial in &expansion.trials {
+            assert_eq!(trial.replicate, 0);
+            assert_eq!(trial.seed, None);
+        }
+    }
+
+    #[test]
+    fn replicate_seeds_are_deterministic_and_distinct() {
+        let mut config = sweep_config();
+        config.replicates = 3;
+        let first = expand_sweep(&config, "sweep-fixed").expect("first");
+        let second = expand_sweep(&config, "sweep-fixed").expect("second");
+        // Same sweep id -> identical config keys and seeds across re-expansion.
+        assert_eq!(first.trials, second.trials);
+        let seeds: std::collections::BTreeSet<_> = first
+            .trials
+            .iter()
+            .map(|trial| {
+                trial
+                    .seed
+                    .clone()
+                    .expect("seed present when replicates > 1")
+            })
+            .collect();
+        // 12 distinct seeds (per config x replicate).
+        assert_eq!(seeds.len(), 12);
+        // Seed format is a 64-char hex SHA-256 digest.
+        assert!(seeds.iter().all(|seed| seed.len() == 64));
+        // A different sweep id changes the seeds.
+        let other = expand_sweep(&config, "sweep-other").expect("other");
+        assert_ne!(first.trials[0].seed, other.trials[0].seed);
+    }
+
+    #[test]
+    fn replicate_interpolation_vars_include_replicate_and_seed() {
+        let mut config = sweep_config();
+        config.replicates = 2;
+        let expansion = expand_sweep(&config, "sweep-test").expect("expand");
+        let vars = interpolation_vars_for_sweep_trial("sweep-test", &expansion.trials[1]);
+        assert_eq!(
+            vars.get("HPC_COMPOSE_SWEEP_TRIAL").map(String::as_str),
+            Some("t000r1")
+        );
+        assert_eq!(
+            vars.get("HPC_COMPOSE_SWEEP_REPLICATE").map(String::as_str),
+            Some("1")
+        );
+        let seed = vars
+            .get("HPC_COMPOSE_SWEEP_SEED")
+            .expect("seed injected when replicates > 1");
+        assert_eq!(seed.len(), 64);
+        assert_eq!(Some(seed), expansion.trials[1].seed.as_ref());
+    }
+
+    #[test]
+    fn v2_manifest_without_replicate_fields_still_loads() {
+        // A minimal v2 manifest JSON (pre-#12): no config_key/replicate/seed on
+        // trials, schema_version 2. It must deserialize under the v3 structs via
+        // serde(default).
+        let json = r#"{
+            "schema_version": 2,
+            "sweep_id": "sweep-legacy",
+            "compose_file": "/tmp/compose.yaml",
+            "submitted_at": 100,
+            "matrix": "full",
+            "total_combinations": 1,
+            "trials": [
+                {
+                    "trial_id": "t000",
+                    "index": 0,
+                    "variables": {"lr": "0.1"},
+                    "script_path": "/tmp/sweeps/sweep-legacy/t000.sbatch"
+                }
+            ]
+        }"#;
+        let manifest: SweepManifest = serde_json::from_str(json).expect("v2 manifest loads");
+        assert_eq!(manifest.schema_version, 2);
+        assert!(manifest.schema_version <= SWEEP_MANIFEST_SCHEMA_VERSION);
+        let trial = &manifest.trials[0];
+        assert_eq!(trial.config_key, "");
+        assert_eq!(trial.replicate, 0);
+        assert_eq!(trial.seed, None);
     }
 }

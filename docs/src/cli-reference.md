@@ -290,6 +290,8 @@ The command rejects `x-slurm.array` and never rewrites your compose file automat
 
 `sweep` expands the top-level `sweep` block in a compose file. Each generated trial is rendered and submitted as an independent tracked Slurm job; `sweep status` and `sweep list` read the persisted manifest under `.hpc-compose/sweeps/`.
 
+When the sweep sets `replicates: N`, each parameter config fans out into N seeded trials (`t000r0`, `t000r1`, …). `sweep status`, `sweep observe`, and `sweep results` then add a per-config mean±std(n) rollup (text and a `groups` array in JSON), `sweep results --format csv` gains `config_key` and `replicate` columns, and `best_trial` ranks on the per-config group mean rather than the single best replicate.
+
 ```bash
 hpc-compose sweep submit -f train.yaml --dry-run
 hpc-compose sweep submit -f train.yaml --max-trials 200

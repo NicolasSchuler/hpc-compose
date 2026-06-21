@@ -7348,6 +7348,9 @@ fn results_trial(trial_id: &str, index: usize, vars: &[(&str, &str)]) -> SweepMa
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect(),
+        config_key: String::new(),
+        replicate: 0,
+        seed: None,
         script_path: PathBuf::from(format!("{trial_id}.sbatch")),
         job_id: None,
         record_path: None,

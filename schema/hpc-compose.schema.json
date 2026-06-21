@@ -246,6 +246,11 @@
         "objective": {
           "$ref": "#/definitions/sweepObjective",
           "description": "Optional objective parsed from terminal trials by `sweep observe` and used by `sweep stop --stop-when`."
+        },
+        "replicates": {
+          "$ref": "#/definitions/positiveInteger",
+          "default": 1,
+          "description": "Number of seeded replicate trials per parameter config; status/observe roll up mean+/-std(n) per config."
         }
       },
       "description": "Embedded hyperparameter sweep metadata consumed by hpc-compose sweep submit/status/list. sweep.spec is intentionally unsupported in v1."

@@ -96,6 +96,14 @@ pub struct SweepConfig {
     /// `sweep stop --stop-when` to trigger early termination.
     #[serde(default)]
     pub objective: Option<SweepObjective>,
+    /// Number of seeded replicate trials submitted per parameter config.
+    ///
+    /// Defaults to `1` (no fan-out, byte-identical to a non-replicated sweep).
+    /// When `> 1`, each parameter combination is expanded into this many
+    /// trials with a deterministic per-replicate seed, and `sweep
+    /// status`/`observe` roll up mean±std(n) per config group.
+    #[serde(default = "default_sweep_replicates")]
+    pub replicates: u32,
 }
 
 /// Optimization direction for a sweep objective.
@@ -175,6 +183,10 @@ fn default_sweep_objective_group() -> u32 {
     1
 }
 
+fn default_sweep_replicates() -> u32 {
+    1
+}
+
 impl SweepConfig {
     /// Returns the number of parameter combinations in this sweep.
     ///
@@ -189,9 +201,27 @@ impl SweepConfig {
         })
     }
 
+    /// Returns the number of materialized runs once replicates are fanned out.
+    ///
+    /// This is `total_trials() * replicates` and is the count the `--max-trials`
+    /// guard applies to. `total_trials()` itself stays combinations-only because
+    /// `matrix.random` is bounded against the number of combinations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the product would overflow `usize`.
+    pub fn total_runs(&self) -> Result<usize> {
+        self.total_trials()?
+            .checked_mul(self.replicates as usize)
+            .context("sweep run matrix is too large")
+    }
+
     fn validate(&self) -> Result<()> {
         if self.parameters.is_empty() {
             bail!("sweep.parameters must contain at least one parameter");
+        }
+        if self.replicates == 0 {
+            bail!("sweep.replicates must be at least 1");
         }
         for (name, values) in &self.parameters {
             validate_sweep_parameter_name(name)?;

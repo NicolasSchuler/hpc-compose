@@ -37,6 +37,7 @@ mod runtime_state;
 mod scheduler;
 mod score;
 mod stats;
+mod stats_rollup;
 mod sweep;
 
 #[cfg(test)]
@@ -112,6 +113,7 @@ pub use stats::{
     SamplerSnapshot, SchedulerOptions, SlurmSamplerSnapshot, StatsOptions, StatsSnapshot,
     StepStats, build_stats_snapshot, metrics_dir_for_record,
 };
+pub use stats_rollup::{ReplicateStats, group_by_config, replicate_rollup};
 pub use sweep::{
     SWEEP_MANIFEST_SCHEMA_VERSION, SweepExpansion, SweepExpansionTrial, SweepManifest,
     SweepManifestTrial, expand_sweep, expand_sweep_with_limit, generate_sweep_id,

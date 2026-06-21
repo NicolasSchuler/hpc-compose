@@ -136,6 +136,7 @@ Rules:
 - `matrix: full` expands the Cartesian product deterministically over sorted parameter names.
 - `matrix.random` must be at least 1 and cannot exceed the total number of combinations.
 - `matrix.seed` is optional. If omitted, `sweep submit` derives a seed from the new sweep id and persists it.
+- `replicates` (optional, default `1`) submits N seeded replicate trials per parameter config. Each replicate is a separate allocation with a deterministic per-replicate seed; `sweep status`/`observe` roll up mean±std(n) per config. The `--max-trials` guard counts combinations × replicates. `replicates: 0` is rejected; `replicates: 1` is byte-identical to a non-replicated sweep (legacy `t000` trial ids). See [Hyperparameter Sweeps](sweeps.md#replicates).
 - `sweep.spec` is not supported; embed the sweep in the same compose file.
 
 For each trial, sweep variables override existing interpolation variables from `.env`, environment, settings, or `--env`. These reserved variables are also available:
@@ -143,8 +144,10 @@ For each trial, sweep variables override existing interpolation variables from `
 | Variable | Meaning |
 | --- | --- |
 | `HPC_COMPOSE_SWEEP_ID` | Persisted sweep id. |
-| `HPC_COMPOSE_SWEEP_TRIAL` | Trial label such as `t000`. |
+| `HPC_COMPOSE_SWEEP_TRIAL` | Trial label such as `t000` (or `t000r0` with replicates). |
 | `HPC_COMPOSE_SWEEP_TRIAL_INDEX` | Zero-based trial index. |
+| `HPC_COMPOSE_SWEEP_REPLICATE` | Zero-based replicate index within the config (`0` when `replicates: 1`). |
+| `HPC_COMPOSE_SWEEP_SEED` | Deterministic per-replicate seed; present only when `replicates` > 1. |
 
 Normal commands do not expand the sweep matrix. If the runnable spec contains `${lr}` with no default, ordinary `plan`, `up`, and `render` still fail unless `lr` is provided. Use defaults such as `${lr:-0.001}` when the base spec should remain runnable, or use `hpc-compose sweep submit --dry-run` to validate sweep-only variables.
 

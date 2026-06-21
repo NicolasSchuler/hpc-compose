@@ -2262,7 +2262,10 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
         ("runtime", &["backend", "gpu"]),
         ("serviceRuntime", &["prepare"]),
         ("serviceEnroot", &["prepare"]),
-        ("sweep", &["parameters", "matrix", "objective"]),
+        (
+            "sweep",
+            &["parameters", "matrix", "objective", "replicates"],
+        ),
     ];
 
     for (def_name, expected_keys) in catalog {
