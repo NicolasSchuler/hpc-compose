@@ -46,6 +46,10 @@ pub(crate) fn status(
     match output::resolve_output_format(format, json) {
         OutputFormat::Text => {
             output::print_status_snapshot(&snapshot).context("failed to write status output")?;
+            let job_id = snapshot.record.job_id.as_str();
+            output::print_next_steps(&output::inspect_next_commands(
+                (!job_id.is_empty()).then_some(job_id),
+            ));
         }
         OutputFormat::Json => {
             println!(

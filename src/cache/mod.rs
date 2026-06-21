@@ -1,6 +1,7 @@
 //! Cache manifest management for imported and prepared image artifacts.
 
 pub mod dataset;
+pub mod source;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -26,6 +27,8 @@ pub enum CacheEntryKind {
     Dataset,
     /// A staged model materialized into the content-addressed store.
     Model,
+    /// A content-addressed snapshot of a project's working-tree source.
+    Source,
     /// A kind produced by a newer (or older) tool version. Kept so that
     /// [`scan_cache`] never fails on a manifest it does not recognize and the
     /// entry still round-trips through deserialize/serialize.
@@ -282,8 +285,9 @@ pub fn touch_dataset_manifest(staged_dir: &Path, kind: CacheEntryKind) -> Result
 fn staged_kind_suffix(kind: &CacheEntryKind) -> &'static str {
     match kind {
         CacheEntryKind::Model => "model",
-        // The CAS only ever upserts Dataset/Model; default the rest to dataset
-        // so a misuse still produces a deterministic, scannable sidecar.
+        CacheEntryKind::Source => "source",
+        // The CAS only ever upserts Dataset/Model/Source; default the rest to
+        // dataset so a misuse still produces a deterministic, scannable sidecar.
         _ => "dataset",
     }
 }
@@ -502,7 +506,10 @@ pub fn cache_key_for_service(service: &RuntimeService, kind: CacheEntryKind) -> 
         }
         // Staged inputs are keyed by `dataset::dataset_cache_key`, not by a
         // service; there is no image cache key for them.
-        CacheEntryKind::Dataset | CacheEntryKind::Model | CacheEntryKind::Unknown => String::new(),
+        CacheEntryKind::Dataset
+        | CacheEntryKind::Model
+        | CacheEntryKind::Source
+        | CacheEntryKind::Unknown => String::new(),
     }
 }
 
@@ -554,6 +561,7 @@ fn sidecar_manifest_path_for_kind(artifact: &Path, kind: &CacheEntryKind) -> Pat
     match kind {
         CacheEntryKind::Dataset => dataset::sidecar_manifest_path_for_suffix(artifact, "dataset"),
         CacheEntryKind::Model => dataset::sidecar_manifest_path_for_suffix(artifact, "model"),
+        CacheEntryKind::Source => dataset::sidecar_manifest_path_for_suffix(artifact, "source"),
         CacheEntryKind::Base | CacheEntryKind::Prepared | CacheEntryKind::Unknown => {
             manifest_path_for(artifact)
         }
@@ -612,6 +620,7 @@ fn looks_like_manifest_path(path: &Path) -> bool {
                 || name.ends_with(".sif.json")
                 || name.ends_with(".dataset.json")
                 || name.ends_with(".model.json")
+                || name.ends_with(".source.json")
         })
         .unwrap_or(false)
 }
@@ -621,7 +630,11 @@ fn looks_like_manifest_path(path: &Path) -> bool {
 fn is_staged_input_sidecar(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.ends_with(".dataset.json") || name.ends_with(".model.json"))
+        .map(|name| {
+            name.ends_with(".dataset.json")
+                || name.ends_with(".model.json")
+                || name.ends_with(".source.json")
+        })
         .unwrap_or(false)
 }
 
@@ -631,6 +644,7 @@ fn is_staged_input_sidecar(path: &Path) -> bool {
 fn is_staged_input_dir(dir: &Path) -> bool {
     dataset::sidecar_manifest_path_for_suffix(dir, "dataset").is_file()
         || dataset::sidecar_manifest_path_for_suffix(dir, "model").is_file()
+        || dataset::sidecar_manifest_path_for_suffix(dir, "source").is_file()
         || dir.join(dataset::HF_COMPLETE_MARKER).is_file()
 }
 
@@ -696,6 +710,7 @@ fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
     let artifact_filename = filename
         .strip_suffix(".dataset.json")
         .or_else(|| filename.strip_suffix(".model.json"))
+        .or_else(|| filename.strip_suffix(".source.json"))
         .or_else(|| filename.strip_suffix(".json"))
         .unwrap_or(filename);
     path.with_file_name(artifact_filename)
@@ -1485,6 +1500,39 @@ mod tests {
         assert_eq!(
             staged_input_dir(cache, StagedInputKind::Dataset, &key),
             cache.join("datasets").join(&key)
+        );
+    }
+
+    #[test]
+    fn scan_cache_and_prune_track_source_snapshots() {
+        // A source snapshot staged via the CAS is discovered by scan_cache as a
+        // Source entry pointing at the staged DIRECTORY, and is prunable. Guards
+        // the discovery/label touch points patched for CacheEntryKind::Source.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let work = tmp.path().join("work");
+        let cache = tmp.path().join("cache");
+        fs::create_dir_all(work.join("src")).expect("work dir");
+        fs::write(work.join("src/main.rs"), b"fn main() {}").expect("src");
+
+        let snap = crate::cache::source::stage_source(&work, &cache).expect("stage");
+
+        let scanned = scan_cache(&cache).expect("scan");
+        assert_eq!(scanned.len(), 1, "one source entry discovered: {scanned:?}");
+        assert_eq!(scanned[0].kind, CacheEntryKind::Source);
+        assert_eq!(scanned[0].artifact_path, snap.dir.display().to_string());
+        assert!(Path::new(&scanned[0].artifact_path).is_dir());
+        // The inner source file must NOT be parsed as (or descended into for) a manifest.
+        assert!(
+            !scanned.iter().any(|m| m.artifact_path.ends_with("main.rs")),
+            "scan must not descend into the source snapshot dir"
+        );
+
+        let pruned = prune_by_age(&cache, 0).expect("prune");
+        assert_eq!(pruned.removed, vec![snap.dir.clone()]);
+        assert!(!snap.dir.exists(), "source snapshot dir removed");
+        assert!(
+            !dataset::sidecar_manifest_path_for_suffix(&snap.dir, "source").exists(),
+            "source sidecar removed"
         );
     }
 }

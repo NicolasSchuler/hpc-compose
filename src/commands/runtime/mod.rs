@@ -196,17 +196,45 @@ fn tracked_cached_artifacts(plan: &RuntimePlan) -> Vec<PathBuf> {
 }
 
 /// Collects best-effort submit-time provenance (tool version, git state of the
-/// repo containing the compose context, and per-service image refs). Static-safe:
-/// reads git locally and contacts no scheduler. Always `Some` on submit paths.
+/// repo containing the compose context, and per-service image refs) and, inside a
+/// git working tree, snapshots the working-tree source into the content-addressed
+/// store and pins its hash. Contacts no scheduler. Always `Some` on submit paths.
 pub(crate) fn collect_submit_provenance(
     cwd: &Path,
     plan: &RuntimePlan,
 ) -> Option<hpc_compose::job::JobProvenance> {
-    Some(hpc_compose::job::collect_provenance(
-        &hpc_compose::context::repo_root_or_cwd(cwd),
+    let repo_root = hpc_compose::context::repo_root_or_cwd(cwd);
+    let provenance = hpc_compose::job::collect_provenance(
+        &repo_root,
         env!("CARGO_PKG_VERSION"),
         image_refs_from_plan(plan),
+    );
+    Some(attach_submit_source_snapshot(
+        provenance,
+        &repo_root,
+        &plan.cache_dir,
     ))
+}
+
+/// Pins the working-tree source snapshot's content hash into `provenance` when it
+/// describes a git working tree (mirroring `provenance.git`: a non-git tree has
+/// no reproducible source identity to pin). Reuses the content-addressed store
+/// ([`hpc_compose::cache::source::stage_source`]); identical source dedups, so a
+/// sweep's trials share one entry. Best-effort: a staging failure is reported and
+/// leaves the hash unset rather than failing the submit.
+pub(crate) fn attach_submit_source_snapshot(
+    mut provenance: hpc_compose::job::JobProvenance,
+    repo_root: &Path,
+    cache_dir: &Path,
+) -> hpc_compose::job::JobProvenance {
+    if provenance.git.is_none() {
+        return provenance;
+    }
+    match hpc_compose::cache::source::stage_source(repo_root, cache_dir) {
+        Ok(snapshot) => provenance.source_content_hash = Some(snapshot.content_hash),
+        Err(err) => eprintln!("warning: failed to snapshot source for provenance: {err:#}"),
+    }
+    provenance
 }
 
 fn image_refs_from_plan(plan: &RuntimePlan) -> std::collections::BTreeMap<String, String> {
@@ -1983,7 +2011,7 @@ pub(crate) fn launch(
                 let (endpoints, next_commands) = if print_endpoints {
                     (
                         output::build_submit_endpoints(&runtime_plan),
-                        output::submit_next_commands(None, backend),
+                        output::submit_next_commands(None),
                     )
                 } else {
                     (Vec::new(), Vec::new())
@@ -2053,10 +2081,7 @@ pub(crate) fn launch(
                 let (endpoints, next_commands) = if print_endpoints {
                     (
                         output::build_submit_endpoints(&runtime_plan),
-                        output::submit_next_commands(
-                            Some(&record.job_id),
-                            SubmissionBackend::Local,
-                        ),
+                        output::submit_next_commands(Some(&record.job_id)),
                     )
                 } else {
                     (Vec::new(), Vec::new())
@@ -2114,10 +2139,8 @@ pub(crate) fn launch(
     let mut outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
     if print_endpoints {
         outcome.submit_output.endpoints = output::build_submit_endpoints(&prepared.runtime_plan);
-        outcome.submit_output.next_commands = output::submit_next_commands(
-            outcome.submit_output.job_id.as_deref(),
-            SubmissionBackend::Slurm,
-        );
+        outcome.submit_output.next_commands =
+            output::submit_next_commands(outcome.submit_output.job_id.as_deref());
     }
     print_slurm_submit_outcome(&prepared, &outcome)?;
     maybe_watch_slurm_submission(

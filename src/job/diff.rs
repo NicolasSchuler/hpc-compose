@@ -547,6 +547,12 @@ fn provenance_changes(left: &SubmissionRecord, right: &SubmissionRecord) -> Vec<
             .and_then(|prov| prov.git.as_ref())
             .and_then(|git| git.branch.clone()),
     );
+    push_change_if_different(
+        &mut changes,
+        "provenance.source_content_hash",
+        left_prov.and_then(|prov| prov.source_content_hash.clone()),
+        right_prov.and_then(|prov| prov.source_content_hash.clone()),
+    );
     let mut services: BTreeSet<&str> = BTreeSet::new();
     if let Some(prov) = left_prov {
         services.extend(prov.image_refs.keys().map(String::as_str));
@@ -917,6 +923,7 @@ mod tests {
             image_refs: [("app".to_string(), "img:1".to_string())]
                 .into_iter()
                 .collect(),
+            source_content_hash: None,
         });
         right.provenance = Some(JobProvenance {
             tool_version: "0.2.0".to_string(),
@@ -928,6 +935,7 @@ mod tests {
             image_refs: [("app".to_string(), "img:2".to_string())]
                 .into_iter()
                 .collect(),
+            source_content_hash: None,
         });
         let changes = provenance_changes(&left, &right);
         let paths: Vec<&str> = changes.iter().map(|change| change.path.as_str()).collect();
@@ -1232,6 +1240,7 @@ mod tests {
                 image_refs: [("app".to_string(), "img:1".to_string())]
                     .into_iter()
                     .collect(),
+                source_content_hash: None,
             })
         };
         first.provenance = provenance("aaa", "0.1.0");

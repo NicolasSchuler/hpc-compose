@@ -821,7 +821,15 @@ echo "Submitted batch job 12345"
         ],
     );
     assert_success(&submit);
-    assert!(stdout_text(&submit).contains("Submitted batch job 12345"));
+    let out = stdout_text(&submit);
+    assert!(out.contains("Submitted batch job 12345"));
+    // The human summary box surfaces parameterized next-step hints, with `pull`
+    // suggested before the destructive `down` so results are collected first.
+    assert!(out.contains("Next:"), "next-step hints shown: {out}");
+    assert!(
+        out.contains("hpc-compose pull --job-id 12345"),
+        "pull hint parameterized with the job id: {out}"
+    );
 }
 
 #[test]
@@ -7331,6 +7339,7 @@ services:
                     branch: Some("main".to_string()),
                 }),
                 image_refs: std::collections::BTreeMap::new(),
+                source_content_hash: None,
             }),
             ..SubmissionRecordBuildOptions::default()
         },
@@ -7824,6 +7833,7 @@ services:
             branch: Some("main".to_string()),
         }),
         image_refs: std::collections::BTreeMap::new(),
+        source_content_hash: None,
     });
     second.provenance = Some(JobProvenance {
         tool_version: "0.0.2".to_string(),
@@ -7833,6 +7843,7 @@ services:
             branch: Some("main".to_string()),
         }),
         image_refs: std::collections::BTreeMap::new(),
+        source_content_hash: None,
     });
     write_submission_record(&first).expect("write first");
     write_submission_record(&second).expect("write second");

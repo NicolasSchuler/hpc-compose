@@ -31,6 +31,23 @@ pub struct JobProvenance {
     pub git: Option<GitProvenance>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub image_refs: BTreeMap<String, String>,
+    /// Content hash of the working-tree source snapshot captured at submit (the
+    /// CAS key from [`crate::cache::source::stage_source`]). Populated only on
+    /// the approval-gated submit path; `None` when source was not snapshotted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_content_hash: Option<String>,
+}
+
+impl JobProvenance {
+    /// Returns this provenance with the working-tree source snapshot's content
+    /// hash attached (the CAS key from [`crate::cache::source::stage_source`]).
+    /// Used by the approval-gated submit path; provenance *collection* itself
+    /// stays static-safe and never stages.
+    #[must_use]
+    pub fn with_source_content_hash(mut self, hash: Option<String>) -> Self {
+        self.source_content_hash = hash;
+        self
+    }
 }
 
 /// Collects provenance for a submission: the tool version, the git state of
@@ -45,6 +62,7 @@ pub fn collect_provenance(
         tool_version: tool_version.to_string(),
         git: read_git_provenance(repo_root),
         image_refs,
+        source_content_hash: None,
     }
 }
 
@@ -122,5 +140,40 @@ mod tests {
             Some("docker://x:1")
         );
         assert!(prov.git.is_none());
+        assert!(prov.source_content_hash.is_none());
+    }
+
+    #[test]
+    fn with_source_content_hash_sets_field_and_serde_omits_when_none() {
+        let prov = collect_provenance(
+            std::path::Path::new("/nonexistent"),
+            "1.2.3",
+            BTreeMap::new(),
+        );
+        // Omitted from JSON when None (byte-compatible with pre-source records).
+        let json = serde_json::to_string(&prov).expect("serialize none");
+        assert!(
+            !json.contains("source_content_hash"),
+            "None source hash must be omitted: {json}"
+        );
+
+        // The builder attaches it, and it round-trips.
+        let pinned = prov.with_source_content_hash(Some("abc123".into()));
+        assert_eq!(pinned.source_content_hash.as_deref(), Some("abc123"));
+        let json = serde_json::to_string(&pinned).expect("serialize some");
+        assert!(json.contains("source_content_hash"));
+        let parsed: JobProvenance = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(parsed, pinned);
+    }
+
+    #[test]
+    fn old_record_without_source_hash_field_deserializes() {
+        // A provenance record written before the field existed must still load.
+        let raw = r#"{"tool_version":"0.1.0"}"#;
+        let prov: JobProvenance = serde_json::from_str(raw).expect("parse legacy");
+        assert_eq!(prov.tool_version, "0.1.0");
+        assert!(prov.source_content_hash.is_none());
+        assert!(prov.git.is_none());
+        assert!(prov.image_refs.is_empty());
     }
 }

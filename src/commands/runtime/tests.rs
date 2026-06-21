@@ -1233,3 +1233,47 @@ fn requested_walltime_parses_time_and_ignores_invalid() {
     plan.slurm.time = Some("not-a-time".to_string());
     assert!(requested_walltime(&plan).is_none());
 }
+
+#[test]
+fn attach_submit_source_snapshot_pins_hash_only_inside_a_git_tree() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo_root = tmp.path().join("src");
+    let cache_dir = tmp.path().join("cache");
+    fs::create_dir_all(&repo_root).expect("repo dir");
+    fs::write(repo_root.join("main.rs"), b"fn main() {}").expect("src file");
+
+    let base = hpc_compose::job::JobProvenance {
+        tool_version: "9.9.9".to_string(),
+        git: None,
+        image_refs: BTreeMap::new(),
+        source_content_hash: None,
+    };
+
+    // No git provenance => the source is not snapshotted (nothing to pin), and
+    // nothing is written to the cache.
+    let without_git = attach_submit_source_snapshot(base.clone(), &repo_root, &cache_dir);
+    assert!(without_git.source_content_hash.is_none());
+    assert!(
+        !cache_dir.join("source").exists(),
+        "no snapshot staged for a non-git tree"
+    );
+
+    // With git provenance => the working-tree source is staged and its hash pinned.
+    let with_git = hpc_compose::job::JobProvenance {
+        git: Some(hpc_compose::job::GitProvenance {
+            sha: "abc1234".to_string(),
+            dirty: true,
+            branch: Some("main".to_string()),
+        }),
+        ..base
+    };
+    let pinned = attach_submit_source_snapshot(with_git, &repo_root, &cache_dir);
+    let hash = pinned
+        .source_content_hash
+        .expect("hash pinned inside a git tree");
+    assert_eq!(hash.len(), 64, "full sha-256 hex");
+    assert!(
+        cache_dir.join("source").is_dir(),
+        "snapshot staged under the source/ segment"
+    );
+}

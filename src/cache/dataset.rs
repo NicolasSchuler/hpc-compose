@@ -33,6 +33,12 @@ pub enum StagedInputKind {
     Dataset,
     /// A model staged under `cache_dir/models/<key>`.
     Model,
+    /// A content-addressed snapshot of a project's working-tree source, staged
+    /// under `cache_dir/source/<key>`. Unlike `Dataset`/`Model` (keyed by an
+    /// immutable upstream `(uri, revision)`), a source snapshot is keyed by the
+    /// **content hash** of the tree, so a dirty working tree is captured
+    /// distinctly from a clean one. See [`crate::cache::source`].
+    Source,
 }
 
 impl StagedInputKind {
@@ -42,6 +48,7 @@ impl StagedInputKind {
         match self {
             StagedInputKind::Dataset => "datasets",
             StagedInputKind::Model => "models",
+            StagedInputKind::Source => "source",
         }
     }
 
@@ -52,6 +59,7 @@ impl StagedInputKind {
         match self {
             StagedInputKind::Dataset => "dataset",
             StagedInputKind::Model => "model",
+            StagedInputKind::Source => "source",
         }
     }
 
@@ -61,6 +69,7 @@ impl StagedInputKind {
         match self {
             StagedInputKind::Dataset => CacheEntryKind::Dataset,
             StagedInputKind::Model => CacheEntryKind::Model,
+            StagedInputKind::Source => CacheEntryKind::Source,
         }
     }
 }
@@ -270,7 +279,9 @@ fn is_version_tag(s: &str) -> bool {
 pub fn render_hf_stage_command(reference: &HfArtifactRef, dest: &str, cli_bin: &str) -> String {
     let repo_type_flag = match reference.kind {
         StagedInputKind::Dataset => " --repo-type dataset",
-        StagedInputKind::Model => "",
+        // hf:// staging only ever produces Model/Dataset; Source never reaches
+        // here, but the match must stay total over the shared kind enum.
+        StagedInputKind::Model | StagedInputKind::Source => "",
     };
     let bin = shell_single_quote(cli_bin);
     let repo = shell_single_quote(&reference.repo);
@@ -281,6 +292,7 @@ pub fn render_hf_stage_command(reference: &HfArtifactRef, dest: &str, cli_bin: &
     let kind_word = match reference.kind {
         StagedInputKind::Dataset => "dataset",
         StagedInputKind::Model => "model",
+        StagedInputKind::Source => "source",
     };
     let mut out = String::new();
     // Build the progress line from shell-quoted tokens (and a quoted "->" so it

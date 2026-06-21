@@ -162,17 +162,42 @@ pub(crate) fn build_submit_endpoints(plan: &RuntimePlan) -> Vec<SubmitEndpoint> 
 
 /// Suggested next commands after a submission. Only references commands that
 /// exist today; `--job-id` is added to the per-job reads when a job id is known.
-pub(crate) fn submit_next_commands(
-    job_id: Option<&str>,
-    _backend: SubmissionBackend,
-) -> Vec<String> {
+pub(crate) fn submit_next_commands(job_id: Option<&str>) -> Vec<String> {
     let target = job_id.map_or(String::new(), |id| format!(" --job-id {id}"));
     vec![
         format!("hpc-compose status{target}"),
         "hpc-compose logs --follow".to_string(),
         format!("hpc-compose stats{target}"),
+        // `pull` before `down`: collect results before the destructive teardown.
+        format!("hpc-compose pull{target}"),
         "hpc-compose down".to_string(),
     ]
+}
+
+/// Suggested next commands after an inspect read such as `status`. Omits
+/// `status` itself; `--job-id` is added to the per-job reads when known.
+pub(crate) fn inspect_next_commands(job_id: Option<&str>) -> Vec<String> {
+    let target = job_id.map_or(String::new(), |id| format!(" --job-id {id}"));
+    vec![
+        "hpc-compose logs --follow".to_string(),
+        format!("hpc-compose stats{target}"),
+        format!("hpc-compose pull{target}"),
+        "hpc-compose down".to_string(),
+    ]
+}
+
+/// Prints a human-facing "Next:" block of suggested follow-up commands. Text
+/// output only (JSON consumers read the structured `next_commands` field). A
+/// no-op when there are no suggestions.
+pub(crate) fn print_next_steps(commands: &[String]) {
+    if commands.is_empty() {
+        return;
+    }
+    println!();
+    println!("Next:");
+    for command in commands {
+        println!("  {command}");
+    }
 }
 
 /// Best-effort host+port from an HTTP(S) URL authority. Strips userinfo, handles
@@ -2938,6 +2963,7 @@ fn write_cache_artifact_block(
             CacheEntryKind::Prepared => "prepared",
             CacheEntryKind::Dataset => "dataset",
             CacheEntryKind::Model => "model",
+            CacheEntryKind::Source => "source",
             CacheEntryKind::Unknown => "unknown",
         };
         writeln!(writer, "manifest kind: {kind}")?;
@@ -3267,6 +3293,7 @@ pub(crate) fn print_submit_summary_box(
         );
     }
     println!("{separator}");
+    print_next_steps(&submit_next_commands(Some(job_id)));
 }
 
 use hpc_compose::context::ValueSource;

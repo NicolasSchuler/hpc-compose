@@ -1843,3 +1843,51 @@ fn http_host_port_handles_scheme_defaults_ipv6_and_userinfo() {
     );
     assert_eq!(http_host_port("garbage"), ("<host>".to_string(), 80));
 }
+
+#[test]
+fn submit_next_commands_parameterizes_job_id_and_orders_pull_before_down() {
+    let with_id = submit_next_commands(Some("12345"));
+    assert_eq!(
+        with_id,
+        vec![
+            "hpc-compose status --job-id 12345".to_string(),
+            "hpc-compose logs --follow".to_string(),
+            "hpc-compose stats --job-id 12345".to_string(),
+            "hpc-compose pull --job-id 12345".to_string(),
+            "hpc-compose down".to_string(),
+        ]
+    );
+    // pull is suggested before the destructive down so results are collected first.
+    let pull = with_id
+        .iter()
+        .position(|c| c.starts_with("hpc-compose pull"))
+        .expect("pull present");
+    let down = with_id
+        .iter()
+        .position(|c| c == "hpc-compose down")
+        .expect("down present");
+    assert!(pull < down, "pull must precede down");
+
+    // Without a job id, no --job-id is appended to any suggestion.
+    let without_id = submit_next_commands(None);
+    assert!(without_id.iter().all(|c| !c.contains("--job-id")));
+    assert!(without_id.contains(&"hpc-compose status".to_string()));
+}
+
+#[test]
+fn print_next_steps_is_noop_when_empty() {
+    // Empty list prints nothing and does not panic.
+    print_next_steps(&[]);
+}
+
+#[test]
+fn inspect_next_commands_omit_status_and_parameterize_job_id() {
+    let cmds = inspect_next_commands(Some("777"));
+    assert!(
+        cmds.iter().all(|c| !c.starts_with("hpc-compose status")),
+        "inspect hints must not re-suggest status: {cmds:?}"
+    );
+    assert!(cmds.contains(&"hpc-compose stats --job-id 777".to_string()));
+    assert!(cmds.contains(&"hpc-compose pull --job-id 777".to_string()));
+    assert!(cmds.contains(&"hpc-compose down".to_string()));
+}

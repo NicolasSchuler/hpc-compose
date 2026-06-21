@@ -362,6 +362,7 @@ services:
                 branch: Some("main".to_string()),
             }),
             image_refs,
+            source_content_hash: None,
         });
 
         let output = build_experiment_show_output(

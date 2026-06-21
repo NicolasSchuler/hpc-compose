@@ -22,6 +22,7 @@ pub(crate) fn list(cache_dir: Option<PathBuf>, format: Option<OutputFormat>) -> 
                         CacheEntryKind::Prepared => "prepared",
                         CacheEntryKind::Dataset => "dataset",
                         CacheEntryKind::Model => "model",
+                        CacheEntryKind::Source => "source",
                         CacheEntryKind::Unknown => "unknown",
                     };
                     println!(
