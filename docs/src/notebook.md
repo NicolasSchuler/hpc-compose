@@ -34,6 +34,32 @@ then open the URL above in your browser.
 
 For VS Code, open the printed `vscode.dev` link directly in a browser — no tunnel is required.
 
+### Login nodes that require an OTP / 2FA
+
+If your login node demands a one-time password on every SSH session, opening the
+forward above prompts for a fresh OTP each time — and an automation/agent cannot
+answer it. Use SSH connection multiplexing so you authenticate **once** and every
+later tunnel (and `rsync`/`scp`) reuses the master connection:
+
+```text
+# ~/.ssh/config
+Host <login-node>
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlPersist 10m
+```
+
+Establish the master once (entering the OTP), then the forward runs without
+re-authenticating until `ControlPersist` expires:
+
+```sh
+ssh -fN <login-node>                          # OTP entered here, once
+ssh -L 8888:<compute-node>:8888 <login-node>  # reuses the master — no OTP
+```
+
+`hpc-compose` only prints the tunnel command; it never opens a connection or
+stores credentials, so the OTP step stays entirely under your control.
+
 ## Local mode
 
 `--local` runs the server on the current host (login node or workstation) through the same local supervisor used by `dev`. The printed URL points at `127.0.0.1` directly:
