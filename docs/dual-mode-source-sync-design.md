@@ -154,9 +154,15 @@ modes reuse — without yet changing how a job runs:
   on `provenance.git.is_some()` (so it is dormant in non-git test tempdirs — zero
   churn — and active in real git repos), best-effort (a staging failure never
   blocks a submit). This pins `source_content_hash` and stores the snapshot, giving
-  reproducibility + recoverable dirty trees. **Remaining (Phase 0c):** redirect the
-  job's bind mounts at the snapshot so it *runs* against it (concurrency safety),
-  plus the `source: live` opt-out + schema — the job-execution change, needs review.
+  reproducibility + recoverable dirty trees. **Phase 0c (deferred — not required
+  for the login-node use cases).** Redirecting the job's bind mounts at the
+  snapshot so it *runs* against it (concurrency safety) is only needed for the
+  laptop thin-client mode (Phase 3), where there is no live tree on the cluster.
+  UC1 (spawn + inspect) never touches source mounting; UC2 (edit → spawn) already
+  works — the job runs the edited live tree and provenance records the exact
+  source content hash. Settled model if revisited: source mounts → snapshot;
+  outputs/caches/data and any mount that bundles both → stay live; `source: live`
+  opts out.
 
 ## Phase 1a — next-step hints in human output (landed)
 
