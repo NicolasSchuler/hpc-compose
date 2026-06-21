@@ -772,6 +772,7 @@ mod tests {
             sweep: None,
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
+            provenance: None,
         };
         write_submission_record(&record).expect("write record");
         record

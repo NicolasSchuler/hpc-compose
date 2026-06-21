@@ -594,6 +594,16 @@ x-slurm:
   - The canonical resume source is the shared `path`, not exported artifact bundles.
   - Attempt-specific runtime state moves under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/attempts/<attempt>/`, and the top-level `logs`, `metrics`, `artifacts`, and `state.json` paths continue to point at the latest attempt for compatibility.
 
+### Tracked-record provenance
+
+Every tracked submission record auto-pins best-effort provenance so a run
+self-describes what produced it: the `hpc-compose` tool version, the git state of
+the working tree (HEAD SHA, dirty flag, and branch — read locally and static-safe,
+`null` outside a git repository or when git is unavailable, and never fabricated),
+and the per-service image reference as launched. This is tracked-record metadata,
+not a compose field, so there is no YAML key to set. `hpc-compose diff` surfaces
+provenance deltas in a dedicated provenance section.
+
 ### Allocation metadata inside services
 
 Every service receives:

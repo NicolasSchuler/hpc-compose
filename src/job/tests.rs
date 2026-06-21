@@ -234,6 +234,7 @@ fn defaults_and_path_helpers_cover_remaining_helpers() {
         sweep: None,
         config_snapshot_yaml: None,
         cached_artifacts: Vec::new(),
+        provenance: None,
     };
     assert_eq!(
         log_dir_for_record(&fallback_record),

@@ -12,6 +12,7 @@ pub struct JobDiffReport {
     pub left: JobDiffSide,
     pub right: JobDiffSide,
     pub outcome_changes: Vec<JobDiffChange>,
+    pub provenance_changes: Vec<JobDiffChange>,
     pub resource_changes: Vec<JobDiffChange>,
     pub config_changes: Vec<JobDiffChange>,
     pub notes: Vec<String>,
@@ -30,6 +31,8 @@ pub struct JobDiffSide {
     pub scheduler_failed: Option<bool>,
     pub first_failure: Option<FirstFailure>,
     pub services: Vec<JobDiffServiceStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<JobProvenance>,
 }
 
 /// Service status projected into a diff report.
@@ -130,14 +133,83 @@ pub fn build_job_diff_report(
         _ => Vec::new(),
     };
 
+    let provenance_changes = provenance_changes(left, right);
+    if provenance_changes
+        .iter()
+        .any(|change| change.path == "provenance.git.sha")
+    {
+        notes.push("jobs were built from different commits".to_string());
+    }
+
     JobDiffReport {
         left: left_side,
         right: right_side,
         outcome_changes,
+        provenance_changes,
         resource_changes,
         config_changes,
         notes,
     }
+}
+
+/// Builds value-level differences between the two records' pinned provenance:
+/// tool version, git sha/dirty/branch, and per-service image refs.
+fn provenance_changes(left: &SubmissionRecord, right: &SubmissionRecord) -> Vec<JobDiffChange> {
+    let mut changes = Vec::new();
+    let left_prov = left.provenance.as_ref();
+    let right_prov = right.provenance.as_ref();
+    push_change_if_different(
+        &mut changes,
+        "provenance.tool_version",
+        left_prov.map(|prov| prov.tool_version.clone()),
+        right_prov.map(|prov| prov.tool_version.clone()),
+    );
+    push_change_if_different(
+        &mut changes,
+        "provenance.git.sha",
+        left_prov
+            .and_then(|prov| prov.git.as_ref())
+            .map(|git| git.sha.clone()),
+        right_prov
+            .and_then(|prov| prov.git.as_ref())
+            .map(|git| git.sha.clone()),
+    );
+    push_change_if_different(
+        &mut changes,
+        "provenance.git.dirty",
+        left_prov
+            .and_then(|prov| prov.git.as_ref())
+            .map(|git| git.dirty.to_string()),
+        right_prov
+            .and_then(|prov| prov.git.as_ref())
+            .map(|git| git.dirty.to_string()),
+    );
+    push_change_if_different(
+        &mut changes,
+        "provenance.git.branch",
+        left_prov
+            .and_then(|prov| prov.git.as_ref())
+            .and_then(|git| git.branch.clone()),
+        right_prov
+            .and_then(|prov| prov.git.as_ref())
+            .and_then(|git| git.branch.clone()),
+    );
+    let mut services: BTreeSet<&str> = BTreeSet::new();
+    if let Some(prov) = left_prov {
+        services.extend(prov.image_refs.keys().map(String::as_str));
+    }
+    if let Some(prov) = right_prov {
+        services.extend(prov.image_refs.keys().map(String::as_str));
+    }
+    for service in services {
+        push_change_if_different(
+            &mut changes,
+            &format!("provenance.image_refs.{service}"),
+            left_prov.and_then(|prov| prov.image_refs.get(service).cloned()),
+            right_prov.and_then(|prov| prov.image_refs.get(service).cloned()),
+        );
+    }
+    changes
 }
 
 fn diff_side(record: &SubmissionRecord, status: Option<&StatusSnapshot>) -> JobDiffSide {
@@ -165,6 +237,7 @@ fn diff_side(record: &SubmissionRecord, status: Option<&StatusSnapshot>) -> JobD
         scheduler_failed: status.map(|status| status.scheduler.failed),
         first_failure,
         services,
+        provenance: record.provenance.clone(),
     }
 }
 
@@ -458,6 +531,7 @@ mod tests {
             sweep: None,
             config_snapshot_yaml: Some(config_snapshot_yaml.to_string()),
             cached_artifacts: Vec::new(),
+            provenance: None,
         }
     }
 
@@ -473,6 +547,53 @@ mod tests {
             fs::create_dir_all(parent).expect("state dir");
         }
         fs::write(state_path, state_json).expect("state");
+    }
+
+    #[test]
+    fn provenance_changes_reports_tool_git_and_image_deltas() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut left = local_diff_record(tmp.path(), "1", "name: x");
+        let mut right = local_diff_record(tmp.path(), "2", "name: x");
+        left.provenance = Some(JobProvenance {
+            tool_version: "0.1.0".to_string(),
+            git: Some(GitProvenance {
+                sha: "aaa".to_string(),
+                dirty: false,
+                branch: Some("main".to_string()),
+            }),
+            image_refs: [("app".to_string(), "img:1".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        right.provenance = Some(JobProvenance {
+            tool_version: "0.2.0".to_string(),
+            git: Some(GitProvenance {
+                sha: "bbb".to_string(),
+                dirty: true,
+                branch: Some("main".to_string()),
+            }),
+            image_refs: [("app".to_string(), "img:2".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        let changes = provenance_changes(&left, &right);
+        let paths: Vec<&str> = changes.iter().map(|change| change.path.as_str()).collect();
+        assert!(paths.contains(&"provenance.tool_version"));
+        assert!(paths.contains(&"provenance.git.sha"));
+        assert!(paths.contains(&"provenance.git.dirty"));
+        assert!(paths.contains(&"provenance.image_refs.app"));
+        // An identical field (branch) is not reported.
+        assert!(!paths.contains(&"provenance.git.branch"));
+
+        // Identical provenance yields no changes; one-sided Some/None does.
+        right.provenance = left.provenance.clone();
+        assert!(provenance_changes(&left, &right).is_empty());
+        right.provenance = None;
+        assert!(
+            provenance_changes(&left, &right)
+                .iter()
+                .any(|change| change.path == "provenance.tool_version")
+        );
     }
 
     #[test]

@@ -258,6 +258,7 @@ pub fn build_submission_record_with_backend_and_options(
         sweep: options.sweep.clone(),
         config_snapshot_yaml: options.config_snapshot_yaml.clone(),
         cached_artifacts: options.cached_artifacts.clone(),
+        provenance: options.provenance.clone(),
     })
 }
 

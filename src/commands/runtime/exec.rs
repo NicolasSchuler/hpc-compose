@@ -261,6 +261,7 @@ pub(crate) fn run_service(
                 sweep: None,
                 config_snapshot_yaml: None,
                 cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+                provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
             },
         )?;
         write_submission_record(&record)
@@ -326,6 +327,7 @@ pub(crate) fn run_service(
             sweep: None,
             config_snapshot_yaml: None,
             cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+            provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
         },
     )?;
     write_submission_record(&record)?;
@@ -491,6 +493,7 @@ pub(crate) fn run_ephemeral(
         sweep: None,
         config_snapshot_yaml: None,
         cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+        provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
     };
 
     if local {
@@ -888,6 +891,7 @@ pub(crate) fn notebook(
         sweep: None,
         config_snapshot_yaml: None,
         cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+        provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
     };
 
     let scheduler_options = SchedulerOptions {

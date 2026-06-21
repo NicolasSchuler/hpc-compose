@@ -1262,6 +1262,7 @@ mod tests {
             sweep: None,
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
+            provenance: None,
         }
     }
 

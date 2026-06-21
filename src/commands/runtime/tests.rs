@@ -217,6 +217,7 @@ fn smoke_evaluation_rejects_missing_readiness_and_completion() {
             sweep: None,
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
+            provenance: None,
         },
         scheduler: hpc_compose::job::SchedulerStatus {
             state: "COMPLETED".into(),

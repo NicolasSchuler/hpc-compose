@@ -183,6 +183,36 @@ fn tracked_cached_artifacts(plan: &RuntimePlan) -> Vec<PathBuf> {
     artifacts
 }
 
+/// Collects best-effort submit-time provenance (tool version, git state of the
+/// repo containing the compose context, and per-service image refs). Static-safe:
+/// reads git locally and contacts no scheduler. Always `Some` on submit paths.
+pub(crate) fn collect_submit_provenance(
+    cwd: &Path,
+    plan: &RuntimePlan,
+) -> Option<hpc_compose::job::JobProvenance> {
+    Some(hpc_compose::job::collect_provenance(
+        &hpc_compose::context::repo_root_or_cwd(cwd),
+        env!("CARGO_PKG_VERSION"),
+        image_refs_from_plan(plan),
+    ))
+}
+
+fn image_refs_from_plan(plan: &RuntimePlan) -> std::collections::BTreeMap<String, String> {
+    plan.ordered_services
+        .iter()
+        .map(|service| (service.name.clone(), image_source_label(&service.source)))
+        .collect()
+}
+
+/// Stringifies an image source as launched (remote ref or local artifact path).
+fn image_source_label(source: &ImageSource) -> String {
+    match source {
+        ImageSource::LocalSqsh(path) | ImageSource::LocalSif(path) => path.display().to_string(),
+        ImageSource::Remote(remote) => remote.clone(),
+        ImageSource::Host => "host".to_string(),
+    }
+}
+
 #[derive(Debug)]
 struct UpInvocationLock {
     path: Option<PathBuf>,
@@ -1094,6 +1124,7 @@ where
         sweep: None,
         config_snapshot_yaml: Some(effective_config_yaml),
         cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+        provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
     };
 
     if !no_preflight {
@@ -1507,6 +1538,7 @@ where
         sweep: None,
         config_snapshot_yaml: Some(effective_config_yaml.clone()),
         cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+        provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
     };
 
     if maybe_check_resume_diff(
@@ -1795,6 +1827,7 @@ pub(crate) fn launch(
         sweep: None,
         config_snapshot_yaml: Some(effective_config_yaml.clone()),
         cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+        provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
     };
 
     if maybe_check_resume_diff(

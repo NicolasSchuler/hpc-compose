@@ -10,10 +10,10 @@ use std::thread;
 use std::time::Duration;
 
 use hpc_compose::job::{
-    SubmissionBackend, SubmissionKind, SubmissionRecord, SubmissionRecordBuildOptions,
-    build_submission_record, build_submission_record_with_backend_and_options,
-    build_submission_record_with_options, latest_record_path_for, load_submission_record,
-    state_path_for_record, write_submission_record,
+    GitProvenance, JobProvenance, SubmissionBackend, SubmissionKind, SubmissionRecord,
+    SubmissionRecordBuildOptions, build_submission_record,
+    build_submission_record_with_backend_and_options, build_submission_record_with_options,
+    latest_record_path_for, load_submission_record, state_path_for_record, write_submission_record,
 };
 use hpc_compose::render::log_file_name_for_service;
 use serde_json::Value;
@@ -7060,6 +7060,24 @@ services:
     )
     .expect("second record");
     second.submitted_at = 20;
+    first.provenance = Some(JobProvenance {
+        tool_version: "0.0.1".to_string(),
+        git: Some(GitProvenance {
+            sha: "aaaaaaa".to_string(),
+            dirty: false,
+            branch: Some("main".to_string()),
+        }),
+        image_refs: std::collections::BTreeMap::new(),
+    });
+    second.provenance = Some(JobProvenance {
+        tool_version: "0.0.2".to_string(),
+        git: Some(GitProvenance {
+            sha: "bbbbbbb".to_string(),
+            dirty: true,
+            branch: Some("main".to_string()),
+        }),
+        image_refs: std::collections::BTreeMap::new(),
+    });
     write_submission_record(&first).expect("write first");
     write_submission_record(&second).expect("write second");
     let first_state_path = state_path_for_record(&first);
@@ -7115,6 +7133,21 @@ services:
             .iter()
             .any(|change| change["path"] == "x-slurm.time")
     );
+    // Provenance pinned on each record (#9) is surfaced as provenance_changes.
+    let provenance_changes = value["provenance_changes"]
+        .as_array()
+        .expect("provenance_changes array");
+    assert!(
+        provenance_changes
+            .iter()
+            .any(|change| change["path"] == "provenance.tool_version")
+    );
+    assert!(
+        provenance_changes
+            .iter()
+            .any(|change| change["path"] == "provenance.git.sha")
+    );
+    assert!(text_stdout.contains("provenance.tool_version"));
 
     let third = build_submission_record_with_backend_and_options(
         &compose,

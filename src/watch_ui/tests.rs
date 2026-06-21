@@ -36,6 +36,7 @@ fn sample_snapshot() -> PsSnapshot {
             sweep: None,
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
+            provenance: None,
         },
         scheduler: SchedulerStatus {
             state: "RUNNING".into(),

@@ -324,6 +324,7 @@ fn submit_sweep_trial(
             }),
             config_snapshot_yaml: Some(effective_config_yaml),
             cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+            provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
         },
         output_format,
     };

@@ -757,6 +757,12 @@ fn write_job_diff_report(writer: &mut impl Write, report: &JobDiffReport) -> io:
     } else {
         write_diff_changes(writer, &report.outcome_changes, usize::MAX)?;
     }
+    writeln!(writer, "{}", term::styled_section_header("Provenance:"))?;
+    if report.provenance_changes.is_empty() {
+        writeln!(writer, "  no provenance changes")?;
+    } else {
+        write_diff_changes(writer, &report.provenance_changes, usize::MAX)?;
+    }
     writeln!(writer, "{}", term::styled_section_header("Resources:"))?;
     if report.resource_changes.is_empty() {
         writeln!(writer, "  no resource changes")?;

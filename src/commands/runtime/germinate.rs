@@ -197,6 +197,7 @@ pub(crate) fn germinate(
         sweep: None,
         config_snapshot_yaml: Some(effective_config_yaml),
         cached_artifacts: tracked_cached_artifacts(&canary_plan),
+        provenance: collect_submit_provenance(&context.cwd, &canary_plan),
     };
     let prepared = PreparedSlurmSubmission {
         file: file.clone(),

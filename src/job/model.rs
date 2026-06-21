@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::provenance::JobProvenance;
+
 /// Metadata persisted for a submitted job tracked under `.hpc-compose/`.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +49,11 @@ pub struct SubmissionRecord {
     pub config_snapshot_yaml: Option<String>,
     #[serde(default)]
     pub cached_artifacts: Vec<PathBuf>,
+    /// Best-effort provenance pinned at submit time (tool version, git state,
+    /// per-service image refs). Optional and additive; legacy records load with
+    /// `None`. Descriptive only — capturing it contacts no scheduler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<JobProvenance>,
 }
 
 /// Backend used to execute a tracked submission.
@@ -107,6 +114,7 @@ pub struct SubmissionRecordBuildOptions {
     pub sweep: Option<SweepTrialMetadata>,
     pub config_snapshot_yaml: Option<String>,
     pub cached_artifacts: Vec<PathBuf>,
+    pub provenance: Option<JobProvenance>,
 }
 
 /// Source used to determine scheduler state.
@@ -155,5 +163,7 @@ mod tests {
         assert_eq!(record.backend, SubmissionBackend::Slurm);
         assert_eq!(record.kind, SubmissionKind::Main);
         assert!(record.cached_artifacts.is_empty());
+        // Legacy records lacking the provenance key load with provenance == None.
+        assert!(record.provenance.is_none());
     }
 }

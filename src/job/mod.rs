@@ -27,6 +27,7 @@ mod diff;
 mod logs;
 mod metrics_probe;
 mod model;
+mod provenance;
 mod ps;
 mod record;
 mod replay;
@@ -67,6 +68,7 @@ pub use model::{
     RequestedWalltime, SchedulerSource, SubmissionBackend, SubmissionKind, SubmissionRecord,
     SubmissionRecordBuildOptions, SweepTrialMetadata,
 };
+pub use provenance::{GitProvenance, JobProvenance, collect_provenance, read_git_provenance};
 pub use ps::{PsSnapshot, build_ps_snapshot};
 pub use record::{
     CleanupJobReport, CleanupMode, CleanupReport, JobInventoryEntry, JobInventoryScan,
