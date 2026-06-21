@@ -1,0 +1,9 @@
+# Worktrunk project config (shared, checked in).
+# Reclaim disk after each worktree merge: `cargo llvm-cov` and other heavy tasks leave
+# duplicate target/ trees behind. `just cache-sweep` drops target/llvm-cov-target and
+# target/mutants, then prunes main-tree artifacts older than 3 days via cargo-sweep,
+# keeping the warm incremental debug cache intact.
+#
+# First run prompts for approval because the recipe uses `rm -rf` on regenerable build
+# dirs under target/. Pre-approve once with: `wt config approvals add`
+post-merge = "just cache-sweep"

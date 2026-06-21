@@ -23,6 +23,28 @@ bootstrap-docs-tools: (_require-tools "cargo" "npm")
 clean:
     rm -rf target .tmp coverage htmlcov tarpaulin-report.html lcov.info *.profraw *.profdata
 
+# Trim stale build artifacts without a full `cargo clean` (keeps the warm debug cache).
+# Drops the duplicate coverage/mutants target trees unconditionally (a `cargo llvm-cov`
+# run rebuilds the whole workspace into target/llvm-cov-target), then sweeps main-tree
+# artifacts untouched for >N days via cargo-sweep when it is installed.
+cache-sweep days="3":
+    rm -rf target/llvm-cov-target target/mutants
+    @if command -v cargo-sweep >/dev/null 2>&1; then \
+        cargo sweep --time {{days}}; \
+    else \
+        echo "cargo-sweep not installed; removed duplicate trees only."; \
+        echo "Install with: cargo install cargo-sweep"; \
+    fi
+
+# Drop artifacts not built by a currently-installed toolchain. Run after `rustup update`,
+# which orphans the entire previous toolchain's artifacts that `--time` alone won't catch.
+cache-sweep-installed:
+    @if command -v cargo-sweep >/dev/null 2>&1; then \
+        cargo sweep --installed; \
+    else \
+        echo "cargo-sweep not installed. Install with: cargo install cargo-sweep"; \
+    fi
+
 workflow-check: (_require-tools "actionlint")
     actionlint -color
 
@@ -53,4 +75,6 @@ release-check: _require-cargo-subcommands
     cargo llvm-cov --workspace --locked --no-report
     cargo llvm-cov report --json --summary-only --locked --ignore-filename-regex '(^|/)commands/mod\.rs$|(^|/)cli/commands\.rs$|(^|/)main\.rs$|(^|/)job/model\.rs$' --fail-under-lines 87 --fail-under-regions 87 --fail-under-functions 85
 
-ci: check docs-check examples-check release-check
+# `release-check` runs `cargo llvm-cov`, which leaves a full duplicate workspace build in
+# target/llvm-cov-target; sweep it (and prune >3d main-tree artifacts) once the suite passes.
+ci: check docs-check examples-check release-check cache-sweep
