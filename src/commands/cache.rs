@@ -237,6 +237,7 @@ services:
                 sshare: binary("sshare"),
                 sprio: binary("sprio"),
             },
+            huggingface_cli_bin: "huggingface-cli".to_string(),
             interpolation_vars: BTreeMap::new(),
             interpolation_var_sources: BTreeMap::new(),
             watch: Default::default(),

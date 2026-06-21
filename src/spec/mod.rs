@@ -881,15 +881,59 @@ pub enum StageMode {
     Copy,
 }
 
+/// Whether an `hf://` stage-in source is a model or a dataset.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HfStageKind {
+    /// A model repository (no `--repo-type`).
+    #[default]
+    Model,
+    /// A dataset repository (`--repo-type dataset`).
+    Dataset,
+}
+
+impl HfStageKind {
+    /// Maps to the cache-layer staged-input kind.
+    #[must_use]
+    pub fn as_staged_input_kind(self) -> crate::cache::dataset::StagedInputKind {
+        match self {
+            HfStageKind::Model => crate::cache::dataset::StagedInputKind::Model,
+            HfStageKind::Dataset => crate::cache::dataset::StagedInputKind::Dataset,
+        }
+    }
+}
+
+/// A typed HuggingFace stage-in source.
+///
+/// The download runs cluster-side inside the Slurm allocation (the compute node
+/// has network); hpc-compose never downloads on the laptop or over SSH. The
+/// `revision` must be an immutable pin (commit SHA or explicit immutable tag);
+/// floating refs are rejected at validation time.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HfStageSource {
+    pub repo: String,
+    pub revision: String,
+    #[serde(default)]
+    pub kind: HfStageKind,
+}
+
 /// Stage-in path mapping run before service launch.
+///
+/// Either a filesystem `from` path or a typed `hf://` source (`hf`) is staged
+/// into `to`; exactly one of the two must be set.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StageInConfig {
-    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     pub to: String,
     #[serde(default)]
     pub mode: StageMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf: Option<HfStageSource>,
 }
 
 /// Stage-out policy for one path mapping.
@@ -2943,15 +2987,60 @@ impl ScratchConfig {
 
 impl StageInConfig {
     fn validate(&self, index: usize) -> Result<()> {
-        validate_stage_path(&self.from, &format!("x-slurm.stage_in[{index}].from"))?;
         validate_stage_path(&self.to, &format!("x-slurm.stage_in[{index}].to"))?;
+        match (self.from.as_deref(), self.hf.as_ref()) {
+            (Some(_), Some(_)) => {
+                bail!(
+                    "x-slurm.stage_in[{index}] must set exactly one of 'from' (filesystem path) or 'hf' (HuggingFace source), not both"
+                );
+            }
+            (None, None) => {
+                bail!(
+                    "x-slurm.stage_in[{index}] must set either 'from' (filesystem path) or 'hf' (HuggingFace source)"
+                );
+            }
+            (Some(from), None) => {
+                validate_stage_path(from, &format!("x-slurm.stage_in[{index}].from"))?;
+            }
+            (None, Some(hf)) => {
+                hf.validate(index)?;
+            }
+        }
         Ok(())
     }
 
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
-        self.from = interpolate_string_preserving_slurm_job_id(&self.from, vars)?;
+        if let Some(from) = &mut self.from {
+            *from = interpolate_string_preserving_slurm_job_id(from, vars)?;
+        }
         self.to = interpolate_string_preserving_slurm_job_id(&self.to, vars)?;
+        if let Some(hf) = &mut self.hf {
+            hf.repo = interpolate_string(&hf.repo, vars)?;
+            hf.revision = interpolate_string(&hf.revision, vars)?;
+        }
         Ok(())
+    }
+}
+
+impl HfStageSource {
+    /// Builds the `hf://repo` URI string for this source.
+    #[must_use]
+    pub fn uri(&self) -> String {
+        format!("{}{}", crate::cache::dataset::HF_URI_SCHEME, self.repo)
+    }
+
+    fn validate(&self, index: usize) -> Result<()> {
+        let field = format!("x-slurm.stage_in[{index}].hf");
+        let uri = format!("{}@{}", self.uri(), self.revision);
+        crate::cache::dataset::parse_hf_uri(&uri, self.as_staged_input_kind())
+            .with_context(|| format!("{field} is invalid"))?;
+        Ok(())
+    }
+
+    /// Maps the kind to the cache-layer staged-input kind.
+    #[must_use]
+    pub fn as_staged_input_kind(&self) -> crate::cache::dataset::StagedInputKind {
+        self.kind.as_staged_input_kind()
     }
 }
 

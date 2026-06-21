@@ -70,7 +70,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             strict_env,
             format,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::validate(context, strict_env, format)
         }
         Commands::Lint {
@@ -81,7 +81,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             dry_run,
             format,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::lint(context, strict_env, allow_warnings, fix, dry_run, format)
         }
         Commands::Render {
@@ -89,7 +89,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             output,
             format,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::render(context, output, format)
         }
         Commands::Prepare {
@@ -97,6 +97,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             enroot_bin,
             apptainer_bin,
             singularity_bin,
+            huggingface_cli_bin,
             keep_failed_prep,
             force_rebuild,
             force_deprecated,
@@ -115,6 +116,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--enroot-bin", &enroot_bin),
                     ("--apptainer-bin", &apptainer_bin),
                     ("--singularity-bin", &singularity_bin),
+                    ("--huggingface-cli-bin", &huggingface_cli_bin),
                 ],
             )?;
             spec::prepare(
@@ -191,7 +193,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             variables,
             show_values,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::config(context, format, variables, show_values)
         }
         Commands::Schema { kind } => print_schema(kind),
@@ -204,7 +206,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             explain,
             format,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::plan(
                 context,
                 strict_env,
@@ -265,7 +267,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 if checks.is_some() {
                     bail!("doctor --checks requires --fabric-smoke");
                 }
-                let context = resolve_command_context(options, file, binary_overrides)?;
+                let context = resolve_command_context(options, file, binary_overrides, None)?;
                 doctor::doctor_mpi_smoke(
                     context,
                     format,
@@ -279,7 +281,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 if cluster_report {
                     bail!("doctor --fabric-smoke cannot be combined with --cluster-report");
                 }
-                let context = resolve_command_context(options, file, binary_overrides)?;
+                let context = resolve_command_context(options, file, binary_overrides, None)?;
                 doctor::doctor_fabric_smoke(
                     context,
                     doctor::FabricSmokeOptions {
@@ -371,6 +373,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sacct-bin", &sacct_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
+                    ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                 ],
             )?;
             runtime::up(
@@ -422,6 +425,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--scancel-bin", &scancel_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
+                    ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                 ],
             )?;
             runtime::smoke_test(
@@ -456,6 +460,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--enroot-bin", &launch.enroot_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
+                    ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                 ],
             )?;
             runtime::dev(
@@ -490,6 +495,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--enroot-bin", &launch.enroot_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
+                    ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                 ],
             )?;
             runtime::tmux(
@@ -563,7 +569,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 runtime::sweep_status(context, sweep_id, format)
             }
             SweepCommands::List { file, format } => {
-                let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+                let context =
+                    resolve_command_context(options, file, BinaryOverrides::default(), None)?;
                 runtime::sweep_list(context, format)
             }
             SweepCommands::Observe {
@@ -682,6 +689,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sstat-bin", &sstat_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
+                    ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                 ],
             )?;
             runtime::germinate(
@@ -777,6 +785,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sacct-bin", &sacct_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
+                    ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                 ],
             )?;
             runtime::when(
@@ -819,6 +828,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--enroot-bin", &launch.enroot_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
+                    ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                 ],
             )?;
             runtime::alloc(
@@ -942,7 +952,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             bundles,
             tarball,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             runtime::artifacts(context, job_id, format, false, bundles, tarball)
         }
         Commands::Pull {
@@ -951,7 +961,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             into,
             format,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             runtime::pull(context, job_id, into, format)
         }
         Commands::Logs {
@@ -963,7 +973,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             since,
             lines,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             runtime::logs(context, job_id, service, follow, lines, grep, since)
         }
         Commands::Ps {
@@ -1006,7 +1016,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             watch_mode,
             format,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             runtime::replay(context, job_id, service, speed, lines, watch_mode, format)
         }
         Commands::Checkpoints {
@@ -1014,7 +1024,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             job_id,
             format,
         } => {
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             runtime::checkpoints(context, job_id, format)
         }
         Commands::Debug {
@@ -1073,7 +1083,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             }
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, file, binary_overrides, None)?;
             runtime::cancel(context, job_id, purge_cache, format)
         }
         Commands::Down {
@@ -1092,7 +1102,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             }
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, file, binary_overrides, None)?;
             runtime::cancel(context, job_id, purge_cache, format)
         }
         Commands::Run {
@@ -1127,12 +1137,21 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--singularity-bin", &launch.singularity_bin),
                 ],
             );
+            let huggingface_cli_bin = explicit_huggingface_cli_bin(
+                options,
+                &[("--huggingface-cli-bin", &launch.huggingface_cli_bin)],
+            );
             if let Some(image) = image {
                 if launch.file.is_some() {
                     bail!("run --image cannot be combined with -f/--file or service mode");
                 }
                 ensure_run_image_mode_uses_separator(options)?;
-                let context = resolve_command_context(options, None, binary_overrides)?;
+                let context = resolve_command_context(
+                    options,
+                    None,
+                    binary_overrides,
+                    huggingface_cli_bin.clone(),
+                )?;
                 runtime::run_ephemeral(
                     context,
                     image,
@@ -1185,7 +1204,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 if cmd.is_empty() {
                     bail!("run service mode requires a command after the service name");
                 }
-                let context = resolve_command_context(options, launch.file, binary_overrides)?;
+                let context = resolve_command_context(
+                    options,
+                    launch.file,
+                    binary_overrides,
+                    huggingface_cli_bin,
+                )?;
                 runtime::run_service(
                     context,
                     service,
@@ -1285,8 +1309,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 let cache_dir = match cache_dir {
                     Some(path) => path,
                     None => {
-                        let context =
-                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        let context = resolve_command_context(
+                            options,
+                            None,
+                            BinaryOverrides::default(),
+                            None,
+                        )?;
                         context.cache_dir.value
                     }
                 };
@@ -1314,8 +1342,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 let cache_dir = match cache_dir {
                     Some(path) => path,
                     None => {
-                        let context =
-                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        let context = resolve_command_context(
+                            options,
+                            None,
+                            BinaryOverrides::default(),
+                            None,
+                        )?;
                         context.cache_dir.value
                     }
                 };
@@ -1325,8 +1357,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 let cache_dir = match cache_dir {
                     Some(path) => path,
                     None => {
-                        let context =
-                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        let context = resolve_command_context(
+                            options,
+                            None,
+                            BinaryOverrides::default(),
+                            None,
+                        )?;
                         context.cache_dir.value
                     }
                 };
@@ -1336,8 +1372,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 let cache_dir = match cache_dir {
                     Some(path) => path,
                     None => {
-                        let context =
-                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        let context = resolve_command_context(
+                            options,
+                            None,
+                            BinaryOverrides::default(),
+                            None,
+                        )?;
                         context.cache_dir.value
                     }
                 };
@@ -1349,8 +1389,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 let cache_dir = match cache_dir {
                     Some(path) => Some(path),
                     None => {
-                        let context =
-                            resolve_command_context(options, None, BinaryOverrides::default())?;
+                        let context = resolve_command_context(
+                            options,
+                            None,
+                            BinaryOverrides::default(),
+                            None,
+                        )?;
                         Some(context.cache_dir.value)
                     }
                 };
@@ -1361,7 +1405,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 service,
                 format,
             } => {
-                let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+                let context =
+                    resolve_command_context(options, file, BinaryOverrides::default(), None)?;
                 cache::inspect(context, service, format)
             }
             CacheCommands::Prune {
@@ -1386,13 +1431,17 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                         "prune cached artifacts that the current compose plan no longer references",
                         yes,
                     )?;
-                    let context =
-                        resolve_command_context(options, Some(file), BinaryOverrides::default())?;
+                    let context = resolve_command_context(
+                        options,
+                        Some(file),
+                        BinaryOverrides::default(),
+                        None,
+                    )?;
                     cache::prune(context, cache_dir, age, all_unused, format)
                 } else if cache_dir.is_none() {
                     confirm::confirm_destructive_action("prune cached artifacts by age", yes)?;
                     let context =
-                        resolve_command_context(options, file, BinaryOverrides::default())?;
+                        resolve_command_context(options, file, BinaryOverrides::default(), None)?;
                     cache::prune(context, cache_dir, age, all_unused, format)
                 } else {
                     confirm::confirm_destructive_action("prune cached artifacts by age", yes)?;
@@ -1423,14 +1472,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 };
                 confirm::confirm_destructive_action(action, yes)?;
             }
-            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             runtime::clean(context, age, all, dry_run, disk_usage, format)
         }
         Commands::Context {
             format,
             show_values,
         } => {
-            let context = resolve_command_context(options, None, BinaryOverrides::default())?;
+            let context = resolve_command_context(options, None, BinaryOverrides::default(), None)?;
             spec::context(context, format, show_values)
         }
         Commands::Setup {
@@ -1509,6 +1558,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--enroot-bin", &launch.enroot_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
+                    ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                     ("--sbatch-bin", &sbatch_bin),
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
@@ -1723,7 +1773,7 @@ fn run_doctor_subcommand(
             script_out,
             timeout_seconds,
         } => {
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, file, binary_overrides, None)?;
             doctor::doctor_mpi_smoke(
                 context,
                 format.or(parent_format),
@@ -1743,7 +1793,7 @@ fn run_doctor_subcommand(
             script_out,
             timeout_seconds,
         } => {
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, file, binary_overrides, None)?;
             doctor::doctor_fabric_smoke(
                 context,
                 doctor::FabricSmokeOptions {
@@ -1765,7 +1815,7 @@ fn run_doctor_subcommand(
             log_file,
             timeout_seconds,
         } => {
-            let context = resolve_command_context(options, file, binary_overrides)?;
+            let context = resolve_command_context(options, file, binary_overrides, None)?;
             doctor::doctor_readiness(
                 context,
                 format.or(parent_format),
@@ -1797,6 +1847,7 @@ fn resolve_command_context(
     options: &GlobalCommandOptions,
     compose_file: Option<PathBuf>,
     binary_overrides: BinaryOverrides,
+    huggingface_cli_bin: Option<String>,
 ) -> Result<ResolvedContext> {
     let cwd = env::current_dir().context("failed to determine current working directory")?;
     resolve(&ResolveRequest {
@@ -1805,6 +1856,7 @@ fn resolve_command_context(
         settings_file: options.settings_file.clone(),
         compose_file_override: compose_file,
         binary_overrides,
+        huggingface_cli_bin,
     })
 }
 
@@ -1819,7 +1871,23 @@ fn resolve_ctx(
     explicit_binaries: &[(&str, &str)],
 ) -> Result<ResolvedContext> {
     let overrides = resolve_binary_overrides(options, explicit_binaries);
-    resolve_command_context(options, compose_file, overrides)
+    let huggingface_cli_bin = explicit_huggingface_cli_bin(options, explicit_binaries);
+    resolve_command_context(options, compose_file, overrides, huggingface_cli_bin)
+}
+
+/// Extracts an explicit `--huggingface-cli-bin` value when the flag was set on
+/// the command line. Unlike the cluster-binary overrides, this is not a
+/// laptop-probed binary, so it is threaded straight into the context rather than
+/// through [`BinaryOverrides`].
+fn explicit_huggingface_cli_bin(
+    options: &GlobalCommandOptions,
+    explicit_values: &[(&str, &str)],
+) -> Option<String> {
+    explicit_values
+        .iter()
+        .find(|(flag, _)| *flag == "--huggingface-cli-bin")
+        .filter(|_| value_is_explicit(options, "--huggingface-cli-bin"))
+        .map(|(_, value)| (*value).to_string())
 }
 
 /// Convenience wrapper that resolves per-command binary overrides and then
@@ -1843,6 +1911,7 @@ fn resolve_command_binaries(
         settings_file: options.settings_file.clone(),
         compose_file_override: None,
         binary_overrides,
+        huggingface_cli_bin: None,
     })
 }
 

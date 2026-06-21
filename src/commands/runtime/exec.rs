@@ -78,6 +78,7 @@ pub(crate) fn alloc(
                     enroot_bin: context.binaries.enroot.value.clone(),
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -206,6 +207,7 @@ pub(crate) fn run_service(
                     enroot_bin: context.binaries.enroot.value.clone(),
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -223,6 +225,7 @@ pub(crate) fn run_service(
             &RenderOptions {
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
+                huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 cluster_profile,
                 runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
                     &context.cwd,
@@ -471,6 +474,7 @@ pub(crate) fn run_ephemeral(
                     enroot_bin: context.binaries.enroot.value.clone(),
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -503,6 +507,7 @@ pub(crate) fn run_ephemeral(
                 &RenderOptions {
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     cluster_profile,
                     runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
                         &context.cwd,
@@ -864,6 +869,7 @@ pub(crate) fn notebook(
                     enroot_bin: context.binaries.enroot.value.clone(),
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -896,6 +902,7 @@ pub(crate) fn notebook(
                 &RenderOptions {
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     cluster_profile,
                     runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
                         &context.cwd,

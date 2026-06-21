@@ -296,6 +296,7 @@ fn validate_sweep_trial_plan(
         &RenderOptions {
             apptainer_bin: context.binaries.apptainer.value.clone(),
             singularity_bin: context.binaries.singularity.value.clone(),
+            huggingface_cli_bin: context.huggingface_cli_bin.clone(),
             cluster_profile,
             runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
                 &context.cwd,
@@ -389,6 +390,7 @@ fn submit_sweep_trial(
                     enroot_bin: context.binaries.enroot.value.clone(),
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep: false,
                     force_rebuild,
                 },
@@ -406,6 +408,7 @@ fn submit_sweep_trial(
             &RenderOptions {
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
+                huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 cluster_profile,
                 runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
                     &context.cwd,

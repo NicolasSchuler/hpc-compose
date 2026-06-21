@@ -70,6 +70,7 @@ fn public_context_and_manpage_apis_work_from_integration_tests() {
         settings_file: Some(settings_path.clone()),
         compose_file_override: None,
         binary_overrides: BinaryOverrides::default(),
+        huggingface_cli_bin: None,
     })
     .expect("resolve");
     assert_eq!(resolved.compose_file.value, compose);

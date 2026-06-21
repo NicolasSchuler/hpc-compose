@@ -415,6 +415,15 @@ const EXAMPLES: &[ExampleInfo] = &[
         tags: &["llm", "uv", "worker", "python", "llama"],
     },
     ExampleInfo {
+        name: "hf-stage-model",
+        path: "examples/hf-stage-model.yaml",
+        availability: ExampleAvailability::RepositoryFile,
+        category: "llm",
+        demonstrates: "Cluster-side hf:// stage_in of a pinned HuggingFace model into a GPU service.",
+        start_when: "You want hpc-compose to download a pinned model inside the allocation, not on your laptop.",
+        tags: &["llm", "gpu", "model-serving", "huggingface", "stage-in"],
+    },
+    ExampleInfo {
         name: "vllm-openai",
         path: "examples/vllm-openai.yaml",
         availability: ExampleAvailability::BuiltInTemplate,

@@ -226,6 +226,7 @@ fn resolve_context_for_tracked_compose(
         settings_file: context.settings_path.clone(),
         compose_file_override: Some(compose_file),
         binary_overrides: resolved_binary_overrides(context),
+        huggingface_cli_bin: Some(context.huggingface_cli_bin.clone()),
     })
 }
 

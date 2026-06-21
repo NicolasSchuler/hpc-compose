@@ -91,6 +91,168 @@ impl StagedInputSpec {
     }
 }
 
+/// The `hf://` URI scheme prefix recognized by [`parse_hf_uri`].
+pub const HF_URI_SCHEME: &str = "hf://";
+
+/// The sentinel file written by the rendered cluster-side download step once a
+/// HuggingFace artifact has been fully fetched into its content-addressed
+/// directory. A subsequent job that finds this marker skips the download.
+pub const HF_COMPLETE_MARKER: &str = ".hpc-compose-hf-complete";
+
+/// A parsed, validated `hf://org/name@rev` reference.
+///
+/// Produced by [`parse_hf_uri`]. The `revision` is mandatory and must be an
+/// immutable pin (a commit-SHA-shaped hex string or an explicit tag); floating
+/// refs such as `@main` or a bare branch name are rejected at parse time so a
+/// rendered job is reproducible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HfArtifactRef {
+    /// The HuggingFace repo id (`org/name`), e.g. `meta-llama/Llama-3.1-8B`.
+    pub repo: String,
+    /// The immutable pinned revision (commit SHA or explicit tag).
+    pub revision: String,
+    /// Whether this resolves a model or a dataset.
+    pub kind: StagedInputKind,
+}
+
+impl HfArtifactRef {
+    /// Builds the [`StagedInputSpec`] used to derive this ref's cache key/dir.
+    #[must_use]
+    pub fn staged_input_spec(&self) -> StagedInputSpec {
+        StagedInputSpec::new(
+            self.kind,
+            format!("{HF_URI_SCHEME}{}", self.repo),
+            Some(self.revision.clone()),
+        )
+    }
+}
+
+/// Parses and validates an `hf://org/name@rev` URI for the given artifact kind.
+///
+/// Performs **no** network I/O — this is pure validation/derivation, so it is
+/// safe to call at validate/plan/render time on the laptop. The actual download
+/// happens cluster-side in the rendered batch script.
+///
+/// # Errors
+///
+/// Returns an error when:
+/// * the URI does not use the `hf://` scheme,
+/// * the repo id is not exactly `org/name` (missing/extra path segments),
+/// * the `@rev` pin is missing, or
+/// * the revision is a floating ref (`main`, `master`, `HEAD`, or any
+///   non-immutable-looking token) rather than an immutable commit SHA / tag.
+pub fn parse_hf_uri(raw: &str, kind: StagedInputKind) -> Result<HfArtifactRef> {
+    let trimmed = raw.trim();
+    let Some(rest) = trimmed.strip_prefix(HF_URI_SCHEME) else {
+        anyhow::bail!(
+            "must be a HuggingFace URI of the form '{HF_URI_SCHEME}org/name@<immutable-rev>', got '{raw}'"
+        );
+    };
+    if rest.contains("://") {
+        anyhow::bail!("'{raw}' is not a valid {HF_URI_SCHEME} URI");
+    }
+
+    let Some((repo, revision)) = rest.split_once('@') else {
+        anyhow::bail!(
+            "{HF_URI_SCHEME} reference '{raw}' must pin an immutable revision with '@<rev>' (e.g. '{HF_URI_SCHEME}org/name@<commit-sha>'); floating refs are not allowed"
+        );
+    };
+
+    let repo = repo.trim();
+    let revision = revision.trim();
+
+    let segments: Vec<&str> = repo.split('/').collect();
+    if segments.len() != 2 || segments.iter().any(|s| s.trim().is_empty()) {
+        anyhow::bail!(
+            "{HF_URI_SCHEME} reference '{raw}' must name a repo as 'org/name', got '{repo}'"
+        );
+    }
+    if repo.contains('\0') || revision.contains('\0') {
+        anyhow::bail!("{HF_URI_SCHEME} reference '{raw}' must not contain null bytes");
+    }
+
+    if revision.is_empty() {
+        anyhow::bail!(
+            "{HF_URI_SCHEME} reference '{raw}' must pin a non-empty immutable revision after '@'"
+        );
+    }
+    if is_floating_revision(revision) {
+        anyhow::bail!(
+            "{HF_URI_SCHEME} reference '{raw}' pins floating ref '{revision}'; pin an immutable commit SHA (or an explicit immutable tag) for reproducibility"
+        );
+    }
+
+    Ok(HfArtifactRef {
+        repo: repo.to_string(),
+        revision: revision.to_string(),
+        kind,
+    })
+}
+
+/// Whether a revision token is a well-known floating ref that must be rejected.
+///
+/// A commit SHA (hex, >= 7 chars) or an explicit version-looking tag is
+/// accepted; the common mutable branch names and `HEAD` are not.
+fn is_floating_revision(revision: &str) -> bool {
+    let lower = revision.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "main" | "master" | "head" | "latest" | "dev"
+    )
+}
+
+/// Renders the guarded, cluster-side `huggingface-cli download` shell step for a
+/// parsed reference, fetching into `dest` (the content-addressed directory on
+/// the shared filesystem).
+///
+/// The emitted step is idempotent: it only downloads when the
+/// [`HF_COMPLETE_MARKER`] sentinel is absent, and writes the marker on success
+/// so a repeated job reuses the staged artifact. Datasets pass
+/// `--repo-type dataset`; models omit it.
+///
+/// `HF_HOME`/`HF_HUB_CACHE` are referenced only via `${VAR:-default}` guards and
+/// `HF_TOKEN` is **never** written into the returned string — it is imported
+/// from the job's runtime environment by `huggingface-cli` itself.
+#[must_use]
+pub fn render_hf_stage_command(reference: &HfArtifactRef, dest: &str, cli_bin: &str) -> String {
+    let repo_type_flag = match reference.kind {
+        StagedInputKind::Dataset => " --repo-type dataset",
+        StagedInputKind::Model => "",
+    };
+    let bin = shell_single_quote(cli_bin);
+    let repo = shell_single_quote(&reference.repo);
+    let revision = shell_single_quote(&reference.revision);
+    let target = shell_single_quote(dest);
+    let marker = shell_single_quote(HF_COMPLETE_MARKER);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "echo \"Staging in HuggingFace {} {}@{} -> {}\"\n",
+        match reference.kind {
+            StagedInputKind::Dataset => "dataset",
+            StagedInputKind::Model => "model",
+        },
+        reference.repo,
+        reference.revision,
+        dest
+    ));
+    out.push_str(&format!("HF_STAGE_TARGET={target}\n"));
+    out.push_str(&format!("HF_STAGE_MARKER=\"$HF_STAGE_TARGET/\"{marker}\n"));
+    out.push_str("if [ ! -e \"$HF_STAGE_MARKER\" ]; then\n");
+    out.push_str("  mkdir -p \"$HF_STAGE_TARGET\"\n");
+    out.push_str(&format!(
+        "  {bin} download {repo}{repo_type_flag} --revision {revision} --local-dir \"$HF_STAGE_TARGET\"\n"
+    ));
+    out.push_str("  touch \"$HF_STAGE_MARKER\"\n");
+    out.push_str("fi\n");
+    out
+}
+
+/// Single-quotes a value for safe embedding in the rendered shell step.
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// Whether [`ensure_staged_input`] reused an existing entry or built a new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StagedInputAction {
@@ -408,6 +570,89 @@ mod tests {
         assert!(built_dir.join("data.bin").exists());
         assert!(!built_dir.join("partial.tmp").exists());
         assert!(sidecar_manifest_path_for_suffix(&built_dir, "dataset").is_file());
+    }
+
+    #[test]
+    fn parse_hf_uri_accepts_org_name_at_rev() {
+        let parsed = parse_hf_uri(
+            "hf://meta-llama/Llama-3.1-8B@abc1234def5678",
+            StagedInputKind::Model,
+        )
+        .expect("valid hf uri");
+        assert_eq!(parsed.repo, "meta-llama/Llama-3.1-8B");
+        assert_eq!(parsed.revision, "abc1234def5678");
+        assert_eq!(parsed.kind, StagedInputKind::Model);
+
+        // The derived staged-input spec keys the CAS dir deterministically.
+        let spec = parsed.staged_input_spec();
+        assert_eq!(spec.uri, "hf://meta-llama/Llama-3.1-8B");
+        assert_eq!(spec.revision.as_deref(), Some("abc1234def5678"));
+        assert_eq!(spec.kind, StagedInputKind::Model);
+    }
+
+    #[test]
+    fn parse_hf_uri_rejects_non_hf_scheme() {
+        for raw in [
+            "s3://bucket/model@abc1234",
+            "https://example.com/x@abc1234",
+            "/local/path/to/model",
+            "meta-llama/Llama-3.1-8B@abc1234",
+        ] {
+            assert!(
+                parse_hf_uri(raw, StagedInputKind::Model).is_err(),
+                "expected non-hf scheme to be rejected: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_hf_uri_requires_immutable_revision() {
+        // Missing @rev entirely.
+        let err = parse_hf_uri("hf://org/name", StagedInputKind::Model)
+            .expect_err("missing rev must error");
+        assert!(err.to_string().contains("immutable revision"));
+
+        // Floating refs are hard-rejected.
+        for floating in ["main", "master", "HEAD", "latest", "dev"] {
+            let raw = format!("hf://org/name@{floating}");
+            let err =
+                parse_hf_uri(&raw, StagedInputKind::Dataset).expect_err("floating ref must error");
+            assert!(
+                err.to_string().contains("floating ref"),
+                "floating ref '{floating}' should be rejected"
+            );
+        }
+
+        // A bad repo shape is rejected.
+        assert!(parse_hf_uri("hf://only-one-segment@abc1234", StagedInputKind::Model).is_err());
+        assert!(parse_hf_uri("hf://a/b/c@abc1234", StagedInputKind::Model).is_err());
+    }
+
+    #[test]
+    fn render_hf_stage_command_models_vs_datasets() {
+        let model = HfArtifactRef {
+            repo: "org/model".into(),
+            revision: "abc1234".into(),
+            kind: StagedInputKind::Model,
+        };
+        let model_cmd = render_hf_stage_command(&model, "/shared/cache/models/key", "hf-cli");
+        assert!(model_cmd.contains("'hf-cli' download 'org/model' --revision 'abc1234'"));
+        assert!(model_cmd.contains("--local-dir \"$HF_STAGE_TARGET\""));
+        assert!(!model_cmd.contains("--repo-type"));
+        // Guarded by the completion marker, idempotent.
+        assert!(model_cmd.contains(HF_COMPLETE_MARKER));
+        assert!(model_cmd.contains("if [ ! -e \"$HF_STAGE_MARKER\" ]; then"));
+        // Never embeds a secret.
+        assert!(!model_cmd.contains("HF_TOKEN"));
+
+        let dataset = HfArtifactRef {
+            repo: "org/data".into(),
+            revision: "deadbeef".into(),
+            kind: StagedInputKind::Dataset,
+        };
+        let dataset_cmd = render_hf_stage_command(&dataset, "/shared/cache/datasets/key", "hf-cli");
+        assert!(dataset_cmd.contains("--repo-type dataset"));
+        assert!(dataset_cmd.contains("--revision 'deadbeef'"));
     }
 
     #[test]

@@ -707,6 +707,7 @@ fn render_apptainer_and_singularity_honor_binary_overrides() {
         &RenderOptions {
             apptainer_bin: "/opt/site/bin/apptainer".into(),
             singularity_bin: "/opt/site/bin/singularity".into(),
+            huggingface_cli_bin: "huggingface-cli".into(),
             cluster_profile: None,
             runtime_root: None,
         },
@@ -727,6 +728,7 @@ fn render_apptainer_and_singularity_honor_binary_overrides() {
         &RenderOptions {
             apptainer_bin: "/opt/site/bin/apptainer".into(),
             singularity_bin: "/opt/site/bin/singularity".into(),
+            huggingface_cli_bin: "huggingface-cli".into(),
             cluster_profile: None,
             runtime_root: None,
         },
@@ -749,9 +751,10 @@ fn render_scratch_staging_and_burst_buffer_directives() {
                 cleanup: ScratchCleanupPolicy::OnSuccess,
             }),
             stage_in: vec![StageInConfig {
-                from: "/shared/input".into(),
+                from: Some("/shared/input".into()),
                 to: "/scratch/input".into(),
                 mode: StageMode::Rsync,
+                hf: None,
             }],
             stage_out: vec![StageOutConfig {
                 from: "/scratch/output".into(),
@@ -783,6 +786,71 @@ fn render_scratch_staging_and_burst_buffer_directives() {
     assert!(script.contains("stage_out_paths \"$code\" || stage_out_status=$?"));
     assert!(script.contains("if (( stage_out_status == 0 ));"));
     assert!(script.contains("cleanup_scratch \"$code\" || true"));
+}
+
+#[test]
+fn hf_stage_in_renders_cluster_side_download_not_a_mount() {
+    let plan = RuntimePlan {
+        name: "hf-demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            stage_in: vec![
+                StageInConfig {
+                    from: None,
+                    to: "/models/llama".into(),
+                    mode: StageMode::Rsync,
+                    hf: Some(crate::spec::HfStageSource {
+                        repo: "meta-llama/Llama-3.1-8B".into(),
+                        revision: "abc1234def".into(),
+                        kind: crate::spec::HfStageKind::Model,
+                    }),
+                },
+                // A path entry alongside hf stays on the rsync/cp path unchanged.
+                StageInConfig {
+                    from: Some("/shared/input".into()),
+                    to: "/scratch/input".into(),
+                    mode: StageMode::Copy,
+                    hf: None,
+                },
+            ],
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+
+    let script = render_script_with_options(
+        &plan,
+        &RenderOptions {
+            huggingface_cli_bin: "/opt/hf/huggingface-cli".into(),
+            ..RenderOptions::default()
+        },
+    )
+    .expect("script");
+
+    // The cluster-side download is emitted with the configured CLI, pinned
+    // revision, and a CAS --local-dir; never as an hf:// mount argument.
+    assert!(
+        script.contains(
+            "'/opt/hf/huggingface-cli' download 'meta-llama/Llama-3.1-8B' --revision 'abc1234def' --local-dir \"$HF_STAGE_TARGET\""
+        ),
+        "expected guarded huggingface-cli download line; got:\n{script}"
+    );
+    assert!(
+        script.contains("/shared/cache/models/"),
+        "downloads into CAS path"
+    );
+    assert!(script.contains("stage_in_huggingface_artifacts"));
+    // Guarded so a repeated job reuses the staged weights.
+    assert!(script.contains(".hpc-compose-hf-complete"));
+    // Never mounts/binds the hf:// URI and never inlines the token.
+    assert!(!script.contains("hf://"), "no literal hf:// in the script");
+    assert!(
+        !script.contains("HF_TOKEN"),
+        "HF_TOKEN must never be inlined"
+    );
+    // The path entry's existing rsync/cp behavior is untouched.
+    assert!(script.contains("STAGE_IN_FROM=('/shared/input')"));
 }
 
 #[test]
@@ -881,9 +949,10 @@ fn render_node_local_multi_node_scratch_initializes_every_node() {
                 cleanup: ScratchCleanupPolicy::Always,
             }),
             stage_in: vec![StageInConfig {
-                from: "/shared/input".into(),
+                from: Some("/shared/input".into()),
                 to: "/scratch/input".into(),
                 mode: StageMode::Copy,
+                hf: None,
             }],
             stage_out: vec![StageOutConfig {
                 from: "/scratch/output".into(),

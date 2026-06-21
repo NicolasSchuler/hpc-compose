@@ -13,6 +13,7 @@ const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const SETTINGS_RELATIVE_PATH: &str = ".hpc-compose/settings.toml";
 
 const DEFAULT_COMPOSE_FILE: &str = "compose.yaml";
+const DEFAULT_HUGGINGFACE_CLI_BIN: &str = "huggingface-cli";
 const DEFAULT_ENROOT_BIN: &str = "enroot";
 const DEFAULT_APPTAINER_BIN: &str = "apptainer";
 const DEFAULT_SINGULARITY_BIN: &str = "singularity";
@@ -291,6 +292,12 @@ pub struct ResolvedContext {
     pub login_host: Option<String>,
     pub resource_profiles: BTreeMap<String, ResourceProfile>,
     pub binaries: ResolvedBinaries,
+    /// `huggingface-cli` path used by `hf://` stage-in, executed cluster-side
+    /// inside the Slurm allocation. Sourced from the `--huggingface-cli-bin`
+    /// flag; defaults to `huggingface-cli`. Not a laptop-probed binary, so it is
+    /// kept out of [`ResolvedBinaries`] / settings `binaries`.
+    #[serde(default = "default_huggingface_cli_bin")]
+    pub huggingface_cli_bin: String,
     pub interpolation_vars: BTreeMap<String, String>,
     pub interpolation_var_sources: BTreeMap<String, ValueSource>,
     /// Watch/replay TUI display defaults from settings.
@@ -307,6 +314,14 @@ pub struct ResolveRequest {
     pub settings_file: Option<PathBuf>,
     pub compose_file_override: Option<PathBuf>,
     pub binary_overrides: BinaryOverrides,
+    /// Explicit `--huggingface-cli-bin` override, when set on the command line.
+    pub huggingface_cli_bin: Option<String>,
+}
+
+/// Built-in default for the `huggingface-cli` used by `hf://` stage-in.
+#[must_use]
+pub fn default_huggingface_cli_bin() -> String {
+    DEFAULT_HUGGINGFACE_CLI_BIN.to_string()
 }
 
 impl ResolveRequest {
@@ -542,6 +557,10 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
             .map(|settings| settings.resource_profiles.clone())
             .unwrap_or_default(),
         binaries,
+        huggingface_cli_bin: request
+            .huggingface_cli_bin
+            .clone()
+            .unwrap_or_else(default_huggingface_cli_bin),
         interpolation_vars,
         interpolation_var_sources,
         watch: settings

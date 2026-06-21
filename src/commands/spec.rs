@@ -308,6 +308,7 @@ pub(crate) fn render(
         &RenderOptions {
             apptainer_bin: context.binaries.apptainer.value.clone(),
             singularity_bin: context.binaries.singularity.value.clone(),
+            huggingface_cli_bin: context.huggingface_cli_bin.clone(),
             cluster_profile,
             runtime_root: None,
         },
@@ -399,6 +400,7 @@ pub(crate) fn plan(
             &RenderOptions {
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
+                huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 cluster_profile: cluster_profile.clone(),
                 runtime_root: None,
             },
@@ -580,6 +582,7 @@ pub(crate) fn prepare(
                 enroot_bin: context.binaries.enroot.value.clone(),
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
+                huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 keep_failed_prep,
                 force_rebuild: force,
             },
@@ -1419,6 +1422,7 @@ services:
             login_host: None,
             resource_profiles: BTreeMap::new(),
             binaries: binaries(root),
+            huggingface_cli_bin: "huggingface-cli".to_string(),
             interpolation_vars: BTreeMap::new(),
             interpolation_var_sources: BTreeMap::new(),
             watch: Default::default(),

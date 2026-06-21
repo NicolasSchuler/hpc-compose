@@ -512,6 +512,7 @@ fn force_rebuild_option_rebuilds_prepared_images() {
 fn helper_defaults_and_paths_cover_remaining_prepare_helpers() {
     let defaults = PrepareOptions::default();
     assert_eq!(defaults.enroot_bin, "enroot");
+    assert_eq!(defaults.huggingface_cli_bin, "huggingface-cli");
     assert!(!defaults.keep_failed_prep);
     assert!(!defaults.force_rebuild);
 

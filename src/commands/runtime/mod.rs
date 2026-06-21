@@ -1178,6 +1178,7 @@ where
                     enroot_bin: context.binaries.enroot.value.clone(),
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -1605,6 +1606,7 @@ where
                     enroot_bin: context.binaries.enroot.value.clone(),
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -1622,6 +1624,7 @@ where
             &RenderOptions {
                 apptainer_bin: context.binaries.apptainer.value.clone(),
                 singularity_bin: context.binaries.singularity.value.clone(),
+                huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 cluster_profile,
                 runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
                     &context.cwd,
@@ -1909,6 +1912,7 @@ pub(crate) fn launch(
                     enroot_bin: context.binaries.enroot.value.clone(),
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
                 },
@@ -1940,6 +1944,7 @@ pub(crate) fn launch(
                 &RenderOptions {
                     apptainer_bin: context.binaries.apptainer.value.clone(),
                     singularity_bin: context.binaries.singularity.value.clone(),
+                    huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     cluster_profile,
                     runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
                         &context.cwd,

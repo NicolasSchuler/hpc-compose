@@ -92,6 +92,7 @@ fn context_for(compose: &Path, cwd: &Path) -> ResolvedContext {
             sshare: resolved_string("/definitely/missing-sshare"),
             sprio: resolved_string("/definitely/missing-sprio"),
         },
+        huggingface_cli_bin: "huggingface-cli".to_string(),
         interpolation_vars: BTreeMap::new(),
         interpolation_var_sources: BTreeMap::new(),
         watch: Default::default(),

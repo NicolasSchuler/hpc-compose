@@ -1,0 +1,41 @@
+name: hf-stage-model
+
+# Stage a pinned HuggingFace model into the job, then serve it.
+#
+# The download runs INSIDE the Slurm allocation (the compute node has network),
+# never on your laptop or over SSH. hpc-compose renders a guarded
+# `huggingface-cli download ... --revision <sha> --local-dir <cas-path>` step
+# into the batch script and reuses the content-addressed copy on repeat runs.
+#
+# The revision MUST be an immutable pin (a commit SHA or an explicit immutable
+# tag); floating refs like `main` are rejected at validation time so the job is
+# reproducible. Set HF_TOKEN in the JOB environment for gated repos — it is
+# imported at runtime by huggingface-cli and never written into the script.
+x-slurm:
+  job_name: hf-stage-model
+  time: "02:00:00"
+  gpus_per_node: 1
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+  stage_in:
+    - to: /models/llama-3.1-8b
+      hf:
+        repo: meta-llama/Llama-3.1-8B
+        revision: 0e9e39f249a16976918f6564b8830bc894c89659
+        kind: model
+
+services:
+  server:
+    image: vllm/vllm-openai:v0.6.3
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python -m vllm.entrypoints.openai.api_server \
+          --model /models/llama-3.1-8b \
+          --host 0.0.0.0 \
+          --port 8000
+    readiness:
+      type: sleep
+      seconds: 5
+    x-slurm:
+      gpus_per_node: 1

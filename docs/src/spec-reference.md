@@ -259,7 +259,7 @@ These fields live under the top-level `x-slurm` block.
 | `runtime_root` | string | `<submit_dir>/.hpc-compose` | Directory that holds per-job runtime state (`<runtime_root>/<job_id>/{logs,metrics,state.json,artifacts}`). Relative values resolve against the submit directory. Must be visible from both login and compute nodes; node-local overrides are rejected by preflight. |
 | `cleanup` | mapping | omitted | Teardown cleanup policy. `cleanup.runtime_cache` (`never` \| `on_success` \| `always`, default `never`) controls whether the batch teardown trap removes the per-job enroot runtime cache. |
 | `scratch` | mapping | omitted | Optional scratch path mounted into services and exposed as `HPC_COMPOSE_SCRATCH_DIR`. |
-| `stage_in` | list of mappings | omitted | Copy or rsync host paths before services launch. |
+| `stage_in` | list of mappings | omitted | Copy or rsync host paths, or fetch an `hf://` model/dataset, before services launch. |
 | `stage_out` | list of mappings | omitted | Copy or rsync paths during teardown, optionally by outcome. |
 | `burst_buffer` | mapping | omitted | Raw `#BB` / `#DW` directives for site-specific burst-buffer systems. |
 | `metrics` | mapping | omitted | Enables runtime metrics sampling. |
@@ -496,6 +496,29 @@ x-slurm:
 - `stage_out.when` is `always`, `on_success`, or `on_failure`.
 - `${SLURM_JOB_ID}` is preserved in scratch and staging paths for runtime expansion.
 - `burst_buffer.directives` entries are emitted as raw batch-script directives and must start with `#BB` or `#DW`.
+
+#### Staging HuggingFace models and datasets (`hf://`)
+
+A `stage_in` entry can fetch a HuggingFace model or dataset instead of copying a filesystem path. Set the typed `hf` block (in place of `from`) and a destination `to`:
+
+```yaml
+x-slurm:
+  cache_dir: /cluster/shared/hpc-compose-cache
+  stage_in:
+    - to: /models/llama-3.1-8b
+      hf:
+        repo: meta-llama/Llama-3.1-8B
+        revision: 0e9e39f249a16976918f6564b8830bc894c89659
+        kind: model        # or `dataset` for a dataset repo
+```
+
+- Each `stage_in` entry sets **exactly one** of `from` (a filesystem path) or `hf` (a HuggingFace source); setting both or neither is rejected at validation time.
+- `hf.revision` must be an **immutable pin** — a commit SHA or an explicit immutable tag. Floating refs such as `main`, `master`, or `HEAD` are rejected so the rendered job is reproducible.
+- `hf.kind` is `model` (default) or `dataset`; datasets are fetched with `huggingface-cli download --repo-type dataset`.
+- The download runs **inside the Slurm allocation** on the compute node, never on your laptop or over SSH — this preserves the OTP-per-SSH and laptop-driven contract. The rendered batch script contains a guarded `huggingface-cli download <repo> --revision <sha> --local-dir <cache-path>` step; it never mounts or passes an `hf://` URI to the container runtime.
+- Artifacts land in a content-addressed directory under `x-slurm.cache_dir` (`<cache_dir>/{models,datasets}/<key>`) and are guarded by a completion marker, so a repeated job reuses the staged copy instead of re-downloading. The staged copy is then materialized into the entry's `to` path for the service.
+- For gated repos, export `HF_TOKEN` in the **job** environment; it is imported at runtime by `huggingface-cli` and is never written into the rendered script, the submission record, or the cache manifest. `HF_HOME`/`HF_HUB_CACHE` are honored only via `${VAR:-default}` guards.
+- Override the CLI invoked inside the job with `--huggingface-cli-bin <PATH>` (default `huggingface-cli`).
 
 #### Per-service scratch opt-out
 

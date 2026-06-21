@@ -895,6 +895,83 @@ services:
 }
 
 #[test]
+fn up_renders_cluster_side_huggingface_stage_in_step() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+x-slurm:
+  cache_dir: {}
+  stage_in:
+    - to: /models/llama
+      hf:
+        repo: meta-llama/Llama-3.1-8B
+        revision: 0e9e39f249a16976918f6564b8830bc894c89659
+        kind: model
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            cache_dir.display(),
+            local_image.display()
+        ),
+    );
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let script_out = tmpdir.path().join("submit.sbatch");
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--huggingface-cli-bin",
+            "/opt/hf/huggingface-cli",
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let script = fs::read_to_string(&script_out).expect("rendered script");
+    // The download runs inside the allocation with the overridden CLI, pinned
+    // revision, and a CAS --local-dir under the configured cache dir.
+    assert!(
+        script.contains(
+            "'/opt/hf/huggingface-cli' download 'meta-llama/Llama-3.1-8B' --revision '0e9e39f249a16976918f6564b8830bc894c89659' --local-dir \"$HF_STAGE_TARGET\""
+        ),
+        "expected guarded cluster-side huggingface-cli download; got:\n{script}"
+    );
+    assert!(
+        script.contains(&format!("{}/models/", cache_dir.display())),
+        "downloads into the content-addressed cache path"
+    );
+    assert!(script.contains("stage_in_huggingface_artifacts"));
+    assert!(script.contains(".hpc-compose-hf-complete"));
+    // Never mounts the hf:// URI and never inlines the token.
+    assert!(!script.contains("hf://"), "no literal hf:// in the script");
+    assert!(
+        !script.contains("HF_TOKEN"),
+        "HF_TOKEN must never be inlined"
+    );
+}
+
+#[test]
 fn status_reports_malformed_submission_record_without_panicking() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");

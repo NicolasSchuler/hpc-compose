@@ -1,23 +1,31 @@
 use super::bash_array_literal;
+use crate::cache::dataset::{HfArtifactRef, render_hf_stage_command, staged_input_dir};
 use crate::prepare::RuntimePlan;
-use crate::spec::{StageMode, StageOutWhen};
+use crate::spec::{StageInConfig, StageMode, StageOutWhen};
+
+/// Whether any stage-in entry stages a `hf://` HuggingFace source.
+pub(super) fn has_hf_stage_in(plan: &RuntimePlan) -> bool {
+    plan.slurm.stage_in.iter().any(|entry| entry.hf.is_some())
+}
 
 pub(super) fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
-    let stage_in_from = plan
+    // Filesystem-path stage-in entries only; `hf://` sources stage via a
+    // separate cluster-side download step (see `render_hf_stage_in`).
+    let path_entries: Vec<&StageInConfig> = plan
         .slurm
         .stage_in
         .iter()
-        .map(|entry| entry.from.clone())
+        .filter(|entry| entry.from.is_some())
+        .collect();
+    let stage_in_from = path_entries
+        .iter()
+        .map(|entry| entry.from.clone().unwrap_or_default())
         .collect::<Vec<_>>();
-    let stage_in_to = plan
-        .slurm
-        .stage_in
+    let stage_in_to = path_entries
         .iter()
         .map(|entry| entry.to.clone())
         .collect::<Vec<_>>();
-    let stage_in_modes = plan
-        .slurm
-        .stage_in
+    let stage_in_modes = path_entries
         .iter()
         .map(|entry| stage_mode_label(entry.mode).to_string())
         .collect::<Vec<_>>();
@@ -320,6 +328,59 @@ pub(super) fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
     out.push_str("    run_scratch_command_on_each_node 'rm -rf \"$1\"'\n");
     out.push_str("  fi\n");
     out.push_str("}\n\n");
+}
+
+/// Emits the cluster-side HuggingFace download steps for every `hf://`
+/// stage-in entry, fetching into each entry's content-addressed directory under
+/// the shared cache dir. The download runs INSIDE the Slurm allocation; the
+/// rendered script contains a guarded `huggingface-cli download` line and never
+/// a literal `hf://` mount argument.
+pub(super) fn render_hf_stage_in(out: &mut String, plan: &RuntimePlan, huggingface_cli_bin: &str) {
+    let hf_entries: Vec<&StageInConfig> = plan
+        .slurm
+        .stage_in
+        .iter()
+        .filter(|entry| entry.hf.is_some())
+        .collect();
+    if hf_entries.is_empty() {
+        return;
+    }
+
+    out.push_str("# Stage in HuggingFace artifacts (downloaded inside the allocation).\n");
+    out.push_str("stage_in_huggingface_artifacts() {\n");
+    for entry in hf_entries {
+        let hf = entry.hf.as_ref().expect("filtered to hf entries");
+        let kind = hf.as_staged_input_kind();
+        let spec = hf.uri();
+        let staged_spec =
+            crate::cache::dataset::StagedInputSpec::new(kind, spec, Some(hf.revision.clone()));
+        let key = crate::cache::dataset::dataset_cache_key(&staged_spec);
+        let cas_dir = staged_input_dir(&plan.cache_dir, kind, &key);
+        let reference = HfArtifactRef {
+            repo: hf.repo.clone(),
+            revision: hf.revision.clone(),
+            kind,
+        };
+        let command =
+            render_hf_stage_command(&reference, &cas_dir.to_string_lossy(), huggingface_cli_bin);
+        for line in command.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        // Materialize the staged artifact into the in-job destination so the
+        // service sees it at the spec'd `to` path, reusing the path-copy helper.
+        let to = shell_single_quote(&entry.to);
+        out.push_str(&format!(
+            "  stage_copy_path \"$HF_STAGE_TARGET\"/. {to} copy\n"
+        ));
+    }
+    out.push_str("}\n\n");
+}
+
+/// Single-quotes a value for safe embedding in the rendered shell step.
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn stage_mode_label(mode: StageMode) -> &'static str {

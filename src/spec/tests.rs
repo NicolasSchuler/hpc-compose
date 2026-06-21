@@ -2011,6 +2011,133 @@ services:
 }
 
 #[test]
+fn stage_in_hf_uri_validation_rejects_missing_or_floating_rev() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cases = [
+        (
+            "missing revision",
+            r#"
+x-slurm:
+  stage_in:
+    - to: /models/llama
+      hf:
+        repo: meta-llama/Llama-3.1-8B
+        revision: " "
+services:
+  app:
+    image: redis:7
+"#,
+            "x-slurm.stage_in[0].hf",
+        ),
+        (
+            "floating ref main",
+            r#"
+x-slurm:
+  stage_in:
+    - to: /models/llama
+      hf:
+        repo: meta-llama/Llama-3.1-8B
+        revision: main
+services:
+  app:
+    image: redis:7
+"#,
+            "floating ref",
+        ),
+        (
+            "both from and hf",
+            r#"
+x-slurm:
+  stage_in:
+    - from: /shared/in
+      to: /models/llama
+      hf:
+        repo: meta-llama/Llama-3.1-8B
+        revision: abc1234
+services:
+  app:
+    image: redis:7
+"#,
+            "exactly one of 'from'",
+        ),
+        (
+            "neither from nor hf",
+            r#"
+x-slurm:
+  stage_in:
+    - to: /models/llama
+services:
+  app:
+    image: redis:7
+"#,
+            "must set either 'from'",
+        ),
+    ];
+
+    for (label, body, expected) in cases {
+        let path = write_spec(tmpdir.path(), body);
+        let err = match ComposeSpec::load(&path) {
+            Ok(_) => panic!("{label} should reject invalid hf stage_in"),
+            Err(err) => err,
+        };
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(expected),
+            "{label} should mention {expected}; got {text}"
+        );
+    }
+}
+
+#[test]
+fn stage_in_hf_uri_validation_accepts_pinned_rev_and_preserves_path_mode() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    // A pinned commit-SHA-shaped revision validates as a dataset.
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  stage_in:
+    - to: /data/cifar
+      hf:
+        repo: org/cifar10
+        revision: abc1234def5678
+        kind: dataset
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("hf stage_in should validate");
+    let entry = &spec.slurm.stage_in[0];
+    assert!(entry.from.is_none());
+    let hf = entry.hf.as_ref().expect("hf source");
+    assert_eq!(hf.repo, "org/cifar10");
+    assert_eq!(hf.revision, "abc1234def5678");
+    assert_eq!(hf.kind, crate::spec::HfStageKind::Dataset);
+
+    // A filesystem-path stage_in still validates and round-trips unchanged.
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  stage_in:
+    - from: /shared/input
+      to: /scratch/input
+      mode: copy
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("path stage_in should validate");
+    let entry = &spec.slurm.stage_in[0];
+    assert_eq!(entry.from.as_deref(), Some("/shared/input"));
+    assert_eq!(entry.to, "/scratch/input");
+    assert!(entry.hf.is_none());
+}
+
+#[test]
 fn slurm_notify_and_dependency_helpers_normalize_defaults_and_interpolate_ids() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let path = write_spec(

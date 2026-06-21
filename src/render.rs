@@ -41,7 +41,7 @@ use software_env::{
     effective_software_env_pairs, render_apply_software_env, render_software_env_helpers,
     software_env_export_names,
 };
-use stage::render_stage_helpers;
+use stage::{has_hf_stage_in, render_hf_stage_in, render_stage_helpers};
 use text::{bash_array_literal, flag, service_step_name, service_token, shell_quote};
 
 const DIST_ENV_NAMES: &[&str] = &[
@@ -93,6 +93,9 @@ pub struct RenderOptions {
     pub apptainer_bin: String,
     /// Singularity executable used by Singularity-backed service steps.
     pub singularity_bin: String,
+    /// `huggingface-cli` used by `hf://` stage-in steps, executed cluster-side
+    /// inside the Slurm allocation. Never invoked on the laptop.
+    pub huggingface_cli_bin: String,
     /// Optional cluster profile used only for render-time distributed env wiring.
     pub cluster_profile: Option<ClusterProfile>,
     /// Resolved absolute *parent* of the per-job runtime root (the directory that
@@ -109,6 +112,7 @@ impl Default for RenderOptions {
         Self {
             apptainer_bin: "apptainer".to_string(),
             singularity_bin: "singularity".to_string(),
+            huggingface_cli_bin: "huggingface-cli".to_string(),
             cluster_profile: None,
             runtime_root: None,
         }
@@ -291,6 +295,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     let resume_enabled = plan.slurm.resume_dir().is_some();
     let scratch_enabled = plan.slurm.scratch.is_some();
     let stage_enabled = !plan.slurm.stage_in.is_empty() || !plan.slurm.stage_out.is_empty();
+    let hf_stage_enabled = has_hf_stage_in(plan);
     let transfer_helpers_enabled = scratch_enabled || stage_enabled;
     let mpi_enabled = plan
         .ordered_services
@@ -1244,6 +1249,9 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     if transfer_helpers_enabled {
         render_stage_helpers(&mut out, plan);
     }
+    if hf_stage_enabled {
+        render_hf_stage_in(&mut out, plan, &options.huggingface_cli_bin);
+    }
 
     if metrics_enabled {
         render_metrics_helpers(&mut out);
@@ -2110,6 +2118,9 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     }
     if stage_enabled {
         out.push_str("stage_in_paths\n\n");
+    }
+    if hf_stage_enabled {
+        out.push_str("stage_in_huggingface_artifacts\n\n");
     }
     if !rendezvous_client_names.is_empty() {
         out.push_str("resolve_rendezvous_dependencies\n\n");

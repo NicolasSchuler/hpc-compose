@@ -438,11 +438,26 @@
     "stageIn": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["from", "to"],
+      "required": ["to"],
       "properties": {
         "from": { "type": "string", "minLength": 1 },
         "to": { "type": "string", "minLength": 1 },
-        "mode": { "$ref": "#/definitions/stageMode" }
+        "mode": { "$ref": "#/definitions/stageMode" },
+        "hf": { "$ref": "#/definitions/hfStageSource" }
+      }
+    },
+    "hfStageSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "revision"],
+      "properties": {
+        "repo": { "type": "string", "minLength": 1 },
+        "revision": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": ["model", "dataset"],
+          "default": "model"
+        }
       }
     },
     "stageOut": {

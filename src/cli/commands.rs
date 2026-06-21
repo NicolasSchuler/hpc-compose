@@ -88,6 +88,14 @@ pub struct RuntimeLaunchArgs {
     pub singularity_bin: String,
     #[arg(
         long,
+        value_name = "PATH",
+        default_value = "huggingface-cli",
+        help_heading = "Tool overrides",
+        help = "Path to the huggingface-cli used by hf:// stage_in inside the job (default: huggingface-cli)"
+    )]
+    pub huggingface_cli_bin: String,
+    #[arg(
+        long,
         help = "Keep failed preparation state on disk for later inspection"
     )]
     pub keep_failed_prep: bool,
@@ -256,6 +264,14 @@ pub enum Commands {
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "huggingface-cli",
+            help_heading = "Tool overrides",
+            help = "Path to the huggingface-cli used by hf:// stage_in inside the job (default: huggingface-cli)"
+        )]
+        huggingface_cli_bin: String,
         #[arg(
             long,
             help = "Keep failed preparation state on disk for later inspection"

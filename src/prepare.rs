@@ -57,6 +57,10 @@ pub struct PrepareOptions {
     pub enroot_bin: String,
     pub apptainer_bin: String,
     pub singularity_bin: String,
+    /// `huggingface-cli` used by `hf://` stage-in. Prepare does not download hf
+    /// artifacts (that is a cluster-side render step); the name only flows on to
+    /// render and doctor advisories.
+    pub huggingface_cli_bin: String,
     pub keep_failed_prep: bool,
     pub force_rebuild: bool,
 }
@@ -67,6 +71,7 @@ impl Default for PrepareOptions {
             enroot_bin: "enroot".to_string(),
             apptainer_bin: "apptainer".to_string(),
             singularity_bin: "singularity".to_string(),
+            huggingface_cli_bin: "huggingface-cli".to_string(),
             keep_failed_prep: false,
             force_rebuild: false,
         }

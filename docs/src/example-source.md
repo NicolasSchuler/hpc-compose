@@ -50,6 +50,14 @@ Source: `examples/fairseq-preprocess.yaml`
 {{#include ../../examples/fairseq-preprocess.yaml}}
 ```
 
+## Hf Stage Model
+
+Source: `examples/hf-stage-model.yaml`
+
+```yaml
+{{#include ../../examples/hf-stage-model.yaml}}
+```
+
 ## Jupyter
 
 Source: `examples/jupyter.yaml`
