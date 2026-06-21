@@ -268,6 +268,8 @@ Examples:
   hpc-compose notebook --kind vscode --image ghcr.io/example/code:1 --gpus 1
   hpc-compose notebook --dry-run --script-out notebook.sbatch
   hpc-compose notebook --follow --kind jupyter
+  hpc-compose notebook --kind jupyter --format json
+Set login_host in settings so the tunnel hint names your real SSH login host.
 Stop the server with the management command printed after launch.";
 
 pub(super) const NEW_HELP: &str = "\

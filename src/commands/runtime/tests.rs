@@ -74,6 +74,7 @@ fn context_for(compose: &Path, cwd: &Path) -> ResolvedContext {
             value: cwd.join(".cache/hpc-compose"),
             source: ValueSource::Builtin,
         },
+        login_host: None,
         resource_profiles: BTreeMap::new(),
         binaries: ResolvedBinaries {
             enroot: resolved_string("/definitely/missing-enroot"),

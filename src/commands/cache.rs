@@ -216,6 +216,7 @@ services:
                     .join(".cache/hpc-compose"),
                 source: ValueSource::Builtin,
             },
+            login_host: None,
             resource_profiles: BTreeMap::new(),
             binaries: ResolvedBinaries {
                 enroot: binary("enroot"),

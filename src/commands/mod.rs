@@ -1418,6 +1418,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             srun_bin,
             squeue_bin,
             sacct_bin,
+            format,
         } => {
             use hpc_compose::cli::NotebookKindArg;
             use hpc_compose::spec::parse_short_duration;
@@ -1483,6 +1484,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 },
                 local,
                 options.quiet,
+                format,
             )
         }
         Commands::Completions { shell } => init::completions(shell),

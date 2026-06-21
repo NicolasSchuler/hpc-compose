@@ -94,6 +94,10 @@
         },
         "cache": {
           "$ref": "#/definitions/cacheSettings"
+        },
+        "login_host": {
+          "type": "string",
+          "description": "SSH login/jump host shown in connection hints (descriptive only; never used to open a connection)."
         }
       }
     },

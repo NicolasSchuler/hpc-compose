@@ -166,6 +166,10 @@ pub struct SettingsDefaults {
     pub binaries: BinaryOverrides,
     #[serde(default)]
     pub cache: CacheSettings,
+    /// SSH login/jump host shown in connection hints (descriptive only; never
+    /// used to open a connection).
+    #[serde(default)]
+    pub login_host: Option<String>,
 }
 
 /// One named profile in settings.
@@ -183,6 +187,10 @@ pub struct SettingsProfile {
     pub binaries: BinaryOverrides,
     #[serde(default)]
     pub cache: CacheSettings,
+    /// SSH login/jump host shown in connection hints (descriptive only; never
+    /// used to open a connection). Overrides the shared default.
+    #[serde(default)]
+    pub login_host: Option<String>,
 }
 
 /// Watch/replay TUI display preferences in settings.
@@ -277,6 +285,10 @@ pub struct ResolvedContext {
     pub selected_profile: Option<String>,
     pub compose_file: ResolvedValue<PathBuf>,
     pub cache_dir: ResolvedValue<PathBuf>,
+    /// SSH login/jump host for connection hints (descriptive only; never used
+    /// to open a connection). Profile overrides defaults; `None` when unset.
+    #[serde(default)]
+    pub login_host: Option<String>,
     pub resource_profiles: BTreeMap<String, ResourceProfile>,
     pub binaries: ResolvedBinaries,
     pub interpolation_vars: BTreeMap<String, String>,
@@ -463,6 +475,10 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         defaults_cfg.and_then(|defaults| defaults.cache.dir.as_deref()),
         &settings_base,
     );
+    let login_host = resolve_login_host(
+        profile_cfg.and_then(|profile| profile.login_host.as_deref()),
+        defaults_cfg.and_then(|defaults| defaults.login_host.as_deref()),
+    );
 
     let mut interpolation_vars = BTreeMap::new();
     let mut interpolation_var_sources = BTreeMap::new();
@@ -520,6 +536,7 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         selected_profile,
         compose_file,
         cache_dir,
+        login_host,
         resource_profiles: settings
             .as_ref()
             .map(|settings| settings.resource_profiles.clone())
@@ -764,6 +781,12 @@ fn resolve_cache_dir_default(
     }
 }
 
+/// Resolves the login/jump host shown in connection hints: profile value wins
+/// over the shared default; `None` when neither is set. Descriptive only.
+fn resolve_login_host(profile_value: Option<&str>, defaults_value: Option<&str>) -> Option<String> {
+    profile_value.or(defaults_value).map(str::to_string)
+}
+
 fn load_compose_dotenv(
     compose_file: &Path,
     vars: &mut BTreeMap<String, String>,
@@ -938,6 +961,7 @@ mod tests {
             .insert("A".into(), "defaults-map".into());
         settings.defaults.binaries.srun = Some("/defaults/srun".into());
         settings.defaults.cache.dir = Some("defaults-cache".into());
+        settings.defaults.login_host = Some("login-defaults.example".into());
 
         let mut profile = SettingsProfile {
             compose_file: Some("compose-profile.yaml".into()),
@@ -947,8 +971,20 @@ mod tests {
         profile.env.insert("A".into(), "profile-map".into());
         profile.binaries.srun = Some("/profile/srun".into());
         profile.cache.dir = Some("profile-cache".into());
+        profile.login_host = Some("login-profile.example".into());
         settings.profiles.insert("dev".into(), profile);
         settings
+    }
+
+    #[test]
+    fn resolve_login_host_prefers_profile_then_defaults() {
+        assert_eq!(
+            resolve_login_host(Some("p"), Some("d")).as_deref(),
+            Some("p")
+        );
+        assert_eq!(resolve_login_host(None, Some("d")).as_deref(), Some("d"));
+        assert_eq!(resolve_login_host(Some("p"), None).as_deref(), Some("p"));
+        assert_eq!(resolve_login_host(None, None), None);
     }
 
     #[test]
@@ -1004,6 +1040,11 @@ mod tests {
         assert_eq!(resolved.binaries.srun.source, ValueSource::Profile);
         assert_eq!(resolved.cache_dir.value, repo.join("profile-cache"));
         assert_eq!(resolved.cache_dir.source, ValueSource::Profile);
+        // Profile login_host overrides the shared default.
+        assert_eq!(
+            resolved.login_host.as_deref(),
+            Some("login-profile.example")
+        );
         assert_eq!(
             resolved.interpolation_vars.get("A").map(String::as_str),
             Some("profile-map")

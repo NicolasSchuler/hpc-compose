@@ -261,6 +261,53 @@ pub fn jupyter_tunnel_hint(
     )
 }
 
+/// Machine-readable form of [`NotebookConnection`] for `--format json`.
+///
+/// Mirrors the human-readable output. `compute_node` and `login_host` are the
+/// resolved hosts used to render the tunnel hint; they are descriptive only —
+/// nothing here opens a connection.
+#[derive(Debug, Clone, Serialize)]
+pub struct NotebookConnectionOutput {
+    /// The URL to open (localhost for Jupyter, scraped link for VS Code).
+    pub url: String,
+    /// SSH tunnel hint, when one is needed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_hint: Option<String>,
+    /// Resolved compute node the server runs on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_node: Option<String>,
+    /// Resolved SSH login/jump host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_host: Option<String>,
+    /// Tracked Slurm (or local) job id.
+    pub job_id: String,
+    /// Suggested follow-up commands an agent can run next.
+    pub next_commands: Vec<String>,
+}
+
+/// Builds the machine-readable connection output. Pure; opens no connection.
+#[must_use]
+pub fn build_connection_output(
+    connection: &NotebookConnection,
+    compute_node: Option<&str>,
+    login_host: Option<&str>,
+    job_id: &str,
+    file: &std::path::Path,
+) -> NotebookConnectionOutput {
+    let file = file.display();
+    NotebookConnectionOutput {
+        url: connection.url.clone(),
+        tunnel_hint: connection.tunnel_hint.clone(),
+        compute_node: compute_node.map(str::to_string),
+        login_host: login_host.map(str::to_string),
+        job_id: job_id.to_string(),
+        next_commands: vec![
+            format!("hpc-compose status -f {file}"),
+            format!("hpc-compose cancel -f {file}"),
+        ],
+    }
+}
+
 /// Generates an opaque random-looking hex token. Not cryptographically strong;
 /// its job is only to keep an interactive notebook URL unguessable.
 #[must_use]
@@ -438,6 +485,38 @@ mod tests {
                 extra_args: vec![],
             }
         }
+    }
+
+    #[test]
+    fn build_connection_output_carries_fields_and_next_commands() {
+        let conn = NotebookConnection {
+            url: "http://127.0.0.1:8888/lab?token=abc".to_string(),
+            tunnel_hint: Some("ssh -L 8888:gpu07:8888 login01".to_string()),
+        };
+        let out = build_connection_output(
+            &conn,
+            Some("gpu07"),
+            Some("login01"),
+            "4815162",
+            std::path::Path::new("nb.yaml"),
+        );
+        assert_eq!(out.url, conn.url);
+        assert_eq!(out.compute_node.as_deref(), Some("gpu07"));
+        assert_eq!(out.login_host.as_deref(), Some("login01"));
+        assert_eq!(out.job_id, "4815162");
+        assert!(
+            out.next_commands
+                .iter()
+                .any(|c| c.contains("status -f nb.yaml"))
+        );
+        assert!(
+            out.next_commands
+                .iter()
+                .any(|c| c.contains("cancel -f nb.yaml"))
+        );
+        // Round-trips through serde and includes the resolved login host.
+        let json = serde_json::to_string(&out).expect("json");
+        assert!(json.contains("\"login_host\":\"login01\""));
     }
 
     #[test]

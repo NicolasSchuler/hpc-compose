@@ -1416,6 +1416,7 @@ services:
                 value: root.join(".cache/hpc-compose"),
                 source: ValueSource::Builtin,
             },
+            login_host: None,
             resource_profiles: BTreeMap::new(),
             binaries: binaries(root),
             interpolation_vars: BTreeMap::new(),

@@ -2225,6 +2225,7 @@ x-slurm:
                 value: tmpdir.path().join(".cache/hpc-compose"),
                 source: ValueSource::Builtin,
             },
+            login_host: None,
             resource_profiles: BTreeMap::new(),
             binaries: binaries_with_srun(&srun),
             interpolation_vars: BTreeMap::new(),

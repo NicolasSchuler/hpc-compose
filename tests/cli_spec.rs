@@ -2342,7 +2342,14 @@ fn settings_schema_definition_keys_match_exhaustive_catalog() {
     let catalog: &[(&str, &[&str])] = &[
         (
             "profileDefaults",
-            &["compose_file", "env_files", "env", "binaries", "cache"],
+            &[
+                "compose_file",
+                "env_files",
+                "env",
+                "binaries",
+                "cache",
+                "login_host",
+            ],
         ),
         (
             "binaryOverrides",

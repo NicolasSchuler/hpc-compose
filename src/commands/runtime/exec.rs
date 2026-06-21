@@ -1,12 +1,13 @@
 use super::notebook::{
-    NotebookArgs, build_connection, build_notebook_service_spec, build_server_command,
-    generate_token, preset_for, readiness_spec, resolve_image,
+    NotebookArgs, build_connection, build_connection_output, build_notebook_service_spec,
+    build_server_command, generate_token, preset_for, readiness_spec, resolve_image,
 };
 use super::resources::{
     build_ephemeral_runtime_plan, build_synthetic_service_plan, parse_env_entries,
     push_slurm_salloc_options, push_slurm_srun_options, slurm_from_resource_options,
 };
 use super::*;
+use hpc_compose::cli::OutputFormat;
 
 pub(crate) fn alloc(
     context: ResolvedContext,
@@ -734,6 +735,7 @@ pub(crate) fn notebook(
     flags: PrepareFlags,
     local: bool,
     quiet: bool,
+    format: Option<OutputFormat>,
 ) -> Result<()> {
     let PrepareFlags {
         keep_failed_prep,
@@ -741,6 +743,16 @@ pub(crate) fn notebook(
         force_rebuild,
         no_preflight,
     } = flags;
+    // JSON output emits a single document on stdout, so every human-readable
+    // print on the submit path is gated on `!json_mode`. `--follow` streams a
+    // live log view that cannot coexist with a single JSON document.
+    let json_mode = matches!(
+        output::resolve_output_format(format, false),
+        OutputFormat::Json
+    );
+    if json_mode && follow {
+        bail!("--format json is incompatible with --follow (which streams a live log view)");
+    }
     let preset = preset_for(nb_args.kind);
     let image = resolve_image(&nb_args, &preset)?;
     let token = nb_args.token.clone().unwrap_or_else(generate_token);
@@ -765,7 +777,7 @@ pub(crate) fn notebook(
         load_discovered_cluster_profile(&context)?
     };
 
-    let progress = ProgressReporter::new(!quiet);
+    let progress = ProgressReporter::new(!quiet && !json_mode);
     // --dry-run is a static preview: skip preflight and image preparation so
     // it works without a runtime backend or network access.
     if !dry_run && !no_preflight {
@@ -789,7 +801,7 @@ pub(crate) fn notebook(
             },
             |report| report.has_errors(),
         )?;
-        if !quiet || report.has_errors() {
+        if report.has_errors() || (!quiet && !json_mode) {
             output::print_report(&report, false);
         }
         if report.has_errors() {
@@ -812,7 +824,7 @@ pub(crate) fn notebook(
             )
         })?;
         prepare_progress.finish_from_summary(&summary);
-        if !quiet {
+        if !quiet && !json_mode {
             output::print_prepare_summary(&summary);
         }
     }
@@ -910,7 +922,9 @@ pub(crate) fn notebook(
             rollback_local_tracking(&record, Some(supervisor_pid));
             return Err(err);
         }
-        print_local_launch_details(&record, &runtime_plan, &script_path);
+        if !json_mode {
+            print_local_launch_details(&record, &runtime_plan, &script_path);
+        }
         record
     } else {
         super::ensure_default_batch_log_dir(&submit_dir, &runtime_plan)?;
@@ -928,8 +942,10 @@ pub(crate) fn notebook(
             );
         }
         let stdout = String::from_utf8_lossy(&output_result.stdout);
-        print!("{stdout}");
-        output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
+        if !json_mode {
+            print!("{stdout}");
+            output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
+        }
         let Some(job_id) = output::extract_job_id(stdout.trim()) else {
             bail!(
                 "sbatch output did not include a numeric Slurm job id; cannot track the notebook"
@@ -949,25 +965,29 @@ pub(crate) fn notebook(
         record
     };
 
-    output::print_submit_summary_box(
-        &runtime_plan,
-        &record.job_id,
-        &script_path,
-        Some(&latest_record_path(&record)),
-    );
+    if !json_mode {
+        output::print_submit_summary_box(
+            &runtime_plan,
+            &record.job_id,
+            &script_path,
+            Some(&latest_record_path(&record)),
+        );
+    }
 
     // Readiness gate --------------------------------------------------------
     let log_path = record
         .service_logs
         .get("notebook")
         .with_context(|| "tracked notebook service log path was not recorded")?;
-    println!(
-        "{}",
-        term::styled_dim(&format!(
-            "waiting for notebook to become ready (timeout {}s)...",
-            ready_timeout.as_secs()
-        ))
-    );
+    if !json_mode {
+        println!(
+            "{}",
+            term::styled_dim(&format!(
+                "waiting for notebook to become ready (timeout {}s)...",
+                ready_timeout.as_secs()
+            ))
+        );
+    }
     let log_text = wait_for_notebook_log(log_path, preset.readiness_log_pattern, ready_timeout)?;
 
     let (compute_node, login_node) = if local {
@@ -980,7 +1000,12 @@ pub(crate) fn notebook(
             .find(|row| row.service_name == "notebook")
             .and_then(|row| row.nodelist.clone())
             .and_then(|nodes| nodes.split(',').next().map(str::to_string));
-        (compute, current_hostname())
+        // Configured login_host wins over the hostname guess; both may be None,
+        // in which case the hint degrades to a <login-node> placeholder.
+        (
+            compute,
+            context.login_host.clone().or_else(current_hostname),
+        )
     };
     let connection = build_connection(
         &nb_args,
@@ -991,15 +1016,26 @@ pub(crate) fn notebook(
         login_node.as_deref(),
         local,
     )?;
-    print_notebook_connection(&connection);
-    println!(
-        "{}",
-        term::styled_dim(&format!(
-            "manage with: `hpc-compose status -f {}` / `hpc-compose cancel -f {}`",
-            file.display(),
-            file.display()
-        ))
-    );
+    if json_mode {
+        let out = build_connection_output(
+            &connection,
+            compute_node.as_deref(),
+            login_node.as_deref(),
+            &record.job_id,
+            &file,
+        );
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        print_notebook_connection(&connection);
+        println!(
+            "{}",
+            term::styled_dim(&format!(
+                "manage with: `hpc-compose status -f {}` / `hpc-compose cancel -f {}`",
+                file.display(),
+                file.display()
+            ))
+        );
+    }
 
     if follow {
         return output::finish_watch(

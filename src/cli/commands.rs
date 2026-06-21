@@ -2129,6 +2129,8 @@ pub enum Commands {
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
     },
     #[command(
         display_order = 10,

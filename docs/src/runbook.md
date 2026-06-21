@@ -73,6 +73,7 @@ default_profile = "dev"
 [defaults]
 compose_file = "compose.yaml"
 env_files = [".env"]
+login_host = "login01.hpc.example.edu"
 
 [defaults.env]
 CACHE_DIR = "/cluster/shared/hpc-compose-cache"
@@ -114,6 +115,8 @@ Resolution precedence is fixed:
 Use `context` whenever you want to inspect effective compose path, binaries, interpolation variables, runtime paths, and per-field sources.
 
 Resource profiles are referenced from YAML with `x-slurm.resources: gpu-small`. They are Slurm resource defaults, not the same thing as the global `--profile` setting selector, and explicit `x-slurm` values in the spec override profile defaults.
+
+`login_host` is the SSH login/jump host shown in `notebook` connection and tunnel hints, and in the machine-readable `hpc-compose notebook --format json` output. A profile's `login_host` overrides the shared default. It is descriptive only — `hpc-compose` never opens a connection to it.
 
 An editor schema for `settings.toml` is available:
 

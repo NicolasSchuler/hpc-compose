@@ -126,7 +126,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `alloc` | Open an interactive Slurm allocation for iterative service runs | Uses top-level `x-slurm` allocation settings, exports `HPC_COMPOSE_*`, and lets `run SERVICE -- CMD` reuse the active allocation. |
 | `run` | Launch a one-off command | Service mode uses an existing compose service. Image mode uses `--image IMAGE -- CMD` and builds an ephemeral one-service plan. |
 | `shell` | Open an interactive Pyxis shell | Thin wrapper around `srun --pty --container-image=<image> bash -l`. |
-| `notebook` | Launch a tracked JupyterLab or VS Code notebook server | Submits a single-service Slurm job (or `--local`), waits for readiness, and prints the connection URL plus an SSH tunnel hint for Jupyter. Stop with `hpc-compose cancel`. |
+| `notebook` | Launch a tracked JupyterLab or VS Code notebook server | Submits a single-service Slurm job (or `--local`), waits for readiness, and prints the connection URL plus an SSH tunnel hint for Jupyter. `--format json` emits `{url, tunnel_hint, compute_node, login_host, job_id, next_commands}` as a single object. Set `login_host` in settings so the tunnel names your real SSH login host. Stop with `hpc-compose cancel`. |
 
 ```bash
 hpc-compose plan -f compose.yaml
@@ -183,6 +183,7 @@ hpc-compose shell --image docker://ubuntu:24.04
 hpc-compose notebook --kind jupyter --gpus 1 --volume ./project:/workspace
 hpc-compose notebook --kind vscode --image ghcr.io/example/code:1 --gpus 1
 hpc-compose notebook --local --kind jupyter
+hpc-compose notebook --kind jupyter --format json
 ```
 
 ### Lint rules
