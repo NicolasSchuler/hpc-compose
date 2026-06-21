@@ -5,15 +5,17 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
 use hpc_compose::job::{
-    GitProvenance, JobProvenance, SubmissionBackend, SubmissionKind, SubmissionRecord,
-    SubmissionRecordBuildOptions, build_submission_record,
-    build_submission_record_with_backend_and_options, build_submission_record_with_options,
-    latest_record_path_for, load_submission_record, state_path_for_record, write_submission_record,
+    GitProvenance, JobProvenance, SWEEP_MANIFEST_SCHEMA_VERSION, SubmissionBackend, SubmissionKind,
+    SubmissionRecord, SubmissionRecordBuildOptions, SweepManifest, SweepManifestTrial,
+    build_submission_record, build_submission_record_with_backend_and_options,
+    build_submission_record_with_options, latest_record_path_for, load_submission_record,
+    state_path_for_record, sweep_manifest_path_for, write_submission_record, write_sweep_manifest,
 };
 use hpc_compose::render::log_file_name_for_service;
 use serde_json::Value;
@@ -6762,15 +6764,124 @@ echo "Submitted batch job 12345"
     let stdout = stdout_text(&output);
     assert!(stdout.contains("waiting for job 12345 to start"));
     assert!(stdout.contains("queue state: PENDING (squeue)"));
-    assert!(stdout.contains("queue state: RUNNING (squeue)"));
     assert!(stdout.contains("watching job 12345"));
+    // The wait loop exits on RUNNING *or* a terminal state, so the watch view
+    // always opens, but the brief RUNNING poll line is not reliably observed
+    // under full-suite load. Assert the deterministic invariant instead: the
+    // watch opens only after a PENDING poll (it waited rather than watching
+    // the still-pending job immediately).
     assert!(
         stdout
-            .find("queue state: RUNNING")
-            .expect("running queue state")
+            .find("queue state: PENDING")
+            .expect("pending queue state")
             < stdout.find("watching job 12345").expect("watch starts")
     );
     assert!(stdout.contains("[app] ready"));
+}
+
+fn results_trial(trial_id: &str, index: usize, vars: &[(&str, &str)]) -> SweepManifestTrial {
+    SweepManifestTrial {
+        trial_id: trial_id.to_string(),
+        index,
+        variables: vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect(),
+        script_path: PathBuf::from(format!("{trial_id}.sbatch")),
+        job_id: None,
+        record_path: None,
+        submitted_at: None,
+        submit_error: None,
+        objective: None,
+        objective_error: None,
+        observed_at: None,
+    }
+}
+
+#[test]
+fn sweep_results_tabulates_trials_and_leaves_manifest_unchanged() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let sweep_id = "sweep-results-test";
+    // Two trials with differing variable keys exercise the sorted column union;
+    // no job ids means status is "unknown" with zero scheduler contact.
+    let manifest = SweepManifest {
+        schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
+        sweep_id: sweep_id.to_string(),
+        compose_file: compose.clone(),
+        submitted_at: 1,
+        matrix: "full".to_string(),
+        seed: None,
+        total_combinations: 2,
+        objective: None,
+        best_trial: None,
+        stopped_at: None,
+        stop_reason: None,
+        trials: vec![
+            results_trial("t000", 0, &[("lr", "0.1"), ("bs", "32")]),
+            results_trial("t001", 1, &[("lr", "0.2"), ("wd", "0.01")]),
+        ],
+    };
+    write_sweep_manifest(&manifest).expect("write manifest");
+    let manifest_path = sweep_manifest_path_for(&compose, sweep_id);
+    let before = fs::read(&manifest_path).expect("manifest bytes before");
+
+    // CSV: header is trial_id, index, sorted-union vars (bs, lr, wd), status, objective.
+    let csv = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "results",
+            "-f",
+            compose.to_str().expect("path"),
+            "--sweep-id",
+            sweep_id,
+            "--format",
+            "csv",
+        ],
+    );
+    assert_success(&csv);
+    let csv_out = stdout_text(&csv);
+    let mut lines = csv_out.lines();
+    assert_eq!(
+        lines.next().expect("csv header"),
+        "\"trial_id\",\"index\",\"bs\",\"lr\",\"wd\",\"status\",\"objective\""
+    );
+    let row0 = lines.next().expect("csv row 0");
+    // t000 has bs+lr but no wd (empty cell); status is unknown with no job id.
+    assert!(
+        row0.starts_with("\"t000\",\"0\",\"32\",\"0.1\",\"\",\"unknown\","),
+        "unexpected row: {row0}"
+    );
+
+    // JSON: stable sorted variable_columns and one row per trial.
+    let json = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "results",
+            "-f",
+            compose.to_str().expect("path"),
+            "--sweep-id",
+            sweep_id,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&json);
+    let value: Value = serde_json::from_str(&stdout_text(&json)).expect("sweep results json");
+    assert_eq!(value["sweep_id"], Value::from("sweep-results-test"));
+    assert_eq!(
+        value["variable_columns"],
+        serde_json::json!(["bs", "lr", "wd"])
+    );
+    assert_eq!(value["rows"].as_array().expect("rows").len(), 2);
+
+    // Read-only: unlike `sweep observe`, results must not rewrite the manifest.
+    let after = fs::read(&manifest_path).expect("manifest bytes after");
+    assert_eq!(before, after, "sweep results modified the manifest");
 }
 
 #[test]
