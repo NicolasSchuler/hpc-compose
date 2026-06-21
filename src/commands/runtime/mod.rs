@@ -188,11 +188,21 @@ struct UpInvocationLock {
     path: Option<PathBuf>,
 }
 
+struct UpInvocationReclaimLock {
+    path: PathBuf,
+}
+
 impl Drop for UpInvocationLock {
     fn drop(&mut self) {
         if let Some(path) = &self.path {
             let _ = fs::remove_file(path);
         }
+    }
+}
+
+impl Drop for UpInvocationReclaimLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -209,17 +219,117 @@ fn up_invocation_lock_path(compose_file: &Path) -> PathBuf {
         .join(format!("{hash}.up.lock"))
 }
 
-/// Returns `true` when an existing lock file's recorded process is provably no
-/// longer running, meaning a previous `up` crashed or was interrupted before
-/// its [`Drop`] could remove the lock. Returns `false` when the holder is alive
-/// or when liveness cannot be determined (missing/unparseable pid), so an
-/// undecidable lock is never reclaimed out from under a live process.
-fn up_invocation_lock_is_stale(existing: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(existing)
+fn up_invocation_reclaim_lock_path(lock_path: &Path) -> PathBuf {
+    let file_name = lock_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "up.lock".to_string());
+    lock_path.with_file_name(format!("{file_name}.reclaim"))
+}
+
+fn normalize_up_invocation_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('.');
+    if trimmed.is_empty()
+        || trimmed == "127.0.0.1"
+        || trimmed == "::1"
+        || trimmed.eq_ignore_ascii_case("localhost")
+    {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
+fn current_up_invocation_host() -> Option<String> {
+    #[cfg(unix)]
+    {
+        let mut buffer = [0u8; 256];
+        let rc =
+            unsafe { libc::gethostname(buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
+        if rc == 0 {
+            let len = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(buffer.len());
+            if let Ok(name) = std::str::from_utf8(&buffer[..len])
+                && let Some(host) = normalize_up_invocation_host(name)
+            {
+                return Some(host);
+            }
+        }
+    }
+
+    env::var("HOSTNAME")
         .ok()
-        .and_then(|value| value.get("pid").and_then(serde_json::Value::as_u64))
+        .and_then(|name| normalize_up_invocation_host(&name))
+}
+
+/// Returns `true` when an existing lock file's recorded process is provably no
+/// longer running on this host, meaning a previous local `up` crashed or was
+/// interrupted before its [`Drop`] could remove the lock. Returns `false` when
+/// the holder is alive, belongs to a different host, or liveness cannot be
+/// determined (missing/unparseable pid or host), so an undecidable lock is never
+/// reclaimed out from under a live process.
+fn up_invocation_lock_is_stale(existing: &str) -> bool {
+    let Some(current_host) = current_up_invocation_host() else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(existing) else {
+        return false;
+    };
+    let Some(lock_host) = value
+        .get("host")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_up_invocation_host)
+    else {
+        return false;
+    };
+    if lock_host != current_host {
+        return false;
+    }
+    value
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
         .and_then(|pid| u32::try_from(pid).ok())
         .is_some_and(|pid| !pid_is_running(pid))
+}
+
+fn try_acquire_up_invocation_reclaim_lock(
+    lock_path: &Path,
+) -> Result<Option<UpInvocationReclaimLock>> {
+    let reclaim_path = up_invocation_reclaim_lock_path(lock_path);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&reclaim_path)
+    {
+        Ok(_) => Ok(Some(UpInvocationReclaimLock { path: reclaim_path })),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to create {}", reclaim_path.display()))
+        }
+    }
+}
+
+fn reclaim_stale_up_invocation_lock(lock_path: &Path, expected: &str) -> Result<bool> {
+    let Some(_guard) = try_acquire_up_invocation_reclaim_lock(lock_path)? else {
+        return Ok(false);
+    };
+    let current = match fs::read_to_string(lock_path) {
+        Ok(current) => current,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(_) => return Ok(false),
+    };
+    if current != expected || !up_invocation_lock_is_stale(&current) {
+        return Ok(false);
+    }
+    fs::remove_file(lock_path).with_context(|| {
+        format!(
+            "failed to remove stale up invocation lock {}",
+            lock_path.display()
+        )
+    })?;
+    Ok(true)
 }
 
 fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
@@ -241,6 +351,7 @@ fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
         .join(" ");
     let content = serde_json::json!({
         "pid": std::process::id(),
+        "host": current_up_invocation_host(),
         "command": command,
         "compose_path": canonical,
         "created_at_unix": SystemTime::now()
@@ -267,9 +378,12 @@ fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
                 let existing =
                     fs::read_to_string(&path).unwrap_or_else(|_| "<unreadable>".to_string());
                 if attempt == 0 && up_invocation_lock_is_stale(&existing) {
-                    // Stale lock from a crashed/interrupted `up`: remove it and retry.
-                    let _ = fs::remove_file(&path);
-                    continue;
+                    // Stale lock from a crashed/interrupted local `up`: remove
+                    // it only if we win the reclaim sidecar and the file still
+                    // contains the same owner record we inspected above.
+                    if reclaim_stale_up_invocation_lock(&path, &existing)? {
+                        continue;
+                    }
                 }
                 bail!(
                     "another hpc-compose up appears to be running for {}; lock file: {}; existing lock: {}; if this process is gone, remove the lock file and retry",

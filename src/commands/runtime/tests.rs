@@ -955,11 +955,12 @@ fn runtime_wrappers_cover_success_paths_with_local_tracking() {
     .expect("clean");
 }
 
-fn plant_up_lock(compose: &Path, pid: u32) -> PathBuf {
+fn plant_up_lock_with_host(compose: &Path, pid: u32, host: Option<&str>) -> PathBuf {
     let path = up_invocation_lock_path(compose);
     fs::create_dir_all(path.parent().expect("lock parent")).expect("create lock dir");
     let content = serde_json::json!({
         "pid": pid,
+        "host": host,
         "command": "hpc-compose up",
         "compose_path": compose,
         "created_at_unix": 0,
@@ -972,19 +973,33 @@ fn plant_up_lock(compose: &Path, pid: u32) -> PathBuf {
     path
 }
 
+fn plant_up_lock(compose: &Path, pid: u32) -> PathBuf {
+    let host = current_up_invocation_host().expect("test host should be discoverable");
+    plant_up_lock_with_host(compose, pid, Some(&host))
+}
+
 #[test]
-fn up_invocation_lock_is_stale_only_for_dead_pids() {
-    // Dead pid (u32::MAX is rejected by pid_is_running) -> stale.
+fn up_invocation_lock_is_stale_only_for_dead_same_host_pids() {
+    let host = current_up_invocation_host().expect("test host should be discoverable");
+    let foreign_host = format!("{host}-foreign");
+    // Dead pid (u32::MAX is rejected by pid_is_running) on this host -> stale.
     assert!(up_invocation_lock_is_stale(
-        &serde_json::json!({ "pid": u32::MAX }).to_string()
+        &serde_json::json!({ "pid": u32::MAX, "host": host }).to_string()
+    ));
+    // Dead pid on another host is undecidable from this process and is not reclaimed.
+    assert!(!up_invocation_lock_is_stale(
+        &serde_json::json!({ "pid": u32::MAX, "host": foreign_host }).to_string()
     ));
     // Our own live pid -> not stale.
     assert!(!up_invocation_lock_is_stale(
-        &serde_json::json!({ "pid": std::process::id() }).to_string()
+        &serde_json::json!({ "pid": std::process::id(), "host": host }).to_string()
     ));
     // Undecidable locks are never reclaimed.
     assert!(!up_invocation_lock_is_stale(
         &serde_json::json!({ "command": "no pid here" }).to_string()
+    ));
+    assert!(!up_invocation_lock_is_stale(
+        &serde_json::json!({ "pid": u32::MAX }).to_string()
     ));
     assert!(!up_invocation_lock_is_stale("not json at all"));
     assert!(!up_invocation_lock_is_stale("<unreadable>"));
@@ -1004,6 +1019,10 @@ fn acquire_up_invocation_lock_reclaims_stale_pid() {
         serde_json::from_str(&fs::read_to_string(&lock_path).expect("read reclaimed lock"))
             .expect("parse reclaimed lock");
     assert_eq!(written["pid"], serde_json::Value::from(std::process::id()));
+    assert_eq!(
+        written["host"],
+        serde_json::Value::from(current_up_invocation_host().expect("test host"))
+    );
     drop(guard);
     assert!(
         !lock_path.exists(),
@@ -1027,6 +1046,45 @@ fn acquire_up_invocation_lock_refuses_live_holder() {
     );
     // The live holder's lock is left untouched.
     assert!(lock_path.exists(), "live holder's lock must be preserved");
+}
+
+#[test]
+fn reclaim_stale_up_invocation_lock_preserves_changed_owner() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(tmp.path());
+    let lock_path = plant_up_lock(&compose, u32::MAX);
+    let stale_owner = fs::read_to_string(&lock_path).expect("read stale owner");
+
+    // Simulate a competitor that acquired the main lock after we inspected the
+    // stale owner but before we won the reclaim sidecar. Reclaim must re-read
+    // and refuse to remove this new live owner.
+    let host = current_up_invocation_host().expect("test host should be discoverable");
+    fs::write(
+        &lock_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "pid": std::process::id(),
+            "host": host,
+            "command": "hpc-compose up",
+            "compose_path": compose,
+            "created_at_unix": 1,
+        }))
+        .expect("serialize new owner"),
+    )
+    .expect("replace lock owner");
+
+    assert!(
+        !reclaim_stale_up_invocation_lock(&lock_path, &stale_owner)
+            .expect("reclaim attempt should not fail"),
+        "changed owner must not be reclaimed"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&lock_path).expect("read current owner"))
+            .expect("parse current owner");
+    assert_eq!(current["pid"], serde_json::Value::from(std::process::id()));
+    assert!(
+        !up_invocation_reclaim_lock_path(&lock_path).exists(),
+        "reclaim sidecar is removed after the guarded attempt"
+    );
 }
 
 #[test]
