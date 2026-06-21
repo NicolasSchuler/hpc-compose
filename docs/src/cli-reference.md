@@ -261,7 +261,7 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | `--enroot-bin` | `enroot` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
 | `--apptainer-bin` | `apptainer` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
 | `--singularity-bin` | `singularity` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
-| `--huggingface-cli-bin` | `huggingface-cli` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `prepare` |
+| `--huggingface-cli-bin` | `huggingface-cli` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare` |
 | `--tmux-bin` | `tmux` | `tmux` |
 
 Settings profiles can also configure these via `[defaults.binaries]` or `[profiles.<name>.binaries]` (see [Runbook](runbook.md)).

@@ -3078,6 +3078,14 @@ pub enum SweepCommands {
             help = "Path to the singularity executable"
         )]
         singularity_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "huggingface-cli",
+            help_heading = "Tool overrides",
+            help = "Path to the huggingface-cli executable used by hf:// stage-in trials"
+        )]
+        huggingface_cli_bin: String,
     },
     #[command(
         about = "Show aggregated tracked state for one sweep",

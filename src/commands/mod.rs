@@ -530,6 +530,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 enroot_bin,
                 apptainer_bin,
                 singularity_bin,
+                huggingface_cli_bin,
             } => {
                 let context = resolve_ctx(
                     options,
@@ -541,6 +542,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                         ("--scontrol-bin", &scontrol_bin),
                         ("--apptainer-bin", &apptainer_bin),
                         ("--singularity-bin", &singularity_bin),
+                        ("--huggingface-cli-bin", &huggingface_cli_bin),
                     ],
                 )?;
                 runtime::sweep_submit(
