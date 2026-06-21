@@ -5579,6 +5579,139 @@ fn run_image_rejects_invalid_env_entries_before_launch() {
 }
 
 #[test]
+fn run_image_dataset_and_output_bind_dataset_ro_and_export_artifacts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let dataset = tmpdir.path().join("dataset");
+    fs::create_dir_all(&dataset).expect("dataset dir");
+    let results = tmpdir.path().join("results");
+
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "NONE\n").expect("squeue state");
+    fs::write(&sacct_state, "COMPLETED\n").expect("sacct state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let script_out = tmpdir.path().join("ephemeral.sbatch");
+
+    let run = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--dataset",
+            dataset.to_str().expect("path"),
+            "--output",
+            results.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "--",
+            "python",
+            "infer.py",
+        ],
+    );
+    assert_success(&run);
+
+    // The dataset is bound read-only at the dataset container destination.
+    let script = fs::read_to_string(&script_out).expect("script");
+    assert!(
+        script.contains(&format!("{}:/hpc-compose/dataset:ro", dataset.display())),
+        "dataset must be bound read-only:\n{script}"
+    );
+    // Both in-job env vars point the command at the container destinations.
+    assert!(script.contains("HPC_COMPOSE_DATASET_DIR=/hpc-compose/dataset"));
+    assert!(script.contains("HPC_COMPOSE_OUTPUT_DIR=/hpc-compose/job/output"));
+    // --output flips the artifacts pipeline on; the output path is collected.
+    assert!(script.contains("ARTIFACTS_DIR="));
+
+    // The submission record exports artifacts into the host --output directory.
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(tmpdir.path().join(".hpc-compose/latest-run.json"))
+            .expect("latest run"),
+    )
+    .expect("latest run json");
+    assert_eq!(
+        record["artifact_export_dir"],
+        Value::from(results.display().to_string())
+    );
+}
+
+#[test]
+fn run_image_dataset_missing_path_bails_before_submission() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let missing = tmpdir.path().join("does-not-exist");
+    let sbatch_log = tmpdir.path().join("sbatch.log");
+    let sbatch = write_fake_sbatch_with_log(tmpdir.path(), &sbatch_log);
+    let script_out = tmpdir.path().join("ephemeral.sbatch");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--image",
+            local_image.to_str().expect("path"),
+            "--dataset",
+            missing.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--dataset path does not exist"));
+    // No rendering and no submission happen when the dataset is missing.
+    assert!(!script_out.exists());
+    assert!(!sbatch_log.exists());
+}
+
+#[test]
+fn run_dataset_and_output_require_image_mode() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let dataset = tmpdir.path().join("dataset");
+    fs::create_dir_all(&dataset).expect("dataset dir");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--dataset",
+            dataset.to_str().expect("path"),
+            "--output",
+            tmpdir.path().join("results").to_str().expect("path"),
+            "app",
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    // The diagnostic is line-wrapped by the error renderer, so assert on tokens
+    // rather than a contiguous phrase.
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("--dataset"));
+    assert!(stderr.contains("--output"));
+    assert!(stderr.contains("require"));
+    assert!(stderr.contains("--image"));
+}
+
+#[test]
 fn run_image_local_tracks_latest_run_backend_without_main_latest() {
     if std::env::consts::OS != "linux" {
         return;

@@ -360,6 +360,8 @@ pub(crate) fn run_ephemeral(
     image: String,
     command: Vec<String>,
     resource_options: ResourceCliOptions,
+    dataset: Option<PathBuf>,
+    output: Option<PathBuf>,
     script_out: Option<PathBuf>,
     flags: PrepareFlags,
     local: bool,
@@ -377,10 +379,45 @@ pub(crate) fn run_ephemeral(
     if command.is_empty() {
         bail!("run --image requires a command after --");
     }
+    // The planner only normalizes mount/host paths lexically and never checks
+    // that they exist, so validate the dataset path here before any rendering
+    // or submission. `run` only prepares and submits locally-built scripts; it
+    // never opens a connection or copies the dataset itself.
+    if let Some(dataset) = dataset.as_deref() {
+        let raw = dataset.to_string_lossy();
+        if raw.trim().is_empty() {
+            bail!("run --dataset requires a non-empty path");
+        }
+        // Path-based only: reject remote/registry schemes such as `hf://`.
+        if let Some((scheme, _)) = raw.split_once("://") {
+            bail!(
+                "run --dataset must be a filesystem path, not a '{scheme}://' URL; copy the dataset onto the shared filesystem first"
+            );
+        }
+        match dataset.try_exists() {
+            Ok(true) => {}
+            Ok(false) => bail!("run --dataset path does not exist: {}", dataset.display()),
+            Err(err) => bail!(
+                "run --dataset path {} could not be accessed: {err}",
+                dataset.display()
+            ),
+        }
+    }
+    if let Some(output) = output.as_deref()
+        && output.as_os_str().is_empty()
+    {
+        bail!("run --output requires a non-empty directory");
+    }
     let file = context.cwd.join("hpc-compose-run.yaml");
     let progress = ProgressReporter::new(!quiet);
-    let runtime_plan =
-        build_ephemeral_runtime_plan(&context, image, command.clone(), &resource_options)?;
+    let runtime_plan = build_ephemeral_runtime_plan(
+        &context,
+        image,
+        command.clone(),
+        &resource_options,
+        dataset.as_deref(),
+        output.as_deref(),
+    )?;
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
 
     if local {
@@ -763,8 +800,14 @@ pub(crate) fn notebook(
     let readiness = readiness_spec(&preset);
     let service = build_notebook_service_spec(&nb_args, &image, command.clone(), readiness);
     let job_name = format!("hpc-compose-notebook-{}", preset.kind.as_str());
-    let runtime_plan =
-        build_synthetic_service_plan(&context, &job_name, "notebook", service, &resource_options)?;
+    let runtime_plan = build_synthetic_service_plan(
+        &context,
+        &job_name,
+        "notebook",
+        service,
+        &resource_options,
+        None,
+    )?;
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let file = context.cwd.join(format!("{job_name}.yaml"));
 

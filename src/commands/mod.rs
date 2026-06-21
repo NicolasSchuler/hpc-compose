@@ -1089,6 +1089,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             gpus,
             partition,
             env,
+            dataset,
+            output,
             local,
             script_out,
             sbatch_bin,
@@ -1127,6 +1129,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                         partition,
                         env,
                     },
+                    dataset,
+                    output,
                     script_out,
                     runtime::PrepareFlags {
                         keep_failed_prep: launch.keep_failed_prep,
@@ -1145,10 +1149,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     || gpus.is_some()
                     || partition.is_some()
                     || !env.is_empty()
+                    || dataset.is_some()
+                    || output.is_some()
                     || local
                 {
                     bail!(
-                        "run resource flags, --env, and --local require --image; service mode uses the compose spec"
+                        "run resource flags, --env, --dataset, --output, and --local require --image; service mode uses the compose spec"
                     );
                 }
                 let mut args = args.into_iter();
@@ -1630,6 +1636,8 @@ fn run_flag_takes_value(value: &str) -> bool {
             | "--gpus"
             | "--partition"
             | "--env"
+            | "--dataset"
+            | "--output"
             | "--script-out"
             | "--salloc-bin"
             | "--sbatch-bin"

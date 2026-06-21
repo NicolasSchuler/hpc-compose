@@ -1,13 +1,17 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use hpc_compose::context::ResolvedContext;
 use hpc_compose::planner::{PlanOptions, build_plan_with_options};
 use hpc_compose::prepare::{RuntimePlan, build_runtime_plan};
 use hpc_compose::spec::{
-    CommandSpec, ComposeSpec, DependsOnSpec, EnvironmentSpec, RuntimeConfig, ServiceEnrootConfig,
-    ServiceRuntimeConfig, ServiceSlurmConfig, ServiceSpec, SlurmConfig, SoftwareEnvConfig,
+    ArtifactCollectPolicy, ArtifactsConfig, CommandSpec, ComposeSpec, DependsOnSpec,
+    EnvironmentSpec, RuntimeConfig, ServiceEnrootConfig, ServiceRuntimeConfig, ServiceSlurmConfig,
+    ServiceSpec, SlurmConfig, SoftwareEnvConfig,
 };
+
+use crate::tracked_paths::{DATASET_CONTAINER_DIR, OUTPUT_CONTAINER_DIR};
 
 /// Shared resource flags accepted by ephemeral `run --image` and `shell`.
 #[derive(Debug, Clone, Default)]
@@ -77,15 +81,45 @@ pub(super) fn build_ephemeral_runtime_plan(
     image: String,
     command: Vec<String>,
     options: &ResourceCliOptions,
+    dataset: Option<&Path>,
+    output: Option<&Path>,
 ) -> Result<RuntimePlan> {
-    let environment = EnvironmentSpec::Map(parse_env_entries(&options.env)?);
+    // `--dataset`/`--output` are CLI sugar over existing ComposeSpec fields
+    // (service volumes + x-slurm.artifacts), synthesized in memory here. No new
+    // schema fields are introduced.
+    let mut env = parse_env_entries(&options.env)?;
+    let mut volumes = Vec::new();
+    if let Some(dataset) = dataset {
+        // The host side is normalized by the planner's `normalize_mount`, which
+        // preserves the container destination and the `:ro` mode verbatim.
+        volumes.push(format!("{}:{DATASET_CONTAINER_DIR}:ro", dataset.display()));
+        env.insert(
+            "HPC_COMPOSE_DATASET_DIR".to_string(),
+            DATASET_CONTAINER_DIR.to_string(),
+        );
+    }
+    let artifacts = output.map(|output| {
+        // The in-job command writes to OUTPUT_CONTAINER_DIR (a writable path
+        // beneath the job container dir), which is collected as an artifact and
+        // exported to the host --output directory by the artifacts pipeline.
+        env.insert(
+            "HPC_COMPOSE_OUTPUT_DIR".to_string(),
+            OUTPUT_CONTAINER_DIR.to_string(),
+        );
+        ArtifactsConfig {
+            collect: ArtifactCollectPolicy::Always,
+            export_dir: Some(output.display().to_string()),
+            paths: vec![OUTPUT_CONTAINER_DIR.to_string()],
+            ..ArtifactsConfig::default()
+        }
+    });
     let service = ServiceSpec {
         image: Some(image),
         command: Some(CommandSpec::Vec(command)),
         entrypoint: None,
         script: None,
-        environment,
-        volumes: Vec::new(),
+        environment: EnvironmentSpec::Map(env),
+        volumes,
         working_dir: None,
         depends_on: DependsOnSpec::None,
         readiness: None,
@@ -96,27 +130,42 @@ pub(super) fn build_ephemeral_runtime_plan(
         runtime: ServiceRuntimeConfig::default(),
         enroot: ServiceEnrootConfig::default(),
     };
-    build_synthetic_service_plan(context, "hpc-compose-run", "run", service, options)
+    build_synthetic_service_plan(
+        context,
+        "hpc-compose-run",
+        "run",
+        service,
+        options,
+        artifacts,
+    )
 }
 
 /// Builds a runtime plan for a single synthetic service, used by `run
 /// --image` and `notebook`. The compose spec is constructed in memory from
 /// *job_name*, the per-service *service_name*, the supplied [`ServiceSpec`],
-/// and resource flags; no compose file is required on disk.
+/// and resource flags; no compose file is required on disk. *artifacts* is set
+/// on `x-slurm.artifacts` before planning (e.g. `run --output`); `notebook`
+/// passes `None`.
 pub(crate) fn build_synthetic_service_plan(
     context: &ResolvedContext,
     job_name: &str,
     service_name: &str,
     service: ServiceSpec,
     options: &ResourceCliOptions,
+    artifacts: Option<ArtifactsConfig>,
 ) -> Result<RuntimePlan> {
     let mut services = BTreeMap::new();
     services.insert(service_name.to_string(), service);
+    let mut slurm = slurm_from_resource_options(job_name, options)?;
+    // Must be set before `build_plan_with_options`: ComposeSpec.slurm moves
+    // directly into Plan.slurm and is cloned into RuntimePlan.slurm, which both
+    // render (artifacts pipeline) and the submission record read from.
+    slurm.artifacts = artifacts;
     let spec = ComposeSpec {
         name: Some(job_name.to_string()),
         runtime: RuntimeConfig::default(),
         software_env: SoftwareEnvConfig::default(),
-        slurm: slurm_from_resource_options(job_name, options)?,
+        slurm,
         sweep: None,
         secrets: BTreeMap::new(),
         services,

@@ -446,10 +446,19 @@ Useful `tmux` options:
 
 ```bash
 hpc-compose run [-f compose.yaml] SERVICE -- CMD [ARGS...]
-hpc-compose run --image IMAGE [--resources NAME] [--time T] [--mem M] [--cpus-per-task N] [--gpus N] [--partition P] [--env K=V] [--local] -- CMD [ARGS...]
+hpc-compose run --image IMAGE [--resources NAME] [--time T] [--mem M] [--cpus-per-task N] [--gpus N] [--partition P] [--env K=V] [--dataset PATH] [--output DIR] [--local] -- CMD [ARGS...]
 ```
 
 Service mode reuses the named service's image, environment, mounts, working directory, and prepare rules, clears `depends_on`, and submits a fresh tracked run job. When launched inside `hpc-compose alloc`, service mode detects `HPC_COMPOSE_ALLOCATION=1` and `SLURM_JOB_ID`, prints the active allocation id, runs the one-service launcher inside the allocation with `srun`, and records the latest run metadata against the allocation job id. Image mode creates an ephemeral one-service plan from CLI flags, then follows the normal render/prepare/submit path. `--resources` refers to `[resource_profiles.<name>]` in settings; it is not the global `--profile` selector.
+
+Image mode also accepts two batch-inference flags (both image-mode-only; using either without `--image` is an error):
+
+- `--dataset <PATH>` binds an existing shared-filesystem path read-only into the container and exposes its in-container location as `HPC_COMPOSE_DATASET_DIR`. The path is filesystem-based only; remote or registry schemes such as `hf://` are rejected, and a non-existent path fails before any submission. Copy datasets onto the shared filesystem first.
+- `--output <DIR>` turns on artifact export: the in-container path exposed as `HPC_COMPOSE_OUTPUT_DIR` is collected after the job and exported into `<DIR>` (recorded as the run's `artifact_export_dir`). Have the in-job command write its results under `$HPC_COMPOSE_OUTPUT_DIR`.
+
+```bash
+hpc-compose run --image docker://python:3.12 --dataset /scratch/data --output ./results -- python infer.py
+```
 
 `alloc` requests an interactive allocation through `salloc`:
 

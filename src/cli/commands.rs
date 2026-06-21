@@ -1955,6 +1955,18 @@ pub enum Commands {
         env: Vec<String>,
         #[arg(
             long,
+            value_name = "PATH",
+            help = "Shared-FS dataset path to bind read-only and expose as HPC_COMPOSE_DATASET_DIR (image mode only)"
+        )]
+        dataset: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Directory to export job artifacts into; exposed in-job as HPC_COMPOSE_OUTPUT_DIR (image mode only)"
+        )]
+        output: Option<PathBuf>,
+        #[arg(
+            long,
             help = "Run the ephemeral image locally through the local Pyxis-compatible launcher"
         )]
         local: bool,

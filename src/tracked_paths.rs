@@ -40,6 +40,21 @@ pub(crate) const ENROOT_RUNTIME_DIR_NAME: &str = "runtime";
 // normalizer, and the rendered batch script's bind-mount spec.
 pub(crate) const JOB_CONTAINER_DIR: &str = "/hpc-compose/job";
 
+/// In-container destination for the read-only dataset bound by `run --dataset`.
+///
+/// Exposed in-job as `HPC_COMPOSE_DATASET_DIR`. Deliberately a sibling of
+/// [`JOB_CONTAINER_DIR`] (not nested beneath it) so it is not a reserved runtime
+/// mount destination and passes the planner's mount-destination guard.
+pub(crate) const DATASET_CONTAINER_DIR: &str = "/hpc-compose/dataset";
+
+/// In-container destination for artifacts collected by `run --output`.
+///
+/// Exposed in-job as `HPC_COMPOSE_OUTPUT_DIR` and declared as an
+/// `x-slurm.artifacts.paths` entry. It lives *beneath* [`JOB_CONTAINER_DIR`]
+/// (but is not the reserved `.../artifacts` export tree) because artifact source
+/// paths must resolve under the job container directory.
+pub(crate) const OUTPUT_CONTAINER_DIR: &str = "/hpc-compose/job/output";
+
 /// Returns `true` if `path` equals [`JOB_CONTAINER_DIR`] or is nested beneath it.
 ///
 /// Used by spec validation to gate artifact and assertion paths: users may

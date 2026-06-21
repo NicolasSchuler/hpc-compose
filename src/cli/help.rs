@@ -260,7 +260,8 @@ Examples:
   hpc-compose run -f compose.yaml app -- bash
   hpc-compose alloc -f compose.yaml
   hpc-compose run -f compose.yaml app -- python -m pytest
-  hpc-compose run --image docker://python:3.12 -- python -V";
+  hpc-compose run --image docker://python:3.12 -- python -V
+  hpc-compose run --image docker://python:3.12 --dataset /scratch/data --output ./results -- python infer.py";
 
 pub(super) const SHELL_HELP: &str = "\
 Examples:
