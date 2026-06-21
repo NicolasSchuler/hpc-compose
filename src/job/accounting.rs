@@ -327,6 +327,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accounting_duration_parser_accepts_forms_without_range_rules() {
+        assert_eq!(parse_slurm_accounting_duration("90"), Some(90));
+        assert_eq!(parse_slurm_accounting_duration("01:30"), Some(90));
+        assert_eq!(parse_slurm_accounting_duration("1:02:03"), Some(3723));
+        // day-HH:MM:SS form.
+        assert_eq!(parse_slurm_accounting_duration("1-00:00:00"), Some(86_400));
+        // Fractional seconds are stripped.
+        assert_eq!(parse_slurm_accounting_duration("00:01.500"), Some(1));
+        assert_eq!(parse_slurm_accounting_duration(""), None);
+        assert_eq!(parse_slurm_accounting_duration("unknown"), None);
+        // Unlike the score parser, the accounting parser does NOT apply the spec
+        // walltime range rules, so out-of-range fields still parse.
+        assert_eq!(parse_slurm_accounting_duration("00:90"), Some(90));
+    }
+
+    #[test]
     fn parse_sacct_accounting_output_and_rollup() {
         let rows = parse_sacct_accounting_output(
             "\

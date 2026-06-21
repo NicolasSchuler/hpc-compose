@@ -95,3 +95,88 @@ pub(crate) fn artifact_cache_key(parts: &[&str]) -> String {
 pub(crate) fn short_digest_prefix(hash: &str) -> &str {
     &hash[..16]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_mount_parts_classifies_shapes() {
+        assert!(matches!(
+            split_mount_parts("/h:/c"),
+            MountParts::HostContainer { mode: None, .. }
+        ));
+        assert!(matches!(
+            split_mount_parts("/h:/c:ro"),
+            MountParts::HostContainer {
+                mode: Some("ro"),
+                ..
+            }
+        ));
+        assert!(matches!(
+            split_mount_parts("/h:/c:rw"),
+            MountParts::HostContainer {
+                mode: Some("rw"),
+                ..
+            }
+        ));
+        assert!(matches!(
+            split_mount_parts("/h:/c:rx"),
+            MountParts::UnsupportedMode("rx")
+        ));
+        assert!(matches!(
+            split_mount_parts("/host-only"),
+            MountParts::InvalidShape
+        ));
+        assert!(matches!(
+            split_mount_parts("a:b:c:d"),
+            MountParts::InvalidShape
+        ));
+    }
+
+    #[test]
+    fn parse_node_index_ranges_parses_and_rejects() {
+        assert_eq!(
+            parse_node_index_ranges("0,2-3", "nodes").unwrap(),
+            vec![(0, 0), (2, 3)]
+        );
+        for (input, needle) in [
+            ("  ", "must not be empty"),
+            ("0,,1", "empty range segment"),
+            ("1-", "incomplete range"),
+            ("a", "invalid node index"),
+            ("3-1", "descending range"),
+        ] {
+            let err = parse_node_index_ranges(input, "nodes")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(needle), "for {input:?} got: {err}");
+        }
+    }
+
+    #[test]
+    fn resolve_node_index_expr_bounds_and_dedups() {
+        assert_eq!(
+            resolve_node_index_expr("0-2,1", 4, "nodes").unwrap(),
+            vec![0, 1, 2]
+        );
+        let err = resolve_node_index_expr("0-4", 4, "nodes")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only has 4 node(s)"), "got: {err}");
+    }
+
+    #[test]
+    fn cache_key_separates_parts_and_digest_prefix_is_16() {
+        assert_ne!(
+            artifact_cache_key(&["x", "y"]),
+            artifact_cache_key(&["x", "z"])
+        );
+        // The NUL separator prevents the classic concatenation collision.
+        assert_ne!(
+            artifact_cache_key(&["ab", "c"]),
+            artifact_cache_key(&["a", "bc"])
+        );
+        assert_eq!(short_digest_prefix(&artifact_cache_key(&["x"])).len(), 16);
+    }
+}

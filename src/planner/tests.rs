@@ -2507,3 +2507,59 @@ fn build_plan_rejects_dependencies_on_ignore_services() {
     let err = build_plan(&compose, spec).expect_err("ignore dependency");
     assert!(err.to_string().contains("cannot be depended on"));
 }
+
+#[test]
+fn pyxis_backend_rejects_local_sif_image() {
+    let err = normalize_image(
+        Some("./image.sif"),
+        RuntimeBackend::Pyxis,
+        Path::new("/tmp/project"),
+        "app",
+    )
+    .expect_err("pyxis must reject a local .sif image");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("runtime.backend=pyxis expects a remote image"),
+        "unexpected: {msg}"
+    );
+}
+
+#[test]
+fn mount_rejects_unsupported_mode() {
+    let err = normalize_mount("./data:/data:rx", Path::new("/tmp/project"))
+        .expect_err("unsupported mode rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unsupported mode") && msg.contains("use ro or rw"),
+        "unexpected: {msg}"
+    );
+}
+
+#[test]
+fn mount_rejects_relative_container_path() {
+    let err = normalize_mount("./data:relative/path", Path::new("/tmp/project"))
+        .expect_err("relative container path rejected");
+    assert!(
+        err.to_string().contains("container path must be absolute"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn mount_rejects_empty_components() {
+    let err =
+        normalize_mount(" :/data", Path::new("/tmp/project")).expect_err("empty host rejected");
+    assert!(
+        err.to_string()
+            .contains("non-empty host and container paths"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn registry_host_handles_colon_host_without_dot() {
+    assert_eq!(
+        registry_host_for_remote("docker://myhost:5000/app:latest"),
+        "myhost:5000"
+    );
+}

@@ -354,4 +354,28 @@ mod tests {
             .expect("parse");
         assert_eq!(total, 8, "exclusive flock must serialize read-modify-write");
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_atomic_replaces_symlinked_destination_without_clobbering_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        fs::write(&outside, b"old").expect("seed outside target");
+        let dest = dir.path().join("state.json");
+        symlink(&outside, &dest).expect("plant a symlink at the destination");
+
+        write_atomic(&dest, b"new", false).expect("atomic write over a symlinked destination");
+
+        // The rename replaced the symlink itself with a regular file ...
+        let meta = fs::symlink_metadata(&dest).expect("dest metadata");
+        assert!(
+            !meta.file_type().is_symlink(),
+            "destination must no longer be a symlink after write_atomic"
+        );
+        assert_eq!(fs::read(&dest).expect("read dest"), b"new");
+        // ... and the symlink's former target was never followed/overwritten.
+        assert_eq!(fs::read(&outside).expect("read outside"), b"old");
+    }
 }

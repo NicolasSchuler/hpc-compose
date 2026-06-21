@@ -230,6 +230,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn is_under_job_container_dir_guards_sibling_prefixes() {
+        assert!(is_under_job_container_dir(JOB_CONTAINER_DIR));
+        assert!(is_under_job_container_dir("/hpc-compose/job/data"));
+        assert!(is_under_job_container_dir("/hpc-compose/job/a/b"));
+        // Siblings that merely share the string prefix must NOT count as "under".
+        assert!(!is_under_job_container_dir("/hpc-compose/jobevil"));
+        assert!(!is_under_job_container_dir("/hpc-compose/job-extra/x"));
+        assert!(!is_under_job_container_dir("/etc/passwd"));
+        // The join helper normalizes leading slashes.
+        assert_eq!(under_job_container_dir("hooks"), "/hpc-compose/job/hooks");
+        assert_eq!(under_job_container_dir("/hooks"), "/hpc-compose/job/hooks");
+        assert_eq!(under_job_container_dir("///a/b"), "/hpc-compose/job/a/b");
+    }
+
+    #[test]
     fn compose_level_metadata_paths_match_expected_layout() {
         let spec_path = Path::new("/tmp/project/compose.yaml");
 

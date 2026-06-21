@@ -533,4 +533,43 @@ mod tests {
             "docker://registry.example#proj/app:2.0"
         ));
     }
+
+    #[test]
+    fn split_mount_trims_parts_and_rejects_malformed() {
+        // host/container are trimmed; the mode token must match `ro`/`rw` exactly.
+        assert_eq!(
+            split_mount("  /data : /mnt :ro"),
+            Some(("/data", "/mnt", Some("ro")))
+        );
+        assert_eq!(split_mount("/data:/mnt"), Some(("/data", "/mnt", None)));
+        // An unsupported mode token is rejected.
+        assert_eq!(split_mount("/data:/mnt:private"), None);
+        // A bare path with no container target has an invalid shape.
+        assert_eq!(split_mount("/only-one"), None);
+    }
+
+    #[test]
+    fn path_is_under_matches_self_and_descendants_only() {
+        assert!(path_is_under("/scratch", "/scratch"));
+        assert!(path_is_under("/scratch/job/data", "/scratch"));
+        assert!(!path_is_under("/scratchpad", "/scratch"));
+        assert!(!path_is_under("/home/user", "/scratch"));
+    }
+
+    #[test]
+    fn host_looks_shared_uses_explicit_roots_when_provided() {
+        let roots = vec!["/shared".to_string(), "/projects".to_string()];
+        assert!(host_looks_shared("/shared/data", &roots));
+        assert!(host_looks_shared("/projects", &roots));
+        assert!(!host_looks_shared("/local/tmp", &roots));
+    }
+
+    #[test]
+    fn format_bytes_keeps_bytes_exact_and_scales_larger_units() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1_024), "1.0 KiB");
+        assert_eq!(format_bytes(1_536), "1.5 KiB");
+        assert_eq!(format_bytes(2 * 1_024 * 1_024), "2.0 MiB");
+        assert_eq!(format_bytes(3 * 1_024 * 1_024 * 1_024), "3.0 GiB");
+    }
 }

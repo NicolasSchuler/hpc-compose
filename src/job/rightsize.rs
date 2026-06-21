@@ -867,6 +867,76 @@ mod tests {
     }
 
     #[test]
+    fn ceil_nice_memory_snaps_to_nice_tiers() {
+        assert_eq!(ceil_nice_memory_bytes(GIB), GIB);
+        assert_eq!(ceil_nice_memory_bytes(3 * GIB), 4 * GIB);
+        assert_eq!(ceil_nice_memory_bytes(15 * GIB), 16 * GIB);
+        assert_eq!(ceil_nice_memory_bytes(17 * GIB), 24 * GIB);
+        assert_eq!(ceil_nice_memory_bytes(700 * GIB), 768 * GIB);
+        assert_eq!(ceil_nice_memory_bytes(1), GIB);
+        assert_eq!(ceil_nice_memory_bytes(0), GIB);
+    }
+
+    #[test]
+    fn ceil_nice_memory_handles_above_1024_gib_branch() {
+        assert_eq!(ceil_nice_memory_bytes(1025 * GIB), 1_280 * GIB);
+        assert_eq!(ceil_nice_memory_bytes(2_000 * GIB), 2_048 * GIB);
+        assert_eq!(ceil_nice_memory_bytes(1_024 * GIB), 1_024 * GIB);
+    }
+
+    #[test]
+    fn ceil_nice_memory_is_monotonic_and_idempotent() {
+        let inputs = [
+            GIB,
+            3 * GIB,
+            15 * GIB,
+            17 * GIB,
+            64 * GIB,
+            700 * GIB,
+            1_024 * GIB,
+            1_025 * GIB,
+            2_000 * GIB,
+        ];
+        let mut prev = 0u64;
+        for bytes in inputs {
+            let rounded = ceil_nice_memory_bytes(bytes);
+            assert!(rounded >= bytes, "rounded {rounded} < input {bytes}");
+            assert!(rounded >= prev, "non-monotonic: {rounded} < {prev}");
+            prev = rounded;
+            assert_eq!(ceil_nice_memory_bytes(rounded), rounded);
+        }
+    }
+
+    #[test]
+    fn format_slurm_memory_rounds_up_to_whole_gib() {
+        assert_eq!(format_slurm_memory(64 * GIB), "64G");
+        assert_eq!(format_slurm_memory(0), "1G");
+        assert_eq!(format_slurm_memory(1), "1G");
+        assert_eq!(format_slurm_memory(GIB + 1), "2G");
+        assert_eq!(format_slurm_memory(2_048 * GIB), "2048G");
+    }
+
+    #[test]
+    fn gpu_confidence_tracks_sample_count() {
+        let low = GpuActivitySummary {
+            sample_count: 2,
+            max_active_devices: 1,
+            max_seen_devices: 2,
+        };
+        let medium = GpuActivitySummary {
+            sample_count: 3,
+            ..low.clone()
+        };
+        assert_eq!(gpu_confidence(&low), RightsizeConfidence::Low);
+        assert_eq!(gpu_confidence(&medium), RightsizeConfidence::Medium);
+        let single = GpuActivitySummary {
+            sample_count: 1,
+            ..low.clone()
+        };
+        assert_eq!(gpu_confidence(&single), RightsizeConfidence::Low);
+    }
+
+    #[test]
     fn step_memory_uses_max_rss_or_average_total() {
         let step = StepStats {
             step_id: "123.0".into(),

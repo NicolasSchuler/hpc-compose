@@ -29,7 +29,7 @@ pub(super) use hpc_compose::job::{
     find_submission_record_in_repo, generate_sweep_id, interpolation_vars_for_sweep_trial,
     jobs_dir_for, latest_canary_record_path_for, latest_notebook_record_path_for,
     latest_record_path_for, latest_run_record_path_for, load_submission_record,
-    load_sweep_manifest, metadata_root_for, parse_log_since_duration, print_logs,
+    load_sweep_manifest, metadata_root_for, parse_log_since_duration, pid_is_running, print_logs,
     remove_submission_record, run_cleanup_report, runtime_job_root_for_record, scan_job_inventory,
     scan_job_records, scan_sweep_manifests, serialize_metrics_probe_report, state_path_for_record,
     sweep_manifest_path_for, validate_metrics_probe_options, wait_for_job_start, watch_submission,
@@ -183,6 +183,7 @@ fn tracked_cached_artifacts(plan: &RuntimePlan) -> Vec<PathBuf> {
     artifacts
 }
 
+#[derive(Debug)]
 struct UpInvocationLock {
     path: Option<PathBuf>,
 }
@@ -195,11 +196,34 @@ impl Drop for UpInvocationLock {
     }
 }
 
-fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
+/// Computes the deterministic lock-file path for a compose file's `up`
+/// invocation lock. The name is the SHA-256 of the canonical compose path so
+/// distinct specs never collide on the same lock.
+fn up_invocation_lock_path(compose_file: &Path) -> PathBuf {
     let canonical = fs::canonicalize(compose_file).unwrap_or_else(|_| compose_file.to_path_buf());
     let mut digest = Sha256::new();
     digest.update(canonical.to_string_lossy().as_bytes());
     let hash = hex::encode(digest.finalize());
+    metadata_root_for(compose_file)
+        .join("locks")
+        .join(format!("{hash}.up.lock"))
+}
+
+/// Returns `true` when an existing lock file's recorded process is provably no
+/// longer running, meaning a previous `up` crashed or was interrupted before
+/// its [`Drop`] could remove the lock. Returns `false` when the holder is alive
+/// or when liveness cannot be determined (missing/unparseable pid), so an
+/// undecidable lock is never reclaimed out from under a live process.
+fn up_invocation_lock_is_stale(existing: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(existing)
+        .ok()
+        .and_then(|value| value.get("pid").and_then(serde_json::Value::as_u64))
+        .and_then(|pid| u32::try_from(pid).ok())
+        .is_some_and(|pid| !pid_is_running(pid))
+}
+
+fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
+    let canonical = fs::canonicalize(compose_file).unwrap_or_else(|_| compose_file.to_path_buf());
     let lock_dir = metadata_root_for(compose_file).join("locks");
     if let Err(err) = fs::create_dir_all(&lock_dir) {
         let _ = writeln!(
@@ -210,7 +234,7 @@ fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
         let _ = io::stderr().flush();
         return Ok(UpInvocationLock { path: None });
     }
-    let path = lock_dir.join(format!("{hash}.up.lock"));
+    let path = up_invocation_lock_path(compose_file);
     let command = env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>()
@@ -224,36 +248,51 @@ fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
             .unwrap_or_default()
             .as_secs(),
     });
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => {
-            writeln!(
-                file,
-                "{}",
-                serde_json::to_string_pretty(&content).context("failed to serialize lock file")?
-            )
-            .with_context(|| format!("failed to write {}", path.display()))?;
-            Ok(UpInvocationLock { path: Some(path) })
+    // Try once; if a lock already exists for a dead process, reclaim it and try
+    // again exactly once. A second `AlreadyExists` means a live competitor won
+    // the race after we reclaimed, so we bail rather than loop.
+    for attempt in 0..2 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                writeln!(
+                    file,
+                    "{}",
+                    serde_json::to_string_pretty(&content)
+                        .context("failed to serialize lock file")?
+                )
+                .with_context(|| format!("failed to write {}", path.display()))?;
+                return Ok(UpInvocationLock { path: Some(path) });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing =
+                    fs::read_to_string(&path).unwrap_or_else(|_| "<unreadable>".to_string());
+                if attempt == 0 && up_invocation_lock_is_stale(&existing) {
+                    // Stale lock from a crashed/interrupted `up`: remove it and retry.
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                bail!(
+                    "another hpc-compose up appears to be running for {}; lock file: {}; existing lock: {}; if this process is gone, remove the lock file and retry",
+                    compose_file.display(),
+                    path.display(),
+                    existing.trim()
+                );
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: concurrent up protection unavailable because {} could not be created: {err}",
+                    path.display()
+                );
+                let _ = io::stderr().flush();
+                return Ok(UpInvocationLock { path: None });
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to create {}", path.display()));
+            }
         }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = fs::read_to_string(&path).unwrap_or_else(|_| "<unreadable>".to_string());
-            bail!(
-                "another hpc-compose up appears to be running for {}; lock file: {}; existing lock: {}; if this process is gone, remove the lock file and retry",
-                compose_file.display(),
-                path.display(),
-                existing.trim()
-            );
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            let _ = writeln!(
-                io::stderr(),
-                "warning: concurrent up protection unavailable because {} could not be created: {err}",
-                path.display()
-            );
-            let _ = io::stderr().flush();
-            Ok(UpInvocationLock { path: None })
-        }
-        Err(err) => Err(err).with_context(|| format!("failed to create {}", path.display())),
     }
+    unreachable!("up invocation lock acquisition retries at most once");
 }
 
 fn requested_walltime(plan: &RuntimePlan) -> Option<RequestedWalltime> {

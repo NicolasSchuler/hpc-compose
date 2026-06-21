@@ -9607,3 +9607,107 @@ fn clean_requires_strategy_flag() {
         "error should mention required flags: {err}"
     );
 }
+
+#[test]
+fn run_image_mode_rejects_empty_image_before_any_backend() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let script_out = tmpdir.path().join("ephemeral.sbatch");
+    let missing_bin = tmpdir.path().join("does-not-exist-bin");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "--image",
+            "",
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            missing_bin.to_str().expect("path"),
+            "--srun-bin",
+            missing_bin.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    assert!(
+        stderr_text(&output).contains("run --image requires a non-empty image"),
+        "stderr:\n{}",
+        stderr_text(&output)
+    );
+    assert!(!script_out.exists());
+}
+
+#[test]
+fn run_service_mode_rejects_unknown_service_naming_it() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_dir = tmpdir.path().join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache");
+    let local_image = tmpdir.path().join("image.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: run-unknown
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: {}
+    command: ["echo", "base"]
+"#,
+            cache_dir.display(),
+            local_image.display()
+        ),
+    );
+    let missing_bin = tmpdir.path().join("does-not-exist-bin");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "run",
+            "-f",
+            compose.to_str().expect("path"),
+            "--skip-prepare",
+            "--no-preflight",
+            "--sbatch-bin",
+            missing_bin.to_str().expect("path"),
+            "--srun-bin",
+            missing_bin.to_str().expect("path"),
+            "nope",
+            "--",
+            "/bin/true",
+        ],
+    );
+    assert_failure(&output);
+    let stderr = stderr_text(&output);
+    assert!(
+        stderr.contains("service 'nope' does not exist in"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn shell_mode_rejects_empty_image_before_srun() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let missing_bin = tmpdir.path().join("does-not-exist-srun");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "shell",
+            "--image",
+            "",
+            "--srun-bin",
+            missing_bin.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(
+        stderr_text(&output).contains("shell --image requires a non-empty image"),
+        "stderr:\n{}",
+        stderr_text(&output)
+    );
+}

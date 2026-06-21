@@ -1633,6 +1633,75 @@ mod tests {
     }
 
     #[test]
+    fn is_contextual_warning_matches_only_known_warn_prefixes() {
+        let warn = |message: &str| Item {
+            level: Level::Warn,
+            message: message.to_string(),
+            remediation: None,
+        };
+        assert!(is_contextual_warning(&warn(
+            "HAICORE helper path is /opt/missing"
+        )));
+        assert!(is_contextual_warning(&warn(
+            "metrics collector nvidia-smi not found on host"
+        )));
+        // Same message but at Error level is not "contextual".
+        assert!(!is_contextual_warning(&Item {
+            level: Level::Error,
+            message: "metrics collector missing".to_string(),
+            remediation: None,
+        }));
+        // An unrelated warning is not contextual.
+        assert!(!is_contextual_warning(&warn("something else entirely")));
+    }
+
+    #[test]
+    fn execution_text_renders_each_execution_shape() {
+        assert_eq!(execution_text(&ExecutionSpec::ImageDefault), "");
+        assert_eq!(
+            execution_text(&ExecutionSpec::Shell("echo hi".into())),
+            "echo hi"
+        );
+        assert_eq!(
+            execution_text(&ExecutionSpec::Exec(vec![
+                "python".into(),
+                "-m".into(),
+                "train".into()
+            ])),
+            "python -m train"
+        );
+    }
+
+    #[test]
+    fn service_env_helpers_read_environment_pairs() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.ordered_services[0].environment = vec![
+            ("OMPI_MCA_btl".into(), "self".into()),
+            ("CUDA_VISIBLE_DEVICES".into(), "0".into()),
+        ];
+        let service = &plan.ordered_services[0];
+
+        assert!(service_env_has(service, "CUDA_VISIBLE_DEVICES"));
+        assert!(!service_env_has(service, "MISSING"));
+        assert_eq!(service_env_value(service, "OMPI_MCA_btl"), Some("self"));
+        assert_eq!(service_env_value(service, "MISSING"), None);
+        // The env name is uppercased before matching, so a lowercase env name
+        // still matches an uppercase prefix.
+        plan.ordered_services[0].environment = vec![("ompi_mca_btl".into(), "self".into())];
+        let service = &plan.ordered_services[0];
+        assert!(service_has_any_env_prefix(service, &["OMPI_"]));
+        assert!(!service_has_any_env_prefix(service, &["NCCL_"]));
+    }
+
+    #[test]
+    fn profile_mpi_type_remediation_is_specific_per_profile() {
+        assert!(profile_mpi_type_remediation(MpiProfile::Openmpi).contains("pmix"));
+        assert!(profile_mpi_type_remediation(MpiProfile::Mpich).contains("pmi2"));
+        assert!(profile_mpi_type_remediation(MpiProfile::IntelMpi).contains("I_MPI_PMI_LIBRARY"));
+    }
+
+    #[test]
     fn preflight_reports_missing_mounts() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let plan = runtime_plan(tmpdir.path());

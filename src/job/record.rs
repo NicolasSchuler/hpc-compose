@@ -975,4 +975,58 @@ mod tests {
         scan_inventory_recursive(tmpdir.path(), false, 0, &mut jobs).expect("scan");
         assert!(jobs.is_empty());
     }
+
+    fn record_json(job_id: &str, schema_version: u32) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": schema_version,
+            "backend": "slurm",
+            "kind": "main",
+            "job_id": job_id,
+            "submitted_at": 0,
+            "compose_file": "/tmp/p/compose.yaml",
+            "submit_dir": "/tmp/p",
+            "script_path": "/tmp/p/run.sbatch",
+            "cache_dir": "/tmp/cache",
+            "batch_log": "/tmp/p/logs/x.out",
+            "service_logs": {}
+        })
+    }
+
+    #[test]
+    fn validate_submission_record_rejects_empty_job_id() {
+        let record: SubmissionRecord =
+            serde_json::from_value(record_json("   ", SUBMISSION_SCHEMA_VERSION))
+                .expect("deserialize record");
+        let err = validate_submission_record(record, Path::new("/tmp/p/x.json")).unwrap_err();
+        assert!(
+            err.to_string().contains("has an empty job id"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_submission_record_rejects_future_schema_version() {
+        let record: SubmissionRecord =
+            serde_json::from_value(record_json("12345", SUBMISSION_SCHEMA_VERSION + 1))
+                .expect("deserialize record");
+        let err = validate_submission_record(record, Path::new("/tmp/p/x.json")).unwrap_err();
+        assert!(
+            err.to_string().contains("uses schema version"),
+            "got: {err}"
+        );
+        assert!(
+            err.to_string().contains("please upgrade hpc-compose"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_submission_record_accepts_current_schema_and_nonempty_job_id() {
+        let record: SubmissionRecord =
+            serde_json::from_value(record_json("12345", SUBMISSION_SCHEMA_VERSION))
+                .expect("deserialize record");
+        let ok = validate_submission_record(record, Path::new("/tmp/p/x.json"))
+            .expect("valid record accepted");
+        assert_eq!(ok.job_id, "12345");
+    }
 }

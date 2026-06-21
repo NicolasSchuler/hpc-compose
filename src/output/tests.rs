@@ -1702,3 +1702,115 @@ services:
         "{text}"
     );
 }
+
+#[test]
+fn score_bar_fills_proportionally_and_clamps() {
+    assert_eq!(score_bar(0.0), "..........");
+    assert_eq!(score_bar(1.0), "##########");
+    assert_eq!(score_bar(0.5), "#####.....");
+    // Out-of-range utilization is clamped to [0, 1].
+    assert_eq!(score_bar(2.0), "##########");
+    assert_eq!(score_bar(-1.0), "..........");
+}
+
+#[test]
+fn clip_ascii_truncates_with_ellipsis_and_handles_narrow_widths() {
+    assert_eq!(clip_ascii("hello", 10), "hello");
+    assert_eq!(clip_ascii("abc", 3), "abc");
+    assert_eq!(clip_ascii("hello world", 8), "hello...");
+    // Widths too small for an ellipsis collapse to dots.
+    assert_eq!(clip_ascii("hello", 2), "..");
+}
+
+#[test]
+fn wrap_score_card_text_wraps_on_width_and_keeps_one_empty_line() {
+    assert_eq!(
+        wrap_score_card_text("the quick brown fox", 9),
+        vec!["the quick".to_string(), "brown fox".to_string()]
+    );
+    assert_eq!(wrap_score_card_text("", 5), vec![String::new()]);
+}
+
+#[test]
+fn score_confidence_label_covers_all_variants() {
+    use hpc_compose::job::EfficiencyScoreConfidence;
+    assert_eq!(
+        score_confidence_label(EfficiencyScoreConfidence::High),
+        "high"
+    );
+    assert_eq!(
+        score_confidence_label(EfficiencyScoreConfidence::Medium),
+        "medium"
+    );
+    assert_eq!(
+        score_confidence_label(EfficiencyScoreConfidence::Low),
+        "low"
+    );
+}
+
+#[test]
+fn format_bytes_scales_units_and_keeps_raw_byte_counts() {
+    assert_eq!(format_bytes(0), "0 B");
+    assert_eq!(format_bytes(512), "512 B");
+    assert_eq!(format_bytes(1023), "1023 B");
+    assert_eq!(format_bytes(1024), "1.0 KiB");
+    assert_eq!(format_bytes(1536), "1.5 KiB");
+    assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
+    assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
+    assert_eq!(format_bytes(1024u64.pow(4)), "1.0 TiB");
+    assert_eq!(format_bytes(2 * 1024u64.pow(4)), "2.0 TiB");
+}
+
+#[test]
+fn format_compact_elapsed_covers_each_duration_band() {
+    assert_eq!(format_compact_elapsed(0), "0s");
+    assert_eq!(format_compact_elapsed(59), "59s");
+    assert_eq!(format_compact_elapsed(61), "1m1s");
+    assert_eq!(format_compact_elapsed(3_600), "1h0m");
+    assert_eq!(format_compact_elapsed(3_661), "1h1m");
+    assert_eq!(format_compact_elapsed(90_000), "1d1h");
+}
+
+#[test]
+fn confidence_label_covers_all_rightsize_variants() {
+    use hpc_compose::job::RightsizeConfidence;
+    assert_eq!(confidence_label(RightsizeConfidence::High), "high");
+    assert_eq!(confidence_label(RightsizeConfidence::Medium), "medium");
+    assert_eq!(confidence_label(RightsizeConfidence::Low), "low");
+}
+
+#[test]
+fn runtime_presence_label_covers_all_combinations() {
+    assert_eq!(runtime_presence_label(true, true), "runtime+legacy");
+    assert_eq!(runtime_presence_label(true, false), "runtime");
+    assert_eq!(runtime_presence_label(false, true), "legacy");
+    assert_eq!(runtime_presence_label(false, false), "missing");
+}
+
+#[test]
+fn csv_field_and_format_tres_map_quote_and_join() {
+    assert_eq!(csv_field("plain"), "\"plain\"");
+    assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
+    assert_eq!(csv_field(""), "\"\"");
+
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("gres/gpu".to_string(), "1".to_string());
+    map.insert("cpu".to_string(), "4".to_string());
+    assert_eq!(format_tres_map(&map), "cpu=4;gres/gpu=1");
+    assert_eq!(format_tres_map(&std::collections::BTreeMap::new()), "");
+}
+
+#[test]
+fn display_optional_f64_formats_to_six_decimals_or_dash() {
+    assert_eq!(display_optional_f64(None), "-");
+    assert_eq!(display_optional_f64(Some(1.5)), "1.500000");
+    assert_eq!(display_optional_f64(Some(0.0)), "0.000000");
+}
+
+#[test]
+fn dot_escape_escapes_graphviz_special_characters() {
+    assert_eq!(dot_escape("plain"), "plain");
+    assert_eq!(dot_escape("a\"b"), "a\\\"b");
+    assert_eq!(dot_escape("a\\b"), "a\\\\b");
+    assert_eq!(dot_escape("a\nb\tc\rd"), "a\\nb\\tc\\rd");
+}

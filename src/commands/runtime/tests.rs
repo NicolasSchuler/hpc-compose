@@ -954,3 +954,160 @@ fn runtime_wrappers_cover_success_paths_with_local_tracking() {
     )
     .expect("clean");
 }
+
+fn plant_up_lock(compose: &Path, pid: u32) -> PathBuf {
+    let path = up_invocation_lock_path(compose);
+    fs::create_dir_all(path.parent().expect("lock parent")).expect("create lock dir");
+    let content = serde_json::json!({
+        "pid": pid,
+        "command": "hpc-compose up",
+        "compose_path": compose,
+        "created_at_unix": 0,
+    });
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&content).expect("serialize lock"),
+    )
+    .expect("write lock");
+    path
+}
+
+#[test]
+fn up_invocation_lock_is_stale_only_for_dead_pids() {
+    // Dead pid (u32::MAX is rejected by pid_is_running) -> stale.
+    assert!(up_invocation_lock_is_stale(
+        &serde_json::json!({ "pid": u32::MAX }).to_string()
+    ));
+    // Our own live pid -> not stale.
+    assert!(!up_invocation_lock_is_stale(
+        &serde_json::json!({ "pid": std::process::id() }).to_string()
+    ));
+    // Undecidable locks are never reclaimed.
+    assert!(!up_invocation_lock_is_stale(
+        &serde_json::json!({ "command": "no pid here" }).to_string()
+    ));
+    assert!(!up_invocation_lock_is_stale("not json at all"));
+    assert!(!up_invocation_lock_is_stale("<unreadable>"));
+}
+
+#[test]
+fn acquire_up_invocation_lock_reclaims_stale_pid() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(tmp.path());
+    let lock_path = plant_up_lock(&compose, u32::MAX);
+    assert!(lock_path.exists(), "precondition: stale lock present");
+
+    let guard = acquire_up_invocation_lock(&compose).expect("stale lock should be reclaimed");
+
+    // The reclaimed lock now records the current process.
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&lock_path).expect("read reclaimed lock"))
+            .expect("parse reclaimed lock");
+    assert_eq!(written["pid"], serde_json::Value::from(std::process::id()));
+    drop(guard);
+    assert!(
+        !lock_path.exists(),
+        "dropping the guard removes the reclaimed lock"
+    );
+}
+
+#[test]
+fn acquire_up_invocation_lock_refuses_live_holder() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(tmp.path());
+    // A live holder (this process) must not be reclaimed.
+    let lock_path = plant_up_lock(&compose, std::process::id());
+
+    let err =
+        acquire_up_invocation_lock(&compose).expect_err("a live holder must block acquisition");
+    assert!(
+        err.to_string()
+            .contains("another hpc-compose up appears to be running"),
+        "unexpected error: {err}"
+    );
+    // The live holder's lock is left untouched.
+    assert!(lock_path.exists(), "live holder's lock must be preserved");
+}
+
+#[test]
+fn sh_quote_leaves_safe_values_and_neutralizes_injection() {
+    assert_eq!(sh_quote("abc123"), "abc123");
+    assert_eq!(
+        sh_quote("/path/to-file.ext_v2:tag=1"),
+        "/path/to-file.ext_v2:tag=1"
+    );
+    assert_eq!(sh_quote("a b"), "'a b'");
+    // Shell metacharacters are single-quoted, neutralizing command injection.
+    assert_eq!(sh_quote("$(rm -rf /)"), "'$(rm -rf /)'");
+    // An embedded single quote is escaped via the '\'' idiom.
+    assert_eq!(sh_quote("it's"), "'it'\\''s'");
+}
+
+#[test]
+fn strip_sbatch_directives_removes_only_directive_lines() {
+    let script = "#!/bin/bash\n#SBATCH --time=1\necho hi\n  #SBATCH --mem=2\nrun\n";
+    let stripped = strip_sbatch_directives(script);
+    assert!(!stripped.contains("#SBATCH"), "directives removed");
+    assert!(stripped.contains("#!/bin/bash"));
+    assert!(stripped.contains("echo hi"));
+    assert!(stripped.contains("run"));
+}
+
+#[test]
+fn diff_lines_reports_changes_and_none_when_equal() {
+    assert_eq!(diff_lines("same\n", "same\n"), None);
+    let diff = diff_lines("a\nb\n", "a\nc\nd\n").expect("differing scripts produce a diff");
+    assert!(diff.contains("--- previous") && diff.contains("+++ current"));
+    assert!(diff.contains("-b"));
+    assert!(diff.contains("+c"));
+    assert!(diff.contains("+d"));
+}
+
+#[test]
+fn condition_descriptions_renders_free_nodes_and_after_job() {
+    use hpc_compose::spec::JobDependencyCondition;
+    use hpc_compose::when::{AfterJobCondition, FreeNodesCondition};
+
+    let conditions = WhenConditions {
+        free_nodes: Some(FreeNodesCondition {
+            partition: "gpu8".to_string(),
+            minimum_idle_nodes: 4,
+        }),
+        after_job: Some(AfterJobCondition {
+            job_id: "12345".to_string(),
+            condition: JobDependencyCondition::AfterOk,
+        }),
+        time_window: None,
+    };
+    assert_eq!(
+        condition_descriptions(&conditions),
+        vec![
+            "partition gpu8 has at least 4 idle node(s)".to_string(),
+            "job 12345 satisfies afterok".to_string(),
+        ]
+    );
+    let empty = WhenConditions {
+        free_nodes: None,
+        after_job: None,
+        time_window: None,
+    };
+    assert!(condition_descriptions(&empty).is_empty());
+}
+
+#[test]
+fn requested_walltime_parses_time_and_ignores_invalid() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(tmpdir.path());
+    let mut plan = output::load_runtime_plan(&compose).expect("runtime plan");
+
+    plan.slurm.time = None;
+    assert!(requested_walltime(&plan).is_none());
+
+    plan.slurm.time = Some("01:00:00".to_string());
+    let walltime = requested_walltime(&plan).expect("walltime parsed");
+    assert_eq!(walltime.original, "01:00:00");
+    assert_eq!(walltime.seconds, 3600);
+
+    plan.slurm.time = Some("not-a-time".to_string());
+    assert!(requested_walltime(&plan).is_none());
+}
