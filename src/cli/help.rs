@@ -237,6 +237,12 @@ Examples:
   hpc-compose replay -f compose.yaml --job-id 12345 --service app
   hpc-compose replay -f compose.yaml --format json";
 
+pub(super) const CHECKPOINTS_HELP: &str = "\
+Examples:
+  hpc-compose checkpoints -f compose.yaml
+  hpc-compose checkpoints --job-id 12345
+  hpc-compose checkpoints --format json";
+
 pub(super) const DEBUG_HELP: &str = "\
 Examples:
   hpc-compose debug -f compose.yaml
@@ -530,6 +536,12 @@ const REPLAY_EXAMPLES: &[&str] = &[
     "hpc-compose replay -f compose.yaml --format json",
 ];
 
+const CHECKPOINTS_EXAMPLES: &[&str] = &[
+    "hpc-compose checkpoints -f compose.yaml",
+    "hpc-compose checkpoints --job-id 12345",
+    "hpc-compose checkpoints --format json",
+];
+
 const DEBUG_EXAMPLES: &[&str] = &[
     "hpc-compose debug -f compose.yaml",
     "hpc-compose debug -f compose.yaml --preflight",
@@ -688,6 +700,7 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["ps"] => PS_EXAMPLES,
         ["watch"] => WATCH_EXAMPLES,
         ["replay"] => REPLAY_EXAMPLES,
+        ["checkpoints"] => CHECKPOINTS_EXAMPLES,
         ["debug"] => DEBUG_EXAMPLES,
         ["cancel"] => CANCEL_EXAMPLES,
         ["down"] => DOWN_EXAMPLES,

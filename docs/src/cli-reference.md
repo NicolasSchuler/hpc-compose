@@ -12,7 +12,7 @@ Jump to the section that documents each command group:
 | `--profile`, `--settings-file`, `setup`, `context`, `validate --strict-env`, `lint`, `schema` | [Settings-aware commands](#settings-aware-commands) |
 | `plan`, `validate`, `lint`, `config`, `schema`, `inspect`, `preflight`, `doctor`, `weather`, `prepare`, `render`, `up`, `test`, `dev`, `tmux`, `germinate`, `sweep`, `when`, `alloc`, `run`, `shell`, `notebook` | [Plan and Run](#plan-and-run) |
 | `lint` finding codes (`HPC001`-`HPC900`) | [Lint rules](#lint-rules) |
-| `debug`, `status`, `ps`, `watch`, `replay`, `logs`, `inspect --rightsize`, `stats`, `score`, `diff`, `artifacts`, `cancel`, `down`, `jobs`, `clean`, `rendezvous` | [Tracked Runtime](#tracked-runtime) |
+| `debug`, `status`, `ps`, `watch`, `replay`, `checkpoints`, `logs`, `inspect --rightsize`, `stats`, `score`, `diff`, `artifacts`, `cancel`, `down`, `jobs`, `clean`, `rendezvous` | [Tracked Runtime](#tracked-runtime) |
 | `cache list`, `cache inspect`, `cache prune` | [Cache Maintenance](#cache-maintenance) |
 | `--<tool>-bin` overrides | [Tool overrides](#tool-overrides) |
 
@@ -23,6 +23,7 @@ Every command also ships a Unix man page, generated from the same definitions as
 ```bash
 man hpc-compose
 man hpc-compose-up
+man hpc-compose-checkpoints
 man hpc-compose-sweep-submit
 ```
 
@@ -516,6 +517,7 @@ hpc-compose status -f compose.yaml --format json
 | `experiment ` | Read-only aggregator for one tracked run | Parent command; the `experiment show` subcommand aggregates a single run into one object. |
 | `experiment show` | Aggregate one tracked run into a single read-only object | Combines scheduler status, the post-run efficiency score, the artifact manifest, and submit-time provenance into one object. `--format json` emits `{job_id, name, state, services[], provenance, results, efficiency, next_commands}`; each service carries `{name, nodelist, status, tunnel_hint}` with an `ssh -L` `ControlMaster` hint for TCP/HTTP readiness. Defaults to the latest tracked run; energy flags (`--pue`, `--gpu-tdp-w`, `--cpu-watts-per-core`) tune the embedded efficiency report. Static-safe: contacts the scheduler only as much as `status`/`score` do, writes nothing, and opens no connection. Example: `hpc-compose experiment show 12345 --format json`. |
 | `replay` | Reanimate a tracked job timeline from existing artifacts | Best-effort DVR view built from final state, service-exit markers, metrics JSONL, and logs. Use `--speed` or `--format json` as needed. |
+| `checkpoints` | Show attempt and requeue history from tracked state | Reads LOCAL tracked state only: the per-attempt `state.json` files written under `.hpc-compose/<job>/attempts/<n>/` when `x-slurm.resume` is configured (each requeue is a new attempt), or the single latest `state.json` otherwise (reported as one attempt, zero requeues). Reports per-attempt start/finish/duration and exit code. Contacts no scheduler and reads nothing from the cluster filesystem; missing or unreadable state degrades into `degraded[]` notes instead of failing. `--format json` emits `{job_id, compose_file, submitted_at, resume_configured, attempts, requeues, current_attempt, is_resume, resume_dir, entries[], degraded[]}`. Not to be confused with the `artifacts --bundle checkpoints` model-checkpoint export. |
 | `logs` | Print tracked service logs | Add `--follow`, `--grep <pattern>`, or coarse `--since <duration>` as needed. |
 | `inspect --rightsize` | Suggest conservative resource request reductions after a tracked run | Uses tracked `sacct`, `sstat`, and sampler evidence; supports `--job-id` and `--format json`. |
 | `stats` | Report tracked runtime metrics, step stats, and optional accounting | Supports `--accounting`, `--format json`, `--format jsonl`, and `--format csv`. |
@@ -546,6 +548,8 @@ hpc-compose replay -f compose.yaml
 hpc-compose replay -f compose.yaml --speed 10
 hpc-compose replay -f compose.yaml --job-id 12345 --service app
 hpc-compose replay -f compose.yaml --format json
+hpc-compose checkpoints -f compose.yaml
+hpc-compose checkpoints --job-id 12345 --format json
 hpc-compose logs -f compose.yaml --service app --follow
 hpc-compose logs -f compose.yaml --grep 'error|oom' --since 30m
 hpc-compose inspect -f compose.yaml --rightsize

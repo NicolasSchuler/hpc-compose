@@ -2472,6 +2472,85 @@ fn replay_resume_attempts_are_reported_in_attempt_order() {
 }
 
 #[test]
+fn checkpoints_command_reports_attempt_and_requeue_history_in_json() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let (compose, _record) = write_replay_fixture(&tmpdir);
+    let job_root = tmpdir.path().join(".hpc-compose/12345");
+    for (attempt, started, finished, exit) in [(0u32, 100u64, 110u64, 41i32), (1, 200, 230, 0)] {
+        fs::create_dir_all(job_root.join(format!("attempts/{attempt}"))).expect("attempt dir");
+        fs::write(
+            job_root.join(format!("attempts/{attempt}/state.json")),
+            format!(
+                r#"{{"attempt":{attempt},"is_resume":{is_resume},"job_exit_code":{exit},"services":[{{"service_name":"app","started_at":{started},"finished_at":{finished},"last_exit_code":{exit},"restart_count":0}}]}}"#,
+                is_resume = attempt > 0
+            ),
+        )
+        .expect("attempt state");
+    }
+
+    let checkpoints = run_cli(
+        tmpdir.path(),
+        &[
+            "checkpoints",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&checkpoints);
+    let value: Value = serde_json::from_str(&stdout_text(&checkpoints)).expect("checkpoints json");
+    assert_eq!(value["job_id"], Value::from("12345"));
+    assert_eq!(value["attempts"], Value::from(2));
+    assert_eq!(value["requeues"], Value::from(1));
+    assert_eq!(value["current_attempt"], Value::from(1));
+    assert_eq!(value["resume_configured"], Value::from(true));
+    assert_eq!(value["is_resume"], Value::from(true));
+    let entries = value["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["attempt"], Value::from(0));
+    assert_eq!(entries[0]["duration_seconds"], Value::from(10));
+    assert_eq!(entries[1]["attempt"], Value::from(1));
+    assert_eq!(entries[1]["job_exit_code"], Value::from(0));
+    assert!(value["degraded"].as_array().expect("degraded").is_empty());
+}
+
+#[test]
+fn checkpoints_command_degrades_gracefully_without_attempts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let (compose, _record) = write_replay_fixture(&tmpdir);
+    // write_replay_fixture leaves a single top-level state.json and no attempts/
+    // directory; checkpoints should report a single attempt and zero requeues.
+    let checkpoints = run_cli(
+        tmpdir.path(),
+        &[
+            "checkpoints",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&checkpoints);
+    let value: Value = serde_json::from_str(&stdout_text(&checkpoints)).expect("checkpoints json");
+    assert_eq!(value["attempts"], Value::from(1));
+    assert_eq!(value["requeues"], Value::from(0));
+    assert_eq!(value["current_attempt"], Value::Null);
+    assert_eq!(value["resume_configured"], Value::from(false));
+    assert_eq!(value["entries"].as_array().expect("entries").len(), 1);
+
+    // Text output stays coherent too.
+    let text = run_cli(
+        tmpdir.path(),
+        &["checkpoints", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&text);
+    let stdout = stdout_text(&text);
+    assert!(stdout.contains("hpc-compose checkpoints | job 12345"));
+    assert!(stdout.contains("attempts: 1 | requeues: 0"));
+}
+
+#[test]
 fn replay_service_filter_excludes_other_service_events_and_frames() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let (compose, mut record) = write_replay_fixture(&tmpdir);

@@ -96,7 +96,7 @@ Each job gets its own runtime root: `<runtime-root>/<job-id>/`, where `<runtime-
 | `allocation/distributed-hostfiles/` | dir | Generated distributed (torchrun-style) hostfiles. |
 | `service-exits/` | dir | Per-service exit markers (`<service>.jsonl`). |
 | `hooks/` | dir | Materialized prologue/epilogue/event hook scripts and their manifest. |
-| `attempts/<n>/` | dir | Per-attempt copies of `logs/`, `metrics/`, `artifacts/`, and `state.json` for resume-aware runs. |
+| `attempts/<n>/` | dir | Per-attempt copies of `logs/`, `metrics/`, `artifacts/`, and `state.json` for resume-aware runs. These per-attempt `state.json` files are the data source for `hpc-compose checkpoints` attempt/requeue history. |
 
 The batch script keeps the root-level `logs/`, `metrics/`, `artifacts/`, and `state.json` as the "latest" view (it updates them to point at the most recent attempt) so status and export commands read the latest attempt without reconstructing shell logic.
 

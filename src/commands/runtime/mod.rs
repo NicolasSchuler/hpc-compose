@@ -73,6 +73,7 @@ pub(crate) use resources::ResourceCliOptions;
 // public surface used by `commands::mod` is unchanged. The launch/submit core and
 // the cross-cutting helpers stay in this facade module so the submodules can reach
 // them via `use super::*;`.
+mod checkpoints;
 mod debug;
 mod dev;
 mod exec;
@@ -86,6 +87,7 @@ mod rendezvous_cmd;
 mod ssh_hint;
 mod sweep;
 
+pub(crate) use checkpoints::*;
 pub(crate) use debug::*;
 pub(crate) use dev::*;
 pub(crate) use exec::*;

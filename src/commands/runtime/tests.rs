@@ -633,6 +633,64 @@ fn tracking_resolution_and_cache_purge_helpers_cover_edge_cases() {
 }
 
 #[test]
+fn checkpoints_command_resolves_and_bails_on_unknown_job() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_local_compose(tmpdir.path());
+    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let context = context_for(&compose, tmpdir.path());
+
+    // Unknown --job-id bails with the shared tracked-job hint.
+    let err = checkpoints(
+        context.clone(),
+        Some("missing".into()),
+        Some(OutputFormat::Json),
+    )
+    .expect_err("unknown job should bail");
+    assert!(err.to_string().contains("tracked job 'missing'"));
+
+    // No tracked submission at all bails (the underlying lookup reports the
+    // missing-metadata error, surfaced like the other tracked-runtime commands).
+    let err = checkpoints(context.clone(), None, Some(OutputFormat::Json))
+        .expect_err("missing tracked submission should bail");
+    assert!(
+        err.to_string()
+            .contains("no tracked submission metadata exists")
+    );
+
+    // With a tracked record and attempt fixtures, the command runs cleanly.
+    let mut record = build_submission_record_with_backend(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("job.local.sh"),
+        &runtime_plan,
+        "12345",
+        SubmissionBackend::Local,
+    )
+    .expect("record");
+    record.submitted_at = 100;
+    write_submission_record(&record).expect("write record");
+    let job_root = tmpdir.path().join(".hpc-compose/12345");
+    for attempt in [0u32, 1] {
+        let attempt_root = job_root.join(format!("attempts/{attempt}"));
+        fs::create_dir_all(&attempt_root).expect("attempt dir");
+        fs::write(
+            attempt_root.join("state.json"),
+            format!(
+                r#"{{"attempt":{attempt},"services":[{{"service_name":"app","started_at":{attempt}0,"finished_at":{attempt}9,"last_exit_code":0}}]}}"#
+            ),
+        )
+        .expect("attempt state");
+    }
+    checkpoints(
+        context.clone(),
+        Some("12345".into()),
+        Some(OutputFormat::Json),
+    )
+    .expect("json checkpoints");
+    checkpoints(context, Some("12345".into()), None).expect("text checkpoints");
+}
+
+#[test]
 fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose(tmpdir.path());

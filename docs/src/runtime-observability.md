@@ -137,6 +137,22 @@ Replay data sources:
 
 Use `--format json` when notebooks, dashboards, or experiment records need the reconstructed events, frame summaries, artifact paths, and fidelity notes.
 
+## Checkpoints
+
+`hpc-compose checkpoints` reports the attempt and requeue history of a tracked job from LOCAL tracked state only. It contacts no scheduler and reads nothing from the cluster filesystem, so it is safe to run from a laptop against a synced tracked directory.
+
+```bash
+hpc-compose checkpoints -f compose.yaml
+hpc-compose checkpoints --job-id 12345
+hpc-compose checkpoints --format json
+```
+
+The history derives from the per-attempt `state.json` files written under `.hpc-compose/<job>/attempts/<n>/`. These per-attempt directories are produced only when `x-slurm.resume` is configured and the job is requeued: each requeue records a new 0-based attempt index (`attempts = highest index + 1`, `requeues = attempts - 1`). A non-resume job has no `attempts/` directory and writes a single top-level `state.json`, which `checkpoints` reports as one attempt with zero requeues and no per-attempt index.
+
+For each attempt, the command reports the earliest service start, the latest service finish, the derived duration, the job status, and the job exit code. A missing or unreadable per-attempt `state.json` is skipped and surfaced under `degraded[]` rather than failing the command, and a gap in the 0-based attempt indices (for example, an early attempt reaped by retention) is flagged as a truncated history so requeue counts are not silently miscounted.
+
+`--format json` emits one object: `{job_id, compose_file, submitted_at, resume_configured, attempts, requeues, current_attempt, is_resume, resume_dir, entries[], degraded[]}`. This is distinct from the `artifacts --bundle checkpoints` export, which copies model checkpoint files rather than describing attempt history. See [Artifacts and Resume](artifacts-and-resume.md) for the attempt directory layout.
+
 ## Logs
 
 Runtime logs live under:

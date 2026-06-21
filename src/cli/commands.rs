@@ -1743,6 +1743,29 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 245,
+        about = "Show attempt and requeue history from tracked state",
+        long_about = "Reconstruct the attempt and requeue history of a tracked job from LOCAL tracked state only: the per-attempt state.json files written under .hpc-compose/<job>/attempts/<n>/ when x-slurm.resume is configured, or the single latest state.json otherwise. Contacts no scheduler and reads nothing from the cluster filesystem; missing or unreadable state degrades gracefully into notes instead of failing.",
+        after_help = CHECKPOINTS_HELP
+    )]
+    Checkpoints {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to inspect instead of the latest recorded submission"
+        )]
+        job_id: Option<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
         display_order = 200,
         about = "Diagnose the latest tracked run",
         long_about = "Collect tracked scheduler state, service state, batch and service log tails, and a recommended next command. Add --preflight to rerun cluster prerequisite checks.",

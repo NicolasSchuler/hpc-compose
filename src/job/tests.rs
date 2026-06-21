@@ -2215,3 +2215,125 @@ fn local_scheduler_status_marks_dead_supervisor_as_failed() {
             .contains("exited before recording a terminal outcome")
     );
 }
+
+fn checkpoint_record(submit_dir: &Path) -> SubmissionRecord {
+    build_submission_record(
+        &submit_dir.join("compose.yaml"),
+        submit_dir,
+        &submit_dir.join("job.sbatch"),
+        &runtime_plan(submit_dir),
+        "12345",
+    )
+    .expect("record")
+}
+
+#[test]
+fn checkpoint_history_enumerates_attempt_directories_in_order() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let record = checkpoint_record(tmpdir.path());
+    let job_root = runtime_job_root_for_record(&record);
+    for (attempt, started, finished, exit) in [
+        (0u32, 100u64, 110u64, 41i32),
+        (1, 200, 215, 41),
+        (2, 300, 330, 0),
+    ] {
+        let attempt_root = tracked_paths::attempt_root(&job_root, attempt);
+        fs::create_dir_all(&attempt_root).expect("attempt dir");
+        fs::write(
+            tracked_paths::attempt_state_path(&attempt_root),
+            format!(
+                r#"{{"attempt":{attempt},"is_resume":{is_resume},"job_exit_code":{exit},"services":[{{"service_name":"app","started_at":{started},"finished_at":{finished},"last_exit_code":{exit},"restart_count":0}}]}}"#,
+                is_resume = attempt > 0
+            ),
+        )
+        .expect("attempt state");
+    }
+
+    let history = collect_checkpoint_history(&record);
+    assert_eq!(history.attempts, 3);
+    assert_eq!(history.requeues, 2);
+    assert_eq!(history.current_attempt, Some(2));
+    assert!(history.resume_configured);
+    assert_eq!(history.is_resume, Some(true));
+    assert_eq!(history.entries.len(), 3);
+    assert_eq!(history.entries[0].attempt, 0);
+    assert_eq!(history.entries[0].started_at, Some(100));
+    assert_eq!(history.entries[0].finished_at, Some(110));
+    assert_eq!(history.entries[0].duration_seconds, Some(10));
+    assert_eq!(history.entries[2].attempt, 2);
+    assert_eq!(history.entries[2].job_exit_code, Some(0));
+    assert_eq!(history.entries[2].duration_seconds, Some(30));
+    assert!(history.degraded.is_empty());
+}
+
+#[test]
+fn checkpoint_history_falls_back_to_single_state_for_non_resume_job() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let record = checkpoint_record(tmpdir.path());
+    let job_root = runtime_job_root_for_record(&record);
+    fs::create_dir_all(&job_root).expect("job root");
+    fs::write(
+        tracked_paths::latest_state_path(&job_root),
+        r#"{"services":[{"service_name":"app","started_at":100,"finished_at":150,"last_exit_code":0}]}"#,
+    )
+    .expect("state");
+
+    let history = collect_checkpoint_history(&record);
+    assert_eq!(history.attempts, 1);
+    assert_eq!(history.requeues, 0);
+    assert_eq!(history.current_attempt, None);
+    assert!(!history.resume_configured);
+    assert_eq!(history.entries.len(), 1);
+    assert_eq!(history.entries[0].attempt, 0);
+    assert_eq!(history.entries[0].duration_seconds, Some(50));
+    assert!(history.degraded.is_empty());
+}
+
+#[test]
+fn checkpoint_history_skips_unreadable_attempt_state_into_degraded() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let record = checkpoint_record(tmpdir.path());
+    let job_root = runtime_job_root_for_record(&record);
+    let good = tracked_paths::attempt_root(&job_root, 0);
+    fs::create_dir_all(&good).expect("attempt 0");
+    fs::write(
+        tracked_paths::attempt_state_path(&good),
+        r#"{"attempt":0,"services":[{"service_name":"app","started_at":1,"finished_at":2,"last_exit_code":0}]}"#,
+    )
+    .expect("attempt 0 state");
+    let bad = tracked_paths::attempt_root(&job_root, 1);
+    fs::create_dir_all(&bad).expect("attempt 1");
+    fs::write(tracked_paths::attempt_state_path(&bad), "{ not json").expect("attempt 1 state");
+
+    let history = collect_checkpoint_history(&record);
+    // attempt 1 is unreadable; the directory still bumps the attempt count via
+    // the surviving index, but its content is skipped and noted.
+    assert_eq!(history.current_attempt, Some(1));
+    assert_eq!(history.attempts, 2);
+    assert_eq!(history.entries.len(), 1);
+    assert_eq!(history.entries[0].attempt, 0);
+    assert!(
+        history
+            .degraded
+            .iter()
+            .any(|note| note.contains("could not read attempt state"))
+    );
+}
+
+#[test]
+fn checkpoint_history_reports_nothing_for_missing_state() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let record = checkpoint_record(tmpdir.path());
+
+    let history = collect_checkpoint_history(&record);
+    assert_eq!(history.attempts, 0);
+    assert_eq!(history.requeues, 0);
+    assert_eq!(history.current_attempt, None);
+    assert!(history.entries.is_empty());
+    assert!(
+        history
+            .degraded
+            .iter()
+            .any(|note| note.contains("could not read state"))
+    );
+}

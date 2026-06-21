@@ -23,6 +23,7 @@ use crate::tracked_paths;
 
 mod accounting;
 mod artifacts;
+mod checkpoints;
 mod diff;
 mod logs;
 mod metrics_probe;
@@ -52,6 +53,9 @@ pub use artifacts::{
     ArtifactBundleManifest, ArtifactBundleProvenance, ArtifactEntryMetadata, ArtifactExportOptions,
     ArtifactExportReport, ArtifactManifest, BundleExportReport, artifact_manifest_path_for_record,
     artifact_payload_dir_for_record, artifacts_dir_for_record, export_artifacts,
+};
+pub use checkpoints::{
+    CheckpointAttempt, CheckpointAttemptService, CheckpointHistory, collect_checkpoint_history,
 };
 pub use diff::{
     JobDiffChange, JobDiffReport, JobDiffServiceStatus, JobDiffSide, JobMatrixReport, JobMatrixRow,

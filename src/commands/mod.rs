@@ -1007,6 +1007,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default())?;
             runtime::replay(context, job_id, service, speed, lines, watch_mode, format)
         }
+        Commands::Checkpoints {
+            file,
+            job_id,
+            format,
+        } => {
+            let context = resolve_command_context(options, file, BinaryOverrides::default())?;
+            runtime::checkpoints(context, job_id, format)
+        }
         Commands::Debug {
             file,
             job_id,
