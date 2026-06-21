@@ -2607,3 +2607,343 @@ fn render_omits_metrics_sampler_when_disabled() {
     assert!(!script.contains("start_metrics_sampler"));
     assert!(!script.contains("metrics_sampler_loop"));
 }
+
+// --- Behavioral coverage of the generated rendezvous bash --------------------
+//
+// `render_rendezvous_helpers` emits ~100% line-covered bash that, until now, was
+// never executed by a test. These tests assemble that bash with faithful stand-ins
+// for the two cross-cutting helpers it depends on (`json_escape`/`first_word`, which
+// live elsewhere in render.rs) and actually run register/resolve/timeout, asserting
+// on the JSON record written and the env it exports.
+
+fn run_rendezvous_bash(tmpdir: &std::path::Path, driver: &str) -> std::process::Output {
+    let mut script = String::from("#!/usr/bin/env bash\nset -u\n");
+    // Minimal but faithful versions of the helpers defined elsewhere in render.rs;
+    // our inputs contain no characters that require JSON escaping.
+    script.push_str("json_escape() { printf '%s' \"$1\"; }\n");
+    script.push_str("first_word() { local v=${1-}; printf '%s' \"${v%% *}\"; }\n\n");
+    render_rendezvous_helpers(&mut script);
+    script.push_str(driver);
+    let path = tmpdir.join("rdzv.sh");
+    fs::write(&path, &script).expect("write rendezvous script");
+    Command::new(bash_executable())
+        .arg(&path)
+        .output()
+        .expect("run rendezvous script")
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+}
+
+#[test]
+fn rendezvous_register_writes_valid_record_and_latest_pointer() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = tmpdir.path().join("cache");
+    let driver = format!(
+        r#"
+CACHE_ROOT="{cache}"
+SLURM_JOB_ID="12345"
+HPC_COMPOSE_PRIMARY_NODE="node01"
+SERVICE_NAMES=(model-server)
+SERVICE_RDZV_NAMES=(model)
+SERVICE_RDZV_PORTS=(8080)
+SERVICE_RDZV_PROTOCOLS=(http)
+SERVICE_RDZV_PATHS=(/infer)
+SERVICE_RDZV_TTLS=(3600)
+SERVICE_RDZV_METADATA_JSON=('{{"role":"server"}}')
+SERVICE_STEP_NODELIST=("")
+SERVICE_RDZV_REGISTERED=(0)
+register_service_rendezvous_by_index 0
+"#,
+        cache = cache.display()
+    );
+    let output = run_rendezvous_bash(tmpdir.path(), &driver);
+    assert!(
+        output.status.success(),
+        "register failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Registered rendezvous 'model'"),
+        "missing registration notice"
+    );
+    let latest = cache.join("rendezvous/model/latest.json");
+    let record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&latest).expect("read latest.json"))
+            .expect("latest.json is valid JSON");
+    assert_eq!(record["schema_version"], 1);
+    assert_eq!(record["name"], "model");
+    assert_eq!(record["service"], "model-server");
+    assert_eq!(record["host"], "node01");
+    assert_eq!(record["port"], 8080);
+    assert_eq!(record["url"], "http://node01:8080/infer");
+    assert_eq!(record["job_id"], "12345");
+    assert_eq!(record["metadata"]["role"], "server");
+}
+
+#[test]
+fn rendezvous_resolve_exports_namespaced_env_from_live_record() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = tmpdir.path().join("cache");
+    let dir = cache.join("rendezvous/model");
+    fs::create_dir_all(&dir).expect("rendezvous dir");
+    // Seed a live record (registered just now, long TTL).
+    let record = format!(
+        "{{\n  \"url\": \"http://node01:8080/infer\",\n  \"host\": \"node01\",\n  \"port\": 8080,\n  \"protocol\": \"http\",\n  \"path\": \"/infer\",\n  \"job_id\": \"999\",\n  \"service\": \"model-server\",\n  \"registered_at\": {now},\n  \"ttl_seconds\": 3600\n}}\n",
+        now = unix_now()
+    );
+    fs::write(dir.join("latest.json"), record).expect("seed latest.json");
+    let driver = format!(
+        r#"
+CACHE_ROOT="{cache}"
+RDZV_CLIENT_NAMES=(model)
+RDZV_CLIENT_TIMEOUT_SECONDS=0
+RDZV_CLIENT_REQUIRED=1
+resolve_rendezvous_dependencies
+printf '%s\n' "${{RDZV_LAUNCH_ENV[@]}}"
+"#,
+        cache = cache.display()
+    );
+    let output = run_rendezvous_bash(tmpdir.path(), &driver);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "resolve failed: {stdout}");
+    assert!(
+        stdout.contains("HPC_COMPOSE_RDZV_URL=http://node01:8080/infer"),
+        "{stdout}"
+    );
+    // Namespaced (token-uppercased) variant.
+    assert!(
+        stdout.contains("HPC_COMPOSE_RDZV_MODEL_URL=http://node01:8080/infer"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("HPC_COMPOSE_RDZV_MODEL_PORT=8080"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn rendezvous_resolve_required_times_out_but_optional_warns() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = tmpdir.path().join("cache"); // intentionally never created
+    // Required + immediate timeout -> exit 1 with a timeout error.
+    let required = format!(
+        r#"
+CACHE_ROOT="{cache}"
+RDZV_CLIENT_NAMES=(missing)
+RDZV_CLIENT_TIMEOUT_SECONDS=0
+RDZV_CLIENT_REQUIRED=1
+resolve_rendezvous_dependencies
+echo "exit=$?"
+"#,
+        cache = cache.display()
+    );
+    let out = run_rendezvous_bash(tmpdir.path(), &required);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("exit=1"),
+        "required should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Timed out resolving rendezvous 'missing'"),
+        "missing timeout error"
+    );
+    // Optional + immediate timeout -> exit 0 with a warning.
+    let optional = format!(
+        r#"
+CACHE_ROOT="{cache}"
+RDZV_CLIENT_NAMES=(missing)
+RDZV_CLIENT_TIMEOUT_SECONDS=0
+RDZV_CLIENT_REQUIRED=0
+resolve_rendezvous_dependencies
+echo "exit=$?"
+"#,
+        cache = cache.display()
+    );
+    let out = run_rendezvous_bash(tmpdir.path(), &optional);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("exit=0"),
+        "optional should succeed"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("warning: rendezvous 'missing' not resolved"),
+        "missing optional warning"
+    );
+}
+
+#[test]
+fn rendezvous_deregister_is_ownership_guarded() {
+    fn seed_and_deregister(owner_job_id: &str, self_job_id: &str) -> bool {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache = tmpdir.path().join("cache");
+        let dir = cache.join("rendezvous/model");
+        fs::create_dir_all(&dir).expect("rendezvous dir");
+        fs::write(
+            dir.join("latest.json"),
+            format!("{{\n  \"job_id\": \"{owner_job_id}\"\n}}\n"),
+        )
+        .expect("seed latest.json");
+        let driver = format!(
+            r#"
+CACHE_ROOT="{cache}"
+SLURM_JOB_ID="{self_job_id}"
+SERVICE_NAMES=(model-server)
+SERVICE_RDZV_NAMES=(model)
+deregister_rendezvous_records
+"#,
+            cache = cache.display()
+        );
+        let out = run_rendezvous_bash(tmpdir.path(), &driver);
+        assert!(out.status.success(), "deregister should not error");
+        dir.join("latest.json").exists()
+    }
+    // The owner reaps its own record ...
+    assert!(
+        !seed_and_deregister("12345", "12345"),
+        "owner must remove its record"
+    );
+    // ... but a different job must not delete someone else's record.
+    assert!(
+        seed_and_deregister("999", "12345"),
+        "non-owner must preserve the record"
+    );
+}
+
+fn run_metrics_bash(tmpdir: &std::path::Path, driver: &str) -> std::process::Output {
+    let mut script = String::from("#!/usr/bin/env bash\nset -u\n");
+    // Helpers defined elsewhere in render.rs; faithful for our simple inputs.
+    script.push_str("json_escape() { printf '%s' \"$1\"; }\n");
+    script.push_str(
+        "json_number_or_null() { local v=${1-}; if [[ -z \"$v\" ]]; then printf 'null'; else printf '%s' \"$v\"; fi; }\n",
+    );
+    script.push_str(
+        "json_string_or_null() { local v=${1-}; if [[ -z \"$v\" ]]; then printf 'null'; else printf '\"%s\"' \"$(json_escape \"$v\")\"; fi; }\n\n",
+    );
+    render_metrics_helpers(&mut script);
+    script.push_str(driver);
+    let path = tmpdir.join("metrics.sh");
+    fs::write(&path, &script).expect("write metrics script");
+    Command::new(bash_executable())
+        .arg(&path)
+        .output()
+        .expect("run metrics script")
+}
+
+#[test]
+fn metrics_meta_is_written_as_valid_json_with_collector_states() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let meta = tmpdir.path().join("metrics-meta.json");
+    let driver = format!(
+        r#"
+METRICS_META_FILE="{meta}"
+METRICS_INTERVAL_SECONDS=5
+SAMPLER_PID=4242
+GPU_COLLECTOR_ENABLED=1
+GPU_COLLECTOR_AVAILABLE=0
+GPU_COLLECTOR_NOTE="nvidia-smi is not available on this node"
+GPU_COLLECTOR_LAST_SAMPLED_AT=""
+SLURM_COLLECTOR_ENABLED=1
+SLURM_COLLECTOR_AVAILABLE=1
+SLURM_COLLECTOR_NOTE=""
+SLURM_COLLECTOR_LAST_SAMPLED_AT="2024-01-01T00:00:00Z"
+write_metrics_meta
+"#,
+        meta = meta.display()
+    );
+    let output = run_metrics_bash(tmpdir.path(), &driver);
+    assert!(
+        output.status.success(),
+        "write_metrics_meta failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&meta).expect("read meta"))
+            .expect("metrics meta must be valid JSON");
+    assert_eq!(value["sampler_pid"], 4242);
+    assert_eq!(value["interval_seconds"], 5);
+    let collectors = value["collectors"].as_array().expect("collectors array");
+    assert_eq!(collectors.len(), 2);
+    assert_eq!(collectors[0]["name"], "gpu");
+    assert_eq!(collectors[0]["enabled"], true);
+    assert_eq!(collectors[0]["available"], false);
+    assert_eq!(
+        collectors[0]["note"],
+        "nvidia-smi is not available on this node"
+    );
+    assert_eq!(collectors[0]["last_sampled_at"], serde_json::Value::Null);
+    assert_eq!(collectors[1]["name"], "slurm");
+    assert_eq!(collectors[1]["available"], true);
+    assert_eq!(collectors[1]["note"], serde_json::Value::Null);
+}
+
+fn run_artifact_bash(tmpdir: &std::path::Path, driver: &str) -> std::process::Output {
+    // No `set -u`: the manifest writer expands several arrays that are legitimately
+    // empty (e.g. bundles), which would trip unbound-variable checks.
+    let mut script = String::from("#!/usr/bin/env bash\n");
+    script.push_str("json_escape() { printf '%s' \"$1\"; }\n\n");
+    render_artifact_helpers(&mut script);
+    script.push_str(driver);
+    let path = tmpdir.join("artifact.sh");
+    fs::write(&path, &script).expect("write artifact script");
+    Command::new(bash_executable())
+        .arg(&path)
+        .output()
+        .expect("run artifact script")
+}
+
+#[test]
+fn artifact_manifest_is_written_as_valid_json() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let manifest = tmpdir.path().join("manifest.json");
+    let driver = format!(
+        r#"
+SLURM_JOB_ID=12345
+ARTIFACTS_MANIFEST_FILE="{manifest}"
+ARTIFACTS_COLLECT_POLICY=on_success
+RESUME_ENABLED=0
+ARTIFACT_SOURCE_PATTERNS=("out/*.txt" "logs/")
+ARTIFACT_COPIED_RELATIVE_PATHS=("out/a.txt")
+ARTIFACT_WARNINGS=("pattern logs/ matched nothing")
+ARTIFACT_BUNDLE_NAMES=()
+write_artifact_manifest success "out/a.txt"
+"#,
+        manifest = manifest.display()
+    );
+    let output = run_artifact_bash(tmpdir.path(), &driver);
+    assert!(
+        output.status.success(),
+        "write_artifact_manifest failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest).expect("read manifest"))
+            .expect("artifact manifest must be valid JSON");
+    assert_eq!(value["schema_version"], 3);
+    assert_eq!(value["job_id"], "12345");
+    assert_eq!(value["collect_policy"], "on_success");
+    assert_eq!(value["job_outcome"], "success");
+    // RESUME_ENABLED=0 -> resume fields are null.
+    assert_eq!(value["attempt"], serde_json::Value::Null);
+    assert_eq!(value["is_resume"], serde_json::Value::Null);
+    assert_eq!(
+        value["declared_source_patterns"],
+        serde_json::json!(["out/*.txt", "logs/"])
+    );
+    assert_eq!(
+        value["matched_source_paths"],
+        serde_json::json!(["out/a.txt"])
+    );
+    assert_eq!(
+        value["copied_relative_paths"],
+        serde_json::json!(["out/a.txt"])
+    );
+    assert_eq!(
+        value["warnings"],
+        serde_json::json!(["pattern logs/ matched nothing"])
+    );
+    assert!(value["bundles"].is_object(), "bundles must be an object");
+}

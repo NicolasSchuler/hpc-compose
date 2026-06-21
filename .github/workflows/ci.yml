@@ -535,9 +535,23 @@ jobs:
 
       - name: Enforce coverage gate
         run: |
-          # Gate core planner/runtime logic and exclude presentation-only CLI/UI surfaces.
+          # Gate core planner/runtime logic at a high bar, excluding presentation-only
+          # CLI/UI surfaces. Complemented by the strict whole-crate floor below.
           cargo llvm-cov report --json --summary-only --locked \
             --ignore-filename-regex 'commands/|output/mod\.rs|watch_ui\.rs|term\.rs|progress\.rs|manpages\.rs|main\.rs|cli/|job/model\.rs' \
             --fail-under-lines 92 \
             --fail-under-regions 91 \
             --fail-under-functions 88
+
+      - name: Enforce strict coverage gate (whole crate minus thin declarative shells)
+        run: |
+          # Honest floor for the surfaces the broad gate above excludes (the runtime
+          # command layer, watch_ui, output renderers, ...). Only the four thin
+          # declarative shells are excluded here, matching the justfile release-check
+          # gate (kept in sync by tests/release_metadata.rs). Ratchet these thresholds
+          # upward as coverage waves land so gains are locked in.
+          cargo llvm-cov report --json --summary-only --locked \
+            --ignore-filename-regex '(^|/)commands/mod\.rs$|(^|/)cli/commands\.rs$|(^|/)main\.rs$|(^|/)job/model\.rs$' \
+            --fail-under-lines 87 \
+            --fail-under-regions 87 \
+            --fail-under-functions 85

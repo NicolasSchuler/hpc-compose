@@ -1127,7 +1127,7 @@ pub(crate) fn build_local_scheduler_status(
     }
 }
 
-fn pid_is_running(pid: u32) -> bool {
+pub(crate) fn pid_is_running(pid: u32) -> bool {
     #[cfg(unix)]
     {
         if pid == 0 || pid > i32::MAX as u32 {
@@ -1585,6 +1585,62 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("local runtime state exists")
+        );
+    }
+
+    #[test]
+    fn normalize_scheduler_metadata_filters_sentinels() {
+        assert_eq!(normalize_scheduler_metadata(""), None);
+        assert_eq!(normalize_scheduler_metadata("   "), None);
+        for sentinel in [
+            "n/a", "N/A", "na", "NA", "none", "None", "NONE", "null", "NULL", "unknown", "Unknown",
+            "invalid", "INVALID", "not_set", "NOT_SET", "not set", "Not Set",
+        ] {
+            assert_eq!(
+                normalize_scheduler_metadata(sentinel),
+                None,
+                "expected sentinel {sentinel:?} to normalize to None",
+            );
+        }
+        assert_eq!(
+            normalize_scheduler_metadata("Resources"),
+            Some("Resources".to_string())
+        );
+        assert_eq!(
+            normalize_scheduler_metadata("  Priority  "),
+            Some("Priority".to_string())
+        );
+        assert_eq!(
+            normalize_scheduler_metadata("none-of-the-above"),
+            Some("none-of-the-above".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_service_duration_seconds_covers_all_branches() {
+        assert_eq!(
+            derive_service_duration_seconds(None, Some(50), 100, true),
+            None
+        );
+        assert_eq!(
+            derive_service_duration_seconds(Some(10), Some(50), 999, false),
+            Some(40)
+        );
+        assert_eq!(
+            derive_service_duration_seconds(Some(50), Some(10), 999, true),
+            Some(0)
+        );
+        assert_eq!(
+            derive_service_duration_seconds(Some(10), None, 100, true),
+            Some(90)
+        );
+        assert_eq!(
+            derive_service_duration_seconds(Some(200), None, 100, true),
+            Some(0)
+        );
+        assert_eq!(
+            derive_service_duration_seconds(Some(10), None, 100, false),
+            None
         );
     }
 }

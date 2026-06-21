@@ -1875,6 +1875,120 @@ name = ""
     }
 
     #[test]
+    fn is_slurm_command_version_recognizes_client_tools_only() {
+        for program in ["slurm", "sbatch", "srun", "salloc", "scontrol", "squeue"] {
+            assert!(is_slurm_command_version(program), "{program}");
+        }
+        assert!(!is_slurm_command_version("mpirun"));
+        assert!(!is_slurm_command_version("custom wrapper"));
+    }
+
+    #[test]
+    fn mpi_implementation_inference_and_compatibility() {
+        assert_eq!(
+            infer_mpi_implementation_from_path("/opt/intel/impi/2021"),
+            MpiImplementation::IntelMpi
+        );
+        assert_eq!(
+            infer_mpi_implementation_from_path("/usr/lib/openmpi"),
+            MpiImplementation::Openmpi
+        );
+        assert_eq!(
+            infer_mpi_implementation_from_path("/opt/ompi/4.1"),
+            MpiImplementation::Openmpi
+        );
+        assert_eq!(
+            infer_mpi_implementation_from_path("/opt/mpich/3.4"),
+            MpiImplementation::Mpich
+        );
+        assert_eq!(
+            infer_mpi_implementation_from_path("/opt/exotic"),
+            MpiImplementation::Unknown
+        );
+
+        // Open MPI / MPICH prefer pmi2 and any pmix flavor; Intel MPI only pmi2.
+        assert!(mpi_type_compatible_with_profile(
+            MpiProfile::Openmpi,
+            "pmix_v4"
+        ));
+        assert!(mpi_type_compatible_with_profile(MpiProfile::Mpich, "pmi2"));
+        assert!(!mpi_type_compatible_with_profile(
+            MpiProfile::IntelMpi,
+            "pmix"
+        ));
+        assert!(mpi_type_compatible_with_profile(
+            MpiProfile::IntelMpi,
+            "pmi2"
+        ));
+
+        // Compatibility filter keeps only advertised types the profile accepts;
+        // an unknown implementation has no profile and accepts nothing.
+        let advertised = vec!["pmi2".to_string(), "pmix".into(), "openmpi".into()];
+        assert_eq!(
+            compatible_mpi_types_for_implementation(MpiImplementation::Openmpi, &advertised),
+            vec!["pmi2".to_string(), "pmix".into()]
+        );
+        assert!(
+            compatible_mpi_types_for_implementation(MpiImplementation::Unknown, &advertised)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mpi_installation_name_uses_root_basename_or_source_fallback() {
+        assert_eq!(
+            mpi_installation_name(
+                "env",
+                MpiImplementation::Openmpi,
+                Some(Path::new("/opt/openmpi-4.1"))
+            ),
+            "openmpi:openmpi-4.1"
+        );
+        assert_eq!(
+            mpi_installation_name("PATH", MpiImplementation::Mpich, None),
+            "mpich:PATH"
+        );
+    }
+
+    #[test]
+    fn constraint_token_and_gpu_helpers() {
+        assert_eq!(normalize_constraint_token("(a100"), "a100");
+        assert_eq!(normalize_constraint_token("ib)&"), "ib");
+        assert_eq!(normalize_constraint_token("gpu-v100"), "gpu-v100");
+        assert!(contains_gpu("gpu:a100:4"));
+        assert!(contains_gpu("GRES/GPU:1"));
+        assert!(!contains_gpu("cpu:8"));
+    }
+
+    #[test]
+    fn merge_scontrol_partitions_creates_and_fills_without_clobbering() {
+        let mut partitions = vec![PartitionProfile {
+            name: "gpu".into(),
+            state: Some("UP".into()),
+            ..PartitionProfile::default()
+        }];
+        let raw = "PartitionName=gpu State=DOWN MaxTime=1-00:00:00 TRES=gpu:a100:4 AllowQos=normal,debug DefaultQOS=normal\n\
+                   PartitionName=cpu State=UP MaxTime=UNLIMITED DefaultTime=NONE\n\
+                   NotAPartitionLine here\n";
+        merge_scontrol_partitions(&mut partitions, raw);
+
+        assert_eq!(partitions.len(), 2);
+        let gpu = &partitions[0];
+        // Existing state is preserved (None-guarded), new attributes are filled.
+        assert_eq!(gpu.state.as_deref(), Some("UP"));
+        assert_eq!(gpu.max_time.as_deref(), Some("1-00:00:00"));
+        assert_eq!(gpu.gres.as_deref(), Some("gpu:a100:4"));
+        assert_eq!(gpu.qos, vec!["normal".to_string(), "debug".into()]);
+        assert_eq!(gpu.default_qos.as_deref(), Some("normal"));
+
+        let cpu = &partitions[1];
+        assert_eq!(cpu.state.as_deref(), Some("UP"));
+        // UNLIMITED MaxTime and NONE DefaultTime are filtered to None.
+        assert_eq!(cpu.max_time, None);
+        assert_eq!(cpu.default_time, None);
+    }
+
+    #[test]
     fn cluster_profile_validation_accepts_or_constraints_and_rejects_path_prefixes() {
         let profile = ClusterProfile {
             schema_version: 1,

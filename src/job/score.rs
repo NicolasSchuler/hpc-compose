@@ -1209,6 +1209,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn score_duration_parser_applies_walltime_range_rules() {
+        assert_eq!(parse_slurm_duration_seconds("90"), Some(90));
+        assert_eq!(parse_slurm_duration_seconds("01:30"), Some(90));
+        assert_eq!(parse_slurm_duration_seconds("1:02:03"), Some(3723));
+        // day-HH:MM form.
+        assert_eq!(parse_slurm_duration_seconds("1-00:00"), Some(86_400));
+        // Fractional seconds are stripped.
+        assert_eq!(parse_slurm_duration_seconds("00:01.500"), Some(1));
+        assert_eq!(parse_slurm_duration_seconds(""), None);
+        assert_eq!(parse_slurm_duration_seconds("UNKNOWN"), None);
+        // Range rules reject out-of-range minutes/seconds and hours-with-day,
+        // unlike the accounting parser (see job::accounting::tests).
+        assert_eq!(parse_slurm_duration_seconds("00:90"), None);
+        assert_eq!(parse_slurm_duration_seconds("01:60:00"), None);
+        assert_eq!(parse_slurm_duration_seconds("1-24:00"), None);
+    }
+
+    #[test]
     fn score_grades_follow_thresholds() {
         assert_eq!(grade_for_score(100), "A");
         assert_eq!(grade_for_score(85), "A");

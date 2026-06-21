@@ -87,6 +87,7 @@ pub use rightsize::{
     RightsizeConfidence, RightsizeObservation, RightsizeRecommendation, RightsizeReport,
     build_rightsize_report,
 };
+pub(crate) use scheduler::pid_is_running;
 pub use scheduler::{
     ArrayStatusSnapshot, ArrayTaskStatus, BatchLogStatus, PsServiceRow, QueueDiagnostics,
     SchedulerStatus, ServiceAssertionStatus, ServiceLogStatus, StatusSnapshot, WalltimeProgress,

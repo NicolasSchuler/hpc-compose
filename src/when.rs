@@ -698,6 +698,142 @@ mod tests {
     }
 
     #[test]
+    fn after_job_condition_parser_maps_known_and_rejects_unknown() {
+        assert_eq!(
+            parse_after_job_condition("afterany").unwrap(),
+            JobDependencyCondition::AfterAny
+        );
+        assert_eq!(
+            parse_after_job_condition("afterok").unwrap(),
+            JobDependencyCondition::AfterOk
+        );
+        assert_eq!(
+            parse_after_job_condition("afternotok").unwrap(),
+            JobDependencyCondition::AfterNotOk
+        );
+        let err = parse_after_job_condition("afterfail")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("afterfail"), "{err}");
+        assert!(err.contains("afterany"), "{err}");
+    }
+
+    #[test]
+    fn job_state_normalizers_strip_decorators_and_pick_first_real_state() {
+        assert_eq!(
+            normalized_job_state("completed").as_deref(),
+            Some("COMPLETED")
+        );
+        assert_eq!(
+            normalized_job_state("CANCELLED+ (by 1001)").as_deref(),
+            Some("CANCELLED")
+        );
+        assert_eq!(normalized_job_state("   ").as_deref(), None);
+        assert_eq!(normalize_state_label("running|x"), "RUNNING");
+        // Falls back to the trimmed raw text when no token is extractable.
+        assert_eq!(normalize_state_label("  -- "), "--");
+        // Header rows and blank lines are skipped before the first real state.
+        assert_eq!(
+            first_state("STATE\n\n  failed |x\ncompleted\n").as_deref(),
+            Some("FAILED")
+        );
+        assert_eq!(first_state("state\n\n").as_deref(), None);
+    }
+
+    #[test]
+    fn terminal_state_predicate_matches_only_final_states() {
+        assert!(is_terminal_state("COMPLETED"));
+        assert!(is_terminal_state("OUT_OF_MEMORY"));
+        assert!(is_terminal_state("TIMEOUT"));
+        assert!(!is_terminal_state("RUNNING"));
+        assert!(!is_terminal_state("PENDING"));
+    }
+
+    #[test]
+    fn summary_for_job_outcome_reports_source_and_rejects_impossible() {
+        let condition = AfterJobCondition {
+            job_id: "12345".to_string(),
+            condition: JobDependencyCondition::AfterOk,
+        };
+        let satisfied = summary_for_job_outcome(
+            &condition,
+            "completed",
+            JobConditionOutcome::Satisfied,
+            true,
+        )
+        .unwrap();
+        assert!(satisfied.satisfied);
+        assert!(
+            satisfied.detail.contains("from squeue"),
+            "{}",
+            satisfied.detail
+        );
+        assert!(
+            satisfied.detail.contains("COMPLETED"),
+            "{}",
+            satisfied.detail
+        );
+
+        let pending =
+            summary_for_job_outcome(&condition, "running", JobConditionOutcome::Pending, false)
+                .unwrap();
+        assert!(!pending.satisfied);
+        assert!(pending.detail.contains("from sacct"), "{}", pending.detail);
+        assert!(
+            pending.detail.contains("does not satisfy"),
+            "{}",
+            pending.detail
+        );
+
+        let err =
+            summary_for_job_outcome(&condition, "failed", JobConditionOutcome::Impossible, false)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("can never satisfy"), "{err}");
+    }
+
+    #[test]
+    fn command_failure_detail_prefers_stderr_then_stdout_then_default() {
+        assert_eq!(
+            command_failure_detail(&ProbeOutput {
+                success: false,
+                stdout: "out".to_string(),
+                stderr: "  boom  ".to_string(),
+            }),
+            "boom"
+        );
+        assert_eq!(
+            command_failure_detail(&ProbeOutput {
+                success: false,
+                stdout: " just stdout ".to_string(),
+                stderr: String::new(),
+            }),
+            "just stdout"
+        );
+        assert_eq!(
+            command_failure_detail(&ProbeOutput {
+                success: false,
+                stdout: "   ".to_string(),
+                stderr: String::new(),
+            }),
+            "command exited unsuccessfully"
+        );
+    }
+
+    #[test]
+    fn hhmm_parser_and_formatter_round_trip_and_validate() {
+        assert_eq!(parse_hhmm("00:00", "x").unwrap(), 0);
+        assert_eq!(parse_hhmm("23:59", "x").unwrap(), 23 * 60 + 59);
+        assert!(parse_hhmm("9:30", "x").is_err());
+        assert!(parse_hhmm("24:00", "x").is_err());
+        assert!(parse_hhmm("12:60", "x").is_err());
+        assert!(parse_hhmm("nope", "x").is_err());
+        assert_eq!(format_minutes(0), "00:00");
+        assert_eq!(format_minutes(9 * 60 + 5), "09:05");
+        assert_eq!(format_minutes(23 * 60 + 59), "23:59");
+    }
+
+    #[test]
     fn monitor_loop_times_out_without_real_sleep() {
         let options = MonitorOptions {
             conditions: WhenConditions {

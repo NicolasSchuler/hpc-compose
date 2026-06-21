@@ -280,6 +280,18 @@ fn coverage_gate_ignores_only_declarative_shells() {
             "coverage gate should not broadly ignore {broad_pattern}"
         );
     }
+
+    // CI runs the same strict whole-crate floor (only the four thin declarative
+    // shells excluded) alongside its broad core-logic gate, so the command/UI
+    // surfaces cannot silently rot in CI. Keep this wired.
+    let ci_workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    assert!(
+        ci_workflow.contains(
+            "--ignore-filename-regex '(^|/)commands/mod\\.rs$|(^|/)cli/commands\\.rs$|(^|/)main\\.rs$|(^|/)job/model\\.rs$'"
+        ),
+        "ci.yml should enforce the strict whole-crate coverage floor"
+    );
 }
 
 #[test]

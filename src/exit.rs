@@ -25,3 +25,41 @@ impl ExitCodeError {
         self.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_round_trips_the_carried_status() {
+        assert_eq!(ExitCodeError(0).code(), 0);
+        assert_eq!(ExitCodeError(1).code(), 1);
+        assert_eq!(ExitCodeError(2).code(), 2);
+        assert_eq!(ExitCodeError(137).code(), 137);
+        assert_eq!(ExitCodeError(-1).code(), -1);
+    }
+
+    #[test]
+    fn display_reports_the_status() {
+        assert_eq!(ExitCodeError(5).to_string(), "command exited with status 5");
+    }
+
+    #[test]
+    fn downcasts_through_anyhow_preserving_the_code() {
+        // main.rs downcasts the error carrier off the anyhow channel; this
+        // pins that the code survives the boxing round-trip.
+        let err: anyhow::Error = ExitCodeError(2).into();
+        let recovered = err
+            .downcast_ref::<ExitCodeError>()
+            .expect("ExitCodeError survives anyhow round-trip");
+        assert_eq!(recovered.code(), 2);
+    }
+
+    #[test]
+    fn is_copy_eq_and_distinct_by_code() {
+        let err = ExitCodeError(42);
+        let copied = err; // Copy
+        assert_eq!(err, copied);
+        assert_ne!(ExitCodeError(1), ExitCodeError(2));
+    }
+}

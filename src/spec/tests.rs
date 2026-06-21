@@ -4252,3 +4252,250 @@ services:
         prop_assert!(load.expect("load result").is_err());
     }
 }
+
+#[test]
+fn duplicate_prepare_hook_is_rejected() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: redis:7
+    x-runtime:
+      prepare:
+        commands: ["echo a"]
+    x-enroot:
+      prepare:
+        commands: ["echo b"]
+"#,
+    );
+    let err = ComposeSpec::load(&path).expect_err("both prepare hooks should be rejected");
+    assert!(
+        err.to_string()
+            .contains("both x-runtime.prepare and x-enroot.prepare"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn enroot_prepare_requires_pyxis_backend() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+runtime:
+  backend: apptainer
+services:
+  app:
+    image: redis:7
+    x-enroot:
+      prepare:
+        commands: ["echo hi"]
+"#,
+    );
+    let err = ComposeSpec::load(&path).expect_err("enroot prepare on apptainer should be rejected");
+    assert!(
+        err.to_string()
+            .contains("x-enroot.prepare with runtime.backend=apptainer"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn array_entrypoint_with_multiline_string_command_is_rejected() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        "
+services:
+  app:
+    image: redis:7
+    entrypoint: [\"bash\", \"-lc\"]
+    command: \"echo a\\npython train.py\\n\"
+",
+    );
+    let err = ComposeSpec::load(&path).expect_err("array entrypoint + multiline command rejected");
+    assert!(
+        err.to_string().contains("mixes array-form entrypoint"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn secret_requires_a_source() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+secrets:
+  tok: {}
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let err = ComposeSpec::load(&path).expect_err("secret with neither file nor env rejected");
+    assert!(
+        err.to_string().contains("must set either 'file' or 'env'"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn slurm_job_id_validation_rejects_boundary_forms() {
+    let field = "x-slurm.after_job";
+    let cases = [
+        ("", "must not be empty"),
+        ("12\u{0}34", "must not contain null bytes"),
+        ("123 45", "must not contain whitespace"),
+        ("12345_7_8", "must be a Slurm job id like 12345"),
+        ("0", "job id must be greater than 0"),
+        ("0_7", "job id must be greater than 0"),
+    ];
+    for (input, needle) in cases {
+        let err = validate_slurm_job_id(input, field)
+            .expect_err(&format!("{input:?} should be rejected"));
+        assert!(
+            err.to_string().contains(needle),
+            "for {input:?} expected {needle:?}, got: {err}"
+        );
+    }
+    assert!(validate_slurm_job_id("_7", field).is_err());
+    assert!(validate_slurm_job_id("12345_", field).is_err());
+    validate_slurm_job_id("12345", field).expect("plain job id");
+    validate_slurm_job_id("12345_7", field).expect("array task id");
+}
+
+#[test]
+fn artifact_path_rejects_traversal_and_non_container_roots() {
+    assert!(
+        validate_artifact_path("/../x")
+            .unwrap_err()
+            .to_string()
+            .contains("escapes the root path")
+    );
+    assert!(validate_artifact_path("/hpc-compose/job/artifacts").is_err());
+    assert!(validate_artifact_path("/etc/passwd").is_err());
+    assert!(validate_artifact_path("relative/x").is_err());
+    validate_artifact_path("/hpc-compose/job/data").expect("valid container path");
+}
+
+#[test]
+fn resume_path_rejects_traversal_and_container_roots() {
+    assert!(
+        validate_resume_path("/shared/../../etc")
+            .unwrap_err()
+            .to_string()
+            .contains("escapes the root path")
+    );
+    assert!(
+        validate_resume_path("")
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty")
+    );
+    assert!(validate_resume_path("relative/run").is_err());
+    assert!(validate_resume_path("/hpc-compose/run").is_err());
+    validate_resume_path("/shared/runs/../demo").expect("valid host resume path");
+}
+
+#[test]
+fn slurm_log_pattern_handles_specifiers_and_traversal() {
+    let field = "x-slurm.output";
+    validate_slurm_log_pattern(Some("100%%done/%08j.out"), field).expect("specifiers ok");
+    validate_slurm_log_pattern(None, field).expect("none ok");
+    assert!(
+        validate_slurm_log_pattern(Some("a\u{0}b"), field)
+            .unwrap_err()
+            .to_string()
+            .contains("must not contain null bytes")
+    );
+    assert!(
+        validate_slurm_log_pattern(Some("   "), field)
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty")
+    );
+    assert!(
+        validate_slurm_log_pattern(Some("%%/../x"), field)
+            .unwrap_err()
+            .to_string()
+            .contains("must not use '..' path traversal")
+    );
+}
+
+#[test]
+fn service_assert_artifact_pattern_rejects_bad_forms() {
+    let field = "x-slurm.assert.artifacts_contain";
+    assert!(
+        validate_service_assert_artifact_pattern("out\n/x", field)
+            .unwrap_err()
+            .to_string()
+            .contains("must not contain line breaks")
+    );
+    assert!(
+        validate_service_assert_artifact_pattern("a\u{0}b", field)
+            .unwrap_err()
+            .to_string()
+            .contains("must not contain null bytes")
+    );
+    assert!(
+        validate_service_assert_artifact_pattern("/hpc-compose/job/../etc", field)
+            .unwrap_err()
+            .to_string()
+            .contains("must not contain '..' path components")
+    );
+    assert!(
+        validate_service_assert_artifact_pattern("/etc/passwd", field)
+            .unwrap_err()
+            .to_string()
+            .contains("must be relative or rooted under")
+    );
+    validate_service_assert_artifact_pattern("relative/ok.txt", field).expect("relative ok");
+    validate_service_assert_artifact_pattern("/hpc-compose/job/out.txt", field).expect("rooted ok");
+}
+
+#[test]
+fn interpolate_string_collapses_double_dollar_and_nested_brace_defaults() {
+    let empty = BTreeMap::<String, String>::new();
+    assert_eq!(
+        interpolate_string("${MISSING:-a$$b}", &empty).expect("double-dollar default"),
+        "a$b"
+    );
+    let inner = BTreeMap::from([("INNER".to_string(), "deep".to_string())]);
+    assert_eq!(
+        interpolate_string("${MISSING:-${INNER}}", &inner).expect("nested-brace default"),
+        "deep"
+    );
+    let err = interpolate_string("${A:-${B}", &empty).expect_err("unterminated nested default");
+    assert!(
+        err.to_string().contains("unterminated variable expression"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn strict_env_scanner_collects_no_colon_nested_defaults_and_ignores_present_empty() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let nested = write_spec(
+        tmpdir.path(),
+        "services:\n  app:\n    image: redis:7\n    environment:\n      KEEP: \"${A-${B-fb}}\"\n",
+    );
+    let missing = missing_defaulted_variables(&nested, &BTreeMap::new()).expect("scan nested");
+    assert_eq!(missing, BTreeSet::from(["A".to_string(), "B".to_string()]));
+
+    let present_empty = write_spec(
+        tmpdir.path(),
+        "services:\n  app:\n    image: redis:7\n    environment:\n      KEEP: \"${A-fb}\"\n",
+    );
+    let missing = missing_defaulted_variables(
+        &present_empty,
+        &BTreeMap::from([("A".to_string(), String::new())]),
+    )
+    .expect("scan present-empty");
+    assert!(
+        missing.is_empty(),
+        "present-empty must not be missing: {missing:?}"
+    );
+}
