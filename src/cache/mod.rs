@@ -1,5 +1,7 @@
 //! Cache manifest management for imported and prepared image artifacts.
 
+pub mod dataset;
+
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -20,6 +22,15 @@ pub enum CacheEntryKind {
     Base,
     /// A prepared runtime image derived from a base image.
     Prepared,
+    /// A staged dataset materialized into the content-addressed store.
+    Dataset,
+    /// A staged model materialized into the content-addressed store.
+    Model,
+    /// A kind produced by a newer (or older) tool version. Kept so that
+    /// [`scan_cache`] never fails on a manifest it does not recognize and the
+    /// entry still round-trips through deserialize/serialize.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Metadata stored next to a cached artifact.
@@ -40,6 +51,20 @@ pub struct CacheEntryManifest {
     pub created_at: u64,
     pub last_used_at: u64,
     pub tool_version: String,
+    /// Source URI of a staged input (e.g. `hf://org/model`). Only set for
+    /// `Dataset`/`Model` entries; omitted from image-manifest JSON so existing
+    /// `Base`/`Prepared` manifests serialize byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    /// Pinned revision of a staged input (e.g. a git tag or commit). Only set
+    /// for `Dataset`/`Model` entries; omitted when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Content digest recorded after a staged input is materialized, when the
+    /// materializer can compute one. Only set for `Dataset`/`Model` entries;
+    /// omitted when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
 }
 
 /// Result returned by cache-pruning operations.
@@ -174,6 +199,113 @@ pub fn touch_manifest(artifact_path: &Path) -> Result<()> {
     })
 }
 
+/// Creates or refreshes the sidecar manifest for a staged dataset/model.
+///
+/// The `staged_dir` is the materialized content-addressed directory; the
+/// manifest lands at the `<staged_dir>.{dataset,model}.json` sidecar. Like the
+/// image upserts this serializes its read-modify-write under
+/// [`with_manifest_lock`] so concurrent sweeps of the same key do not lose an
+/// update, and an existing manifest's `created_at`/`service_names` survive.
+///
+/// # Errors
+///
+/// Returns an error when an existing manifest cannot be read or the refreshed
+/// manifest cannot be written.
+pub fn upsert_dataset_manifest(
+    staged_dir: &Path,
+    kind: CacheEntryKind,
+    cache_key: &str,
+    uri: &str,
+    revision: Option<&str>,
+    content_digest: Option<&str>,
+) -> Result<CacheEntryManifest> {
+    let suffix = staged_kind_suffix(&kind);
+    let manifest_path = dataset::sidecar_manifest_path_for_suffix(staged_dir, suffix);
+    with_manifest_lock(staged_dir, || {
+        let now = unix_timestamp_now();
+        let mut manifest =
+            read_staged_manifest_if_exists(&manifest_path)?.unwrap_or_else(|| CacheEntryManifest {
+                kind: kind.clone(),
+                artifact_path: staged_dir.display().to_string(),
+                service_names: Vec::new(),
+                cache_key: cache_key.to_string(),
+                source_image: uri.to_string(),
+                registry: None,
+                prepare_commands: Vec::new(),
+                prepare_env: Vec::new(),
+                prepare_root: None,
+                prepare_mounts: Vec::new(),
+                force_rebuild_due_to_mounts: false,
+                created_at: now,
+                last_used_at: now,
+                tool_version: env!("CARGO_PKG_VERSION").to_string(),
+                uri: Some(uri.to_string()),
+                revision: revision.map(str::to_string),
+                content_digest: content_digest.map(str::to_string),
+            });
+        manifest.kind = kind.clone();
+        manifest.artifact_path = staged_dir.display().to_string();
+        manifest.cache_key = cache_key.to_string();
+        manifest.source_image = uri.to_string();
+        manifest.uri = Some(uri.to_string());
+        manifest.revision = revision.map(str::to_string);
+        if let Some(digest) = content_digest {
+            manifest.content_digest = Some(digest.to_string());
+        }
+        manifest.last_used_at = now;
+        manifest.tool_version = env!("CARGO_PKG_VERSION").to_string();
+        write_manifest_to(&manifest_path, &manifest)?;
+        Ok(manifest)
+    })
+}
+
+/// Refreshes the `last_used_at` timestamp on a staged-input sidecar manifest.
+///
+/// Mirrors [`touch_manifest`] for the `<staged_dir>.{dataset,model}.json`
+/// sidecar layout. A missing manifest is a no-op.
+///
+/// # Errors
+///
+/// Returns an error when an existing manifest cannot be read or written back.
+pub fn touch_dataset_manifest(staged_dir: &Path, kind: CacheEntryKind) -> Result<()> {
+    let suffix = staged_kind_suffix(&kind);
+    let manifest_path = dataset::sidecar_manifest_path_for_suffix(staged_dir, suffix);
+    with_manifest_lock(staged_dir, || {
+        let Some(mut manifest) = read_staged_manifest_if_exists(&manifest_path)? else {
+            return Ok(());
+        };
+        manifest.last_used_at = unix_timestamp_now();
+        write_manifest_to(&manifest_path, &manifest)
+    })
+}
+
+fn staged_kind_suffix(kind: &CacheEntryKind) -> &'static str {
+    match kind {
+        CacheEntryKind::Model => "model",
+        // The CAS only ever upserts Dataset/Model; default the rest to dataset
+        // so a misuse still produces a deterministic, scannable sidecar.
+        _ => "dataset",
+    }
+}
+
+/// Test-only: read a staged-input sidecar manifest at an explicit path.
+#[cfg(test)]
+pub(crate) fn read_staged_manifest_for_test(manifest_path: &Path) -> CacheEntryManifest {
+    let raw = fs::read_to_string(manifest_path).expect("read staged manifest");
+    serde_json::from_str(&raw).expect("parse staged manifest")
+}
+
+fn read_staged_manifest_if_exists(manifest_path: &Path) -> Result<Option<CacheEntryManifest>> {
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(manifest_path)
+        .context(format!("failed to read {}", manifest_path.display()))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .context(format!("failed to parse {}", manifest_path.display()))
+}
+
 /// Reads the manifest stored next to an artifact path.
 ///
 /// # Errors
@@ -227,7 +359,14 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
                 .context(format!("failed to read file type for {}", path.display()))?
                 .is_dir()
             {
-                stack.push(path);
+                // Never recurse into a staged-input directory: its tracking
+                // sidecar is a SIBLING (`<dir>.{dataset,model}.json`), and its
+                // contents may include unrelated `*.json` (e.g. a model
+                // snapshot's `config.json`, or even a data file literally named
+                // `x.dataset.json`) that must not be parsed as a manifest.
+                if !is_staged_input_dir(&path) {
+                    stack.push(path);
+                }
                 continue;
             }
             let is_manifest = path.extension() == Some(OsStr::new("json"));
@@ -237,13 +376,18 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
             if !looks_like_manifest_path(&path) {
                 continue;
             }
+            let artifact = artifact_path_from_manifest_path(&path);
+            // A staged-input sidecar is only valid when its reconstructed
+            // artifact directory actually exists as a sibling: this rejects a
+            // stray `<x>.dataset.json` data file inside an unrelated tree.
+            if is_staged_input_sidecar(&path) && !artifact.is_dir() {
+                continue;
+            }
             let raw =
                 fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
             let mut manifest: CacheEntryManifest = serde_json::from_str(&raw)
                 .context(format!("failed to parse {}", path.display()))?;
-            manifest.artifact_path = artifact_path_from_manifest_path(&path)
-                .display()
-                .to_string();
+            manifest.artifact_path = artifact.display().to_string();
             manifests.push(manifest);
         }
     }
@@ -337,6 +481,9 @@ pub fn cache_key_for_service(service: &RuntimeService, kind: CacheEntryKind) -> 
             parts.push(format!("root={}", prepare.root));
             parts.join("|")
         }
+        // Staged inputs are keyed by `dataset::dataset_cache_key`, not by a
+        // service; there is no image cache key for them.
+        CacheEntryKind::Dataset | CacheEntryKind::Model | CacheEntryKind::Unknown => String::new(),
     }
 }
 
@@ -351,9 +498,22 @@ pub fn parse_remote_registry(source: &ImageSource) -> Option<String> {
 
 fn remove_manifest_and_artifact(cache_dir: &Path, manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
-    let manifest_path = manifest_path_for(artifact);
-    if artifact.exists() {
-        fs::remove_file(artifact).context(format!("failed to remove {}", artifact.display()))?;
+    let manifest_path = sidecar_manifest_path_for_kind(artifact, &manifest.kind);
+    // Staged inputs (`Dataset`/`Model`) are directories; image artifacts are
+    // single files. `symlink_metadata` avoids following a dangling symlink.
+    match fs::symlink_metadata(artifact) {
+        Ok(meta) if meta.is_dir() => {
+            fs::remove_dir_all(artifact)
+                .context(format!("failed to remove {}", artifact.display()))?;
+        }
+        Ok(_) => {
+            fs::remove_file(artifact)
+                .context(format!("failed to remove {}", artifact.display()))?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).context(format!("failed to stat {}", artifact.display()));
+        }
     }
     if manifest_path.exists() {
         fs::remove_file(&manifest_path)
@@ -365,6 +525,20 @@ fn remove_manifest_and_artifact(cache_dir: &Path, manifest: &CacheEntryManifest)
     let _ = fs::remove_file(manifest_lock_path_for(artifact));
     prune_empty_parents(cache_dir, artifact.parent());
     Ok(())
+}
+
+/// Resolves the sidecar-manifest path for an artifact given its kind. Image
+/// entries (`Base`/`Prepared`/`Unknown`) use the `<artifact>.json` sibling;
+/// staged inputs use the `<staged_dir>.{dataset,model}.json` sidecar so the
+/// directory artifact itself stays free of metadata.
+fn sidecar_manifest_path_for_kind(artifact: &Path, kind: &CacheEntryKind) -> PathBuf {
+    match kind {
+        CacheEntryKind::Dataset => dataset::sidecar_manifest_path_for_suffix(artifact, "dataset"),
+        CacheEntryKind::Model => dataset::sidecar_manifest_path_for_suffix(artifact, "model"),
+        CacheEntryKind::Base | CacheEntryKind::Prepared | CacheEntryKind::Unknown => {
+            manifest_path_for(artifact)
+        }
+    }
 }
 
 /// Collision-safe removal of now-empty parent dirs after an artifact entry is
@@ -417,8 +591,26 @@ fn looks_like_manifest_path(path: &Path) -> bool {
             name.ends_with(".sqsh.json")
                 || name.ends_with(".squashfs.json")
                 || name.ends_with(".sif.json")
+                || name.ends_with(".dataset.json")
+                || name.ends_with(".model.json")
         })
         .unwrap_or(false)
+}
+
+/// Whether `path`'s file name is a staged-input sidecar
+/// (`<dir>.dataset.json`/`<dir>.model.json`).
+fn is_staged_input_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(".dataset.json") || name.ends_with(".model.json"))
+        .unwrap_or(false)
+}
+
+/// Whether `dir` is a staged-input store directory, detected by the presence of
+/// a sibling `<dir>.dataset.json`/`<dir>.model.json` tracking sidecar.
+fn is_staged_input_dir(dir: &Path) -> bool {
+    dataset::sidecar_manifest_path_for_suffix(dir, "dataset").is_file()
+        || dataset::sidecar_manifest_path_for_suffix(dir, "model").is_file()
 }
 
 fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
@@ -426,7 +618,15 @@ fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    let artifact_filename = filename.strip_suffix(".json").unwrap_or(filename);
+    // Staged-input sidecars are `<staged_dir>.{dataset,model}.json` siblings of
+    // the staged DIRECTORY: stripping the full suffix reconstructs that
+    // directory, not a phantom `<staged_dir>.dataset` file. Image manifests are
+    // `<artifact>.json` and strip only the trailing `.json`.
+    let artifact_filename = filename
+        .strip_suffix(".dataset.json")
+        .or_else(|| filename.strip_suffix(".model.json"))
+        .or_else(|| filename.strip_suffix(".json"))
+        .unwrap_or(filename);
     path.with_file_name(artifact_filename)
 }
 
@@ -449,13 +649,19 @@ fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
 /// complete, valid one regardless.
 fn write_manifest(manifest: &CacheEntryManifest) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
-    let manifest_path = manifest_path_for(artifact);
+    write_manifest_to(&manifest_path_for(artifact), manifest)
+}
+
+/// Atomically writes `manifest` to an explicit sidecar path. Used directly for
+/// staged-input sidecars whose path (`<dir>.{dataset,model}.json`) does not
+/// follow the `<artifact>.json` derivation [`write_manifest`] uses.
+fn write_manifest_to(manifest_path: &Path, manifest: &CacheEntryManifest) -> Result<()> {
     if let Some(parent) = manifest_path.parent() {
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
     let raw =
         serde_json::to_string_pretty(manifest).context("failed to serialize cache manifest")?;
-    crate::secure_io::write_atomic(&manifest_path, raw.as_bytes(), false)
+    crate::secure_io::write_atomic(manifest_path, raw.as_bytes(), false)
         .context(format!("failed to write {}", manifest_path.display()))
 }
 
@@ -483,6 +689,9 @@ fn new_base_manifest(
         created_at: unix_timestamp_now(),
         last_used_at: unix_timestamp_now(),
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        uri: None,
+        revision: None,
+        content_digest: None,
     }
 }
 
@@ -765,6 +974,9 @@ mod tests {
             created_at: 1,
             last_used_at: 1,
             tool_version: env!("CARGO_PKG_VERSION").into(),
+            uri: None,
+            revision: None,
+            content_digest: None,
         };
         fs::write(
             manifest_path_for(&artifact),
@@ -960,5 +1172,195 @@ mod tests {
         let scanned = scan_cache(tmpdir.path()).expect("scan");
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].artifact_path, artifact.display().to_string());
+    }
+
+    // --- staged-input (CAS) manifest integration ---
+
+    use crate::cache::dataset::{
+        StagedInputKind, StagedInputProof, StagedInputSpec, dataset_cache_key, ensure_staged_input,
+        staged_input_dir,
+    };
+
+    fn seed_staged(cache_dir: &Path, kind: StagedInputKind, uri: &str) -> PathBuf {
+        let spec = StagedInputSpec::new(kind, uri, Some("v1".into()));
+        let (dir, _action) = ensure_staged_input(cache_dir, &spec, |dest| {
+            fs::write(dest.join("payload.bin"), b"data").expect("payload");
+            // A model snapshot's config.json must never be mistaken for a manifest.
+            fs::write(dest.join("config.json"), b"{}").expect("config");
+            Ok(StagedInputProof {
+                content_digest: Some("sha256:abc".into()),
+            })
+        })
+        .expect("seed staged");
+        dir
+    }
+
+    #[test]
+    fn scan_cache_discovers_dataset_and_model_sidecars() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache = tmpdir.path();
+        let ds_dir = seed_staged(cache, StagedInputKind::Dataset, "hf://org/cifar10");
+        let md_dir = seed_staged(cache, StagedInputKind::Model, "hf://org/llm");
+
+        let scanned = scan_cache(cache).expect("scan");
+        assert_eq!(scanned.len(), 2, "both staged sidecars discovered");
+
+        let dataset = scanned
+            .iter()
+            .find(|m| m.kind == CacheEntryKind::Dataset)
+            .expect("dataset entry");
+        // The artifact path points at the staged DIRECTORY, not a phantom file.
+        assert_eq!(dataset.artifact_path, ds_dir.display().to_string());
+        assert!(Path::new(&dataset.artifact_path).is_dir());
+        assert_eq!(dataset.uri.as_deref(), Some("hf://org/cifar10"));
+        assert_eq!(dataset.revision.as_deref(), Some("v1"));
+        assert_eq!(dataset.content_digest.as_deref(), Some("sha256:abc"));
+
+        let model = scanned
+            .iter()
+            .find(|m| m.kind == CacheEntryKind::Model)
+            .expect("model entry");
+        assert_eq!(model.artifact_path, md_dir.display().to_string());
+        assert!(Path::new(&model.artifact_path).is_dir());
+
+        // The inner config.json inside a staged dir must NOT be parsed as a manifest.
+        assert!(
+            !scanned
+                .iter()
+                .any(|m| m.artifact_path.ends_with("config.json")),
+            "scan_cache must not descend into staged-input dirs"
+        );
+    }
+
+    #[test]
+    fn cache_entry_kind_unknown_round_trips() {
+        // An unrecognized kind from a newer tool deserializes to Unknown and
+        // re-serializes without panicking.
+        let raw = r#"{
+            "kind": "some_future_kind",
+            "artifact_path": "/cache/x.sqsh",
+            "service_names": [],
+            "cache_key": "k",
+            "source_image": "docker://redis:7",
+            "registry": null,
+            "prepare_commands": [],
+            "prepare_env": [],
+            "prepare_root": null,
+            "prepare_mounts": [],
+            "force_rebuild_due_to_mounts": false,
+            "created_at": 1,
+            "last_used_at": 1,
+            "tool_version": "9.9.9"
+        }"#;
+        let manifest: CacheEntryManifest = serde_json::from_str(raw).expect("parse unknown kind");
+        assert_eq!(manifest.kind, CacheEntryKind::Unknown);
+        let reserialized = serde_json::to_string(&manifest).expect("reserialize");
+        let round: CacheEntryManifest =
+            serde_json::from_str(&reserialized).expect("re-parse unknown kind");
+        assert_eq!(round.kind, CacheEntryKind::Unknown);
+    }
+
+    #[test]
+    fn cache_manifest_optional_fields_omitted_when_none() {
+        // A Base manifest with no staged-input fields must serialize byte-for-byte
+        // identically to the pre-CAS layout (no uri/revision/content_digest keys).
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let artifact = tmpdir.path().join("base.sqsh");
+        let manifest = new_base_manifest(
+            &artifact,
+            &ImageSource::Remote("docker://redis:7".into()),
+            "base-key",
+        );
+        let json = serde_json::to_string_pretty(&manifest).expect("serialize base manifest");
+        assert!(
+            !json.contains("\"uri\""),
+            "uri key must be omitted when None"
+        );
+        assert!(
+            !json.contains("\"revision\""),
+            "revision key must be omitted when None"
+        );
+        assert!(
+            !json.contains("\"content_digest\""),
+            "content_digest key must be omitted when None"
+        );
+        // And it still parses (no required-field break for old/new readers).
+        let parsed: CacheEntryManifest = serde_json::from_str(&json).expect("reparse");
+        assert_eq!(parsed.kind, CacheEntryKind::Base);
+        assert_eq!(parsed.uri, None);
+    }
+
+    #[test]
+    fn old_base_manifest_without_new_fields_still_loads() {
+        // Simulate an on-disk manifest written by a pre-CAS tool version: it has
+        // none of the new optional fields. It must deserialize cleanly.
+        let raw = r#"{
+            "kind": "base",
+            "artifact_path": "/cache/base/redis.sqsh",
+            "service_names": ["svc"],
+            "cache_key": "base:docker://redis:7:0.1.0",
+            "source_image": "docker://redis:7",
+            "registry": "registry-1.docker.io",
+            "prepare_commands": [],
+            "prepare_env": [],
+            "prepare_root": null,
+            "prepare_mounts": [],
+            "force_rebuild_due_to_mounts": false,
+            "created_at": 100,
+            "last_used_at": 200,
+            "tool_version": "0.1.0"
+        }"#;
+        let manifest: CacheEntryManifest = serde_json::from_str(raw).expect("parse old manifest");
+        assert_eq!(manifest.kind, CacheEntryKind::Base);
+        assert_eq!(manifest.uri, None);
+        assert_eq!(manifest.revision, None);
+        assert_eq!(manifest.content_digest, None);
+    }
+
+    #[test]
+    fn prune_by_age_and_prune_all_unused_remove_staged_input_dirs() {
+        // prune --age 0 removes a staged dir via remove_dir_all and reaps the
+        // now-empty kind-segment parent (but never the cache root).
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache = tmpdir.path();
+        let ds_dir = seed_staged(cache, StagedInputKind::Dataset, "hf://org/cifar10");
+        assert!(ds_dir.is_dir());
+        let sidecar = dataset::sidecar_manifest_path_for_suffix(&ds_dir, "dataset");
+        assert!(sidecar.is_file());
+
+        let pruned = prune_by_age(cache, 0).expect("prune age 0");
+        assert_eq!(pruned.removed, vec![ds_dir.clone()]);
+        assert!(!ds_dir.exists(), "staged dir removed via remove_dir_all");
+        assert!(!sidecar.exists(), "sidecar removed");
+        assert!(
+            !cache.join("datasets").exists(),
+            "empty kind-segment parent pruned"
+        );
+        assert!(cache.exists(), "cache root never removed");
+
+        // prune --all-unused removes a staged dir not referenced by the plan
+        // (staged inputs are never in referenced_artifacts today).
+        let md_dir = seed_staged(cache, StagedInputKind::Model, "hf://org/llm");
+        let plan = RuntimePlan {
+            name: "demo".into(),
+            cache_dir: cache.to_path_buf(),
+            runtime: crate::spec::RuntimeConfig::default(),
+            slurm: crate::spec::SlurmConfig::default(),
+            ordered_services: Vec::new(),
+        };
+        let pruned = prune_all_unused(cache, &plan).expect("prune unused");
+        assert_eq!(pruned.removed, vec![md_dir.clone()]);
+        assert!(!md_dir.exists());
+    }
+
+    #[test]
+    fn staged_input_key_matches_module_layout() {
+        let cache = Path::new("/shared/cache");
+        let spec = StagedInputSpec::new(StagedInputKind::Dataset, "hf://org/x", None);
+        let key = dataset_cache_key(&spec);
+        assert_eq!(
+            staged_input_dir(cache, StagedInputKind::Dataset, &key),
+            cache.join("datasets").join(&key)
+        );
     }
 }

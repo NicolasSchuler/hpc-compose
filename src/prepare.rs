@@ -896,6 +896,8 @@ fn create_cache_dirs(plan: &RuntimePlan) -> Result<()> {
     for path in [
         plan.cache_dir.join("base"),
         plan.cache_dir.join("prepared"),
+        plan.cache_dir.join("datasets"),
+        plan.cache_dir.join("models"),
         plan.cache_dir.join("enroot/cache"),
         plan.cache_dir.join("enroot/data"),
         plan.cache_dir.join("enroot/tmp"),

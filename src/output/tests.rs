@@ -445,6 +445,9 @@ fn print_helpers_cover_manifest_and_summary_paths() {
         created_at: 1,
         last_used_at: 1,
         tool_version: "0.1.0".into(),
+        uri: None,
+        revision: None,
+        content_digest: None,
     };
     let manifest_path = hpc_compose::cache::manifest_path_for(&runtime_image);
     std::fs::write(

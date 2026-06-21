@@ -575,9 +575,9 @@ hpc-compose rendezvous prune
 
 | Command | Use it for | Notes |
 | --- | --- | --- |
-| `cache list` | Inspect cached imported and prepared image artifacts | Works without a compose file. |
+| `cache list` | Inspect cached image artifacts and staged dataset/model entries | Works without a compose file. |
 | `cache inspect` | Show cache reuse expectations for the current plan | Supports `--service <name>` for one service. |
-| `cache prune` | Remove old or unused cache entries | `--age` and `--all-unused` are mutually exclusive. |
+| `cache prune` | Remove old or unused cache entries | Covers image artifacts and staged dataset/model entries; `--age` and `--all-unused` are mutually exclusive. |
 
 ```bash
 hpc-compose cache list

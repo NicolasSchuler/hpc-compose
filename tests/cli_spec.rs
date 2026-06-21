@@ -2807,3 +2807,167 @@ services:
         "expected one-of validation error:\n{combined}"
     );
 }
+
+// --- staged-input content-addressed store (CAS) ---
+
+fn seed_staged_input(
+    cache_dir: &std::path::Path,
+    kind: hpc_compose::cache::dataset::StagedInputKind,
+    uri: &str,
+) -> std::path::PathBuf {
+    use hpc_compose::cache::dataset::{StagedInputProof, StagedInputSpec, ensure_staged_input};
+    let spec = StagedInputSpec::new(kind, uri, Some("v1".into()));
+    let (dir, _action) = ensure_staged_input(cache_dir, &spec, |dest| {
+        fs::write(dest.join("payload.bin"), b"data").expect("payload");
+        Ok(StagedInputProof::default())
+    })
+    .expect("seed staged input");
+    dir
+}
+
+#[test]
+fn cache_list_reports_staged_dataset_entries() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_dir = tmpdir.path().join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+    let dir = seed_staged_input(
+        &cache_dir,
+        hpc_compose::cache::dataset::StagedInputKind::Dataset,
+        "hf://org/cifar10",
+    );
+    assert!(dir.is_dir());
+
+    let list_text = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "list",
+            "--cache-dir",
+            cache_dir.to_str().expect("path"),
+        ],
+    );
+    assert_success(&list_text);
+    assert!(stdout_text(&list_text).contains("dataset"));
+
+    let list_json = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "list",
+            "--cache-dir",
+            cache_dir.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&list_json);
+    let value: Value = serde_json::from_str(&stdout_text(&list_json)).expect("list json");
+    let entries = value.as_array().expect("entries array");
+    let dataset = entries
+        .iter()
+        .find(|e| e["kind"] == "dataset")
+        .expect("dataset entry present");
+    assert_eq!(dataset["uri"], Value::from("hf://org/cifar10"));
+    assert_eq!(dataset["revision"], Value::from("v1"));
+    assert_eq!(
+        dataset["artifact_path"],
+        Value::from(dir.display().to_string())
+    );
+}
+
+#[test]
+fn cache_prune_age_removes_staged_inputs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_dir = tmpdir.path().join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+    let dir = seed_staged_input(
+        &cache_dir,
+        hpc_compose::cache::dataset::StagedInputKind::Model,
+        "hf://org/llm",
+    );
+    assert!(dir.is_dir());
+
+    let prune = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "prune",
+            "--age",
+            "0",
+            "--cache-dir",
+            cache_dir.to_str().expect("path"),
+            "--yes",
+        ],
+    );
+    assert_success(&prune);
+    assert!(!dir.exists(), "staged model dir removed by prune --age 0");
+}
+
+#[test]
+fn rendered_script_unchanged_by_staged_input_cache() {
+    // A CAS entry living under the same cache_dir must not change the rendered
+    // batch script, and must never leak a datasets/models path or hf:// URI.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+
+    let before = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "--show-script",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&before);
+    let before_value: Value = serde_json::from_str(&stdout_text(&before)).expect("before json");
+    let before_script = before_value["script"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!before_script.is_empty());
+
+    // Seed staged inputs (dataset + model) under the very same cache dir.
+    seed_staged_input(
+        &cache_dir,
+        hpc_compose::cache::dataset::StagedInputKind::Dataset,
+        "hf://org/cifar10",
+    );
+    seed_staged_input(
+        &cache_dir,
+        hpc_compose::cache::dataset::StagedInputKind::Model,
+        "hf://org/llm",
+    );
+
+    let after = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "--show-script",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&after);
+    let after_value: Value = serde_json::from_str(&stdout_text(&after)).expect("after json");
+    let after_script = after_value["script"].as_str().unwrap_or_default();
+
+    assert_eq!(
+        before_script, after_script,
+        "presence of a CAS entry must not alter the rendered script"
+    );
+    assert!(
+        !after_script.contains("/datasets/") && !after_script.contains("/models/"),
+        "no staged-input cache path may leak into the rendered script"
+    );
+    assert!(
+        !after_script.contains("hf://"),
+        "no staged-input URI may leak into the rendered script"
+    );
+}

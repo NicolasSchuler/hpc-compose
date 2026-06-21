@@ -34,6 +34,12 @@ Use `cache inspect` to answer:
 - whether a prepared image came from a cached manifest
 - whether a service rebuilds on every prepare because prepare mounts are present
 
+## Staged-Input Cache (Datasets/Models)
+
+Staged datasets and models live in a content-addressed store under the same shared cache root, at `cache_dir/datasets/<key>` and `cache_dir/models/<key>`. The key is derived from the input spec (its source URI and pinned revision), so identical staged inputs are materialized once and reused on every later run. Each staged directory carries a sidecar manifest (`<key>.dataset.json` or `<key>.model.json`) so `cache list` and `cache prune` cover staged inputs alongside image artifacts.
+
+The store itself never fetches anything: it is a pure on-disk store, and the actual fetch and materialization (network) is approval-gated and introduced by the `hf://` stage-in work, not run automatically by `cache`, `plan`, or `prepare`.
+
 ## Prune Cache Entries
 
 Prune old entries by age:

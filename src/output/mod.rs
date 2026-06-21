@@ -2936,6 +2936,9 @@ fn write_cache_artifact_block(
         let kind = match manifest.kind {
             CacheEntryKind::Base => "base",
             CacheEntryKind::Prepared => "prepared",
+            CacheEntryKind::Dataset => "dataset",
+            CacheEntryKind::Model => "model",
+            CacheEntryKind::Unknown => "unknown",
         };
         writeln!(writer, "manifest kind: {kind}")?;
         writeln!(writer, "manifest cache key: {}", manifest.cache_key)?;

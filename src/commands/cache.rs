@@ -20,6 +20,9 @@ pub(crate) fn list(cache_dir: Option<PathBuf>, format: Option<OutputFormat>) -> 
                     let kind = match manifest.kind {
                         CacheEntryKind::Base => "base",
                         CacheEntryKind::Prepared => "prepared",
+                        CacheEntryKind::Dataset => "dataset",
+                        CacheEntryKind::Model => "model",
+                        CacheEntryKind::Unknown => "unknown",
                     };
                     println!(
                         "{kind}\t{}\tservices={}\tsource={}",
