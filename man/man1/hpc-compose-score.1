@@ -14,6 +14,9 @@ Compute a post\-run 0\-100 efficiency score for a tracked Slurm job from GPU sam
 \fIJOB_ID\fR
 Tracked Slurm job id to score.
 .TP
+\fB--sweep\fR \fIID\fR
+Score every trial of this sweep id instead of a single job.
+.TP
 \fB-f\fR, \fB--file\fR \fIFILE\fR
 Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml.
 .TP

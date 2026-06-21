@@ -171,6 +171,10 @@ hpc-compose germinate -f compose.yaml --format json
 hpc-compose germinate -f compose.yaml --dry-run --script-out canary.sbatch
 hpc-compose sweep submit -f compose.yaml --dry-run
 hpc-compose sweep submit -f compose.yaml --max-trials 200
+hpc-compose sweep results -f compose.yaml --format csv > runs.csv
+hpc-compose sweep results -f compose.yaml --include score,energy --format json
+hpc-compose score --sweep latest -f compose.yaml --format json
+hpc-compose stats --sweep latest -f compose.yaml --format json
 hpc-compose sweep status -f compose.yaml --format json
 hpc-compose sweep list -f compose.yaml
 hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4

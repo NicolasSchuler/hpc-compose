@@ -630,6 +630,26 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 )?;
                 runtime::sweep_stop(context, sweep_id, yes, reason, format)
             }
+            SweepCommands::Results {
+                file,
+                sweep_id,
+                format,
+                include,
+                squeue_bin,
+                sacct_bin,
+                sstat_bin,
+            } => {
+                let context = resolve_ctx(
+                    options,
+                    file,
+                    &[
+                        ("--squeue-bin", &squeue_bin),
+                        ("--sacct-bin", &sacct_bin),
+                        ("--sstat-bin", &sstat_bin),
+                    ],
+                )?;
+                runtime::sweep_results(context, sweep_id, format, include)
+            }
         },
         Commands::Germinate {
             launch,
@@ -829,6 +849,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Stats {
             file,
             job_id,
+            sweep,
             format,
             accounting,
             sstat_bin,
@@ -844,7 +865,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sacct-bin", &sacct_bin),
                 ],
             )?;
-            runtime::stats(context, job_id, false, format, accounting)
+            if sweep.is_some() {
+                runtime::stats_sweep(context, sweep, format, accounting)
+            } else {
+                runtime::stats(context, job_id, false, format, accounting)
+            }
         }
         Commands::MetricsProbe {
             duration_seconds,
@@ -853,6 +878,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         } => runtime::metrics_probe(duration_seconds, format, compare_nvidia_smi),
         Commands::Score {
             job_id,
+            sweep,
             file,
             format,
             pue,
@@ -871,15 +897,19 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sacct-bin", &sacct_bin),
                 ],
             )?;
-            runtime::score(
-                context,
-                job_id,
-                false,
-                format,
-                pue,
-                gpu_tdp_w,
-                cpu_watts_per_core,
-            )
+            if sweep.is_some() {
+                runtime::score_sweep(context, sweep, format, pue, gpu_tdp_w, cpu_watts_per_core)
+            } else {
+                runtime::score(
+                    context,
+                    job_id,
+                    false,
+                    format,
+                    pue,
+                    gpu_tdp_w,
+                    cpu_watts_per_core,
+                )
+            }
         }
         Commands::Diff {
             job_id_1,

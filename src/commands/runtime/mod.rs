@@ -11,7 +11,9 @@ pub(super) use std::thread;
 pub(super) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) use anyhow::{Context, Result, bail};
-pub(super) use hpc_compose::cli::{HoldOnExit, OutputFormat, StatsOutputFormat, WatchMode};
+pub(super) use hpc_compose::cli::{
+    HoldOnExit, OutputFormat, StatsOutputFormat, SweepResultsFormat, WatchMode,
+};
 pub(super) use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 pub(super) use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};
 #[cfg(test)]

@@ -1030,3 +1030,487 @@ fn print_sweep_stop_output(report: &SweepStopOutput) {
         report.sweep_id, report.cancelled_count, report.skipped_count
     );
 }
+
+// --- sweep results / score --sweep / stats --sweep -------------------------
+
+#[derive(Debug, Serialize)]
+struct SweepResultsOutput {
+    sweep_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objective_direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    best_trial: Option<String>,
+    variable_columns: Vec<String>,
+    rows: Vec<SweepResultRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepResultRow {
+    trial_id: String,
+    index: usize,
+    variables: BTreeMap<String, String>,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduler_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objective: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objective_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    energy_kwh: Option<f64>,
+}
+
+/// Parses `--include` tokens into (want_score, want_energy); rejects unknowns.
+fn parse_sweep_include(include: &[String]) -> Result<(bool, bool)> {
+    let mut want_score = false;
+    let mut want_energy = false;
+    for token in include {
+        match token.trim() {
+            "" => {}
+            "score" => want_score = true,
+            "energy" => want_energy = true,
+            other => bail!("unknown --include value '{other}'; valid values are: score, energy"),
+        }
+    }
+    Ok((want_score, want_energy))
+}
+
+/// Sorted union of variable keys across all trials, used as stable columns.
+fn sweep_variable_columns<'a>(
+    variable_maps: impl Iterator<Item = &'a BTreeMap<String, String>>,
+) -> Vec<String> {
+    let mut columns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for map in variable_maps {
+        columns.extend(map.keys().cloned());
+    }
+    columns.into_iter().collect()
+}
+
+/// Loads the per-trial efficiency report (resolves the tracked record + runtime
+/// plan, then builds the score). Static read of tracked state plus the same
+/// terminal-only accounting probe `score` performs.
+fn trial_efficiency_report(
+    context: &ResolvedContext,
+    trial: &SweepManifestTrial,
+    options: &EfficiencyScoreOptions,
+) -> Result<hpc_compose::job::EfficiencyScoreReport> {
+    let job_id = trial
+        .job_id
+        .as_deref()
+        .context("trial has no recorded job id")?;
+    let record = resolve_tracked_record(context, Some(job_id))?
+        .with_context(|| format!("no tracked record for trial job {job_id}"))?;
+    let plan =
+        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &record.compose_file,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    build_efficiency_score_report(&plan, &record, options)
+}
+
+/// Parses and prints one tidy row per trial (read-only; never writes back to
+/// the manifest, unlike `sweep observe`).
+pub(crate) fn sweep_results(
+    context: ResolvedContext,
+    sweep_id: Option<String>,
+    format: Option<SweepResultsFormat>,
+    include: Vec<String>,
+) -> Result<()> {
+    let (want_score, want_energy) = parse_sweep_include(&include)?;
+    let manifest = load_sweep_manifest(&context.compose_file.value, sweep_id.as_deref())?;
+    let scheduler = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+    let direction = manifest
+        .objective
+        .as_ref()
+        .map(|objective| objective.direction);
+    let variable_columns = sweep_variable_columns(manifest.trials.iter().map(|t| &t.variables));
+    let score_options = EfficiencyScoreOptions {
+        scheduler: SchedulerOptions {
+            squeue_bin: context.binaries.squeue.value.clone(),
+            sacct_bin: context.binaries.sacct.value.clone(),
+        },
+        sstat_bin: context.binaries.sstat.value.clone(),
+        ..EfficiencyScoreOptions::default()
+    };
+
+    let mut rows = Vec::new();
+    let mut best: Option<(f64, String)> = None;
+    for trial in &manifest.trials {
+        let status = status_for_sweep_trial(&manifest, trial, &scheduler);
+        let (objective, objective_error) = match parse_trial_objective(trial, &manifest, &scheduler)
+        {
+            Ok(Some(value)) => {
+                if let Some(direction) = direction {
+                    let better = best.as_ref().is_none_or(|(best, _)| match direction {
+                        hpc_compose::spec::ObjectiveDirection::Minimize => value < *best,
+                        hpc_compose::spec::ObjectiveDirection::Maximize => value > *best,
+                    });
+                    if better {
+                        best = Some((value, trial.trial_id.clone()));
+                    }
+                }
+                (Some(value.to_string()), None)
+            }
+            Ok(None) => (None, None),
+            Err(err) => (None, Some(format!("{err:#}"))),
+        };
+        let (score, energy_kwh) = if want_score || want_energy {
+            match trial_efficiency_report(&context, trial, &score_options) {
+                Ok(report) => (
+                    want_score.then_some(report.score),
+                    if want_energy { report.energy_kwh } else { None },
+                ),
+                Err(_) => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        rows.push(SweepResultRow {
+            trial_id: trial.trial_id.clone(),
+            index: trial.index,
+            variables: trial.variables.clone(),
+            status: status.status,
+            scheduler_state: status.scheduler_state,
+            objective,
+            objective_error,
+            score,
+            energy_kwh,
+        });
+    }
+
+    let output = SweepResultsOutput {
+        sweep_id: manifest.sweep_id,
+        objective_direction: direction.map(|direction| match direction {
+            hpc_compose::spec::ObjectiveDirection::Minimize => "minimize".to_string(),
+            hpc_compose::spec::ObjectiveDirection::Maximize => "maximize".to_string(),
+        }),
+        best_trial: best.map(|(_, id)| id),
+        variable_columns,
+        rows,
+    };
+
+    match output::resolve_sweep_results_format(format) {
+        SweepResultsFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output)
+                    .context("failed to serialize sweep results output")?
+            );
+        }
+        SweepResultsFormat::Csv => println!("{}", sweep_results_csv(&output)),
+        SweepResultsFormat::Text => print_sweep_results_output(&output),
+    }
+    Ok(())
+}
+
+fn sweep_results_csv(output: &SweepResultsOutput) -> String {
+    let has_score = output.rows.iter().any(|row| row.score.is_some());
+    let has_energy = output.rows.iter().any(|row| row.energy_kwh.is_some());
+    let mut header = vec!["trial_id".to_string(), "index".to_string()];
+    header.extend(output.variable_columns.iter().cloned());
+    header.push("status".to_string());
+    header.push("objective".to_string());
+    if has_score {
+        header.push("score".to_string());
+    }
+    if has_energy {
+        header.push("energy_kwh".to_string());
+    }
+    let mut lines = vec![
+        header
+            .iter()
+            .map(|field| output::csv_field(field))
+            .collect::<Vec<_>>()
+            .join(","),
+    ];
+    for row in &output.rows {
+        let mut fields = vec![
+            output::csv_field(&row.trial_id),
+            output::csv_field(&row.index.to_string()),
+        ];
+        for column in &output.variable_columns {
+            fields.push(output::csv_field(
+                row.variables.get(column).map(String::as_str).unwrap_or(""),
+            ));
+        }
+        fields.push(output::csv_field(&row.status));
+        fields.push(output::csv_field(row.objective.as_deref().unwrap_or("")));
+        if has_score {
+            fields.push(output::csv_field(
+                &row.score.map(|score| score.to_string()).unwrap_or_default(),
+            ));
+        }
+        if has_energy {
+            fields.push(output::csv_field(
+                &row.energy_kwh
+                    .map(|energy| format!("{energy:.6}"))
+                    .unwrap_or_default(),
+            ));
+        }
+        lines.push(fields.join(","));
+    }
+    lines.join("\n")
+}
+
+fn print_sweep_results_output(output: &SweepResultsOutput) {
+    println!("sweep {}", output.sweep_id);
+    if let Some(best) = &output.best_trial {
+        println!("best trial: {best}");
+    }
+    for row in &output.rows {
+        let vars = output
+            .variable_columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "{column}={}",
+                    row.variables.get(column).map(String::as_str).unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut line = format!("{}  {}  {vars}", row.trial_id, row.status);
+        if let Some(objective) = &row.objective {
+            line.push_str(&format!("  objective={objective}"));
+        }
+        if let Some(score) = row.score {
+            line.push_str(&format!("  score={score}"));
+        }
+        if let Some(energy) = row.energy_kwh {
+            line.push_str(&format!("  energy_kwh={energy:.4}"));
+        }
+        println!("{line}");
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct SweepScoreOutput {
+    sweep_id: String,
+    trials: Vec<SweepScoreTrial>,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepScoreTrial {
+    trial_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<hpc_compose::job::EfficiencyScoreReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Per-trial efficiency score collection over a sweep (read-only).
+pub(crate) fn score_sweep(
+    context: ResolvedContext,
+    sweep_id: Option<String>,
+    format: Option<OutputFormat>,
+    pue: f64,
+    gpu_tdp_w: f64,
+    cpu_watts_per_core: f64,
+) -> Result<()> {
+    let manifest = load_sweep_manifest(&context.compose_file.value, sweep_id.as_deref())?;
+    let options = EfficiencyScoreOptions {
+        scheduler: SchedulerOptions {
+            squeue_bin: context.binaries.squeue.value.clone(),
+            sacct_bin: context.binaries.sacct.value.clone(),
+        },
+        sstat_bin: context.binaries.sstat.value.clone(),
+        pue,
+        gpu_tdp_w,
+        cpu_watts_per_core,
+    };
+    let trials = manifest
+        .trials
+        .iter()
+        .map(|trial| {
+            let (report, error) = match trial_efficiency_report(&context, trial, &options) {
+                Ok(report) => (Some(report), None),
+                Err(err) => (None, Some(format!("{err:#}"))),
+            };
+            SweepScoreTrial {
+                trial_id: trial.trial_id.clone(),
+                job_id: trial.job_id.clone(),
+                report,
+                error,
+            }
+        })
+        .collect();
+    let output = SweepScoreOutput {
+        sweep_id: manifest.sweep_id,
+        trials,
+    };
+    match output::resolve_output_format(format, false) {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&output)
+                .context("failed to serialize sweep score output")?
+        ),
+        OutputFormat::Text => {
+            println!("sweep {}", output.sweep_id);
+            for trial in &output.trials {
+                match (&trial.report, &trial.error) {
+                    (Some(report), _) => println!(
+                        "{}  score={}  grade={}",
+                        trial.trial_id, report.score, report.grade
+                    ),
+                    (None, Some(error)) => println!("{}  error: {error}", trial.trial_id),
+                    (None, None) => println!("{}  (no score)", trial.trial_id),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct SweepStatsOutput {
+    sweep_id: String,
+    trials: Vec<SweepStatsTrial>,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepStatsTrial {
+    trial_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot: Option<hpc_compose::job::StatsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Per-trial runtime metrics/step-stats collection over a sweep (read-only).
+pub(crate) fn stats_sweep(
+    context: ResolvedContext,
+    sweep_id: Option<String>,
+    format: Option<StatsOutputFormat>,
+    accounting: bool,
+) -> Result<()> {
+    let manifest = load_sweep_manifest(&context.compose_file.value, sweep_id.as_deref())?;
+    let options = StatsOptions {
+        scheduler: SchedulerOptions {
+            squeue_bin: context.binaries.squeue.value.clone(),
+            sacct_bin: context.binaries.sacct.value.clone(),
+        },
+        sstat_bin: context.binaries.sstat.value.clone(),
+        accounting,
+    };
+    let trials = manifest
+        .trials
+        .iter()
+        .map(|trial| {
+            let (snapshot, error) = match trial.job_id.as_deref() {
+                Some(job_id) => {
+                    match build_stats_snapshot(&manifest.compose_file, Some(job_id), &options) {
+                        Ok(snapshot) => (Some(snapshot), None),
+                        Err(err) => (None, Some(format!("{err:#}"))),
+                    }
+                }
+                None => (None, Some("trial has no recorded job id".to_string())),
+            };
+            SweepStatsTrial {
+                trial_id: trial.trial_id.clone(),
+                job_id: trial.job_id.clone(),
+                snapshot,
+                error,
+            }
+        })
+        .collect();
+    let output = SweepStatsOutput {
+        sweep_id: manifest.sweep_id,
+        trials,
+    };
+    // The collection is naturally a document; emit JSON for json/csv/jsonl and a
+    // compact per-trial summary for text.
+    match format.unwrap_or(StatsOutputFormat::Text) {
+        StatsOutputFormat::Text => {
+            println!("sweep {}", output.sweep_id);
+            for trial in &output.trials {
+                match &trial.error {
+                    Some(error) => println!("{}  error: {error}", trial.trial_id),
+                    None => println!(
+                        "{}  job={}",
+                        trial.trial_id,
+                        trial.job_id.as_deref().unwrap_or("-")
+                    ),
+                }
+            }
+        }
+        _ => println!(
+            "{}",
+            serde_json::to_string_pretty(&output)
+                .context("failed to serialize sweep stats output")?
+        ),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_sweep_include_accepts_known_and_rejects_unknown() {
+        assert_eq!(
+            parse_sweep_include(&["score".into(), "energy".into()]).unwrap(),
+            (true, true)
+        );
+        assert_eq!(parse_sweep_include(&[]).unwrap(), (false, false));
+        assert!(parse_sweep_include(&["bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn sweep_variable_columns_is_sorted_union() {
+        let a = vars(&[("lr", "0.1"), ("bs", "32")]);
+        let b = vars(&[("lr", "0.2"), ("wd", "0.01")]);
+        let columns = sweep_variable_columns([&a, &b].into_iter());
+        assert_eq!(columns, vec!["bs", "lr", "wd"]);
+    }
+
+    #[test]
+    fn sweep_results_csv_quotes_and_orders_columns() {
+        let output = SweepResultsOutput {
+            sweep_id: "s1".to_string(),
+            objective_direction: Some("minimize".to_string()),
+            best_trial: Some("t000".to_string()),
+            variable_columns: vec!["lr".to_string(), "note".to_string()],
+            rows: vec![SweepResultRow {
+                trial_id: "t000".to_string(),
+                index: 0,
+                variables: vars(&[("lr", "0.1"), ("note", "a,b\"c")]),
+                status: "completed".to_string(),
+                scheduler_state: Some("COMPLETED".to_string()),
+                objective: Some("0.05".to_string()),
+                objective_error: None,
+                score: None,
+                energy_kwh: None,
+            }],
+        };
+        let csv = sweep_results_csv(&output);
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "\"trial_id\",\"index\",\"lr\",\"note\",\"status\",\"objective\""
+        );
+        // The comma/quote-containing value is escaped per RFC4180.
+        assert_eq!(
+            lines.next().unwrap(),
+            "\"t000\",\"0\",\"0.1\",\"a,b\"\"c\",\"completed\",\"0.05\""
+        );
+    }
+}

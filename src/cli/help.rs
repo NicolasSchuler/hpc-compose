@@ -158,6 +158,12 @@ Examples:
   hpc-compose sweep stop -f train.yaml
   hpc-compose sweep stop -f train.yaml --yes --reason 'objective threshold met'";
 
+pub(super) const SWEEP_RESULTS_HELP: &str = "\
+Examples:
+  hpc-compose sweep results -f train.yaml
+  hpc-compose sweep results -f train.yaml --format csv > runs.csv
+  hpc-compose sweep results -f train.yaml --include score,energy --format json";
+
 pub(super) const WHEN_HELP: &str = "\
 Examples:
   hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
@@ -642,6 +648,7 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["sweep", "submit"] => SWEEP_EXAMPLES,
         ["sweep", "status"] => SWEEP_EXAMPLES,
         ["sweep", "list"] => SWEEP_EXAMPLES,
+        ["sweep", "results"] => SWEEP_EXAMPLES,
         ["status"] => STATUS_EXAMPLES,
         ["stats"] => STATS_EXAMPLES,
         ["score"] => SCORE_EXAMPLES,

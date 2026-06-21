@@ -6,7 +6,7 @@ use clap_complete::Shell;
 use super::help::*;
 use super::{
     ColorPolicy, DependencyOutputFormat, ExamplesOutputFormat, HoldOnExit, OutputFormat,
-    SchemaKind, StatsOutputFormat, WatchMode,
+    SchemaKind, StatsOutputFormat, SweepResultsFormat, WatchMode,
 };
 
 #[derive(Debug, Parser)]
@@ -1290,6 +1290,13 @@ pub enum Commands {
             help = "Tracked Slurm job id to inspect instead of the latest recorded submission"
         )]
         job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "ID",
+            conflicts_with = "job_id",
+            help = "Aggregate per-trial stats over all trials of this sweep id instead of a single job"
+        )]
+        sweep: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<StatsOutputFormat>,
         #[arg(
@@ -1354,6 +1361,13 @@ pub enum Commands {
     Score {
         #[arg(value_name = "JOB_ID", help = "Tracked Slurm job id to score")]
         job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "ID",
+            conflicts_with = "job_id",
+            help = "Score every trial of this sweep id instead of a single job"
+        )]
+        sweep: Option<String>,
         #[arg(
             short = 'f',
             long,
@@ -2997,5 +3011,53 @@ pub enum SweepCommands {
             help = "Path to the scancel executable"
         )]
         scancel_bin: String,
+    },
+    #[command(
+        about = "Tabulate per-trial results for one sweep",
+        long_about = "Read a persisted sweep manifest and print one tidy row per trial (each sweep variable as its own column, status, and parsed objective) as text, JSON, or CSV. Read-only: unlike `sweep observe`, it never writes objective state back to the manifest.",
+        after_help = SWEEP_RESULTS_HELP
+    )]
+    Results {
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "Sweep id to tabulate; defaults to the latest sweep"
+        )]
+        sweep_id: Option<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<SweepResultsFormat>,
+        #[arg(
+            long,
+            value_name = "METRIC",
+            value_delimiter = ',',
+            help = "Extra per-trial columns: score, energy (comma-separated)"
+        )]
+        include: Vec<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "squeue",
+            help_heading = "Tool overrides",
+            help = "Path to the squeue executable"
+        )]
+        squeue_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sacct",
+            help_heading = "Tool overrides",
+            help = "Path to the sacct executable"
+        )]
+        sacct_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "sstat",
+            help_heading = "Tool overrides",
+            help = "Path to the sstat executable"
+        )]
+        sstat_bin: String,
     },
 }

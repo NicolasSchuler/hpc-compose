@@ -44,6 +44,15 @@ pub enum StatsOutputFormat {
     Jsonl,
 }
 
+/// Output format for `sweep results`. CSV is sweep-results-specific and cannot
+/// live on the shared [`OutputFormat`] (which is Text/Json only).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum SweepResultsFormat {
+    Text,
+    Json,
+    Csv,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum DependencyOutputFormat {
     Text,

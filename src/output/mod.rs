@@ -7,7 +7,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
-use hpc_compose::cli::{OutputFormat, StatsOutputFormat};
+use hpc_compose::cli::{OutputFormat, StatsOutputFormat, SweepResultsFormat};
 use hpc_compose::cluster::ClusterProfile;
 use hpc_compose::context::ResourceProfile;
 use hpc_compose::init::{
@@ -300,6 +300,13 @@ pub(crate) fn resolve_stats_output_format(
     } else {
         format.unwrap_or(StatsOutputFormat::Text)
     }
+}
+
+/// Resolves the `sweep results` output format, defaulting to text.
+pub(crate) fn resolve_sweep_results_format(
+    format: Option<SweepResultsFormat>,
+) -> SweepResultsFormat {
+    format.unwrap_or(SweepResultsFormat::Text)
 }
 
 pub(crate) fn build_validate_output(plan: &Plan, cluster_warnings: Vec<String>) -> ValidateOutput {
@@ -1873,7 +1880,7 @@ fn write_jsonl_record(writer: &mut impl Write, value: &serde_json::Value) -> io:
     writeln!(writer)
 }
 
-fn csv_field(value: &str) -> String {
+pub(crate) fn csv_field(value: &str) -> String {
     let escaped = value.replace('"', "\"\"");
     format!("\"{escaped}\"")
 }
