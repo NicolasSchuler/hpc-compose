@@ -102,7 +102,7 @@ pub(crate) fn reach(
 
     let compute = compute_node.as_deref().unwrap_or("<compute-node>");
     let login = login_host.as_deref().unwrap_or("<login-node>");
-    let ssh_command = reach_ssh_command(local_port, remote_port, compute, login);
+    let ssh_command = ssh_forward_command(local_port, remote_port, compute, login);
 
     if json {
         let out = ReachOutput {
@@ -133,23 +133,8 @@ pub(crate) fn reach(
     println!("Forward the port from your laptop:");
     println!("  {ssh_command}");
     println!();
-    println!(
-        "{}",
-        term::styled_dim(
-            "The ControlMaster options reuse one authenticated connection, so a login node that \
-             requires an OTP/2FA only prompts on the first reach (or notebook) within ControlPersist."
-        )
-    );
+    println!("{}", term::styled_dim(OTP_MULTIPLEX_NOTE));
     Ok(())
-}
-
-/// Builds the SSH port-forward command with connection multiplexing so a
-/// per-session OTP is entered once and reused by later tunnels/transfers.
-fn reach_ssh_command(local_port: u16, remote_port: u16, compute: &str, login: &str) -> String {
-    format!(
-        "ssh -N -o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=10m \
-         -L {local_port}:{compute}:{remote_port} {login}"
-    )
 }
 
 /// Runs the port-forward in the foreground (Ctrl-C to stop). Never daemonized.
@@ -158,19 +143,11 @@ fn run_reach_forward(local_port: u16, remote_port: u16, compute: &str, login: &s
         "forwarding 127.0.0.1:{local_port} -> {compute}:{remote_port} via {login} (Ctrl-C to stop)"
     );
     let forward = format!("{local_port}:{compute}:{remote_port}");
+    let mut args: Vec<&str> = vec!["-N"];
+    args.extend(CONTROL_MASTER_SSH_OPTS);
+    args.extend(["-L", forward.as_str(), login]);
     let status = std::process::Command::new("ssh")
-        .args([
-            "-N",
-            "-o",
-            "ControlMaster=auto",
-            "-o",
-            "ControlPath=~/.ssh/cm-%r@%h:%p",
-            "-o",
-            "ControlPersist=10m",
-            "-L",
-            &forward,
-            login,
-        ])
+        .args(&args)
         .status()
         .context("failed to execute 'ssh'")?;
     if !status.success() {
@@ -180,18 +157,4 @@ fn run_reach_forward(local_port: u16, remote_port: u16, compute: &str, login: &s
         bail!("ssh exited abnormally");
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reach_ssh_command_includes_multiplexing_and_forward() {
-        let command = reach_ssh_command(8000, 8000, "gpu042", "login01");
-        assert!(command.contains("-L 8000:gpu042:8000 login01"));
-        assert!(command.contains("ControlMaster=auto"));
-        assert!(command.contains("ControlPersist=10m"));
-        assert!(command.starts_with("ssh -N "));
-    }
 }

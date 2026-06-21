@@ -81,6 +81,7 @@ mod inspect;
 mod lifecycle;
 mod reach;
 mod rendezvous_cmd;
+mod ssh_hint;
 mod sweep;
 
 pub(crate) use debug::*;
@@ -91,6 +92,7 @@ pub(crate) use inspect::*;
 pub(crate) use lifecycle::*;
 pub(crate) use reach::*;
 pub(crate) use rendezvous_cmd::*;
+pub(crate) use ssh_hint::*;
 pub(crate) use sweep::*;
 
 /// Bundle of the four preparation-related flags shared across the runtime
