@@ -321,3 +321,11 @@ Source: `examples/vllm-uv-worker.yaml`
 ```yaml
 {{#include ../../examples/vllm-uv-worker.yaml}}
 ```
+
+## Eval Harness
+
+Source: `examples/eval-harness.yaml`
+
+```yaml
+{{#include ../../examples/eval-harness.yaml}}
+```

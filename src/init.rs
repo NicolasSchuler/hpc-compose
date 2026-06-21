@@ -94,6 +94,11 @@ const TEMPLATES: &[Template] = &[
         body: include_str!("../examples/vllm-uv-worker.yaml"),
     },
     Template {
+        name: "eval-harness",
+        description: "vLLM OpenAI server with HTTP /health readiness plus an lm-eval-harness client writing results.json, with a model/tasks sweep stub.",
+        body: include_str!("../examples/eval-harness.yaml"),
+    },
+    Template {
         name: "mpi-hello",
         description: "MPI hello world with Open MPI.",
         body: include_str!("../examples/mpi-hello.yaml"),

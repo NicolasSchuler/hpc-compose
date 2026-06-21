@@ -96,6 +96,7 @@ fn inspect_json_preflight_json_and_init_cover_new_modes() {
         "nextflow-bridge",
         "snakemake-bridge",
         "vllm-uv-worker",
+        "eval-harness",
     ] {
         let output = tmpdir.path().join(format!("{template}.yaml"));
         let init = run_cli(
