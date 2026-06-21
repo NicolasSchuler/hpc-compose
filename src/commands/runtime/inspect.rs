@@ -213,10 +213,15 @@ pub(crate) fn artifacts(
 
 pub(crate) fn diff(
     context: ResolvedContext,
-    job_id_1: String,
-    job_id_2: String,
+    job_id_1: Option<String>,
+    job_id_2: Option<String>,
     format: Option<OutputFormat>,
 ) -> Result<()> {
+    let (Some(job_id_1), Some(job_id_2)) = (job_id_1, job_id_2) else {
+        bail!(
+            "pairwise diff requires two tracked job ids; pass both (e.g. 'hpc-compose diff 12345 12346'), or use --across <sweep>/--jobs a,b,c for an N-way matrix"
+        );
+    };
     let left = resolve_tracked_record(&context, Some(&job_id_1))?
         .with_context(|| format!("tracked job '{job_id_1}' was not found"))?;
     let right = resolve_tracked_record(&context, Some(&job_id_2))?
@@ -237,6 +242,71 @@ pub(crate) fn diff(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).context("failed to serialize diff output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Builds an N-way comparison matrix over either every submitted trial of a
+/// sweep (`--across`) or an explicit list of tracked job ids (`--jobs`).
+pub(crate) fn diff_matrix(
+    context: ResolvedContext,
+    across: Option<String>,
+    jobs: Vec<String>,
+    format: Option<DiffMatrixFormat>,
+) -> Result<()> {
+    let options = SchedulerOptions {
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
+    };
+    let mut records = Vec::new();
+    let mut notes = Vec::new();
+    match across {
+        Some(sweep) => {
+            let manifest = load_sweep_manifest(&context.compose_file.value, Some(&sweep))?;
+            for trial in &manifest.trials {
+                match trial.job_id.as_deref() {
+                    Some(job_id) => {
+                        let record = resolve_tracked_record(&context, Some(job_id))?
+                            .with_context(|| format!("tracked job '{job_id}' was not found"))?;
+                        records.push(record);
+                    }
+                    None => notes.push(format!(
+                        "trial '{}' has not been submitted; skipping",
+                        trial.trial_id
+                    )),
+                }
+            }
+        }
+        None => {
+            for job_id in &jobs {
+                let record = resolve_tracked_record(&context, Some(job_id))?
+                    .with_context(|| format!("tracked job '{job_id}' was not found"))?;
+                records.push(record);
+            }
+        }
+    }
+    if records.len() < 2 {
+        bail!(
+            "an N-way diff needs at least two resolvable runs; found {}",
+            records.len()
+        );
+    }
+
+    let mut report = build_job_matrix_report(&records, &options);
+    // Surface any unsubmitted-trial notes alongside the builder's own notes.
+    report.notes.splice(0..0, notes);
+
+    match output::resolve_diff_matrix_format(format) {
+        DiffMatrixFormat::Text => {
+            output::print_job_matrix_report(&report).context("failed to write diff matrix")?;
+        }
+        DiffMatrixFormat::Csv => println!("{}", output::job_matrix_csv(&report)),
+        DiffMatrixFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).context("failed to serialize diff matrix")?
             );
         }
     }

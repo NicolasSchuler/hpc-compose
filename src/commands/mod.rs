@@ -914,8 +914,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Diff {
             job_id_1,
             job_id_2,
+            across,
+            jobs,
             file,
             format,
+            matrix_format,
             squeue_bin,
             sacct_bin,
         } => {
@@ -924,7 +927,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 file,
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             )?;
-            runtime::diff(context, job_id_1, job_id_2, format)
+            if across.is_some() || !jobs.is_empty() {
+                runtime::diff_matrix(context, across, jobs, matrix_format)
+            } else {
+                runtime::diff(context, job_id_1, job_id_2, format)
+            }
         }
         Commands::Artifacts {
             file,

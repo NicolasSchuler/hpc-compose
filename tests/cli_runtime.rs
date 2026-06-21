@@ -7865,6 +7865,293 @@ fn diff_malformed_config_snapshot_reports_note_and_keeps_outcome_changes() {
     );
 }
 
+/// Builds and persists a completed local record with the given config snapshot
+/// and a written state file, returning the record so callers can reference it.
+fn write_matrix_record(
+    compose: &std::path::Path,
+    project: &std::path::Path,
+    script: &std::path::Path,
+    plan: &hpc_compose::prepare::RuntimePlan,
+    job_id: &str,
+    config_snapshot_yaml: &str,
+) -> SubmissionRecord {
+    let options = SubmissionRecordBuildOptions {
+        config_snapshot_yaml: Some(config_snapshot_yaml.to_string()),
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let record = build_submission_record_with_backend_and_options(
+        compose,
+        project,
+        script,
+        plan,
+        job_id,
+        SubmissionBackend::Local,
+        &options,
+    )
+    .expect("matrix record");
+    write_submission_record(&record).expect("write matrix record");
+    let state_path = state_path_for_record(&record);
+    fs::create_dir_all(state_path.parent().unwrap()).expect("state dir");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backend": "local",
+            "job_status": "COMPLETED",
+            "job_exit_code": 0,
+            "services": [{"service_name": "app", "last_exit_code": 0, "completed_successfully": true}]
+        }))
+        .expect("state json"),
+    )
+    .expect("write state");
+    record
+}
+
+#[test]
+fn diff_jobs_builds_nway_matrix_text_and_csv() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+
+    // Same partition across all three; differing time + per-service image.
+    let snapshot = |time: &str, image: &str| {
+        format!(
+            "name: demo\nx-slurm:\n  partition: gpu\n  time: \"{time}\"\nservices:\n  app:\n    image: {image}\n",
+        )
+    };
+    write_matrix_record(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "11111",
+        &snapshot("00:10:00", "python:3.10"),
+    );
+    write_matrix_record(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "22222",
+        &snapshot("00:20:00", "python:3.11"),
+    );
+    write_matrix_record(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "33333",
+        &snapshot("00:30:00", "python:3.12"),
+    );
+
+    // JSON: assert the run columns and a differing row's positionally-aligned cells.
+    let json = run_cli(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--jobs",
+            "11111,22222,33333",
+            "--matrix-format",
+            "json",
+        ],
+    );
+    assert_success(&json);
+    let value: Value = serde_json::from_str(&stdout_text(&json)).expect("matrix json");
+    let runs = value["runs"].as_array().expect("runs array");
+    assert_eq!(
+        runs.iter()
+            .map(|run| run["job_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["11111", "22222", "33333"]
+    );
+    let rows = value["rows"].as_array().expect("rows array");
+    let time_row = rows
+        .iter()
+        .find(|row| row["path"] == "x-slurm.time")
+        .expect("time row present");
+    assert_eq!(time_row["section"], "resources");
+    assert_eq!(
+        time_row["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cell| cell.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["00:10:00", "00:20:00", "00:30:00"]
+    );
+    // The identical partition field is collapsed (no row).
+    assert!(!rows.iter().any(|row| row["path"] == "x-slurm.partition"));
+
+    // Text: legend lists every run, and differing rows are shown.
+    let text = run_cli(tmpdir.path(), &["diff", "--jobs", "11111,22222,33333"]);
+    assert_success(&text);
+    let text_stdout = stdout_text(&text);
+    assert!(text_stdout.contains("11111"));
+    assert!(text_stdout.contains("22222"));
+    assert!(text_stdout.contains("33333"));
+    assert!(text_stdout.contains("x-slurm.time"));
+    assert!(text_stdout.contains("services.app.image"));
+
+    // CSV: header is section,field,<job_id>... with quoted cells.
+    let csv = run_cli(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--jobs",
+            "11111,22222,33333",
+            "--matrix-format",
+            "csv",
+        ],
+    );
+    assert_success(&csv);
+    let csv_stdout = stdout_text(&csv);
+    let header = csv_stdout.lines().next().expect("csv header");
+    assert_eq!(
+        header,
+        "\"section\",\"field\",\"11111\",\"22222\",\"33333\""
+    );
+    assert!(csv_stdout.lines().any(|line| {
+        line.starts_with("\"resources\",\"x-slurm.time\",")
+            && line.contains("\"00:10:00\"")
+            && line.contains("\"00:30:00\"")
+    }));
+}
+
+#[test]
+fn diff_across_sweep_skips_unsubmitted_trials_with_note() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+
+    let snapshot = |time: &str| {
+        format!(
+            "name: demo\nx-slurm:\n  partition: gpu\n  time: \"{time}\"\nservices:\n  app:\n    image: python:3.10\n"
+        )
+    };
+    write_matrix_record(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "70001",
+        &snapshot("00:10:00"),
+    );
+    write_matrix_record(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "70002",
+        &snapshot("00:20:00"),
+    );
+
+    let sweep_id = "sweep-across-test";
+    let mut submitted_a = results_trial("t000", 0, &[("lr", "0.1")]);
+    submitted_a.job_id = Some("70001".to_string());
+    let mut submitted_b = results_trial("t001", 1, &[("lr", "0.2")]);
+    submitted_b.job_id = Some("70002".to_string());
+    // Third trial was never submitted (job_id None) -> skipped with a note.
+    let unsubmitted = results_trial("t002", 2, &[("lr", "0.3")]);
+    let manifest = SweepManifest {
+        schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
+        sweep_id: sweep_id.to_string(),
+        compose_file: compose.clone(),
+        submitted_at: 1,
+        matrix: "full".to_string(),
+        seed: None,
+        total_combinations: 3,
+        objective: None,
+        best_trial: None,
+        stopped_at: None,
+        stop_reason: None,
+        trials: vec![submitted_a, submitted_b, unsubmitted],
+    };
+    write_sweep_manifest(&manifest).expect("write manifest");
+
+    let json = run_cli(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--across",
+            sweep_id,
+            "-f",
+            compose.to_str().unwrap(),
+            "--matrix-format",
+            "json",
+        ],
+    );
+    assert_success(&json);
+    let value: Value = serde_json::from_str(&stdout_text(&json)).expect("matrix json");
+    // Only the two submitted trials become columns.
+    assert_eq!(
+        value["runs"]
+            .as_array()
+            .expect("runs")
+            .iter()
+            .map(|run| run["job_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["70001", "70002"]
+    );
+    // The unsubmitted trial is reported as a skip note.
+    assert!(
+        value["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .is_some_and(|note| note.contains("t002") && note.contains("not been submitted")))
+    );
+    // The differing time field is still surfaced across the submitted trials.
+    assert!(
+        value["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .any(|row| row["path"] == "x-slurm.time")
+    );
+}
+
+#[test]
+fn diff_single_job_bails_without_second_id() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    write_matrix_record(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "90001",
+        "name: demo\nservices:\n  app:\n    image: python:3.10\n",
+    );
+
+    // A single positional id (pairwise mode missing its second id) bails clearly.
+    let output = run_cli(tmpdir.path(), &["diff", "90001"]);
+    assert!(!output.status.success());
+    assert!(stderr_text(&output).contains("pairwise diff requires two tracked job ids"));
+}
+
 #[test]
 fn submit_dry_run_skips_sbatch() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");

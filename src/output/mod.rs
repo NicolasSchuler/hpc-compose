@@ -7,7 +7,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
-use hpc_compose::cli::{OutputFormat, StatsOutputFormat, SweepResultsFormat};
+use hpc_compose::cli::{DiffMatrixFormat, OutputFormat, StatsOutputFormat, SweepResultsFormat};
 use hpc_compose::cluster::ClusterProfile;
 use hpc_compose::context::ResourceProfile;
 use hpc_compose::init::{
@@ -16,8 +16,9 @@ use hpc_compose::init::{
 };
 use hpc_compose::job::{
     ArtifactExportReport, CleanupReport, EfficiencyScoreReport, JobDiffChange, JobDiffReport,
-    JobInventoryScan, PsSnapshot, RightsizeConfidence, RightsizeReport, StatsSnapshot,
-    StatusSnapshot, SubmissionBackend, WatchOutcome, scheduler_source_label,
+    JobInventoryScan, JobMatrixReport, JobMatrixRow, PsSnapshot, RightsizeConfidence,
+    RightsizeReport, StatsSnapshot, StatusSnapshot, SubmissionBackend, WatchOutcome,
+    scheduler_source_label,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, registry_host_for_remote,
@@ -307,6 +308,11 @@ pub(crate) fn resolve_sweep_results_format(
     format: Option<SweepResultsFormat>,
 ) -> SweepResultsFormat {
     format.unwrap_or(SweepResultsFormat::Text)
+}
+
+/// Resolves the N-way `diff` matrix output format, defaulting to text.
+pub(crate) fn resolve_diff_matrix_format(format: Option<DiffMatrixFormat>) -> DiffMatrixFormat {
+    format.unwrap_or(DiffMatrixFormat::Text)
 }
 
 pub(crate) fn build_validate_output(plan: &Plan, cluster_warnings: Vec<String>) -> ValidateOutput {
@@ -618,6 +624,10 @@ pub(crate) fn print_job_diff_report(report: &JobDiffReport) -> io::Result<()> {
     write_job_diff_report(&mut io::stdout(), report)
 }
 
+pub(crate) fn print_job_matrix_report(report: &JobMatrixReport) -> io::Result<()> {
+    write_job_matrix_report(&mut io::stdout(), report)
+}
+
 fn write_job_inventory_scan(
     writer: &mut impl Write,
     report: &JobInventoryScan,
@@ -810,6 +820,89 @@ fn write_diff_changes(
         )?;
     }
     Ok(())
+}
+
+/// Maximum number of `config` rows rendered in the text matrix before the rest
+/// are summarized; csv/json are uncapped.
+const MATRIX_CONFIG_TEXT_CAP: usize = 25;
+
+fn write_job_matrix_report(writer: &mut impl Write, report: &JobMatrixReport) -> io::Result<()> {
+    // Legend: one numbered column per run so rows can reference them compactly.
+    writeln!(
+        writer,
+        "{}",
+        term::styled_section_header("Runs (one column per run):")
+    )?;
+    for (index, run) in report.runs.iter().enumerate() {
+        writeln!(
+            writer,
+            "  [{}] {}",
+            index + 1,
+            term::styled_bold(&run.job_id)
+        )?;
+    }
+
+    for section in ["outcome", "provenance", "resources", "config"] {
+        let header = match section {
+            "outcome" => "Outcome:",
+            "provenance" => "Provenance:",
+            "resources" => "Resources:",
+            _ => "Config:",
+        };
+        writeln!(writer, "{}", term::styled_section_header(header))?;
+        let section_rows: Vec<&JobMatrixRow> = report
+            .rows
+            .iter()
+            .filter(|row| row.section == section)
+            .collect();
+        if section_rows.is_empty() {
+            writeln!(writer, "  no {section} changes")?;
+            continue;
+        }
+        let cap = if section == "config" {
+            MATRIX_CONFIG_TEXT_CAP
+        } else {
+            usize::MAX
+        };
+        for row in section_rows.iter().take(cap) {
+            let cells = row
+                .values
+                .iter()
+                .map(|cell| cell.as_deref().unwrap_or("<missing>"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            writeln!(writer, "  {}: {}", row.path, cells)?;
+        }
+        if section == "config" && section_rows.len() > cap {
+            writeln!(
+                writer,
+                "  ... {} more config changes; use --matrix-format json for full detail",
+                section_rows.len() - cap
+            )?;
+        }
+    }
+    for note in &report.notes {
+        writeln!(writer, "note: {note}")?;
+    }
+    Ok(())
+}
+
+/// Renders the N-way matrix as CSV: `section,field,<job_id>...` with every cell
+/// quoted via [`csv_field`] (empty string for an absent cell).
+pub(crate) fn job_matrix_csv(report: &JobMatrixReport) -> String {
+    let mut header = vec![csv_field("section"), csv_field("field")];
+    header.extend(report.runs.iter().map(|run| csv_field(&run.job_id)));
+    let mut lines = vec![header.join(",")];
+    for row in &report.rows {
+        let mut fields = vec![csv_field(&row.section), csv_field(&row.path)];
+        fields.extend(
+            row.values
+                .iter()
+                .map(|cell| csv_field(cell.as_deref().unwrap_or(""))),
+        );
+        lines.push(fields.join(","));
+    }
+    lines.join("\n")
 }
 
 fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> io::Result<()> {

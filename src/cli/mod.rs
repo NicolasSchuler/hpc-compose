@@ -53,6 +53,16 @@ pub enum SweepResultsFormat {
     Csv,
 }
 
+/// Output format for the N-way `diff --across`/`--jobs` matrix. CSV is
+/// matrix-specific (column-per-run) and cannot live on the shared
+/// [`OutputFormat`] (which is Text/Json only).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum DiffMatrixFormat {
+    Text,
+    Json,
+    Csv,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum DependencyOutputFormat {
     Text,

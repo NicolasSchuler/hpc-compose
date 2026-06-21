@@ -520,7 +520,7 @@ hpc-compose status -f compose.yaml --format json
 | `inspect --rightsize` | Suggest conservative resource request reductions after a tracked run | Uses tracked `sacct`, `sstat`, and sampler evidence; supports `--job-id` and `--format json`. |
 | `stats` | Report tracked runtime metrics, step stats, and optional accounting | Supports `--accounting`, `--format json`, `--format jsonl`, and `--format csv`. |
 | `score` | Score post-run resource efficiency | Supports positional job ids, `--format json`, `--pue`, `--gpu-tdp-w`, and `--cpu-watts-per-core`. |
-| `diff` | Compare two tracked job submissions | Compact text by default; use `--format json` for full detail. |
+| `diff` | Compare two tracked job submissions, or an N-way matrix of several runs | Pairwise: two positional job ids, compact text by default, `--format json` for full detail. N-way matrix: `--across <SWEEP_ID>` compares every submitted trial of a sweep, or `--jobs a,b,c` compares an explicit list. The matrix shows one column per run and one row per field that differs in at least one run (fields identical across all runs are collapsed); pick `--matrix-format text\|csv\|json` (CSV emits `section,field,<job_id>...` for spreadsheets). |
 | `artifacts` | Export tracked artifact bundles after a run | Use `--bundle <name>` and `--tarball` when needed. |
 | `pull` | Print the `rsync` command to copy a tracked job's artifacts to a laptop | Resolves the artifact payload directory from tracked state and prints an `rsync` line (with `ControlMaster` multiplexing so an OTP login node prompts once); `--into <DIR>` sets the local destination, `--format json` emits `{bundles, cluster_path, suggested_command, files, bytes}`. Read-only: copies nothing and opens no connection. |
 | `cancel` | Cancel the latest tracked job or an explicit job id | Uses tracked metadata instead of making you retype paths. |
@@ -553,6 +553,8 @@ hpc-compose stats -f compose.yaml --format jsonl
 hpc-compose stats -f compose.yaml --accounting --format csv
 hpc-compose score 12345
 hpc-compose diff 12345 12346 -f compose.yaml
+hpc-compose diff --jobs 12345,12346,12347 --matrix-format json
+hpc-compose diff --across sweep-1700000000-1234 --matrix-format csv
 hpc-compose artifacts -f compose.yaml --bundle checkpoints --tarball
 hpc-compose down -f compose.yaml --yes
 hpc-compose cancel -f compose.yaml --yes

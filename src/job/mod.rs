@@ -54,7 +54,8 @@ pub use artifacts::{
     artifact_payload_dir_for_record, artifacts_dir_for_record, export_artifacts,
 };
 pub use diff::{
-    JobDiffChange, JobDiffReport, JobDiffServiceStatus, JobDiffSide, build_job_diff_report,
+    JobDiffChange, JobDiffReport, JobDiffServiceStatus, JobDiffSide, JobMatrixReport, JobMatrixRow,
+    JobMatrixRun, build_job_diff_report, build_job_matrix_report,
 };
 pub use logs::{
     LogPrintOptions, WatchOutcome, parse_log_since_duration, parse_queue_warn_after_duration,

@@ -5,8 +5,8 @@ use clap_complete::Shell;
 
 use super::help::*;
 use super::{
-    ColorPolicy, DependencyOutputFormat, ExamplesOutputFormat, HoldOnExit, OutputFormat,
-    SchemaKind, StatsOutputFormat, SweepResultsFormat, WatchMode,
+    ColorPolicy, DependencyOutputFormat, DiffMatrixFormat, ExamplesOutputFormat, HoldOnExit,
+    OutputFormat, SchemaKind, StatsOutputFormat, SweepResultsFormat, WatchMode,
 };
 
 #[derive(Debug, Parser)]
@@ -1426,18 +1426,45 @@ pub enum Commands {
     #[command(
         display_order = 255,
         about = "Compare two tracked job submissions",
-        long_about = "Compare tracked submission metadata, effective config snapshots, selected resource settings, and observed outcomes between two jobs.",
+        long_about = "Compare tracked submission metadata, effective config snapshots, selected resource settings, and observed outcomes between two jobs. With --across <SWEEP_ID> or --jobs <a,b,c> the comparison becomes an N-way matrix (one column per run, one row per field that differs in at least one run).",
         after_help = DIFF_HELP
     )]
     Diff {
         #[arg(value_name = "JOB_ID_1", help = "Earlier or left-hand tracked job id")]
-        job_id_1: String,
+        job_id_1: Option<String>,
         #[arg(value_name = "JOB_ID_2", help = "Later or right-hand tracked job id")]
-        job_id_2: String,
+        job_id_2: Option<String>,
+        #[arg(
+            long,
+            value_name = "SWEEP_ID",
+            conflicts_with_all = ["job_id_1", "job_id_2", "jobs"],
+            help = "Compare every submitted trial of this sweep id as an N-way matrix"
+        )]
+        across: Option<String>,
+        #[arg(
+            long,
+            value_name = "JOB_IDS",
+            value_delimiter = ',',
+            conflicts_with_all = ["job_id_1", "job_id_2", "across"],
+            help = "Compare these tracked job ids as an N-way matrix (comma-separated)"
+        )]
+        jobs: Vec<String>,
         #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
         file: Option<PathBuf>,
-        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        #[arg(
+            long,
+            value_enum,
+            value_name = "FORMAT",
+            help = "Pairwise output format (text, json)"
+        )]
         format: Option<OutputFormat>,
+        #[arg(
+            long = "matrix-format",
+            value_enum,
+            value_name = "FORMAT",
+            help = "N-way matrix output format (text, csv, json)"
+        )]
+        matrix_format: Option<DiffMatrixFormat>,
         #[arg(
             long,
             value_name = "PATH",

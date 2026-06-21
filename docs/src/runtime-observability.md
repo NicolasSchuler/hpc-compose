@@ -190,6 +190,17 @@ Sweep submission and monitoring (`sweep submit`, `sweep status`, `sweep list`) a
 
 Use `hpc-compose diff <job-id-1> <job-id-2>` to compare two tracked submissions. The compact text view highlights outcome, resource, and config changes; `--format json` returns the full uncapped diff for notebooks or experiment records. Older tracked jobs without config snapshots still compare outcome metadata and report a note that config comparison is unavailable.
 
+### N-Way Comparison Matrix
+
+To compare more than two runs at once, drop the positional job ids and pass either `--jobs a,b,c` (an explicit comma-separated list of tracked job ids) or `--across <sweep-id>` (every *submitted* trial of a sweep; unsubmitted trials are skipped with a note). The result is a matrix with one column per run and one row per field that differs in at least one run — fields identical across every run are collapsed and omitted, so the output stays focused on what actually changed. The same outcome, provenance, resource, and config sections as the pairwise diff are projected across all runs.
+
+Choose the output with `--matrix-format text|csv|json` (default `text`). `--matrix-format csv` emits a `section,field,<job_id>...` table for spreadsheets, while `--matrix-format json` serializes the full uncapped matrix (the text view caps the `config` section at 25 rows). This is a pure read-only projection over already-persisted records; like pairwise `diff`, it opens no connection and only probes the scheduler as much as `status` does.
+
+```bash
+hpc-compose diff --jobs 12345,12346,12347 --matrix-format json
+hpc-compose diff --across sweep-1700000000-1234 --matrix-format csv
+```
+
 ## Related Docs
 
 - [Operate a Real Cluster Run](runbook.md)

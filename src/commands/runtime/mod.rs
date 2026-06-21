@@ -12,7 +12,7 @@ pub(super) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) use anyhow::{Context, Result, bail};
 pub(super) use hpc_compose::cli::{
-    HoldOnExit, OutputFormat, StatsOutputFormat, SweepResultsFormat, WatchMode,
+    DiffMatrixFormat, HoldOnExit, OutputFormat, StatsOutputFormat, SweepResultsFormat, WatchMode,
 };
 pub(super) use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 pub(super) use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};
@@ -24,8 +24,8 @@ pub(super) use hpc_compose::job::{
     SubmissionBackend, SubmissionKind, SubmissionRecord, SubmissionRecordBuildOptions,
     SweepExpansionTrial, SweepManifest, SweepManifestTrial, SweepTrialMetadata,
     build_array_status_snapshot, build_cleanup_report, build_efficiency_score_report,
-    build_job_diff_report, build_metrics_probe_report, build_ps_snapshot, build_replay_report,
-    build_rightsize_report, build_stats_snapshot, build_status_snapshot,
+    build_job_diff_report, build_job_matrix_report, build_metrics_probe_report, build_ps_snapshot,
+    build_replay_report, build_rightsize_report, build_stats_snapshot, build_status_snapshot,
     build_status_snapshot_with_array, build_submission_record_with_backend_and_options,
     build_submission_record_with_options, expand_sweep_with_limit, export_artifacts,
     find_submission_record_in_repo, generate_sweep_id, interpolation_vars_for_sweep_trial,

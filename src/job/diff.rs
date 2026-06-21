@@ -53,6 +53,42 @@ pub struct JobDiffChange {
     pub right: Option<String>,
 }
 
+/// N-way comparison matrix across several tracked job submissions.
+///
+/// One column per run (positionally aligned to [`Self::runs`]) and one row per
+/// field that differs in at least one run; fields identical across every run are
+/// collapsed (omitted).
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct JobMatrixReport {
+    pub runs: Vec<JobMatrixRun>,
+    pub rows: Vec<JobMatrixRow>,
+    pub notes: Vec<String>,
+}
+
+/// Metadata for one column (run) of a [`JobMatrixReport`].
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct JobMatrixRun {
+    pub job_id: String,
+    pub submitted_at: u64,
+    pub compose_file: PathBuf,
+    pub backend: SubmissionBackend,
+    pub kind: SubmissionKind,
+    pub scheduler_state: Option<String>,
+    pub scheduler_failed: Option<bool>,
+}
+
+/// One differing field projected across every run; `values` is positionally
+/// aligned to [`JobMatrixReport::runs`] (one cell per run, `None` when absent).
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct JobMatrixRow {
+    pub section: String,
+    pub path: String,
+    pub values: Vec<Option<String>>,
+}
+
 const RESOURCE_FIELDS: &[&[&str]] = &[
     &["runtime", "backend"],
     &["x-slurm", "resources"],
@@ -150,6 +186,323 @@ pub fn build_job_diff_report(
         config_changes,
         notes,
     }
+}
+
+/// Builds an N-way comparison matrix across several tracked job submissions.
+///
+/// This is a pure projection over already-persisted records (the same surface
+/// the pairwise [`build_job_diff_report`] reads) and reuses its field-derivation
+/// primitives. Rows are emitted only for fields that differ in at least one run;
+/// fields identical across every run are collapsed. Cells are positionally
+/// aligned to the returned `runs`.
+pub fn build_job_matrix_report(
+    records: &[SubmissionRecord],
+    options: &SchedulerOptions,
+) -> JobMatrixReport {
+    let mut notes = Vec::new();
+
+    // Project each record into the same per-side view the pairwise diff uses,
+    // and parse its config snapshot once. Both reuse the existing primitives.
+    let mut sides = Vec::with_capacity(records.len());
+    let mut configs = Vec::with_capacity(records.len());
+    for record in records {
+        let status =
+            match build_status_snapshot(&record.compose_file, Some(&record.job_id), options) {
+                Ok(snapshot) => Some(snapshot),
+                Err(err) => {
+                    notes.push(format!(
+                        "status unavailable for job {}: {err}",
+                        record.job_id
+                    ));
+                    None
+                }
+            };
+        sides.push(diff_side(record, status.as_ref()));
+        configs.push(parse_config_snapshot(record, &mut notes));
+    }
+
+    let mut rows = Vec::new();
+    matrix_outcome_rows(&sides, &mut rows);
+    matrix_provenance_rows(records, &mut rows);
+    matrix_resource_rows(&configs, &mut rows);
+    matrix_config_rows(&configs, &mut rows);
+
+    if rows
+        .iter()
+        .any(|row| row.path == "provenance.git.sha" && row.section == "provenance")
+    {
+        notes.push("jobs were built from different commits".to_string());
+    }
+
+    JobMatrixReport {
+        runs: sides.iter().map(matrix_run_from_side).collect(),
+        rows,
+        notes,
+    }
+}
+
+fn matrix_run_from_side(side: &JobDiffSide) -> JobMatrixRun {
+    JobMatrixRun {
+        job_id: side.job_id.clone(),
+        submitted_at: side.submitted_at,
+        compose_file: side.compose_file.clone(),
+        backend: side.backend,
+        kind: side.kind,
+        scheduler_state: side.scheduler_state.clone(),
+        scheduler_failed: side.scheduler_failed,
+    }
+}
+
+/// Returns `true` when every cell holds the same value (so the row is dropped).
+fn collapse_identical(values: &[Option<String>]) -> bool {
+    values
+        .first()
+        .is_none_or(|first| values.iter().all(|value| value == first))
+}
+
+/// Appends a row for the field unless all cells are identical.
+fn push_matrix_row_if_different(
+    rows: &mut Vec<JobMatrixRow>,
+    section: &str,
+    path: String,
+    values: Vec<Option<String>>,
+) {
+    if collapse_identical(&values) {
+        return;
+    }
+    rows.push(JobMatrixRow {
+        section: section.to_string(),
+        path,
+        values,
+    });
+}
+
+/// Outcome rows mirror [`outcome_changes`]: scheduler.state/failed,
+/// first_failure.service/exit_code, and per-service status/last_exit_code.
+fn matrix_outcome_rows(sides: &[JobDiffSide], rows: &mut Vec<JobMatrixRow>) {
+    push_matrix_row_if_different(
+        rows,
+        "outcome",
+        "scheduler.state".to_string(),
+        sides
+            .iter()
+            .map(|side| side.scheduler_state.clone())
+            .collect(),
+    );
+    push_matrix_row_if_different(
+        rows,
+        "outcome",
+        "scheduler.failed".to_string(),
+        sides
+            .iter()
+            .map(|side| side.scheduler_failed.map(|value| value.to_string()))
+            .collect(),
+    );
+    push_matrix_row_if_different(
+        rows,
+        "outcome",
+        "first_failure.service".to_string(),
+        sides
+            .iter()
+            .map(|side| {
+                side.first_failure
+                    .as_ref()
+                    .map(|failure| failure.service.clone())
+            })
+            .collect(),
+    );
+    push_matrix_row_if_different(
+        rows,
+        "outcome",
+        "first_failure.exit_code".to_string(),
+        sides
+            .iter()
+            .map(|side| {
+                side.first_failure
+                    .as_ref()
+                    .map(|failure| failure.exit_code.to_string())
+            })
+            .collect(),
+    );
+
+    let service_names = sides
+        .iter()
+        .flat_map(|side| {
+            side.services
+                .iter()
+                .map(|service| service.service_name.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    for service_name in service_names {
+        let find = |side: &JobDiffSide| {
+            side.services
+                .iter()
+                .find(|service| service.service_name == service_name)
+                .cloned()
+        };
+        push_matrix_row_if_different(
+            rows,
+            "outcome",
+            format!("services.{service_name}.status"),
+            sides
+                .iter()
+                .map(|side| find(side).and_then(|service| service.status))
+                .collect(),
+        );
+        push_matrix_row_if_different(
+            rows,
+            "outcome",
+            format!("services.{service_name}.last_exit_code"),
+            sides
+                .iter()
+                .map(|side| {
+                    find(side)
+                        .and_then(|service| service.last_exit_code)
+                        .map(|value| value.to_string())
+                })
+                .collect(),
+        );
+    }
+}
+
+/// Provenance rows mirror [`provenance_changes`]: tool version, git sha/dirty/
+/// branch, and per-service image refs.
+fn matrix_provenance_rows(records: &[SubmissionRecord], rows: &mut Vec<JobMatrixRow>) {
+    let provenances: Vec<Option<&JobProvenance>> = records
+        .iter()
+        .map(|record| record.provenance.as_ref())
+        .collect();
+    push_matrix_row_if_different(
+        rows,
+        "provenance",
+        "provenance.tool_version".to_string(),
+        provenances
+            .iter()
+            .map(|prov| prov.map(|prov| prov.tool_version.clone()))
+            .collect(),
+    );
+    push_matrix_row_if_different(
+        rows,
+        "provenance",
+        "provenance.git.sha".to_string(),
+        provenances
+            .iter()
+            .map(|prov| {
+                prov.and_then(|prov| prov.git.as_ref())
+                    .map(|git| git.sha.clone())
+            })
+            .collect(),
+    );
+    push_matrix_row_if_different(
+        rows,
+        "provenance",
+        "provenance.git.dirty".to_string(),
+        provenances
+            .iter()
+            .map(|prov| {
+                prov.and_then(|prov| prov.git.as_ref())
+                    .map(|git| git.dirty.to_string())
+            })
+            .collect(),
+    );
+    push_matrix_row_if_different(
+        rows,
+        "provenance",
+        "provenance.git.branch".to_string(),
+        provenances
+            .iter()
+            .map(|prov| {
+                prov.and_then(|prov| prov.git.as_ref())
+                    .and_then(|git| git.branch.clone())
+            })
+            .collect(),
+    );
+    let services = provenances
+        .iter()
+        .flatten()
+        .flat_map(|prov| prov.image_refs.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    for service in services {
+        push_matrix_row_if_different(
+            rows,
+            "provenance",
+            format!("provenance.image_refs.{service}"),
+            provenances
+                .iter()
+                .map(|prov| prov.and_then(|prov| prov.image_refs.get(&service).cloned()))
+                .collect(),
+        );
+    }
+}
+
+/// Resource rows reuse [`RESOURCE_FIELDS`]/[`SERVICE_RESOURCE_FIELDS`] projected
+/// across each record's parsed config snapshot. Records whose config snapshot
+/// could not be parsed contribute `None` cells.
+fn matrix_resource_rows(configs: &[Option<Value>], rows: &mut Vec<JobMatrixRow>) {
+    for path in RESOURCE_FIELDS {
+        push_matrix_row_if_different(
+            rows,
+            "resources",
+            path.join("."),
+            project_path_across(configs, path),
+        );
+    }
+    let service_names = configs
+        .iter()
+        .flatten()
+        .flat_map(service_names)
+        .collect::<BTreeSet<_>>();
+    for service_name in service_names {
+        for field_path in SERVICE_RESOURCE_FIELDS {
+            let mut full_path = vec!["services", service_name.as_str()];
+            full_path.extend(field_path.iter().copied());
+            push_matrix_row_if_different(
+                rows,
+                "resources",
+                full_path.join("."),
+                project_path_across(configs, &full_path),
+            );
+        }
+    }
+}
+
+/// Config rows enumerate the union of dotted config paths that differ across any
+/// pair of records (reusing [`diff_json_values`] for path derivation, matching
+/// the pairwise config-change keying), then project each path across all runs.
+fn matrix_config_rows(configs: &[Option<Value>], rows: &mut Vec<JobMatrixRow>) {
+    let mut candidate_paths: BTreeSet<String> = BTreeSet::new();
+    for index in 0..configs.len() {
+        for other in (index + 1)..configs.len() {
+            if let (Some(left), Some(right)) = (configs[index].as_ref(), configs[other].as_ref()) {
+                let mut changes = Vec::new();
+                diff_json_values("", left, right, &mut changes);
+                candidate_paths.extend(changes.into_iter().map(|change| change.path));
+            }
+        }
+    }
+    for path in candidate_paths {
+        let segments: Vec<&str> = path.split('.').collect();
+        push_matrix_row_if_different(
+            rows,
+            "config",
+            path.clone(),
+            project_path_across(configs, &segments),
+        );
+    }
+}
+
+/// Projects a JSON path across each record's optional config, producing one cell
+/// per record (`None` when the config is missing or the path is absent).
+fn project_path_across(configs: &[Option<Value>], path: &[&str]) -> Vec<Option<String>> {
+    configs
+        .iter()
+        .map(|config| {
+            config
+                .as_ref()
+                .and_then(|config| get_path(config, path))
+                .map(value_label)
+        })
+        .collect()
 }
 
 /// Builds value-level differences between the two records' pinned provenance:
@@ -723,6 +1076,196 @@ mod tests {
                 .resource_changes
                 .iter()
                 .any(|change| change.path == "x-slurm.time")
+        );
+    }
+
+    #[test]
+    fn collapse_identical_detects_uniform_and_mixed_cells() {
+        assert!(collapse_identical(&[]));
+        assert!(collapse_identical(&[Some("a".to_string())]));
+        assert!(collapse_identical(&[
+            Some("a".to_string()),
+            Some("a".to_string()),
+        ]));
+        assert!(collapse_identical(&[None, None]));
+        assert!(!collapse_identical(&[
+            Some("a".to_string()),
+            Some("b".to_string()),
+        ]));
+        assert!(!collapse_identical(&[Some("a".to_string()), None]));
+    }
+
+    fn row_for<'a>(report: &'a JobMatrixReport, path: &str) -> Option<&'a JobMatrixRow> {
+        report.rows.iter().find(|row| row.path == path)
+    }
+
+    #[test]
+    fn matrix_keeps_differing_rows_and_collapses_identical_ones() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        // Same partition across all three; differing time and per-service image.
+        let records: Vec<SubmissionRecord> = ["1", "2", "3"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, job_id)| {
+                let time = format!("00:1{index}:00");
+                let image = format!("app-{index}.sqsh");
+                let record = local_diff_record(
+                    tmpdir.path(),
+                    job_id,
+                    &format!(
+                        "x-slurm:\n  partition: gpu\n  time: {time}\nservices:\n  app:\n    image: {image}\n",
+                    ),
+                );
+                write_local_diff_record(
+                    &record,
+                    r#"{"backend":"local","job_status":"COMPLETED","job_exit_code":0,"services":[{"service_name":"app","completed_successfully":true,"last_exit_code":0}]}"#,
+                );
+                record
+            })
+            .collect();
+
+        let report = build_job_matrix_report(&records, &SchedulerOptions::default());
+        assert_eq!(report.runs.len(), 3);
+        assert_eq!(
+            report
+                .runs
+                .iter()
+                .map(|run| run.job_id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+
+        // Differing fields are kept, one positionally-aligned cell per run.
+        let time_row = row_for(&report, "x-slurm.time").expect("time row present");
+        assert_eq!(time_row.section, "resources");
+        assert_eq!(
+            time_row.values,
+            vec![
+                Some("00:10:00".to_string()),
+                Some("00:11:00".to_string()),
+                Some("00:12:00".to_string()),
+            ]
+        );
+        let image_row = row_for(&report, "services.app.image").expect("image row present");
+        assert_eq!(
+            image_row.values,
+            vec![
+                Some("app-0.sqsh".to_string()),
+                Some("app-1.sqsh".to_string()),
+                Some("app-2.sqsh".to_string()),
+            ]
+        );
+
+        // An identical field (partition) is collapsed (no row).
+        assert!(row_for(&report, "x-slurm.partition").is_none());
+    }
+
+    #[test]
+    fn matrix_two_records_matches_pairwise_resource_and_config_paths() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let left = local_diff_record(
+            tmpdir.path(),
+            "111",
+            "x-slurm:\n  time: 00:10:00\nservices:\n  app:\n    image: app.sqsh\n    command: train\n",
+        );
+        let right = local_diff_record(
+            tmpdir.path(),
+            "222",
+            "x-slurm:\n  time: 00:20:00\nservices:\n  app:\n    image: app.sqsh\n    command: eval\n",
+        );
+        write_local_diff_record(
+            &left,
+            r#"{"backend":"local","job_status":"COMPLETED","job_exit_code":0,"services":[{"service_name":"app","completed_successfully":true,"last_exit_code":0}]}"#,
+        );
+        write_local_diff_record(
+            &right,
+            r#"{"backend":"local","job_status":"COMPLETED","job_exit_code":0,"services":[{"service_name":"app","completed_successfully":true,"last_exit_code":0}]}"#,
+        );
+
+        let pairwise = build_job_diff_report(&left, &right, &SchedulerOptions::default());
+        let matrix =
+            build_job_matrix_report(&[left.clone(), right.clone()], &SchedulerOptions::default());
+
+        // The resource paths the matrix surfaces match the pairwise diff exactly.
+        let pairwise_resource: BTreeSet<&str> = pairwise
+            .resource_changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        let matrix_resource: BTreeSet<&str> = matrix
+            .rows
+            .iter()
+            .filter(|row| row.section == "resources")
+            .map(|row| row.path.as_str())
+            .collect();
+        assert_eq!(pairwise_resource, matrix_resource);
+
+        // The config-section paths match the pairwise config_changes exactly.
+        let pairwise_config: BTreeSet<&str> = pairwise
+            .config_changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        let matrix_config: BTreeSet<&str> = matrix
+            .rows
+            .iter()
+            .filter(|row| row.section == "config")
+            .map(|row| row.path.as_str())
+            .collect();
+        assert_eq!(pairwise_config, matrix_config);
+    }
+
+    #[test]
+    fn matrix_surfaces_provenance_rows_when_git_sha_differs() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut first = local_diff_record(tmpdir.path(), "1", "name: x");
+        let mut second = local_diff_record(tmpdir.path(), "2", "name: x");
+        let mut third = local_diff_record(tmpdir.path(), "3", "name: x");
+        let provenance = |sha: &str, tool: &str| {
+            Some(JobProvenance {
+                tool_version: tool.to_string(),
+                git: Some(GitProvenance {
+                    sha: sha.to_string(),
+                    dirty: false,
+                    branch: Some("main".to_string()),
+                }),
+                image_refs: [("app".to_string(), "img:1".to_string())]
+                    .into_iter()
+                    .collect(),
+            })
+        };
+        first.provenance = provenance("aaa", "0.1.0");
+        second.provenance = provenance("bbb", "0.1.0");
+        third.provenance = provenance("ccc", "0.1.0");
+        for record in [&first, &second, &third] {
+            write_local_diff_record(
+                record,
+                r#"{"backend":"local","job_status":"COMPLETED","job_exit_code":0,"services":[{"service_name":"app","completed_successfully":true,"last_exit_code":0}]}"#,
+            );
+        }
+
+        let report = build_job_matrix_report(&[first, second, third], &SchedulerOptions::default());
+        let sha_row = row_for(&report, "provenance.git.sha").expect("git sha row");
+        assert_eq!(sha_row.section, "provenance");
+        assert_eq!(
+            sha_row.values,
+            vec![
+                Some("aaa".to_string()),
+                Some("bbb".to_string()),
+                Some("ccc".to_string()),
+            ]
+        );
+        // tool_version is identical across all runs -> collapsed.
+        assert!(row_for(&report, "provenance.tool_version").is_none());
+        // git.branch identical -> collapsed; image refs identical -> collapsed.
+        assert!(row_for(&report, "provenance.git.branch").is_none());
+        assert!(row_for(&report, "provenance.image_refs.app").is_none());
+        // The differing-commit note is surfaced.
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note == "jobs were built from different commits")
         );
     }
 }
