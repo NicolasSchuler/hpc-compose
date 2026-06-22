@@ -238,7 +238,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shellcheck install.sh scripts/cluster_smoke.sh
+          shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_e2e.sh
 
           cargo build --locked
           tmpdir="$(mktemp -d)"
@@ -555,3 +555,33 @@ jobs:
             --fail-under-lines 87 \
             --fail-under-regions 87 \
             --fail-under-functions 85
+
+  dev-cluster-e2e:
+    name: Dev Cluster E2E
+    runs-on: ubuntu-24.04
+    # Independent of the fast lint/unit lanes (no `needs:`), so it runs in
+    # parallel and never gates them. Exercises the real up -> sbatch -> slurmd ->
+    # sacct path against a single-node Slurm cluster in a privileged container —
+    # the ~39% of the code the unit suite mocks out.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+
+      - name: Build dev-cluster image (cached cargo build layer)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+        with:
+          context: .
+          file: dev-cluster/Dockerfile
+          # Must match compose.yaml's image: so the harness reuses it via
+          # DEVCLUSTER_SKIP_BUILD instead of recompiling on the default builder.
+          tags: hpc-compose-devcluster:latest
+          load: true
+          # Cache the multi-minute cargo build layer across runs.
+          cache-from: type=gha,scope=dev-cluster
+          cache-to: type=gha,mode=max,scope=dev-cluster
+
+      - name: Run dev-cluster end-to-end suite
+        run: DEVCLUSTER_SKIP_BUILD=1 DEVCLUSTER_E2E_DOWN=1 scripts/devcluster_e2e.sh

@@ -43,7 +43,14 @@ case "$cmd" in
       project="$(cd "$2" && pwd)"
       shift 2
     fi
-    HPC_COMPOSE_PROJECT_DIR="$project" "${compose[@]}" -f "$compose_file" up --build -d "$@"
+    # DEVCLUSTER_SKIP_BUILD=1 reuses an existing hpc-compose-devcluster image
+    # instead of rebuilding it — used by CI, which prebuilds the image with a
+    # cached cargo layer before booting (see scripts/devcluster_e2e.sh).
+    if [[ "${DEVCLUSTER_SKIP_BUILD:-0}" == "1" ]]; then
+      HPC_COMPOSE_PROJECT_DIR="$project" "${compose[@]}" -f "$compose_file" up -d "$@"
+    else
+      HPC_COMPOSE_PROJECT_DIR="$project" "${compose[@]}" -f "$compose_file" up --build -d "$@"
+    fi
     printf 'devcluster: started; mounted %s at /workspace\n' "$project"
     ;;
   down)

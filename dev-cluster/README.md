@@ -81,6 +81,25 @@ part):
   on this Slurm build emits an `Invalid field requested: AllocTRES` notice for a
   completed one. Post-run accounting via `sacct` (used by `score`) works.
 
+## Automated end-to-end check
+
+`scripts/devcluster_e2e.sh` (also `just dev-cluster-e2e`) boots the cluster and
+runs every spec under `specs/` through the real path, asserting for each one:
+
+- the job submits via real `sbatch`,
+- it drains to `COMPLETED` via `sacct` with exit code `0:0`,
+- the expected log output is present, and
+- `status` and `score` render the terminal/efficiency data.
+
+CI runs this as a **separate** `dev-cluster-e2e` job (privileged container on a
+Linux runner) that runs in parallel with — and never gates — the fast
+lint/unit lanes. It prebuilds the image with a cached cargo build layer
+(`docker/build-push-action` + `type=gha`), then boots with
+`DEVCLUSTER_SKIP_BUILD=1` to reuse it. This is the harness that closes the
+unit-suite gap: it exercises the scheduler/cluster code paths the unit tests
+mock out. The `host`-backend scope above still applies — the e2e check does
+**not** cover the `pyxis`/`enroot` runtime layer or GPU execution.
+
 ## Files
 
 | File | Purpose |
@@ -94,3 +113,4 @@ part):
 | `specs/hello.yaml` | Smallest `host`-backend spec to prove the loop |
 | `specs/multi-service.yaml` | Two `host`-backend services proving `depends_on` + a readiness gate (server/client) against the real scheduler |
 | `../scripts/devcluster.sh` | `up` / `run` / `exec` / `sinfo` / `logs` / `down` wrapper |
+| `../scripts/devcluster_e2e.sh` | End-to-end assertion harness (boots, runs every spec, checks `sacct`/`status`/`score`) |
