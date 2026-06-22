@@ -186,6 +186,22 @@ pub(crate) fn inspect_next_commands(job_id: Option<&str>) -> Vec<String> {
     ]
 }
 
+/// Suggested next commands after a clean spec check (`validate`): continue along
+/// the authoring -> run funnel. Bare commands; the active compose file is implied.
+pub(crate) fn validate_next_commands() -> Vec<String> {
+    vec![
+        "hpc-compose plan".to_string(),
+        "hpc-compose preflight".to_string(),
+        "hpc-compose up".to_string(),
+    ]
+}
+
+/// Suggested next command once a run is ready to launch — after a clean
+/// `preflight` or a successful `prepare`.
+pub(crate) fn ready_to_run_next_commands() -> Vec<String> {
+    vec!["hpc-compose up".to_string()]
+}
+
 /// Prints a human-facing "Next:" block of suggested follow-up commands. Text
 /// output only (JSON consumers read the structured `next_commands` field). A
 /// no-op when there are no suggestions.

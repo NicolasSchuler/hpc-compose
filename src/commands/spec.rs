@@ -19,7 +19,7 @@ use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
 use serde::Serialize;
 
-use crate::output::{common as output_common, spec as output_spec};
+use crate::output::{self, common as output_common, spec as output_spec};
 use crate::progress::{PrepareProgress, ProgressReporter};
 
 pub(crate) fn validate(
@@ -60,6 +60,7 @@ pub(crate) fn validate(
             for warning in &cluster_warnings {
                 eprintln!("{} {warning}", term::styled_warning("WARN"));
             }
+            output::print_next_steps(&output::validate_next_commands());
         }
         OutputFormat::Json => {
             println!(
@@ -590,7 +591,10 @@ pub(crate) fn prepare(
     })?;
     prepare_progress.finish_from_summary(&summary);
     match output_format {
-        OutputFormat::Text if !quiet => output_spec::print_prepare_summary(&summary),
+        OutputFormat::Text if !quiet => {
+            output_spec::print_prepare_summary(&summary);
+            output::print_next_steps(&output::ready_to_run_next_commands());
+        }
         OutputFormat::Text => {}
         OutputFormat::Json => {
             println!(
@@ -660,6 +664,10 @@ pub(crate) fn preflight(
     }
     if strict && report.has_warnings() {
         bail!("preflight reported warnings");
+    }
+    // Reached only on a clean pass; point at the run.
+    if output_format == OutputFormat::Text && !quiet {
+        output::print_next_steps(&output::ready_to_run_next_commands());
     }
     Ok(())
 }

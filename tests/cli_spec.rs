@@ -19,7 +19,12 @@ fn validate_and_render_commands_work() {
         &["validate", "-f", compose.to_str().expect("path")],
     );
     assert_success(&validate);
-    assert!(stdout_text(&validate).contains("spec is valid"));
+    let validate_stdout = stdout_text(&validate);
+    assert!(validate_stdout.contains("spec is valid"));
+    // Success output points along the authoring -> run funnel.
+    assert!(validate_stdout.contains("Next:"));
+    assert!(validate_stdout.contains("hpc-compose plan"));
+    assert!(validate_stdout.contains("hpc-compose up"));
 
     let validate_json = run_cli(
         tmpdir.path(),
@@ -32,6 +37,8 @@ fn validate_and_render_commands_work() {
         ],
     );
     assert_success(&validate_json);
+    // The "Next:" hint is text-only and must never leak into --format json.
+    assert!(!stdout_text(&validate_json).contains("Next:"));
     let validate_value: Value =
         serde_json::from_str(&stdout_text(&validate_json)).expect("validate json");
     assert_eq!(validate_value["valid"], Value::from(true));
