@@ -16,7 +16,7 @@ use super::{
     about = "Compile a compose-like spec into a single Slurm job",
     long_about = "Compile a compose-like specification into one Slurm batch job that launches one or more services through Pyxis/Enroot, Apptainer, Singularity, or host runtime software inside a single allocation. Use plan for static authoring, up for the normal run, and debug for one-command triage.",
     help_template = "{about-with-newline}\n{usage-heading} {usage}\n\n{options}\n\n{after-help}",
-    after_help = TOP_LEVEL_HELP
+    after_help = top_level_help()
 )]
 pub struct Cli {
     #[arg(

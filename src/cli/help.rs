@@ -1,6 +1,62 @@
 pub(super) const FILE_ARG_HELP: &str = "Compose specification file to read; if omitted, use the active context compose file or fall back to compose.yaml";
 
-pub(super) const TOP_LEVEL_HELP: &str = "\
+/// Workflow groups shown under `hpc-compose --help`, in display order. This is
+/// the single source of truth for that listing: [`top_level_help`] renders the
+/// help block from it, and `tests` cross-checks it against the real clap
+/// subcommand set, so the list can never silently drift from the actual command
+/// surface again (it previously dropped `pull`, `checkpoints`, `experiment`, and
+/// `reach`). Every non-hidden top-level command must appear in exactly one group.
+pub(super) const WORKFLOW_GROUPS: &[(&str, &[&str])] = &[
+    ("Start", &["new", "evolve", "setup", "context"]),
+    (
+        "Plan/Run",
+        &["plan", "up", "when", "alloc", "run", "shell", "germinate"],
+    ),
+    ("Develop/Test", &["test", "dev", "tmux", "notebook"]),
+    (
+        "Observe/Debug",
+        &[
+            "weather",
+            "doctor",
+            "debug",
+            "watch",
+            "replay",
+            "status",
+            "logs",
+            "ps",
+            "stats",
+            "score",
+            "diff",
+            "artifacts",
+            "sweep",
+            "reach",
+            "pull",
+            "checkpoints",
+            "experiment",
+        ],
+    ),
+    (
+        "Maintain",
+        &["cache", "jobs", "clean", "down", "cancel", "rendezvous"],
+    ),
+    (
+        "Advanced",
+        &[
+            "examples",
+            "validate",
+            "lint",
+            "inspect",
+            "config",
+            "render",
+            "prepare",
+            "preflight",
+            "schema",
+            "completions",
+        ],
+    ),
+];
+
+const TOP_LEVEL_HELP_PREAMBLE: &str = "\
 Start from an existing spec:
   hpc-compose plan -f compose.yaml
   hpc-compose up -f compose.yaml
@@ -9,21 +65,47 @@ Create or evolve a spec:
   hpc-compose new --template minimal-batch --name my-app --output compose.yaml
   hpc-compose evolve --output compose.yaml
 
+Not sure which command fits? Describe the goal and get a recommendation:
+  hpc-compose examples recommend 'multi-node training' --tag gpu
+
 Run when cluster conditions are friendlier:
   hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
 
 Debug failed run:
-  hpc-compose debug -f compose.yaml --preflight
+  hpc-compose debug -f compose.yaml --preflight";
 
-Workflow groups:
-  Start:          new, evolve, setup, context
-  Plan/Run:       plan, up, when, alloc, run, shell, germinate
-  Develop/Test:   test, dev, tmux, notebook
-  Observe/Debug:  weather, doctor, debug, watch, replay, status, logs, ps, stats, score, diff, artifacts, sweep
-  Maintain:       cache, jobs, clean, down, cancel, rendezvous
-  Advanced:       examples, validate, lint, inspect, config, render, prepare, preflight, schema, completions
+const TOP_LEVEL_HELP_FOOTER: &str = "Use `hpc-compose help <command>` for command details.";
 
-Use `hpc-compose help <command>` for command details.";
+/// Renders the aligned `Workflow groups:` block from [`WORKFLOW_GROUPS`].
+fn workflow_groups_block() -> String {
+    // Pad every heading to the widest one (+1 for the trailing ':') so the
+    // command lists line up in a single column.
+    let heading_width = WORKFLOW_GROUPS
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut block = String::from("Workflow groups:");
+    for (label, names) in WORKFLOW_GROUPS {
+        let heading = format!("{label}:");
+        block.push_str(&format!(
+            "\n  {heading:<heading_width$}  {}",
+            names.join(", ")
+        ));
+    }
+    block
+}
+
+/// Builds the top-level `--help` epilogue (`after_help`). Generated rather than
+/// hand-maintained so the workflow-group listing stays in lockstep with the
+/// actual command set (guarded by `tests::workflow_groups_match_every_command_exactly_once`).
+pub(super) fn top_level_help() -> String {
+    format!(
+        "{TOP_LEVEL_HELP_PREAMBLE}\n\n{}\n\n{TOP_LEVEL_HELP_FOOTER}",
+        workflow_groups_block()
+    )
+}
 
 pub(super) const VALIDATE_HELP: &str = "\
 Examples:
@@ -719,5 +801,128 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["setup"] => SETUP_EXAMPLES,
         ["completions"] => COMPLETIONS_EXAMPLES,
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::WORKFLOW_GROUPS;
+
+    /// Real, non-hidden top-level command names from the actual clap tree.
+    /// Excludes clap's auto-generated `help` subcommand, which is not a workflow
+    /// command and is intentionally absent from the groups.
+    ///
+    /// Built on a large-stack thread because clap's command tree is deep enough
+    /// to overflow the smaller default test-thread stack (same reason
+    /// `manpages::render_manpages` does it).
+    fn real_top_level_commands() -> BTreeSet<String> {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                crate::cli::build_cli_command()
+                    .get_subcommands()
+                    .filter(|cmd| !cmd.is_hide_set())
+                    .map(|cmd| cmd.get_name().to_string())
+                    .filter(|name| name != "help")
+                    .collect()
+            })
+            .expect("failed to spawn cli builder thread")
+            .join()
+            .expect("cli builder thread panicked")
+    }
+
+    /// Flattened group membership, asserting no command is listed twice.
+    fn grouped_commands() -> BTreeSet<String> {
+        let mut seen = BTreeSet::new();
+        for (group, names) in WORKFLOW_GROUPS {
+            for &name in *names {
+                assert!(
+                    seen.insert(name.to_string()),
+                    "command '{name}' appears in more than one workflow group (second: {group})"
+                );
+            }
+        }
+        seen
+    }
+
+    /// Phase 1 drift guard: every non-hidden command is in exactly one group, and
+    /// every grouped name is a real command. This is the test that would have
+    /// caught `pull`/`checkpoints`/`experiment`/`reach` going missing from the
+    /// hand-maintained help block.
+    #[test]
+    fn workflow_groups_match_every_command_exactly_once() {
+        let real = real_top_level_commands();
+        let grouped = grouped_commands();
+
+        let missing: Vec<&String> = real.difference(&grouped).collect();
+        assert!(
+            missing.is_empty(),
+            "commands missing from the --help workflow groups (drift): {missing:?}"
+        );
+
+        let stale: Vec<&String> = grouped.difference(&real).collect();
+        assert!(
+            stale.is_empty(),
+            "workflow groups list names that are not real, non-hidden commands: {stale:?}"
+        );
+    }
+
+    /// Phase 3 scope budget. Each top-level command is a discovery cost, so adding
+    /// one is a deliberate UX decision. Prefer a subcommand or a *deprecating
+    /// alias* over growing this number — the only safe merge candidate today is
+    /// `lint` -> `validate --strict`, and only as a deprecating alias (each
+    /// command otherwise has distinct UX). Raising the budget is allowed but must
+    /// be a conscious edit in the same change that adds the command.
+    #[test]
+    fn top_level_command_count_stays_within_budget() {
+        const MAX_TOP_LEVEL_COMMANDS: usize = 48;
+        let count = real_top_level_commands().len();
+        assert!(
+            count <= MAX_TOP_LEVEL_COMMANDS,
+            "non-hidden top-level command count {count} exceeds budget \
+             {MAX_TOP_LEVEL_COMMANDS}; consolidate via a subcommand or deprecating alias, \
+             or bump the budget intentionally"
+        );
+    }
+
+    /// The generated epilogue lists every group and surfaces `examples recommend`
+    /// as the "which command?" answer (Phase 2 discoverability).
+    #[test]
+    fn top_level_help_lists_all_groups_and_the_recommend_entrypoint() {
+        let help = super::top_level_help();
+        for (label, _) in WORKFLOW_GROUPS {
+            assert!(
+                help.contains(&format!("{label}:")),
+                "help missing group '{label}'"
+            );
+        }
+        assert!(
+            help.contains("examples recommend"),
+            "top-level help should point undecided users at `examples recommend`"
+        );
+    }
+
+    /// Phase 2 anti-drift: the structured `next_commands` hints printed after a
+    /// run/read only ever point at real commands, so a rename can't leave a
+    /// dangling "Next:" suggestion (the discoverability analogue of the workflow
+    /// group drift guard above).
+    #[test]
+    fn next_step_hints_reference_only_real_commands() {
+        let real = real_top_level_commands();
+        let mut hints = crate::output::submit_next_commands(Some("123"));
+        hints.extend(crate::output::inspect_next_commands(Some("123")));
+        for hint in hints {
+            // Each hint is "hpc-compose <command> ...".
+            let command = hint
+                .strip_prefix("hpc-compose ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or_default();
+            assert!(
+                real.contains(command),
+                "next-step hint references unknown command '{command}' in: {hint}"
+            );
+        }
     }
 }
