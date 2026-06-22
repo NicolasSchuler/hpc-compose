@@ -3,3 +3,6 @@
 .hpc-compose/
 .DS_Store
 /*.sbatch
+
+# Rendered scripts from `devcluster run` when dogfooding the repo at /workspace
+dev-cluster/specs/*.sbatch

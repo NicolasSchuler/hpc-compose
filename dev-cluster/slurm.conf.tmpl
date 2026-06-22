@@ -1,0 +1,42 @@
+# Single-node Slurm config for the hpc-compose local dev cluster.
+# Rendered at container start by entrypoint.sh, which substitutes @CPUS@/@MEM@
+# with values auto-detected from the container so the node always boots `idle`.
+#
+# Container-safety choices:
+#   - proctrack/linuxproc + task/none avoid cgroup access, which is unreliable
+#     inside an unprivileged container (especially the macOS Podman/Docker VM).
+#   - accounting via slurmdbd+mariadb (bootstrapped in the same container by
+#     entrypoint.sh) so `sacct` works and `up`/`status`/`stats`/`score` can
+#     track jobs to a terminal state.
+ClusterName=hpc-compose-dev
+SlurmctldHost=hpc-compose-dev
+SlurmUser=root
+MailProg=/bin/true
+
+AuthType=auth/munge
+CryptoType=crypto/munge
+
+StateSaveLocation=/var/spool/slurmctld
+SlurmdSpoolDir=/var/spool/slurmd
+SlurmctldPidFile=/run/slurmctld.pid
+SlurmdPidFile=/run/slurmd.pid
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+
+ProctrackType=proctrack/linuxproc
+TaskPlugin=task/none
+ReturnToService=2
+SlurmctldParameters=enable_configless
+
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+
+MpiDefault=none
+AccountingStorageType=accounting_storage/slurmdbd
+AccountingStorageHost=localhost
+JobAcctGatherType=jobacct_gather/linux
+JobAcctGatherFrequency=10
+
+NodeName=hpc-compose-dev CPUs=@CPUS@ RealMemory=@MEM@ State=UNKNOWN
+PartitionName=compose Nodes=hpc-compose-dev Default=YES MaxTime=INFINITE State=UP

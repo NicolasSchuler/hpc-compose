@@ -1,0 +1,29 @@
+# Local single-node Slurm dev cluster for hpc-compose.
+#
+# Works with either `docker compose` or `podman compose`. Prefer the wrapper:
+#   scripts/devcluster.sh up        # build + start
+#   scripts/devcluster.sh run dev-cluster/specs/hello.yaml
+#   scripts/devcluster.sh down
+#
+# HPC_COMPOSE_PROJECT_DIR selects which project tree is mounted at /workspace
+# (defaults to the repo root so you can dogfood the checked-in specs).
+name: hpc-compose-devcluster
+
+services:
+  devcluster:
+    build:
+      context: ..
+      dockerfile: dev-cluster/Dockerfile
+    image: hpc-compose-devcluster:latest
+    container_name: hpc-compose-devcluster
+    hostname: hpc-compose-dev
+    # Required: rootless engines mount /sys/fs/cgroup read-only, so slurmd can't
+    # create its cgroup/v2 scope without this. It's a throwaway local dev node.
+    privileged: true
+    environment:
+      # Host-backend dev runs need a writable cache path. Not under /tmp: hpc-compose
+      # preflight flags /tmp as node-local; /var/cache reads as a normal shared path.
+      CACHE_DIR: /var/cache/hpc-compose
+    volumes:
+      - ${HPC_COMPOSE_PROJECT_DIR:-..}:/workspace
+    working_dir: /workspace

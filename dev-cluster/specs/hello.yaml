@@ -1,0 +1,26 @@
+name: dev-cluster-hello
+
+# Smallest spec that exercises the local dev cluster end to end. It uses the
+# `host` runtime backend so the command runs as a plain process on the Slurm
+# node — no container runtime, so it sidesteps Enroot/Pyxis nesting entirely.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-hello
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 512M
+  # The dev-cluster container sets CACHE_DIR=/var/cache/hpc-compose.
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "hello from a real (containerized) Slurm node"
+        echo "node=$$(hostname) job=$${SLURM_JOB_ID:-?} cpus=$${SLURM_CPUS_PER_TASK:-?}"
+        sleep 2

@@ -1,0 +1,10 @@
+# Keep the dev-cluster build context small. The Dockerfile compiles hpc-compose
+# from source, so src/, Cargo.*, examples/ (include_str!'d), build.rs etc. MUST
+# stay; only exclude heavy build/VCS/tooling artifacts.
+target/
+.git/
+.tmp/
+.playwright-mcp/
+.code-review-graph/
+.hpc-compose/
+**/.DS_Store
