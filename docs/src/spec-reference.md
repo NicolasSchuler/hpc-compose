@@ -657,6 +657,7 @@ provenance deltas in a dedicated provenance section.
 
 Every service receives:
 
+- `HPC_COMPOSE_JOB_DIR`
 - `HPC_COMPOSE_PRIMARY_NODE`
 - `HPC_COMPOSE_NODE_COUNT`
 - `HPC_COMPOSE_NODELIST`
@@ -665,6 +666,15 @@ Every service receives:
 - `HPC_COMPOSE_SERVICE_NODE_COUNT`
 - `HPC_COMPOSE_SERVICE_NODELIST`
 - `HPC_COMPOSE_SERVICE_NODELIST_FILE`
+
+`HPC_COMPOSE_JOB_DIR` is the per-job scratch directory and the portable way to write
+working files: it resolves to `/hpc-compose/job` under the container backends (where
+the job directory is bind-mounted there) and to the real on-node job path under the
+`host` backend (where nothing is mounted at `/hpc-compose/job`). Writing under
+`$HPC_COMPOSE_JOB_DIR` keeps a spec working unchanged across backends and lands files
+where artifact collection looks — `artifacts.paths` declared as `/hpc-compose/job/**`
+are collected from the same location. Do not hard-code `/hpc-compose/job` in `host`
+service commands: that path is not mounted there and writing to it requires root.
 
 The allocation-wide data is also written under `/hpc-compose/job/allocation/primary_node` and `/hpc-compose/job/allocation/nodes.txt`. Service-scoped node lists are written under `/hpc-compose/job/allocation/service-nodelists/`.
 

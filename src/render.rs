@@ -2603,6 +2603,17 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
     out.push_str(
         "  launch_env+=(\"HPC_COMPOSE_SERVICE_NODELIST_FILE=$service_nodelist_container\")\n",
     );
+    // Portable per-job scratch dir. In container backends $JOB_TMP is bind-mounted
+    // at /hpc-compose/job, so that is the path services see; the host backend has
+    // no mount, so point services at $JOB_TMP directly. Writing under
+    // $HPC_COMPOSE_JOB_DIR keeps the same spec working on both backends and lands
+    // files where artifact collection looks (artifacts declared as
+    // /hpc-compose/job/** remap to $JOB_TMP/** on the host).
+    if context.runtime.backend == RuntimeBackend::Host {
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_JOB_DIR=$JOB_TMP\")\n");
+    } else {
+        out.push_str("  launch_env+=(\"HPC_COMPOSE_JOB_DIR=/hpc-compose/job\")\n");
+    }
     if let Some(parallelism) = &service.slurm.parallelism {
         // Descriptive tensor/pipeline sizes. Emitted for single-node services
         // too, so this lives OUTSIDE the `distributed.enabled` gate. No Slurm

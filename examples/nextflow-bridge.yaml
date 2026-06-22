@@ -23,11 +23,14 @@ services:
       - /bin/sh
       - -lc
       - |
-        mkdir -p /hpc-compose/job/nextflow-work /hpc-compose/job/reports
+        # Write under HPC_COMPOSE_JOB_DIR (the portable per-job scratch path) so
+        # this spec runs on both the container and host backends; artifacts below
+        # are declared with the equivalent /hpc-compose/job/** convention.
+        mkdir -p "$$HPC_COMPOSE_JOB_DIR/nextflow-work" "$$HPC_COMPOSE_JOB_DIR/reports"
         nextflow run "$${NEXTFLOW_PIPELINE:-main.nf}" \
-          -work-dir /hpc-compose/job/nextflow-work \
-          -with-report /hpc-compose/job/reports/report.html \
-          -with-trace /hpc-compose/job/reports/trace.txt \
+          -work-dir "$$HPC_COMPOSE_JOB_DIR/nextflow-work" \
+          -with-report "$$HPC_COMPOSE_JOB_DIR/reports/report.html" \
+          -with-trace "$$HPC_COMPOSE_JOB_DIR/reports/trace.txt" \
           $${NEXTFLOW_ARGS:-}
     environment:
       NEXTFLOW_PIPELINE: main.nf

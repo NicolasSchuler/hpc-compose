@@ -10,11 +10,10 @@ name: dev-cluster-multi-service
 # touches when it finishes, so the whole allocation drains to COMPLETED (every
 # service exits 0) instead of hanging on a never-terminating server.
 #
-# Shared scratch lives under ${TMPDIR:-/tmp}/<job id>: a path any unprivileged
-# user can create on a real compute node. (Don't write to /hpc-compose/job here:
-# that container path is only bind-mounted for the Pyxis/Enroot/Apptainer
-# backends, not for `host`, so on the cluster it would be an unwritable absolute
-# path at the filesystem root.)
+# Shared scratch uses $HPC_COMPOSE_JOB_DIR, the portable per-job scratch path
+# hpc-compose injects into every service (the real on-node job dir under `host`,
+# /hpc-compose/job under the container backends). Don't hard-code /hpc-compose/job
+# in host service commands: it isn't mounted there and writing to it needs root.
 runtime:
   backend: host
 
@@ -34,17 +33,16 @@ services:
       - -lc
       - |
         set -eu
-        scratch="$${TMPDIR:-/tmp}/hpc-compose-multi-service.$${SLURM_JOB_ID:-0}"
-        www="$$scratch/www"
+        www="$$HPC_COMPOSE_JOB_DIR/www"
         mkdir -p "$$www"
         printf 'hpc-compose-dev-cluster-ok\n' >"$$www/health"
-        rm -f "$$scratch/client.done"
+        rm -f "$$HPC_COMPOSE_JOB_DIR/client.done"
         # python3 is shipped in the dev-cluster image; --bind keeps it on loopback.
         python3 -m http.server 8080 --bind 127.0.0.1 --directory "$$www" &
         server_pid=$$!
         echo "server: http.server listening on 127.0.0.1:8080 (pid $$server_pid)"
         # Stay up until the client signals done, or exit early if the listener dies.
-        while [ ! -f "$$scratch/client.done" ]; do
+        while [ ! -f "$$HPC_COMPOSE_JOB_DIR/client.done" ]; do
           if ! kill -0 "$$server_pid" 2>/dev/null; then
             wait "$$server_pid"
             exit $$?
@@ -72,7 +70,6 @@ services:
       - -lc
       - |
         set -eu
-        scratch="$${TMPDIR:-/tmp}/hpc-compose-multi-service.$${SLURM_JOB_ID:-0}"
         echo "client: server is ready, sending request"
         body="$$(curl --fail --show-error --silent http://127.0.0.1:8080/health)"
         echo "client: server returned: $$body"
@@ -82,7 +79,7 @@ services:
         }
         echo "client: readiness gate + request succeeded"
         # Release the server so the allocation can drain to COMPLETED.
-        touch "$$scratch/client.done"
+        touch "$$HPC_COMPOSE_JOB_DIR/client.done"
     # Make the success contract explicit: the smoke is only green on exit 0.
     assert:
       exit_code: 0

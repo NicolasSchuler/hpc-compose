@@ -959,6 +959,44 @@ fn render_host_runtime_exposes_host_scratch_path_to_service_env() {
 }
 
 #[test]
+fn render_exposes_job_dir_pointing_at_the_real_path_per_backend() {
+    // Host backend: no bind mount exists at /hpc-compose/job, so services must be
+    // pointed at the real on-node job directory ($JOB_TMP) instead.
+    let mut host_service = runtime_service();
+    host_service.source = crate::planner::ImageSource::Host;
+    host_service.runtime_image = PathBuf::new();
+    let host_plan = RuntimePlan {
+        name: "job-dir-host".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Host,
+            ..RuntimeConfig::default()
+        },
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![host_service],
+    };
+    let host_script = render_script(&host_plan).expect("host script");
+    assert!(host_script.contains("launch_env+=(\"HPC_COMPOSE_JOB_DIR=$JOB_TMP\")"));
+    assert!(!host_script.contains("HPC_COMPOSE_JOB_DIR=/hpc-compose/job"));
+
+    // Container backends bind-mount $JOB_TMP at /hpc-compose/job, so that is the
+    // path services see.
+    let container_plan = RuntimePlan {
+        name: "job-dir-container".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Pyxis,
+            ..RuntimeConfig::default()
+        },
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+    let container_script = render_script(&container_plan).expect("container script");
+    assert!(container_script.contains("launch_env+=(\"HPC_COMPOSE_JOB_DIR=/hpc-compose/job\")"));
+    assert!(!container_script.contains("HPC_COMPOSE_JOB_DIR=$JOB_TMP"));
+}
+
+#[test]
 fn render_service_scratch_disabled_resolves_to_runtime_disabled_flag() {
     let mut service = runtime_service();
     service.slurm.scratch = Some(ServiceScratchConfig {

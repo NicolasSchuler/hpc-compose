@@ -23,16 +23,18 @@ services:
       - /bin/sh
       - -lc
       - |
-        mkdir -p /hpc-compose/job/snakemake-work /hpc-compose/job/reports
+        # Write under HPC_COMPOSE_JOB_DIR (the portable per-job scratch path) so
+        # this spec runs on both the container and host backends; the artifacts
+        # below are declared with the equivalent /hpc-compose/job/** convention.
+        mkdir -p "$$HPC_COMPOSE_JOB_DIR/snakemake-work" "$$HPC_COMPOSE_JOB_DIR/reports"
         snakemake \
           --snakefile "$${SNAKEMAKE_FILE:-Snakefile}" \
           --cores "$${SNAKEMAKE_CORES:-$${SLURM_CPUS_PER_TASK:-1}}" \
-          --directory "$${SNAKEMAKE_WORKDIR:-.}" \
+          --directory "$${SNAKEMAKE_WORKDIR:-$$HPC_COMPOSE_JOB_DIR/snakemake-work}" \
           --printshellcmds \
           $${SNAKEMAKE_ARGS:-}
     environment:
       SNAKEMAKE_FILE: Snakefile
-      SNAKEMAKE_WORKDIR: "."
       SNAKEMAKE_ARGS: ""
     x-slurm:
       ntasks: 1
