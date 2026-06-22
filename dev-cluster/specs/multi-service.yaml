@@ -1,0 +1,83 @@
+name: dev-cluster-multi-service
+
+# Two host-backend services proving ordering against the REAL scheduler: a
+# `server` HTTP listener and a `client` that only starts once the server passes
+# a readiness gate, hits it, validates the payload, and exits 0. Both run as
+# plain processes on the Slurm node (no Pyxis/Enroot nesting), so this exercises
+# `depends_on` + readiness + multi-service composition end to end on a laptop.
+#
+# Shape mirrors examples/llm-curl-workflow.yaml: the server backgrounds the
+# listener and blocks on a sentinel file the client touches when it finishes, so
+# the whole allocation drains to COMPLETED (every service exits 0) instead of
+# hanging on a never-terminating server.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-multi-service
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 2
+  mem: 512M
+  # The dev-cluster container sets CACHE_DIR=/var/cache/hpc-compose.
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  server:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        www=/hpc-compose/job/www
+        mkdir -p "$$www"
+        printf 'hpc-compose-dev-cluster-ok\n' >"$$www/health"
+        rm -f /hpc-compose/job/client.done
+        # python3 is shipped in the dev-cluster image; --bind keeps it on loopback.
+        python3 -m http.server 8080 --bind 127.0.0.1 --directory "$$www" &
+        server_pid=$$!
+        echo "server: http.server listening on 127.0.0.1:8080 (pid $$server_pid)"
+        # Stay up until the client signals done, or exit early if the listener dies.
+        while [ ! -f /hpc-compose/job/client.done ]; do
+          if ! kill -0 "$$server_pid" 2>/dev/null; then
+            wait "$$server_pid"
+            exit $$?
+          fi
+          sleep 1
+        done
+        echo "server: client finished, shutting down listener"
+        kill "$$server_pid" 2>/dev/null || true
+        wait "$$server_pid" 2>/dev/null || true
+    # The client's depends_on gate waits until this HTTP probe passes.
+    readiness:
+      type: http
+      url: http://127.0.0.1:8080/health
+      status_code: 200
+      timeout_seconds: 30
+    x-slurm:
+      cpus_per_task: 1
+
+  client:
+    depends_on:
+      server:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        echo "client: server is ready, sending request"
+        body="$$(curl --fail --show-error --silent http://127.0.0.1:8080/health)"
+        echo "client: server returned: $$body"
+        printf '%s' "$$body" | grep -q 'hpc-compose-dev-cluster-ok' || {
+          echo "client: unexpected payload from server" >&2
+          exit 1
+        }
+        echo "client: readiness gate + request succeeded"
+        # Release the server so the allocation can drain to COMPLETED.
+        touch /hpc-compose/job/client.done
+    # Make the success contract explicit: the smoke is only green on exit 0.
+    assert:
+      exit_code: 0
+    x-slurm:
+      cpus_per_task: 1

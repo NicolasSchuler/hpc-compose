@@ -36,6 +36,10 @@ scripts/devcluster.sh sinfo
 # Submit the smallest end-to-end spec against the real scheduler.
 scripts/devcluster.sh run dev-cluster/specs/hello.yaml
 
+# Prove multi-service ordering: a `client` waits on a `server` readiness gate
+# (depends_on) before hitting it, then the allocation drains to COMPLETED.
+scripts/devcluster.sh run dev-cluster/specs/multi-service.yaml
+
 # Tear down when done.
 scripts/devcluster.sh down
 ```
@@ -88,4 +92,5 @@ part):
 | `entrypoint.sh` | munge → MariaDB + slurmdbd → `slurmctld`/`slurmd`; surfaces failures |
 | `compose.yaml` | One-service, privileged compose for `docker compose`/`podman compose` |
 | `specs/hello.yaml` | Smallest `host`-backend spec to prove the loop |
+| `specs/multi-service.yaml` | Two `host`-backend services proving `depends_on` + a readiness gate (server/client) against the real scheduler |
 | `../scripts/devcluster.sh` | `up` / `run` / `exec` / `sinfo` / `logs` / `down` wrapper |
