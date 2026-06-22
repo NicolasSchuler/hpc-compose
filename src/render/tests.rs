@@ -2172,6 +2172,11 @@ fn render_metrics_sampler_when_enabled() {
     assert!(script.contains("metrics_sampler_loop"));
     assert!(script.contains("nvidia-smi --query-gpu="));
     assert!(script.contains("sstat --allsteps --jobs \"$SLURM_JOB_ID\""));
+    // AllocTRES is a sacct (allocation) field that sstat rejects; the collector
+    // must request usage fields only and parse the resulting 6 columns.
+    assert!(!script.contains("AllocTRES"));
+    assert!(script.contains("--format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve"));
+    assert!(script.contains("(( ${#fields[@]} != 6 ))"));
     assert!(script.contains("stop_metrics_sampler"));
     assert!(script.contains("GPU_COLLECTOR_ENABLED=1"));
     assert!(script.contains("SLURM_COLLECTOR_ENABLED=1"));

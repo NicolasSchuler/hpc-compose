@@ -820,21 +820,23 @@ fn tail_and_follow_helpers_cover_missing_and_growth() {
 
 #[test]
 fn parse_sstat_output_keeps_only_numbered_steps_and_maps_gpu_fields() {
+    // sstat reports live step usage only (no AllocTRES); GPU utilization/memory
+    // come from TRESUsageInAve, and allocation-derived gpu_count is left unset.
     let steps = parse_sstat_output(
-            "12345",
-            "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.batch|1|00:00:01|10M|10M|cpu=1,mem=10M|cpu=00:00:01
-12345.0|1|00:00:03|128M|256M|cpu=1,mem=512M,gres/gpu:a100=2|cpu=00:00:03,gres/gpuutil=77,gres/gpumem=4096M
-12345.extern|1|00:00:01|1M|1M|cpu=1|cpu=00:00:01
-12345.1|2|00:00:05|64M|128M|cpu=2,mem=256M|cpu=00:00:05
+        "12345",
+        "\
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.batch|1|00:00:01|10M|10M|cpu=00:00:01
+12345.0|1|00:00:03|128M|256M|cpu=00:00:03,gres/gpuutil=77,gres/gpumem=4096M
+12345.extern|1|00:00:01|1M|1M|cpu=00:00:01
+12345.1|2|00:00:05|64M|128M|cpu=00:00:05
 ",
-        )
-        .expect("steps");
+    )
+    .expect("steps");
 
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0].step_id, "12345.0");
-    assert_eq!(steps[0].gpu_count.as_deref(), Some("2"));
+    assert_eq!(steps[0].gpu_count, None);
     assert_eq!(steps[0].gpu_util.as_deref(), Some("77"));
     assert_eq!(steps[0].gpu_mem.as_deref(), Some("4096M"));
     assert_eq!(steps[1].step_id, "12345.1");
@@ -846,12 +848,9 @@ fn parse_sstat_output_rejects_malformed_rows_and_tres_entries() {
     let err = parse_sstat_output("12345", "12345.0|1|00:00:01").expect_err("bad row");
     assert!(err.to_string().contains("malformed sstat output"));
 
-    let err = parse_sstat_output(
-        "12345",
-        "12345.0|1|00:00:01|128M|256M|cpu=1,broken|cpu=00:00:01",
-    )
-    .expect_err("bad tres");
-    assert!(err.to_string().contains("failed to parse AllocTRES"));
+    let err = parse_sstat_output("12345", "12345.0|1|00:00:01|128M|256M|cpu=00:00:01,broken")
+        .expect_err("bad tres");
+    assert!(err.to_string().contains("failed to parse TRESUsageInAve"));
 }
 
 #[test]
@@ -1051,7 +1050,7 @@ fn build_stats_snapshot_falls_back_when_sampler_data_is_malformed() {
     write_script(&sacct, "#!/bin/bash\nexit 0\n");
     write_script(
         &sstat,
-        "#!/bin/bash\ncat <<'EOF'\n12345.0|1|00:00:03|128M|256M|cpu=1,mem=512M|cpu=00:00:03\nEOF\n",
+        "#!/bin/bash\ncat <<'EOF'\n12345.0|1|00:00:03|128M|256M|cpu=00:00:03\nEOF\n",
     );
 
     let snapshot = build_stats_snapshot(

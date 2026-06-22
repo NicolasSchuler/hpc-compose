@@ -2819,11 +2819,11 @@ fn stats_command_reports_live_step_metrics_and_json() {
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.batch|1|00:00:01|1M|1M|cpu=1|cpu=00:00:01
-12345.0|1|00:00:10|512M|1G|cpu=1,mem=4G,gres/gpu=1|cpu=00:00:10,gres/gpuutil=65,gres/gpumem=1024M
-12345.extern|1|00:00:01|1M|1M|cpu=1|cpu=00:00:01
-12345.1|2|00:00:20|256M|512M|cpu=2,mem=8G|cpu=00:00:20
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.batch|1|00:00:01|1M|1M|cpu=00:00:01
+12345.0|1|00:00:10|512M|1G|cpu=00:00:10,gres/gpuutil=65,gres/gpumem=1024M
+12345.extern|1|00:00:01|1M|1M|cpu=00:00:01
+12345.1|2|00:00:20|256M|512M|cpu=00:00:20
 ",
     )
     .expect("sstat output");
@@ -2896,7 +2896,9 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0]["gpu_util"], Value::from("65"));
     assert_eq!(steps[0]["gpu_mem"], Value::from("1024M"));
-    assert_eq!(steps[0]["gpu_count"], Value::from("1"));
+    // gpu_count is an allocation figure (sacct AllocTRES), not an sstat usage
+    // field, so a sstat-sourced step leaves it unset.
+    assert_eq!(steps[0]["gpu_count"], Value::Null);
 }
 
 #[test]
@@ -3257,9 +3259,9 @@ fn stats_command_supports_jsonl_output() {
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.0|1|00:00:10|512M|1G|cpu=1,mem=4G,gres/gpu=1|cpu=00:00:10,gres/gpuutil=65,gres/gpumem=1024M
-12345.1|2|00:00:20|256M|512M|cpu=2,mem=8G|cpu=00:00:20
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.0|1|00:00:10|512M|1G|cpu=00:00:10,gres/gpuutil=65,gres/gpumem=1024M
+12345.1|2|00:00:20|256M|512M|cpu=00:00:20
 ",
     )
     .expect("sstat output");
@@ -3334,8 +3336,8 @@ fn stats_command_supports_csv_output() {
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.0|1|00:00:10|512M|1G|cpu=1,mem=4G,gres/gpu=1|cpu=00:00:10,gres/gpuutil=65,gres/gpumem=1024M
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.0|1|00:00:10|512M|1G|cpu=00:00:10,gres/gpuutil=65,gres/gpumem=1024M
 ",
     )
     .expect("sstat output");
@@ -3399,8 +3401,8 @@ fn stats_command_prefers_sampler_metrics_when_present() {
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.0|1|00:00:11|512M|1G|cpu=1,mem=4G,gres/gpu=1|cpu=00:00:11
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.0|1|00:00:11|512M|1G|cpu=00:00:11
 ",
     )
     .expect("sstat output");
@@ -3590,8 +3592,8 @@ services:
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.0|1|00:20:00|12000M|12300M|cpu=8,mem=64G,gres/gpu=8|cpu=00:20:00,gres/gpuutil=70,gres/gpumem=4096M
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.0|1|00:20:00|12000M|12300M|cpu=00:20:00,gres/gpuutil=70,gres/gpumem=4096M
 ",
     )
     .expect("sstat output");
@@ -3763,8 +3765,8 @@ services:
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.0|1|00:02:00|15000M|16000M|cpu=4,mem=64G,gres/gpu=2|cpu=00:02:00,gres/gpuutil=80,gres/gpumem=8192M
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.0|1|00:02:00|15000M|16000M|cpu=00:02:00,gres/gpuutil=80,gres/gpumem=8192M
 ",
     )
     .expect("sstat output");
@@ -3881,8 +3883,8 @@ services:
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.0|1|00:05:00|2G|2G|cpu=1,mem=8G|cpu=00:05:00
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.0|1|00:05:00|2G|2G|cpu=00:05:00
 ",
     )
     .expect("sstat output");
@@ -4132,8 +4134,8 @@ services:
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-13579.0|1|00:10:00|1024M|2G|cpu=4,mem=8G|cpu=00:10:00
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+13579.0|1|00:10:00|1024M|2G|cpu=00:10:00
 ",
     )
     .expect("sstat output");
@@ -4205,11 +4207,7 @@ fn stats_command_supports_explicit_job_id_without_metadata() {
     let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
     let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
     let sstat_output = tmpdir.path().join("sstat-explicit.output");
-    fs::write(
-        &sstat_output,
-        "67890.0|1|00:00:02|64M|128M|cpu=1,mem=1G|cpu=00:00:02\n",
-    )
-    .expect("sstat output");
+    fs::write(&sstat_output, "67890.0|1|00:00:02|64M|128M|cpu=00:00:02\n").expect("sstat output");
     let sstat = write_fake_sstat(tmpdir.path(), &sstat_output);
 
     let stats_text = run_cli(

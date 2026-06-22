@@ -146,6 +146,14 @@ for spec_path in "${spec_paths[@]}"; do
     || fail "score did not render an efficiency score for job $jobid"
   pass "score renders (sacct-backed)"
 
+  # stats/score must not emit the sstat 'Invalid field requested: AllocTRES'
+  # notice (AllocTRES is a sacct field, not an sstat one).
+  stats_out="$(inctr hpc-compose stats -f "$rel" --job-id "$jobid" 2>&1 || true)"
+  if printf '%s\n%s' "$stats_out" "$score_out" | grep -qiE 'AllocTRES|Invalid field requested'; then
+    fail "stats/sstat emitted the AllocTRES field error for job $jobid"
+  fi
+  pass "stats renders without the sstat AllocTRES error"
+
   rm -f "$out"
 done
 

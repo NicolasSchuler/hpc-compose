@@ -202,8 +202,8 @@ services:
     fs::write(
         &sstat_output,
         "\
-JobID|NTasks|AveCPU|AveRSS|MaxRSS|AllocTRES|TRESUsageInAve
-12345.0|1|00:10:00|12000M|12300M|cpu=1,mem=1G|cpu=00:10:00
+JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
+12345.0|1|00:10:00|12000M|12300M|cpu=00:10:00
 ",
     )
     .expect("sstat output");

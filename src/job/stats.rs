@@ -758,7 +758,10 @@ pub(crate) fn probe_step_stats(job_id: &str, binary: &str) -> Result<Vec<StepSta
             job_id,
             "--parsable2",
             "--noconvert",
-            "--format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,AllocTRES,TRESUsageInAve",
+            // AllocTRES is a sacct (allocation) field that sstat rejects
+            // ("Invalid field requested"); sstat reports live step usage only.
+            // Allocation is sourced from accounting/the plan instead.
+            "--format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve",
         ])
         .output()
         .context(format!("failed to execute '{binary}'"))?;
@@ -791,9 +794,9 @@ pub(crate) fn parse_sstat_output(job_id: &str, stdout: &str) -> Result<Vec<StepS
         {
             continue;
         }
-        if fields.len() != 7 {
+        if fields.len() != 6 {
             bail!(
-                "malformed sstat output on line {}: expected 7 fields, found {}",
+                "malformed sstat output on line {}: expected 6 fields, found {}",
                 index + 1,
                 fields.len()
             );
@@ -804,9 +807,10 @@ pub(crate) fn parse_sstat_output(job_id: &str, stdout: &str) -> Result<Vec<StepS
             continue;
         }
 
-        let alloc_tres_map = parse_tres_map(fields[5])
-            .context(format!("failed to parse AllocTRES for step '{step_id}'"))?;
-        let usage_tres_in_ave_map = parse_tres_map(fields[6]).context(format!(
+        // sstat reports live step usage only; allocation (AllocTRES) is a sacct
+        // field, so alloc_tres / gpu_count are left empty here and resolved from
+        // accounting downstream.
+        let usage_tres_in_ave_map = parse_tres_map(fields[5]).context(format!(
             "failed to parse TRESUsageInAve for step '{step_id}'"
         ))?;
         steps.push(StepStats {
@@ -815,12 +819,12 @@ pub(crate) fn parse_sstat_output(job_id: &str, stdout: &str) -> Result<Vec<StepS
             ave_cpu: fields[2].to_string(),
             ave_rss: fields[3].to_string(),
             max_rss: fields[4].to_string(),
-            alloc_tres: fields[5].to_string(),
-            tres_usage_in_ave: fields[6].to_string(),
-            gpu_count: find_tres_value(&alloc_tres_map, "gres/gpu"),
+            alloc_tres: String::new(),
+            tres_usage_in_ave: fields[5].to_string(),
+            gpu_count: None,
             gpu_util: find_tres_value(&usage_tres_in_ave_map, "gres/gpuutil"),
             gpu_mem: find_tres_value(&usage_tres_in_ave_map, "gres/gpumem"),
-            alloc_tres_map,
+            alloc_tres_map: BTreeMap::new(),
             usage_tres_in_ave_map,
         });
     }

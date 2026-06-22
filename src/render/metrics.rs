@@ -281,7 +281,11 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  local sampled_at\n");
     out.push_str("  sampled_at=$(metrics_timestamp)\n");
     out.push_str("  local output\n");
-    out.push_str("  if ! output=$(sstat --allsteps --jobs \"$SLURM_JOB_ID\" --parsable2 --noconvert --format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,AllocTRES,TRESUsageInAve 2>&1); then\n");
+    // AllocTRES is a sacct (allocation) field that sstat rejects with "Invalid
+    // field requested"; sstat reports live step usage only. Sampling usage and
+    // leaving allocation to accounting keeps this collector working across Slurm
+    // builds. `alloc_tres` stays in the sample schema as null for compatibility.
+    out.push_str("  if ! output=$(sstat --allsteps --jobs \"$SLURM_JOB_ID\" --parsable2 --noconvert --format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve 2>&1); then\n");
     out.push_str("    mark_slurm_collector_unavailable \"sstat query failed: $(trim_whitespace \"${output//$'\\n'/; }\")\"\n");
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
@@ -291,7 +295,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("    [[ \"$line\" == JobID* ]] && continue\n");
     out.push_str("    local -a fields=()\n");
     out.push_str("    IFS='|' read -r -a fields <<< \"$line\"\n");
-    out.push_str("    if (( ${#fields[@]} != 7 )); then\n");
+    out.push_str("    if (( ${#fields[@]} != 6 )); then\n");
     out.push_str("      mark_slurm_collector_unavailable \"malformed sstat output while sampling metrics\"\n");
     out.push_str("      return 0\n");
     out.push_str("    fi\n");
@@ -300,21 +304,19 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("    if [[ ! \"$step_id\" =~ ^${SLURM_JOB_ID}\\.[0-9]+$ ]]; then\n");
     out.push_str("      continue\n");
     out.push_str("    fi\n");
-    out.push_str("    local ntasks ave_cpu ave_rss max_rss alloc_tres tres_usage_in_ave\n");
+    out.push_str("    local ntasks ave_cpu ave_rss max_rss tres_usage_in_ave\n");
     out.push_str("    ntasks=$(trim_whitespace \"${fields[1]}\")\n");
     out.push_str("    ave_cpu=$(trim_whitespace \"${fields[2]}\")\n");
     out.push_str("    ave_rss=$(trim_whitespace \"${fields[3]}\")\n");
     out.push_str("    max_rss=$(trim_whitespace \"${fields[4]}\")\n");
-    out.push_str("    alloc_tres=$(trim_whitespace \"${fields[5]}\")\n");
-    out.push_str("    tres_usage_in_ave=$(trim_whitespace \"${fields[6]}\")\n");
-    out.push_str("    printf '{\"sampled_at\":\"%s\",\"step_id\":%s,\"ntasks\":%s,\"ave_cpu\":%s,\"ave_rss\":%s,\"max_rss\":%s,\"alloc_tres\":%s,\"tres_usage_in_ave\":%s}\\n' \\\n");
+    out.push_str("    tres_usage_in_ave=$(trim_whitespace \"${fields[5]}\")\n");
+    out.push_str("    printf '{\"sampled_at\":\"%s\",\"step_id\":%s,\"ntasks\":%s,\"ave_cpu\":%s,\"ave_rss\":%s,\"max_rss\":%s,\"alloc_tres\":null,\"tres_usage_in_ave\":%s}\\n' \\\n");
     out.push_str("      \"$(json_escape \"$sampled_at\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$step_id\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$ntasks\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$ave_cpu\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$ave_rss\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$max_rss\")\" \\\n");
-    out.push_str("      \"$(json_string_or_null \"$alloc_tres\")\" \\\n");
     out.push_str(
         "      \"$(json_string_or_null \"$tres_usage_in_ave\")\" >> \"$SLURM_METRICS_FILE\"\n",
     );
