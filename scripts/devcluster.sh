@@ -22,7 +22,9 @@ usage() {
 }
 
 cmd="${1:-}"
-[[ $# -gt 0 ]] && shift || true
+if [[ $# -gt 0 ]]; then
+  shift
+fi
 
 case "$cmd" in
   ""|-h|--help|help)
