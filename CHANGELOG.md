@@ -7,6 +7,43 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.48] - 2026-06-22
+
+### Added
+
+- Local Slurm dev-cluster support, including single-node and multi-service
+  examples plus an end-to-end dev-cluster CI path.
+- New workflow inspection and retrieval commands: `experiment show`,
+  `checkpoints`, N-way `diff`, `pull`, and `reach`.
+- Sweep workflow upgrades: `sweep results`, sweep-aware `score`/`stats`,
+  replicate rollups, and `objective.scaling_axis`.
+- `hf://` model and dataset `stage_in` support with content-addressed cache
+  reuse and immutable revision validation.
+- Submit-time provenance now records tool, git, and image details, with
+  `.hpcignore` support for content-addressed source snapshots.
+- `run --dataset` / `--output`, notebook `login_host` and JSON output, and
+  `x-slurm.parallelism` GPU cross-check metadata.
+
+### Changed
+
+- CLI help, validation, preflight, and prepare paths now share generated
+  command-group metadata and provide more direct next-step hints.
+- Runtime jobs expose `HPC_COMPOSE_JOB_DIR` for portable host-backend scripts and
+  surface readiness-derived endpoints/next commands after startup.
+- Manpages and CLI reference docs were regenerated for the new commands and
+  flags.
+
+### Fixed
+
+- Hardened `hf://` staging against shell injection and partial downloads.
+- Fixed sweep scoring/JSON edge cases, zero-baseline scaling, and
+  `--huggingface-cli-bin` propagation.
+- Stopped requesting unsupported `AllocTRES` fields from `sstat`.
+- Repaired stale `up` lock reclamation and dev-cluster shellcheck
+  compatibility.
+- Fixed notebook JSON output, sweep trial scoring, and CLI reference markdown
+  lint.
+
 ## [0.1.47] - 2026-06-20
 
 ### Added
