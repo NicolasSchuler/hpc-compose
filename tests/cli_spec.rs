@@ -23,8 +23,8 @@ fn validate_and_render_commands_work() {
     assert!(validate_stdout.contains("spec is valid"));
     // Success output points along the authoring -> run funnel.
     assert!(validate_stdout.contains("Next:"));
-    assert!(validate_stdout.contains("hpc-compose plan"));
-    assert!(validate_stdout.contains("hpc-compose up"));
+    assert!(validate_stdout.contains(&format!("hpc-compose plan -f '{}'", compose.display())));
+    assert!(validate_stdout.contains(&format!("hpc-compose up -f '{}'", compose.display())));
 
     let validate_json = run_cli(
         tmpdir.path(),

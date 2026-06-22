@@ -20,6 +20,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 container="hpc-compose-devcluster"
 specs_dir="$repo_root/dev-cluster/specs"
+work_dir="$repo_root/.tmp/devcluster-e2e"
+work_specs_dir="$work_dir/specs"
 
 # Per-spec assertion: "<spec file>::<substring the run output/logs must contain>".
 # The harness enumerates every spec under specs/ and fails loudly on any spec
@@ -57,15 +59,14 @@ fi
 
 inctr() { "$engine" exec "$container" "$@"; }
 
-# Runs on EXIT (success or failure). The in-container run writes gitignored
-# tracking dirs into the mounted spec tree as the container's root user; on
-# rootful Docker a host-side rm can't remove those, so clean from inside the
-# still-running container first, then fall back to a host-side rm. Any requested
-# teardown happens last, after cleanup, so it fires on the failure path too.
+# Runs on EXIT (success or failure). The harness copies specs into an owned
+# gitignored work dir before running them; on rootful Docker, job metadata in that
+# mounted tree may be root-owned, so clean from inside the still-running
+# container first, then fall back to a host-side rm. Any requested teardown
+# happens last, after cleanup, so it fires on the failure path too.
 finish() {
-  inctr rm -rf /workspace/.hpc-compose /workspace/dev-cluster/specs/.hpc-compose \
-    /workspace/dev-cluster/specs/hpc-compose.sbatch >/dev/null 2>&1 || true
-  rm -rf "$specs_dir/.hpc-compose" "$specs_dir/hpc-compose.sbatch" "$repo_root/.hpc-compose" 2>/dev/null || true
+  inctr rm -rf /workspace/.tmp/devcluster-e2e >/dev/null 2>&1 || true
+  rm -rf "$work_dir" 2>/dev/null || true
   if [[ "${DEVCLUSTER_E2E_DOWN:-0}" == "1" ]]; then
     note "Tearing the cluster down"
     "$repo_root/scripts/devcluster.sh" down >/dev/null
@@ -90,16 +91,25 @@ done
 pass "node is idle"
 
 # --- 2. run + assert each spec --------------------------------------------
+inctr rm -rf /workspace/.tmp/devcluster-e2e >/dev/null 2>&1 || true
+rm -rf "$work_dir" 2>/dev/null || true
+mkdir -p "$work_specs_dir"
+
 shopt -s nullglob
-spec_paths=("$specs_dir"/*.yaml)
+source_specs=("$specs_dir"/*.yaml)
 shopt -u nullglob
-[[ ${#spec_paths[@]} -gt 0 ]] || fail "no specs found under $specs_dir"
+[[ ${#source_specs[@]} -gt 0 ]] || fail "no specs found under $specs_dir"
+cp "${source_specs[@]}" "$work_specs_dir"/
+
+shopt -s nullglob
+spec_paths=("$work_specs_dir"/*.yaml)
+shopt -u nullglob
 
 for spec_path in "${spec_paths[@]}"; do
   spec="$(basename "$spec_path")"
   expect_log="$(expected_log_for "$spec")" \
     || fail "no expected-log assertion registered for $spec (add it to the expectations array)"
-  rel="dev-cluster/specs/$spec"
+  rel=".tmp/devcluster-e2e/specs/$spec"
   note "Spec $spec"
 
   out="$(mktemp)"

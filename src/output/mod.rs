@@ -186,20 +186,32 @@ pub(crate) fn inspect_next_commands(job_id: Option<&str>) -> Vec<String> {
     ]
 }
 
+fn file_arg(file: Option<&Path>) -> String {
+    file.map(|path| format!(" -f {}", shell_arg(path)))
+        .unwrap_or_default()
+}
+
+fn shell_arg(path: &Path) -> String {
+    let raw = path.display().to_string();
+    format!("'{}'", raw.replace('\'', "'\\''"))
+}
+
 /// Suggested next commands after a clean spec check (`validate`): continue along
-/// the authoring -> run funnel. Bare commands; the active compose file is implied.
-pub(crate) fn validate_next_commands() -> Vec<String> {
+/// the authoring -> run funnel. Include the resolved compose file when known so
+/// the hint keeps targeting the spec the user just checked.
+pub(crate) fn validate_next_commands(file: Option<&Path>) -> Vec<String> {
+    let file = file_arg(file);
     vec![
-        "hpc-compose plan".to_string(),
-        "hpc-compose preflight".to_string(),
-        "hpc-compose up".to_string(),
+        format!("hpc-compose plan{file}"),
+        format!("hpc-compose preflight{file}"),
+        format!("hpc-compose up{file}"),
     ]
 }
 
 /// Suggested next command once a run is ready to launch — after a clean
 /// `preflight` or a successful `prepare`.
-pub(crate) fn ready_to_run_next_commands() -> Vec<String> {
-    vec!["hpc-compose up".to_string()]
+pub(crate) fn ready_to_run_next_commands(file: Option<&Path>) -> Vec<String> {
+    vec![format!("hpc-compose up{}", file_arg(file))]
 }
 
 /// Prints a human-facing "Next:" block of suggested follow-up commands. Text

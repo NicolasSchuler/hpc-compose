@@ -913,8 +913,8 @@ mod tests {
         let real = real_top_level_commands();
         let mut hints = crate::output::submit_next_commands(Some("123"));
         hints.extend(crate::output::inspect_next_commands(Some("123")));
-        hints.extend(crate::output::validate_next_commands());
-        hints.extend(crate::output::ready_to_run_next_commands());
+        hints.extend(crate::output::validate_next_commands(None));
+        hints.extend(crate::output::ready_to_run_next_commands(None));
         for hint in hints {
             // Each hint is "hpc-compose <command> ...".
             let command = hint

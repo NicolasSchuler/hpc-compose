@@ -60,7 +60,9 @@ pub(crate) fn validate(
             for warning in &cluster_warnings {
                 eprintln!("{} {warning}", term::styled_warning("WARN"));
             }
-            output::print_next_steps(&output::validate_next_commands());
+            output::print_next_steps(&output::validate_next_commands(Some(
+                &context.compose_file.value,
+            )));
         }
         OutputFormat::Json => {
             println!(
@@ -593,7 +595,9 @@ pub(crate) fn prepare(
     match output_format {
         OutputFormat::Text if !quiet => {
             output_spec::print_prepare_summary(&summary);
-            output::print_next_steps(&output::ready_to_run_next_commands());
+            output::print_next_steps(&output::ready_to_run_next_commands(Some(
+                &context.compose_file.value,
+            )));
         }
         OutputFormat::Text => {}
         OutputFormat::Json => {
@@ -667,7 +671,9 @@ pub(crate) fn preflight(
     }
     // Reached only on a clean pass; point at the run.
     if output_format == OutputFormat::Text && !quiet {
-        output::print_next_steps(&output::ready_to_run_next_commands());
+        output::print_next_steps(&output::ready_to_run_next_commands(Some(
+            &context.compose_file.value,
+        )));
     }
     Ok(())
 }

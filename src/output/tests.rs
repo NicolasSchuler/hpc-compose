@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::commands::run_command;
@@ -1890,4 +1890,33 @@ fn inspect_next_commands_omit_status_and_parameterize_job_id() {
     assert!(cmds.contains(&"hpc-compose stats --job-id 777".to_string()));
     assert!(cmds.contains(&"hpc-compose pull --job-id 777".to_string()));
     assert!(cmds.contains(&"hpc-compose down".to_string()));
+}
+
+#[test]
+fn spec_next_commands_preserve_the_checked_compose_file() {
+    let file = Path::new("/tmp/hpc compose/demo'spec.yaml");
+    let validate = validate_next_commands(Some(file));
+    assert_eq!(
+        validate,
+        vec![
+            "hpc-compose plan -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string(),
+            "hpc-compose preflight -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string(),
+            "hpc-compose up -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string(),
+        ]
+    );
+
+    let ready = ready_to_run_next_commands(Some(file));
+    assert_eq!(
+        ready,
+        vec!["hpc-compose up -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string()]
+    );
+
+    assert_eq!(
+        validate_next_commands(None),
+        vec![
+            "hpc-compose plan".to_string(),
+            "hpc-compose preflight".to_string(),
+            "hpc-compose up".to_string(),
+        ]
+    );
 }

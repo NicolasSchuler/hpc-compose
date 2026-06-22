@@ -576,6 +576,44 @@ fn just_clean_preserves_local_runtime_state() {
 }
 
 #[test]
+fn devcluster_e2e_cleanup_preserves_repo_runtime_state() {
+    let script = fs::read_to_string(repo_root().join("scripts/devcluster_e2e.sh"))
+        .expect("read devcluster e2e script");
+
+    assert!(
+        !script.contains("$repo_root/.hpc-compose") && !script.contains("/workspace/.hpc-compose"),
+        "dev-cluster e2e cleanup must not delete repo-level .hpc-compose runtime/config state"
+    );
+    assert!(
+        script.contains(".tmp/devcluster-e2e"),
+        "dev-cluster e2e should use an owned gitignored work dir for generated state"
+    );
+}
+
+#[test]
+fn devcluster_help_does_not_require_a_container_engine() {
+    let output = Command::new("bash")
+        .arg(repo_root().join("scripts/devcluster.sh"))
+        .arg("--help")
+        .output()
+        .expect("run devcluster help");
+
+    assert!(
+        output.status.success(),
+        "devcluster --help failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scripts/devcluster.sh up [--project DIR]"));
+    assert!(!stdout.contains("set -euo pipefail"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "--help should not probe Docker/Podman before printing usage"
+    );
+}
+
+#[test]
 fn pre_commit_hooks_file_advertises_validate_and_lint() {
     let hooks = fs::read_to_string(repo_root().join(".pre-commit-hooks.yaml"))
         .expect("read .pre-commit-hooks.yaml");

@@ -17,6 +17,20 @@ container="hpc-compose-devcluster"
 
 die() { printf 'devcluster: %s\n' "$*" >&2; exit 1; }
 
+usage() {
+  sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+cmd="${1:-}"
+[[ $# -gt 0 ]] && shift || true
+
+case "$cmd" in
+  ""|-h|--help|help)
+    usage
+    exit 0
+    ;;
+esac
+
 # Pick a compose provider and matching engine CLI.
 if docker compose version >/dev/null 2>&1; then
   compose=(docker compose)
@@ -27,13 +41,6 @@ elif podman compose version >/dev/null 2>&1; then
 else
   die "need 'docker compose' or 'podman compose' on PATH (is the engine running?)"
 fi
-
-usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-}
-
-cmd="${1:-}"
-[[ $# -gt 0 ]] && shift || true
 
 case "$cmd" in
   up)
@@ -76,9 +83,6 @@ case "$cmd" in
     ;;
   logs)
     "$engine" logs -f "$container"
-    ;;
-  ""|-h|--help|help)
-    usage
     ;;
   *)
     die "unknown command '$cmd' (try: up, run, exec, sinfo, logs, down)"
