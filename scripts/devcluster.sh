@@ -47,6 +47,11 @@ case "$cmd" in
     # instead of rebuilding it — used by CI, which prebuilds the image with a
     # cached cargo layer before booting (see scripts/devcluster_e2e.sh).
     if [[ "${DEVCLUSTER_SKIP_BUILD:-0}" == "1" ]]; then
+      # Fail fast: without --build, compose would silently fall back to a slow,
+      # uncached build if the prebuilt image never loaded — defeating the point.
+      if ! "$engine" image inspect hpc-compose-devcluster:latest >/dev/null 2>&1; then
+        die "DEVCLUSTER_SKIP_BUILD=1 but image hpc-compose-devcluster:latest is absent; build it first"
+      fi
       HPC_COMPOSE_PROJECT_DIR="$project" "${compose[@]}" -f "$compose_file" up -d "$@"
     else
       HPC_COMPOSE_PROJECT_DIR="$project" "${compose[@]}" -f "$compose_file" up --build -d "$@"
