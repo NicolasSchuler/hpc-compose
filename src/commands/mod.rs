@@ -386,13 +386,30 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 if watch_queue {
                     bail!("up --remote cannot be combined with --watch-queue");
                 }
+                if script_out.is_some() {
+                    bail!(
+                        "up --remote cannot be combined with --script-out: the rendered script is produced in the remote staged project"
+                    );
+                }
                 return runtime::remote_up(
                     &context,
                     &remote_target,
                     local,
-                    dry_run,
-                    detach,
-                    launch.no_preflight,
+                    runtime::RemoteUpOptions {
+                        keep_failed_prep: launch.keep_failed_prep,
+                        skip_prepare: launch.skip_prepare,
+                        force_rebuild: launch.force_rebuild,
+                        no_preflight: launch.no_preflight,
+                        allow_resume_changes,
+                        resume_diff_only,
+                        dry_run,
+                        detach,
+                        format,
+                        print_endpoints,
+                        watch_mode,
+                        hold_on_exit,
+                        quiet: options.quiet,
+                    },
                 );
             }
             runtime::up(

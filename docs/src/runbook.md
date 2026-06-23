@@ -279,7 +279,7 @@ hpc-compose up --remote -f compose.yaml
 hpc-compose up --remote=login01 -f compose.yaml
 ```
 
-`--remote` rsyncs the compose file's project directory to a per-project staging directory on the login node (`~/.hpc-compose-remote/<project>`), then runs `hpc-compose up` there over SSH, streaming the output back and propagating the remote exit code. Run-shape flags (`--detach`, `--dry-run`, `--no-preflight`) are forwarded; without `--detach` the remote run streams in line mode.
+`--remote` rsyncs the compose project to a per-project staging directory on the login node (`~/.hpc-compose-remote/<project>`), including project settings such as `.hpc-compose/settings.toml` and `.hpc-compose/cluster.toml` while excluding tracked job/runtime state. It then runs `hpc-compose up` there over SSH, streaming the output back and propagating the remote exit code. Behavioral `up` flags such as `--detach`, `--dry-run`, `--no-preflight`, `--skip-prepare`, `--force-rebuild`, `--allow-resume-changes`, `--resume-diff-only`, `--format`, `--print-endpoints`, `--watch-mode line`, and `--hold-on-exit` are forwarded; without `--detach` the default remote run streams in line mode.
 
 Connection details belong in your `~/.ssh/config` (port, identity, user, jump host), so `--remote=<host>` stays a bare host or alias. For an ad-hoc host not in your config, set `HPC_COMPOSE_REMOTE_SSH_OPTS` (whitespace-split ssh flags, e.g. `-p 2222 -i ~/.ssh/cluster`). Every connection reuses one SSH ControlMaster, so a login node that requires an OTP/2FA prompts only once within `ControlPersist`.
 

@@ -59,43 +59,190 @@ pub(crate) fn remote_stage_path(project_dir: &Path) -> String {
     format!(".hpc-compose-remote/{safe}")
 }
 
-/// Flags forwarded to the remote `hpc-compose up`. Only run-shape flags are
-/// forwarded; tool-path overrides are intentionally dropped so the login node
-/// resolves its own binaries. When not detaching, the remote runs over a
-/// non-TTY SSH pipe, so line mode is forced to keep the streamed output
-/// deterministic.
-pub(crate) fn forwarded_up_flags(dry_run: bool, detach: bool, no_preflight: bool) -> Vec<String> {
+/// Options that preserve the local `up` CLI contract when delegating the actual
+/// submission to a login node. Tool-path overrides are intentionally excluded:
+/// the login node should resolve its own scheduler/runtime binaries from its
+/// environment and staged settings.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RemoteUpOptions {
+    pub keep_failed_prep: bool,
+    pub skip_prepare: bool,
+    pub force_rebuild: bool,
+    pub no_preflight: bool,
+    pub allow_resume_changes: bool,
+    pub resume_diff_only: bool,
+    pub dry_run: bool,
+    pub detach: bool,
+    pub format: Option<OutputFormat>,
+    pub print_endpoints: bool,
+    pub watch_mode: WatchMode,
+    pub hold_on_exit: HoldOnExit,
+    pub quiet: bool,
+}
+
+fn output_format_arg(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Text => "text",
+        OutputFormat::Json => "json",
+    }
+}
+
+fn watch_mode_arg(mode: WatchMode) -> &'static str {
+    match mode {
+        WatchMode::Auto => "auto",
+        WatchMode::Tui => "tui",
+        WatchMode::Line => "line",
+    }
+}
+
+fn hold_on_exit_arg(hold: HoldOnExit) -> &'static str {
+    match hold {
+        HoldOnExit::Never => "never",
+        HoldOnExit::Failure => "failure",
+        HoldOnExit::Always => "always",
+    }
+}
+
+/// Chooses the directory rsynced into the remote stage. When project settings
+/// were discovered, the staged root must include both the compose file and the
+/// settings base so the delegated command resolves the same defaults, profiles,
+/// env files, and cluster profile.
+pub(crate) fn remote_stage_root(context: &ResolvedContext, compose_file: &Path) -> Result<PathBuf> {
+    let compose_dir = compose_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let Some(settings_base) = context.settings_base_dir.as_ref() else {
+        return Ok(compose_dir);
+    };
+
+    if compose_file.starts_with(settings_base) {
+        return Ok(settings_base.clone());
+    }
+    if settings_base.starts_with(&compose_dir) {
+        return Ok(compose_dir);
+    }
+    bail!(
+        "up --remote cannot stage settings from '{}' because they are outside the compose project '{}'",
+        settings_base.display(),
+        compose_dir.display()
+    );
+}
+
+/// Global flags forwarded before the `up` subcommand so the remote process uses
+/// the same settings context as the local command resolution.
+pub(crate) fn forwarded_global_flags(
+    context: &ResolvedContext,
+    stage_root: &Path,
+    quiet: bool,
+) -> Result<Vec<String>> {
     let mut flags = Vec::new();
-    if dry_run {
-        flags.push("--dry-run".to_string());
+    if quiet {
+        flags.push("--quiet".to_string());
     }
-    if detach {
-        flags.push("--detach".to_string());
+    if let Some(settings_path) = context.settings_path.as_ref() {
+        let rel = settings_path.strip_prefix(stage_root).with_context(|| {
+            format!(
+                "up --remote cannot forward settings file '{}' because it is outside the staged project '{}'",
+                settings_path.display(),
+                stage_root.display()
+            )
+        })?;
+        flags.push("--settings-file".to_string());
+        flags.push(shell_quote::quote(&rel.to_string_lossy()));
     }
-    if no_preflight {
+    if let Some(profile) = context.selected_profile.as_ref() {
+        flags.push("--profile".to_string());
+        flags.push(shell_quote::quote(profile));
+    }
+    Ok(flags)
+}
+
+/// Flags forwarded to the remote `hpc-compose up`. When not detaching, the
+/// default remote stream runs over a non-TTY SSH pipe, so auto mode is converted
+/// to line mode to keep output deterministic. Explicit TUI mode is rejected
+/// before SSH because it cannot work through that non-TTY pipe.
+pub(crate) fn forwarded_up_flags(options: RemoteUpOptions) -> Result<Vec<String>> {
+    if !options.detach && options.watch_mode == WatchMode::Tui {
+        bail!("up --remote cannot be combined with --watch-mode tui; use --watch-mode line");
+    }
+
+    let mut flags = Vec::new();
+    if options.keep_failed_prep {
+        flags.push("--keep-failed-prep".to_string());
+    }
+    if options.skip_prepare {
+        flags.push("--skip-prepare".to_string());
+    }
+    if options.force_rebuild {
+        flags.push("--force-rebuild".to_string());
+    }
+    if options.no_preflight {
         flags.push("--no-preflight".to_string());
     }
-    if !detach {
-        flags.push("--watch-mode".to_string());
-        flags.push("line".to_string());
+    if options.allow_resume_changes {
+        flags.push("--allow-resume-changes".to_string());
     }
-    flags
+    if options.resume_diff_only {
+        flags.push("--resume-diff-only".to_string());
+    }
+    if options.dry_run {
+        flags.push("--dry-run".to_string());
+    }
+    if options.detach {
+        flags.push("--detach".to_string());
+    }
+    if let Some(format) = options.format {
+        flags.push("--format".to_string());
+        flags.push(output_format_arg(format).to_string());
+    }
+    if options.print_endpoints {
+        flags.push("--print-endpoints".to_string());
+    }
+    if !options.detach {
+        flags.push("--watch-mode".to_string());
+        flags.push(
+            match options.watch_mode {
+                WatchMode::Auto => "line",
+                WatchMode::Line => "line",
+                WatchMode::Tui => unreachable!("TUI mode rejected above"),
+            }
+            .to_string(),
+        );
+    } else if options.watch_mode != WatchMode::Auto {
+        flags.push("--watch-mode".to_string());
+        flags.push(watch_mode_arg(options.watch_mode).to_string());
+    }
+    if options.hold_on_exit != HoldOnExit::Failure {
+        flags.push("--hold-on-exit".to_string());
+        flags.push(hold_on_exit_arg(options.hold_on_exit).to_string());
+    }
+    Ok(flags)
 }
 
 /// The remote shell command: cd into the staged project, then run `up`. The
-/// user-controlled values (stage, spec path) are passed through the canonical
-/// shell quoter; `cd`, `&&`, and the run-shape flags are fixed safe tokens.
-pub(crate) fn build_remote_command(stage: &str, spec_rel: &str, flags: &[String]) -> String {
+/// user-controlled values (stage, spec path, forwarded settings/profile values)
+/// are passed through the canonical shell quoter; `cd`, `&&`, and flag names are
+/// fixed safe tokens.
+pub(crate) fn build_remote_command(
+    stage: &str,
+    spec_rel: &str,
+    global_flags: &[String],
+    up_flags: &[String],
+) -> String {
     let mut parts = vec![
         "cd".to_string(),
         shell_quote::quote(stage),
         "&&".to_string(),
         "hpc-compose".to_string(),
+    ];
+    parts.extend(global_flags.iter().cloned());
+    parts.extend([
         "up".to_string(),
         "-f".to_string(),
         shell_quote::quote(spec_rel),
-    ];
-    parts.extend(flags.iter().cloned());
+    ]);
+    parts.extend(up_flags.iter().cloned());
     parts.join(" ")
 }
 
@@ -119,7 +266,19 @@ pub(crate) fn build_rsync_args(
         "--exclude".to_string(),
         "target".to_string(),
         "--exclude".to_string(),
-        ".hpc-compose".to_string(),
+        ".hpc-compose/jobs/".to_string(),
+        "--exclude".to_string(),
+        ".hpc-compose/sweeps/".to_string(),
+        "--exclude".to_string(),
+        ".hpc-compose/locks/".to_string(),
+        "--exclude".to_string(),
+        ".hpc-compose/logs/".to_string(),
+        "--exclude".to_string(),
+        ".hpc-compose/latest*.json".to_string(),
+        "--exclude".to_string(),
+        ".hpc-compose/[0-9]*/".to_string(),
+        "--exclude".to_string(),
+        ".hpc-compose/local-*/".to_string(),
         "--exclude".to_string(),
         ".hpc-compose-remote".to_string(),
     ];
@@ -144,9 +303,7 @@ pub(crate) fn remote_up(
     context: &ResolvedContext,
     remote_flag: &str,
     local: bool,
-    dry_run: bool,
-    detach: bool,
-    no_preflight: bool,
+    options: RemoteUpOptions,
 ) -> Result<()> {
     if local {
         bail!(
@@ -157,14 +314,23 @@ pub(crate) fn remote_up(
 
     let host = resolve_remote_host(remote_flag, context.login_host.as_deref())?;
     let compose_file = context.compose_file.value.clone();
-    let project_dir = compose_file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let project_dir = remote_stage_root(context, &compose_file)?;
     let spec_rel = compose_file
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .context("--remote: compose file path has no file name")?;
+        .strip_prefix(&project_dir)
+        .with_context(|| {
+            format!(
+                "--remote: compose file '{}' is outside staged project '{}'",
+                compose_file.display(),
+                project_dir.display()
+            )
+        })?
+        .to_string_lossy()
+        .to_string();
+    if spec_rel.is_empty() {
+        bail!("--remote: compose file path has no file name");
+    }
+    let global_flags = forwarded_global_flags(context, &project_dir, options.quiet)?;
+    let up_flags = forwarded_up_flags(options)?;
     let stage = remote_stage_path(&project_dir);
 
     let extra_opts = parse_extra_ssh_opts(env::var(REMOTE_SSH_OPTS_ENV).ok().as_deref());
@@ -209,8 +375,7 @@ pub(crate) fn remote_up(
     }
 
     // 2. Delegate to the login node's hpc-compose, streaming output back.
-    let flags = forwarded_up_flags(dry_run, detach, no_preflight);
-    let remote_command = build_remote_command(&stage, &spec_rel, &flags);
+    let remote_command = build_remote_command(&stage, &spec_rel, &global_flags, &up_flags);
     eprintln!("  delegating: ssh {host} '{remote_command}'");
     let mut ssh_args = base_ssh_args.clone();
     ssh_args.push(host.clone());
@@ -229,6 +394,27 @@ pub(crate) fn remote_up(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hpc_compose::context::{
+        ResolveRequest, Settings, SettingsProfile, resolve, write_settings,
+    };
+
+    fn remote_options() -> RemoteUpOptions {
+        RemoteUpOptions {
+            keep_failed_prep: false,
+            skip_prepare: false,
+            force_rebuild: false,
+            no_preflight: false,
+            allow_resume_changes: false,
+            resume_diff_only: false,
+            dry_run: false,
+            detach: false,
+            format: None,
+            print_endpoints: false,
+            watch_mode: WatchMode::Auto,
+            hold_on_exit: HoldOnExit::Failure,
+            quiet: false,
+        }
+    }
 
     #[test]
     fn resolve_remote_host_prefers_flag_over_login_host() {
@@ -273,13 +459,122 @@ mod tests {
     #[test]
     fn forwarded_flags_force_line_mode_unless_detached() {
         assert_eq!(
-            forwarded_up_flags(false, false, false),
+            forwarded_up_flags(remote_options()).unwrap(),
             vec!["--watch-mode", "line"]
         );
-        assert_eq!(forwarded_up_flags(false, true, false), vec!["--detach"]);
         assert_eq!(
-            forwarded_up_flags(true, false, true),
-            vec!["--dry-run", "--no-preflight", "--watch-mode", "line"]
+            forwarded_up_flags(RemoteUpOptions {
+                detach: true,
+                ..remote_options()
+            })
+            .unwrap(),
+            vec!["--detach"]
+        );
+        assert_eq!(
+            forwarded_up_flags(RemoteUpOptions {
+                dry_run: true,
+                no_preflight: true,
+                ..remote_options()
+            })
+            .unwrap(),
+            vec!["--no-preflight", "--dry-run", "--watch-mode", "line"]
+        );
+    }
+
+    #[test]
+    fn forwarded_flags_preserve_behavioral_up_options() {
+        let flags = forwarded_up_flags(RemoteUpOptions {
+            keep_failed_prep: true,
+            skip_prepare: true,
+            force_rebuild: true,
+            no_preflight: true,
+            allow_resume_changes: true,
+            resume_diff_only: true,
+            dry_run: true,
+            detach: true,
+            format: Some(OutputFormat::Json),
+            print_endpoints: true,
+            watch_mode: WatchMode::Line,
+            hold_on_exit: HoldOnExit::Always,
+            quiet: false,
+        })
+        .unwrap();
+        assert_eq!(
+            flags,
+            vec![
+                "--keep-failed-prep",
+                "--skip-prepare",
+                "--force-rebuild",
+                "--no-preflight",
+                "--allow-resume-changes",
+                "--resume-diff-only",
+                "--dry-run",
+                "--detach",
+                "--format",
+                "json",
+                "--print-endpoints",
+                "--watch-mode",
+                "line",
+                "--hold-on-exit",
+                "always",
+            ]
+        );
+    }
+
+    #[test]
+    fn forwarded_flags_reject_tui_remote_watch() {
+        let err = forwarded_up_flags(RemoteUpOptions {
+            watch_mode: WatchMode::Tui,
+            ..remote_options()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--watch-mode tui"));
+    }
+
+    #[test]
+    fn remote_stage_root_and_globals_preserve_project_settings_context() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let root = tmpdir.path();
+        fs::create_dir_all(root.join(".hpc-compose")).expect("settings dir");
+        fs::create_dir_all(root.join("configs")).expect("configs dir");
+        fs::write(root.join("configs/app.yaml"), "name: demo\nservices: {}\n").expect("compose");
+
+        let mut settings = Settings {
+            default_profile: Some("gpu".to_string()),
+            ..Settings::default()
+        };
+        settings
+            .profiles
+            .insert("gpu".to_string(), SettingsProfile::default());
+        write_settings(&root.join(".hpc-compose/settings.toml"), &settings).expect("settings");
+
+        let context = resolve(&ResolveRequest {
+            cwd: root.to_path_buf(),
+            compose_file_override: Some(root.join("configs/app.yaml")),
+            ..ResolveRequest::default()
+        })
+        .expect("resolve context");
+        let stage_root = remote_stage_root(&context, &context.compose_file.value).unwrap();
+        assert_eq!(stage_root, root);
+        assert_eq!(
+            context
+                .compose_file
+                .value
+                .strip_prefix(&stage_root)
+                .unwrap()
+                .to_string_lossy(),
+            "configs/app.yaml"
+        );
+        assert_eq!(
+            forwarded_global_flags(&context, &stage_root, true).unwrap(),
+            vec![
+                "--quiet",
+                "--settings-file",
+                "'.hpc-compose/settings.toml'",
+                "--profile",
+                "'gpu'",
+            ]
         );
     }
 
@@ -287,12 +582,20 @@ mod tests {
     fn build_remote_command_quotes_and_chains() {
         let cmd = build_remote_command(
             ".hpc-compose-remote/specs",
-            "hello.yaml",
-            &["--detach".to_string()],
+            "configs/hello.yaml",
+            &[
+                "--settings-file".to_string(),
+                "'.hpc-compose/settings.toml'".to_string(),
+            ],
+            &[
+                "--detach".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+            ],
         );
         assert_eq!(
             cmd,
-            "cd '.hpc-compose-remote/specs' && hpc-compose up -f 'hello.yaml' --detach"
+            "cd '.hpc-compose-remote/specs' && hpc-compose --settings-file '.hpc-compose/settings.toml' up -f 'configs/hello.yaml' --detach --format json"
         );
     }
 
@@ -309,6 +612,13 @@ mod tests {
         assert!(args.contains(&"ssh -o ControlMaster=auto".to_string()));
         assert!(args.contains(&".git".to_string()));
         assert!(args.contains(&"target".to_string()));
+        assert!(!args.contains(&".hpc-compose".to_string()));
+        assert!(args.contains(&".hpc-compose/jobs/".to_string()));
+        assert!(args.contains(&".hpc-compose/sweeps/".to_string()));
+        assert!(args.contains(&".hpc-compose/locks/".to_string()));
+        assert!(args.contains(&".hpc-compose/latest*.json".to_string()));
+        assert!(args.contains(&".hpc-compose/[0-9]*/".to_string()));
+        assert!(args.contains(&".hpc-compose/local-*/".to_string()));
         // Source has a trailing slash; destination is host:stage/.
         assert_eq!(args[args.len() - 2], "/home/me/specs/");
         assert_eq!(args[args.len() - 1], "login01:.hpc-compose-remote/specs/");
