@@ -297,6 +297,27 @@ pub(crate) fn parse_extra_ssh_opts(raw: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn ensure_control_master_dir() -> Result<()> {
+    let Some(home) = env::var_os("HOME") else {
+        return Ok(());
+    };
+    let dir = PathBuf::from(home).join(".ssh");
+    let existed = dir.exists();
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create SSH ControlMaster directory {}",
+            dir.display()
+        )
+    })?;
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to chmod {}", dir.display()))?;
+    }
+    Ok(())
+}
+
 /// Orchestrate the thin remote submit: resolve the destination, rsync the
 /// project, then delegate `up` over SSH and propagate the remote exit code.
 pub(crate) fn remote_up(
@@ -332,6 +353,7 @@ pub(crate) fn remote_up(
     let global_flags = forwarded_global_flags(context, &project_dir, options.quiet)?;
     let up_flags = forwarded_up_flags(options)?;
     let stage = remote_stage_path(&project_dir);
+    ensure_control_master_dir()?;
 
     let extra_opts = parse_extra_ssh_opts(env::var(REMOTE_SSH_OPTS_ENV).ok().as_deref());
     // One set of multiplexing opts for every connection this run makes (mkdir,
