@@ -5,4 +5,4 @@
 /*.sbatch
 
 # Rendered scripts from `devcluster run` when dogfooding the repo at /workspace
-dev-cluster/specs/*.sbatch
+dev-cluster/specs/**/*.sbatch

@@ -44,6 +44,8 @@ For real cluster runs, configure a cache path visible from both the Slurm submis
 
 Run `hpc-compose up -f compose.yaml` only on a supported Linux Slurm submission host with the runtime backend your spec selects. If it fails, start with `hpc-compose debug -f compose.yaml --preflight`.
 
+If you have a source checkout and want to exercise real `sbatch` without a cluster login, use the [Local Slurm Dev Cluster](local-slurm-dev-cluster.md) as a host-backend smoke test.
+
 Download the [asciinema-style quickstart demo cast](quickstart-demo.cast) if you want the same flow as a terminal recording.
 
 ## Terms To Know

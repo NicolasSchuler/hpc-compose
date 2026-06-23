@@ -1,0 +1,64 @@
+name: dev-cluster-restart-policy
+
+# Real restart-supervisor smoke: the service fails twice then succeeds, so the
+# batch supervisor must re-invoke srun through its restart/backoff/window state
+# machine against a live slurmd before the allocation drains to COMPLETED. The
+# unit suite can only drive this via a synthetic per-attempt exit-code plan file;
+# here the exit codes, the backoff timing, and the restart hook are all real.
+#
+# The attempt counter persists across restarts under $HPC_COMPOSE_JOB_DIR (the
+# per-job scratch dir, stable for the job's lifetime), read from python via
+# os.environ so the command body needs no shell interpolation. The success line
+# is printed ONLY on the third attempt, so seeing it at COMPLETED proves the
+# supervisor restarted the failing service twice.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-restart-policy
+  time: "00:10:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 512M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  flaky:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python3 - <<'PY'
+        import os
+        import pathlib
+        import sys
+
+        state_dir = pathlib.Path(os.environ["HPC_COMPOSE_JOB_DIR"]) / "restart-policy"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        counter = state_dir / "attempts.txt"
+        attempts = (int(counter.read_text()) + 1) if counter.exists() else 1
+        counter.write_text(str(attempts))
+
+        print(f"restart-policy: attempt {attempts}")
+        if attempts < 3:
+            print("restart-policy: simulating transient failure")
+            sys.exit(42)
+        print("restart-policy: completed after transient failures")
+        PY
+    x-slurm:
+      # Generous limits so the success attempt is well within the restart and
+      # crash-loop-window budgets (avoids a window_exhausted flake at the margin).
+      failure_policy:
+        mode: restart_on_failure
+        max_restarts: 10
+        backoff_seconds: 1
+        window_seconds: 120
+        max_restarts_in_window: 10
+      # Exercises the on:restart hook rendering + execution path end to end (the
+      # hook is recorded in the job's event-hooks ledger). Its stdout is not
+      # asserted: host-hook output does not reliably reach `hpc-compose logs`, and
+      # the ledger lives under the tracked dir the harness must not read directly.
+      hooks:
+        - on: restart
+          context: host
+          script: 'echo "restart hook fired"'

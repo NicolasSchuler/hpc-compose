@@ -84,7 +84,7 @@ Without `--job-id`, it launches a new local run. With `--job-id`, it attaches to
 - no service-level MPI
 - no Slurm arrays or scheduler dependencies
 
-Use these commands to author and debug single-host launch behavior. Use `test --submit` or `up` on a Slurm login node for real scheduler behavior.
+Use these commands to author and debug single-host launch behavior. Use `test --submit` or `up` on a Slurm login node for real scheduler behavior, or use the [Local Slurm Dev Cluster](local-slurm-dev-cluster.md) from a source checkout when you want a throwaway real `sbatch` smoke test without a cluster login.
 
 ## Example Recipe
 
@@ -105,6 +105,7 @@ hpc-compose test --submit --time 00:01:00 -f examples/dev-python-smoke.yaml
 ## Related Docs
 
 - [Operate a Real Cluster Run](runbook.md)
+- [Local Slurm Dev Cluster](local-slurm-dev-cluster.md)
 - [Monitor a Run](runtime-observability.md)
 - [Troubleshoot a Failed Run](troubleshooting.md)
 - [Manage the Cache and Clean Up](cache-management.md)

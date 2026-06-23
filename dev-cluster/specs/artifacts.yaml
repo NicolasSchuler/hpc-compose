@@ -1,0 +1,45 @@
+name: dev-cluster-artifacts
+
+# Real artifact-collection smoke: the service writes files under the per-job
+# scratch dir, and hpc-compose's teardown collection copies the declared paths
+# into the tracked payload dir and writes a manifest.json. This is the ONLY
+# real-manifest exercise of `artifacts`/`pull` (which otherwise just print a
+# placeholder hint); the unit suite runs the script in a tmp dir with no real
+# teardown/scratch lifecycle.
+#
+# Artifact paths MUST be declared as literal /hpc-compose/job/** (validation
+# rejects $HPC_COMPOSE_JOB_DIR there): hpc-compose remaps that reserved root to
+# the real on-node job dir at collection time. The service command, by contrast,
+# writes via $HPC_COMPOSE_JOB_DIR (the portable per-job scratch path).
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-artifacts
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 512M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+  artifacts:
+    collect: on_success
+    export_dir: ${CACHE_DIR:-/var/cache/hpc-compose}/artifacts-export
+    paths:
+      - /hpc-compose/job/reports/**
+    bundles:
+      logs:
+        paths:
+          - /hpc-compose/job/reports/run.log
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        reports="$$HPC_COMPOSE_JOB_DIR/reports"
+        mkdir -p "$$reports"
+        printf 'artifact report body\n' >"$$reports/r.txt"
+        printf 'collected log line\n' >"$$reports/run.log"
+        echo "dev-cluster artifacts produced"

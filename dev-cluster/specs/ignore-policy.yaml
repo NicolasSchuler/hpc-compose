@@ -1,0 +1,35 @@
+name: dev-cluster-ignore-policy
+
+# The inverse of failing-service.yaml (default fail_job): a non-zero service exit
+# under failure_policy.mode: ignore must NOT fail the whole job. Two INDEPENDENT
+# services (the planner rejects depending on an ignore-mode target): `flaky`
+# exits non-zero but is ignored, `ok` exits 0, so the batch job drains COMPLETED
+# 0:0 — proving ignore propagates correctly through real scheduler state.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-ignore-policy
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  flaky:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "ignore-policy: flaky exiting non-zero (should be ignored)"
+        exit 23
+    x-slurm:
+      failure_policy:
+        mode: ignore
+  ok:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "ignore-policy: ok service succeeded"

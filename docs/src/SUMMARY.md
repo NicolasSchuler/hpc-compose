@@ -29,6 +29,7 @@
 - [Manage the Cache and Clean Up](cache-management.md)
 - [Troubleshoot a Failed Run](troubleshooting.md)
 - [Develop and Smoke-Test Locally](development-workflow.md)
+- [Local Slurm Dev Cluster](local-slurm-dev-cluster.md)
 
 # Advanced Features
 

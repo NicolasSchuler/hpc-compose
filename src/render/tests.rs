@@ -2339,6 +2339,62 @@ fn render_resume_helpers_when_enabled() {
 }
 
 #[test]
+fn render_resume_dir_is_backend_aware() {
+    // Host backend: HPC_COMPOSE_RESUME_DIR must be the real on-node
+    // $RESUME_HOST_PATH, not the container mount point /hpc-compose/resume which
+    // is never mounted under `host` (regression test — a resuming host service
+    // would otherwise read an unmounted path).
+    let mut host_service = runtime_service();
+    host_service.source = crate::planner::ImageSource::Host;
+    host_service.runtime_image = PathBuf::new();
+    let host_plan = RuntimePlan {
+        name: "resume-host".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Host,
+            ..RuntimeConfig::default()
+        },
+        slurm: SlurmConfig {
+            resume: Some(ResumeConfig {
+                path: "/shared/runs/demo".into(),
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![host_service],
+    };
+    let host_script = render_script(&host_plan).expect("host script");
+    assert!(host_script.contains("launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_HOST_PATH\")"));
+    assert!(
+        !host_script.contains("launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")")
+    );
+
+    // Container backends bind-mount $RESUME_HOST_PATH at $RESUME_CONTAINER_PATH.
+    let container_plan = RuntimePlan {
+        name: "resume-container".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Pyxis,
+            ..RuntimeConfig::default()
+        },
+        slurm: SlurmConfig {
+            resume: Some(ResumeConfig {
+                path: "/shared/runs/demo".into(),
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![runtime_service()],
+    };
+    let container_script = render_script(&container_plan).expect("container script");
+    assert!(
+        container_script
+            .contains("launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")")
+    );
+    assert!(
+        !container_script.contains("launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_HOST_PATH\")")
+    );
+}
+
+#[test]
 fn rendered_resume_script_preserves_prior_attempts_and_updates_latest_links() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     write_fake_runtime_srun(tmpdir.path());

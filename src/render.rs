@@ -2683,7 +2683,15 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
         out.push_str("  launch_env+=(\"${RDZV_LAUNCH_ENV[@]:-}\")\n");
     }
     out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
-    out.push_str("    launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")\n");
+    // Same host/container split as $HPC_COMPOSE_JOB_DIR and $HPC_COMPOSE_SCRATCH_DIR
+    // above: $RESUME_CONTAINER_PATH (/hpc-compose/resume) is only bind-mounted under
+    // container backends, so the host backend must see $RESUME_HOST_PATH directly
+    // (mkdir'd above) — otherwise a resuming host service reads an unmounted path.
+    if context.runtime.backend == RuntimeBackend::Host {
+        out.push_str("    launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_HOST_PATH\")\n");
+    } else {
+        out.push_str("    launch_env+=(\"HPC_COMPOSE_RESUME_DIR=$RESUME_CONTAINER_PATH\")\n");
+    }
     out.push_str("    launch_env+=(\"HPC_COMPOSE_ATTEMPT=$ATTEMPT\")\n");
     out.push_str("    launch_env+=(\"HPC_COMPOSE_IS_RESUME=$IS_RESUME\")\n");
     out.push_str("  fi\n");

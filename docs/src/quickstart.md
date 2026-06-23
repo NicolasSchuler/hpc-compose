@@ -88,6 +88,7 @@ Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for `x-slurm.cache_
 | Command category | Where to run it | Required tools | Notes |
 | --- | --- | --- | --- |
 | Authoring: `new`, `plan`, `validate`, `inspect`, `render`, `config`, `schema` | laptop, workstation, or login node | `hpc-compose` | `plan` is the recommended static pre-run check. |
+| Local real-scheduler smoke test | source checkout on a machine with Docker/Podman | `docker compose` or `podman compose` | The [Local Slurm Dev Cluster](local-slurm-dev-cluster.md) runs real local `sbatch`; use `runtime.backend: host`. |
 | Prepare: `prepare` | Linux host with selected runtime backend | Pyxis needs Enroot; Apptainer needs `apptainer`; Singularity needs `singularity`; host backend needs no container runtime | Does not call `sbatch`, but needs runtime tools for image work. |
 | Cluster checks: `preflight`, `doctor cluster-report` | Linux Slurm login node | Slurm client tools plus selected backend tools | Use `preflight --strict` when warnings should block launch. |
 | Run: `up`, `run` | Linux Slurm login node | `sbatch`, `srun`, scheduler tools, selected backend tools | `up` is the normal cluster execution path. |

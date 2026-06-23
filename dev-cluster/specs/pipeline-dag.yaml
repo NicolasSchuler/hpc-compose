@@ -1,0 +1,52 @@
+name: dev-cluster-pipeline-dag
+
+# One-shot DAG ordering: three services chained by
+# `depends_on: { condition: service_completed_successfully }`. Each stage reads a
+# file the previous stage produced under the per-job scratch dir, and the final
+# `done` line is printed to stdout only after both upstream stages exited 0. Its
+# presence at COMPLETED proves the real in-allocation supervisor enforced the
+# preprocess -> train -> postprocess order (the fake srun's instant return
+# cannot order meaningfully). Complements multi-service.yaml's service_healthy.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-pipeline-dag
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  preprocess:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        echo "pipeline-dag: preprocess running"
+        echo prepared >"$$HPC_COMPOSE_JOB_DIR/prep.txt"
+  train:
+    depends_on:
+      preprocess:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        test -f "$$HPC_COMPOSE_JOB_DIR/prep.txt" || { echo "train: prep missing" >&2; exit 1; }
+        echo "pipeline-dag: train consumed prep"
+        echo trained >"$$HPC_COMPOSE_JOB_DIR/model.txt"
+  postprocess:
+    depends_on:
+      train:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        test -f "$$HPC_COMPOSE_JOB_DIR/model.txt" || { echo "postprocess: model missing" >&2; exit 1; }
+        echo "pipeline-dag: postprocess done"

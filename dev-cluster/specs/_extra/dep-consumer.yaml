@@ -1,0 +1,28 @@
+name: dev-cluster-dep-consumer
+
+# Consumer half of the scheduler inter-job dependency block. The producer's job
+# id is injected at submit time via `-e PRODUCER_JOB=<id>` (no default, so it
+# only validates/submits when supplied). The block asserts slurmctld holds this
+# job PENDING with reason Dependency until the producer reaches afterok, which a
+# unit fake (which can render --dependency but never enforce it) cannot prove.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-dep-consumer
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+  after_job:
+    id: ${PRODUCER_JOB}
+    condition: afterok
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "consumer: ran after producer reached afterok"

@@ -39,7 +39,7 @@ Rendered script:
 
 Additional lines (runtime mode, cache dir, allocation geometry, per-service image state) are normal.
 
-Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slurm submission host with the runtime backend your spec selects. If a run fails, start triage with `hpc-compose debug -f compose.yaml --preflight`.
+Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slurm submission host with the runtime backend your spec selects. From a source checkout, the [local Slurm dev cluster](docs/src/local-slurm-dev-cluster.md) can smoke-test host-backend specs against real local `sbatch` before you use a shared cluster. If a run fails, start triage with `hpc-compose debug -f compose.yaml --preflight`.
 
 ## Scope
 

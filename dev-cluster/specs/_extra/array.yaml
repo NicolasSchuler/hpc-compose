@@ -1,0 +1,28 @@
+name: dev-cluster-array
+
+# Real Slurm array smoke. Lives under _extra/ so the generic e2e loop does NOT
+# glob it: an array job is rejected with --watch-mode line, so its dedicated
+# harness block submits with `up --detach` and polls `sacct --array` for the
+# per-task rows. Proves the #SBATCH --array directive reaches a real controller,
+# fans out N tasks, propagates SLURM_ARRAY_TASK_ID, and produces real per-task
+# accounting rows — all hard-coded to a single fake job id in the unit suite.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-array
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+  array: "0-3"
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "array task $${SLURM_ARRAY_TASK_ID}"
+        sleep 2

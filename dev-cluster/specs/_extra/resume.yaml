@@ -1,0 +1,32 @@
+name: dev-cluster-resume
+
+# Regression smoke for the host-backend resume dir. With resume enabled,
+# hpc-compose exports $HPC_COMPOSE_RESUME_DIR; under `host` it must point at the
+# real on-node resume path (not the container mount /hpc-compose/resume, which is
+# never mounted here). The service asserts the dir exists and is writable, so
+# this fails loudly if the env var ever regresses to the unmounted container path.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-resume
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+  resume:
+    path: ${CACHE_DIR:-/var/cache/hpc-compose}/resume/dev-cluster-resume
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        echo "resume: HPC_COMPOSE_RESUME_DIR=$$HPC_COMPOSE_RESUME_DIR is_resume=$$HPC_COMPOSE_IS_RESUME"
+        test -d "$$HPC_COMPOSE_RESUME_DIR" || { echo "resume dir is not a real directory" >&2; exit 1; }
+        echo checkpoint-ok > "$$HPC_COMPOSE_RESUME_DIR/checkpoint.txt"
+        cat "$$HPC_COMPOSE_RESUME_DIR/checkpoint.txt"
+        echo "resume: wrote and read back checkpoint under the resume dir"
