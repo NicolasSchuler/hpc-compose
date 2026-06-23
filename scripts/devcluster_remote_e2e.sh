@@ -72,7 +72,9 @@ resolve_binary() {
 remote_jobid=""
 finish() {
   # Cancel a leaked remote job, drop the staged tree, and clean the work dir.
-  [[ -n "$remote_jobid" ]] && inctr scancel "$remote_jobid" >/dev/null 2>&1 || true
+  if [[ -n "$remote_jobid" ]]; then
+    inctr scancel "$remote_jobid" >/dev/null 2>&1 || true
+  fi
   inctr rm -rf /root/.hpc-compose-remote >/dev/null 2>&1 || true
   rm -rf "$work_dir" 2>/dev/null || true
   if [[ "${DEVCLUSTER_E2E_DOWN:-0}" == "1" ]]; then
