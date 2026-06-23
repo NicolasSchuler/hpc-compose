@@ -24,6 +24,10 @@ services:
       # Host-backend dev runs need a writable cache path. Not under /tmp: hpc-compose
       # preflight flags /tmp as node-local; /var/cache reads as a normal shared path.
       CACHE_DIR: /var/cache/hpc-compose
+    # Maps host 2222 -> container sshd so the remote-submit e2e can drive the node
+    # over ssh/rsync as a login-node stand-in. Unused by the exec-based harness.
+    ports:
+      - "2222:22"
     volumes:
       - ${HPC_COMPOSE_PROJECT_DIR:-..}:/workspace
     working_dir: /workspace

@@ -181,3 +181,21 @@ behind `--print-endpoints`. This surfaces them for humans:
 loops — a footer reads as noise; a maintainer UX call), and the `top` single-shot
 dashboard (new command → manpage/completions/cli-reference surface; overlaps
 `experiment show`).
+
+## Phase 2-lite — thin `up --remote` delegation (landed)
+
+A deliberately thin slice of Mode M shipped as `hpc-compose up --remote[=HOST]`
+(`src/commands/runtime/remote.rs`): it rsyncs the compose project to a
+per-project staging dir on the login node and runs `hpc-compose up` there over
+SSH, streaming output back and propagating the remote exit code. It reuses the
+`ssh_hint` ControlMaster options (one OTP per `ControlPersist`) and an optional
+`HPC_COMPOSE_REMOTE_SSH_OPTS` escape hatch for hosts not in `~/.ssh/config`.
+
+This is **not** the full thin client. Deliberately omitted (still deferred): the
+`login`/`logout` session lifecycle, `ssh -O check` fail-fast-when-cold, auto
+mode-detection (it is explicit opt-in, not inferred from the host), and the
+content-addressed `--source-hash`/`--no-restage` path (it re-stages every run).
+It is end-to-end tested against the dev cluster acting as an SSH login-node
+stand-in (`scripts/devcluster_remote_e2e.sh`); the headline one-OTP-per-session
+ControlMaster reuse against a real OTP login node remains a manual check (there
+is no OTP locally, and macOS stays compile-time authoring-only).

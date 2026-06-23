@@ -30,6 +30,24 @@ struct PullOutput {
     ssh_multiplex_hint: String,
 }
 
+/// Build the cluster-side path label and the rsync command `pull` suggests.
+/// Factored out so the ControlMaster opts (one OTP per session) and the
+/// login_host-filled-vs-`<login-node>`-placeholder behavior are unit-testable:
+/// a divergent ControlPath spelling here would silently cost a second OTP prompt.
+fn pull_rsync_command(
+    login_host: Option<&str>,
+    payload_dir: &Path,
+    into_display: &str,
+) -> (String, String) {
+    let login = login_host.unwrap_or("<login-node>");
+    let cluster_path = format!("{login}:{}", payload_dir.display());
+    let suggested_command = format!(
+        "rsync -avz -e 'ssh {opts}' {cluster_path}/ {into_display}/",
+        opts = control_master_opts_str(),
+    );
+    (cluster_path, suggested_command)
+}
+
 pub(crate) fn pull(
     context: ResolvedContext,
     job_id: Option<String>,
@@ -90,12 +108,8 @@ pub(crate) fn pull(
     // Descriptive only. Never fall back to current_hostname: that is the laptop
     // host, not the cluster login host — a `<login-node>` placeholder is safer.
     let login_host = context.login_host.clone();
-    let login = login_host.as_deref().unwrap_or("<login-node>");
-    let cluster_path = format!("{login}:{}", payload_dir.display());
-    let suggested_command = format!(
-        "rsync -avz -e 'ssh {opts}' {cluster_path}/ {into_display}/",
-        opts = control_master_opts_str(),
-    );
+    let (cluster_path, suggested_command) =
+        pull_rsync_command(login_host.as_deref(), &payload_dir, &into_display);
 
     match output::resolve_output_format(format, false) {
         OutputFormat::Json => {
@@ -136,4 +150,31 @@ pub(crate) fn pull(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pull_rsync_command_carries_controlmaster_opts_and_otp_note_surface() {
+        let (cluster_path, command) =
+            pull_rsync_command(Some("login01"), Path::new("/scratch/job/42/artifacts"), ".");
+        assert_eq!(cluster_path, "login01:/scratch/job/42/artifacts");
+        // The exact ControlMaster triplet — a divergent ControlPath spelling here
+        // would silently cost a second OTP prompt (the design's flagged risk).
+        assert!(command.contains("ControlMaster=auto"));
+        assert!(command.contains("ControlPath=~/.ssh/cm-%r@%h:%p"));
+        assert!(command.contains("ControlPersist=10m"));
+        assert!(command.starts_with("rsync -avz -e 'ssh "));
+        assert!(command.ends_with("login01:/scratch/job/42/artifacts/ ./"));
+    }
+
+    #[test]
+    fn pull_rsync_command_uses_placeholder_without_login_host() {
+        let (cluster_path, command) =
+            pull_rsync_command(None, Path::new("/scratch/job/42/artifacts"), "out");
+        assert_eq!(cluster_path, "<login-node>:/scratch/job/42/artifacts");
+        assert!(command.contains("<login-node>:/scratch/job/42/artifacts/ out/"));
+    }
 }

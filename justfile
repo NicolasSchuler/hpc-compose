@@ -66,7 +66,7 @@ docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "typos" "markdownlint-c
 examples-check: (_require-tools "shellcheck")
     cargo build --locked
     for f in examples/*.yaml; do echo "Validating $f"; env -u CACHE_DIR cargo run --locked -- validate -f "$f"; done
-    shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_e2e.sh
+    shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh
     tmpdir="$(mktemp -d)"; trap 'rm -rf "$tmpdir"' EXIT; for f in examples/*.yaml; do echo "Shellchecking rendered $f"; out="$tmpdir/$(basename "$f" .yaml).sbatch"; env -u CACHE_DIR cargo run --locked -- render -f "$f" --output "$out"; shellcheck -e SC2034 -x -s bash "$out"; done
 
 # Boot the local single-node Slurm dev cluster and run the real
@@ -76,6 +76,13 @@ examples-check: (_require-tools "shellcheck")
 # `dev-cluster-e2e` job with a cached image build.
 dev-cluster-e2e:
     scripts/devcluster_e2e.sh
+
+# Boot the dev cluster as an SSH login-node stand-in and exercise the thin
+# remote-submit path (`up --remote`) from this host: rsync the project over,
+# submit on the node via real sbatch, and track to COMPLETED. Same privileged
+# container requirements as dev-cluster-e2e; CI runs it in the same job.
+dev-cluster-remote-e2e:
+    scripts/devcluster_remote_e2e.sh
 
 release-check: _require-cargo-subcommands
     cargo test --locked --test release_metadata

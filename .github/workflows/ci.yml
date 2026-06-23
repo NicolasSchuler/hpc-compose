@@ -238,7 +238,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_e2e.sh
+          shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh
 
           cargo build --locked
           tmpdir="$(mktemp -d)"
@@ -562,7 +562,9 @@ jobs:
     # Independent of the fast lint/unit lanes (no `needs:`), so it runs in
     # parallel and never gates them. Exercises the real up -> sbatch -> slurmd ->
     # sacct path against a single-node Slurm cluster in a privileged container —
-    # the ~39% of the code the unit suite mocks out.
+    # the ~39% of the code the unit suite mocks out. Covers BOTH operator modes:
+    # running hpc-compose inside the node (UC1) and submitting to it over
+    # ssh/rsync from the host as a login-node stand-in (UC2, `up --remote`).
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -583,5 +585,11 @@ jobs:
           cache-from: type=gha,scope=dev-cluster
           cache-to: type=gha,mode=max,scope=dev-cluster
 
-      - name: Run dev-cluster end-to-end suite
-        run: DEVCLUSTER_SKIP_BUILD=1 DEVCLUSTER_E2E_DOWN=1 scripts/devcluster_e2e.sh
+      - name: Run dev-cluster end-to-end suite (UC1, in-container)
+        # Leaves the cluster up so the remote suite below reuses it (no reboot).
+        run: DEVCLUSTER_SKIP_BUILD=1 scripts/devcluster_e2e.sh
+
+      - name: Run dev-cluster remote-submit end-to-end suite (UC2, over SSH)
+        # Drives `up --remote` from the host against the same node as a login-node
+        # stand-in; the harness pulls the image's Linux binary for the host side.
+        run: DEVCLUSTER_SKIP_BUILD=1 DEVCLUSTER_E2E_DOWN=1 scripts/devcluster_remote_e2e.sh

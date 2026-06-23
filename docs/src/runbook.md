@@ -268,6 +268,23 @@ hpc-compose run app -- python -m pytest
 
 Inside the allocation shell, `run SERVICE -- CMD` reuses the active allocation with `srun` instead of submitting a new `sbatch` job. `alloc` exports `HPC_COMPOSE_*` metadata for the compose file, cache directory, runtime backend, and allocated nodes. For interactive notebook sessions inside an allocation, see [Notebook](notebook.md).
 
+## 5b. Submit From Your Laptop With `up --remote`
+
+`hpc-compose up` runs on a Linux Slurm login node. macOS (and any host without Slurm) is authoring-only, so to submit from a laptop, delegate the run to a login node over SSH:
+
+```bash
+# Uses the configured login_host:
+hpc-compose up --remote -f compose.yaml
+# Or target a specific host (or ~/.ssh/config alias):
+hpc-compose up --remote=login01 -f compose.yaml
+```
+
+`--remote` rsyncs the compose file's project directory to a per-project staging directory on the login node (`~/.hpc-compose-remote/<project>`), then runs `hpc-compose up` there over SSH, streaming the output back and propagating the remote exit code. Run-shape flags (`--detach`, `--dry-run`, `--no-preflight`) are forwarded; without `--detach` the remote run streams in line mode.
+
+Connection details belong in your `~/.ssh/config` (port, identity, user, jump host), so `--remote=<host>` stays a bare host or alias. For an ad-hoc host not in your config, set `HPC_COMPOSE_REMOTE_SSH_OPTS` (whitespace-split ssh flags, e.g. `-p 2222 -i ~/.ssh/cluster`). Every connection reuses one SSH ControlMaster, so a login node that requires an OTP/2FA prompts only once within `ControlPersist`.
+
+This is a thin delegation: it re-stages the project on each run and does not maintain a persistent login session. It is not `up --local` (that launches on the current host); `--remote` and `--local` cannot be combined.
+
 ## 6. Run Preflight When Debugging Cluster Readiness
 
 ```bash

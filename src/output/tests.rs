@@ -1385,6 +1385,7 @@ fn run_command_covers_success_and_error_arms() {
         hold_on_exit: HoldOnExit::Failure,
         format: None,
         print_endpoints: false,
+        remote: None,
     })
     .expect_err("sbatch fail");
     assert!(err.to_string().contains("sbatch failed"));
@@ -1417,6 +1418,7 @@ fn run_command_covers_success_and_error_arms() {
         hold_on_exit: HoldOnExit::Failure,
         format: None,
         print_endpoints: false,
+        remote: None,
     })
     .expect("submit");
     run_command(Commands::Up {
@@ -1447,6 +1449,7 @@ fn run_command_covers_success_and_error_arms() {
         hold_on_exit: HoldOnExit::Failure,
         format: None,
         print_endpoints: false,
+        remote: None,
     })
     .expect("submit without id");
 

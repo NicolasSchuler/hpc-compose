@@ -86,6 +86,9 @@ Output format for \-\-detach or \-\-dry\-run. Possible values: text, json.
 \fB--print\-endpoints\fR
 Include readiness\-derived service endpoints (host/port/url) and suggested next commands in the JSON output (with \-\-detach or \-\-dry\-run).
 .TP
+\fB--remote\fR \fIHOST\fR
+Delegate this submission to a login node over SSH: rsync the project there and run `hpc\-compose up` remotely, streaming output back. With no value, uses the configured login_host; the host's port, identity, and user come from your ~/.ssh/config (or set HPC_COMPOSE_REMOTE_SSH_OPTS for ad\-hoc ssh flags).
+.TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.
 .TP

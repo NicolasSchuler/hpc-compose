@@ -341,6 +341,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             hold_on_exit,
             format,
             print_endpoints,
+            remote,
         } => {
             if format.is_some() && !detach && !dry_run {
                 bail!("up --format requires --detach or --dry-run");
@@ -376,6 +377,24 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--huggingface-cli-bin", &launch.huggingface_cli_bin),
                 ],
             )?;
+            // Thin laptop -> login-node delegation: rsync the project to the
+            // login node and run `up` there over SSH. Resolved after context so
+            // login_host and the compose path are available; bypasses the local
+            // Slurm path entirely (so it works from macOS, which is otherwise
+            // authoring-only).
+            if let Some(remote_target) = remote {
+                if watch_queue {
+                    bail!("up --remote cannot be combined with --watch-queue");
+                }
+                return runtime::remote_up(
+                    &context,
+                    &remote_target,
+                    local,
+                    dry_run,
+                    detach,
+                    launch.no_preflight,
+                );
+            }
             runtime::up(
                 context,
                 script_out,

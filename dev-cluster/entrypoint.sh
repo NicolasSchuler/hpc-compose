@@ -2,10 +2,8 @@
 # Boot a single-node Slurm cluster (controller + worker in one container) for
 # local hpc-compose development, then stay alive so callers can `exec` into it.
 #
-# Status: the file layout and recipe follow the standard "Slurm in a container"
-# pattern, but this entrypoint has NOT yet been boot-verified end to end (no
-# container engine was running in the authoring environment). Treat the first
-# `devcluster up` as the validating spike; see dev-cluster/README.md.
+# The boot path is covered by scripts/devcluster_e2e.sh and the CI
+# dev-cluster-e2e job; see dev-cluster/README.md for scope and caveats.
 set -euo pipefail
 
 log() { printf '[devcluster] %s\n' "$*"; }
@@ -114,6 +112,21 @@ fi
 sleep 1
 scontrol update nodename=hpc-compose-dev state=resume 2>/dev/null || true
 sinfo || true
+
+# --- 5b. sshd: SSH-reachable login-node stand-in for the remote-submit e2e ---
+# Key-only root login. No credentials are baked into the image; the remote e2e
+# harness injects its ephemeral public key into /root/.ssh/authorized_keys after
+# boot. Harmless when unused (the default exec-based harness never connects).
+install -d -m 0755 /run/sshd
+install -d -m 0700 /root/.ssh
+mkdir -p /etc/ssh/sshd_config.d
+cat >/etc/ssh/sshd_config.d/devcluster.conf <<'SSHD'
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+SSHD
+log "starting sshd"
+/usr/sbin/sshd || log "sshd failed to start (remote-submit e2e unavailable)"
 
 log "cluster ready — exec hpc-compose against it, e.g.:"
 log "  hpc-compose up -f <compose.yaml>"

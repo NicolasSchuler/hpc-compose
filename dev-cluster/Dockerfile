@@ -25,12 +25,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 # slurm-wlm: slurmctld/slurmd/client commands. slurmdbd + mariadb-server give
 # `sacct` accounting so `up`/`stats`/`score` track jobs to a terminal state.
 # munge: auth. Extra tools let host-backend example services actually run.
+# openssh-server + rsync make the node an SSH-reachable login-node stand-in for
+# the remote-submit e2e (host -> ssh/rsync -> this node); ssh-keygen -A
+# pre-generates host keys so sshd can start at boot.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       slurm-wlm slurmdbd munge mariadb-server \
       ca-certificates procps iproute2 tini \
       python3 curl redis-server socat \
- && rm -rf /var/lib/apt/lists/*
+      openssh-server rsync \
+ && rm -rf /var/lib/apt/lists/* \
+ && ssh-keygen -A
 
 COPY --from=build /src/target/release/hpc-compose /usr/local/bin/hpc-compose
 COPY dev-cluster/slurm.conf.tmpl /etc/slurm/slurm.conf.tmpl

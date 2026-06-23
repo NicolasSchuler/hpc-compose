@@ -793,6 +793,15 @@ pub enum Commands {
             help = "Include readiness-derived service endpoints (host/port/url) and suggested next commands in the JSON output (with --detach or --dry-run)"
         )]
         print_endpoints: bool,
+        #[arg(
+            long,
+            value_name = "HOST",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "",
+            help = "Delegate this submission to a login node over SSH: rsync the project there and run `hpc-compose up` remotely, streaming output back. With no value, uses the configured login_host; the host's port, identity, and user come from your ~/.ssh/config (or set HPC_COMPOSE_REMOTE_SSH_OPTS for ad-hoc ssh flags)"
+        )]
+        remote: Option<String>,
     },
     #[command(
         display_order = 112,
