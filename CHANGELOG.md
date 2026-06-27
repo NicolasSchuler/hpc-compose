@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.49] - 2026-06-27
+
 ### Added
 
 - Dev-cluster safe dry-runs are now a first-class, asserted capability: the
