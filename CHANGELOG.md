@@ -14,6 +14,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   submitting nothing (queue and accounting unchanged, text and `--format json`),
   and the UC2 remote harness proves `up --remote --dry-run` stages-but-doesn't-
   submit on the login node.
+- Real-scheduler e2e coverage for read-side affordances that were previously only
+  fake-tool tested: `weather` (live node/queue signals, text + JSON), N-way `diff`
+  of two real runs, `when` (evaluates live conditions and declines to submit when
+  unmet), and the interactive `watch` TUI driven under a pseudo-terminal
+  (`dev-cluster/pty-run.py`) — asserting it enters **and** restores the alternate
+  screen so it never leaves the terminal in a bad state.
 - New `dev-cluster-otp-e2e` harness (`scripts/devcluster_otp_e2e.sh`,
   `just dev-cluster-otp-e2e`) and an `otp-sim` toggle baked into the dev-cluster
   image (`dev-cluster/otp-sim.sh`): the SSH login-node stand-in can now require an

@@ -377,6 +377,43 @@ printf '%s' "$dry_json" | grep -q '"job_id": null' \
 pass "dry-run JSON reports submitted=false, job_id=null"
 inctr rm -f "$rendered" >/dev/null 2>&1 || true
 
+# --- 3d. read-side affordances over the live scheduler (weather, diff) -------
+# Cheap reads that the unit suite can only fake: weather aggregates live
+# sinfo/squeue (sshare/sprio degrade to null on this build), and diff compares two
+# real tracked runs.
+note "Read-side affordance pack (weather, diff)"
+weather_text="$(inctr hpc-compose weather 2>&1)" || fail "weather failed"
+printf '%s' "$weather_text" | grep -q 'CLUSTER WEATHER' \
+  || { printf '%s' "$weather_text" | sed 's/^/    | /' >&2; fail "weather text missing the header"; }
+printf '%s' "$weather_text" | grep -qE 'Nodes: [0-9]+/[0-9]+ free' \
+  || fail "weather text missing the node summary"
+weather_json="$(inctr hpc-compose weather --format json 2>&1)" || fail "weather --format json failed"
+printf '%s' "$weather_json" | grep -q '"condition"' || fail "weather json missing condition"
+printf '%s' "$weather_json" | grep -q '"total_nodes": 1' || fail "weather json missing the node count"
+pass "weather renders live node/queue signals (text + json)"
+
+# diff needs two real runs of the same spec: reuse the generic-loop hello job and
+# submit one more, then assert a pairwise render and an N-way matrix.
+[[ -n "$hello_jobid" ]] || fail "diff: no hello job id captured from the generic loop"
+diff_out="$(mktemp)"
+if ! inctr hpc-compose up -f "$hello_rel" --watch-mode line >"$diff_out" 2>&1; then
+  sed 's/^/    | /' "$diff_out" >&2; rm -f "$diff_out"; fail "diff: second hello run failed"
+fi
+hello_jobid2="$(grep -oE 'Submitted batch job [0-9]+' "$diff_out" | head -n1 | grep -oE '[0-9]+')"
+rm -f "$diff_out"
+[[ -n "$hello_jobid2" ]] || fail "diff: could not parse the second hello job id"
+diff_text="$(inctr hpc-compose diff "$hello_jobid" "$hello_jobid2" -f "$hello_rel" 2>&1)" \
+  || fail "diff (pairwise) failed for $hello_jobid -> $hello_jobid2"
+printf '%s' "$diff_text" | grep -q "$hello_jobid -> $hello_jobid2" \
+  || { printf '%s' "$diff_text" | sed 's/^/    | /' >&2; fail "diff missing the pairwise header"; }
+printf '%s' "$diff_text" | grep -qE '^(Outcome|Resources|Config):' \
+  || fail "diff did not render the comparison sections"
+pass "diff renders a pairwise comparison of two real runs ($hello_jobid -> $hello_jobid2)"
+diff_json="$(inctr hpc-compose diff --jobs "$hello_jobid,$hello_jobid2" --matrix-format json -f "$hello_rel" 2>&1)" \
+  || fail "diff (N-way matrix json) failed"
+printf '%s' "$diff_json" | grep -q '"runs"' || fail "diff matrix json missing the runs[] array"
+pass "diff renders an N-way matrix (json)"
+
 # --- 4. dedicated blocks (specs the generic up/watch loop cannot drive) -----
 # These live under specs/_extra/ (the generic loop only globs specs/*.yaml) and
 # need bespoke flows: --detach + polling, multi-job orchestration, scancel.
@@ -390,7 +427,7 @@ mkdir -p "$work_specs_dir/_extra"
 cp "${extra_specs[@]}" "$work_specs_dir/_extra"/
 # Every _extra spec must be handled by a block below; fail loudly on a new one so
 # it can never be silently skipped (mirrors the generic loop's spec registry).
-handled_extra=(array.yaml long-running.yaml dep-producer.yaml dep-consumer.yaml resume.yaml)
+handled_extra=(array.yaml long-running.yaml dep-producer.yaml dep-consumer.yaml resume.yaml when.yaml watch-tui.yaml)
 for ex in "${extra_specs[@]}"; do
   exb="$(basename "$ex")"
   found=0
@@ -558,6 +595,60 @@ reuse_out="$(inctr hpc-compose alloc -f "$hello_rel" --skip-prepare --no-preflig
 printf '%s' "$reuse_out" | grep -qF 'using active Slurm allocation' \
   || { printf '%s\n' "$reuse_out" | sed 's/^/    | /' >&2; fail "run did not reuse the active allocation"; }
 pass "run reuses the active allocation via srun (not a fresh sbatch)"
+
+# 4f. when: evaluate live scheduler conditions WITHOUT submitting. An impossible
+# --free-nodes on a single-node cluster means `when` checks once (--timeout 0s),
+# declines, exits nonzero, and submits nothing.
+note "When block (conditions unmet -> no submission)"
+when_rel=".tmp/devcluster-e2e/specs/_extra/when.yaml"
+when_acct_before="$(inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' ')"
+when_out="$(mktemp)"
+when_status=0
+inctr hpc-compose when -f "$when_rel" --partition compose --free-nodes 9999 --timeout 0s \
+  --skip-prepare --no-preflight >"$when_out" 2>&1 || when_status=$?
+if [[ "$when_status" == 0 ]]; then
+  sed 's/^/    | /' "$when_out" >&2; rm -f "$when_out"
+  fail "when unexpectedly succeeded; it should decline the unmet condition"
+fi
+grep -qi 'conditions were not satisfied' "$when_out" \
+  || { sed 's/^/    | /' "$when_out" >&2; rm -f "$when_out"; fail "when did not report the unmet condition"; }
+if grep -q 'Submitted batch job' "$when_out"; then
+  rm -f "$when_out"; fail "when submitted a job despite the unmet condition"
+fi
+rm -f "$when_out"
+when_acct_after="$(inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$when_acct_after" == "$when_acct_before" ]] \
+  || fail "when changed the accounting job count ($when_acct_before -> $when_acct_after)"
+pass "when evaluated live conditions, declined, and submitted nothing"
+
+# 4g. watch TUI: drive the interactive crossterm UI under a pseudo-terminal
+# (pty-run.py) against a live job. The job succeeds, so the TUI auto-exits
+# (hold-on-exit defaults to failure); assert it ENTERED (1049h) and RESTORED
+# (1049l) the alternate screen -- i.e. it did not leave the terminal dirty.
+note "Watch TUI block (pty-driven alternate-screen UI)"
+wt_rel=".tmp/devcluster-e2e/specs/_extra/watch-tui.yaml"
+detach_submit "$wt_rel"
+wt_jobid="$DETACHED_JOBID"
+pass "watch-tui submitted (job $wt_jobid)"
+wt_running=0
+for _ in $(seq 1 30); do
+  if [[ "$(inctr squeue -j "$wt_jobid" -h -o '%T' 2>/dev/null | head -n1)" == "RUNNING" ]]; then
+    wt_running=1; break
+  fi
+  sleep 1
+done
+[[ "$wt_running" == 1 ]] || fail "watch-tui: job $wt_jobid never reached RUNNING"
+wt_cap="/workspace/.tmp/devcluster-e2e/watch-tui.cap"
+wt_status=0
+inctr python3 /workspace/dev-cluster/pty-run.py --timeout 60 --out "$wt_cap" -- \
+  hpc-compose watch --job-id "$wt_jobid" -f "$wt_rel" --watch-mode tui || wt_status=$?
+[[ "$wt_status" == 0 ]] || fail "watch TUI did not exit cleanly under a pty (exit $wt_status)"
+inctr grep -q '1049h' "$wt_cap" || fail "watch TUI never entered the alternate screen"
+inctr grep -q '1049l' "$wt_cap" \
+  || fail "watch TUI did not restore the alternate screen (terminal left dirty)"
+inctr grep -q 'COMPLETED' "$wt_cap" || fail "watch TUI did not render the terminal job state"
+inctr rm -f "$wt_cap" >/dev/null 2>&1 || true
+pass "watch TUI entered + restored the alternate screen and tracked to COMPLETED"
 
 note "All dev-cluster end-to-end checks passed"
 # Artifact cleanup and any requested teardown run in the EXIT trap (`finish`).

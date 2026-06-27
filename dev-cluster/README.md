@@ -126,6 +126,11 @@ part):
   stand-in is flipped into an OTP/2FA-requiring sshd, and a multi-command session
   (`up --remote`, a second `up --remote --dry-run`, and a `pull`-style transfer)
   is shown to authenticate **exactly once** via SSH ControlMaster multiplexing
+- read-side affordances over the live scheduler: `weather` (live node/queue
+  signals), `diff` (pairwise + N-way comparison of two real runs), `when`
+  (evaluates live conditions and declines to submit when they are unmet), and the
+  interactive `watch` TUI driven under a pseudo-terminal (it enters **and**
+  restores the alternate screen, so it never leaves the terminal in a bad state)
 
 **Not validated locally** (revalidate on the cluster):
 
@@ -166,7 +171,11 @@ is registered and `scancel`ed in the EXIT trap. Adding an `_extra/` spec without
 a dedicated block fails the harness loudly, mirroring the generic registry. A
 post-loop block also proves the **dry-run-submits-nothing** property: `up
 --dry-run` renders a valid sbatch while the queue and accounting db stay
-unchanged (text and `--format json` forms).
+unchanged (text and `--format json` forms). Further blocks drive the read-side
+affordances against the live scheduler — `weather`, an N-way `diff` of two real
+runs, a `when` that evaluates conditions and declines to submit, and the
+interactive `watch` TUI under a pseudo-terminal (asserting it enters and restores
+the alternate screen).
 
 The same image is also an SSH-reachable login-node stand-in (`sshd` + `rsync`,
 port `2222`), which `scripts/devcluster_remote_e2e.sh` uses to exercise the thin
@@ -205,6 +214,7 @@ mock out. The `host`-backend scope above still applies — the e2e check does
 | `slurmdbd.conf` | Accounting daemon config (installed 0600 at boot) for `sacct` |
 | `entrypoint.sh` | munge → MariaDB + slurmdbd → `slurmctld`/`slurmd` → `sshd`; surfaces failures |
 | `otp-sim.sh` | `otp-sim {enable\|disable\|reset\|count}`: toggles the sshd login-node stand-in into an OTP/2FA-requiring mode and counts authentications (used by the one-OTP e2e) |
+| `pty-run.py` | Runs a command under a fresh pseudo-terminal (sized 40×120) and captures its output, so the e2e can drive the crossterm `watch` TUI non-interactively |
 | `compose.yaml` | One-service, privileged compose for `docker compose`/`podman compose` |
 | `specs/hello.yaml` | Smallest `host`-backend spec to prove the loop |
 | `specs/multi-service.yaml` | Two `host`-backend services proving `depends_on` + a readiness gate (server/client) against the real scheduler |
@@ -218,6 +228,8 @@ mock out. The `host`-backend scope above still applies — the e2e check does
 | `specs/_extra/dep-producer.yaml` | Producer half of the scheduler inter-job dependency block |
 | `specs/_extra/dep-consumer.yaml` | Consumer half: `after_job` (afterok) held PENDING until the producer terminates |
 | `specs/_extra/resume.yaml` | Host-backend resume dir: `$HPC_COMPOSE_RESUME_DIR` is a real on-node path, not the container mount |
+| `specs/_extra/when.yaml` | Pins `x-slurm.partition` so the `when` block can evaluate `--free-nodes` against the live scheduler and decline to submit |
+| `specs/_extra/watch-tui.yaml` | A ~20s job that stays RUNNING long enough for the pty-driven `watch` TUI block to attach, render, and auto-exit on success |
 | `../scripts/devcluster.sh` | `up` / `run` / `exec` / `sinfo` / `logs` / `down` wrapper |
 | `../scripts/devcluster_e2e.sh` | UC1 end-to-end harness (generic loop + `_extra/` dedicated blocks; checks `sacct`/`status`/`ps`/`score`/`pull`) |
 | `../scripts/devcluster_remote_e2e.sh` | UC2 end-to-end harness: drives `up --remote` from the host against this node as an SSH login-node stand-in (`sshd` + `rsync` in the image; port `2222`); also asserts remote `--dry-run` stages-but-doesn't-submit |
