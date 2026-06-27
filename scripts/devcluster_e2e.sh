@@ -125,6 +125,29 @@ wait_for_sacct_state() {
   return 1
 }
 
+sacct_job_count() {
+  inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' '
+}
+
+wait_for_sacct_count_stable() {
+  local attempts="${1:-10}" previous="" current="" stable=0
+  for _ in $(seq 1 "$attempts"); do
+    current="$(sacct_job_count)"
+    if [[ "$current" == "$previous" ]]; then
+      stable=$((stable + 1))
+      if (( stable >= 2 )); then
+        printf '%s' "$current"
+        return 0
+      fi
+    else
+      previous="$current"
+      stable=0
+    fi
+    sleep 1
+  done
+  printf '%s' "$current"
+}
+
 # Runs on EXIT (success or failure). The harness copies specs into an owned
 # gitignored work dir before running them; on rootful Docker, job metadata in that
 # mounted tree may be root-owned, so clean from inside the still-running
@@ -601,7 +624,7 @@ pass "run reuses the active allocation via srun (not a fresh sbatch)"
 # declines, exits nonzero, and submits nothing.
 note "When block (conditions unmet -> no submission)"
 when_rel=".tmp/devcluster-e2e/specs/_extra/when.yaml"
-when_acct_before="$(inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' ')"
+when_acct_before="$(wait_for_sacct_count_stable)"
 when_out="$(mktemp)"
 when_status=0
 inctr hpc-compose when -f "$when_rel" --partition compose --free-nodes 9999 --timeout 0s \
@@ -616,7 +639,7 @@ if grep -q 'Submitted batch job' "$when_out"; then
   rm -f "$when_out"; fail "when submitted a job despite the unmet condition"
 fi
 rm -f "$when_out"
-when_acct_after="$(inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' ')"
+when_acct_after="$(wait_for_sacct_count_stable)"
 [[ "$when_acct_after" == "$when_acct_before" ]] \
   || fail "when changed the accounting job count ($when_acct_before -> $when_acct_after)"
 pass "when evaluated live conditions, declined, and submitted nothing"
