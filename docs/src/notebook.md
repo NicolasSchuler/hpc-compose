@@ -28,9 +28,14 @@ After readiness, `hpc-compose` prints the URL. For Jupyter on Slurm it also prin
 Open: http://127.0.0.1:8888/lab?token=<generated>
 
 On your laptop, forward the port:
-  ssh -L 8888:<compute-node>:8888 <login-node>
+  ssh -N -o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=10m -L 8888:<compute-node>:8888 <login-node>
 then open the URL above in your browser.
+The ControlMaster options reuse one authenticated connection, so a login node that requires an OTP/2FA only prompts on the first connection within ControlPersist.
 ```
+
+The printed command already carries the SSH connection-multiplexing options (the
+same ones `reach`, `pull`, and `experiment` emit), so a login node that requires
+an OTP/2FA prompts only on the first connection of your session.
 
 For VS Code, open the printed `vscode.dev` link directly in a browser — no tunnel is required.
 

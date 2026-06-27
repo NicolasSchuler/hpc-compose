@@ -16,6 +16,8 @@ use hpc_compose::spec::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::ssh_hint::{OTP_MULTIPLEX_NOTE, ssh_forward_command};
+
 /// Which interactive server preset to launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -246,6 +248,11 @@ pub fn build_connection(
 }
 
 /// Renders the SSH tunnel hint for a Jupyter server on a remote compute node.
+///
+/// Uses the same connection-multiplexing options as `reach`/`experiment` (via
+/// [`ssh_forward_command`]) and surfaces the [`OTP_MULTIPLEX_NOTE`], so a login
+/// node that requires an OTP/2FA prompts only once for the whole laptop session
+/// instead of charging a fresh prompt for the notebook tunnel.
 #[must_use]
 pub fn jupyter_tunnel_hint(
     port: u16,
@@ -255,9 +262,9 @@ pub fn jupyter_tunnel_hint(
     let compute = compute_node.unwrap_or("<compute-node>");
     let login = login_node.unwrap_or("<login-node>");
     format!(
-        "On your laptop, forward the port:\n  \
-         ssh -L {port}:{compute}:{port} {login}\n\
-         then open the URL above in your browser."
+        "On your laptop, forward the port:\n  {command}\n\
+         then open the URL above in your browser.\n{OTP_MULTIPLEX_NOTE}",
+        command = ssh_forward_command(port, port, compute, login),
     )
 }
 
@@ -433,7 +440,12 @@ mod tests {
         .expect("conn");
         assert_eq!(conn.url, "http://127.0.0.1:8888/lab?token=abc");
         let hint = conn.tunnel_hint.expect("tunnel hint on slurm");
-        assert!(hint.contains("ssh -L 8888:gpu-node-07:8888 login.hpc.example"));
+        // Carries the port-forward with the shared connection-multiplexing opts
+        // (one OTP per session), like reach/experiment -- not a bare `ssh -L`.
+        assert!(hint.contains("-L 8888:gpu-node-07:8888 login.hpc.example"));
+        assert!(hint.contains("ControlMaster=auto"));
+        assert!(hint.contains("ControlPath=~/.ssh/cm-%r@%h:%p"));
+        assert!(hint.contains("only prompts on the first connection"));
     }
 
     #[test]
