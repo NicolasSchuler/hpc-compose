@@ -41,10 +41,11 @@ For VS Code, open the printed `vscode.dev` link directly in a browser — no tun
 
 ### Login nodes that require an OTP / 2FA
 
-If your login node demands a one-time password on every SSH session, opening the
-forward above prompts for a fresh OTP each time — and an automation/agent cannot
-answer it. Use SSH connection multiplexing so you authenticate **once** and every
-later tunnel (and `rsync`/`scp`) reuses the master connection:
+If your login node demands a one-time password on every SSH session, keep SSH
+connection multiplexing enabled so you authenticate **once** and every later
+tunnel (and `rsync`/`scp`) reuses the master connection. The printed Jupyter
+tunnel command already includes these options; the equivalent persistent
+`~/.ssh/config` form is:
 
 ```text
 # ~/.ssh/config
