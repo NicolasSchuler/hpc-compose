@@ -130,7 +130,7 @@ sacct_job_count() {
 }
 
 wait_for_sacct_count_stable() {
-  local attempts="${1:-10}" previous="" current="" stable=0
+  local attempts=10 previous="" current="" stable=0
   for _ in $(seq 1 "$attempts"); do
     current="$(sacct_job_count)"
     if [[ "$current" == "$previous" ]]; then
