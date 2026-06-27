@@ -18,9 +18,10 @@
 # macOS dev machines fall back to the locally built target/ binary).
 #
 # NOT covered (same host-backend scope as devcluster_e2e.sh): the container
-# runtime layer, GPU, and the full laptop thin client (login/logout, one-OTP
-# ControlMaster lifecycle, --source-hash). This proves the rsync pre-stage +
-# delegating executor against a real scheduler.
+# runtime layer, GPU, and the rest of the laptop thin client (login/logout,
+# --source-hash). The one-OTP ControlMaster lifecycle has its own harness now:
+# scripts/devcluster_otp_e2e.sh. This proves the rsync pre-stage + delegating
+# executor (and the remote --dry-run preview) against a real scheduler.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -70,11 +71,21 @@ resolve_binary() {
 }
 
 remote_jobid=""
+# up --remote always multiplexes over ~/.ssh/cm-%r@%h:%p, which for root@localhost
+# -p 2222 is this socket; close + remove it so no live master is left on a laptop.
+control_socket="$HOME/.ssh/cm-root@localhost:$ssh_port"
 finish() {
   # Cancel a leaked remote job, drop the staged tree, and clean the work dir.
   if [[ -n "$remote_jobid" ]]; then
     inctr scancel "$remote_jobid" >/dev/null 2>&1 || true
   fi
+  # Belt-and-suspenders for an interrupt before $remote_jobid was parsed: this
+  # harness's only jobs are its own, so a blanket scancel can't strand others.
+  inctr scancel --user=root >/dev/null 2>&1 || true
+  if [[ -S "$control_socket" ]]; then
+    ssh -o ControlPath="$control_socket" -O exit root@localhost >/dev/null 2>&1 || true
+  fi
+  rm -f "$control_socket" 2>/dev/null || true
   inctr rm -rf /root/.hpc-compose-remote >/dev/null 2>&1 || true
   rm -rf "$work_dir" 2>/dev/null || true
   if [[ "${DEVCLUSTER_E2E_DOWN:-0}" == "1" ]]; then
@@ -162,7 +173,48 @@ pass "sacct confirms remote job $remote_jobid COMPLETED"
 inctr test -f "/root/.hpc-compose-remote/specs/hello.yaml" \
   || fail "the project was not rsync-staged into the remote stage dir"
 pass "project was rsync-staged to the remote stage dir"
-
 rm -f "$out"
+
+# --- 4. remote dry-run: stage + render remotely, submit nothing -------------
+# `up --remote --dry-run` is the safe preview for the laptop->login-node path: it
+# rsyncs the project and renders the sbatch ON the login node, but submits no job.
+# Prove it lands no job in the remote accounting db (stages-but-doesn't-submit).
+note "Remote dry-run: up --remote=root@localhost --dry-run"
+# Drop the sbatch the section-3 real submit rendered into the same staged path, so
+# the "rendered a valid sbatch" assertion below proves the DRY-RUN produced it (a
+# fresh render), not a stale leftover. (up --remote re-rsyncs with --delete, which
+# also clears it, but removing it explicitly makes the assertion's intent clear.)
+inctr rm -f /root/.hpc-compose-remote/specs/hpc-compose.sbatch >/dev/null 2>&1 || true
+acct_before="$(inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' ')"
+queue_before="$(inctr squeue -h 2>/dev/null | wc -l | tr -d ' ')"
+dry_out="$(mktemp)"
+dry_status=0
+"$bin" up --remote=root@localhost -f "$spec" --dry-run >"$dry_out" 2>&1 || dry_status=$?
+sed 's/^/    | /' "$dry_out"
+[[ "$dry_status" == 0 ]] || { rm -f "$dry_out"; fail "up --remote --dry-run exited $dry_status"; }
+grep -q 'skipping sbatch submission' "$dry_out" \
+  || { rm -f "$dry_out"; fail "remote dry-run did not report skipping submission"; }
+if grep -q 'Submitted batch job' "$dry_out"; then
+  rm -f "$dry_out"; fail "remote dry-run reported an sbatch submission"
+fi
+rm -f "$dry_out"
+acct_after="$(inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' ')"
+queue_after="$(inctr squeue -h 2>/dev/null | wc -l | tr -d ' ')"
+# sacct rows are monotonic (a real submit always adds one), so this is the
+# authoritative "submitted nothing" check. squeue can only shrink as a prior
+# job drains, so assert it never GREW (a dry-run submission would grow it).
+[[ "$acct_after" == "$acct_before" ]] \
+  || fail "remote dry-run changed the accounting job count ($acct_before -> $acct_after)"
+[[ "$queue_after" -le "$queue_before" ]] \
+  || fail "remote dry-run enqueued a job ($queue_before -> $queue_after)"
+pass "remote dry-run submitted nothing (remote sacct=$acct_after, squeue=$queue_after unchanged)"
+# It stages-but-doesn't-submit: the project is rsynced and a VALID sbatch is
+# rendered on the login node, ready for a real run, but no job was created.
+inctr test -f "/root/.hpc-compose-remote/specs/hpc-compose.sbatch" \
+  || fail "remote dry-run did not render the sbatch on the login node"
+inctr grep -q '^#SBATCH ' "/root/.hpc-compose-remote/specs/hpc-compose.sbatch" \
+  || fail "remote dry-run rendered a script with no #SBATCH directives"
+pass "remote dry-run staged the project and rendered a valid sbatch (no submission)"
+
 note "All dev-cluster remote-submit end-to-end checks passed"
 # Stage cleanup and any requested teardown run in the EXIT trap (`finish`).

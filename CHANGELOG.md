@@ -7,6 +7,28 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- Dev-cluster safe dry-runs are now a first-class, asserted capability: the
+  in-container UC1 harness proves `up --dry-run` renders a valid sbatch while
+  submitting nothing (queue and accounting unchanged, text and `--format json`),
+  and the UC2 remote harness proves `up --remote --dry-run` stages-but-doesn't-
+  submit on the login node.
+- New `dev-cluster-otp-e2e` harness (`scripts/devcluster_otp_e2e.sh`,
+  `just dev-cluster-otp-e2e`) and an `otp-sim` toggle baked into the dev-cluster
+  image (`dev-cluster/otp-sim.sh`): the SSH login-node stand-in can now require an
+  OTP/2FA-style second factor, and the harness proves a multi-command laptop
+  session (`up --remote`, `up --remote --dry-run`, a `pull`-style transfer)
+  authenticates **exactly once** via SSH ControlMaster multiplexing. Wired into
+  the CI `dev-cluster-e2e` job as UC3.
+
+### Changed
+
+- `notebook`'s Jupyter SSH tunnel hint now carries the same connection-
+  multiplexing options (and OTP note) as `reach`/`pull`/`experiment`, so a login
+  node that requires an OTP/2FA prompts only once per session instead of charging
+  a fresh prompt for the notebook tunnel.
+
 ## [0.1.48] - 2026-06-22
 
 ### Added

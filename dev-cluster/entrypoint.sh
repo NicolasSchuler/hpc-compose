@@ -117,6 +117,8 @@ sinfo || true
 # Key-only root login. No credentials are baked into the image; the remote e2e
 # harness injects its ephemeral public key into /root/.ssh/authorized_keys after
 # boot. Harmless when unused (the default exec-based harness never connects).
+# `otp-sim enable` (see otp-sim.sh) can later flip this into an OTP/2FA-requiring
+# mode for the one-OTP ControlMaster e2e; it stays key-only until then.
 install -d -m 0755 /run/sshd
 install -d -m 0700 /root/.ssh
 mkdir -p /etc/ssh/sshd_config.d

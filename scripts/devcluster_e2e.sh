@@ -332,6 +332,51 @@ inctr hpc-compose clean -f "$hello_rel" --all --dry-run >/dev/null 2>&1 \
   || fail "clean --all --dry-run failed"
 pass "experiment/replay/debug/checkpoints/jobs/clean render over a real run"
 
+# --- 3c. dry-run: render the real sbatch, submit nothing --------------------
+# The dev cluster is the safe place to preview a run: `up --dry-run` renders the
+# exact sbatch it would submit and stops -- nothing reaches the scheduler. Prove
+# that against the LIVE controller: accounting and the queue must be unchanged.
+note "Dry-run block (renders the sbatch, submits nothing)"
+dry_rel=".tmp/devcluster-e2e/specs/hello.yaml"
+rendered="/workspace/.tmp/devcluster-e2e/specs/hpc-compose.sbatch"
+inctr rm -f "$rendered" >/dev/null 2>&1 || true
+acct_before="$(inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' ')"
+queue_before="$(inctr squeue -h 2>/dev/null | wc -l | tr -d ' ')"
+dry_out="$(mktemp)"
+if ! inctr hpc-compose up -f "$dry_rel" --dry-run >"$dry_out" 2>&1; then
+  sed 's/^/    | /' "$dry_out" >&2; rm -f "$dry_out"; fail "up --dry-run exited nonzero"
+fi
+grep -q 'skipping sbatch submission' "$dry_out" \
+  || { sed 's/^/    | /' "$dry_out" >&2; rm -f "$dry_out"; fail "dry-run did not report skipping submission"; }
+if grep -q 'Submitted batch job' "$dry_out"; then
+  sed 's/^/    | /' "$dry_out" >&2; rm -f "$dry_out"; fail "dry-run reported an sbatch submission"
+fi
+rm -f "$dry_out"
+acct_after="$(inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' ')"
+queue_after="$(inctr squeue -h 2>/dev/null | wc -l | tr -d ' ')"
+# sacct rows are monotonic (a real submit always adds one), so this is the
+# authoritative "submitted nothing" check. squeue can only shrink as a prior
+# job drains, so assert it never GREW (a dry-run submission would grow it).
+[[ "$acct_after" == "$acct_before" ]] \
+  || fail "dry-run changed the accounting job count ($acct_before -> $acct_after)"
+[[ "$queue_after" -le "$queue_before" ]] \
+  || fail "dry-run enqueued a job ($queue_before -> $queue_after)"
+pass "dry-run submitted nothing (sacct=$acct_after, squeue=$queue_after unchanged)"
+# The rendered script is a real, submittable sbatch -- a faithful preview.
+inctr test -f "$rendered" || fail "dry-run did not render a submission script at $rendered"
+inctr grep -q '^#SBATCH ' "$rendered" || fail "rendered dry-run script has no #SBATCH directives"
+inctr grep -q 'dev-cluster-hello' "$rendered" || fail "rendered dry-run script is not the hello spec"
+pass "dry-run rendered a valid sbatch for the spec"
+# JSON contract: a machine reader sees submitted=false, job_id=null, dry_run=true.
+dry_json="$(inctr hpc-compose up -f "$dry_rel" --dry-run --format json 2>&1)" \
+  || fail "dry-run --format json failed"
+printf '%s' "$dry_json" | grep -q '"submitted": false' \
+  || { printf '%s' "$dry_json" | sed 's/^/    | /' >&2; fail "dry-run JSON missing submitted=false"; }
+printf '%s' "$dry_json" | grep -q '"job_id": null' \
+  || fail "dry-run JSON missing job_id=null"
+pass "dry-run JSON reports submitted=false, job_id=null"
+inctr rm -f "$rendered" >/dev/null 2>&1 || true
+
 # --- 4. dedicated blocks (specs the generic up/watch loop cannot drive) -----
 # These live under specs/_extra/ (the generic loop only globs specs/*.yaml) and
 # need bespoke flows: --detach + polling, multi-job orchestration, scancel.
