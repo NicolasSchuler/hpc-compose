@@ -2,13 +2,13 @@
 
 Status, watch, logs.
 
-After a submission, `hpc-compose` records tracked metadata under:
+After a real submission, `hpc-compose` writes per-job runtime artifacts under:
 
 ```text
-${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/
+<runtime-root>/<job-id>/
 ```
 
-That directory lets follow-up commands reconnect without resubmitting.
+`<runtime-root>` defaults to `<submit-dir>/.hpc-compose` and can be overridden with `x-slurm.runtime_root`. The tracked submission record lives next to the compose file under `.hpc-compose/jobs/<job-id>.json`, and together those paths let follow-up commands reconnect without resubmitting.
 
 ## Common Commands
 
@@ -158,10 +158,10 @@ For each attempt, the command reports the earliest service start, the latest ser
 Runtime logs live under:
 
 ```text
-${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/logs/<service>.log
+<runtime-root>/<job-id>/logs/<service>.log
 ```
 
-Slurm may also write a top-level batch log such as `slurm-<jobid>.out`, or to the path configured with `x-slurm.output`. Check the batch log first when a job fails before any service log appears.
+Unless `x-slurm.output` is set, real submissions also write the top-level batch log under `<runtime-root>/logs/hpc-compose-<job-id>.out`. Check the batch log first when a job fails before any service log appears.
 
 Service names containing non-alphanumeric characters are encoded in log filenames. Prefer `[a-zA-Z0-9_-]` in service names for readability.
 
@@ -178,7 +178,7 @@ Use `on: restart` for retry notifications and `on: window_exhausted` for crash-l
 When `x-slurm.metrics` is enabled, sampler files are written under:
 
 ```text
-${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics/
+<runtime-root>/<job-id>/metrics/
   meta.json
   gpu.jsonl
   gpu_processes.jsonl

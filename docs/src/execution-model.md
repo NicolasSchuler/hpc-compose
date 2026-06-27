@@ -43,8 +43,8 @@ Use per-service `x-slurm.hooks` when you want host-side notifications around tho
 
 - The resolved cache directory must be visible from both the login node and the compute nodes. It may come from `x-slurm.cache_dir`, project settings, or the builtin `$HOME/.cache/hpc-compose` fallback.
 - Relative host paths in `volumes`, local image paths, and `x-runtime.prepare.mounts` resolve against the compose file directory.
-- Each submitted job writes tracked state under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}` on the host.
-- That per-job directory is mounted into every container at `/hpc-compose/job`.
+- Each submitted job writes per-job runtime state under `<runtime-root>/<job-id>` on the host. `<runtime-root>` defaults to `<submit-dir>/.hpc-compose` and can be overridden with `x-slurm.runtime_root`.
+- The active job workspace is mounted into containerized services at `/hpc-compose/job`. For ordinary runs that workspace is `<runtime-root>/<job-id>`; for resume-aware attempts it is `<runtime-root>/<job-id>/attempts/<attempt>`, with top-level paths kept as the latest view.
 - Multi-node jobs also populate `/hpc-compose/job/allocation/{primary_node,nodes.txt}` and export allocation-wide `HPC_COMPOSE_NODE...` variables plus service-scoped `HPC_COMPOSE_SERVICE_NODE...` variables.
 
 Use `/hpc-compose/job` for small shared state inside the allocation, such as ready files, request payloads, logs, metrics, or teardown signals.

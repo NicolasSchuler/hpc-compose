@@ -57,7 +57,7 @@ Download the [asciinema-style quickstart demo cast](quickstart-demo.cast) if you
 | runtime backend | The mechanism used to launch services: Pyxis/Enroot, Apptainer, Singularity, or host. |
 | preflight | Checks that inspect local tools, paths, backend support, and optional cluster profiles before a run. |
 | prepare | The login-node image import/customization phase used before compute-node runtime. |
-| tracked job | Metadata under `.hpc-compose/<job-id>/` that lets `status`, `ps`, `watch`, `logs`, `stats`, and `artifacts` reconnect later. |
+| tracked job | Submission metadata under `.hpc-compose/jobs/<job-id>.json` plus runtime artifacts under `<runtime-root>/<job-id>`, which let `status`, `ps`, `watch`, `logs`, `stats`, and `artifacts` reconnect later. |
 | `x-slurm` | The spec section for Slurm settings and hpc-compose runtime extensions. |
 
 See the [Glossary](glossary.md) for the full set of terms.

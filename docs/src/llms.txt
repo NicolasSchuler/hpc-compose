@@ -19,7 +19,7 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
 ## Canonical conventions (so you do not author broken specs)
 
 - Prefer `x-runtime.prepare.commands`, the backend-neutral image-preparation key. `x-enroot.prepare` is a valid Pyxis/Enroot compatibility alias and is only accepted when `runtime.backend: pyxis`.
-- The cache dir MUST be storage shared between the login node (where `prepare` runs) and the compute nodes (where services run). Never `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` — they are node-local and are rejected by planning and preflight.
+- The cache dir MUST be storage shared between the login node (where `prepare` runs) and the compute nodes (where services run). Never `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` — they are node-local; static planning may resolve them, but `lint` warns (`HPC004`) and `preflight` reports them unsafe before a real run.
 - Replace Docker Compose `build:` with a base `image:` plus `x-runtime.prepare.commands`. `ports`, `networks` / `network_mode`, `restart`, and `deploy` are not supported. Use `127.0.0.1` for same-node helper services and hpc-compose allocation metadata for distributed services.
 - Machine-readable authoring schema: https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose.schema.json
 

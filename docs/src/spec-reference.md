@@ -563,7 +563,7 @@ x-slurm:
     - `gpu` samples device and process telemetry through `nvidia-smi`
     - `slurm` samples job-step CPU and memory data through `sstat`
   - In multi-node jobs, `gpu` sampling launches one best-effort sampler task per allocated node and writes node metadata into GPU rows; legacy rows without `node` remain readable as primary-node samples.
-  - Sampler files are written under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/metrics` on the host and are also visible inside containers at `/hpc-compose/job/metrics`.
+  - Sampler files are written under the active job workspace's `metrics/` directory and are also visible inside containers at `/hpc-compose/job/metrics`. For ordinary runs that is `<runtime-root>/<job-id>/metrics`; for resume-aware attempts it is `<runtime-root>/<job-id>/attempts/<attempt>/metrics`.
   - Diagnostics are written under `metrics/diagnostics/` when available, including `nvidia-smi topo -m`, `nvidia-smi -q`, selected fabric/GPU environment variables, and best-effort `ibstat`, `ibv_devinfo`, `ucx_info -v`, and `fi_info` output.
 
 ### `x-slurm.rendezvous`
@@ -618,7 +618,7 @@ x-slurm:
   - Every source path must be an absolute container-visible path rooted at `/hpc-compose/job`.
   - Paths under `/hpc-compose/job/artifacts` are rejected.
   - Collection happens during batch teardown and is best-effort.
-  - Collected payloads and `manifest.json` are written under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/artifacts/`.
+  - Collected payloads and `manifest.json` are written under the active job workspace's `artifacts/` directory. For ordinary runs that is `<runtime-root>/<job-id>/artifacts`; for resume-aware attempts it is `<runtime-root>/<job-id>/attempts/<attempt>/artifacts`.
   - `hpc-compose artifacts --bundle <name>` exports only the selected bundle or bundles.
   - `hpc-compose artifacts --tarball` also writes one `<bundle>.tar.gz` archive per exported bundle.
   - Export writes per-bundle provenance metadata under `<export_dir>/_hpc-compose/bundles/<bundle>.json`.
@@ -641,7 +641,7 @@ x-slurm:
   - When enabled, `hpc-compose` mounts `path` into every service at `/hpc-compose/resume`.
   - Services also receive `HPC_COMPOSE_RESUME_DIR`, `HPC_COMPOSE_ATTEMPT`, and `HPC_COMPOSE_IS_RESUME`.
   - The canonical resume source is the shared `path`, not exported artifact bundles.
-  - Attempt-specific runtime state moves under `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/attempts/<attempt>/`, and the top-level `logs`, `metrics`, `artifacts`, and `state.json` paths continue to point at the latest attempt for compatibility.
+  - Attempt-specific runtime state moves under `<runtime-root>/<job-id>/attempts/<attempt>/`, and the top-level `logs`, `metrics`, `artifacts`, and `state.json` paths continue to point at the latest attempt for compatibility.
 
 ### Tracked-record provenance
 
@@ -814,7 +814,7 @@ Rules:
 - Host paths are resolved against the compose file directory.
 - Runtime mounts accept `host_path:container_path` and `host_path:container_path:ro|rw`.
 - Pyxis mounts are passed through `srun --container-mounts=...`; Apptainer/Singularity mounts are passed as `--bind`.
-- Every service also gets an automatic shared mount at `/hpc-compose/job`, backed by `${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}` on the host.
+- Every containerized service also gets an automatic shared mount at `/hpc-compose/job`, backed by the active job workspace on the host. For ordinary runs that is `<runtime-root>/<job-id>`; for resume-aware attempts it is `<runtime-root>/<job-id>/attempts/<attempt>`.
 - `/hpc-compose/job` is reserved and cannot be used as an explicit volume destination.
 
 <div class="callout warning">

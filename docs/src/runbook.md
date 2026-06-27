@@ -116,7 +116,7 @@ Use `context` whenever you want to inspect effective compose path, binaries, int
 
 Resource profiles are referenced from YAML with `x-slurm.resources: gpu-small`. They are Slurm resource defaults, not the same thing as the global `--profile` setting selector, and explicit `x-slurm` values in the spec override profile defaults.
 
-`login_host` is the SSH login/jump host shown in `notebook` connection and tunnel hints, and in the machine-readable `hpc-compose notebook --format json` output. A profile's `login_host` overrides the shared default. It is descriptive only — `hpc-compose` never opens a connection to it. If the login node requires an OTP/2FA on every SSH session, use SSH connection multiplexing (`ControlMaster`/`ControlPersist`) so you authenticate once and reused tunnels skip the prompt — see [Run a Notebook or IDE Session](notebook.md).
+`login_host` is the SSH login/jump host shown in `notebook` connection and tunnel hints, and in the machine-readable `hpc-compose notebook --format json` output. A profile's `login_host` overrides the shared default. Ordinary local and cluster commands treat it as descriptive metadata; explicit `hpc-compose up --remote` also uses it as the default SSH destination when you do not pass `--remote=<host>`. If the login node requires an OTP/2FA on every SSH session, use SSH connection multiplexing (`ControlMaster`/`ControlPersist`) so you authenticate once and reused tunnels skip the prompt — see [Run a Notebook or IDE Session](notebook.md).
 
 An editor schema for `settings.toml` is available:
 

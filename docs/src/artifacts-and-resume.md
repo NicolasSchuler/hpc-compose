@@ -7,10 +7,12 @@ Artifacts are collected after a run for export and provenance. Resume state is t
 When `x-slurm.artifacts` is enabled, teardown collection writes:
 
 ```text
-${SLURM_SUBMIT_DIR:-$PWD}/.hpc-compose/${SLURM_JOB_ID}/artifacts/
+<runtime-root>/<job-id>/artifacts/
   manifest.json
   payload/...
 ```
+
+For resume-aware runs, the active attempt writes first under `<runtime-root>/<job-id>/attempts/<attempt>/artifacts/`; the top-level `artifacts` path is kept as the latest view.
 
 Export collected payloads after the job finishes:
 
@@ -29,8 +31,8 @@ When `x-slurm.resume` is enabled, `hpc-compose`:
 
 - mounts the shared resume path into every service at `/hpc-compose/resume`
 - injects `HPC_COMPOSE_RESUME_DIR`, `HPC_COMPOSE_ATTEMPT`, and `HPC_COMPOSE_IS_RESUME`
-- writes attempt-specific runtime outputs under `.hpc-compose/<job-id>/attempts/<attempt>/`
-- keeps `.hpc-compose/<job-id>/{logs,metrics,artifacts,state.json}` pointed at the latest attempt for compatibility
+- writes attempt-specific runtime outputs under `<runtime-root>/<job-id>/attempts/<attempt>/`
+- keeps `<runtime-root>/<job-id>/{logs,metrics,artifacts,state.json}` pointed at the latest attempt for compatibility
 
 Use the shared resume directory for the canonical checkpoint a restarted run should load next. Treat exported artifacts as retrieval and provenance output after the attempt finishes, not as the primary live resume source.
 

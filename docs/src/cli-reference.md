@@ -12,7 +12,7 @@ Jump to the section that documents each command group:
 | `--profile`, `--settings-file`, `setup`, `context`, `validate --strict-env`, `lint`, `schema` | [Settings-aware commands](#settings-aware-commands) |
 | `plan`, `validate`, `lint`, `config`, `schema`, `inspect`, `preflight`, `doctor`, `weather`, `prepare`, `render`, `up`, `test`, `dev`, `tmux`, `germinate`, `sweep`, `when`, `alloc`, `run`, `shell`, `notebook` | [Plan and Run](#plan-and-run) |
 | `lint` finding codes (`HPC001`-`HPC900`) | [Lint rules](#lint-rules) |
-| `debug`, `status`, `ps`, `watch`, `replay`, `checkpoints`, `logs`, `inspect --rightsize`, `stats`, `score`, `diff`, `artifacts`, `cancel`, `down`, `jobs`, `clean`, `rendezvous` | [Tracked Runtime](#tracked-runtime) |
+| `debug`, `status`, `ps`, `watch`, `replay`, `checkpoints`, `logs`, `inspect --rightsize`, `stats`, `score`, `diff`, `artifacts`, `reach`, `pull`, `experiment`, `cancel`, `down`, `jobs`, `clean`, `rendezvous` | [Tracked Runtime](#tracked-runtime) |
 | `cache list`, `cache inspect`, `cache prune` | [Cache Maintenance](#cache-maintenance) |
 | `--<tool>-bin` overrides | [Tool overrides](#tool-overrides) |
 
@@ -174,8 +174,8 @@ hpc-compose sweep submit -f compose.yaml --dry-run
 hpc-compose sweep submit -f compose.yaml --max-trials 200
 hpc-compose sweep results -f compose.yaml --format csv > runs.csv
 hpc-compose sweep results -f compose.yaml --include score,energy --format json
-hpc-compose score --sweep latest -f compose.yaml --format json
-hpc-compose stats --sweep latest -f compose.yaml --format json
+hpc-compose score --sweep sweep-1700000000-1234 -f compose.yaml --format json
+hpc-compose stats --sweep sweep-1700000000-1234 -f compose.yaml --format json
 hpc-compose sweep status -f compose.yaml --format json
 hpc-compose sweep list -f compose.yaml
 hpc-compose when -f compose.yaml --partition gpu8 --free-nodes 4
@@ -235,11 +235,13 @@ Useful workflow flags:
 - `--allow-resume-changes` acknowledges an intentional change to resume-coupled config between tracked runs.
 - `--resume-diff-only` prints the resume-sensitive config diff without submitting.
 - `--script-out <PATH>` keeps a copy of the rendered batch script.
+- `--remote[=<HOST>]` delegates submission to a login node over SSH; without `<HOST>` it uses `login_host` from settings. It cannot be combined with `--local`, `--watch-queue`, `--script-out`, or non-detached `--watch-mode tui`. See [Submit From Your Laptop With `up --remote`](runbook.md#5b-submit-from-your-laptop-with-up---remote).
 - `--force-rebuild` refreshes imported and prepared artifacts before launch.
 - `--skip-prepare` skips image import and prepare reuse checks.
 - `--keep-failed-prep` leaves the failed Enroot rootfs behind for inspection.
 - Array jobs (`x-slurm.array`) require `--detach` because live watch/log fan-out is not array-aware yet.
 - Scheduler dependencies from `x-slurm.after_job` and `x-slurm.dependency` are passed as `sbatch --dependency=...`.
+- `stats --sweep <ID>` and `score --sweep <ID>` require a real sweep id from `sweep list`; `latest` is not a special sentinel for those options.
 
 #### Tool overrides
 

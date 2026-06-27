@@ -52,7 +52,8 @@ These capabilities are intentionally outside the product seam.
 | Broad cluster inspection tools such as a full `sinfo` / `sprio` / `sreport` frontend | Out of scope; `weather` is limited to a compact advisory snapshot |
 | Background submit daemons or reservations | Out of scope; `when` is a foreground advisory monitor and does not reserve resources |
 | Dynamic scheduling or bin packing across nodes | Not supported; use explicit `x-slurm.placement` selectors |
-| Heterogeneous jobs and job arrays as first-class workflow concepts | Not supported; sweeps deliberately submit many normal allocations instead of Slurm arrays |
+| Heterogeneous jobs | Not supported |
+| Slurm arrays | Supported only through `x-slurm.array` for detached Slurm submissions. Local mode and live watch do not fan out array tasks; sweeps deliberately submit many normal allocations instead of Slurm arrays. |
 | Compose `build`, `ports`, custom networks, `restart`, `deploy` | Not supported |
 
 ## Non-goals
