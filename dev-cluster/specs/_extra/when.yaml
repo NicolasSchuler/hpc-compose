@@ -1,0 +1,26 @@
+name: dev-cluster-when
+
+# Drives `hpc-compose when` against the live scheduler WITHOUT submitting: the
+# e2e runs it with `--free-nodes 9999 --timeout 0s`, an impossible condition on a
+# single-node cluster, so `when` performs one check, reports the unmet condition,
+# and exits without an sbatch. `--free-nodes` requires x-slurm.partition, so it is
+# pinned to the dev-cluster's default partition here.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-when
+  partition: compose
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 512M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "when service should never run in the e2e (condition is unmet)"

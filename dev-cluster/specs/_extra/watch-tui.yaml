@@ -1,0 +1,27 @@
+name: dev-cluster-watch-tui
+
+# A job that runs long enough (~20s) for the e2e to attach the interactive
+# crossterm `watch` TUI under a pseudo-terminal while it is RUNNING, then succeeds
+# so the TUI auto-exits (hold-on-exit defaults to `failure`). The harness asserts
+# the TUI entered AND restored the alternate screen — i.e. it did not leave the
+# terminal in a bad state.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-watch-tui
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 512M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "watch-tui: service started"
+        sleep 20
+        echo "watch-tui: service done"

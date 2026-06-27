@@ -44,7 +44,10 @@ COPY dev-cluster/cgroup.conf /etc/slurm/cgroup.conf
 # /etc/slurm/slurmdbd.conf with 0600 perms at boot.
 COPY dev-cluster/slurmdbd.conf /etc/slurm/slurmdbd.conf.in
 COPY dev-cluster/entrypoint.sh /usr/local/bin/devcluster-entrypoint.sh
-RUN chmod +x /usr/local/bin/devcluster-entrypoint.sh
+# OTP/2FA login simulation toggle for the SSH login-node stand-in, used by the
+# one-OTP ControlMaster e2e (scripts/devcluster_otp_e2e.sh). Inert until enabled.
+COPY dev-cluster/otp-sim.sh /usr/local/bin/otp-sim
+RUN chmod +x /usr/local/bin/devcluster-entrypoint.sh /usr/local/bin/otp-sim
 
 # tini reaps the daemons started by the entrypoint.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/devcluster-entrypoint.sh"]

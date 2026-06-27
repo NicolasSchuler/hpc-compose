@@ -6,3 +6,7 @@
 
 # Rendered scripts from `devcluster run` when dogfooding the repo at /workspace
 dev-cluster/specs/**/*.sbatch
+
+# Python bytecode (scripts/*.py, dev-cluster/pty-run.py)
+__pycache__/
+*.pyc

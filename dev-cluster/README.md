@@ -40,9 +40,36 @@ scripts/devcluster.sh run dev-cluster/specs/hello.yaml
 # (depends_on) before hitting it, then the allocation drains to COMPLETED.
 scripts/devcluster.sh run dev-cluster/specs/multi-service.yaml
 
+# Preview a run WITHOUT submitting: render the exact sbatch and stop. `run`
+# forwards extra args to `hpc-compose up`, so `--dry-run` works against the
+# dev cluster too — nothing reaches the scheduler (see "Safe dry-runs" below).
+scripts/devcluster.sh run dev-cluster/specs/hello.yaml --dry-run
+
 # Tear down when done.
 scripts/devcluster.sh down
 ```
+
+### Safe dry-runs against the dev cluster
+
+The dev cluster is the safest place to preview a real run: `up --dry-run` renders
+the exact sbatch it would submit and stops — no job is created, so the queue and
+accounting database stay untouched. It works both ways:
+
+```bash
+# In-container (running ON the login node): renders .../hpc-compose.sbatch, exit 0,
+# and submits nothing. Add --format json for {submitted:false, job_id:null, dry_run:true}.
+scripts/devcluster.sh run dev-cluster/specs/hello.yaml --dry-run
+
+# Host -> login node: stages the project over rsync and renders the sbatch ON the
+# node, but submits no job (stages-but-doesn't-submit). The dev-cluster stand-in
+# listens on port 2222 with key-only root login, so point ssh at it the way the
+# remote harness does (a host in your ~/.ssh/config needs no env var):
+HPC_COMPOSE_REMOTE_SSH_OPTS="-p 2222 -i <your-key> -o StrictHostKeyChecking=no" \
+  hpc-compose up --remote=root@localhost -f dev-cluster/specs/hello.yaml --dry-run
+```
+
+Both paths are asserted end to end (the rendered script exists and is a valid
+sbatch; `squeue`/`sacct` show no new job) — see "Automated end-to-end check".
 
 To work on your own project instead of this repo:
 
@@ -92,6 +119,18 @@ part):
   on-node path, not the unmounted container mount (`specs/_extra/resume.yaml`)
 - `alloc` opens a real `salloc` and `run` reuses that allocation via `srun`
   instead of a fresh `sbatch`
+- safe dry-runs: `up --dry-run` (in-container) and `up --remote --dry-run`
+  (host→node) render the real sbatch but submit nothing — proven against the live
+  controller (the queue and accounting db are unchanged)
+- the **one-OTP-per-session** property of the laptop thin client: the login-node
+  stand-in is flipped into an OTP/2FA-requiring sshd, and a multi-command session
+  (`up --remote`, a second `up --remote --dry-run`, and a `pull`-style transfer)
+  is shown to authenticate **exactly once** via SSH ControlMaster multiplexing
+- read-side affordances over the live scheduler: `weather` (live node/queue
+  signals), `diff` (pairwise + N-way comparison of two real runs), `when`
+  (evaluates live conditions and declines to submit when they are unmet), and the
+  interactive `watch` TUI driven under a pseudo-terminal (it enters **and**
+  restores the alternate screen, so it never leaves the terminal in a bad state)
 
 **Not validated locally** (revalidate on the cluster):
 
@@ -129,14 +168,32 @@ cancel→CANCELLED path, and scheduler inter-job dependencies. A post-loop
 deep-check resolves the `artifacts.yaml` manifest through `pull` and `artifacts`.
 A leaked detached job can't strand the single node: every `--detach` submission
 is registered and `scancel`ed in the EXIT trap. Adding an `_extra/` spec without
-a dedicated block fails the harness loudly, mirroring the generic registry.
+a dedicated block fails the harness loudly, mirroring the generic registry. A
+post-loop block also proves the **dry-run-submits-nothing** property: `up
+--dry-run` renders a valid sbatch while the queue and accounting db stay
+unchanged (text and `--format json` forms). Further blocks drive the read-side
+affordances against the live scheduler — `weather`, an N-way `diff` of two real
+runs, a `when` that evaluates conditions and declines to submit, and the
+interactive `watch` TUI under a pseudo-terminal (asserting it enters and restores
+the alternate screen).
 
 The same image is also an SSH-reachable login-node stand-in (`sshd` + `rsync`,
 port `2222`), which `scripts/devcluster_remote_e2e.sh` uses to exercise the thin
 remote-submit path (`up --remote`) from the host: it rsyncs the project to the
 node and submits over SSH, asserting a real remote `sbatch` tracked to
-COMPLETED. That harness injects a throwaway per-run key (no credentials are
-baked into the image).
+COMPLETED, then that `up --remote --dry-run` stages-but-doesn't-submit. That
+harness injects a throwaway per-run key (no credentials are baked into the image).
+
+`scripts/devcluster_otp_e2e.sh` (also `just dev-cluster-otp-e2e`) closes the
+last laptop-thin-client gap: real login nodes demand an OTP/2FA per SSH session,
+and hpc-compose copes via SSH ControlMaster multiplexing so a whole session
+authenticates **once**. The harness flips the stand-in into an OTP-requiring
+sshd (publickey **plus** an interactive second factor counted by a `pam_exec`
+hook — see `otp-sim.sh`), verifies a key-only login is now *rejected*, then
+drives a multi-command laptop session (`up --remote`, a second `up --remote
+--dry-run`, and a `pull`-style `rsync`) and asserts **exactly one**
+authentication occurred — corroborated by the live ControlMaster socket and `ssh
+-O check`. It restores the key-only sshd and removes the control socket on exit.
 
 CI runs this as a **separate** `dev-cluster-e2e` job (privileged container on a
 Linux runner) that runs in parallel with — and never gates — the fast
@@ -155,7 +212,9 @@ mock out. The `host`-backend scope above still applies — the e2e check does
 | `slurm.conf.tmpl` | Single-node, container-safe Slurm config (CPUs/RAM filled in at boot) |
 | `cgroup.conf` | `IgnoreSystemd=yes` so slurmd skips the absent dbus/systemd scope |
 | `slurmdbd.conf` | Accounting daemon config (installed 0600 at boot) for `sacct` |
-| `entrypoint.sh` | munge → MariaDB + slurmdbd → `slurmctld`/`slurmd`; surfaces failures |
+| `entrypoint.sh` | munge → MariaDB + slurmdbd → `slurmctld`/`slurmd` → `sshd`; surfaces failures |
+| `otp-sim.sh` | `otp-sim {enable\|disable\|reset\|count}`: toggles the sshd login-node stand-in into an OTP/2FA-requiring mode and counts authentications (used by the one-OTP e2e) |
+| `pty-run.py` | Runs a command under a fresh pseudo-terminal (sized 40×120) and captures its output, so the e2e can drive the crossterm `watch` TUI non-interactively |
 | `compose.yaml` | One-service, privileged compose for `docker compose`/`podman compose` |
 | `specs/hello.yaml` | Smallest `host`-backend spec to prove the loop |
 | `specs/multi-service.yaml` | Two `host`-backend services proving `depends_on` + a readiness gate (server/client) against the real scheduler |
@@ -169,6 +228,9 @@ mock out. The `host`-backend scope above still applies — the e2e check does
 | `specs/_extra/dep-producer.yaml` | Producer half of the scheduler inter-job dependency block |
 | `specs/_extra/dep-consumer.yaml` | Consumer half: `after_job` (afterok) held PENDING until the producer terminates |
 | `specs/_extra/resume.yaml` | Host-backend resume dir: `$HPC_COMPOSE_RESUME_DIR` is a real on-node path, not the container mount |
+| `specs/_extra/when.yaml` | Pins `x-slurm.partition` so the `when` block can evaluate `--free-nodes` against the live scheduler and decline to submit |
+| `specs/_extra/watch-tui.yaml` | A ~20s job that stays RUNNING long enough for the pty-driven `watch` TUI block to attach, render, and auto-exit on success |
 | `../scripts/devcluster.sh` | `up` / `run` / `exec` / `sinfo` / `logs` / `down` wrapper |
 | `../scripts/devcluster_e2e.sh` | UC1 end-to-end harness (generic loop + `_extra/` dedicated blocks; checks `sacct`/`status`/`ps`/`score`/`pull`) |
-| `../scripts/devcluster_remote_e2e.sh` | UC2 end-to-end harness: drives `up --remote` from the host against this node as an SSH login-node stand-in (`sshd` + `rsync` in the image; port `2222`) |
+| `../scripts/devcluster_remote_e2e.sh` | UC2 end-to-end harness: drives `up --remote` from the host against this node as an SSH login-node stand-in (`sshd` + `rsync` in the image; port `2222`); also asserts remote `--dry-run` stages-but-doesn't-submit |
+| `../scripts/devcluster_otp_e2e.sh` | UC3 end-to-end harness: flips the stand-in into an OTP/2FA-requiring sshd and proves a multi-command laptop session authenticates exactly once via SSH ControlMaster multiplexing |
