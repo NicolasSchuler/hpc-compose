@@ -101,6 +101,14 @@ pub struct BinaryOverrides {
 pub struct CacheSettings {
     #[serde(default)]
     pub dir: Option<String>,
+    /// Directory enroot uses for its temporary extraction scratch
+    /// (`ENROOT_TEMP_PATH`) during prepare-time image import. Defaults to
+    /// `<cache_dir>/enroot/tmp` (on the shared cache); point it at fast
+    /// node-local storage (e.g. `/tmp/$USER-hpc-compose-enroot`) when the shared
+    /// cache filesystem causes `Stale file handle` errors during squashfs
+    /// creation. The final image and layer cache stay under `cache_dir`.
+    #[serde(default)]
+    pub enroot_temp_dir: Option<String>,
 }
 
 /// Reusable Slurm resource defaults in settings.
@@ -167,10 +175,16 @@ pub struct SettingsDefaults {
     pub binaries: BinaryOverrides,
     #[serde(default)]
     pub cache: CacheSettings,
-    /// SSH login/jump host shown in connection hints (descriptive only; never
-    /// used to open a connection).
+    /// SSH login host used as the `up --remote` delegation destination and shown
+    /// in connection hints. May be a bare host, a `~/.ssh/config` alias, or
+    /// `user@host`. Used to open the connection.
     #[serde(default)]
     pub login_host: Option<String>,
+    /// SSH username applied to a bare [`Self::login_host`] (or bare `--remote`
+    /// host) so the `up --remote` destination becomes `user@host`. Overridden by
+    /// an explicit `user@` and by `HPC_COMPOSE_REMOTE_USER`.
+    #[serde(default)]
+    pub login_user: Option<String>,
 }
 
 /// One named profile in settings.
@@ -188,10 +202,15 @@ pub struct SettingsProfile {
     pub binaries: BinaryOverrides,
     #[serde(default)]
     pub cache: CacheSettings,
-    /// SSH login/jump host shown in connection hints (descriptive only; never
-    /// used to open a connection). Overrides the shared default.
+    /// SSH login host used as the `up --remote` delegation destination and shown
+    /// in connection hints. May be a bare host, a `~/.ssh/config` alias, or
+    /// `user@host`. Overrides the shared default. Used to open the connection.
     #[serde(default)]
     pub login_host: Option<String>,
+    /// SSH username applied to a bare login host for `up --remote` (destination
+    /// becomes `user@host`). Overrides the shared default.
+    #[serde(default)]
+    pub login_user: Option<String>,
 }
 
 /// Watch/replay TUI display preferences in settings.
@@ -286,10 +305,20 @@ pub struct ResolvedContext {
     pub selected_profile: Option<String>,
     pub compose_file: ResolvedValue<PathBuf>,
     pub cache_dir: ResolvedValue<PathBuf>,
-    /// SSH login/jump host for connection hints (descriptive only; never used
-    /// to open a connection). Profile overrides defaults; `None` when unset.
+    /// SSH login host used as the `up --remote` delegation destination and shown
+    /// in connection hints. Profile overrides defaults; `None` when unset.
     #[serde(default)]
     pub login_host: Option<String>,
+    /// SSH username applied to a bare [`Self::login_host`] for `up --remote`.
+    /// Profile overrides defaults; overridden by an explicit `user@` and by
+    /// `HPC_COMPOSE_REMOTE_USER`. `None` when unset.
+    #[serde(default)]
+    pub login_user: Option<String>,
+    /// Override for enroot's temporary extraction scratch directory used during
+    /// prepare-time image import. `None` falls back to `<cache_dir>/enroot/tmp`
+    /// on the shared cache.
+    #[serde(default)]
+    pub enroot_temp_dir: Option<String>,
     pub resource_profiles: BTreeMap<String, ResourceProfile>,
     pub binaries: ResolvedBinaries,
     /// `huggingface-cli` path used by `hf://` stage-in, executed cluster-side
@@ -494,6 +523,14 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         profile_cfg.and_then(|profile| profile.login_host.as_deref()),
         defaults_cfg.and_then(|defaults| defaults.login_host.as_deref()),
     );
+    let login_user = resolve_login_user(
+        profile_cfg.and_then(|profile| profile.login_user.as_deref()),
+        defaults_cfg.and_then(|defaults| defaults.login_user.as_deref()),
+    );
+    let enroot_temp_dir = profile_cfg
+        .and_then(|profile| profile.cache.enroot_temp_dir.as_deref())
+        .or_else(|| defaults_cfg.and_then(|defaults| defaults.cache.enroot_temp_dir.as_deref()))
+        .map(str::to_string);
 
     let mut interpolation_vars = BTreeMap::new();
     let mut interpolation_var_sources = BTreeMap::new();
@@ -552,6 +589,8 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         compose_file,
         cache_dir,
         login_host,
+        login_user,
+        enroot_temp_dir,
         resource_profiles: settings
             .as_ref()
             .map(|settings| settings.resource_profiles.clone())
@@ -803,6 +842,12 @@ fn resolve_cache_dir_default(
 /// Resolves the login/jump host shown in connection hints: profile value wins
 /// over the shared default; `None` when neither is set. Descriptive only.
 fn resolve_login_host(profile_value: Option<&str>, defaults_value: Option<&str>) -> Option<String> {
+    profile_value.or(defaults_value).map(str::to_string)
+}
+
+/// Resolves the SSH login username applied to a bare `up --remote` host: profile
+/// value wins over the shared default; `None` when neither is set.
+fn resolve_login_user(profile_value: Option<&str>, defaults_value: Option<&str>) -> Option<String> {
     profile_value.or(defaults_value).map(str::to_string)
 }
 
@@ -1166,6 +1211,23 @@ mod tests {
             err.to_string()
                 .contains("unsupported settings schema version")
         );
+    }
+
+    #[test]
+    fn resolve_login_user_prefers_profile_then_default() {
+        // Profile wins over the shared default.
+        assert_eq!(
+            resolve_login_user(Some("vy3326"), Some("fallback")).as_deref(),
+            Some("vy3326")
+        );
+        // Default applies when the profile is silent.
+        assert_eq!(
+            resolve_login_user(None, Some("fallback")).as_deref(),
+            Some("fallback")
+        );
+        // Neither set: no login user, so the bare host (or user@host) is used as-is
+        // — not the local laptop username (the original bug this guards).
+        assert_eq!(resolve_login_user(None, None), None);
     }
 
     #[test]

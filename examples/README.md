@@ -15,6 +15,7 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 - [`app-redis-worker.yaml`](app-redis-worker.yaml)
 - [`dev-python-app.yaml`](dev-python-app.yaml)
 - [`dev-python-smoke.yaml`](dev-python-smoke.yaml)
+- [`cuda-probe.yaml`](cuda-probe.yaml)
 - [`restart-policy.yaml`](restart-policy.yaml)
 
 ## Model serving and LLM workflows

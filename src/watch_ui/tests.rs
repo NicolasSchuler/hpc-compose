@@ -1,12 +1,40 @@
 use super::*;
 use crate::output;
 use hpc_compose::job::{
-    PsSnapshot, QueueDiagnostics, ReplayArtifactPaths, ReplayEvent, ReplayEventKind, ReplayFrame,
+    GpuNodeSummary, PsSnapshot, QueueDiagnostics, ReplayArtifactPaths, ReplayEvent, ReplayEventKind,
+    ReplayFrame,
     ReplayReport, ReplayServiceFrame, RequestedWalltime, SchedulerOptions, SchedulerSource,
     SchedulerStatus, SubmissionBackend, SubmissionKind, SubmissionRecord, WalltimeProgress,
     WatchOutcome, build_submission_record_with_backend, state_path_for_record,
     write_submission_record,
 };
+
+#[test]
+fn format_gpu_metrics_includes_power_when_reported() {
+    let node = GpuNodeSummary {
+        node: Some("node01".into()),
+        gpu_count: 4,
+        avg_utilization_gpu: Some(72.0),
+        memory_used_mib: Some(2100),
+        memory_total_mib: Some(40960),
+        power_draw_w: Some(185.4),
+        power_limit_w: Some(1200.0),
+    };
+    assert_eq!(
+        format_gpu_metrics(&node),
+        "gpu: 4 util=72% mem=2100/40960 MiB power=185W"
+    );
+
+    // Power is omitted entirely when the sampler did not report it.
+    let no_power = GpuNodeSummary {
+        power_draw_w: None,
+        ..node
+    };
+    assert_eq!(
+        format_gpu_metrics(&no_power),
+        "gpu: 4 util=72% mem=2100/40960 MiB"
+    );
+}
 
 fn sample_snapshot() -> PsSnapshot {
     PsSnapshot {

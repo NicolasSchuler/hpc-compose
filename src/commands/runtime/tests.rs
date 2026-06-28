@@ -75,6 +75,8 @@ fn context_for(compose: &Path, cwd: &Path) -> ResolvedContext {
             source: ValueSource::Builtin,
         },
         login_host: None,
+        login_user: None,
+        enroot_temp_dir: None,
         resource_profiles: BTreeMap::new(),
         binaries: ResolvedBinaries {
             enroot: resolved_string("/definitely/missing-enroot"),
@@ -312,6 +314,7 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
         false,
         WatchMode::Auto,
         HoldOnExit::Failure,
+        MetricsOverrides::default(),
         false,
     )
     .expect("submit dry run");
@@ -335,6 +338,7 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
         false,
         WatchMode::Auto,
         HoldOnExit::Failure,
+        MetricsOverrides::default(),
         false,
     )
     .expect("submit dry run json");
@@ -427,6 +431,7 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
         false,
         WatchMode::Auto,
         HoldOnExit::Failure,
+        MetricsOverrides::default(),
         false,
     )
     .expect_err("sbatch failure");
@@ -1276,4 +1281,90 @@ fn attach_submit_source_snapshot_pins_hash_only_inside_a_git_tree() {
         cache_dir.join("source").is_dir(),
         "snapshot staged under the source/ segment"
     );
+}
+
+#[test]
+fn metrics_overrides_validate_and_apply() {
+    // validate(): interval 0 is rejected; absent / positive are accepted.
+    assert!(
+        MetricsOverrides {
+            disable: false,
+            interval_seconds: Some(0),
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(MetricsOverrides::default().validate().is_ok());
+    assert!(
+        MetricsOverrides {
+            disable: false,
+            interval_seconds: Some(5),
+        }
+        .validate()
+        .is_ok()
+    );
+
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    // --no-metrics disables metrics that the compose enabled.
+    let with = tmpdir.path().join("with.yaml");
+    fs::write(
+        &with,
+        format!(
+            "name: demo\nx-slurm:\n  cache_dir: {}\n  metrics:\n    enabled: true\n    interval_seconds: 5\nservices:\n  app:\n    image: docker://redis:7\n    command: /bin/true\n",
+            tmpdir.path().join("c1").display()
+        ),
+    )
+    .expect("with metrics compose");
+    let mut plan = output::load_runtime_plan(&with).expect("plan with metrics");
+    MetricsOverrides {
+        disable: true,
+        interval_seconds: None,
+    }
+    .apply(&mut plan);
+    assert_eq!(
+        plan.slurm.metrics.as_ref().and_then(|m| m.enabled),
+        Some(false)
+    );
+
+    // --metrics-interval enables + sets the interval even when the compose has
+    // no metrics block, defaulting collectors.
+    let without = tmpdir.path().join("without.yaml");
+    fs::write(
+        &without,
+        format!(
+            "name: demo\nx-slurm:\n  cache_dir: {}\nservices:\n  app:\n    image: docker://redis:7\n    command: /bin/true\n",
+            tmpdir.path().join("c2").display()
+        ),
+    )
+    .expect("no metrics compose");
+    let mut plan2 = output::load_runtime_plan(&without).expect("plan without metrics");
+    assert!(plan2.slurm.metrics.is_none());
+    MetricsOverrides {
+        disable: false,
+        interval_seconds: Some(10),
+    }
+    .apply(&mut plan2);
+    let metrics = plan2.slurm.metrics.as_ref().expect("metrics created");
+    assert_eq!(metrics.enabled, Some(true));
+    assert_eq!(metrics.interval_seconds, Some(10));
+    assert!(!metrics.collectors.is_empty());
+}
+
+#[test]
+fn enrich_sbatch_failure_adds_association_hint_only_for_account_errors() {
+    let enriched = enrich_sbatch_failure(
+        "sbatch: error: Batch job submission failed: Invalid account or account/partition combination specified",
+    );
+    assert!(enriched.contains("Invalid account"));
+    assert!(enriched.contains("sacctmgr -nP show assoc"));
+    assert!(enriched.contains("x-slurm.account"));
+
+    // Invalid QOS is also an association problem.
+    assert!(enrich_sbatch_failure("Invalid qos specification").contains("sacctmgr"));
+
+    // Unrelated failures are passed through unchanged (trimmed).
+    let other = enrich_sbatch_failure("  sbatch: error: Unable to open file script.sh  ");
+    assert_eq!(other, "sbatch: error: Unable to open file script.sh");
+    assert!(!other.contains("sacctmgr"));
 }

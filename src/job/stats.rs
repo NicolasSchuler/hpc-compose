@@ -97,6 +97,8 @@ pub struct GpuNodeSummary {
     pub avg_utilization_gpu: Option<f64>,
     pub memory_used_mib: Option<u64>,
     pub memory_total_mib: Option<u64>,
+    pub power_draw_w: Option<f64>,
+    pub power_limit_w: Option<f64>,
 }
 
 /// One sampled GPU device record.
@@ -613,12 +615,18 @@ fn summarize_gpu_nodes(devices: &[GpuDeviceSample]) -> Vec<GpuNodeSummary> {
                     .iter()
                     .map(|device| device.memory_total_mib.as_deref()),
             );
+            let power_draw_w =
+                sum_optional_f64_stats(devices.iter().map(|device| device.power_draw_w.as_deref()));
+            let power_limit_w =
+                sum_optional_f64_stats(devices.iter().map(|device| device.power_limit_w.as_deref()));
             GpuNodeSummary {
                 node,
                 gpu_count,
                 avg_utilization_gpu,
                 memory_used_mib,
                 memory_total_mib,
+                power_draw_w,
+                power_limit_w,
             }
         })
         .collect()
@@ -630,6 +638,15 @@ fn parse_u64_stats(value: Option<&str>) -> Option<u64> {
 
 fn sum_optional_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Option<u64> {
     let parsed = values.filter_map(parse_u64_stats).collect::<Vec<_>>();
+    (!parsed.is_empty()).then(|| parsed.iter().sum())
+}
+
+fn parse_f64_stats(value: Option<&str>) -> Option<f64> {
+    value?.trim().parse::<f64>().ok()
+}
+
+fn sum_optional_f64_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Option<f64> {
+    let parsed = values.filter_map(parse_f64_stats).collect::<Vec<_>>();
     (!parsed.is_empty()).then(|| parsed.iter().sum())
 }
 

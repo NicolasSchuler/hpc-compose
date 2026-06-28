@@ -109,6 +109,8 @@ pub(crate) fn setup(
     env_entries: Vec<String>,
     binary_entries: Vec<String>,
     cache_dir: Option<String>,
+    login_host: Option<String>,
+    login_user: Option<String>,
     default_profile: Option<String>,
     non_interactive: bool,
     format: Option<OutputFormat>,
@@ -275,6 +277,19 @@ pub(crate) fn setup(
         prompt(&mut stdin, &mut stdout, "Default profile", &default)?
     };
 
+    // Login host/user are flag-driven (no interactive prompt): a provided flag
+    // wins, otherwise the profile keeps its current value.
+    let login_host_value = login_host.or_else(|| {
+        existing_profile
+            .as_ref()
+            .and_then(|profile| profile.login_host.clone())
+    });
+    let login_user_value = login_user.or_else(|| {
+        existing_profile
+            .as_ref()
+            .and_then(|profile| profile.login_user.clone())
+    });
+
     let profile = settings
         .profiles
         .entry(selected_profile.clone())
@@ -284,6 +299,8 @@ pub(crate) fn setup(
     profile.env = env_value;
     profile.binaries = binaries_value;
     profile.cache.dir = cache_dir_value;
+    profile.login_host = login_host_value;
+    profile.login_user = login_user_value;
     let setup_output = output_init::SetupOutput {
         settings_path: settings_path.clone(),
         profile: selected_profile.clone(),
@@ -293,6 +310,8 @@ pub(crate) fn setup(
         env: profile.env.clone(),
         binaries: profile.binaries.clone(),
         cache_dir: profile.cache.dir.clone(),
+        login_host: profile.login_host.clone(),
+        login_user: profile.login_user.clone(),
     };
     settings.default_profile = Some(selected_default_profile.clone());
     settings.version = 1;
@@ -598,6 +617,8 @@ mod tests {
             vec!["CACHE_DIR=/shared/cache".to_string()],
             vec!["srun=/opt/slurm/bin/srun".to_string()],
             None,
+            None,
+            None,
             Some("dev".to_string()),
             true,
             None,
@@ -629,6 +650,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
+            None,
             None,
             None,
             true,
@@ -765,6 +788,8 @@ mod tests {
             vec![".env".to_string()],
             vec!["CACHE_DIR=/shared/cache-json".to_string()],
             vec!["squeue=/opt/slurm/bin/squeue".to_string()],
+            None,
+            None,
             None,
             Some("json".to_string()),
             true,

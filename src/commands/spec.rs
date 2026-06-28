@@ -13,7 +13,9 @@ use hpc_compose::lint::{LintFinding, LintLevel};
 use hpc_compose::lint_fix::{self, AppliedFix};
 use hpc_compose::planner::ImageSource;
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
-use hpc_compose::prepare::{PrepareOptions, RuntimePlan, build_runtime_plan, prepare_runtime_plan};
+use hpc_compose::prepare::{
+    PrepareOptions, RuntimePlan, build_runtime_plan, prepare_runtime_plan_with_reporter,
+};
 use hpc_compose::render::{RenderOptions, render_script_with_options};
 use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
@@ -569,7 +571,6 @@ pub(crate) fn prepare(
     quiet: bool,
 ) -> Result<()> {
     let output_format = output_common::resolve_output_format(format, false);
-    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
     let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
@@ -578,8 +579,8 @@ pub(crate) fn prepare(
     )?;
     let prepare_progress =
         PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
-    let summary = progress.run_result("Preparing runtime artifacts", || {
-        prepare_runtime_plan(
+    let summary = prepare_progress.run("Preparing runtime artifacts", || {
+        prepare_runtime_plan_with_reporter(
             &runtime_plan,
             &PrepareOptions {
                 enroot_bin: context.binaries.enroot.value.clone(),
@@ -588,7 +589,9 @@ pub(crate) fn prepare(
                 huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 keep_failed_prep,
                 force_rebuild: force,
+                enroot_temp_dir: context.enroot_temp_dir.clone(),
             },
+            &prepare_progress,
         )
     })?;
     prepare_progress.finish_from_summary(&summary);
@@ -890,6 +893,9 @@ struct ContextRuntimePaths {
     default_script_path: PathBuf,
     runtime_job_root_pattern: String,
     cache_dir: Option<ResolvedValue<PathBuf>>,
+    /// Resolved enroot prepare-time temporary scratch directory
+    /// (`ENROOT_TEMP_PATH`).
+    enroot_temp_dir: ResolvedValue<PathBuf>,
     resume_dir: Option<ResolvedValue<PathBuf>>,
     artifact_export_dir: Option<ResolvedValue<String>>,
     metadata_root: ResolvedValue<PathBuf>,
@@ -910,6 +916,30 @@ struct ContextOutput {
     runtime_paths: ContextRuntimePaths,
 }
 
+/// Resolves the enroot prepare temp dir for display, tracking which layer won.
+fn resolve_enroot_temp_display(
+    spec_value: Option<&str>,
+    settings_value: Option<&str>,
+    cache_dir: &std::path::Path,
+) -> ResolvedValue<PathBuf> {
+    let env_value = std::env::var(hpc_compose::prepare::ENROOT_TEMP_DIR_ENV).ok();
+    let env_ref = env_value.as_deref().filter(|raw| !raw.trim().is_empty());
+    let spec_ref = spec_value.filter(|raw| !raw.trim().is_empty());
+    let settings_ref = settings_value.filter(|raw| !raw.trim().is_empty());
+    let value =
+        hpc_compose::prepare::resolve_enroot_temp_dir(env_ref, spec_ref, settings_ref, cache_dir);
+    let source = if env_ref.is_some() {
+        ValueSource::ProcessEnv
+    } else if spec_ref.is_some() {
+        ValueSource::Compose
+    } else if settings_ref.is_some() {
+        ValueSource::Defaults
+    } else {
+        ValueSource::Builtin
+    };
+    ResolvedValue { value, source }
+}
+
 pub(crate) fn context(
     context: ResolvedContext,
     format: Option<OutputFormat>,
@@ -922,7 +952,7 @@ pub(crate) fn context(
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
     let current_submit_dir = context.cwd.clone();
-    let (cache_dir, resume_dir, artifact_export_dir, compose_load_error) =
+    let (cache_dir, spec_enroot_temp, plan_cache_dir, resume_dir, artifact_export_dir, compose_load_error) =
         match output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
@@ -938,6 +968,8 @@ pub(crate) fn context(
                         context.cache_dir.source
                     },
                 }),
+                runtime_plan.slurm.enroot_temp_dir.clone(),
+                runtime_plan.cache_dir.clone(),
                 runtime_plan.slurm.resume_dir().map(|value| ResolvedValue {
                     value: PathBuf::from(value),
                     source: ValueSource::Compose,
@@ -953,8 +985,13 @@ pub(crate) fn context(
                     }),
                 None,
             ),
-            Err(err) => (None, None, None, Some(format!("{err:#}"))),
+            Err(err) => (None, None, context.cache_dir.value.clone(), None, None, Some(format!("{err:#}"))),
         };
+    let enroot_temp_dir = resolve_enroot_temp_display(
+        spec_enroot_temp.as_deref(),
+        context.enroot_temp_dir.as_deref(),
+        &plan_cache_dir,
+    );
     let runtime_paths = ContextRuntimePaths {
         compose_dir: compose_dir.clone(),
         current_submit_dir: current_submit_dir.clone(),
@@ -965,6 +1002,7 @@ pub(crate) fn context(
             .display()
             .to_string(),
         cache_dir,
+        enroot_temp_dir,
         resume_dir,
         artifact_export_dir,
         metadata_root: ResolvedValue {
@@ -1134,6 +1172,17 @@ pub(crate) fn context(
             } else {
                 println!("  {}", term::styled_label("cache dir", "<unavailable>"));
             }
+            println!(
+                "  {}",
+                term::styled_label(
+                    "enroot temp dir",
+                    &format!(
+                        "{} ({:?})",
+                        output.runtime_paths.enroot_temp_dir.value.display(),
+                        output.runtime_paths.enroot_temp_dir.source
+                    )
+                )
+            );
             if let Some(resume) = &output.runtime_paths.resume_dir {
                 println!(
                     "  {}",
@@ -1434,6 +1483,8 @@ services:
                 source: ValueSource::Builtin,
             },
             login_host: None,
+            login_user: None,
+            enroot_temp_dir: None,
             resource_profiles: BTreeMap::new(),
             binaries: binaries(root),
             huggingface_cli_bin: "huggingface-cli".to_string(),

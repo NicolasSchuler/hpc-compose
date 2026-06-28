@@ -1049,15 +1049,25 @@ fn check_mount_path(report: &mut Report, service_name: &str, mount: &str, kind: 
             remediation: None,
         });
     } else {
+        let remediation = if path.is_absolute() {
+            "If this is a cluster workspace or site storage path (not a file in your repo), \
+             provision it first with your site's allocation command (e.g. ws_allocate), then \
+             create the sub-directories declaratively in an x-slurm.setup step (e.g. `mkdir -p \
+             $WORKSPACE/{cache,data,results}`): hpc-compose stages your repo but does not allocate \
+             cluster workspaces or create site storage directories. Otherwise create the host \
+             directory/file or fix the mount path in compose.yaml."
+        } else {
+            "Create the host directory/file (commit an in-repo directory with a .gitkeep so it \
+             stages), declare it in an x-slurm.setup `mkdir -p` step, or fix the mount path in \
+             compose.yaml."
+        };
         report.items.push(Item {
             level: Level::Error,
             message: format!(
                 "{kind} for service '{service_name}' is missing: {}",
                 path.display()
             ),
-            remediation: Some(
-                "Create the host directory/file or fix the mount path in compose.yaml.".to_string(),
-            ),
+            remediation: Some(remediation.to_string()),
         });
     }
 }
@@ -1086,12 +1096,15 @@ fn check_skip_prepare_readiness(report: &mut Report, plan: &RuntimePlan) {
             report.items.push(Item {
                 level: Level::Error,
                 message: format!(
-                    "skip-prepare requested, but runtime image for service '{}' is missing: {}",
+                    "skip-prepare requested, but the runtime image for service '{}' has not been \
+                     prepared yet: {}",
                     service.name,
                     service.runtime_image.display()
                 ),
                 remediation: Some(
-                    "Run 'hpc-compose prepare -f compose.yaml' first or remove --skip-prepare."
+                    "This is expected on a first run: --skip-prepare reuses an already-built image \
+                     cache and builds nothing. Run `hpc-compose up` (or `hpc-compose prepare`) once \
+                     without --skip-prepare to import/build it, then --skip-prepare can reuse it."
                         .to_string(),
                 ),
             });

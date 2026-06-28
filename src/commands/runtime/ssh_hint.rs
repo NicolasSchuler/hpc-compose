@@ -15,6 +15,17 @@ pub(crate) const CONTROL_MASTER_SSH_OPTS: [&str; 6] = [
     "ControlPersist=10m",
 ];
 
+/// ssh options that neutralize an interactive Host alias for non-interactive
+/// automation. A `~/.ssh/config` block tailored for human use (e.g.
+/// `RemoteCommand tmux new -A ...` + `RequestTTY yes`) otherwise hijacks the
+/// commands `up --remote` runs (`mkdir`, the version probe, the delegated `up`):
+/// OpenSSH refuses with "Cannot execute command-line and remote command" when a
+/// config `RemoteCommand` collides with a command on the line. Forcing
+/// `RemoteCommand=none` / `RequestTTY=no` makes delegation work through such an
+/// alias instead of failing cryptically.
+pub(crate) const NONINTERACTIVE_SSH_OPTS: [&str; 4] =
+    ["-o", "RemoteCommand=none", "-o", "RequestTTY=no"];
+
 /// One-line explanation shown beneath an emitted ssh/rsync command.
 pub(crate) const OTP_MULTIPLEX_NOTE: &str = "The ControlMaster options reuse one authenticated connection, so a login node that requires \
      an OTP/2FA only prompts on the first connection within ControlPersist.";

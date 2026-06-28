@@ -345,3 +345,11 @@ Source: `examples/eval-harness.yaml`
 ```yaml
 {{#include ../../examples/eval-harness.yaml}}
 ```
+
+## Cuda Probe
+
+Source: `examples/cuda-probe.yaml`
+
+```yaml
+{{#include ../../examples/cuda-probe.yaml}}
+```

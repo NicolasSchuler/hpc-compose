@@ -352,6 +352,15 @@ const EXAMPLES: &[ExampleInfo] = &[
         tags: &["test", "python", "dev", "finite"],
     },
     ExampleInfo {
+        name: "cuda-probe",
+        path: "examples/cuda-probe.yaml",
+        availability: ExampleAvailability::RepositoryFile,
+        category: "basics",
+        demonstrates: "Lightweight compute-node GPU/CUDA probe: hostname, nvidia-smi, and device files.",
+        start_when: "You want a fast nvidia-smi check that GPU allocation works before any real training run.",
+        tags: &["gpu", "cuda", "probe", "nvidia-smi", "diagnostics"],
+    },
+    ExampleInfo {
         name: "jupyter",
         path: "examples/jupyter.yaml",
         availability: ExampleAvailability::BuiltInTemplate,

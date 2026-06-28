@@ -102,6 +102,8 @@ x-slurm:
 
 The official HAICORE filesystem page documents workspace lifetime, extension limits, quotas, and backup policy. Treat workspace expiration as operational risk: long-running projects should have a habit of checking `ws_list` and copying durable results to the correct long-term location.
 
+`hpc-compose` (including `hpc-compose up --remote` from a laptop) stages your repo and reads these paths, but it does not run `ws_allocate` or create the cache and storage directories for you. Allocate the workspace and `mkdir -p` your `cache_dir`, dataset, and checkpoint paths first; a missing host bind-mount or storage directory blocks preflight. See [Repo staging vs cluster workspace provisioning](files-and-directories.md#repo-staging-vs-cluster-workspace-provisioning).
+
 ## Containers On HAICORE
 
 The official HAICORE container documentation says native Docker and rootless Docker are not supported on the HPC systems. The relevant paths are site-supported HPC runtimes, including Enroot/Pyxis and Apptainer.
@@ -148,6 +150,16 @@ See [Runtime Backends](runtime-backends.md) for the backend behavior and require
 HAICORE documents Enroot as available by default, with default data paths under the user's home directory. For repeated container jobs, large images, or quota-sensitive projects, place runtime cache/data under a workspace-backed `x-slurm.cache_dir`.
 
 `hpc-compose` sets per-job Enroot runtime paths below the configured cache directory. That keeps image runtime state close to the job and avoids filling `$HOME` accidentally.
+
+The first time an image is imported (on a fresh cache, or after eviction) enroot downloads a multi-GB image and then extracts it and builds a squashfs, which can take several minutes. Later jobs reuse the cached `.sqsh`, so subsequent runs are fast.
+
+On HAICORE the recommended opt-in is to point enroot's extraction scratch at node-local storage so `mksquashfs` does not hit `Stale file handle` on shared home/work storage. Set `x-slurm.enroot_temp_dir` in the spec (or `cache.enroot_temp_dir` in `.hpc-compose/settings.toml`) to a node-local path such as `/tmp/${USER}-hpc-compose-enroot`; the final `.sqsh` and the layer cache still live on the workspace-backed cache. Prefer the spec or settings field over the `HPC_COMPOSE_ENROOT_TEMP_DIR` environment variable for `up --remote`, because a laptop env var does not propagate over SSH.
+
+```yaml
+x-slurm:
+  cache_dir: ${CACHE_DIR}
+  enroot_temp_dir: /tmp/${USER}-hpc-compose-enroot
+```
 
 ## BeeOND And Job-Local Scratch
 
@@ -204,6 +216,10 @@ hpc-compose status -f compose.yaml
 hpc-compose logs -f compose.yaml --follow
 ```
 
+For a fast compute-node GPU/CUDA sanity check before your real workload, submit the `cuda-probe.yaml` example — a short GPU job that runs `nvidia-smi` and a minimal CUDA check inside the container.
+
+The first `up` imports the image with enroot (download, extract, then squashfs build) and can take several minutes; later runs reuse the cache.
+
 ## Common HAICORE Failure Modes
 
 | Symptom | Likely cause | What to check |
@@ -215,6 +231,7 @@ hpc-compose logs -f compose.yaml --follow
 | GPU request is rejected | Wrong `gres` name, too many GPUs, or partition limit. | HAICORE batch docs and a tiny smoke job. |
 | Job starts but cannot see data | Data is on node-local storage or an unmounted path. | Use workspace paths or explicit `volumes`. |
 | Workspace fills or expires | Container cache, datasets, checkpoints, or logs accumulated. | `ws_list`, quota tools, cache cleanup, artifact retention policy. |
+| enroot import fails at `Creating squashfs filesystem...` (`Stale file handle`) | Extraction scratch is on shared home/work storage. | Set `x-slurm.enroot_temp_dir` (or `cache.enroot_temp_dir`) to node-local `/tmp/$USER-...`; the layer cache and final `.sqsh` stay on the workspace cache. |
 
 ## Official HAICORE References
 

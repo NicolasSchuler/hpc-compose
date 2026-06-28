@@ -22,10 +22,10 @@ use crossterm::execute;
 use crossterm::terminal::{self, Clear, ClearType};
 use hpc_compose::cli::HoldOnExit;
 use hpc_compose::job::{
-    PsServiceRow, PsSnapshot, ReplayReport, SchedulerOptions, StatsOptions, StatsSnapshot,
-    SubmissionBackend, SubmissionRecord, WalltimeProgress, WatchOutcome, build_ps_snapshot,
-    build_stats_snapshot, format_walltime_summary, runtime_job_root_for_record, walltime_progress,
-    walltime_progress_percent,
+    GpuNodeSummary, PsServiceRow, PsSnapshot, ReplayReport, SchedulerOptions, StatsOptions,
+    StatsSnapshot, SubmissionBackend, SubmissionRecord, WalltimeProgress, WatchOutcome,
+    build_ps_snapshot, build_stats_snapshot, format_walltime_summary, runtime_job_root_for_record,
+    walltime_progress, walltime_progress_percent,
 };
 
 const DATA_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -2318,6 +2318,25 @@ fn load_watch_metrics_line(
     format_watch_metrics_line(&snapshot)
 }
 
+/// Formats the compact per-node GPU summary for the watch metrics line, e.g.
+/// `gpu: 4 util=72% mem=2100/40960 MiB power=185W`. Power is shown only when the
+/// sampler reported it (aggregated draw across the node's devices).
+fn format_gpu_metrics(node: &GpuNodeSummary) -> String {
+    let util = node
+        .avg_utilization_gpu
+        .map(|value| format!("{value:.0}%"))
+        .unwrap_or_else(|| "-".to_string());
+    let mem = match (node.memory_used_mib, node.memory_total_mib) {
+        (Some(used), Some(total)) => format!("{used}/{total} MiB"),
+        _ => "-".to_string(),
+    };
+    let mut line = format!("gpu: {} util={} mem={}", node.gpu_count, util, mem);
+    if let Some(power) = node.power_draw_w {
+        line.push_str(&format!(" power={power:.0}W"));
+    }
+    line
+}
+
 fn format_watch_metrics_line(snapshot: &StatsSnapshot) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(failure) = &snapshot.first_failure {
@@ -2332,15 +2351,7 @@ fn format_watch_metrics_line(snapshot: &StatsSnapshot) -> Option<String> {
         .and_then(|sampler| sampler.gpu.as_ref())
         && let Some(node) = gpu.nodes.first()
     {
-        let util = node
-            .avg_utilization_gpu
-            .map(|value| format!("{value:.0}%"))
-            .unwrap_or_else(|| "-".to_string());
-        let mem = match (node.memory_used_mib, node.memory_total_mib) {
-            (Some(used), Some(total)) => format!("{used}/{total} MiB"),
-            _ => "-".to_string(),
-        };
-        parts.push(format!("gpu: {} util={} mem={}", node.gpu_count, util, mem));
+        parts.push(format_gpu_metrics(node));
     }
     if snapshot.available {
         parts.push(format!("stats: {}", snapshot.source));

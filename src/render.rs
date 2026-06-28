@@ -1940,6 +1940,10 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("    SERVICE_FIRST_FAILURE_NODE[index]=\"$(first_word \"${SERVICE_STEP_NODELIST[index]:-}\")\"\n");
     out.push_str("    SERVICE_FIRST_FAILURE_RANK[index]=\"\"\n");
     out.push_str("  fi\n");
+    // Lifecycle marker: a timestamped command-exit line in the service log, so a
+    // completed/failed run is visible inline alongside its output (complements the
+    // machine-readable exit marker written next).
+    out.push_str("  printf '[hpc-compose] %s service %s: command exited rc=%s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"${SERVICE_NAMES[index]:-?}\" \"$status\" >>\"${SERVICE_LOG_PATHS[index]}\" 2>/dev/null || true\n");
     out.push_str("  write_service_exit_marker \"$index\" \"$status\" || true\n");
     out.push_str("  if [[ \"$mode\" == \"restart_on_failure\" ]]; then\n");
     out.push_str("    prune_restart_window \"$index\"\n");
@@ -2734,6 +2738,10 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
     if !service.slurm.software_env.is_empty() {
         render_apply_software_env(out, &service.slurm.software_env, "      ");
     }
+    // Lifecycle marker: a timestamped line in the service log right before the
+    // container launch, so the gap before the command's own first output (srun
+    // scheduling + container image extract) is visible instead of looking stuck.
+    out.push_str("      printf '[hpc-compose] %s service %s: container starting via srun (image extract on first node use can take a moment)\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" \"$service_name\" >>\"$logfile\" 2>&1\n");
     out.push_str("      if (( ${#launch_env[@]} == 0 )); then\n");
     out.push_str("        \"${srun_cmd[@]}\" \"${runtime_cmd[@]}\" >>\"$logfile\" 2>&1\n");
     out.push_str("      else\n");

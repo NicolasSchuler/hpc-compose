@@ -538,12 +538,47 @@ fn helper_defaults_and_paths_cover_remaining_prepare_helpers() {
     assert_eq!(short_hash("1234567890abcdef1234"), "1234567890abcdef");
     assert_eq!(sanitize_name("svc/name"), "svc_name");
     assert_eq!(image_label(&service.source), "local-image");
-    let envs = enroot_env(cache_dir);
+    let temp = cache_dir.join("enroot/tmp");
+    let data = cache_dir.join("enroot/data");
+    let envs = enroot_env(cache_dir, &data, &temp, false);
     assert_eq!(envs.len(), 3);
     assert!(envs[0].1.contains("enroot/cache"));
     assert!(
         envs.iter()
+            .any(|(key, value)| key == "ENROOT_DATA_PATH" && value.contains("enroot/data"))
+    );
+    assert!(
+        envs.iter()
             .any(|(key, value)| key == "ENROOT_TEMP_PATH" && value.contains("enroot/tmp"))
+    );
+    assert!(!envs.iter().any(|(key, _)| key == "NVIDIA_VISIBLE_DEVICES"));
+    let envs_no_gpu = enroot_env(cache_dir, &data, &temp, true);
+    assert_eq!(envs_no_gpu.len(), 4);
+    assert!(
+        envs_no_gpu
+            .iter()
+            .any(|(key, value)| key == "NVIDIA_VISIBLE_DEVICES" && value == "void")
+    );
+}
+
+#[test]
+fn enroot_data_dir_follows_scratch_redirect() {
+    let cache = Path::new("/shared/cache");
+    // Default scratch keeps the prepare rootfs on the persistent shared cache.
+    assert_eq!(
+        enroot_data_dir(&cache.join("enroot/tmp"), cache),
+        cache.join("enroot/data")
+    );
+    // A redirected (node-local) scratch moves the transient rootfs node-local too,
+    // in an hpc-compose-owned per-process subdir of the scratch root.
+    let local = Path::new("/tmp/me-hpc-compose-enroot");
+    let data = enroot_data_dir(local, cache);
+    assert!(data.starts_with(local), "data dir {data:?} should be node-local");
+    assert!(
+        data.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("hpc-compose-enroot-data-")),
+        "data dir {data:?} should be an hpc-compose-owned per-process subdir"
     );
 }
 
@@ -736,6 +771,7 @@ fn local_sqsh_prepare_and_helper_failures_cover_remaining_branches() {
         &[],
         vec!["version".to_string()],
         "probe missing binary",
+        &StreamCtx::quiet(&NoopPrepareReporter, "test"),
     )
     .expect_err("missing binary execution");
     assert!(err.to_string().contains("failed to execute"));
@@ -825,6 +861,7 @@ fn helper_paths_binary_search_and_run_failures_are_reported() {
         &[],
         vec!["fail".to_string()],
         "run failing command",
+        &StreamCtx::quiet(&NoopPrepareReporter, "test"),
     )
     .expect_err("failing helper");
     assert!(
@@ -1237,4 +1274,84 @@ fn runtime_path_and_command_helpers_cover_remaining_branches() {
         .len()
             > 10
     );
+}
+
+#[test]
+fn resolve_enroot_temp_dir_applies_precedence_and_default() {
+    let cache = Path::new("/shared/cache");
+    assert_eq!(
+        resolve_enroot_temp_dir(None, None, None, cache),
+        cache.join("enroot/tmp")
+    );
+    assert_eq!(
+        resolve_enroot_temp_dir(None, None, Some("/local/from-settings"), cache),
+        PathBuf::from("/local/from-settings")
+    );
+    assert_eq!(
+        resolve_enroot_temp_dir(
+            None,
+            Some("/local/from-spec"),
+            Some("/local/from-settings"),
+            cache
+        ),
+        PathBuf::from("/local/from-spec")
+    );
+    assert_eq!(
+        resolve_enroot_temp_dir(
+            Some("/local/from-env"),
+            Some("/local/from-spec"),
+            Some("/local/from-settings"),
+            cache
+        ),
+        PathBuf::from("/local/from-env")
+    );
+    // Blank values fall through to the next layer.
+    assert_eq!(
+        resolve_enroot_temp_dir(Some("  "), None, None, cache),
+        cache.join("enroot/tmp")
+    );
+}
+
+#[test]
+fn gpu_flag_enabled_accepts_truthy_values_and_defaults_off() {
+    // Default (unset) keeps the NVIDIA hook disabled during prepare.
+    assert!(!gpu_flag_enabled(None));
+    // Accepted truthy spellings, case- and whitespace-insensitive.
+    for value in ["1", "true", "TRUE", "yes", "On", "  true  "] {
+        assert!(gpu_flag_enabled(Some(value)), "{value:?} should enable GPU");
+    }
+    // Anything else stays off.
+    for value in ["0", "false", "no", "", "  ", "maybe"] {
+        assert!(!gpu_flag_enabled(Some(value)), "{value:?} should stay off");
+    }
+}
+
+#[test]
+fn is_stale_handle_error_detects_estale_signatures() {
+    assert!(is_stale_handle_error(&anyhow::Error::msg(
+        "failed to import base image: Read failed because Stale file handle"
+    )));
+    assert!(is_stale_handle_error(&anyhow::Error::msg(
+        "Creating squashfs filesystem... read failed because stale file handle"
+    )));
+    assert!(!is_stale_handle_error(&anyhow::Error::msg(
+        "failed to import base image: manifest unknown"
+    )));
+}
+
+#[test]
+fn is_missing_image_error_detects_registry_rejections() {
+    assert!(is_missing_image_error(&anyhow::Error::msg(
+        "failed to import base image: manifest unknown: manifest unknown"
+    )));
+    assert!(is_missing_image_error(&anyhow::Error::msg(
+        "Error reading manifest 2.3.1-cuda12.1-cudnn9-runtime: manifest not found"
+    )));
+    assert!(is_missing_image_error(&anyhow::Error::msg(
+        "unexpected http status 401 Unauthorized"
+    )));
+    // A stale-handle failure is a filesystem problem, not a missing image.
+    assert!(!is_missing_image_error(&anyhow::Error::msg(
+        "Read failed because Stale file handle"
+    )));
 }

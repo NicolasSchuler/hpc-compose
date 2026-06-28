@@ -2153,6 +2153,7 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
                 "after_job",
                 "dependency",
                 "cache_dir",
+                "enroot_temp_dir",
                 "runtime_root",
                 "cleanup",
                 "scratch",
@@ -2507,6 +2508,7 @@ fn settings_schema_definition_keys_match_exhaustive_catalog() {
                 "binaries",
                 "cache",
                 "login_host",
+                "login_user",
             ],
         ),
         (
@@ -2528,7 +2530,7 @@ fn settings_schema_definition_keys_match_exhaustive_catalog() {
                 "sprio",
             ],
         ),
-        ("cacheSettings", &["dir"]),
+        ("cacheSettings", &["dir", "enroot_temp_dir"]),
         (
             "resourceProfile",
             &[

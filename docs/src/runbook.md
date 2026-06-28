@@ -74,6 +74,7 @@ default_profile = "dev"
 compose_file = "compose.yaml"
 env_files = [".env"]
 login_host = "login01.hpc.example.edu"
+login_user = "<username>"
 
 [defaults.env]
 CACHE_DIR = "/cluster/shared/hpc-compose-cache"
@@ -116,7 +117,11 @@ Use `context` whenever you want to inspect effective compose path, binaries, int
 
 Resource profiles are referenced from YAML with `x-slurm.resources: gpu-small`. They are Slurm resource defaults, not the same thing as the global `--profile` setting selector, and explicit `x-slurm` values in the spec override profile defaults.
 
-`login_host` is the SSH login/jump host shown in `notebook` connection and tunnel hints, and in the machine-readable `hpc-compose notebook --format json` output. A profile's `login_host` overrides the shared default. Ordinary local and cluster commands treat it as descriptive metadata; explicit `hpc-compose up --remote` also uses it as the default SSH destination when you do not pass `--remote=<host>`. If the login node requires an OTP/2FA on every SSH session, use SSH connection multiplexing (`ControlMaster`/`ControlPersist`) so you authenticate once and reused tunnels skip the prompt — see [Run a Notebook or IDE Session](notebook.md).
+`login_host` is the SSH login host. It is the default SSH destination for `hpc-compose up --remote` when you do not pass `--remote=<host>`, and it also names the host shown in `notebook`, `reach`, and `pull` connection/tunnel hints and in the machine-readable `hpc-compose notebook --format json` output. A profile's `login_host` overrides the shared default.
+
+`login_user` is the SSH username applied to a bare login host, so the resolved destination becomes `user@host`. A profile's `login_user` overrides the shared default. The login user for `up --remote` is resolved with this precedence: an explicit `user@` already present in `--remote=<dest>` or `login_host` wins; then the `HPC_COMPOSE_REMOTE_USER` environment variable; then settings `login_user` (profile over defaults); then the `User` from your `~/.ssh/config`. Persist both values with `hpc-compose setup --profile-name <name> --login-host <host> --login-user <user>` (written into `[profiles.<name>]`) or edit `settings.toml` directly.
+
+If the login node requires an OTP/2FA on every SSH session, use SSH connection multiplexing (`ControlMaster`/`ControlPersist`) so you authenticate once and reused tunnels skip the prompt — see [Run a Notebook or IDE Session](notebook.md).
 
 An editor schema for `settings.toml` is available:
 
@@ -273,17 +278,56 @@ Inside the allocation shell, `run SERVICE -- CMD` reuses the active allocation w
 `hpc-compose up` runs on a Linux Slurm login node. macOS (and any host without Slurm) is authoring-only, so to submit from a laptop, delegate the run to a login node over SSH:
 
 ```bash
-# Uses the configured login_host:
+# Uses the configured login_host (with login_user, if set, as user@host):
 hpc-compose up --remote -f compose.yaml
-# Or target a specific host (or ~/.ssh/config alias):
+# Or target a specific host or ~/.ssh/config alias:
 hpc-compose up --remote=login01 -f compose.yaml
+# Or pass the SSH user inline:
+hpc-compose up --remote=alice@login01 -f compose.yaml
 ```
+
+The SSH destination comes from `--remote=<dest>` when given, otherwise from `login_host`. The login user follows the precedence documented in [Project-Local Settings](#project-local-settings): an inline `user@` wins, then `HPC_COMPOSE_REMOTE_USER`, then settings `login_user` (profile over defaults), then your `~/.ssh/config` `User`.
+
+### What `--remote` stages
 
 `--remote` rsyncs the compose project to a per-project staging directory on the login node (`~/.hpc-compose-remote/<project>`), including project settings such as `.hpc-compose/settings.toml` and `.hpc-compose/cluster.toml` while excluding tracked job/runtime state. It then runs `hpc-compose up` there over SSH, streaming the output back and propagating the remote exit code. Behavioral `up` flags such as `--detach`, `--dry-run`, `--no-preflight`, `--skip-prepare`, `--force-rebuild`, `--allow-resume-changes`, `--resume-diff-only`, `--format`, `--print-endpoints`, `--watch-mode line`, and `--hold-on-exit` are forwarded; without `--detach` the default remote run streams in line mode.
 
-Connection details belong in your `~/.ssh/config` (port, identity, user, jump host), so `--remote=<host>` stays a bare host or alias. For an ad-hoc host not in your config, set `HPC_COMPOSE_REMOTE_SSH_OPTS` (whitespace-split ssh flags, e.g. `-p 2222 -i ~/.ssh/cluster`). Every connection reuses one SSH ControlMaster, so a login node that requires an OTP/2FA prompts only once within `ControlPersist`.
+The staged root is the **settings base**: the directory that contains `.hpc-compose/settings.toml`. Place that file (or run `hpc-compose setup`) at the **repo root** so your whole source tree is staged. If your compose file lives in a subdirectory (for example `hpc/haicore/compose.yaml`) and there is no repo-root settings file, only that subdirectory is staged and the rest of your source tree is hidden from the job; `hpc-compose` prints a warning when it stages only a subdir.
+
+`--remote` stages your repo only. It does not allocate cluster workspaces (for example `ws_allocate`) or create site storage directories — provision those yourself first, or a missing host bind-mount path blocks preflight. See [Repo staging vs cluster workspace provisioning](files-and-directories.md#repo-staging-vs-cluster-workspace-provisioning).
+
+### Auto-installing `hpc-compose` on the login node
+
+Before the (potentially expensive) rsync, `up --remote` probes the login node for `hpc-compose` — on `PATH` or in `~/.local/bin` — and reads its version. If the remote binary is missing or older than your local version, `up --remote` downloads and installs the newest release into `~/.local/bin` with the official installer (`curl -fsSL https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/main/install.sh | sh`), reusing the same multiplexed SSH connection so an OTP login node prompts only once. No root is needed, and the release tarball is checksum-verified. The delegated command runs the resolved absolute binary path, so an install in `~/.local/bin` that is not on the non-interactive SSH `PATH` still works.
+
+Control this with `--remote-install <auto|never|force>` (default `auto`) or the `HPC_COMPOSE_REMOTE_INSTALL` environment variable:
+
+- `auto` (default): install only when the remote binary is missing or older than your local version.
+- `force`: always reinstall the newest release before delegating.
+- `never`: only probe. If the remote binary is missing or old, fail with an actionable error that prints the manual install command. Use this on locked-down or air-gapped login nodes.
+
+If the install fails (for example, the login node has no outbound network), `hpc-compose` prints the manual install one-liner and a clear error. Set `HPC_COMPOSE_REMOTE_INSTALL_URL` to point the installer at a mirror.
+
+### Connection details and first run
+
+Connection details belong in your `~/.ssh/config` (port, identity, jump host), so `--remote=<host>` stays a bare host or alias. For an ad-hoc host not in your config, set `HPC_COMPOSE_REMOTE_SSH_OPTS` (whitespace-split ssh flags, e.g. `-p 2222 -i ~/.ssh/cluster`). Every connection reuses one SSH ControlMaster, so a login node that requires an OTP/2FA prompts only once within `ControlPersist`.
+
+On the first remote run (or after cache eviction) the login-node `prepare` step imports your image with enroot — a multi-GB download plus extract and squashfs build — which can take several minutes; later runs reuse the cache. See [Prepare Images Separately When Needed](#7-prepare-images-separately-when-needed).
 
 This is a thin delegation: it re-stages the project on each run and does not maintain a persistent login session. It is not `up --local` (that launches on the current host); `--remote` and `--local` cannot be combined.
+
+### Inspect a remote run from your laptop
+
+The follow-up commands take the same `--remote` flag, so the metrics/logs workflow stays laptop-native — you don't have to SSH into the staged checkout or know its internal paths. After a successful `up --remote`, `hpc-compose` prints the exact commands to run (fill in the Slurm job id it reported):
+
+```bash
+hpc-compose stats --remote=alice@login01 -f compose.yaml --job-id <job-id>   # GPU util / memory / power
+hpc-compose logs  --remote=alice@login01 -f compose.yaml --job-id <job-id>
+hpc-compose score --remote=alice@login01 -f compose.yaml --job-id <job-id>
+hpc-compose pull  --remote=alice@login01 -f compose.yaml --job-id <job-id>
+```
+
+These reuse the same host/login-user/staging context as `up --remote`: they SSH into the existing remote stage (no re-sync) and stream the output back, reusing the same SSH ControlMaster so an OTP node still prompts only once. They require the project to have been staged by a prior `up --remote`. `pull --remote` prints the same rsync command from the login-node context; run that printed command from your laptop to copy the artifact bundle locally.
 
 ## 6. Run Preflight When Debugging Cluster Readiness
 

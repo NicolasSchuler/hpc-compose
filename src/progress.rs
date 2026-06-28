@@ -1,7 +1,9 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use hpc_compose::prepare::{ArtifactAction, PrepareSummary, RuntimePlan};
+use hpc_compose::prepare::{ArtifactAction, PrepareReporter, PrepareSummary, RuntimePlan};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::term;
@@ -228,53 +230,244 @@ fn format_elapsed(duration: Duration) -> String {
     }
 }
 
+/// Live per-service progress for the prepare step. Owns the whole prepare
+/// display (header line + one bar per service) and acts as the [`PrepareReporter`]
+/// the library streams sub-progress into. On a non-terminal/quiet target it
+/// falls back to plain `[run]`/`[done]` lines (plus coarse phase transitions),
+/// so CI logs and `--format json` stay clean.
 pub(crate) struct PrepareProgress {
+    mode: ProgressMode,
     #[allow(dead_code)]
     multi: Option<MultiProgress>,
-    bars: Vec<ProgressBar>,
+    header: Option<ProgressBar>,
+    bars: RefCell<HashMap<String, ServiceBar>>,
+}
+
+struct ServiceBar {
+    name: String,
+    bar: ProgressBar,
+    phase: String,
+    line: String,
+    bytes: u64,
+    phase_started: Instant,
+}
+
+impl ServiceBar {
+    fn render(&self) {
+        self.bar.set_message(service_bar_message(
+            &self.name,
+            &self.phase,
+            &self.line,
+            self.bytes,
+            self.phase_started.elapsed(),
+        ));
+    }
+}
+
+/// Builds a per-service progress bar message. Split out as a pure function so the
+/// phase/output/bytes/elapsed formatting can be unit-tested without a live
+/// indicatif bar. `elapsed` is the time spent in the current phase, surfaced live
+/// during streaming so a long-running import/extract does not look stuck.
+fn service_bar_message(name: &str, phase: &str, line: &str, bytes: u64, elapsed: Duration) -> String {
+    let mut message = if phase.is_empty() {
+        format!("{name} ...")
+    } else {
+        format!("{name}: {phase}")
+    };
+    if !line.is_empty() {
+        message.push_str(" — ");
+        message.push_str(line);
+    }
+    if bytes > 0 {
+        message.push_str(&format!(" ({} written)", humanize_bytes(bytes)));
+    }
+    if !phase.is_empty() {
+        message.push_str(&format!(" [{}]", format_elapsed(elapsed)));
+    }
+    message
 }
 
 impl PrepareProgress {
     pub(crate) fn new(plan: &RuntimePlan, enabled: bool) -> Self {
-        if !enabled || !io::stderr().is_terminal() || plan.ordered_services.len() <= 1 {
+        let mut mode = progress_mode(enabled, io::stderr().is_terminal());
+        // In verbose mode the library streams raw tool output straight through, so
+        // demote the spinner to plain phase lines to avoid fighting that output.
+        if mode == ProgressMode::Spinner && hpc_compose::prepare::prepare_verbose_enabled() {
+            mode = ProgressMode::Plain;
+        }
+        if mode != ProgressMode::Spinner {
             return Self {
+                mode,
                 multi: None,
-                bars: Vec::new(),
+                header: None,
+                bars: RefCell::new(HashMap::new()),
             };
         }
         let multi = MultiProgress::new();
-        let style = ProgressStyle::with_template("  {wide_msg}")
+        let header_style = ProgressStyle::with_template("{spinner} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner());
+        let header = multi.add(ProgressBar::new_spinner());
+        header.set_style(header_style);
+        let style = ProgressStyle::with_template("    {wide_msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar());
-        let bars: Vec<ProgressBar> = plan
-            .ordered_services
-            .iter()
-            .map(|svc| {
-                let pb = multi.add(ProgressBar::new_spinner());
-                pb.set_style(style.clone());
-                pb.set_message(format!("{} ...", svc.name));
-                pb.enable_steady_tick(Duration::from_millis(200));
-                pb
-            })
-            .collect();
+        let mut bars = HashMap::new();
+        for svc in &plan.ordered_services {
+            let bar = multi.add(ProgressBar::new_spinner());
+            bar.set_style(style.clone());
+            bar.set_message(format!("{} ...", svc.name));
+            bar.enable_steady_tick(Duration::from_millis(120));
+            bars.insert(
+                svc.name.clone(),
+                ServiceBar {
+                    name: svc.name.clone(),
+                    bar,
+                    phase: String::new(),
+                    line: String::new(),
+                    bytes: 0,
+                    phase_started: Instant::now(),
+                },
+            );
+        }
         Self {
+            mode,
             multi: Some(multi),
-            bars,
+            header: Some(header),
+            bars: RefCell::new(bars),
         }
     }
 
+    /// Runs the prepare operation, owning the surrounding `[run]`/`[done]`
+    /// timing line so it does not contend with the per-service bars.
+    pub(crate) fn run<T, E>(
+        &self,
+        message: impl AsRef<str>,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        let message = message.as_ref();
+        let started = Instant::now();
+        match self.mode {
+            ProgressMode::Hidden => {}
+            ProgressMode::Plain => write_plain_start(message),
+            ProgressMode::Spinner => {
+                if let Some(header) = &self.header {
+                    header.set_message(message.to_string());
+                    header.enable_steady_tick(Duration::from_millis(120));
+                }
+            }
+        }
+        let result = operation();
+        let elapsed = format_elapsed(started.elapsed());
+        if let Some(header) = &self.header {
+            header.finish_and_clear();
+        }
+        match self.mode {
+            ProgressMode::Hidden => {}
+            ProgressMode::Plain => write_plain_complete(result.is_ok(), message, &elapsed),
+            ProgressMode::Spinner => {
+                // Clear the live service bars before the raw completion write, so
+                // it is not appended onto a still-active bar (which corrupts
+                // indicatif's line accounting and erases the completion line).
+                for service_bar in self.bars.borrow().values() {
+                    service_bar.bar.finish_and_clear();
+                }
+                write_spinner_complete(result.is_ok(), message, &elapsed);
+            }
+        }
+        result
+    }
+
     pub(crate) fn finish_from_summary(&self, summary: &PrepareSummary) {
-        for (i, svc) in summary.services.iter().enumerate() {
-            if let Some(bar) = self.bars.get(i) {
+        let bars = self.bars.borrow();
+        for svc in &summary.services {
+            if let Some(service_bar) = bars.get(&svc.service_name) {
                 let action_label = match svc.runtime_image.action {
                     ArtifactAction::Present => "present",
                     ArtifactAction::Reused => "reused",
                     ArtifactAction::Built => "built",
                 };
-                bar.set_message(format!("{} {}", svc.service_name, action_label));
-                bar.finish_and_clear();
+                service_bar
+                    .bar
+                    .set_message(format!("{} {}", svc.service_name, action_label));
+                service_bar.bar.finish_and_clear();
             }
         }
-        drop(self.bars.clone());
+    }
+}
+
+impl Drop for PrepareProgress {
+    fn drop(&mut self) {
+        for service_bar in self.bars.borrow().values() {
+            service_bar.bar.finish_and_clear();
+        }
+        if let Some(header) = &self.header {
+            header.finish_and_clear();
+        }
+    }
+}
+
+impl PrepareReporter for PrepareProgress {
+    fn step_started(&self, service: &str, phase: &str) {
+        match self.mode {
+            ProgressMode::Spinner => {
+                if let Some(service_bar) = self.bars.borrow_mut().get_mut(service) {
+                    service_bar.phase = phase.to_string();
+                    service_bar.line.clear();
+                    service_bar.bytes = 0;
+                    service_bar.phase_started = Instant::now();
+                    service_bar.render();
+                }
+            }
+            ProgressMode::Plain => {
+                let mut stderr = io::stderr();
+                let _ = writeln!(stderr, "    {service}: {phase}");
+                let _ = stderr.flush();
+            }
+            ProgressMode::Hidden => {}
+        }
+    }
+
+    fn step_output(&self, service: &str, line: &str) {
+        if self.mode != ProgressMode::Spinner {
+            return;
+        }
+        if let Some(service_bar) = self.bars.borrow_mut().get_mut(service) {
+            service_bar.line = truncate_line(line);
+            service_bar.render();
+        }
+    }
+
+    fn step_bytes(&self, service: &str, bytes: u64) {
+        if self.mode != ProgressMode::Spinner {
+            return;
+        }
+        if let Some(service_bar) = self.bars.borrow_mut().get_mut(service) {
+            service_bar.bytes = bytes;
+            service_bar.render();
+        }
+    }
+}
+
+fn truncate_line(line: &str) -> String {
+    const MAX: usize = 100;
+    if line.chars().count() <= MAX {
+        return line.to_string();
+    }
+    let truncated: String = line.chars().take(MAX - 1).collect();
+    format!("{truncated}…")
+}
+
+fn humanize_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
@@ -326,5 +519,31 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_millis(345)), "345ms");
         assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.5s");
         assert_eq!(format_elapsed(Duration::from_secs(125)), "2m05s");
+    }
+
+    #[test]
+    fn service_bar_message_shows_phase_output_bytes_and_live_elapsed() {
+        // Idle bar before any phase: no elapsed, no trailing noise.
+        assert_eq!(
+            service_bar_message("trainer", "", "", 0, Duration::from_secs(3)),
+            "trainer ..."
+        );
+        // Active phase shows the phase and a live [elapsed] so a quiet import or
+        // extract does not look stuck.
+        assert_eq!(
+            service_bar_message("trainer", "importing pytorch", "", 0, Duration::from_secs(42)),
+            "trainer: importing pytorch [42.0s]"
+        );
+        // Streaming output line and bytes written are both surfaced, with elapsed last.
+        assert_eq!(
+            service_bar_message(
+                "trainer",
+                "importing pytorch",
+                "Parsing layer 3/12",
+                512 * 1024 * 1024,
+                Duration::from_secs(90),
+            ),
+            "trainer: importing pytorch — Parsing layer 3/12 (512.0 MiB written) [1m30s]"
+        );
     }
 }

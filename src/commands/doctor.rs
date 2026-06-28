@@ -147,6 +147,7 @@ pub(crate) fn doctor_mpi_smoke(
                 huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 keep_failed_prep: false,
                 force_rebuild: false,
+                enroot_temp_dir: context.enroot_temp_dir.clone(),
             },
         )?;
         let (script_path, cleanup) = match wrote_script.clone() {
@@ -368,6 +369,7 @@ pub(crate) fn doctor_fabric_smoke(
                 huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 keep_failed_prep: false,
                 force_rebuild: false,
+                enroot_temp_dir: context.enroot_temp_dir.clone(),
             },
         )?;
         let (script_path, cleanup) = match wrote_script.clone() {
@@ -2230,6 +2232,8 @@ x-slurm:
                 source: ValueSource::Builtin,
             },
             login_host: None,
+            login_user: None,
+            enroot_temp_dir: None,
             resource_profiles: BTreeMap::new(),
             binaries: binaries_with_srun(&srun),
             huggingface_cli_bin: "huggingface-cli".to_string(),

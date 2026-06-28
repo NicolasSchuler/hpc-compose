@@ -12,7 +12,8 @@ pub(super) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) use anyhow::{Context, Result, bail};
 pub(super) use hpc_compose::cli::{
-    DiffMatrixFormat, HoldOnExit, OutputFormat, StatsOutputFormat, SweepResultsFormat, WatchMode,
+    DiffMatrixFormat, HoldOnExit, OutputFormat, RemoteInstallMode, StatsOutputFormat,
+    SweepResultsFormat, WatchMode,
 };
 pub(super) use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 pub(super) use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};
@@ -42,7 +43,7 @@ pub(super) use hpc_compose::planner::{
 };
 pub(super) use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 pub(super) use hpc_compose::prepare::{
-    PrepareOptions, RuntimePlan, base_image_path_for_backend, prepare_runtime_plan,
+    PrepareOptions, RuntimePlan, base_image_path_for_backend, prepare_runtime_plan_with_reporter,
 };
 pub(super) use hpc_compose::render::{
     LocalRenderOptions, RenderOptions, log_file_name_for_service, render_local_script_with_options,
@@ -112,6 +113,49 @@ pub(crate) struct PrepareFlags {
     pub skip_prepare: bool,
     pub force_rebuild: bool,
     pub no_preflight: bool,
+}
+
+/// Per-run overrides for runtime metrics sampling, from `up --metrics-interval`
+/// / `up --no-metrics`. They override the compose's `x-slurm.metrics` for this
+/// invocation only (and, for `up --remote`, are forwarded to the login node).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MetricsOverrides {
+    /// Disable metrics sampling for this run (`--no-metrics`).
+    pub disable: bool,
+    /// Override the sampling interval and enable metrics (`--metrics-interval`).
+    pub interval_seconds: Option<u64>,
+}
+
+impl MetricsOverrides {
+    /// Validates the requested overrides (the CLI already rejects combining the
+    /// two flags; this guards the interval bound).
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.interval_seconds == Some(0) {
+            bail!("up --metrics-interval must be at least 1");
+        }
+        Ok(())
+    }
+
+    /// Applies the overrides to a runtime plan's metrics configuration.
+    pub(crate) fn apply(&self, plan: &mut RuntimePlan) {
+        if self.disable {
+            if let Some(metrics) = plan.slurm.metrics.as_mut() {
+                metrics.enabled = Some(false);
+            }
+            return;
+        }
+        if let Some(interval) = self.interval_seconds {
+            let metrics = plan
+                .slurm
+                .metrics
+                .get_or_insert_with(MetricsConfig::default);
+            metrics.enabled = Some(true);
+            metrics.interval_seconds = Some(interval);
+            if metrics.collectors.is_empty() {
+                metrics.collectors = vec![MetricsCollector::Gpu, MetricsCollector::Slurm];
+            }
+        }
+    }
 }
 
 static DEV_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -1201,8 +1245,8 @@ where
     if !skip_prepare {
         let prepare_progress =
             PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
-        let summary = progress.run_result("Preparing runtime artifacts", || {
-            prepare_runtime_plan(
+        let summary = prepare_progress.run("Preparing runtime artifacts", || {
+            prepare_runtime_plan_with_reporter(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
@@ -1211,7 +1255,9 @@ where
                     huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
+                    enroot_temp_dir: context.enroot_temp_dir.clone(),
                 },
+                &prepare_progress,
             )
         })?;
         prepare_progress.finish_from_summary(&summary);
@@ -1365,6 +1411,32 @@ pub(super) fn ensure_default_batch_log_dir(submit_dir: &Path, plan: &RuntimePlan
         .with_context(|| format!("failed to create {}", logs_dir.display()))
 }
 
+/// Turns a raw `sbatch` rejection into an actionable message. Slurm's account /
+/// partition / QOS errors ("Invalid account or account/partition combination",
+/// "Invalid qos specification", …) are cryptic and cluster-specific, so append
+/// the discovery commands that reveal what the user is actually allowed to use.
+/// hpc-compose deliberately does not administer Slurm associations, so this is a
+/// hint rather than a preflight gate.
+pub(crate) fn enrich_sbatch_failure(stderr: &str) -> String {
+    let stderr = stderr.trim();
+    let lower = stderr.to_ascii_lowercase();
+    let association_issue = lower.contains("invalid account")
+        || lower.contains("account/partition")
+        || lower.contains("invalid qos")
+        || lower.contains("invalid partition");
+    if association_issue {
+        format!(
+            "{stderr}\n  hint: the account, partition, or QOS in x-slurm is not a valid \
+             combination for you on this cluster. List what you are allowed to use:\n    \
+             sacctmgr -nP show assoc user=$USER format=Account,Partition,QOS\n    sshare -U\n    \
+             sinfo -s\n  then set x-slurm.account / x-slurm.partition / x-slurm.qos (or your \
+             site's settings) to a valid combination."
+        )
+    } else {
+        stderr.to_string()
+    }
+}
+
 fn submit_prepared_slurm_submission(
     context: &ResolvedContext,
     prepared: &PreparedSlurmSubmission,
@@ -1381,7 +1453,7 @@ fn submit_prepared_slurm_submission(
     if !output_result.status.success() {
         bail!(
             "sbatch failed: {}",
-            String::from_utf8_lossy(&output_result.stderr).trim()
+            enrich_sbatch_failure(&String::from_utf8_lossy(&output_result.stderr))
         );
     }
 
@@ -1629,8 +1701,8 @@ where
     if !skip_prepare {
         let prepare_progress =
             PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
-        let summary = progress.run_result("Preparing runtime artifacts", || {
-            prepare_runtime_plan(
+        let summary = prepare_progress.run("Preparing runtime artifacts", || {
+            prepare_runtime_plan_with_reporter(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
@@ -1639,7 +1711,9 @@ where
                     huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
+                    enroot_temp_dir: context.enroot_temp_dir.clone(),
                 },
+                &prepare_progress,
             )
         })?;
         prepare_progress.finish_from_summary(&summary);
@@ -1824,6 +1898,7 @@ pub(crate) fn launch(
     print_endpoints: bool,
     watch_mode: WatchMode,
     hold_on_exit: HoldOnExit,
+    metrics_overrides: MetricsOverrides,
     quiet: bool,
 ) -> Result<()> {
     let PrepareFlags {
@@ -1847,13 +1922,16 @@ pub(crate) fn launch(
             &context.interpolation_var_sources,
         ),
     )?;
-    let runtime_plan =
+    let mut runtime_plan =
         output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
+    // Apply per-run metrics overrides (`up --metrics-interval` / `--no-metrics`)
+    // before preflight/prepare/render so they take effect for this invocation.
+    metrics_overrides.apply(&mut runtime_plan);
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let output_format = output::resolve_output_format(format, false);
     let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
@@ -1935,8 +2013,8 @@ pub(crate) fn launch(
     if !skip_prepare {
         let prepare_progress =
             PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
-        let summary = progress.run_result("Preparing runtime artifacts", || {
-            prepare_runtime_plan(
+        let summary = prepare_progress.run("Preparing runtime artifacts", || {
+            prepare_runtime_plan_with_reporter(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
@@ -1945,7 +2023,9 @@ pub(crate) fn launch(
                     huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
+                    enroot_temp_dir: context.enroot_temp_dir.clone(),
                 },
+                &prepare_progress,
             )
         })?;
         prepare_progress.finish_from_summary(&summary);
@@ -2172,6 +2252,7 @@ pub(crate) fn up(
     hold_on_exit: HoldOnExit,
     format: Option<OutputFormat>,
     print_endpoints: bool,
+    metrics_overrides: MetricsOverrides,
     quiet: bool,
 ) -> Result<()> {
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
@@ -2190,6 +2271,7 @@ pub(crate) fn up(
         print_endpoints,
         watch_mode,
         hold_on_exit,
+        metrics_overrides,
         quiet,
     )
 }

@@ -83,6 +83,20 @@ pub enum HoldOnExit {
     Always,
 }
 
+/// Controls whether `up --remote` bootstraps/upgrades `hpc-compose` on the login
+/// node before delegating.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum RemoteInstallMode {
+    /// Install the newest release only when the login node's `hpc-compose` is
+    /// missing or older than the local version.
+    Auto,
+    /// Never install; fail with a clear error if the login node's binary is
+    /// missing or too old (use on locked-down/air-gapped login nodes).
+    Never,
+    /// Always (re)install the newest release before delegating.
+    Force,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum SchemaKind {
     Compose,

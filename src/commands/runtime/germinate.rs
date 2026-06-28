@@ -121,8 +121,8 @@ pub(crate) fn germinate(
     if !skip_prepare {
         let prepare_progress =
             PrepareProgress::new(&canary_plan, !quiet && output_format == OutputFormat::Text);
-        let summary = progress.run_result("Preparing canary runtime artifacts", || {
-            prepare_runtime_plan(
+        let summary = prepare_progress.run("Preparing canary runtime artifacts", || {
+            prepare_runtime_plan_with_reporter(
                 &canary_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
@@ -131,7 +131,9 @@ pub(crate) fn germinate(
                     huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
+                    enroot_temp_dir: context.enroot_temp_dir.clone(),
                 },
+                &prepare_progress,
             )
         })?;
         prepare_progress.finish_from_summary(&summary);

@@ -325,6 +325,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         }
         Commands::Up {
             launch,
+            prepare_verbose,
             script_out,
             sbatch_bin,
             srun_bin,
@@ -341,7 +342,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             hold_on_exit,
             format,
             print_endpoints,
+            metrics_interval,
+            no_metrics,
             remote,
+            remote_install,
         } => {
             if format.is_some() && !detach && !dry_run {
                 bail!("up --format requires --detach or --dry-run");
@@ -358,6 +362,22 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             if queue_warn_after.is_some() && !watch_queue {
                 bail!("up --queue-warn-after requires --watch-queue");
             }
+            // `--prepare-verbose` is sugar for HPC_COMPOSE_PREPARE_VERBOSE; honor a
+            // locally-set env too so either form works. Enable it for a local
+            // prepare here, and forward it over --remote below (the env does not
+            // cross SSH).
+            let prepare_verbose =
+                prepare_verbose || hpc_compose::prepare::prepare_verbose_enabled();
+            if prepare_verbose {
+                // SAFETY: CLI dispatch is single-threaded and runs before prepare
+                // spawns its output-streaming threads, so no concurrent env access.
+                unsafe { std::env::set_var(hpc_compose::prepare::PREPARE_VERBOSE_ENV, "1") };
+            }
+            let metrics_overrides = runtime::MetricsOverrides {
+                disable: no_metrics,
+                interval_seconds: metrics_interval,
+            };
+            metrics_overrides.validate()?;
             let queue_warn_after_seconds = if watch_queue {
                 parse_queue_warn_after_duration(queue_warn_after.as_deref().unwrap_or("10m"))?
             } else {
@@ -406,9 +426,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                         detach,
                         format,
                         print_endpoints,
+                        metrics_overrides,
                         watch_mode,
                         hold_on_exit,
                         quiet: options.quiet,
+                        install_mode: remote_install,
+                        prepare_verbose,
                     },
                 );
             }
@@ -432,6 +455,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 hold_on_exit,
                 format,
                 print_endpoints,
+                metrics_overrides,
                 options.quiet,
             )
         }
@@ -900,6 +924,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             file,
             job_id,
             sweep,
+            remote,
             format,
             accounting,
             sstat_bin,
@@ -915,7 +940,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sacct-bin", &sacct_bin),
                 ],
             )?;
-            if sweep.is_some() {
+            if let Some(remote) = remote {
+                runtime::remote_followup(&context, &remote)
+            } else if sweep.is_some() {
                 runtime::stats_sweep(context, sweep, format, accounting)
             } else {
                 runtime::stats(context, job_id, false, format, accounting)
@@ -930,6 +957,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             job_id,
             sweep,
             file,
+            remote,
             format,
             pue,
             gpu_tdp_w,
@@ -947,7 +975,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sacct-bin", &sacct_bin),
                 ],
             )?;
-            if sweep.is_some() {
+            if let Some(remote) = remote {
+                runtime::remote_followup(&context, &remote)
+            } else if sweep.is_some() {
                 runtime::score_sweep(context, sweep, format, pue, gpu_tdp_w, cpu_watts_per_core)
             } else {
                 runtime::score(
@@ -997,10 +1027,15 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             file,
             job_id,
             into,
+            remote,
             format,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            runtime::pull(context, job_id, into, format)
+            if let Some(remote) = remote {
+                runtime::remote_followup(&context, &remote)
+            } else {
+                runtime::pull(context, job_id, into, format)
+            }
         }
         Commands::Logs {
             file,
@@ -1010,9 +1045,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             grep,
             since,
             lines,
+            remote,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            runtime::logs(context, job_id, service, follow, lines, grep, since)
+            if let Some(remote) = remote {
+                runtime::remote_followup(&context, &remote)
+            } else {
+                runtime::logs(context, job_id, service, follow, lines, grep, since)
+            }
         }
         Commands::Ps {
             file,
@@ -1527,6 +1567,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             env,
             binaries,
             cache_dir,
+            login_host,
+            login_user,
             default_profile,
             non_interactive,
             format,
@@ -1539,6 +1581,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             env,
             binaries,
             cache_dir,
+            login_host,
+            login_user,
             default_profile,
             non_interactive,
             format,

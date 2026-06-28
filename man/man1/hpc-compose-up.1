@@ -38,6 +38,9 @@ Refresh imported and prepared artifacts before running.
 \fB--no\-preflight\fR
 Skip the preflight phase before running.
 .TP
+\fB--prepare\-verbose\fR
+Stream the raw image\-prepare tool output (enroot/apptainer) live instead of summarized phase lines. With \-\-remote this enables verbose prepare on the login node, where a local HPC_COMPOSE_PREPARE_VERBOSE would not reach.
+.TP
 \fB--script\-out\fR \fIOUTPUT\fR
 Write the rendered launcher script to this path before submission or local launch.
 .TP
@@ -63,7 +66,7 @@ Allow submission even when resume config drift is detected.
 Print the resume config diff and exit without preparing or submitting.
 .TP
 \fB--dry\-run\fR
-Run preflight, prepare, and render without calling sbatch.
+Run preflight, prepare, and render without calling sbatch (prepare still imports images; add \-\-skip\-prepare for a no\-side\-effect render, or use `plan`).
 .TP
 \fB--detach\fR
 Submit or launch and return without watching logs.
@@ -86,8 +89,17 @@ Output format for \-\-detach or \-\-dry\-run. Possible values: text, json.
 \fB--print\-endpoints\fR
 Include readiness\-derived service endpoints (host/port/url) and suggested next commands in the JSON output (with \-\-detach or \-\-dry\-run).
 .TP
+\fB--metrics\-interval\fR \fISECONDS\fR
+Enable runtime metrics sampling and override x\-slurm.metrics.interval_seconds for this run.
+.TP
+\fB--no\-metrics\fR
+Disable runtime metrics sampling for this run.
+.TP
 \fB--remote\fR \fIHOST\fR
-Delegate this submission to a login node over SSH: rsync the project there and run `hpc\-compose up` remotely, streaming output back. With no value, uses the configured login_host; the host's port, identity, and user come from your ~/.ssh/config (or set HPC_COMPOSE_REMOTE_SSH_OPTS for ad\-hoc ssh flags).
+Delegate this submission to a login node over SSH: rsync the project there and run `hpc\-compose up` remotely, streaming output back. With no value, uses the configured login_host. Accepts user@host; otherwise the user comes from HPC_COMPOSE_REMOTE_USER / login_user / your ~/.ssh/config. Port and identity come from ~/.ssh/config (or set HPC_COMPOSE_REMOTE_SSH_OPTS for ad\-hoc ssh flags).
+.TP
+\fB--remote\-install\fR \fIMODE\fR
+With \-\-remote, bootstrap/upgrade hpc\-compose on the login node before delegating: auto installs the newest release when it is missing or older than the local version, force always reinstalls, never only probes and errors (override with HPC_COMPOSE_REMOTE_INSTALL). Default: auto. Possible values: auto, never, force.
 .TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.

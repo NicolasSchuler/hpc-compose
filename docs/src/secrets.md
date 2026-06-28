@@ -25,7 +25,7 @@ Reference a secret anywhere interpolation works — most commonly in a service `
 ```yaml
 services:
   trainer:
-    image: pytorch/pytorch:2.3.1-cuda12.1-cudnn9-runtime
+    image: pytorch/pytorch:2.12.1-cuda13.2-cudnn9-runtime
     environment:
       HF_TOKEN: ${hf_token}
       DB_PASSWORD: ${db_password}

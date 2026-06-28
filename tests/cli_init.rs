@@ -1273,6 +1273,44 @@ fn new_and_setup_commands_support_json_output() {
 }
 
 #[test]
+fn setup_persists_login_host_and_login_user_to_settings() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let setup_output = run_cli(
+        tmpdir.path(),
+        &[
+            "setup",
+            "--profile-name",
+            "haicore",
+            "--compose-file",
+            "compose.yaml",
+            "--cache-dir",
+            "/shared/setup-cache",
+            "--login-host",
+            "haicore.scc.kit.edu",
+            "--login-user",
+            "vy3326",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&setup_output);
+
+    // The SSH login user/host persist to the profile so `up --remote` resolves
+    // them instead of falling back to the local laptop username.
+    let settings = fs::read_to_string(tmpdir.path().join(".hpc-compose/settings.toml"))
+        .expect("settings.toml written");
+    assert!(
+        settings.contains("login_user = \"vy3326\""),
+        "settings should persist login_user; got:\n{settings}"
+    );
+    assert!(
+        settings.contains("login_host = \"haicore.scc.kit.edu\""),
+        "settings should persist login_host; got:\n{settings}"
+    );
+}
+
+#[test]
 fn new_allows_omitted_cache_dir_when_writing_a_template() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let output_path = tmpdir.path().join("missing-cache.yaml");

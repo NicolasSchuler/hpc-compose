@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::commands::run_command;
 use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
-use hpc_compose::cli::{CacheCommands, Commands, HoldOnExit, RuntimeLaunchArgs, WatchMode};
+use hpc_compose::cli::{
+    CacheCommands, Commands, HoldOnExit, RemoteInstallMode, RuntimeLaunchArgs, WatchMode,
+};
 use hpc_compose::job::{
     ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
     CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, JobInventoryEntry,
@@ -741,6 +743,8 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
                     avg_utilization_gpu: Some(87.0),
                     memory_used_mib: Some(4096),
                     memory_total_mib: Some(8192),
+                    power_draw_w: Some(220.0),
+                    power_limit_w: Some(300.0),
                 }],
                 gpus: vec![GpuDeviceSample {
                     node: Some("node01".into()),
@@ -1369,6 +1373,7 @@ fn run_command_covers_success_and_error_arms() {
             force_rebuild: false,
             no_preflight: true,
         },
+        prepare_verbose: false,
         script_out: None,
         sbatch_bin: sbatch_fail.display().to_string(),
         srun_bin: srun.display().to_string(),
@@ -1385,7 +1390,10 @@ fn run_command_covers_success_and_error_arms() {
         hold_on_exit: HoldOnExit::Failure,
         format: None,
         print_endpoints: false,
+        metrics_interval: None,
+        no_metrics: false,
         remote: None,
+        remote_install: RemoteInstallMode::Auto,
     })
     .expect_err("sbatch fail");
     assert!(err.to_string().contains("sbatch failed"));
@@ -1402,6 +1410,7 @@ fn run_command_covers_success_and_error_arms() {
             force_rebuild: false,
             no_preflight: false,
         },
+        prepare_verbose: false,
         script_out: Some(tmpdir.path().join("submit.sbatch")),
         sbatch_bin: sbatch_ok.display().to_string(),
         srun_bin: srun.display().to_string(),
@@ -1418,7 +1427,10 @@ fn run_command_covers_success_and_error_arms() {
         hold_on_exit: HoldOnExit::Failure,
         format: None,
         print_endpoints: false,
+        metrics_interval: None,
+        no_metrics: false,
         remote: None,
+        remote_install: RemoteInstallMode::Auto,
     })
     .expect("submit");
     run_command(Commands::Up {
@@ -1433,6 +1445,7 @@ fn run_command_covers_success_and_error_arms() {
             force_rebuild: false,
             no_preflight: true,
         },
+        prepare_verbose: false,
         script_out: Some(tmpdir.path().join("submit-no-id.sbatch")),
         sbatch_bin: no_id_sbatch.display().to_string(),
         srun_bin: srun.display().to_string(),
@@ -1449,7 +1462,10 @@ fn run_command_covers_success_and_error_arms() {
         hold_on_exit: HoldOnExit::Failure,
         format: None,
         print_endpoints: false,
+        metrics_interval: None,
+        no_metrics: false,
         remote: None,
+        remote_install: RemoteInstallMode::Auto,
     })
     .expect("submit without id");
 

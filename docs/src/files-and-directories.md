@@ -139,12 +139,51 @@ The cache directory defaults to `$HOME/.cache/hpc-compose/` and is set with `x-s
 | `base/<hash>-<label>.sqsh.json.lock` | file | Advisory-lock sidecar that serializes concurrent manifest read-modify-write. |
 | `prepared/<hash>-<name>.sqsh` | file | A prepared runtime image derived from a base image plus prepare steps, named by `<short-hash>-<service-name>`. |
 | `prepared/<hash>-<name>.sqsh.json` | file | Manifest tracking the prepared entry. |
-| `enroot/cache/`, `enroot/data/`, `enroot/tmp/` | dir | The shared login-node enroot store used during host-side prepare. |
+| `enroot/cache/`, `enroot/data/`, `enroot/tmp/` | dir | The shared login-node enroot store used during host-side prepare. `enroot/tmp` is the default extraction scratch; redirect it to node-local storage with `x-slurm.enroot_temp_dir` (or `cache.enroot_temp_dir` / `HPC_COMPOSE_ENROOT_TEMP_DIR`) to avoid `Stale file handle` on shared filesystems. |
 | `runtime/<job-id>/{cache,data,tmp}/` | dir | The per-job compute-node enroot runtime cache; the renderer exports `ENROOT_CACHE_PATH`/`ENROOT_DATA_PATH`/`ENROOT_TEMP_PATH` at these paths (`enroot_runtime_job_dir`). Namespaced by job id so removing it never touches the shared cache root. |
 | `rendezvous/<name>/latest.json` | file | The current provider record for one rendezvous name (atomic latest pointer). |
 | `rendezvous/<name>/<token>.json` | file | Historical per-registration records, retained until TTL expiry or owner cleanup. |
 
 Manifest `.lock` sidecars carry no data and only serialize writers; the manifest JSON next to each artifact is the persisted record. See [Connect Jobs Across Allocations](cross-job-rendezvous.md) for how rendezvous records are produced and resolved.
+
+## Repo staging vs cluster workspace provisioning
+
+The three roots above are written by `hpc-compose` itself. They are **not** the same as the cluster workspaces and site storage directories your job reads and writes — those you provision yourself.
+
+When you submit from a laptop with `hpc-compose up --remote`, the project is first staged to a per-project directory on the login node:
+
+```text
+~/.hpc-compose-remote/<project>/      # rsync'd copy of your settings base on the login node
+```
+
+The staged root is the **settings base**: the directory that contains `.hpc-compose/settings.toml`. Keep that file at the repo root so your whole source tree is staged. If your compose file sits in a subdirectory with no repo-root settings file, only that subdirectory is staged and the rest of your tree is hidden from the job (`hpc-compose` warns when it stages only a subdir). The stage includes project settings (`.hpc-compose/settings.toml`, `.hpc-compose/cluster.toml`) but excludes tracked job/runtime state. See [Submit From Your Laptop With `up --remote`](runbook.md#5b-submit-from-your-laptop-with-up---remote).
+
+Staging copies your **repo**. It does **not** allocate cluster workspaces (for example `ws_allocate`) or create site storage directories. You must create cache, dataset, checkpoint, and other site storage paths yourself before the run — a missing host bind-mount or storage directory blocks preflight.
+
+Preflight remediation reflects this boundary. For a relative or in-repo missing path it tells you to create the directory; for an absolute missing path it notes that the path may be a cluster workspace or site storage location and should be provisioned with your site's allocation command (for example `ws_allocate`) or an `x-slurm.setup` step, because `hpc-compose` stages your repo but does not allocate workspaces or create site storage directories.
+
+### Bootstrapping required directories
+
+`x-slurm.setup` is the declarative bootstrap phase: its commands run on the allocated node before any service starts, so it is the right place to create the cache/data/results sub-directories your bind mounts expect. Allocate (or look up) the workspace first, then create the layout declaratively:
+
+```yaml
+x-slurm:
+  setup:
+    # $WORKSPACE is resolved on the node (e.g. exported by an earlier step or your shell rc);
+    # ws_allocate / ws_find belong in your session, not here, because they allocate quota.
+    - mkdir -p "$WORKSPACE"/{cache,data,results,runtime}
+```
+
+For **in-repo** directories (relative bind-mount sources such as `./results`), commit them with a `.gitkeep` so they exist and are staged, rather than relying on them being created at runtime. Use absolute cluster paths for large/scratch data that should *not* be staged, and relative in-repo paths for small inputs that travel with the project.
+
+### Excluding files from staging (`.hpcignore`)
+
+A repo-root `.hpcignore` adds extra excludes on top of `.gitignore` when the source tree is snapshotted (for `up`, `prepare`, and `up --remote`). It uses gitignore-style patterns, so **anchoring matters**:
+
+- An **unanchored** directory pattern like `data/` matches that name *at any depth* — including a Python package subtree such as `src/mypackage/data/`. Excluding package source there causes `ModuleNotFoundError` at runtime.
+- **Anchor artifact patterns to the repo root** with a leading slash — `/data/`, `/runs/`, `/results/` — so they only match the top-level artifact directories and never a nested package.
+
+`hpc-compose` warns when `.hpcignore` excludes any `.py` file (the usual symptom of this mistake). To see exactly what an `.hpcignore` removes from the snapshot, set `HPC_COMPOSE_DEBUG_STAGING=1`, which lists every excluded path during staging.
 
 ## Environment variables that affect paths
 
@@ -157,13 +196,16 @@ Manifest `.lock` sidecars carry no data and only serialize writers; the manifest
 | `SLURM_JOB_ID` | Read from environment (set by Slurm) | Selects the per-job runtime root (`JOB_ROOT/<job-id>`) and the per-job enroot runtime dir (`runtime/<job-id>`); expanded into `%j` in the default batch log. |
 | `ENROOT_CACHE_PATH` | Set by hpc-compose | Exported to `<cache_dir>/runtime/<job-id>/cache` in the rendered batch script. |
 | `ENROOT_DATA_PATH` | Set by hpc-compose | Exported to `<cache_dir>/runtime/<job-id>/data`. |
-| `ENROOT_TEMP_PATH` | Set by hpc-compose | Exported to `<cache_dir>/runtime/<job-id>/tmp`. |
+| `ENROOT_TEMP_PATH` | Set by hpc-compose | Exported to `<cache_dir>/runtime/<job-id>/tmp` at compute-node runtime; during prepare it defaults to `<cache_dir>/enroot/tmp` unless redirected (see `HPC_COMPOSE_ENROOT_TEMP_DIR`). |
+| `HPC_COMPOSE_ENROOT_TEMP_DIR` | Read from environment | Overrides the prepare-time enroot extraction scratch (default `<cache_dir>/enroot/tmp`). Mirrors `x-slurm.enroot_temp_dir`/`cache.enroot_temp_dir`; for `up --remote` prefer the spec or settings field, because a laptop env var does not propagate over SSH. |
+| `HPC_COMPOSE_PREPARE_GPU` | Read from environment | Opts prepare-time image building back into enroot's NVIDIA hook. Default is off: prepare runs CPU-only on the login node (`NVIDIA_VISIBLE_DEVICES=void`) so a CUDA image's baked GPU request does not make the hook fail where no driver is present; GPUs are injected at Slurm/Pyxis runtime instead. Set to `1`/`true`/`yes`/`on` only when the prepare host actually has a driver. |
 | `HPC_COMPOSE_BACKEND_OVERRIDE` | Read from environment | Selects the runtime backend used by the batch script (defaults to `slurm`). |
 | `HPC_COMPOSE_DEV_CONTROL_DIR` | Read from environment | When set, enables the dev control directory used for live restart requests during local smoke-tests. |
+| `HPC_COMPOSE_DEBUG_STAGING` | Read from environment | When truthy, lists every path excluded from the source snapshot by `.hpcignore` during staging (a staged-file manifest aid for debugging ignore rules). |
 | `HPC_COMPOSE_SERVICE_LOG` | Set by hpc-compose | Points each service and its hooks at the in-container path of that service's log file. |
 | `HPC_COMPOSE_RESUME_DIR` | Set by hpc-compose | The in-container path of the resume directory for resume-aware runs. |
 
-During login-node prepare the same enroot variables are pointed at the shared `<cache_dir>/enroot/{cache,data,tmp}` store rather than the per-job `runtime/<job-id>` store. The full set of `HPC_COMPOSE_*` runtime variables injected into services (distributed, rendezvous, MPI, scratch, and hook variables) is described in [Monitor a Run](runtime-observability.md) and the feature guides.
+During login-node prepare the same enroot variables are pointed at the shared `<cache_dir>/enroot/{cache,data,tmp}` store rather than the per-job `runtime/<job-id>` store. The persistent layer cache (`ENROOT_CACHE_PATH`) always stays under `cache_dir`, but the temporary extraction scratch (`ENROOT_TEMP_PATH`) — and, when that scratch is redirected, the transient prepare rootfs (`ENROOT_DATA_PATH`, where `enroot create` unsquashes the image before the prepared `.sqsh` is exported) — can be moved to fast node-local storage together. By default the scratch stays at `<cache_dir>/enroot/tmp`; opt in by setting `x-slurm.enroot_temp_dir` in the spec (interpolation-aware, e.g. `/tmp/${USER}-hpc-compose-enroot`), `cache.enroot_temp_dir` in `.hpc-compose/settings.toml` (project-wide default, mirroring `cache.dir`), or the `HPC_COMPOSE_ENROOT_TEMP_DIR` environment variable. Precedence is `HPC_COMPOSE_ENROOT_TEMP_DIR` > `x-slurm.enroot_temp_dir` > `cache.enroot_temp_dir` > the `<cache_dir>/enroot/tmp` default. When the scratch is left at its default the prepare rootfs stays on the shared cache (`<cache_dir>/enroot/data`); redirecting the scratch moves both the extraction scratch and the transient rootfs to an hpc-compose-owned per-process subdir under the node-local path. This matters on shared NFS/Lustre/GPFS home/work storage, where the extract-then-`mksquashfs` import and the `unsquashfs` create step are slow and can fail with `Stale file handle` (ESTALE); pointing the scratch at node-local `/tmp` keeps the final `.sqsh` and layer cache on the shared cache while extraction and rootfs creation happen locally. The override applies to prepare-time import only, not the compute-node runtime. `hpc-compose preflight` surfaces the resolved enroot temp path, and `hpc-compose context` shows the settings-level value. The full set of `HPC_COMPOSE_*` runtime variables injected into services (distributed, rendezvous, MPI, scratch, and hook variables) is described in [Monitor a Run](runtime-observability.md) and the feature guides.
 
 ## Cleanup scope
 

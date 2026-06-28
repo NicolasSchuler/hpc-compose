@@ -20,6 +20,9 @@ Tracked Slurm job id to inspect instead of the latest recorded submission.
 \fB--sweep\fR \fIID\fR
 Aggregate per\-trial stats over all trials of this sweep id instead of a single job.
 .TP
+\fB--remote\fR \fIHOST\fR
+Run this command on the login node's staged checkout from a prior `up \-\-remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config).
+.TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json, csv, jsonl.
 .TP

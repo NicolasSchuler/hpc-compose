@@ -32,6 +32,9 @@ Only print initial log tails for files updated within this coarse duration, e.g.
 \fB--lines\fR \fILINES\fR
 Number of trailing log lines to show before follow mode begins. Default: 100.
 .TP
+\fB--remote\fR \fIHOST\fR
+Run this command on the login node's staged checkout from a prior `up \-\-remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config).
+.TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.
 .TP

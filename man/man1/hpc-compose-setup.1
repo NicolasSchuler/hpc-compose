@@ -29,6 +29,12 @@ Binary override such as srun=/opt/slurm/bin/srun.
 \fB--cache\-dir\fR \fIPATH\fR
 Cache directory default written under the selected profile.
 .TP
+\fB--login\-host\fR \fIHOST\fR
+SSH login host used as the `up \-\-remote` destination (bare host, ~/.ssh/config alias, or user@host).
+.TP
+\fB--login\-user\fR \fIUSER\fR
+SSH username applied to a bare login host for `up \-\-remote` (destination becomes user@host).
+.TP
 \fB--default\-profile\fR \fIPROFILE\fR
 Set settings.default_profile to this profile name.
 .TP

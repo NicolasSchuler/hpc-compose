@@ -572,6 +572,15 @@ pub struct SlurmConfig {
     pub dependency: Option<JobDependencyMode>,
     #[serde(default)]
     pub cache_dir: Option<String>,
+    /// Optional override for enroot's prepare-time temporary extraction scratch
+    /// directory (`ENROOT_TEMP_PATH`), separate from the persistent
+    /// [`Self::cache_dir`]. Point it at fast node-local storage (e.g.
+    /// `/tmp/${USER}-hpc-compose-enroot`) when the shared cache filesystem causes
+    /// `Stale file handle` errors during image import; the final image and layer
+    /// cache still live under `cache_dir`. Interpolated; defaults to
+    /// `<cache_dir>/enroot/tmp` when unset.
+    #[serde(default)]
+    pub enroot_temp_dir: Option<String>,
     /// Optional override for the directory that holds per-job runtime state
     /// (`<runtime_root>/<job_id>/{logs,metrics,state.json,artifacts}`). Defaults
     /// to `<submit_dir>/.hpc-compose`. Relative values resolve against the submit
@@ -2931,6 +2940,7 @@ impl SlurmConfig {
             after_job.interpolate(vars)?;
         }
         interpolate_optional_string(&mut self.cache_dir, vars)?;
+        interpolate_optional_string(&mut self.enroot_temp_dir, vars)?;
         interpolate_optional_string(&mut self.runtime_root, vars)?;
         if let Some(scratch) = &mut self.scratch {
             scratch.interpolate(vars)?;

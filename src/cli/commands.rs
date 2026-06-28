@@ -6,7 +6,7 @@ use clap_complete::Shell;
 use super::help::*;
 use super::{
     ColorPolicy, DependencyOutputFormat, DiffMatrixFormat, ExamplesOutputFormat, HoldOnExit,
-    OutputFormat, SchemaKind, StatsOutputFormat, SweepResultsFormat, WatchMode,
+    OutputFormat, RemoteInstallMode, SchemaKind, StatsOutputFormat, SweepResultsFormat, WatchMode,
 };
 
 #[derive(Debug, Parser)]
@@ -695,6 +695,11 @@ pub enum Commands {
         launch: RuntimeLaunchArgs,
         #[arg(
             long,
+            help = "Stream the raw image-prepare tool output (enroot/apptainer) live instead of summarized phase lines. With --remote this enables verbose prepare on the login node, where a local HPC_COMPOSE_PREPARE_VERBOSE would not reach"
+        )]
+        prepare_verbose: bool,
+        #[arg(
+            long,
             value_name = "OUTPUT",
             help = "Write the rendered launcher script to this path before submission or local launch"
         )]
@@ -749,7 +754,7 @@ pub enum Commands {
         resume_diff_only: bool,
         #[arg(
             long,
-            help = "Run preflight, prepare, and render without calling sbatch"
+            help = "Run preflight, prepare, and render without calling sbatch (prepare still imports images; add --skip-prepare for a no-side-effect render, or use `plan`)"
         )]
         dry_run: bool,
         #[arg(long, help = "Submit or launch and return without watching logs")]
@@ -795,13 +800,30 @@ pub enum Commands {
         print_endpoints: bool,
         #[arg(
             long,
+            value_name = "SECONDS",
+            conflicts_with = "no_metrics",
+            help = "Enable runtime metrics sampling and override x-slurm.metrics.interval_seconds for this run"
+        )]
+        metrics_interval: Option<u64>,
+        #[arg(long, help = "Disable runtime metrics sampling for this run")]
+        no_metrics: bool,
+        #[arg(
+            long,
             value_name = "HOST",
             num_args = 0..=1,
             require_equals = true,
             default_missing_value = "",
-            help = "Delegate this submission to a login node over SSH: rsync the project there and run `hpc-compose up` remotely, streaming output back. With no value, uses the configured login_host; the host's port, identity, and user come from your ~/.ssh/config (or set HPC_COMPOSE_REMOTE_SSH_OPTS for ad-hoc ssh flags)"
+            help = "Delegate this submission to a login node over SSH: rsync the project there and run `hpc-compose up` remotely, streaming output back. With no value, uses the configured login_host. Accepts user@host; otherwise the user comes from HPC_COMPOSE_REMOTE_USER / login_user / your ~/.ssh/config. Port and identity come from ~/.ssh/config (or set HPC_COMPOSE_REMOTE_SSH_OPTS for ad-hoc ssh flags)"
         )]
         remote: Option<String>,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "MODE",
+            default_value = "auto",
+            help = "With --remote, bootstrap/upgrade hpc-compose on the login node before delegating: auto installs the newest release when it is missing or older than the local version, force always reinstalls, never only probes and errors (override with HPC_COMPOSE_REMOTE_INSTALL)"
+        )]
+        remote_install: RemoteInstallMode,
     },
     #[command(
         display_order = 112,
@@ -1322,6 +1344,15 @@ pub enum Commands {
             help = "Aggregate per-trial stats over all trials of this sweep id instead of a single job"
         )]
         sweep: Option<String>,
+        #[arg(
+            long,
+            value_name = "HOST",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "",
+            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
+        )]
+        remote: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<StatsOutputFormat>,
         #[arg(
@@ -1400,6 +1431,15 @@ pub enum Commands {
             help = FILE_ARG_HELP
         )]
         file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "HOST",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "",
+            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
+        )]
+        remote: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
@@ -1559,6 +1599,15 @@ pub enum Commands {
             help = "Local destination directory shown in the rsync command (default: .)"
         )]
         into: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "HOST",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "",
+            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
+        )]
+        remote: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -1609,6 +1658,15 @@ pub enum Commands {
             help = "Number of trailing log lines to show before follow mode begins"
         )]
         lines: usize,
+        #[arg(
+            long,
+            value_name = "HOST",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "",
+            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
+        )]
+        remote: Option<String>,
     },
     #[command(
         display_order = 240,
@@ -2500,6 +2558,18 @@ pub enum Commands {
             help = "Cache directory default written under the selected profile"
         )]
         cache_dir: Option<String>,
+        #[arg(
+            long,
+            value_name = "HOST",
+            help = "SSH login host used as the `up --remote` destination (bare host, ~/.ssh/config alias, or user@host)"
+        )]
+        login_host: Option<String>,
+        #[arg(
+            long,
+            value_name = "USER",
+            help = "SSH username applied to a bare login host for `up --remote` (destination becomes user@host)"
+        )]
+        login_user: Option<String>,
         #[arg(
             long,
             value_name = "PROFILE",

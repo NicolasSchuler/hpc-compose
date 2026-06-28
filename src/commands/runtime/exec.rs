@@ -71,8 +71,8 @@ pub(crate) fn alloc(
 
     if !skip_prepare {
         let prepare_progress = PrepareProgress::new(&runtime_plan, !quiet);
-        let summary = progress.run_result("Preparing runtime artifacts", || {
-            prepare_runtime_plan(
+        let summary = prepare_progress.run("Preparing runtime artifacts", || {
+            prepare_runtime_plan_with_reporter(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
@@ -81,7 +81,9 @@ pub(crate) fn alloc(
                     huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
+                    enroot_temp_dir: context.enroot_temp_dir.clone(),
                 },
+                &prepare_progress,
             )
         })?;
         prepare_progress.finish_from_summary(&summary);
@@ -200,8 +202,8 @@ pub(crate) fn run_service(
 
     if !skip_prepare {
         let prepare_progress = PrepareProgress::new(&runtime_plan, !quiet);
-        let summary = progress.run_result("Preparing runtime artifacts", || {
-            prepare_runtime_plan(
+        let summary = prepare_progress.run("Preparing runtime artifacts", || {
+            prepare_runtime_plan_with_reporter(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
@@ -210,7 +212,9 @@ pub(crate) fn run_service(
                     huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
+                    enroot_temp_dir: context.enroot_temp_dir.clone(),
                 },
+                &prepare_progress,
             )
         })?;
         prepare_progress.finish_from_summary(&summary);
@@ -300,7 +304,7 @@ pub(crate) fn run_service(
     if !output_result.status.success() {
         bail!(
             "sbatch failed: {}",
-            String::from_utf8_lossy(&output_result.stderr).trim()
+            enrich_sbatch_failure(&String::from_utf8_lossy(&output_result.stderr))
         );
     }
 
@@ -467,8 +471,8 @@ pub(crate) fn run_ephemeral(
 
     if !skip_prepare {
         let prepare_progress = PrepareProgress::new(&runtime_plan, !quiet);
-        let summary = progress.run_result("Preparing runtime artifacts", || {
-            prepare_runtime_plan(
+        let summary = prepare_progress.run("Preparing runtime artifacts", || {
+            prepare_runtime_plan_with_reporter(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
@@ -477,7 +481,9 @@ pub(crate) fn run_ephemeral(
                     huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
+                    enroot_temp_dir: context.enroot_temp_dir.clone(),
                 },
+                &prepare_progress,
             )
         })?;
         prepare_progress.finish_from_summary(&summary);
@@ -599,7 +605,7 @@ pub(crate) fn run_ephemeral(
     if !output_result.status.success() {
         bail!(
             "sbatch failed: {}",
-            String::from_utf8_lossy(&output_result.stderr).trim()
+            enrich_sbatch_failure(&String::from_utf8_lossy(&output_result.stderr))
         );
     }
 
@@ -871,8 +877,8 @@ pub(crate) fn notebook(
 
     if !dry_run && !skip_prepare {
         let prepare_progress = PrepareProgress::new(&runtime_plan, !quiet);
-        let summary = progress.run_result("Preparing runtime artifacts", || {
-            prepare_runtime_plan(
+        let summary = prepare_progress.run("Preparing runtime artifacts", || {
+            prepare_runtime_plan_with_reporter(
                 &runtime_plan,
                 &PrepareOptions {
                     enroot_bin: context.binaries.enroot.value.clone(),
@@ -881,7 +887,9 @@ pub(crate) fn notebook(
                     huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                     keep_failed_prep,
                     force_rebuild,
+                    enroot_temp_dir: context.enroot_temp_dir.clone(),
                 },
+                &prepare_progress,
             )
         })?;
         prepare_progress.finish_from_summary(&summary);
@@ -1015,7 +1023,7 @@ pub(crate) fn notebook(
         if !output_result.status.success() {
             bail!(
                 "sbatch failed: {}",
-                String::from_utf8_lossy(&output_result.stderr).trim()
+                enrich_sbatch_failure(&String::from_utf8_lossy(&output_result.stderr))
             );
         }
         let stdout = String::from_utf8_lossy(&output_result.stdout);

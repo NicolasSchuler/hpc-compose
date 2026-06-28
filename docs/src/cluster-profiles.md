@@ -47,6 +47,8 @@ Support teams can edit optional sections such as:
 
 Policy sections warn and suggest snippets. They do not silently add modules, bind mounts, environment variables, or SBATCH directives to user specs.
 
+`hpc-compose` stages your repo but does not allocate cluster workspaces or create site storage directories (see [Repo staging vs cluster workspace provisioning](files-and-directories.md#repo-staging-vs-cluster-workspace-provisioning)); a future site pack could carry the site's workspace/provisioning command so onboarding docs can point at it.
+
 ## MPI Smoke Probe
 
 For MPI services, render a small rank-count probe against the service's real runtime path:

@@ -129,6 +129,7 @@ fn enumerate_source(root: &Path) -> Result<Vec<SourceEntry>> {
     };
     let ignore = HpcIgnore::load(root);
     let mut entries = Vec::with_capacity(rels.len());
+    let mut excluded_by_hpcignore: Vec<String> = Vec::new();
     for rel in rels {
         // Defense in depth: never let an odd path (`..`, absolute) escape the
         // destination directory when the snapshot is copied.
@@ -137,6 +138,7 @@ fn enumerate_source(root: &Path) -> Result<Vec<SourceEntry>> {
         }
         // Honor a repo-root .hpcignore (extra excludes on top of .gitignore).
         if ignore.is_ignored(&rel) {
+            excluded_by_hpcignore.push(rel);
             continue;
         }
         let abs = root.join(&rel);
@@ -166,9 +168,65 @@ fn enumerate_source(root: &Path) -> Result<Vec<SourceEntry>> {
         // Directories are implied by their files; special files (sockets, fifos,
         // devices) are not source and are skipped.
     }
+    warn_hpcignore_exclusions(&excluded_by_hpcignore);
     entries.sort_by(|a, b| a.rel.cmp(&b.rel));
     entries.dedup_by(|a, b| a.rel == b.rel);
     Ok(entries)
+}
+
+/// The `.py` files among a set of `.hpcignore`-excluded paths. Excluding Python
+/// source is almost always an accident, since `.hpcignore` is meant for build
+/// artifacts and data, not code — the classic case is a broad `data/` pattern
+/// matching a package subtree such as `src/pkg/data/`.
+fn excluded_python_sources(excluded: &[String]) -> Vec<&str> {
+    excluded
+        .iter()
+        .filter(|path| path.ends_with(".py"))
+        .map(String::as_str)
+        .collect()
+}
+
+/// Whether staging should dump the full list of `.hpcignore`-excluded paths (a
+/// "staged file manifest" debug aid).
+fn staging_debug_enabled() -> bool {
+    std::env::var("HPC_COMPOSE_DEBUG_STAGING")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+/// Warns when `.hpcignore` excluded Python source files (likely a package subtree
+/// caught by a broad artifact pattern), and — when `HPC_COMPOSE_DEBUG_STAGING` is
+/// set — lists every excluded path so the effect of the ignore rules is visible.
+fn warn_hpcignore_exclusions(excluded: &[String]) {
+    let python = excluded_python_sources(excluded);
+    if !python.is_empty() {
+        let sample = python
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = python.len().saturating_sub(3);
+        let suffix = if more > 0 {
+            format!(", … (+{more} more)")
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "  warning: .hpcignore excluded {} Python source file(s) from staging ({sample}{suffix}). \
+             A broad pattern like `data/` matches nested package subtrees such as `src/pkg/data/`; \
+             anchor artifact patterns to the repo root (use `/data/` instead of `data/`). Set \
+             HPC_COMPOSE_DEBUG_STAGING=1 to list every excluded path.",
+            python.len()
+        );
+    }
+    if staging_debug_enabled() && !excluded.is_empty() {
+        eprintln!("  .hpcignore excluded {} path(s) from staging:", excluded.len());
+        for path in excluded {
+            eprintln!("    - {path}");
+        }
+    }
 }
 
 /// Lists working-tree files via git, or `None` when `root` is not a git repo or
@@ -644,6 +702,25 @@ mod tests {
         HpcIgnore {
             rules: lines.lines().filter_map(IgnoreRule::parse).collect(),
         }
+    }
+
+    #[test]
+    fn excluded_python_sources_flags_package_subtrees() {
+        let excluded = vec![
+            "data/raw/train.bin".to_string(),
+            "src/pkg/data/__init__.py".to_string(),
+            "src/pkg/data/loader.py".to_string(),
+            "runs/metrics.csv".to_string(),
+        ];
+        let python = excluded_python_sources(&excluded);
+        assert_eq!(
+            python,
+            vec!["src/pkg/data/__init__.py", "src/pkg/data/loader.py"]
+        );
+
+        // An artifact-only exclusion set produces no warning.
+        let artifacts = vec!["data/x.bin".to_string(), "runs/y.csv".to_string()];
+        assert!(excluded_python_sources(&artifacts).is_empty());
     }
 
     #[test]

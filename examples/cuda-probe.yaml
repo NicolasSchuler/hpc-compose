@@ -1,0 +1,44 @@
+name: cuda-probe
+
+# Fast compute-node CUDA / GPU probe.
+#
+# No repo install, no uv, no model files: a tiny NVIDIA CUDA base image is
+# imported and run as a one-shot Slurm job. (nvidia-smi is provided by the host
+# driver and injected into the container at runtime by the enroot/pyxis NVIDIA
+# hook — the CUDA base image itself does not bundle it.) It isolates
+# "can the cluster give me a GPU?" from any framework/Python environment, so if
+# this passes but a later PyTorch/JAX/TensorFlow job fails, the problem is in the
+# framework image, not in Slurm/Pyxis/GPU allocation/driver visibility.
+#
+# Notes:
+# - The base image's CUDA version is independent of the driver's reported CUDA;
+#   nvidia-smi reports the *driver's* max CUDA, not the image toolkit version.
+# - GPUs are only injected at Slurm/Pyxis runtime. Prepare-time image import runs
+#   CPU-only on the login node (hpc-compose disables the enroot NVIDIA hook during
+#   prepare), so importing this CUDA image does not need a driver.
+
+runtime:
+  backend: pyxis
+
+x-slurm:
+  job_name: cuda-probe
+  time: "00:10:00"
+  cpus_per_task: 2
+  mem: 8G
+  # Request one GPU. Some sites (e.g. HAICORE) prefer an explicit gres such as
+  # `gres: gpu:full:1`; set partition/account via settings, --profile, or flags.
+  gpus: 1
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  probe:
+    image: nvidia/cuda:12.4.1-base-ubuntu22.04
+    script: |
+      set -eu
+      echo "hostname=$(hostname)"
+      echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
+      echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
+      echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
+      nvidia-smi
+      nvidia-smi -L
+      ls -l /dev/nvidia* 2>/dev/null || true

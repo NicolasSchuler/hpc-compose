@@ -97,7 +97,11 @@
         },
         "login_host": {
           "type": "string",
-          "description": "SSH login/jump host shown in connection hints (descriptive only; never used to open a connection)."
+          "description": "SSH login host used as the `up --remote` delegation destination and shown in connection hints. May be a bare host, a ~/.ssh/config alias, or user@host."
+        },
+        "login_user": {
+          "type": "string",
+          "description": "SSH username applied to a bare login host for `up --remote` (destination becomes user@host). Overridden by an explicit user@ and by HPC_COMPOSE_REMOTE_USER."
         }
       }
     },
@@ -159,6 +163,10 @@
         "dir": {
           "type": "string",
           "description": "Shared cache directory visible from both the Slurm submission host and compute nodes."
+        },
+        "enroot_temp_dir": {
+          "type": "string",
+          "description": "Directory enroot uses for its temporary extraction scratch (ENROOT_TEMP_PATH) during prepare-time image import. Defaults to <cache_dir>/enroot/tmp; point it at fast node-local storage (e.g. /tmp/$USER-hpc-compose-enroot) when the shared cache filesystem causes `Stale file handle` errors. Overridden by the compose x-slurm.enroot_temp_dir and HPC_COMPOSE_ENROOT_TEMP_DIR."
         }
       }
     },

@@ -462,6 +462,10 @@ fn render_uses_prepared_paths_and_readiness() {
     assert!(script.contains("/scratch:/scratch"));
     assert!(script.contains("/usr/lib64/slurm/libslurmfull.so"));
     assert!(script.contains("/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog"));
+    // Lifecycle markers make the container-launch gap and the command exit visible
+    // inline in the service log (so a run no longer "appears paused" before output).
+    assert!(script.contains("container starting via srun"));
+    assert!(script.contains("command exited rc=%s"));
 }
 
 #[test]

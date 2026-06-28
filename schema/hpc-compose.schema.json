@@ -374,6 +374,10 @@
           "enum": ["singleton"]
         },
         "cache_dir": { "type": "string" },
+        "enroot_temp_dir": {
+          "type": "string",
+          "description": "Override for enroot's prepare-time temporary extraction scratch (ENROOT_TEMP_PATH), separate from cache_dir. Point at fast node-local storage (e.g. /tmp/${USER}-hpc-compose-enroot) when the shared cache filesystem causes `Stale file handle` errors during image import; the final image and layer cache stay under cache_dir. Defaults to <cache_dir>/enroot/tmp."
+        },
         "runtime_root": { "type": "string" },
         "cleanup": { "$ref": "#/definitions/cleanup" },
         "scratch": { "$ref": "#/definitions/scratch" },

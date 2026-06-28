@@ -329,6 +329,10 @@ pub(crate) struct SetupOutput {
     pub(crate) env: BTreeMap<String, String>,
     pub(crate) binaries: hpc_compose::context::BinaryOverrides,
     pub(crate) cache_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) login_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) login_user: Option<String>,
 }
 
 #[cfg(test)]

@@ -165,6 +165,8 @@ Unless `x-slurm.output` is set, real submissions also write the top-level batch 
 
 Service names containing non-alphanumeric characters are encoded in log filenames. Prefer `[a-zA-Z0-9_-]` in service names for readability.
 
+Each service log is bracketed by timestamped lifecycle markers so a run does not look stuck before it produces output. A `[hpc-compose] <ts> service <name>: container starting via srun …` line is written just before the container launch (which is where srun scheduling and the first-use image extract happen), and a `[hpc-compose] <ts> service <name>: command exited rc=<code>` line is written when the command finishes. The gap between the start marker and the command's own first line is the container-launch time, not a hang.
+
 Use `--grep <pattern>` to print only matching raw log lines across selected service logs. Use `--since <duration>` for coarse time-bounded initial output, for example `30s`, `15m`, `2h`, `1d`, or `1h30m`. Because service logs do not include line timestamps, `--since` filters by each log file's modification time rather than by individual line time. Follow mode still starts from the current end of each selected log and applies `--grep` to appended lines.
 
 ## Event Hooks
