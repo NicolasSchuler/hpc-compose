@@ -186,25 +186,32 @@ fn build_experiment_show_output(
         provenance,
         results,
         efficiency,
-        next_commands: experiment_next_commands(job_id),
+        next_commands: experiment_next_commands(job_id, output::artifact_export_configured(plan)),
     }
 }
 
 /// Suggested follow-up reads. References only shipped commands and carries the
 /// ControlMaster/ControlPath/ControlPersist multiplexing note so a 2FA/OTP user
 /// authenticates once. Never opens a connection.
-fn experiment_next_commands(job_id: &str) -> Vec<String> {
-    vec![
+fn experiment_next_commands(job_id: &str, export_dir_configured: bool) -> Vec<String> {
+    let mut commands = vec![
         format!("hpc-compose status --job-id {job_id}"),
         format!("hpc-compose score --job-id {job_id}"),
-        format!("hpc-compose pull --job-id {job_id} --into ./results"),
-        "hpc-compose down".to_string(),
-        format!(
-            "ssh {opts} <login-node>  # {note}",
-            opts = control_master_opts_str(),
-            note = OTP_MULTIPLEX_NOTE,
-        ),
-    ]
+    ];
+    // `artifacts` exports the collected payload into the configured export_dir
+    // (the cluster results dir downstream jobs read); `pull` only prints a laptop
+    // rsync. Suggest the export step only when an export_dir is configured.
+    if export_dir_configured {
+        commands.push(format!("hpc-compose artifacts --job-id {job_id}"));
+    }
+    commands.push(format!("hpc-compose pull --job-id {job_id} --into ./results"));
+    commands.push("hpc-compose down".to_string());
+    commands.push(format!(
+        "ssh {opts} <login-node>  # {note}",
+        opts = control_master_opts_str(),
+        note = OTP_MULTIPLEX_NOTE,
+    ));
+    commands
 }
 
 fn print_experiment_show_output(output: &ExperimentShowOutput) {
@@ -464,18 +471,32 @@ services:
 
     #[test]
     fn next_commands_reference_only_shipped_commands_with_multiplex_hint() {
-        let commands = experiment_next_commands("12345");
+        let commands = experiment_next_commands("12345", true);
         // Every entry names a shipped command path (or is the ssh multiplex hint).
         for command in &commands {
             assert!(
                 command.starts_with("hpc-compose status")
                     || command.starts_with("hpc-compose score")
+                    || command.starts_with("hpc-compose artifacts")
                     || command.starts_with("hpc-compose pull")
                     || command.starts_with("hpc-compose down")
                     || command.starts_with("ssh "),
                 "unexpected next_command: {command}"
             );
         }
+        // The export step is surfaced only when an export_dir is configured.
+        assert!(
+            commands
+                .iter()
+                .any(|command| command == "hpc-compose artifacts --job-id 12345"),
+            "artifacts export hint must appear when export_dir is configured: {commands:?}"
+        );
+        assert!(
+            experiment_next_commands("12345", false)
+                .iter()
+                .all(|command| !command.starts_with("hpc-compose artifacts")),
+            "artifacts export hint must be omitted without an export_dir"
+        );
         // The ControlMaster/ControlPath/ControlPersist multiplexing line is present.
         let ssh = commands
             .iter()

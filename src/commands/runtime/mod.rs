@@ -2093,7 +2093,10 @@ pub(crate) fn launch(
                 let (endpoints, next_commands) = if print_endpoints {
                     (
                         output::build_submit_endpoints(&runtime_plan),
-                        output::submit_next_commands(None),
+                        output::submit_next_commands(
+                            None,
+                            output::artifact_export_configured(&runtime_plan),
+                        ),
                     )
                 } else {
                     (Vec::new(), Vec::new())
@@ -2163,7 +2166,10 @@ pub(crate) fn launch(
                 let (endpoints, next_commands) = if print_endpoints {
                     (
                         output::build_submit_endpoints(&runtime_plan),
-                        output::submit_next_commands(Some(&record.job_id)),
+                        output::submit_next_commands(
+                            Some(&record.job_id),
+                            output::artifact_export_configured(&runtime_plan),
+                        ),
                     )
                 } else {
                     (Vec::new(), Vec::new())
@@ -2221,8 +2227,10 @@ pub(crate) fn launch(
     let mut outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
     if print_endpoints {
         outcome.submit_output.endpoints = output::build_submit_endpoints(&prepared.runtime_plan);
-        outcome.submit_output.next_commands =
-            output::submit_next_commands(outcome.submit_output.job_id.as_deref());
+        outcome.submit_output.next_commands = output::submit_next_commands(
+            outcome.submit_output.job_id.as_deref(),
+            output::artifact_export_configured(&prepared.runtime_plan),
+        );
     }
     print_slurm_submit_outcome(&prepared, &outcome)?;
     maybe_watch_slurm_submission(

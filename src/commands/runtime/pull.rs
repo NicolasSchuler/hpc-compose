@@ -140,6 +140,15 @@ pub(crate) fn pull(
             println!("Copy the artifacts to your laptop:");
             println!("  {suggested_command}");
             println!();
+            println!(
+                "{}",
+                term::styled_dim(&format!(
+                    "This copies the payload to your machine. To populate the configured \
+                     export_dir on the cluster (what downstream jobs read), run \
+                     `hpc-compose artifacts --job-id {}`.",
+                    record.job_id
+                ))
+            );
             println!("{}", term::styled_dim(OTP_MULTIPLEX_NOTE));
             if login_host.is_none() {
                 println!(

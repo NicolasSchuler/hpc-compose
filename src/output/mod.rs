@@ -160,30 +160,63 @@ pub(crate) fn build_submit_endpoints(plan: &RuntimePlan) -> Vec<SubmitEndpoint> 
         .collect()
 }
 
+/// True when the plan configures an artifact `export_dir`. Gates the
+/// `hpc-compose artifacts` next-step hint: that command is the only thing that
+/// populates `export_dir`, and it bails when none is configured, so suggesting
+/// it otherwise would be a dead end.
+pub(crate) fn artifact_export_configured(plan: &RuntimePlan) -> bool {
+    plan.slurm
+        .artifacts
+        .as_ref()
+        .and_then(|artifacts| artifacts.export_dir.as_deref())
+        .is_some_and(|export_dir| !export_dir.trim().is_empty())
+}
+
 /// Suggested next commands after a submission. Only references commands that
 /// exist today; `--job-id` is added to the per-job reads when a job id is known.
-pub(crate) fn submit_next_commands(job_id: Option<&str>) -> Vec<String> {
+/// `artifacts` is included only when an `export_dir` is configured: teardown
+/// collection fills the runtime payload but never `export_dir`, so this hint is
+/// the main thing that surfaces the otherwise-easy-to-miss export step.
+pub(crate) fn submit_next_commands(
+    job_id: Option<&str>,
+    export_dir_configured: bool,
+) -> Vec<String> {
     let target = job_id.map_or(String::new(), |id| format!(" --job-id {id}"));
-    vec![
+    let mut commands = vec![
         format!("hpc-compose status{target}"),
         "hpc-compose logs --follow".to_string(),
         format!("hpc-compose stats{target}"),
-        // `pull` before `down`: collect results before the destructive teardown.
-        format!("hpc-compose pull{target}"),
-        "hpc-compose down".to_string(),
-    ]
+    ];
+    // Secure results before the destructive `down`. `artifacts` exports the
+    // collected payload into the configured export_dir (the cluster results dir
+    // downstream jobs read); `pull` only prints a laptop rsync.
+    if export_dir_configured {
+        commands.push(format!("hpc-compose artifacts{target}"));
+    }
+    commands.push(format!("hpc-compose pull{target}"));
+    commands.push("hpc-compose down".to_string());
+    commands
 }
 
 /// Suggested next commands after an inspect read such as `status`. Omits
 /// `status` itself; `--job-id` is added to the per-job reads when known.
-pub(crate) fn inspect_next_commands(job_id: Option<&str>) -> Vec<String> {
+/// `artifacts` is suggested only when an `export_dir` is configured (see
+/// [`submit_next_commands`]).
+pub(crate) fn inspect_next_commands(
+    job_id: Option<&str>,
+    export_dir_configured: bool,
+) -> Vec<String> {
     let target = job_id.map_or(String::new(), |id| format!(" --job-id {id}"));
-    vec![
+    let mut commands = vec![
         "hpc-compose logs --follow".to_string(),
         format!("hpc-compose stats{target}"),
-        format!("hpc-compose pull{target}"),
-        "hpc-compose down".to_string(),
-    ]
+    ];
+    if export_dir_configured {
+        commands.push(format!("hpc-compose artifacts{target}"));
+    }
+    commands.push(format!("hpc-compose pull{target}"));
+    commands.push("hpc-compose down".to_string());
+    commands
 }
 
 fn file_arg(file: Option<&Path>) -> String {
@@ -3325,7 +3358,10 @@ pub(crate) fn print_submit_summary_box(
         );
     }
     println!("{separator}");
-    print_next_steps(&submit_next_commands(Some(job_id)));
+    print_next_steps(&submit_next_commands(
+        Some(job_id),
+        artifact_export_configured(plan),
+    ));
 }
 
 use hpc_compose::context::ValueSource;
