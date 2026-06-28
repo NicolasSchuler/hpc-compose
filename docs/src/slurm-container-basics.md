@@ -1,4 +1,4 @@
-# Slurm And Container Basics
+# Slurm and Container Basics
 
 This page is for users who know shell scripts, Python jobs, or Docker images, but are new to Slurm and HPC container runtimes.
 

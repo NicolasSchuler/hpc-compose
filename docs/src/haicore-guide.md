@@ -31,7 +31,7 @@ Common settings you will map into `hpc-compose`:
 | Tasks | `x-slurm.ntasks`, service `x-slurm.ntasks` | Process/rank count. |
 | CPUs per task | `x-slurm.cpus_per_task`, service `x-slurm.cpus_per_task` | CPU threads per process/rank. |
 | Memory | `x-slurm.mem` | Scheduler/runtime memory request, not storage. |
-| Full GPUs | `x-slurm.gres` or service `x-slurm.gres` | HAICORE examples use `gpu:full:N` style requests. |
+| Full GPUs | `x-slurm.gres` or service `x-slurm.gres` | Request a full A100 with `gpu:N` (e.g. `gpu:1`); the `normal` partition has no `gpu:full` GRES type. |
 | MIG GPUs | `x-slurm.gres` or service `x-slurm.gres` | HAICORE documents MIG profiles such as `gpu:1g.5gb:1`; confirm current names. |
 | Constraints | `x-slurm.constraint` or `x-slurm.submit_args` | HAICORE documents constraints such as `LSDF` and `BEEOND`. |
 
@@ -48,7 +48,7 @@ x-slurm:
   nodes: 1
   cpus_per_task: 4
   mem: 16G
-  gres: gpu:full:1
+  gres: gpu:1
   cache_dir: <workspace-path>/hpc-compose-cache
 
 services:
@@ -106,7 +106,7 @@ The official HAICORE filesystem page documents workspace lifetime, extension lim
 
 ## Containers On HAICORE
 
-The official HAICORE container documentation says native Docker and rootless Docker are not supported on the HPC systems. The relevant paths are site-supported HPC runtimes, including Enroot/Pyxis and Apptainer.
+The official HAICORE container documentation says native Docker and rootless Docker are not supported on the HPC systems. The relevant paths are site-supported HPC runtimes, including Pyxis/Enroot and Apptainer.
 
 For the default `hpc-compose` backend:
 
@@ -192,12 +192,14 @@ Run these on the HAICORE login node before the first real job:
 
 ```bash
 ws_find <workspace-name>
-sinfo
+scontrol show partition normal
 srun --help | grep container-image
 hpc-compose plan --show-script -f compose.yaml
 hpc-compose preflight -f compose.yaml
 hpc-compose doctor cluster-report --out .hpc-compose/haicore-cluster.toml
 ```
+
+On HAICORE, `sinfo`/`sinfo -N` node-state queries are denied (`slurm_load_node: Access/permission denied`). Use `scontrol show partition`, `squeue`, `sacct`, or `srun --test-only` for partition and availability introspection instead.
 
 Check the rendered script for:
 

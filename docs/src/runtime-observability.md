@@ -41,7 +41,7 @@ hpc-compose diff 12345 12346 -f compose.yaml
 | `stats` | Tracked metrics, Slurm step statistics, and optional accounting rollups. |
 | `inspect --rightsize` | Post-run request-versus-usage recommendations for memory, CPUs, GPUs, and walltime. |
 | `score` | 0-100 post-run efficiency score with GPU, memory, compute-time, and kWh components. |
-| `germinate` | Short canary submission; see [Right-Sizing With Canary Runs](canary-runs.md). |
+| `germinate` | Short canary submission; see [Right-Size With Canary Runs](canary-runs.md). |
 | `sweep status` / `sweep list` | Inspect sweep trials and manifests; see [Hyperparameter Sweeps](sweeps.md). |
 | `diff` | Compact comparison between two tracked submissions. |
 
@@ -198,7 +198,7 @@ Use `hpc-compose score <job-id>` after a tracked Slurm run when you want a compa
 
 Use `hpc-compose experiment show <job-id>` when you want all of that in one read-only object. A single call aggregates scheduler status, the post-run efficiency score, the artifact manifest, and submit-time provenance, so a notebook or experiment tracker can capture one run with one command (`hpc-compose experiment show <job-id> --format json`). It is static-safe: it contacts the scheduler only as much as `status` and `score` already do, writes nothing, and opens no connection. For each service with TCP or HTTP readiness it emits a per-service `ssh -L` tunnel hint, and `next_commands` carries SSH `ControlMaster`/`ControlPath`/`ControlPersist` multiplexing guidance so an OTP/2FA login node prompts you only once. Legacy records without provenance, non-terminal jobs without a complete efficiency report, and runs without an artifact manifest still produce a valid object with those fields omitted.
 
-For a short canary run before a full run, use `hpc-compose germinate`; see [Right-Sizing With Canary Runs](canary-runs.md).
+For a short canary run before a full run, use `hpc-compose germinate`; see [Right-Size With Canary Runs](canary-runs.md).
 
 ## Sweep Manifests
 
@@ -226,4 +226,4 @@ hpc-compose diff --across sweep-1700000000-1234 --matrix-format csv
 - [Manage the Cache and Clean Up](cache-management.md)
 - [Artifacts and Resume](artifacts-and-resume.md)
 - [Hyperparameter Sweeps](sweeps.md)
-- [Right-Sizing With Canary Runs](canary-runs.md)
+- [Right-Size With Canary Runs](canary-runs.md)

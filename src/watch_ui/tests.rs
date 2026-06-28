@@ -1,12 +1,11 @@
 use super::*;
 use crate::output;
 use hpc_compose::job::{
-    GpuNodeSummary, PsSnapshot, QueueDiagnostics, ReplayArtifactPaths, ReplayEvent, ReplayEventKind,
-    ReplayFrame,
-    ReplayReport, ReplayServiceFrame, RequestedWalltime, SchedulerOptions, SchedulerSource,
-    SchedulerStatus, SubmissionBackend, SubmissionKind, SubmissionRecord, WalltimeProgress,
-    WatchOutcome, build_submission_record_with_backend, state_path_for_record,
-    write_submission_record,
+    GpuNodeSummary, PsSnapshot, QueueDiagnostics, ReplayArtifactPaths, ReplayEvent,
+    ReplayEventKind, ReplayFrame, ReplayReport, ReplayServiceFrame, RequestedWalltime,
+    SchedulerOptions, SchedulerSource, SchedulerStatus, SubmissionBackend, SubmissionKind,
+    SubmissionRecord, WalltimeProgress, WatchOutcome, build_submission_record_with_backend,
+    state_path_for_record, write_submission_record,
 };
 
 #[test]

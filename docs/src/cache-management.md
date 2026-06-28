@@ -45,19 +45,19 @@ The store itself never fetches anything: it is a pure on-disk store, and the act
 Prune old entries by age:
 
 ```bash
-hpc-compose --profile dev cache prune --age 14
+hpc-compose --profile dev cache prune --age 14 --yes
 ```
 
 Prune artifacts not referenced by the current plan:
 
 ```bash
-hpc-compose cache prune --all-unused -f compose.yaml
+hpc-compose cache prune --all-unused -f compose.yaml --yes
 ```
 
 Prune one cache directory directly:
 
 ```bash
-hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'
+hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>' --yes
 ```
 
 `--age` and `--all-unused` are mutually exclusive.
@@ -81,7 +81,7 @@ hpc-compose clean -f compose.yaml --age 7
 Cache keys include the tool version, so upgrading `hpc-compose` invalidates existing cached artifacts. Expect a full rebuild on the next `prepare` or `up`, then optionally prune old entries:
 
 ```bash
-hpc-compose cache prune --age 0
+hpc-compose cache prune --age 0 --yes
 ```
 
 ## Related Docs

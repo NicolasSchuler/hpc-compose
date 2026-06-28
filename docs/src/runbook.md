@@ -129,7 +129,7 @@ An editor schema for `settings.toml` is available:
 hpc-compose schema --kind settings
 ```
 
-For TOML editor integration, point your TOML language server at the published URL `https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose-settings.schema.json`.
+For TOML editor integration, write that schema to a file (`hpc-compose schema --kind settings > hpc-compose-settings.schema.json`) and point your TOML language server at the local path.
 
 ## Choose A Starting Example
 

@@ -62,7 +62,7 @@ For NHR@KIT HAICORE, start by reading `references/haicore-kit.md` and verify cur
 
 - Slurm is the batch system.
 - `normal` is the broadly available queue; `advanced` requires extra privilege.
-- Full A100 GPU requests use Slurm GRES such as `gpu:full:<count>`; MIG profiles use profile-specific GRES.
+- Full A100 GPU requests on the HAICORE `normal` partition use Slurm GRES such as `gpu:<count>` (for example `gpu:1`); MIG profiles use profile-specific GRES.
 - A workspace path is usually the right starting point for shared hpc-compose cache and prepared images.
 - `$TMPDIR` is node-local and job-lifetime only; it is good for runtime scratch, not for hpc-compose cache reuse across prepare and compute nodes.
 - Pyxis/Enroot support should be confirmed with `srun --help | grep container-image` or `hpc-compose doctor cluster-report`.

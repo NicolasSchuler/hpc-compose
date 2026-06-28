@@ -35,6 +35,7 @@ A well-behaved agent authors and statically verifies a spec first, and only runs
 
 This repository ships a drop-in skill bundle at `skills/hpc-compose/` — the source of truth for the setup recipe. Copy it into your agent's skills directory and start a fresh session so skill discovery reloads:
 
+- Claude Code: `~/.claude/skills/hpc-compose` (user scope) or `.claude/skills/hpc-compose` (project scope)
 - Codex: `$CODEX_HOME/skills/hpc-compose` or `~/.codex/skills/hpc-compose`
 - Other runtimes: the skills location your agent documents
 

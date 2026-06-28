@@ -4,6 +4,8 @@ Core `hpc-compose` terms, in one place. The short version of this list also appe
 
 One-line definitions; follow the link for the owning reference section.
 
+<dl>
+
 <dt id="allocation">allocation</dt>
 <dd>The single Slurm job where all of an application's services run; one spec compiles to one allocation. See <a href="execution-model.md">Execution Model</a>.</dd>
 
@@ -27,6 +29,9 @@ One-line definitions; follow the link for the owning reference section.
 
 <dt id="local-mode">local mode</dt>
 <dd>Running a plan on the current Linux host through the local Pyxis/Enroot supervisor instead of submitting to Slurm; single-host and Pyxis-only. See <a href="cli-reference.md#up---local"><code>up --local</code></a>.</dd>
+
+<dt id="login-node">login node / submission host</dt>
+<dd>The host where you run <code>hpc-compose</code> and from which jobs are submitted; "login node" and "submission host" name the same machine. See <a href="runbook.md">Operate a Real Cluster Run</a>.</dd>
 
 <dt id="preflight">preflight</dt>
 <dd>Checks of local tools, paths, backend support, and optional cluster profiles before a run. See <a href="cli-reference.md#plan-and-run"><code>preflight</code></a>.</dd>
@@ -61,14 +66,16 @@ One-line definitions; follow the link for the owning reference section.
 <dt id="sweep">sweep</dt>
 <dd>An embedded <code>sweep</code> block expanded by <code>hpc-compose sweep submit</code> into many independent tracked allocations, one per trial. See <a href="spec-reference.md#sweep"><code>sweep</code></a>.</dd>
 
-<dt id="tracked-job">tracked job</dt>
-<dd>Metadata under <code>.hpc-compose/&lt;job-id&gt;/</code> that lets <code>status</code>, <code>ps</code>, <code>watch</code>, <code>logs</code>, <code>stats</code>, and <code>artifacts</code> reconnect to a run later. See <a href="cli-reference.md#tracked-runtime">Tracked Runtime</a>.</dd>
+<dt id="tracked-job">tracked job / tracked run</dt>
+<dd>Metadata under <code>.hpc-compose/&lt;job-id&gt;/</code> that lets <code>status</code>, <code>ps</code>, <code>watch</code>, <code>logs</code>, <code>stats</code>, and <code>artifacts</code> reconnect to a run later; "tracked job" and "tracked run" are the same thing. See <a href="cli-reference.md#tracked-runtime">Tracked Runtime</a>.</dd>
 
 <dt id="x-runtime-prepare"><code>x-runtime.prepare</code></dt>
 <dd>The spec block for image-preparation commands and mounts; <code>x-enroot.prepare</code> is an accepted Pyxis/Enroot alias. See <a href="spec-reference.md#x-runtimeprepare-and-x-enrootprepare"><code>x-runtime.prepare</code></a>.</dd>
 
 <dt id="x-slurm"><code>x-slurm</code></dt>
 <dd>The spec section for Slurm settings and <code>hpc-compose</code> runtime extensions, available at the top level and per service. See <a href="spec-reference.md#x-slurm"><code>x-slurm</code></a>.</dd>
+
+</dl>
 
 ## Related Docs
 

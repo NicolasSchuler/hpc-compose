@@ -32,7 +32,7 @@ If a service omits the rolling-window fields, `hpc-compose` still enables crash-
 Use `status` to inspect the tracked policy state after submission. The text view reports:
 
 ```text
-state service 'worker': failure_policy=restart_on_failure restarts=1/5 window=1/3@60s last_exit=42
+state service 'worker': failure_policy=restart_on_failure restarts=1/5 window=1/3@60s last_exit=42 completed=no
 ```
 
 Use `logs` to inspect the corresponding restart messages from the batch script when you need to distinguish lifetime-cap exhaustion from rolling-window exhaustion.

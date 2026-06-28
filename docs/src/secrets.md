@@ -58,7 +58,7 @@ Matching is a case-insensitive substring test, so names such as `SESSION_DIR`, `
 
 ```bash
 hpc-compose config -f compose.yaml --show-values
-hpc-compose context   # shows interpolation vars, secrets tagged (Secret) and redacted
+hpc-compose context   # table of interpolation vars; secret-sourced values show SOURCE 'secret' and are redacted
 ```
 
 The raw secret value never appears in `config`, `context`, or `inspect` output by default. `inspect` does not expose a `--show-values` escape hatch; use `config --show-values` or `context --show-values` for trusted local diagnostics.

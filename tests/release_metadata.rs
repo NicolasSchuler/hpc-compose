@@ -635,7 +635,7 @@ fn pre_commit_hooks_file_advertises_validate_and_lint() {
         "pass_filenames: false",
         "hpc-compose validate -f compose.yaml",
         "hpc-compose lint -f compose.yaml",
-        "files: ^compose\\.(yaml|yml)$",
+        "files: ^compose\\.yaml$",
     ] {
         assert!(
             hooks.contains(expected),

@@ -150,7 +150,7 @@ curl -fsSL "https://raw.githubusercontent.com/NicolasSchuler/hpc-compose/${RELEA
 
 ## Build From Source
 
-Use this path for development, unreleased testing, or local inspection:
+Use this path for development, unreleased testing, or local inspection. Building from source requires a Rust 1.88 or newer toolchain (the crate uses edition 2024):
 
 ```bash
 git clone https://github.com/NicolasSchuler/hpc-compose.git
@@ -159,14 +159,14 @@ cargo build --release
 ./target/release/hpc-compose --help
 ```
 
-Before using a local build on a cluster workflow, validate the binary and one example spec:
+Before using a local build on a cluster workflow, validate the binary and one example spec. `validate` and `plan` are static and need no cache directory:
 
 ```bash
-env CACHE_DIR=/cluster/shared/hpc-compose-cache \
-  target/release/hpc-compose validate -f examples/minimal-batch.yaml
-env CACHE_DIR=/cluster/shared/hpc-compose-cache \
-  target/release/hpc-compose plan --verbose -f examples/minimal-batch.yaml
+target/release/hpc-compose validate -f examples/minimal-batch.yaml
+target/release/hpc-compose plan --verbose -f examples/minimal-batch.yaml
 ```
+
+To point the binary at a shared cache when you do run a job, set `HPC_COMPOSE_CACHE_DIR`, pass `--cache-dir`, or set `x-slurm.cache_dir` in the spec.
 
 ## Local Docs Commands
 

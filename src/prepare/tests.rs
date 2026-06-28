@@ -573,7 +573,10 @@ fn enroot_data_dir_follows_scratch_redirect() {
     // in an hpc-compose-owned per-process subdir of the scratch root.
     let local = Path::new("/tmp/me-hpc-compose-enroot");
     let data = enroot_data_dir(local, cache);
-    assert!(data.starts_with(local), "data dir {data:?} should be node-local");
+    assert!(
+        data.starts_with(local),
+        "data dir {data:?} should be node-local"
+    );
     assert!(
         data.file_name()
             .and_then(|name| name.to_str())

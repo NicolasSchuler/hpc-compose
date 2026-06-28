@@ -268,7 +268,13 @@ impl ServiceBar {
 /// phase/output/bytes/elapsed formatting can be unit-tested without a live
 /// indicatif bar. `elapsed` is the time spent in the current phase, surfaced live
 /// during streaming so a long-running import/extract does not look stuck.
-fn service_bar_message(name: &str, phase: &str, line: &str, bytes: u64, elapsed: Duration) -> String {
+fn service_bar_message(
+    name: &str,
+    phase: &str,
+    line: &str,
+    bytes: u64,
+    elapsed: Duration,
+) -> String {
     let mut message = if phase.is_empty() {
         format!("{name} ...")
     } else {
@@ -531,7 +537,13 @@ mod tests {
         // Active phase shows the phase and a live [elapsed] so a quiet import or
         // extract does not look stuck.
         assert_eq!(
-            service_bar_message("trainer", "importing pytorch", "", 0, Duration::from_secs(42)),
+            service_bar_message(
+                "trainer",
+                "importing pytorch",
+                "",
+                0,
+                Duration::from_secs(42)
+            ),
             "trainer: importing pytorch [42.0s]"
         );
         // Streaming output line and bytes written are both surfaced, with elapsed last.

@@ -222,7 +222,10 @@ fn warn_hpcignore_exclusions(excluded: &[String]) {
         );
     }
     if staging_debug_enabled() && !excluded.is_empty() {
-        eprintln!("  .hpcignore excluded {} path(s) from staging:", excluded.len());
+        eprintln!(
+            "  .hpcignore excluded {} path(s) from staging:",
+            excluded.len()
+        );
         for path in excluded {
             eprintln!("    - {path}");
         }

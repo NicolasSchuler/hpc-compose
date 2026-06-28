@@ -7,6 +7,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.50] - 2026-06-28
+
+### Changed
+
+- Refined setup, runtime, cache, cleanup, schema, and observability docs so the
+  examples match the current CLI behavior and generated command surfaces.
+- Aligned HAICORE full-GPU examples and the bundled agent skill with the
+  `normal` partition GRES syntax (`gpu:N`, for example `gpu:1`).
+
+### Fixed
+
+- Corrected the shipped pre-commit hook metadata and documentation so the
+  default hooks only claim `compose.yaml`; `compose.yml` users now get an
+  explicit override snippet that points both hooks at the staged filename.
+
 ## [0.1.49] - 2026-06-27
 
 ### Added

@@ -56,7 +56,7 @@ hpc-compose dev -f compose.yaml --watch-paths ./src --debounce-ms 500
 
 It infers watch roots from host directories mounted through service `volumes`. File mounts, container-only paths, cache paths, missing paths, and non-directory paths are ignored. `--watch-paths` adds an explicit directory and restarts every service when it changes.
 
-File changes write restart requests into the tracked run's dev control directory. The local supervisor handles those requests as development restarts, so readiness and completion state reset for the affected service without consuming `failure_policy.restart_on_failure` counters.
+File changes write restart requests into the tracked run's dev control directory. The local supervisor handles those requests as development restarts, so readiness and completion state reset for the affected service without consuming the restart counters used by `failure_policy.mode: restart_on_failure` (`max_restarts`/`max_restarts_in_window`).
 
 By default, Ctrl-C stops the local supervisor. Add `--keep-running` when you want to leave the tracked local run alive after exiting the watch loop.
 

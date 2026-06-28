@@ -201,7 +201,7 @@ x-slurm:
   ntasks: 1
   cpus_per_task: 8
   mem: 32G
-  gres: gpu:full:1
+  gres: gpu:1
 ```
 
 Use raw pass-through only for site-specific options:

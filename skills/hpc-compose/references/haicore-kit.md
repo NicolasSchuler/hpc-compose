@@ -52,14 +52,14 @@ x-slurm:
   time: "01:00:00"
   nodes: 1
   ntasks: 1
-  gres: gpu:full:1
+  gres: gpu:1
 ```
 
-Full A100 GPU requests are documented through Slurm GRES:
+Full A100 GPU requests on the `normal` partition use Slurm GRES:
 
 ```yaml
 x-slurm:
-  gres: gpu:full:1
+  gres: gpu:1
 ```
 
 MIG profiles use profile-specific GRES:
@@ -153,7 +153,7 @@ x-slurm:
   nodes: 1
   ntasks: 1
   cpus_per_task: 8
-  gres: gpu:full:1
+  gres: gpu:1
   cache_dir: ${CACHE_DIR}
 
 services:

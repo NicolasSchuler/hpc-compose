@@ -27,12 +27,15 @@ repos:
       - id: hpc-compose-lint
 ```
 
-By default the hooks run when `compose.yaml` is staged. To point at a different filename, override `entry` and `files`:
+By default the hooks run when a top-level `compose.yaml` is staged. If your project uses `compose.yml` or a nested spec, override both `entry` and `files` so the hook checks the file that triggered it:
 
 ```yaml
+      - id: hpc-compose-validate
+        entry: hpc-compose validate -f compose.yml
+        files: ^compose\.yml$
       - id: hpc-compose-lint
-        entry: hpc-compose lint -f deploy/compose.yaml --allow-warnings
-        files: ^deploy/compose\.yaml$
+        entry: hpc-compose lint -f compose.yml --allow-warnings
+        files: ^compose\.yml$
 ```
 
 - `hpc-compose-validate` fails on any spec error.
@@ -100,12 +103,12 @@ hpc-compose-lint:
 
 ## Strict vs. warnings
 
-`validate` always fails on structural spec errors. `lint` emits advisory findings (`HPC001`–`HPC006`, `HPC900`); by default these fail the command, so add `--allow-warnings` for advisory-only runs. A common setup is:
+`validate` always fails on structural spec errors. `lint` emits advisory findings (`HPC001`–`HPC007`, `HPC900`); by default these fail the command, so add `--allow-warnings` for advisory-only runs. A common setup is:
 
 - **pre-commit / local:** `lint --allow-warnings` (fast feedback, advisory).
 - **CI (merge gate):** `lint` without `--allow-warnings`, or `strict: true` (enforce).
 
-See [Spec Reference](spec-reference.md) for the full lint rule table and [Troubleshooting](troubleshooting.md) for related workflows.
+See [CLI Reference](cli-reference.md#lint-rules) for the full lint rule table and [Troubleshooting](troubleshooting.md) for related workflows.
 
 ## Related Docs
 

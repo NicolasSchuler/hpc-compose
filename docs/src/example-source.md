@@ -50,7 +50,7 @@ Source: `examples/fairseq-preprocess.yaml`
 {{#include ../../examples/fairseq-preprocess.yaml}}
 ```
 
-## Hf Stage Model
+## HF Stage Model
 
 Source: `examples/hf-stage-model.yaml`
 
@@ -178,7 +178,7 @@ Source: `examples/multi-node-jax.yaml`
 {{#include ../../examples/multi-node-jax.yaml}}
 ```
 
-## Nccl Tests
+## NCCL Tests
 
 Source: `examples/nccl-tests.yaml`
 

@@ -86,7 +86,7 @@ Because there is no container:
 - `image` is optional
 - service `volumes` are rejected
 - `x-runtime.prepare` and `x-enroot.prepare` are rejected
-- `x-slurm.mpi.host_mpi.bind_paths` is not meaningful
+- `x-slurm.mpi.host_mpi.bind_paths` is rejected
 
 Use top-level or service-level `x-env` for host modules, Spack views, and environment variables.
 

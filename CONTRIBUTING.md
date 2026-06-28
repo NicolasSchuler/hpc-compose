@@ -38,8 +38,6 @@ Equivalent raw commands:
 ```bash
 actionlint -color
 cargo test --locked
-cargo test --locked --test cli_spec --test cli_runtime --test cli_cache --test cli_context --test cli_init --test cli_jobs --test cli_canary_rendezvous --test cli_dev_workflow --test cli_doctor_readiness --test cli_sweep --test docs_examples --test install_script --test public_api --test release_metadata
-cargo test --locked --test release_metadata
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 mdbook build docs

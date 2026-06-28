@@ -4,7 +4,7 @@
   entry: hpc-compose validate -f compose.yaml
   language: system
   pass_filenames: false
-  files: ^compose\.(yaml|yml)$
+  files: ^compose\.yaml$
 
 - id: hpc-compose-lint
   name: hpc-compose lint
@@ -12,4 +12,4 @@
   entry: hpc-compose lint -f compose.yaml --allow-warnings
   language: system
   pass_filenames: false
-  files: ^compose\.(yaml|yml)$
+  files: ^compose\.yaml$

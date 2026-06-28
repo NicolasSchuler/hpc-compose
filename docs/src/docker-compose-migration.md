@@ -11,7 +11,7 @@ This guide helps you convert an existing `docker-compose.yaml` into an `hpc-comp
 | `entrypoint` | `entrypoint` (string or list, same syntax) |
 | `environment` | `environment` (map or list, same syntax) |
 | `volumes` | `volumes` (host:container bind mounts, same syntax) |
-| `depends_on` | `depends_on` (list or map with `condition: service_started` / `service_healthy`) |
+| `depends_on` | `depends_on` (list or map with `condition: service_started` / `service_healthy` / `service_completed_successfully`) |
 | `working_dir` | `working_dir` (requires explicit `command` or `entrypoint`) |
 | `build` | **Not supported.** Use `image` + `x-runtime.prepare.commands` instead. |
 | `ports` | **Not supported.** Use host networking semantics instead. `127.0.0.1` works only when both sides run on the same node. |

@@ -97,7 +97,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, referenced interpolation vars, runtime paths, and value sources; supports `--format json`. Sensitive-looking interpolation values are redacted unless `--show-values` is passed. |
 | `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
 | `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. Auto-fixable findings can be applied with `--fix` (preview with `--fix --dry-run`). See [Lint rules](#lint-rules). |
-| `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Rust validation remains the semantic source of truth. |
+| `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` to print the `settings.toml` authoring schema. Rust validation remains the semantic source of truth. |
 
 ## Plan and Run
 
@@ -107,7 +107,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `validate` | Check YAML shape and field validation | Add `--strict-env` when interpolation fallbacks should fail. |
 | `lint` | Run stricter opinionated static checks | Flags risky-but-valid specs such as weak dependency readiness, unusual memory/CPU ratios, ignored services that can write shared paths, node-local cache or volume paths, and implicit `depends_on` conditions. Warnings fail by default; add `--allow-warnings` to make warning-only results successful. Pass `--fix` to apply auto-fixable findings in place (preview with `--fix --dry-run`). |
 | `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. `config --variables` reports only interpolation variables referenced by the compose file and redacts sensitive-looking names unless `--show-values` is passed. |
-| `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. The same schema is published with the docs site for YAML Language Server and SchemaStore consumption. Rust validation remains the semantic source of truth. |
+| `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` for the `settings.toml` authoring schema. The compose schema is also published with the docs site for YAML Language Server and SchemaStore consumption. Rust validation remains the semantic source of truth. |
 | `inspect` | View the normalized runtime plan | `--verbose` shows resolved argv and final mount mappings with secret values redacted. Add `--dependencies` for a service DAG in text, DOT, or JSON form. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. |
 | `doctor cluster-report` | Generate a best-effort cluster capability profile | Writes `.hpc-compose/cluster.toml` by default; use `--out -` to print the TOML profile. |
@@ -289,7 +289,7 @@ Useful options:
 - `--dry-run` renders the canary script without calling `sbatch`.
 - `--skip-prepare`, `--force-rebuild`, `--keep-failed-prep`, `--no-preflight`, and `--script-out` match the normal preparation flags.
 
-The command rejects `x-slurm.array` and never rewrites your compose file automatically. See [Right-Sizing With Canary Runs](canary-runs.md).
+The command rejects `x-slurm.array` and never rewrites your compose file automatically. See [Right-Size With Canary Runs](canary-runs.md).
 
 ### `sweep` Hyperparameter Sweeps
 
@@ -343,6 +343,18 @@ hpc-compose sweep list -f train.yaml --format json
 | `--poll-interval <DURATION>`, `--timeout <DURATION>` | Tune the `--watch` polling cadence and deadline. |
 | `--scaling` | Print a read-only post-hoc scaling report (objective vs `objective.scaling_axis`: log-log slope plus speedup/efficiency over terminal trials). |
 | `--format text|json` | Print the ranked table or a machine-readable payload (the `scaling` block appears only with `--scaling`). |
+
+`sweep stop` options:
+
+| Option | Use it for |
+| --- | --- |
+| `-f`, `--file <FILE>` | Select the compose file whose sweep manifest should be stopped. |
+| `--sweep-id <ID>` | Stop a specific sweep instead of the latest. |
+| `--reason <REASON>` | Record a free-form stop reason on the manifest. |
+| `--yes` | Skip the interactive confirmation prompt. |
+| `--format text|json` | Print human-readable or machine-readable stop output. |
+
+`sweep stop` cancels every still-running or pending trial of a sweep with `scancel` and records the stop on the manifest. Use it after `sweep observe` to realize early termination once an objective threshold is met.
 
 See [Hyperparameter Sweeps](sweeps.md) for the `sweep` spec shape, interpolation rules, status categories, and current limitations.
 
@@ -439,6 +451,7 @@ Useful `dev` options:
 | `--watch-paths <PATH>` | Add an explicit watch root when mounted source directories cannot be inferred. |
 | `--debounce-ms <N>` | Coalesce rapid file changes before requesting a restart. |
 | `--keep-running` | Leave the local supervisor alive when the watch loop exits. |
+| `--tui` | Open the live watch TUI while file-watching restarts services in the background. |
 
 `tmux` opens a log dashboard for local runs:
 
@@ -542,7 +555,7 @@ hpc-compose status -f compose.yaml --format json
 | `score` | Score post-run resource efficiency | Supports positional job ids, `--format json`, `--pue`, `--gpu-tdp-w`, and `--cpu-watts-per-core`. |
 | `diff` | Compare two tracked job submissions, or an N-way matrix of several runs | Pairwise: two positional job ids, compact text by default, `--format json` for full detail. N-way matrix: `--across <SWEEP_ID>` compares every submitted trial of a sweep, or `--jobs a,b,c` compares an explicit list. The matrix shows one column per run and one row per field that differs in at least one run (fields identical across all runs are collapsed); pick `--matrix-format text\|csv\|json` (CSV emits `section,field,<job_id>...` for spreadsheets). |
 | `artifacts` | Export tracked artifact bundles after a run | Use `--bundle <name>` and `--tarball` when needed. |
-| `pull` | Print the `rsync` command to copy a tracked job's artifacts to a laptop | Resolves the artifact payload directory from tracked state and prints an `rsync` line (with `ControlMaster` multiplexing so an OTP login node prompts once); `--into <DIR>` sets the local destination, `--format json` emits `{bundles, cluster_path, suggested_command, files, bytes}`. Read-only: copies nothing and opens no connection. |
+| `pull` | Print the `rsync` command to copy a tracked job's artifacts to a laptop | Resolves the artifact payload directory from tracked state and prints an `rsync` line (with `ControlMaster` multiplexing so an OTP login node prompts once); `--into <DIR>` sets the local destination, `--format json` emits `{job_id, bundles, login_host, cluster_path, into, files, bytes, suggested_command, ssh_multiplex_hint}` (`login_host` omitted when not set). Read-only: copies nothing and opens no connection. |
 | `cancel` | Cancel the latest tracked job or an explicit job id | Uses tracked metadata instead of making you retype paths. |
 | `down` | Cancel a tracked job and clean tracked state | Supports `--purge-cache` when the tracked snapshot names concrete cache artifacts. |
 | `jobs list` | Scan the current repo tree for tracked runs | Start here when you need to rediscover an older run. |
@@ -551,6 +564,8 @@ hpc-compose status -f compose.yaml --format json
 | `rendezvous resolve NAME` | Resolve one provider record | Prints endpoint fields or JSON for automation. |
 | `rendezvous register NAME` | Manually register a provider record | Intended for debugging and custom workflows; declarative specs usually register providers. |
 | `rendezvous prune` | Remove expired provider records | Cleans stale latest and historical rendezvous JSON files. |
+
+Add `--remote[=<HOST>]` to `stats`, `score`, `logs`, or `pull` to run that command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value it uses the configured `login_host`; pass `user@host` to override.
 
 ```bash
 hpc-compose debug -f compose.yaml

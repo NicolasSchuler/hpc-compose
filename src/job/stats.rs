@@ -617,8 +617,9 @@ fn summarize_gpu_nodes(devices: &[GpuDeviceSample]) -> Vec<GpuNodeSummary> {
             );
             let power_draw_w =
                 sum_optional_f64_stats(devices.iter().map(|device| device.power_draw_w.as_deref()));
-            let power_limit_w =
-                sum_optional_f64_stats(devices.iter().map(|device| device.power_limit_w.as_deref()));
+            let power_limit_w = sum_optional_f64_stats(
+                devices.iter().map(|device| device.power_limit_w.as_deref()),
+            );
             GpuNodeSummary {
                 node,
                 gpu_count,

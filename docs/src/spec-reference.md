@@ -1,4 +1,4 @@
-# Spec reference
+# Spec Reference
 
 This page describes the Compose subset that `hpc-compose` accepts today. Unknown or unsupported fields are rejected unless this page explicitly says otherwise.
 
@@ -56,6 +56,7 @@ services:
 | `x-env` | mapping | omitted | Structured host-side module, Spack view, and environment setup shared by all services. |
 | `x-slurm` | mapping | omitted | Top-level Slurm settings and shared runtime defaults. |
 | `sweep` | mapping | omitted | Embedded hyperparameter sweep metadata consumed by `hpc-compose sweep submit/status/list`. Normal commands treat it as metadata. |
+| `secrets` | mapping | omitted | Named secret sources resolved into the interpolation map and redacted in `config`/`context` output. See [`secrets`](#secrets). |
 
 ## `extends`
 
@@ -256,6 +257,7 @@ These fields live under the top-level `x-slurm` block.
 | `after_job` | string or mapping | omitted | Scheduler dependency on a prior job id. String shorthand means `afterany:<id>`; mapping supports `{ id, condition }`. |
 | `dependency` | string | omitted | Currently supports `singleton`, combined with `after_job` when both are set. |
 | `cache_dir` | string | settings profile, settings defaults, then `$HOME/.cache/hpc-compose` | Must resolve to shared storage visible from the login node and the compute nodes. |
+| `enroot_temp_dir` | string | `<cache_dir>/enroot/tmp` | Override for enroot's prepare-time temporary extraction scratch (`ENROOT_TEMP_PATH`), separate from `cache_dir`. Point it at fast node-local storage (e.g. `/tmp/${USER}-hpc-compose-enroot`) when the shared cache filesystem raises `Stale file handle` (ESTALE) errors during image import; the final image and layer cache still live under `cache_dir`. |
 | `runtime_root` | string | `<submit_dir>/.hpc-compose` | Directory that holds per-job runtime state (`<runtime_root>/<job_id>/{logs,metrics,state.json,artifacts}`). Relative values resolve against the submit directory. Must be visible from both login and compute nodes; node-local overrides are rejected by preflight. |
 | `cleanup` | mapping | omitted | Teardown cleanup policy. `cleanup.runtime_cache` (`never` \| `on_success` \| `always`, default `never`) controls whether the batch teardown trap removes the per-job enroot runtime cache. |
 | `scratch` | mapping | omitted | Optional scratch path mounted into services and exposed as `HPC_COMPOSE_SCRATCH_DIR`. |

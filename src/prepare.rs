@@ -404,7 +404,12 @@ fn prepare_pyxis_runtime_plan(
     // where `enroot create` unsquashes the image) node-local alongside it so the
     // `unsquashfs` is fast too. The persistent layer cache stays on the shared cache.
     let data_dir = enroot_data_dir(&resolved_temp, &plan.cache_dir);
-    let envs = enroot_env(&plan.cache_dir, &data_dir, &temp_dir, !prepare_gpu_enabled());
+    let envs = enroot_env(
+        &plan.cache_dir,
+        &data_dir,
+        &temp_dir,
+        !prepare_gpu_enabled(),
+    );
     create_cache_dirs(plan)?;
     ensure_dir(&temp_dir).with_context(|| {
         format!(

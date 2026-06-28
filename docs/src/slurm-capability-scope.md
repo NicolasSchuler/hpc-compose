@@ -54,7 +54,7 @@ These capabilities are intentionally outside the product seam.
 | Dynamic scheduling or bin packing across nodes | Not supported; use explicit `x-slurm.placement` selectors |
 | Heterogeneous jobs | Not supported |
 | Slurm arrays | Supported only through `x-slurm.array` for detached Slurm submissions. Local mode and live watch do not fan out array tasks; sweeps deliberately submit many normal allocations instead of Slurm arrays. |
-| Compose `build`, `ports`, custom networks, `restart`, `deploy` | Not supported |
+| Compose `build`, `ports`, custom networks, `restart` policy, `deploy` | Not supported |
 
 ## Non-goals
 

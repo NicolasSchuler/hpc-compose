@@ -81,7 +81,7 @@ Use this page when you know what you want to do, but not yet which command or ex
 
 ## Automation and scripting with JSON output
 
-- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `plan`, `validate`, `render`, `prepare`, `preflight`, `config`, `inspect`, `debug`, `status`, `ps`, `stats`, `score`, `artifacts`, `down`, `cancel`, `setup`, `cache`, `clean`, and `context`. For `up`, `--format json` requires `--detach` or `--dry-run`.
+- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `plan`, `validate`, `render`, `prepare`, `preflight`, `config`, `inspect`, `debug`, `status`, `ps`, `stats`, `score`, `artifacts`, `down`, `cancel`, `setup`, `cache list`/`cache inspect`/`cache prune`, `clean`, and `context`. For `up`, `--format json` requires `--detach` or `--dry-run`.
 - Include `context --format json` when automation needs resolved compose path, binaries, referenced interpolation vars, and runtime path roots.
 - Use `hpc-compose stats --format jsonl` or `--format csv` when downstream tooling wants row-oriented metrics.
 - Use `--format json` for machine-readable output on non-streaming commands. Streaming commands such as `logs --follow`, `watch`, and `completions` keep their native text or script output.
