@@ -20,6 +20,11 @@ env:
   ACTIONLINT_VERSION: "1.7.12"
   TYPOS_VERSION: "1.28.4"
   MARKDOWNLINT_CLI2_VERSION: "0.14.0"
+  # Pin the merge-gating cargo subcommands so a cargo-deny binary bump or a
+  # cargo-llvm-cov release that changes region/function counting cannot turn CI
+  # red on an unrelated PR. Bump deliberately (like the docs tools above).
+  CARGO_DENY_VERSION: "0.19.9"
+  CARGO_LLVM_COV_VERSION: "0.8.7"
 
 jobs:
   workflow-lint:
@@ -281,6 +286,55 @@ jobs:
           cargo run --locked -- schema > "$RUNNER_TEMP/hpc-compose.schema.json"
           python3 -m json.tool "$RUNNER_TEMP/hpc-compose.schema.json" >/dev/null
 
+  linux-arm64-authoring:
+    name: Linux arm64 Authoring
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6
+        with:
+          toolchain: stable
+          rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
+
+      - name: Run authoring-focused tests
+        run: cargo test --locked --test cli_context --test cli_init --test cli_spec --test public_api --test release_metadata
+
+      - name: Smoke test authoring commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked -- validate -f examples/minimal-batch.yaml
+          cargo run --locked -- render -f examples/minimal-batch.yaml --output "$RUNNER_TEMP/minimal.sbatch"
+          cargo run --locked -- schema > "$RUNNER_TEMP/hpc-compose.schema.json"
+          python3 -m json.tool "$RUNNER_TEMP/hpc-compose.schema.json" >/dev/null
+
+  windows-check:
+    name: Windows Compile Check
+    runs-on: windows-2022
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6
+        with:
+          toolchain: stable
+          rustflags: ""
+          cache-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          cache-bin: false
+
+      # Windows is a published release target (release.yml builds windows-msvc),
+      # but nothing else in CI compiles for it, so a Windows-only break would only
+      # surface at release time and block shipping the Linux/macOS assets too.
+      # A cheap compile check on PRs catches it pre-merge.
+      - name: Cargo check (Windows MSVC target)
+        run: cargo check --locked --lib --bin hpc-compose
+
   cargo-deny:
     name: Cargo Deny
     runs-on: ubuntu-24.04
@@ -297,7 +351,7 @@ jobs:
           cache-bin: false
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        run: cargo install cargo-deny --locked --version "${CARGO_DENY_VERSION}"
 
       - name: Run cargo-deny
         run: cargo deny check
@@ -477,6 +531,12 @@ jobs:
 
           asset_dir="$PWD/.tmp/homebrew-dist"
           stage_dir="$PWD/.tmp/homebrew-stage"
+          # This builds a synthetic local tap to validate the FORMULA CONTENT
+          # (it installs from a file:// URL), since the release asset is not yet
+          # published at PR time. The documented public command
+          # `brew install NicolasSchuler/hpc-compose/hpc-compose` resolves a
+          # separate tap and should be verified manually on a clean macOS box
+          # after each release.
           tap_name="hpc-compose/local"
           formula_name="hpc-compose"
           asset_path="$asset_dir/hpc-compose-v${version}-${target}.tar.gz"
@@ -529,6 +589,8 @@ jobs:
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@ddc7029b5ba1e37640598eb3580cdbefa9662f46
+        with:
+          tool: cargo-llvm-cov@${{ env.CARGO_LLVM_COV_VERSION }}
 
       - name: Collect coverage data
         run: cargo llvm-cov --workspace --locked --no-report

@@ -26,6 +26,8 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 - [`vllm-uv-worker.yaml`](vllm-uv-worker.yaml)
 - [`llm-curl-workflow.yaml`](llm-curl-workflow.yaml)
 - [`llm-curl-workflow-workdir.yaml`](llm-curl-workflow-workdir.yaml)
+- [`hf-stage-model.yaml`](hf-stage-model.yaml)
+- [`eval-harness.yaml`](eval-harness.yaml)
 - [`jupyter.yaml`](jupyter.yaml)
 
 ## Multi-node training

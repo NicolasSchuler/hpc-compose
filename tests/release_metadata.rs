@@ -181,12 +181,14 @@ fn homebrew_formula_tracks_published_release_or_pending_refresh() {
     let cargo_triplet = parse_version_triplet(&version);
     let formula_triplet = parse_version_triplet(&formula_version);
     let formula_is_current = formula_version == version;
-    let formula_is_previous_patch = formula_triplet.0 == cargo_triplet.0
-        && formula_triplet.1 == cargo_triplet.1
-        && formula_triplet.2 + 1 == cargo_triplet.2;
+    // The formula is refreshed by a PR opened AFTER the release tag is pushed, so
+    // on `main` it legitimately lags the just-bumped Cargo version. Accept any
+    // earlier release (not only patch+1) so a minor/major bump is not wedged; the
+    // URL/asset assertions below still tie the formula to its own declared version.
+    let formula_is_behind = formula_triplet < cargo_triplet;
     assert!(
-        formula_is_current || formula_is_previous_patch,
-        "Homebrew formula version {formula_version} should match Cargo.toml {version} or lag by exactly one patch while release automation opens the checksum-refresh PR"
+        formula_is_current || formula_is_behind,
+        "Homebrew formula version {formula_version} should match Cargo.toml {version} or be an earlier release while the post-tag checksum-refresh PR is pending"
     );
     assert!(
         formula.contains(&format!("/releases/download/v{formula_version}/")),
@@ -258,40 +260,28 @@ fn root_generated_sbatch_artifacts_stay_out_of_the_repo() {
 }
 
 #[test]
-fn coverage_gate_ignores_only_declarative_shells() {
+fn coverage_gate_strict_and_broad_run_in_both_justfile_and_ci() {
     let justfile = fs::read_to_string(repo_root().join("justfile")).expect("read justfile");
-    assert!(
-        justfile.contains(
-            "--ignore-filename-regex '(^|/)commands/mod\\.rs$|(^|/)cli/commands\\.rs$|(^|/)main\\.rs$|(^|/)job/model\\.rs$'"
-        ),
-        "coverage gate should only ignore thin declarative shell files"
-    );
-    for broad_pattern in [
-        "commands/|",
-        "output/mod\\.rs",
-        "watch_ui\\.rs",
-        "term\\.rs",
-        "progress\\.rs",
-        "manpages\\.rs",
-        "cli/|",
-    ] {
-        assert!(
-            !justfile.contains(broad_pattern),
-            "coverage gate should not broadly ignore {broad_pattern}"
-        );
-    }
-
-    // CI runs the same strict whole-crate floor (only the four thin declarative
-    // shells excluded) alongside its broad core-logic gate, so the command/UI
-    // surfaces cannot silently rot in CI. Keep this wired.
     let ci_workflow =
         fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
-    assert!(
-        ci_workflow.contains(
-            "--ignore-filename-regex '(^|/)commands/mod\\.rs$|(^|/)cli/commands\\.rs$|(^|/)main\\.rs$|(^|/)job/model\\.rs$'"
-        ),
-        "ci.yml should enforce the strict whole-crate coverage floor"
-    );
+
+    let strict_floor = "--ignore-filename-regex '(^|/)commands/mod\\.rs$|(^|/)cli/commands\\.rs$|(^|/)main\\.rs$|(^|/)job/model\\.rs$'";
+    let broad_core_gate = "--ignore-filename-regex 'commands/|output/mod\\.rs|watch_ui\\.rs|term\\.rs|progress\\.rs|manpages\\.rs|main\\.rs|cli/|job/model\\.rs'";
+
+    // Both gates must run in CI AND be mirrored by `just release-check`, so a green
+    // `just ci` cannot hide a core-logic coverage regression that only the broad
+    // 92/91/88 gate (CI Coverage job) would catch. CONTRIBUTING promises "the just
+    // recipes mirror the main CI gates"; this keeps that promise honest.
+    for (label, content) in [("justfile", &justfile), ("ci.yml", &ci_workflow)] {
+        assert!(
+            content.contains(strict_floor),
+            "{label} should enforce the strict whole-crate coverage floor (87/87/85)"
+        );
+        assert!(
+            content.contains(broad_core_gate),
+            "{label} should enforce the broad core-logic coverage gate (92/91/88)"
+        );
+    }
 }
 
 #[test]
@@ -507,6 +497,22 @@ fn ci_docs_qa_tools_are_version_pinned() {
         workflow.contains("MARKDOWNLINT_CLI2_VERSION: \"0.14.0\"")
             && workflow.contains("markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"),
         "CI should pin markdownlint-cli2 so markdown lint remains reproducible"
+    );
+}
+
+#[test]
+fn ci_gating_cargo_subcommands_are_version_pinned() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    assert!(
+        workflow.contains("CARGO_DENY_VERSION:")
+            && workflow.contains("cargo install cargo-deny --locked --version"),
+        "CI should pin cargo-deny so the advisory/license gate stays reproducible"
+    );
+    assert!(
+        workflow.contains("CARGO_LLVM_COV_VERSION:")
+            && workflow.contains("cargo-llvm-cov@${{ env.CARGO_LLVM_COV_VERSION }}"),
+        "CI should pin cargo-llvm-cov so coverage region/function counts stay reproducible"
     );
 }
 

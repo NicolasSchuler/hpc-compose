@@ -6,6 +6,8 @@ PA11Y_CI_VERSION := "4.0.1"
 ACTIONLINT_VERSION := "1.7.12"
 TYPOS_VERSION := "1.28.4"
 MARKDOWNLINT_CLI2_VERSION := "0.14.0"
+CARGO_DENY_VERSION := "0.19.9"
+CARGO_LLVM_COV_VERSION := "0.8.7"
 
 _require-tools *tools:
     @missing=0; for tool in {{tools}}; do if ! command -v "$tool" >/dev/null 2>&1; then echo "missing required tool: $tool" >&2; missing=1; fi; done; exit "$missing"
@@ -19,6 +21,27 @@ bootstrap-docs-tools: (_require-tools "cargo" "npm")
     cargo install lychee --locked --version "{{LYCHEE_VERSION}}"
     cargo install typos-cli --locked --version "{{TYPOS_VERSION}}"
     npm install --global "pa11y-ci@{{PA11Y_CI_VERSION}}" "markdownlint-cli2@{{MARKDOWNLINT_CLI2_VERSION}}"
+
+# Install every cargo/npm-installable tool `just ci` needs: the docs tools plus
+# the merge-gating cargo subcommands (cargo-deny, cargo-llvm-cov). Prints hints
+# for the two system tools you install via your package manager.
+bootstrap: bootstrap-docs-tools
+    cargo install cargo-deny --locked --version "{{CARGO_DENY_VERSION}}"
+    cargo install cargo-llvm-cov --locked --version "{{CARGO_LLVM_COV_VERSION}}"
+    @echo "Next, install actionlint and shellcheck via your package manager:"
+    @echo "  macOS:  brew install actionlint shellcheck"
+    @echo "  Linux:  see https://github.com/rhysd/actionlint and https://www.shellcheck.net"
+
+# Bump the project version in Cargo.toml and CITATION.cff and regenerate man
+# pages. Finish by hand (release-metadata guards check these too): update the
+# README citation version field and add a CHANGELOG section for the new version.
+# Usage: just bump-version 0.1.51
+bump-version VERSION:
+    sed -i.bak -E 's/^version = "[0-9]+\.[0-9]+\.[0-9]+"$/version = "{{VERSION}}"/' Cargo.toml && rm -f Cargo.toml.bak
+    sed -i.bak -E 's/^version: "[0-9]+\.[0-9]+\.[0-9]+"$/version: "{{VERSION}}"/' CITATION.cff && rm -f CITATION.cff.bak
+    cargo run --locked --features manpage-bin --bin gen-manpages
+    @echo "Bumped Cargo.toml + CITATION.cff to {{VERSION}} and regenerated man pages."
+    @echo "Now update the README citation version field and add a CHANGELOG entry for {{VERSION}}."
 
 clean:
     rm -rf target .tmp coverage htmlcov tarpaulin-report.html lcov.info *.profraw *.profdata
@@ -95,6 +118,10 @@ release-check: _require-cargo-subcommands
     cargo test --locked --test release_metadata
     cargo deny check
     cargo llvm-cov --workspace --locked --no-report
+    # Broad core-logic gate (mirrors the CI Coverage job): excludes presentation
+    # surfaces so a regression in core planner/runtime/job logic trips here first.
+    cargo llvm-cov report --json --summary-only --locked --ignore-filename-regex 'commands/|output/mod\.rs|watch_ui\.rs|term\.rs|progress\.rs|manpages\.rs|main\.rs|cli/|job/model\.rs' --fail-under-lines 92 --fail-under-regions 91 --fail-under-functions 88
+    # Strict whole-crate floor (only the four thin declarative shells excluded).
     cargo llvm-cov report --json --summary-only --locked --ignore-filename-regex '(^|/)commands/mod\.rs$|(^|/)cli/commands\.rs$|(^|/)main\.rs$|(^|/)job/model\.rs$' --fail-under-lines 87 --fail-under-regions 87 --fail-under-functions 85
 
 # `release-check` runs `cargo llvm-cov`, which leaves a full duplicate workspace build in
