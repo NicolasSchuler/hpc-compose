@@ -17,6 +17,9 @@ Compose specification file to read; if omitted, use the active context compose f
 \fB--job\-id\fR \fIJOB_ID\fR
 Tracked Slurm job id to inspect instead of the latest recorded submission.
 .TP
+\fB--remote\fR \fIHOST\fR
+Run this command on the login node's staged checkout from a prior `up \-\-remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config).
+.TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.
 .TP

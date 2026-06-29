@@ -1293,6 +1293,15 @@ pub enum Commands {
             help = "Tracked Slurm job id to inspect instead of the latest recorded submission"
         )]
         job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "HOST",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "",
+            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
+        )]
+        remote: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
@@ -1688,6 +1697,15 @@ pub enum Commands {
             help = "Tracked Slurm job id to inspect instead of the latest recorded submission"
         )]
         job_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "HOST",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "",
+            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
+        )]
+        remote: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
@@ -1980,6 +1998,11 @@ pub enum Commands {
         scancel_bin: String,
         #[arg(long, help = "Also purge tracked cached image artifacts for this job")]
         purge_cache: bool,
+        #[arg(
+            long,
+            help = "Skip auto-exporting tracked artifacts to x-slurm.artifacts.export_dir before reaping runtime state"
+        )]
+        no_export: bool,
         #[arg(long, help = "Confirm this destructive action without prompting")]
         yes: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
@@ -2015,6 +2038,11 @@ pub enum Commands {
         scancel_bin: String,
         #[arg(long, help = "Also purge tracked cached image artifacts for this job")]
         purge_cache: bool,
+        #[arg(
+            long,
+            help = "Skip auto-exporting tracked artifacts to x-slurm.artifacts.export_dir before reaping runtime state"
+        )]
+        no_export: bool,
         #[arg(long, help = "Confirm this destructive action without prompting")]
         yes: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]

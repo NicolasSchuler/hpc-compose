@@ -564,15 +564,33 @@ fn scan_inventory_recursive(
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name == ".git" || name == "target" {
-            continue;
-        }
         if name == tracked_paths::METADATA_DIR_NAME {
             jobs.extend(build_inventory_entries_for_metadata_root(
                 &path,
                 include_disk_usage,
                 now,
             )?);
+            continue;
+        }
+        // Prune directories that never hold tracked job metadata so the scan stays
+        // bounded on large working trees. Do not skip every hidden directory:
+        // gitignored work dirs such as `.tmp/...` can contain compose-local
+        // `.hpc-compose` metadata from real smoke runs.
+        if matches!(
+            name.as_ref(),
+            ".git"
+                | ".hg"
+                | ".svn"
+                | ".mypy_cache"
+                | ".pytest_cache"
+                | ".ruff_cache"
+                | ".tox"
+                | ".venv"
+                | "target"
+                | "node_modules"
+                | "__pycache__"
+                | "venv"
+        ) {
             continue;
         }
         scan_inventory_recursive(&path, include_disk_usage, now, jobs)?;

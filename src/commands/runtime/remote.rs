@@ -309,8 +309,8 @@ fn run_delegate_capturing_job_id(
     Ok((status, job_id))
 }
 
-/// Rewrites a local follow-up argv (`stats`/`logs`/`score`/`pull` plus its flags)
-/// for delegation to the remote staged checkout: drops the `--remote` flag,
+/// Rewrites a local follow-up argv (`status`/`ps`/`stats`/`logs`/`score`/`pull`
+/// plus its flags) for delegation to the remote staged checkout: drops the `--remote` flag,
 /// rewrites local compose/settings paths to stage-relative paths, and forwards
 /// every other argument — the subcommand name, `--job-id`, `--format`,
 /// `--follow`, … — verbatim, so new flags work without touching this code.
@@ -366,8 +366,8 @@ fn rewrite_followup_args(
     out
 }
 
-/// Delegates a read-only follow-up command (`stats`/`logs`/`score`/`pull`) to the
-/// login node's staged checkout, reusing the same host/login-user/staging context
+/// Delegates a read-only follow-up command (`status`/`ps`/`stats`/`logs`/`score`/`pull`)
+/// to the login node's staged checkout, reusing the same host/login-user/staging context
 /// as `up --remote`. The project is assumed already staged by a prior
 /// `up --remote`, so this does **not** rsync (which would clobber the remote
 /// tracking state with the laptop's); it runs the command in the existing stage
@@ -1153,7 +1153,8 @@ fn remote_followup_hints(host: &str, compose_display: &str, job_id: Option<&str>
         format!("  hpc-compose {cmd:<6} --remote={host} -f {compose_display} --job-id {target}")
     };
     format!(
-        "Next (run these from your laptop):\n{}\n{}\n{}\n{}",
+        "Next (run these from your laptop):\n{}\n{}\n{}\n{}\n{}",
+        line("status"),
         line("stats"),
         line("logs"),
         line("score"),
@@ -1652,8 +1653,8 @@ mod tests {
         assert!(with_id.contains(
             "hpc-compose stats  --remote=vy3326@haicore.scc.kit.edu -f hpc/uv.hpc-compose.yaml --job-id 1653779"
         ));
-        // All four follow-up commands are advertised.
-        for cmd in ["stats", "logs", "score", "pull"] {
+        // All five follow-up commands are advertised.
+        for cmd in ["status", "stats", "logs", "score", "pull"] {
             assert!(
                 with_id.contains(&format!("hpc-compose {cmd}")),
                 "missing {cmd} hint"

@@ -1836,7 +1836,14 @@ fn clip_ascii(value: &str, width: usize) -> String {
     if width <= 3 {
         return ".".repeat(width);
     }
-    format!("{}...", &value[..width - 3])
+    // `width - 3` is a byte budget that may land inside a multi-byte character
+    // (service names and tips can be non-ASCII); walk back to a char boundary so
+    // the slice never panics.
+    let mut end = width - 3;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &value[..end])
 }
 
 fn score_confidence_label(confidence: hpc_compose::job::EfficiencyScoreConfidence) -> &'static str {
@@ -3401,9 +3408,14 @@ pub(crate) fn print_interpolation_vars(
 }
 
 pub(crate) fn extract_job_id(text: &str) -> Option<&str> {
-    text.split_whitespace()
-        .rev()
-        .find(|token| token.chars().all(|ch| ch.is_ascii_digit()))
+    const MARKER: &str = "Submitted batch job ";
+    let rest = &text[text.find(MARKER)? + MARKER.len()..];
+    let len = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .map(char::len_utf8)
+        .sum::<usize>();
+    (len > 0).then(|| &rest[..len])
 }
 
 pub(crate) fn print_prune_result(cache_dir: &Path, removed: &[PathBuf]) {

@@ -741,7 +741,26 @@ fn format_sweep_variables(vars: &BTreeMap<String, String>) -> String {
         .join(" ")
 }
 
+/// Compiles the sweep objective's `log_pattern` once so callers can reuse the
+/// regex across all trials (and poll iterations) instead of recompiling the same
+/// immutable pattern per trial.
+fn compile_objective_log_regex(manifest: &SweepManifest) -> Result<Option<regex::Regex>> {
+    let Some(pattern) = manifest
+        .objective
+        .as_ref()
+        .and_then(|objective| objective.log_pattern.as_ref())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(regex::Regex::new(pattern).with_context(|| {
+        format!("sweep.objective.log_pattern '{pattern}' is not a valid regex")
+    })?))
+}
+
 /// Parses one trial's objective value from its tracked log or artifacts.
+///
+/// `log_regex` is the pre-compiled `objective.log_pattern` (see
+/// [`compile_objective_log_regex`]); pass `None` when no log pattern is set.
 ///
 /// Returns `Ok(Some(value))` on success, `Ok(None)` when the trial is not yet
 /// terminal or has no parseable objective, and `Err` only on unexpected IO.
@@ -749,6 +768,7 @@ fn parse_trial_objective(
     trial: &SweepManifestTrial,
     manifest: &SweepManifest,
     options: &SchedulerOptions,
+    log_regex: Option<&regex::Regex>,
 ) -> Result<Option<f64>> {
     let Some(job_id) = trial.job_id.as_deref() else {
         return Ok(None);
@@ -761,10 +781,10 @@ fn parse_trial_objective(
     if !snapshot.scheduler.terminal {
         return Ok(None);
     }
-    if let Some(pattern) = &objective.log_pattern {
-        let re = regex::Regex::new(pattern).with_context(|| {
-            format!("sweep.objective.log_pattern '{pattern}' is not a valid regex")
-        })?;
+    if objective.log_pattern.is_some() {
+        let Some(re) = log_regex else {
+            return Ok(None);
+        };
         let group = objective.group as usize;
         for service in &snapshot.services {
             let Some(log_path) = &service.log_path else {
@@ -1134,14 +1154,20 @@ pub(crate) fn sweep_observe(
             .unwrap_or(hpc_compose::spec::ObjectiveDirection::Minimize);
 
         // Pass 1 (immutable): compute each trial's status and parsed objective.
+        // Compile the objective regex once per poll, not once per trial.
+        let objective_log_regex = compile_objective_log_regex(&manifest);
         let mut results: Vec<(String, Option<f64>, Option<String>)> = Vec::new();
         for trial in &manifest.trials {
             let status = status_for_sweep_trial(&manifest, trial, &scheduler_options);
             let status_label = status.status.clone();
-            let (parsed, error) = match parse_trial_objective(trial, &manifest, &scheduler_options)
-            {
-                Ok(Some(value)) => (Some(value), None),
-                Ok(None) => (None, None),
+            let (parsed, error) = match objective_log_regex.as_ref() {
+                Ok(re) => {
+                    match parse_trial_objective(trial, &manifest, &scheduler_options, re.as_ref()) {
+                        Ok(Some(value)) => (Some(value), None),
+                        Ok(None) => (None, None),
+                        Err(err) => (None, Some(format!("{err:#}"))),
+                    }
+                }
                 Err(err) => (None, Some(format!("{err:#}"))),
             };
             results.push((status_label, parsed, error));
@@ -1693,14 +1719,18 @@ pub(crate) fn sweep_results(
     // Track parsed objectives per trial so best selection can rank on the
     // per-config GROUP MEAN (not the single luckiest replicate).
     let mut parsed_by_trial: BTreeMap<String, Option<f64>> = BTreeMap::new();
+    // Compile the objective regex once, not once per trial.
+    let objective_log_regex = compile_objective_log_regex(&manifest);
     for trial in &manifest.trials {
         let status = status_for_sweep_trial(&manifest, trial, &scheduler);
-        let (parsed, objective, objective_error) =
-            match parse_trial_objective(trial, &manifest, &scheduler) {
+        let (parsed, objective, objective_error) = match objective_log_regex.as_ref() {
+            Ok(re) => match parse_trial_objective(trial, &manifest, &scheduler, re.as_ref()) {
                 Ok(Some(value)) => (Some(value), Some(value.to_string()), None),
                 Ok(None) => (None, None, None),
                 Err(err) => (None, None, Some(format!("{err:#}"))),
-            };
+            },
+            Err(err) => (None, None, Some(format!("{err:#}"))),
+        };
         parsed_by_trial.insert(trial.trial_id.clone(), parsed);
         let (score, energy_kwh) = if want_score || want_energy {
             match trial_efficiency_report(&context, &manifest, trial, &score_options) {

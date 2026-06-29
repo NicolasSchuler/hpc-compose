@@ -1068,6 +1068,24 @@ fn print_cluster_profile_summary(profile: &ClusterProfile) {
     }
 }
 
+/// Builds a "service not found" message that lists the available services and a
+/// nearest-match suggestion, reusing [`crate::suggest::nearest_default`].
+fn service_not_found_message(plan: &RuntimePlan, name: &str, location: &str) -> String {
+    let available: Vec<&str> = plan
+        .ordered_services
+        .iter()
+        .map(|service| service.name.as_str())
+        .collect();
+    let mut message = format!("service '{name}' was not found in {location}");
+    if let Some(suggestion) = crate::suggest::nearest_default(name, &available) {
+        message.push_str(&format!("; did you mean '{suggestion}'?"));
+    }
+    if !available.is_empty() {
+        message.push_str(&format!(" (available: {})", available.join(", ")));
+    }
+    message
+}
+
 fn select_mpi_service<'a>(
     plan: &'a RuntimePlan,
     requested: Option<&str>,
@@ -1077,7 +1095,7 @@ fn select_mpi_service<'a>(
             .ordered_services
             .iter()
             .find(|service| service.name == name)
-            .with_context(|| format!("service '{name}' was not found in the compose plan"))?;
+            .with_context(|| service_not_found_message(plan, name, "the compose plan"))?;
         if service.slurm.mpi.is_none() {
             bail!("service '{name}' does not define x-slurm.mpi");
         }
@@ -1112,7 +1130,7 @@ fn select_readiness_service<'a>(
             .ordered_services
             .iter()
             .find(|service| service.name == name)
-            .with_context(|| format!("service '{name}' was not found in the compose plan"))?;
+            .with_context(|| service_not_found_message(plan, name, "the compose plan"))?;
         if service.readiness.is_none() {
             bail!("service '{name}' does not define readiness");
         }
@@ -1175,7 +1193,7 @@ fn build_smoke_plan(
         .ordered_services
         .iter()
         .find(|service| service.name == service_name)
-        .with_context(|| format!("service '{service_name}' was not found in the runtime plan"))?;
+        .with_context(|| service_not_found_message(plan, service_name, "the runtime plan"))?;
     let mut smoke_service = service.clone();
     smoke_service.execution = ExecutionSpec::Shell(shell);
     smoke_service.working_dir = None;

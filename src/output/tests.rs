@@ -278,6 +278,35 @@ fn sanitize_and_extract_job_id_work() {
 }
 
 #[test]
+fn extract_job_id_handles_real_world_sbatch_shapes() {
+    // Embedded in multi-line output (site module banners, etc.).
+    assert_eq!(
+        extract_job_id("Loading site module\nSubmitted batch job 67890\n"),
+        Some("67890")
+    );
+    // A trailing parenthetical does not derail the match (its tokens aren't all-digit).
+    assert_eq!(
+        extract_job_id("Submitted batch job 42 (cluster=gpu)"),
+        Some("42")
+    );
+    // Leading banner numbers are ignored because only the Slurm submission marker
+    // starts the id.
+    assert_eq!(
+        extract_job_id("Reservation 7 active\nSubmitted batch job 13579"),
+        Some("13579")
+    );
+    // No numeric token at all.
+    assert_eq!(extract_job_id(""), None);
+    assert_eq!(extract_job_id("   \n  "), None);
+    assert_eq!(extract_job_id("no numeric token here"), None);
+    // Trailing numeric tokens after the submission line do not override the id.
+    assert_eq!(
+        extract_job_id("Submitted batch job 12345\nnodes 8"),
+        Some("12345")
+    );
+}
+
+#[test]
 fn finish_watch_requires_a_terminal_scheduler_result() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache = safe_cache_dir();
@@ -1546,6 +1575,7 @@ fn run_command_covers_success_and_error_arms() {
         job_id: Some("12345".into()),
         scancel_bin: scancel_ok.display().to_string(),
         purge_cache: false,
+        no_export: false,
         yes: false,
         format: None,
     })
@@ -1555,6 +1585,7 @@ fn run_command_covers_success_and_error_arms() {
         job_id: Some("12345".into()),
         scancel_bin: scancel_fail.display().to_string(),
         purge_cache: false,
+        no_export: false,
         yes: false,
         format: None,
     })
@@ -1749,6 +1780,9 @@ fn clip_ascii_truncates_with_ellipsis_and_handles_narrow_widths() {
     assert_eq!(clip_ascii("hello world", 8), "hello...");
     // Widths too small for an ellipsis collapse to dots.
     assert_eq!(clip_ascii("hello", 2), "..");
+    // Multi-byte content: a byte budget that lands inside a char ('é' is 2 bytes
+    // at width 5 -> budget 2) must walk back to a boundary instead of panicking.
+    assert_eq!(clip_ascii("sérvice", 5), "s...");
 }
 
 #[test]

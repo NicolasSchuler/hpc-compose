@@ -6,9 +6,14 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
 
 ## Safety contract (agents MUST honor)
 
-- Safe anywhere — laptop, workstation, or login node, with no scheduler contact and no quota used:
-  `new`, `validate`, `plan`, `plan --show-script`, `inspect`, `render`, `config`,
-  and the read-only tracked-job commands `status`, `ps`, `logs`, `stats`, `artifacts`, `diff`.
+- Safe to run unprompted — never submits, cancels, allocates, or consumes quota:
+  - Purely static (no scheduler contact at all): `new`, `validate`, `plan`,
+    `plan --show-script`, `inspect`, `render`, `config`.
+  - Read-only scheduler queries (run `squeue`/`sacct` lookups but change nothing):
+    `status`, `ps`, `stats`, `diff`, `logs`. Do not poll these in tight loops on a
+    rate-limited login node.
+  - `artifacts` makes no scheduler contact but writes exported files to the local
+    `export_dir`.
 - Requires EXPLICIT user approval — submits or cancels Slurm jobs, opens an allocation, or consumes quota:
   `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel`.
 - Never submit, allocate, or cancel a Slurm job unprompted. Author the spec, then verify with the safe

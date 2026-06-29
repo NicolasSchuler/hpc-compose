@@ -50,7 +50,9 @@ Explicit settings file path; defaults to upward search for .hpc\-compose/setting
 \fB-h\fR, \fB--help\fR
 Print help (see a summary with '\-h').
 .SH EXAMPLES
-.PP
-No examples are documented for this command.
+.nf
+hpc\-compose sweep stop \-f train.yaml
+hpc\-compose sweep stop \-f train.yaml \-\-yes \-\-reason 'objective threshold met'
+.fi
 .SH SEE ALSO
 hpc\-compose(1), hpc\-compose\-sweep(1), hpc\-compose\-sweep\-list(1), hpc\-compose\-sweep\-observe(1), hpc\-compose\-sweep\-results(1), hpc\-compose\-sweep\-status(1), hpc\-compose\-sweep\-submit(1)

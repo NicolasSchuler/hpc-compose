@@ -69,6 +69,10 @@ const EXIT_STATUS_SECTION: &[(&str, &str)] = &[
         "1",
         "The command failed because validation, local I/O, or an external tool reported an error.",
     ),
+    (
+        "2-255",
+        "For direct-execution commands (run, alloc, shell, notebook, reach) the exit status of the executed child process is propagated verbatim, so scripts and CI can distinguish, for example, a test runner's exit code 2 from 5.",
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,7 +203,16 @@ fn render_page(command: &Command, path: &[String], root: &Command) -> String {
     let title = stem.to_ascii_uppercase();
     let summary = command_summary(command);
     let description = command_description(command);
-    let examples = examples_for_path(&path.iter().map(String::as_str).collect::<Vec<_>>());
+    // Prefer the curated examples list; otherwise fall back to the `Examples:`
+    // block in the command's clap after-help, so commands that ship examples only
+    // in `--help` still get them in the man page instead of "No examples are
+    // documented" (single source of truth, no per-command duplication).
+    let curated = examples_for_path(&path.iter().map(String::as_str).collect::<Vec<_>>());
+    let examples: Vec<String> = if curated.is_empty() {
+        examples_from_after_help(command)
+    } else {
+        curated.iter().map(|line| (*line).to_string()).collect()
+    };
     let subcommands = visible_subcommands(command);
     let options = visible_arguments(command);
     let related = related_pages(path, command, root);
@@ -270,13 +283,44 @@ fn render_page(command: &Command, path: &[String], root: &Command) -> String {
         out.push_str(".PP\n");
         out.push_str("No examples are documented for this command.\n");
     } else {
-        write_literal_block(&mut out, examples);
+        write_literal_block(&mut out, &examples);
     }
 
     out.push_str(".SH SEE ALSO\n");
     out.push_str(&format!("{}\n", escape_roff(&related.join(", "))));
 
     out
+}
+
+/// Extracts the `Examples:` block from a command's clap after-help text so the
+/// man page reuses the same examples shown in `--help` (single source of truth).
+/// Returns the indented command lines under an `Examples:` heading; empty when
+/// the command sets no such block.
+fn examples_from_after_help(command: &Command) -> Vec<String> {
+    let Some(after_help) = command.get_after_help() else {
+        return Vec::new();
+    };
+    let text = after_help.to_string();
+    let mut in_examples = false;
+    let mut examples = Vec::new();
+    for line in text.lines() {
+        if line.trim() == "Examples:" {
+            in_examples = true;
+            continue;
+        }
+        if !in_examples {
+            continue;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Examples are indented under the heading; a non-indented line ends them.
+        if !line.starts_with(char::is_whitespace) {
+            break;
+        }
+        examples.push(line.trim().to_string());
+    }
+    examples
 }
 
 fn write_definition_list(out: &mut String, items: &[(&str, &str)]) {
@@ -723,5 +767,20 @@ mod tests {
         assert!(page.contains("No examples are documented for this command."));
         assert!(page.contains(".SH SEE ALSO"));
         assert!(page.contains(r"hpc\-compose(1)"));
+    }
+
+    #[test]
+    fn render_page_derives_examples_from_after_help_block() {
+        // Commands that ship examples only in their clap after-help (e.g. diff,
+        // test, weather) must still document them in the man page rather than
+        // rendering "No examples are documented".
+        let command = Command::new("widget")
+            .after_help("Examples:\n  hpc-compose widget --foo\n  hpc-compose widget --bar");
+        let path = vec!["widget".to_string()];
+        let page = render_page(&command, &path, &command);
+
+        assert!(!page.contains("No examples are documented"));
+        assert!(page.contains(r"hpc\-compose widget \-\-foo"));
+        assert!(page.contains(r"hpc\-compose widget \-\-bar"));
     }
 }

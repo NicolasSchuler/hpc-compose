@@ -365,10 +365,20 @@ pub(crate) fn selected_service_logs(
     service: Option<&str>,
 ) -> Result<Vec<(String, PathBuf)>> {
     if let Some(service) = service {
-        let path = record.service_logs.get(service).cloned().context(format!(
-            "service '{}' does not exist in tracked job {}",
-            service, record.job_id
-        ))?;
+        let path = record.service_logs.get(service).cloned().with_context(|| {
+            let available: Vec<&str> = record.service_logs.keys().map(String::as_str).collect();
+            let mut message = format!(
+                "service '{service}' does not exist in tracked job {}",
+                record.job_id
+            );
+            if let Some(suggestion) = crate::suggest::nearest_default(service, &available) {
+                message.push_str(&format!("; did you mean '{suggestion}'?"));
+            }
+            if !available.is_empty() {
+                message.push_str(&format!(" (available: {})", available.join(", ")));
+            }
+            message
+        })?;
         return Ok(vec![(service.to_string(), path)]);
     }
     let mut selected = Vec::with_capacity(record.service_logs.len());

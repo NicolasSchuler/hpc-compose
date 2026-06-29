@@ -268,6 +268,8 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | `--huggingface-cli-bin` | `huggingface-cli` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare` |
 | `--tmux-bin` | `tmux` | `tmux` |
 
+> **Note:** `doctor` accepts the `--*-bin` overrides only through its deprecated top-level flag form, not the recommended `doctor <subcommand>` forms (`doctor cluster-report`, `doctor readiness`, `doctor mpi-smoke`, `doctor fabric-smoke`), which reject them with an "unexpected argument" error.
+
 Settings profiles can also configure these via `[defaults.binaries]` or `[profiles.<name>.binaries]` (see [Runbook](runbook.md)).
 
 ### `germinate` Canary Runs
@@ -565,7 +567,7 @@ hpc-compose status -f compose.yaml --format json
 | `rendezvous register NAME` | Manually register a provider record | Intended for debugging and custom workflows; declarative specs usually register providers. |
 | `rendezvous prune` | Remove expired provider records | Cleans stale latest and historical rendezvous JSON files. |
 
-Add `--remote[=<HOST>]` to `stats`, `score`, `logs`, or `pull` to run that command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value it uses the configured `login_host`; pass `user@host` to override.
+Add `--remote[=<HOST>]` to `status`, `ps`, `stats`, `score`, `logs`, or `pull` to run that command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value it uses the configured `login_host`; pass `user@host` to override.
 
 ```bash
 hpc-compose debug -f compose.yaml
