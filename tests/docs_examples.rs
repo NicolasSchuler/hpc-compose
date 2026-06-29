@@ -60,6 +60,18 @@ fn examples_guide_mentions_every_repository_yaml_example() {
 }
 
 #[test]
+fn examples_readme_links_every_repository_yaml_example() {
+    let readme = fs::read_to_string(repo_root().join("examples/README.md"))
+        .expect("read examples/README.md");
+    for file in example_yaml_files() {
+        assert!(
+            readme.contains(&format!("({file})")),
+            "examples/README.md should link examples/{file} (the hand-maintained list drifted from the on-disk specs)"
+        );
+    }
+}
+
+#[test]
 fn example_registry_covers_repository_examples_and_templates() {
     let registry = examples();
     for file in example_yaml_files() {

@@ -355,6 +355,19 @@ inctr hpc-compose clean -f "$hello_rel" --all --dry-run >/dev/null 2>&1 \
   || fail "clean --all --dry-run failed"
 pass "experiment/replay/debug/checkpoints/jobs/clean render over a real run"
 
+# --- 3b'. metrics-probe: exercise the real perf_event_open / NVML probe ------
+# The unit suite only drives mocks; this runs the genuine SYS_perf_event_open
+# syscall and NVML dlopen on the real kernel, so an ABI/attr-size regression in
+# the highest-risk unsafe code is caught here (degraded-but-not-crashed is fine).
+note "metrics-probe (real capability probe)"
+probe_json="$(inctr hpc-compose metrics-probe --duration-seconds 1 --format json 2>&1)" \
+  || fail "metrics-probe exited non-zero: $probe_json"
+printf '%s' "$probe_json" | grep -q '"perf_event_open"' \
+  || fail "metrics-probe JSON missing the perf_event_open capability block"
+printf '%s' "$probe_json" | grep -q '"schema_version"' \
+  || fail "metrics-probe JSON missing schema_version"
+pass "metrics-probe runs the real capability probe and emits structured JSON"
+
 # --- 3c. dry-run: render the real sbatch, submit nothing --------------------
 # The dev cluster is the safe place to preview a run: `up --dry-run` renders the
 # exact sbatch it would submit and stops -- nothing reaches the scheduler. Prove

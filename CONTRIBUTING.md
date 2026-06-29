@@ -13,7 +13,7 @@ cargo build
 Useful local commands:
 
 ```bash
-just bootstrap-docs-tools
+just bootstrap
 just check
 just docs-check
 just examples-check
@@ -21,7 +21,7 @@ just release-check
 just ci
 ```
 
-The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`actionlint`, `mdbook`, `lychee`, `pa11y-ci`, `typos`, `markdownlint-cli2`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov`) to be installed locally. `just bootstrap-docs-tools` installs the pinned docs tools (`mdbook`, `lychee`, `typos`, `pa11y-ci`, and `markdownlint-cli2`); install `actionlint`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov` through your platform package manager or Cargo as appropriate.
+The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`actionlint`, `mdbook`, `lychee`, `pa11y-ci`, `typos`, `markdownlint-cli2`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov`) to be installed locally. `just bootstrap` installs everything cargo/npm-installable — the pinned docs tools (via `just bootstrap-docs-tools`: `mdbook`, `lychee`, `typos`, `pa11y-ci`, `markdownlint-cli2`) plus the pinned `cargo-deny` and `cargo-llvm-cov` — and prints package-manager hints for `actionlint` and `shellcheck`, the only tools you install through your platform package manager.
 
 Quality gates:
 

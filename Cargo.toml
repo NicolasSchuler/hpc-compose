@@ -30,6 +30,9 @@ required-features = ["manpage-bin"]
 anyhow = "1.0.100"
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4"
+# Exact pin: comfy-table's rendered table layout can shift across releases and is
+# asserted by the output tests, so bump deliberately and re-check those tests.
+# (Cargo.lock pins it regardless; the exact requirement just makes intent explicit.)
 comfy-table = "=7.2.2"
 crossterm = "0.29"
 flate2 = "1.1.5"
@@ -55,6 +58,10 @@ tempfile = "3.23.0"
 [profile.release]
 opt-level = "s"
 strip = "symbols"
+# Thin LTO: a low-risk win for both binary size and the compute-bound paths
+# (sha2 source hashing, flate2/tar artifact export) without the build-time cost
+# of full LTO. Keep opt-level = "s" so the size goal is preserved.
+lto = "thin"
 
 [package.metadata.deb]
 maintainer = "Nicolas Schuler"
