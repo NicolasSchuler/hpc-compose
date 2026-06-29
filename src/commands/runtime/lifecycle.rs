@@ -1,9 +1,45 @@
 use super::*;
 
+/// Exports tracked artifacts to the configured `export_dir` before teardown reaps
+/// the runtime payload, returning the export directory when an export ran. No-ops
+/// when `--no-export` is set, no record was found, export is not configured, or
+/// the teardown manifest is absent (nothing collected yet). Failing to export is
+/// an error so the destructive reap does not silently discard results — the user
+/// can retry or pass `--no-export`.
+fn maybe_auto_export_artifacts(
+    record: Option<&SubmissionRecord>,
+    no_export: bool,
+) -> Result<Option<std::path::PathBuf>> {
+    if no_export {
+        return Ok(None);
+    }
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    if record.artifact_export_dir.is_none()
+        || !crate::job::artifact_manifest_path_for_record(record).exists()
+    {
+        return Ok(None);
+    }
+    let report = export_artifacts(
+        &record.compose_file,
+        Some(&record.job_id),
+        &ArtifactExportOptions::default(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to auto-export artifacts for job {} before teardown; re-run `hpc-compose artifacts` or pass --no-export to tear down without exporting",
+            record.job_id
+        )
+    })?;
+    Ok(Some(report.export_dir))
+}
+
 pub(crate) fn cancel(
     context: ResolvedContext,
     job_id: Option<String>,
     purge_cache: bool,
+    no_export: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let record = resolve_tracked_record(&context, job_id.as_deref())?;
@@ -17,6 +53,17 @@ pub(crate) fn cancel(
     } else {
         Vec::new()
     };
+
+    // Export tracked artifacts before remove_submission_record (below) reaps the
+    // runtime root and its collected payload. Without this, a job with
+    // x-slurm.artifacts.export_dir configured silently loses its results if the
+    // user forgets to run `hpc-compose artifacts` first. --no-export opts out.
+    if let Some(export_dir) = maybe_auto_export_artifacts(record.as_ref(), no_export)? {
+        eprintln!(
+            "exported tracked artifacts to {} before teardown (pass --no-export to skip)",
+            export_dir.display()
+        );
+    }
 
     if record
         .as_ref()

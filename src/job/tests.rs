@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 
 use super::logs::LogCursor;
-use super::runtime_state::ServiceRuntimeStateFile;
+use super::runtime_state::{ServiceRuntimeStateFile, load_runtime_state};
 use super::scheduler::{
     build_batch_log_status, is_terminal_state, is_transitional_local_only,
     reconcile_scheduler_status, stats_unavailable_reason, unix_timestamp_now,
@@ -107,6 +107,56 @@ fn runtime_root_override_is_persisted_and_resolved() {
             .service_logs
             .values()
             .all(|path| path.starts_with(submit_dir.join("shared/runs/12345")))
+    );
+}
+
+#[test]
+fn runtime_root_override_is_honored_by_state_metrics_and_artifact_readers() {
+    // Regression: status/stats/score/artifacts readers used to rebuild the
+    // default `.hpc-compose/<job_id>` root, silently dropping all runtime
+    // state, metrics, and artifacts for jobs that set x-slurm.runtime_root.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let submit_dir = tmpdir.path();
+
+    let mut plan = runtime_plan(submit_dir);
+    plan.slurm.runtime_root = Some("shared/runs".into());
+    let record = build_submission_record(
+        &submit_dir.join("compose.yaml"),
+        submit_dir,
+        &submit_dir.join("job.sbatch"),
+        &plan,
+        "12345",
+    )
+    .expect("override record");
+
+    let override_root = submit_dir.join("shared/runs/12345");
+    let default_root = submit_dir.join(".hpc-compose/12345");
+
+    // Metrics + artifact dirs (and the manifest/payload paths derived from them)
+    // must resolve under the override root, never the default root.
+    assert_eq!(
+        metrics_dir_for_record(&record),
+        override_root.join("metrics")
+    );
+    assert_eq!(
+        artifacts_dir_for_record(&record),
+        override_root.join("artifacts")
+    );
+    assert!(artifact_manifest_path_for_record(&record).starts_with(&override_root));
+    assert!(artifact_payload_dir_for_record(&record).starts_with(&override_root));
+    assert!(!metrics_dir_for_record(&record).starts_with(&default_root));
+    assert!(!artifacts_dir_for_record(&record).starts_with(&default_root));
+
+    // A runtime-state file written under the override root must be read back by
+    // load_runtime_state (every field defaults, so an empty object suffices);
+    // the pre-fix reader looked under the default root and returned None.
+    let state_path = state_path_for_record(&record);
+    assert!(state_path.starts_with(&override_root));
+    fs::create_dir_all(state_path.parent().expect("state parent")).expect("mkdir state");
+    fs::write(&state_path, "{}").expect("write state");
+    assert!(
+        load_runtime_state(&record).is_some(),
+        "load_runtime_state must read state.json under the runtime_root override"
     );
 }
 
@@ -1996,6 +2046,34 @@ fn scan_job_inventory_recovers_latest_when_pointer_is_missing() {
         .expect("older entry");
     assert!(newer_entry.is_latest);
     assert!(!older_entry.is_latest);
+}
+
+#[test]
+fn scan_job_inventory_descends_into_hidden_work_dirs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let project_dir = tmpdir.path().join(".tmp/devcluster-e2e/specs");
+    fs::create_dir_all(&project_dir).expect("project dir");
+    let compose_path = project_dir.join("hello.yaml");
+    fs::write(&compose_path, "").expect("write compose");
+    let plan = runtime_plan(&project_dir);
+
+    let mut record = build_submission_record(
+        &compose_path,
+        &project_dir,
+        &project_dir.join("hello.sbatch"),
+        &plan,
+        "300",
+    )
+    .expect("record");
+    record.submitted_at = 30;
+    write_submission_record(&record).expect("write record");
+
+    let scan = scan_job_inventory(tmpdir.path(), false).expect("scan inventory");
+    assert!(
+        scan.jobs.iter().any(|entry| entry.job_id == "300"),
+        "inventory scan must find metadata under hidden work dirs like .tmp"
+    );
 }
 
 #[test]

@@ -50,10 +50,22 @@ pub(crate) fn reach(
             &context.resource_profiles,
         )?;
     if !plan.ordered_services.iter().any(|s| s.name == service) {
-        bail!(
+        let available: Vec<&str> = plan
+            .ordered_services
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        let mut message = format!(
             "service '{service}' is not defined in {}",
             record.compose_file.display()
         );
+        if let Some(suggestion) = crate::suggest::nearest_default(&service, &available) {
+            message.push_str(&format!("; did you mean '{suggestion}'?"));
+        }
+        if !available.is_empty() {
+            message.push_str(&format!(" (available: {})", available.join(", ")));
+        }
+        bail!(message);
     }
 
     // Remote port + URL: an explicit --port wins; otherwise reuse the

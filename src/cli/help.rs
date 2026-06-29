@@ -6,15 +6,25 @@ pub(super) const FILE_ARG_HELP: &str = "Compose specification file to read; if o
 /// subcommand set, so the list can never silently drift from the actual command
 /// surface again (it previously dropped `pull`, `checkpoints`, `experiment`, and
 /// `reach`). Every non-hidden top-level command must appear in exactly one group.
-pub(super) const WORKFLOW_GROUPS: &[(&str, &[&str])] = &[
-    ("Start", &["new", "evolve", "setup", "context"]),
+pub(super) const WORKFLOW_GROUPS: &[(&str, &str, &[&str])] = &[
+    (
+        "Start",
+        "scaffold and configure a spec",
+        &["new", "evolve", "setup", "context"],
+    ),
     (
         "Plan/Run",
+        "inspect statically, then submit or launch",
         &["plan", "up", "when", "alloc", "run", "shell", "germinate"],
     ),
-    ("Develop/Test", &["test", "dev", "tmux", "notebook"]),
+    (
+        "Develop/Test",
+        "iterate and smoke-test on a single host",
+        &["test", "dev", "tmux", "notebook"],
+    ),
     (
         "Observe/Debug",
+        "monitor, inspect, and diagnose runs",
         &[
             "weather",
             "doctor",
@@ -37,10 +47,12 @@ pub(super) const WORKFLOW_GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Maintain",
+        "clean up tracked state and resources",
         &["cache", "jobs", "clean", "down", "cancel", "rendezvous"],
     ),
     (
         "Advanced",
+        "low-level spec authoring and tooling",
         &[
             "examples",
             "validate",
@@ -76,21 +88,15 @@ Debug failed run:
 
 const TOP_LEVEL_HELP_FOOTER: &str = "Use `hpc-compose help <command>` for command details.";
 
-/// Renders the aligned `Workflow groups:` block from [`WORKFLOW_GROUPS`].
+/// Renders the `Workflow groups:` block from [`WORKFLOW_GROUPS`]. Each group
+/// shows a one-line purpose so the listing answers "which area?" at a glance,
+/// then its commands; drill in with `hpc-compose help <command>` for per-command
+/// detail.
 fn workflow_groups_block() -> String {
-    // Pad every heading to the widest one (+1 for the trailing ':') so the
-    // command lists line up in a single column.
-    let heading_width = WORKFLOW_GROUPS
-        .iter()
-        .map(|(label, _)| label.len())
-        .max()
-        .unwrap_or(0)
-        + 1;
     let mut block = String::from("Workflow groups:");
-    for (label, names) in WORKFLOW_GROUPS {
-        let heading = format!("{label}:");
+    for (label, description, names) in WORKFLOW_GROUPS {
         block.push_str(&format!(
-            "\n  {heading:<heading_width$}  {}",
+            "\n  {label}: {description}\n    {}",
             names.join(", ")
         ));
     }
@@ -179,7 +185,12 @@ Examples:
   hpc-compose up --dry-run -f compose.yaml
   hpc-compose up --watch-queue --queue-warn-after 15m -f compose.yaml
   hpc-compose up --watch-mode line -f compose.yaml
-  hpc-compose up --hold-on-exit always -f compose.yaml";
+  hpc-compose up --hold-on-exit always -f compose.yaml
+
+Flag constraints:
+  --format requires --detach or --dry-run.
+  --watch-queue cannot be combined with --detach, --dry-run, or --local.
+  --queue-warn-after requires --watch-queue.";
 
 pub(super) const TEST_HELP: &str = "\
 Examples:
@@ -836,7 +847,7 @@ mod tests {
     /// Flattened group membership, asserting no command is listed twice.
     fn grouped_commands() -> BTreeSet<String> {
         let mut seen = BTreeSet::new();
-        for (group, names) in WORKFLOW_GROUPS {
+        for (group, _description, names) in WORKFLOW_GROUPS {
             for &name in *names {
                 assert!(
                     seen.insert(name.to_string()),
@@ -892,7 +903,7 @@ mod tests {
     #[test]
     fn top_level_help_lists_all_groups_and_the_recommend_entrypoint() {
         let help = super::top_level_help();
-        for (label, _) in WORKFLOW_GROUPS {
+        for (label, _, _) in WORKFLOW_GROUPS {
             assert!(
                 help.contains(&format!("{label}:")),
                 "help missing group '{label}'"

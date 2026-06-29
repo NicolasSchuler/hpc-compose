@@ -101,11 +101,10 @@ pub(super) struct ServiceRuntimeAssertionState {
 }
 
 pub(super) fn load_runtime_state(record: &SubmissionRecord) -> Option<ServiceRuntimeStateFile> {
-    let state_path = tracked_paths::latest_state_path(&tracked_paths::runtime_job_root(
-        &record.submit_dir,
-        &record.job_id,
-    ));
-    read_json::<ServiceRuntimeStateFile>(&state_path).ok()
+    // Honor an explicit x-slurm.runtime_root override (schema v3+) exactly like
+    // state_path_for_record does. Rebuilding the default root here silently lost
+    // all runtime state for override jobs.
+    read_json::<ServiceRuntimeStateFile>(&state_path_for_record(record)).ok()
 }
 
 pub(super) fn active_restart_failures_in_window(

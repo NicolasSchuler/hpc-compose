@@ -149,10 +149,10 @@ impl ArtifactManifest {
 
 /// Returns the tracked artifacts directory for a submission record.
 pub fn artifacts_dir_for_record(record: &SubmissionRecord) -> PathBuf {
-    tracked_paths::latest_artifacts_dir(&tracked_paths::runtime_job_root(
-        &record.submit_dir,
-        &record.job_id,
-    ))
+    // Honor an explicit x-slurm.runtime_root override (schema v3+); rebuilding
+    // the default root here silently lost all exported artifacts (and the
+    // manifest/payload paths derived from this) for override jobs.
+    tracked_paths::latest_artifacts_dir(&runtime_job_root_for_record(record))
 }
 
 /// Returns the tracked artifact manifest path for a submission record.

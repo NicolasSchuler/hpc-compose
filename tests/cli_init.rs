@@ -147,10 +147,14 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(top_help_stdout.contains("Debug failed run:"));
     assert!(top_help_stdout.contains("debug -f compose.yaml --preflight"));
     assert!(top_help_stdout.contains("Workflow groups:"));
-    assert!(top_help_stdout.contains("Plan/Run:       plan, up, when, alloc, run"));
-    assert!(top_help_stdout.contains(
-        "Observe/Debug:  weather, doctor, debug, watch, replay, status, logs, ps, stats, score, diff"
-    ));
+    assert!(top_help_stdout.contains("Plan/Run: inspect statically, then submit or launch"));
+    assert!(top_help_stdout.contains("plan, up, when, alloc, run, shell, germinate"));
+    assert!(top_help_stdout.contains("Observe/Debug: monitor, inspect, and diagnose runs"));
+    assert!(
+        top_help_stdout.contains(
+            "weather, doctor, debug, watch, replay, status, logs, ps, stats, score, diff"
+        )
+    );
     assert!(top_help_stdout.contains("--color <WHEN>"));
     assert!(top_help_stdout.contains("--quiet"));
     assert!(top_help_stdout.contains("--profile <NAME>"));

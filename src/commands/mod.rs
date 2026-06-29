@@ -908,6 +908,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Status {
             file,
             job_id,
+            remote,
             format,
             array,
             squeue_bin,
@@ -918,7 +919,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 file,
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             )?;
-            runtime::status(context, job_id, format, false, array)
+            if let Some(remote) = remote {
+                runtime::remote_followup(&context, &remote)
+            } else {
+                runtime::status(context, job_id, format, false, array)
+            }
         }
         Commands::Stats {
             file,
@@ -1057,6 +1062,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Ps {
             file,
             job_id,
+            remote,
             format,
             squeue_bin,
             sacct_bin,
@@ -1066,7 +1072,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 file,
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             )?;
-            runtime::ps(context, job_id, format)
+            if let Some(remote) = remote {
+                runtime::remote_followup(&context, &remote)
+            } else {
+                runtime::ps(context, job_id, format)
+            }
         }
         Commands::Watch {
             file,
@@ -1150,6 +1160,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             job_id,
             scancel_bin,
             purge_cache,
+            no_export,
             yes,
             format,
         } => {
@@ -1162,13 +1173,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
             let context = resolve_command_context(options, file, binary_overrides, None)?;
-            runtime::cancel(context, job_id, purge_cache, format)
+            runtime::cancel(context, job_id, purge_cache, no_export, format)
         }
         Commands::Down {
             file,
             job_id,
             scancel_bin,
             purge_cache,
+            no_export,
             yes,
             format,
         } => {
@@ -1181,7 +1193,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
             let context = resolve_command_context(options, file, binary_overrides, None)?;
-            runtime::cancel(context, job_id, purge_cache, format)
+            runtime::cancel(context, job_id, purge_cache, no_export, format)
         }
         Commands::Run {
             launch,

@@ -837,6 +837,7 @@ fn local_watch_cancel_and_rollback_helpers_cover_terminal_paths() {
         context_for(&compose, tmpdir.path()),
         Some(record.job_id.clone()),
         false,
+        false,
         Some(OutputFormat::Json),
     )
     .expect("cancel local without pid");
@@ -864,6 +865,7 @@ fn local_watch_cancel_and_rollback_helpers_cover_terminal_paths() {
     cancel(
         context_for(&compose, tmpdir.path()),
         Some(record.job_id.clone()),
+        false,
         false,
         None,
     )
@@ -1008,6 +1010,7 @@ fn runtime_wrappers_cover_success_paths_with_local_tracking() {
     cancel(
         context.clone(),
         Some(record.job_id.clone()),
+        false,
         false,
         Some(OutputFormat::Json),
     )

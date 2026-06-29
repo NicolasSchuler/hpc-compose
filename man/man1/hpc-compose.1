@@ -215,6 +215,9 @@ The command completed successfully.
 .TP
 \fB1\fR
 The command failed because validation, local I/O, or an external tool reported an error.
+.TP
+\fB2\-255\fR
+For direct\-execution commands (run, alloc, shell, notebook, reach) the exit status of the executed child process is propagated verbatim, so scripts and CI can distinguish, for example, a test runner's exit code 2 from 5.
 .SH EXAMPLES
 .nf
 hpc\-compose up \-f compose.yaml

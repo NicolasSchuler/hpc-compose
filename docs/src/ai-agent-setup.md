@@ -24,10 +24,10 @@ For a one-line nudge once the agent has context: *"Set up hpc-compose for my clu
 
 ## The safety boundary (what an agent may run unprompted)
 
-| Safe anywhere (no scheduler contact, no quota) | Requires your explicit approval (submits/cancels/allocates) |
+| Safe to run unprompted (never submits, cancels, or allocates; no quota) | Requires your explicit approval (submits/cancels/allocates) |
 | --- | --- |
-| `new`, `validate`, `plan`, `plan --show-script`, `inspect`, `render`, `config` | `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel` |
-| read-only tracked-job views: `status`, `ps`, `logs`, `stats`, `artifacts`, `diff` | — |
+| Static, no scheduler contact: `new`, `validate`, `plan`, `plan --show-script`, `inspect`, `render`, `config` | `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel` |
+| Read-only scheduler queries (`squeue`/`sacct`, no changes): `status`, `ps`, `stats`, `diff`, `logs` — avoid tight polling on rate-limited login nodes. `artifacts` also writes exported files to the local `export_dir` | — |
 
 A well-behaved agent authors and statically verifies a spec first, and only runs a submitting command after you approve it on a supported Linux Slurm submission host. On a login node it should prefer `hpc-compose debug -f <file> --preflight` and `hpc-compose doctor cluster-report` before a first `up`.
 

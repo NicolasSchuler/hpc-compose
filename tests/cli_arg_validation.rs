@@ -65,3 +65,31 @@ fn inspect_rejects_job_id_without_rightsize() {
         "expected a clap requires error, got: {stderr}"
     );
 }
+
+// The following pin runtime (dispatch-time) `bail!` cross-flag guards in
+// `src/commands/mod.rs`, which are not clap-native but still fire before any
+// file access, so they need no fixture either.
+
+#[test]
+fn when_after_job_condition_requires_after_job() {
+    let stderr = arg_error(&["when", "--after-job-condition", "afterok"]);
+    assert!(
+        stderr.contains("when --after-job-condition requires --after-job"),
+        "expected the after-job-condition requires guard, got: {stderr}"
+    );
+}
+
+#[test]
+fn when_rejects_unknown_after_job_condition_value() {
+    let stderr = arg_error(&[
+        "when",
+        "--after-job",
+        "123",
+        "--after-job-condition",
+        "badcond",
+    ]);
+    assert!(
+        stderr.contains("unknown --after-job-condition 'badcond'"),
+        "expected an after-job-condition value error, got: {stderr}"
+    );
+}

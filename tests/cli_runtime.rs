@@ -9498,6 +9498,127 @@ fn submit_reports_script_write_errors_before_submission() {
 }
 
 #[test]
+fn down_auto_exports_tracked_artifacts_before_teardown() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_artifacts_compose(tmpdir.path(), &cache_dir, "always");
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script(tmpdir.path());
+    let scancel_log = tmpdir.path().join("scancel.log");
+    let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let manifest = tmpdir
+        .path()
+        .join(".hpc-compose/12345/artifacts/manifest.json");
+    assert!(
+        manifest.exists(),
+        "artifact manifest should exist after submit"
+    );
+    let export_dir = tmpdir.path().join("results/12345");
+    assert!(
+        !export_dir.exists(),
+        "artifacts must not be exported until teardown"
+    );
+
+    let down = run_cli(
+        tmpdir.path(),
+        &[
+            "down",
+            "-f",
+            compose.to_str().expect("path"),
+            "--yes",
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_success(&down);
+    // The runtime root (and its collected payload) is reaped, but auto-export ran
+    // first, so results survive in the configured export_dir.
+    assert!(
+        export_dir.exists()
+            && fs::read_dir(&export_dir)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false),
+        "down should auto-export tracked artifacts before teardown"
+    );
+    assert!(
+        !tmpdir.path().join(".hpc-compose/12345").exists(),
+        "down should reap the runtime root after exporting"
+    );
+}
+
+#[test]
+fn down_no_export_skips_artifact_export() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_artifacts_compose(tmpdir.path(), &cache_dir, "always");
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch_runs_script(tmpdir.path());
+    let scancel_log = tmpdir.path().join("scancel.log");
+    let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
+
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let export_dir = tmpdir.path().join("results/12345");
+
+    let down = run_cli(
+        tmpdir.path(),
+        &[
+            "down",
+            "-f",
+            compose.to_str().expect("path"),
+            "--yes",
+            "--no-export",
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_success(&down);
+    assert!(
+        !export_dir.exists(),
+        "down --no-export must not export artifacts"
+    );
+    assert!(
+        !tmpdir.path().join(".hpc-compose/12345").exists(),
+        "down --no-export should still reap the runtime root"
+    );
+}
+
+#[test]
 fn artifacts_command_exports_collected_metrics_and_json() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
