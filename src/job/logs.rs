@@ -544,9 +544,46 @@ pub(crate) fn read_new_lines(cursor: &mut LogCursor) -> Result<Vec<String>> {
 }
 
 pub(crate) fn tail_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
-    let Ok(raw) = fs::read_to_string(path) else {
+    if lines == 0 {
         return Ok(Vec::new());
+    }
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to open {}", path.display()));
+        }
     };
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?
+        .len();
+    if file_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    const TAIL_CHUNK_SIZE: u64 = 16 * 1024;
+    let mut position = file_len;
+    let mut newline_count = 0usize;
+    let mut chunks = Vec::new();
+    while position > 0 && newline_count <= lines {
+        let read_len = position.min(TAIL_CHUNK_SIZE) as usize;
+        position -= read_len as u64;
+        let mut chunk = vec![0_u8; read_len];
+        file.seek(SeekFrom::Start(position))
+            .with_context(|| format!("failed to seek {}", path.display()))?;
+        file.read_exact(&mut chunk)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        newline_count += chunk.iter().filter(|byte| **byte == b'\n').count();
+        chunks.push(chunk);
+    }
+
+    let total_len = chunks.iter().map(Vec::len).sum();
+    let mut bytes = Vec::with_capacity(total_len);
+    for chunk in chunks.iter().rev() {
+        bytes.extend_from_slice(chunk);
+    }
+    let raw = String::from_utf8_lossy(&bytes);
     let mut collected = raw.lines().map(|line| line.to_string()).collect::<Vec<_>>();
     if collected.len() > lines {
         collected.drain(0..(collected.len() - lines));
@@ -753,6 +790,22 @@ mod tests {
             tail_lines(&log, 1).expect("last line"),
             vec!["two".to_string()]
         );
+    }
+
+    #[test]
+    fn tail_lines_reads_only_needed_suffix_and_decodes_lossily() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let log = tmpdir.path().join("large.log");
+        let mut bytes = Vec::new();
+        for index in 0..5_000 {
+            bytes.extend_from_slice(format!("line-{index}\n").as_bytes());
+        }
+        bytes.extend_from_slice(b"bad-\xff\nlast\n");
+        fs::write(&log, bytes).expect("large log");
+
+        let tailed = tail_lines(&log, 2).expect("tail large log");
+
+        assert_eq!(tailed, vec!["bad-\u{fffd}".to_string(), "last".to_string()]);
     }
 
     #[test]

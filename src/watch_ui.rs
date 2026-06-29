@@ -228,6 +228,54 @@ pub(crate) struct WatchModel {
     pub(crate) replay: Option<ReplayWatchStatus>,
 }
 
+struct WatchFrameModel<'a> {
+    snapshot: &'a PsSnapshot,
+    selected_index: usize,
+    walltime_progress: Option<&'a WalltimeProgress>,
+    log_lines: &'a [String],
+    follow_logs: bool,
+    log_scroll: usize,
+    log_view_mode: LogViewMode,
+    hold_state: Option<WatchHoldState>,
+    metrics_line: Option<&'a str>,
+    show_help: bool,
+    filter: Option<&'a str>,
+    search_buffer: &'a str,
+    input_mode: InputMode,
+    log_query: Option<&'a str>,
+    log_wrap: bool,
+    sort_mode: ServiceSort,
+    notice: Option<&'a str>,
+    show_detail: bool,
+    replay: Option<&'a ReplayWatchStatus>,
+}
+
+impl<'a> From<&'a WatchModel> for WatchFrameModel<'a> {
+    fn from(model: &'a WatchModel) -> Self {
+        Self {
+            snapshot: &model.snapshot,
+            selected_index: model.selected_index,
+            walltime_progress: model.walltime_progress.as_ref(),
+            log_lines: &model.log_lines,
+            follow_logs: model.follow_logs,
+            log_scroll: model.log_scroll,
+            log_view_mode: model.log_view_mode,
+            hold_state: model.hold_state,
+            metrics_line: model.metrics_line.as_deref(),
+            show_help: model.show_help,
+            filter: model.filter.as_deref(),
+            search_buffer: &model.search_buffer,
+            input_mode: model.input_mode,
+            log_query: model.log_query.as_deref(),
+            log_wrap: model.log_wrap,
+            sort_mode: model.sort_mode,
+            notice: model.notice.as_deref(),
+            show_detail: model.show_detail,
+            replay: model.replay.as_ref(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SelectedLogBuffer {
     service_name: String,
@@ -580,48 +628,46 @@ fn run_replay_ui_loop(
             log_capacity(height),
         );
         let all_log_lines = build_all_log_lines(&snapshot, lines, log_capacity(height));
-        let displayed_log_lines = match log_view_mode {
-            LogViewMode::Selected => log_buffer.lines.clone(),
-            LogViewMode::All => all_log_lines.clone(),
-        };
-
         let (frame_width, frame_height) = terminal_size();
-        renderer.render(
-            &render_watch_frame(
-                &WatchModel {
-                    snapshot: snapshot.clone(),
-                    selected_index,
-                    walltime_progress: None,
-                    log_lines: displayed_log_lines,
-                    follow_logs: false,
-                    log_scroll,
-                    log_view_mode,
-                    hold_state: None,
-                    metrics_line: frame.metrics_line.clone(),
-                    show_help,
-                    filter: filter.clone(),
-                    search_buffer: search_buffer.clone(),
-                    input_mode,
-                    log_query: log_query.clone(),
-                    log_wrap,
-                    sort_mode,
-                    notice: None,
-                    show_detail,
-                    replay: Some(ReplayWatchStatus {
-                        cursor_unix: playback.cursor_unix,
-                        speed: playback.speed,
-                        paused: playback.paused,
-                        fidelity: report.fidelity.clone(),
-                        start_unix: report.timeline_start_unix.unwrap_or(0),
-                        end_unix: report.timeline_end_unix.unwrap_or(0),
-                        event_unix: report.events.iter().map(|event| event.at_unix).collect(),
-                    }),
-                },
-                frame_width,
-                frame_height,
-            ),
-            (frame_width, frame_height),
-        )?;
+        let displayed_log_lines = match log_view_mode {
+            LogViewMode::Selected => log_buffer.lines.as_slice(),
+            LogViewMode::All => all_log_lines.as_slice(),
+        };
+        let replay_status = ReplayWatchStatus {
+            cursor_unix: playback.cursor_unix,
+            speed: playback.speed,
+            paused: playback.paused,
+            fidelity: report.fidelity.clone(),
+            start_unix: report.timeline_start_unix.unwrap_or(0),
+            end_unix: report.timeline_end_unix.unwrap_or(0),
+            event_unix: report.events.iter().map(|event| event.at_unix).collect(),
+        };
+        let rendered = render_watch_frame_model(
+            &WatchFrameModel {
+                snapshot: &snapshot,
+                selected_index,
+                walltime_progress: None,
+                log_lines: displayed_log_lines,
+                follow_logs: false,
+                log_scroll,
+                log_view_mode,
+                hold_state: None,
+                metrics_line: frame.metrics_line.as_deref(),
+                show_help,
+                filter: filter.as_deref(),
+                search_buffer: &search_buffer,
+                input_mode,
+                log_query: log_query.as_deref(),
+                log_wrap,
+                sort_mode,
+                notice: None,
+                show_detail,
+                replay: Some(&replay_status),
+            },
+            frame_width,
+            frame_height,
+        );
+        renderer.render(&rendered, (frame_width, frame_height))?;
 
         if let Some(event) = events.poll_event(INPUT_POLL_INTERVAL, input_mode)? {
             if input_mode == InputMode::Search || input_mode == InputMode::LogSearch {
@@ -934,42 +980,40 @@ fn run_watch_ui_loop(
         }
 
         if dirty {
-            let displayed_log_lines = match log_view_mode {
-                LogViewMode::Selected => log_buffer.lines.clone(),
-                LogViewMode::All => all_log_lines.clone(),
-            };
-
             let (frame_width, frame_height) = frame_size;
-            renderer.render(
-                &render_watch_frame(
-                    &WatchModel {
-                        snapshot: snapshot.clone(),
-                        selected_index,
-                        walltime_progress,
-                        log_lines: displayed_log_lines,
-                        follow_logs,
-                        log_scroll,
-                        log_view_mode,
-                        hold_state: terminal_outcome.as_ref().map(|outcome| WatchHoldState {
-                            failed: matches!(outcome, WatchOutcome::Failed(_)),
-                        }),
-                        metrics_line: metrics_line.clone(),
-                        show_help,
-                        filter: filter.clone(),
-                        search_buffer: search_buffer.clone(),
-                        input_mode,
-                        log_query: log_query.clone(),
-                        log_wrap,
-                        sort_mode,
-                        notice: notice.clone(),
-                        show_detail,
-                        replay: None,
-                    },
-                    frame_width,
-                    frame_height,
-                ),
-                (frame_width, frame_height),
-            )?;
+            let displayed_log_lines = match log_view_mode {
+                LogViewMode::Selected => log_buffer.lines.as_slice(),
+                LogViewMode::All => all_log_lines.as_slice(),
+            };
+            let hold_state = terminal_outcome.as_ref().map(|outcome| WatchHoldState {
+                failed: matches!(outcome, WatchOutcome::Failed(_)),
+            });
+            let rendered = render_watch_frame_model(
+                &WatchFrameModel {
+                    snapshot: &snapshot,
+                    selected_index,
+                    walltime_progress: walltime_progress.as_ref(),
+                    log_lines: displayed_log_lines,
+                    follow_logs,
+                    log_scroll,
+                    log_view_mode,
+                    hold_state,
+                    metrics_line: metrics_line.as_deref(),
+                    show_help,
+                    filter: filter.as_deref(),
+                    search_buffer: &search_buffer,
+                    input_mode,
+                    log_query: log_query.as_deref(),
+                    log_wrap,
+                    sort_mode,
+                    notice: notice.as_deref(),
+                    show_detail,
+                    replay: None,
+                },
+                frame_width,
+                frame_height,
+            );
+            renderer.render(&rendered, (frame_width, frame_height))?;
             last_render_size = Some(frame_size);
             dirty = false;
         }
@@ -1421,14 +1465,15 @@ fn map_key_event(key: KeyEvent, mode: InputMode) -> Option<WatchInput> {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize) -> String {
+    render_watch_frame_model(&WatchFrameModel::from(model), width, height)
+}
+
+fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: usize) -> String {
     let width = width.max(1);
     let height = height.max(1);
-    let effective = effective_services(
-        &model.snapshot.services,
-        model.filter.as_deref(),
-        model.sort_mode,
-    );
+    let effective = effective_services(&model.snapshot.services, model.filter, model.sort_mode);
     let selected = effective.get(model.selected_index);
     if width < 80 || height < 12 {
         return render_compact_watch_frame(model, &effective, selected.copied(), width, height);
@@ -1445,11 +1490,10 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
 
     let filter_indicator = model
         .filter
-        .as_deref()
         .map(|f| format!(" | {}", term::styled_warning(&format!("filter: {f}"))))
         .unwrap_or_default();
 
-    let title_line = if let Some(replay) = &model.replay {
+    let title_line = if let Some(replay) = model.replay {
         format!(
             "{} | {} | job {}{}",
             term::styled_bold("hpc-compose replay"),
@@ -1489,16 +1533,16 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
             width,
         ),
     ];
-    if let Some(progress) = &model.walltime_progress {
+    if let Some(progress) = model.walltime_progress {
         lines.push(fit_line(&render_walltime_bar(progress, width), width));
     }
-    if let Some(replay) = &model.replay {
+    if let Some(replay) = model.replay {
         lines.push(fit_line(&render_replay_scrubber(replay, width), width));
     }
-    if let Some(metrics) = model.metrics_line.as_deref() {
+    if let Some(metrics) = model.metrics_line {
         lines.push(fit_line(metrics, width));
     }
-    if let Some(notice) = model.notice.as_deref() {
+    if let Some(notice) = model.notice {
         lines.push(fit_line(&term::styled_warning(notice), width));
     }
     if let Some(detail) = model.snapshot.scheduler.detail.as_deref() {
@@ -1658,9 +1702,9 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         String::new()
     };
     let wrap_note = if model.log_wrap { " WRAP" } else { "" };
-    let search_note = match model.log_query.as_deref() {
+    let search_note = match model.log_query {
         Some(query) if !query.is_empty() => {
-            format!(" /{query} ({})", count_log_matches(&model.log_lines, query))
+            format!(" /{query} ({})", count_log_matches(model.log_lines, query))
         }
         _ => String::new(),
     };
@@ -1683,7 +1727,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
     if let Some(path_line) = log_path_line(model.log_view_mode, selected.copied()) {
         log_lines.push(fit_line(&term::styled_dim(&path_line), log_width));
     }
-    let displayed = expand_log_lines(&model.log_lines, log_width, model.log_wrap);
+    let displayed = expand_log_lines(model.log_lines, log_width, model.log_wrap);
     let visible = visible_log_lines(
         &displayed,
         body_height.saturating_sub(log_lines.len()),
@@ -1695,10 +1739,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
         log_lines.push(fit_line(&term::styled_dim(empty), log_width));
     }
     for line in visible {
-        log_lines.push(fit_line(
-            &style_log_row(line, model.log_query.as_deref()),
-            log_width,
-        ));
+        log_lines.push(fit_line(&style_log_row(line, model.log_query), log_width));
     }
 
     let row_count = body_height;
@@ -1733,7 +1774,7 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
 }
 
 fn render_compact_watch_frame(
-    model: &WatchModel,
+    model: &WatchFrameModel<'_>,
     effective: &[&PsServiceRow],
     selected: Option<&PsServiceRow>,
     width: usize,
@@ -1753,7 +1794,7 @@ fn render_compact_watch_frame(
         &mut lines,
         width,
         height,
-        &match &model.replay {
+        &match model.replay {
             Some(replay) => format!(
                 "{} | {} | job {}",
                 term::styled_bold("hpc-compose replay"),
@@ -1778,7 +1819,7 @@ fn render_compact_watch_frame(
             selected_name
         ),
     );
-    if let Some(progress) = &model.walltime_progress {
+    if let Some(progress) = model.walltime_progress {
         push_fit_line(
             &mut lines,
             width,
@@ -1786,10 +1827,10 @@ fn render_compact_watch_frame(
             &render_walltime_bar(progress, width),
         );
     }
-    if let Some(metrics) = model.metrics_line.as_deref() {
+    if let Some(metrics) = model.metrics_line {
         push_fit_line(&mut lines, width, height, metrics);
     }
-    if let Some(notice) = model.notice.as_deref() {
+    if let Some(notice) = model.notice {
         push_fit_line(&mut lines, width, height, &term::styled_warning(notice));
     }
     if let Some(hold) = model.hold_state {
@@ -1804,7 +1845,7 @@ fn render_compact_watch_frame(
             },
         );
     }
-    if let Some(filter) = model.filter.as_deref() {
+    if let Some(filter) = model.filter {
         push_fit_line(&mut lines, width, height, &format!("filter: {filter}"));
     }
     if model.input_mode == InputMode::Search || model.input_mode == InputMode::LogSearch {
@@ -1859,9 +1900,9 @@ fn render_compact_watch_frame(
             }
         }
 
-        let compact_search_note = match model.log_query.as_deref() {
+        let compact_search_note = match model.log_query {
             Some(query) if !query.is_empty() => {
-                format!(" /{query} ({})", count_log_matches(&model.log_lines, query))
+                format!(" /{query} ({})", count_log_matches(model.log_lines, query))
             }
             _ => String::new(),
         };
@@ -1893,7 +1934,7 @@ fn render_compact_watch_frame(
                 &term::styled_dim(empty_log_message(model.log_view_mode, selected)),
             );
         }
-        let compact_displayed = expand_log_lines(&model.log_lines, width, model.log_wrap);
+        let compact_displayed = expand_log_lines(model.log_lines, width, model.log_wrap);
         for line in visible_log_lines(
             &compact_displayed,
             height.saturating_sub(lines.len() + 1),
@@ -1904,7 +1945,7 @@ fn render_compact_watch_frame(
                 &mut lines,
                 width,
                 height,
-                &style_log_row(line, model.log_query.as_deref()),
+                &style_log_row(line, model.log_query),
             );
         }
     }
@@ -2969,9 +3010,46 @@ fn read_new_lines(path: &Path, offset: &mut u64, pending: &mut String) -> Result
 }
 
 fn tail_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
-    let Ok(raw) = fs::read_to_string(path) else {
+    if lines == 0 {
         return Ok(Vec::new());
+    }
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to open {}", path.display()));
+        }
     };
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?
+        .len();
+    if file_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    const TAIL_CHUNK_SIZE: u64 = 16 * 1024;
+    let mut position = file_len;
+    let mut newline_count = 0usize;
+    let mut chunks = Vec::new();
+    while position > 0 && newline_count <= lines {
+        let read_len = position.min(TAIL_CHUNK_SIZE) as usize;
+        position -= read_len as u64;
+        let mut chunk = vec![0_u8; read_len];
+        file.seek(SeekFrom::Start(position))
+            .with_context(|| format!("failed to seek {}", path.display()))?;
+        file.read_exact(&mut chunk)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        newline_count += chunk.iter().filter(|byte| **byte == b'\n').count();
+        chunks.push(chunk);
+    }
+
+    let total_len = chunks.iter().map(Vec::len).sum();
+    let mut bytes = Vec::with_capacity(total_len);
+    for chunk in chunks.iter().rev() {
+        bytes.extend_from_slice(chunk);
+    }
+    let raw = String::from_utf8_lossy(&bytes);
     let mut collected = raw.lines().map(|line| line.to_string()).collect::<Vec<_>>();
     if collected.len() > lines {
         collected.drain(0..(collected.len() - lines));

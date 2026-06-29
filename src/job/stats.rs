@@ -1,8 +1,9 @@
 use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
 use super::runtime_state::load_runtime_state;
 use super::scheduler::{
-    build_local_scheduler_status, command_unavailable_detail, command_unavailable_error,
-    reconcile_scheduler_status, stats_unavailable_reason, unix_timestamp_now,
+    SchedulerCommandError, SchedulerCommandUnavailable, build_local_scheduler_status,
+    command_unavailable_detail, command_unavailable_error, reconcile_scheduler_status,
+    run_scheduler_command, stats_unavailable_reason, unix_timestamp_now,
 };
 use super::*;
 
@@ -249,6 +250,20 @@ pub(super) struct SamplerLoadOutcome {
     pub(super) notes: Vec<String>,
 }
 
+const JSONL_TAIL_CHUNK_SIZE: u64 = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct JsonlSampleProbe {
+    sampled_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct JsonlSampleLine {
+    number: usize,
+    text: String,
+    sampled_at: String,
+}
+
 /// Builds the tracked metrics snapshot used by `hpc-compose stats`.
 pub fn build_stats_snapshot(
     spec_path: &Path,
@@ -411,8 +426,11 @@ pub fn metrics_dir_for_record(record: &SubmissionRecord) -> PathBuf {
 fn command_unavailable_anyhow(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(command_unavailable_error)
+            .downcast_ref::<SchedulerCommandUnavailable>()
+            .is_some()
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(command_unavailable_error)
     })
 }
 
@@ -422,8 +440,16 @@ fn command_unavailable_anyhow_detail(
     err: &anyhow::Error,
 ) -> String {
     err.chain()
-        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
-        .map(|io| command_unavailable_detail(command_name, binary, io))
+        .find_map(|cause| {
+            cause
+                .downcast_ref::<SchedulerCommandUnavailable>()
+                .map(|err| err.detail().to_string())
+        })
+        .or_else(|| {
+            err.chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .map(|io| command_unavailable_detail(command_name, binary, io))
+        })
         .unwrap_or_else(|| format!("{command_name} not available at '{binary}' ({err})"))
 }
 
@@ -512,6 +538,174 @@ fn collector_enabled(collectors: &[CollectorStatus], name: &str) -> bool {
         .is_some_and(|collector| collector.enabled)
 }
 
+fn latest_ordered_jsonl_group(path: &Path) -> Result<Vec<JsonlSampleLine>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(path).context(format!("failed to read {}", path.display()))?;
+    let mut position = file
+        .metadata()
+        .context(format!("failed to stat {}", path.display()))?
+        .len();
+    if position == 0 {
+        return Ok(Vec::new());
+    }
+    let mut chunks = Vec::new();
+
+    while position > 0 {
+        let read_len = position.min(JSONL_TAIL_CHUNK_SIZE);
+        position -= read_len;
+        file.seek(SeekFrom::Start(position))
+            .context(format!("failed to seek {}", path.display()))?;
+        let mut chunk = vec![0_u8; read_len as usize];
+        file.read_exact(&mut chunk)
+            .context(format!("failed to read {}", path.display()))?;
+        chunks.push(chunk);
+
+        let lines = decode_ordered_jsonl_suffix(path, position, &chunks)?;
+        if lines.is_empty() {
+            continue;
+        }
+
+        let latest_sampled_at = lines
+            .last()
+            .map(|line| line.sampled_at.as_str())
+            .unwrap_or_default();
+        let mut group_start = lines.len() - 1;
+        while group_start > 0 && lines[group_start - 1].sampled_at == latest_sampled_at {
+            group_start -= 1;
+        }
+        if group_start > 0 || position == 0 {
+            return Ok(lines[group_start..].to_vec());
+        }
+    }
+
+    Ok(Vec::new())
+}
+
+fn ordered_jsonl_group_for_timestamp(
+    path: &Path,
+    sampled_at: &str,
+) -> Result<Vec<JsonlSampleLine>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(path).context(format!("failed to read {}", path.display()))?;
+    let mut position = file
+        .metadata()
+        .context(format!("failed to stat {}", path.display()))?
+        .len();
+    if position == 0 {
+        return Ok(Vec::new());
+    }
+    let mut chunks = Vec::new();
+
+    while position > 0 {
+        let read_len = position.min(JSONL_TAIL_CHUNK_SIZE);
+        position -= read_len;
+        file.seek(SeekFrom::Start(position))
+            .context(format!("failed to seek {}", path.display()))?;
+        let mut chunk = vec![0_u8; read_len as usize];
+        file.read_exact(&mut chunk)
+            .context(format!("failed to read {}", path.display()))?;
+        chunks.push(chunk);
+
+        let lines = decode_ordered_jsonl_suffix(path, position, &chunks)?;
+        if lines.is_empty() {
+            continue;
+        }
+
+        if let Some(group_end) = lines.iter().rposition(|line| line.sampled_at == sampled_at) {
+            let mut group_start = group_end;
+            while group_start > 0 && lines[group_start - 1].sampled_at == sampled_at {
+                group_start -= 1;
+            }
+            if group_start > 0 || position == 0 {
+                return Ok(lines[group_start..=group_end].to_vec());
+            }
+        } else if lines
+            .last()
+            .is_some_and(|line| line.sampled_at.as_str() < sampled_at)
+        {
+            // The sampler appends monotonically timestamped groups. If the
+            // newest process row is older than the GPU sample, no process rows
+            // were collected for that sample.
+            return Ok(Vec::new());
+        }
+    }
+
+    Ok(Vec::new())
+}
+
+fn decode_ordered_jsonl_suffix(
+    path: &Path,
+    start_offset: u64,
+    chunks_from_tail: &[Vec<u8>],
+) -> Result<Vec<JsonlSampleLine>> {
+    let total_len = chunks_from_tail.iter().map(Vec::len).sum();
+    let mut bytes = Vec::with_capacity(total_len);
+    for chunk in chunks_from_tail.iter().rev() {
+        bytes.extend_from_slice(chunk);
+    }
+
+    let mut first_line_number = count_newlines_before(path, start_offset)? + 1;
+    if start_offset > 0 {
+        let Some(newline_index) = bytes.iter().position(|byte| *byte == b'\n') else {
+            return Ok(Vec::new());
+        };
+        bytes.drain(..=newline_index);
+        first_line_number += 1;
+    }
+
+    let text =
+        std::str::from_utf8(&bytes).context(format!("failed to decode {}", path.display()))?;
+    let mut lines = Vec::new();
+    for (offset, raw_line) in text.lines().enumerate() {
+        let line_number = first_line_number + offset;
+        let line = raw_line.trim();
+        if !line.is_empty() {
+            let sampled_at = parse_sampled_at_probe(path, line_number, line)?;
+            lines.push(JsonlSampleLine {
+                number: line_number,
+                text: line.to_string(),
+                sampled_at,
+            });
+        }
+    }
+    Ok(lines)
+}
+
+fn count_newlines_before(path: &Path, byte_len: u64) -> Result<usize> {
+    if byte_len == 0 {
+        return Ok(0);
+    }
+    let mut file = File::open(path).context(format!("failed to read {}", path.display()))?;
+    let mut remaining = byte_len;
+    let mut count = 0;
+    let mut buffer = [0_u8; 8192];
+    while remaining > 0 {
+        let limit = buffer.len().min(remaining as usize);
+        let read = file
+            .read(&mut buffer[..limit])
+            .context(format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        count += buffer[..read].iter().filter(|byte| **byte == b'\n').count();
+        remaining -= read as u64;
+    }
+    Ok(count)
+}
+
+fn parse_sampled_at_probe(path: &Path, line_number: usize, line: &str) -> Result<String> {
+    let row: JsonlSampleProbe = serde_json::from_str(line).context(format!(
+        "failed to parse {} line {}",
+        path.display(),
+        line_number
+    ))?;
+    Ok(row.sampled_at)
+}
+
 fn load_gpu_snapshot(metrics_dir: &Path) -> Result<Option<GpuSnapshot>> {
     let gpu_path = metrics_dir.join("gpu.jsonl");
     let Some((sampled_at, devices)) = load_latest_gpu_devices(&gpu_path)? else {
@@ -529,44 +723,23 @@ fn load_gpu_snapshot(metrics_dir: &Path) -> Result<Option<GpuSnapshot>> {
 }
 
 fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceSample>)>> {
-    if !path.exists() {
+    let lines = latest_ordered_jsonl_group(path)?;
+    let Some(first_line) = lines.first() else {
         return Ok(None);
-    }
-    let raw = fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
-    let mut latest_sampled_at: Option<String> = None;
-    let mut devices = Vec::new();
+    };
+    let latest_sampled_at = first_line.sampled_at.clone();
+    let mut devices = Vec::with_capacity(lines.len());
 
-    for (index, raw_line) in raw.lines().enumerate() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let row: GpuDeviceSampleRow = serde_json::from_str(line).context(format!(
+    for line in lines {
+        let row: GpuDeviceSampleRow = serde_json::from_str(&line.text).context(format!(
             "failed to parse {} line {}",
             path.display(),
-            index + 1
+            line.number
         ))?;
-        match latest_sampled_at.as_deref() {
-            None => {
-                latest_sampled_at = Some(row.sampled_at.clone());
-                devices.push(gpu_device_from_row(row));
-            }
-            Some(current) if row.sampled_at.as_str() > current => {
-                latest_sampled_at = Some(row.sampled_at.clone());
-                devices.clear();
-                devices.push(gpu_device_from_row(row));
-            }
-            Some(current) if row.sampled_at == current => {
-                devices.push(gpu_device_from_row(row));
-            }
-            _ => {}
-        }
+        devices.push(gpu_device_from_row(row));
     }
 
-    match latest_sampled_at {
-        Some(sampled_at) => Ok(Some((sampled_at, devices))),
-        None => Ok(None),
-    }
+    Ok(Some((latest_sampled_at, devices)))
 }
 
 fn gpu_device_from_row(row: GpuDeviceSampleRow) -> GpuDeviceSample {
@@ -654,25 +827,15 @@ fn load_gpu_processes_for_timestamp(
     path: &Path,
     sampled_at: &str,
 ) -> Result<Vec<GpuProcessSample>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let raw = fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
-    let mut processes = Vec::new();
+    let lines = ordered_jsonl_group_for_timestamp(path, sampled_at)?;
+    let mut processes = Vec::with_capacity(lines.len());
 
-    for (index, raw_line) in raw.lines().enumerate() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let row: GpuProcessSampleRow = serde_json::from_str(line).context(format!(
+    for line in lines {
+        let row: GpuProcessSampleRow = serde_json::from_str(&line.text).context(format!(
             "failed to parse {} line {}",
             path.display(),
-            index + 1
+            line.number
         ))?;
-        if row.sampled_at != sampled_at {
-            continue;
-        }
         processes.push(GpuProcessSample {
             node: row.node,
             rank: row.rank,
@@ -691,50 +854,31 @@ fn load_gpu_processes_for_timestamp(
 
 fn load_slurm_sampler_snapshot(metrics_dir: &Path) -> Result<Option<SlurmSamplerSnapshot>> {
     let path = metrics_dir.join("slurm.jsonl");
-    if !path.exists() {
+    let lines = latest_ordered_jsonl_group(&path)?;
+    let Some(first_line) = lines.first() else {
         return Ok(None);
-    }
-    let raw = fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
-    let mut latest_sampled_at: Option<String> = None;
-    let mut steps = Vec::new();
+    };
+    let latest_sampled_at = first_line.sampled_at.clone();
+    let mut steps = Vec::with_capacity(lines.len());
 
-    for (index, raw_line) in raw.lines().enumerate() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let row: SlurmSampleRow = serde_json::from_str(line).context(format!(
+    for line in lines {
+        let row: SlurmSampleRow = serde_json::from_str(&line.text).context(format!(
             "failed to parse {} line {}",
             path.display(),
-            index + 1
+            line.number
         ))?;
-        let sampled_at = row.sampled_at.clone();
         let step = step_from_slurm_sample_row(row).context(format!(
             "failed to parse {} line {}",
             path.display(),
-            index + 1
+            line.number
         ))?;
-        match latest_sampled_at.as_deref() {
-            None => {
-                latest_sampled_at = Some(sampled_at);
-                steps.push(step);
-            }
-            Some(current) if sampled_at.as_str() > current => {
-                latest_sampled_at = Some(sampled_at);
-                steps.clear();
-                steps.push(step);
-            }
-            Some(current) if sampled_at == current => {
-                steps.push(step);
-            }
-            _ => {}
-        }
+        steps.push(step);
     }
 
-    match latest_sampled_at {
-        Some(sampled_at) => Ok(Some(SlurmSamplerSnapshot { sampled_at, steps })),
-        None => Ok(None),
-    }
+    Ok(Some(SlurmSamplerSnapshot {
+        sampled_at: latest_sampled_at,
+        steps,
+    }))
 }
 
 pub(crate) fn step_from_slurm_sample_row(row: SlurmSampleRow) -> Result<StepStats> {
@@ -768,20 +912,21 @@ fn required_json_string(field: &str, value: Option<String>) -> Result<String> {
 }
 
 pub(crate) fn probe_step_stats(job_id: &str, binary: &str) -> Result<Vec<StepStats>> {
-    let output = Command::new(binary)
-        .args([
-            "--allsteps",
-            "--jobs",
-            job_id,
-            "--parsable2",
-            "--noconvert",
-            // AllocTRES is a sacct (allocation) field that sstat rejects
-            // ("Invalid field requested"); sstat reports live step usage only.
-            // Allocation is sourced from accounting/the plan instead.
-            "--format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve",
-        ])
-        .output()
-        .context(format!("failed to execute '{binary}'"))?;
+    let mut command = Command::new(binary);
+    command.args([
+        "--allsteps",
+        "--jobs",
+        job_id,
+        "--parsable2",
+        "--noconvert",
+        // AllocTRES is a sacct (allocation) field that sstat rejects
+        // ("Invalid field requested"); sstat reports live step usage only.
+        // Allocation is sourced from accounting/the plan instead.
+        "--format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve",
+    ]);
+    let output = run_scheduler_command(&mut command, "sstat", binary)
+        .map_err(SchedulerCommandError::into_anyhow)
+        .with_context(|| format!("failed to execute '{binary}'"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -976,6 +1121,91 @@ mod tests {
         let slurm = sampler.slurm.expect("slurm snapshot");
         assert_eq!(slurm.sampled_at, "2026-04-10T10:00:00Z");
         assert_eq!(slurm.steps.len(), 2);
+    }
+
+    #[test]
+    fn sampler_jsonl_loaders_read_complete_latest_tail_group() {
+        use std::fmt::Write as _;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let metrics_dir = tmpdir.path();
+        let old_sampled_at = "2026-04-10T09:59:00Z";
+        let latest_sampled_at = "2026-04-10T10:00:00Z";
+
+        let mut gpu_rows = String::new();
+        for index in 0..1_500 {
+            writeln!(
+                gpu_rows,
+                r#"{{"sampled_at":"{old_sampled_at}","index":"{index}","uuid":"gpu-old-{index}","name":"A100","utilization_gpu":"10"}}"#
+            )
+            .expect("write old gpu row");
+        }
+        for index in 0..900 {
+            writeln!(
+                gpu_rows,
+                r#"{{"sampled_at":"{latest_sampled_at}","index":"{index}","uuid":"gpu-new-{index}","name":"A100","utilization_gpu":"80"}}"#
+            )
+            .expect("write latest gpu row");
+        }
+        fs::write(metrics_dir.join("gpu.jsonl"), gpu_rows).expect("write gpu");
+
+        let (sampled_at, devices) = load_latest_gpu_devices(&metrics_dir.join("gpu.jsonl"))
+            .expect("gpu")
+            .expect("rows");
+        assert_eq!(sampled_at, latest_sampled_at);
+        assert_eq!(devices.len(), 900);
+        assert_eq!(devices[0].uuid.as_deref(), Some("gpu-new-0"));
+        assert_eq!(devices[899].uuid.as_deref(), Some("gpu-new-899"));
+
+        let mut process_rows = String::new();
+        for index in 0..1_000 {
+            writeln!(
+                process_rows,
+                r#"{{"sampled_at":"{old_sampled_at}","gpu_uuid":"gpu-old-{index}","pid":"{index}","process_name":"old","used_memory_mib":"64"}}"#
+            )
+            .expect("write old process row");
+        }
+        for index in 0..700 {
+            writeln!(
+                process_rows,
+                r#"{{"sampled_at":"{latest_sampled_at}","gpu_uuid":"gpu-new-{index}","pid":"{index}","process_name":"python","used_memory_mib":"512"}}"#
+            )
+            .expect("write latest process row");
+        }
+        fs::write(metrics_dir.join("gpu_processes.jsonl"), process_rows)
+            .expect("write gpu processes");
+        let processes = load_gpu_processes_for_timestamp(
+            &metrics_dir.join("gpu_processes.jsonl"),
+            latest_sampled_at,
+        )
+        .expect("processes");
+        assert_eq!(processes.len(), 700);
+        assert_eq!(processes[0].gpu_uuid.as_deref(), Some("gpu-new-0"));
+        assert_eq!(processes[699].gpu_uuid.as_deref(), Some("gpu-new-699"));
+
+        let mut slurm_rows = String::new();
+        for index in 0..1_500 {
+            writeln!(
+                slurm_rows,
+                r#"{{"sampled_at":"{old_sampled_at}","step_id":"123.{index}","ntasks":"1","ave_cpu":"00:00:01","alloc_tres":"cpu=1","tres_usage_in_ave":"cpu=00:00:01"}}"#
+            )
+            .expect("write old slurm row");
+        }
+        for index in 0..800 {
+            writeln!(
+                slurm_rows,
+                r#"{{"sampled_at":"{latest_sampled_at}","step_id":"123.{index}","ntasks":"2","ave_cpu":"00:00:02","alloc_tres":"cpu=2","tres_usage_in_ave":"cpu=00:00:02"}}"#
+            )
+            .expect("write latest slurm row");
+        }
+        fs::write(metrics_dir.join("slurm.jsonl"), slurm_rows).expect("write slurm");
+        let slurm = load_slurm_sampler_snapshot(metrics_dir)
+            .expect("slurm")
+            .expect("rows");
+        assert_eq!(slurm.sampled_at, latest_sampled_at);
+        assert_eq!(slurm.steps.len(), 800);
+        assert_eq!(slurm.steps[0].step_id, "123.0");
+        assert_eq!(slurm.steps[799].step_id, "123.799");
     }
 
     #[test]

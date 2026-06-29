@@ -6,7 +6,7 @@ authors:
   - family-names: "Schuler"
     given-names: "Nicolas"
     affiliation: "Karlsruhe Institute of Technology (KIT)"
-version: "0.1.50"
-date-released: 2026-06-28
+version: "0.1.51"
+date-released: 2026-06-29
 url: "https://github.com/NicolasSchuler/hpc-compose"
 repository-code: "https://github.com/NicolasSchuler/hpc-compose"

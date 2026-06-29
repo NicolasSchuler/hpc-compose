@@ -1,6 +1,6 @@
 [package]
 name = "hpc-compose"
-version = "0.1.50"
+version = "0.1.51"
 edition = "2024"
 rust-version = "1.88"
 autobins = false
@@ -25,6 +25,11 @@ path = "src/main.rs"
 name = "gen-manpages"
 path = "src/bin/gen-manpages.rs"
 required-features = ["manpage-bin"]
+
+[[bench]]
+name = "plan_render"
+path = "benches/plan_render.rs"
+harness = false
 
 [dependencies]
 anyhow = "1.0.100"

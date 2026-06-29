@@ -7,6 +7,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.51] - 2026-06-29
+
+### Added
+
+- Added a `plan_render` benchmark for tracking plan construction and render
+  throughput against the development Python example.
+
+### Changed
+
+- Scheduler-backed probes now run through a shared timeout-aware command runner
+  so unavailable or hanging Slurm commands surface quickly in stats, accounting,
+  and queue diagnostics.
+- `stats`, `logs`, and `watch` now read large JSONL metrics and log files from
+  the needed suffix instead of loading full files for each refresh.
+
 ## [0.1.50] - 2026-06-28
 
 ### Changed

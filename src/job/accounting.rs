@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::spec::parse_memory_bytes;
 
 use super::model::{SubmissionBackend, SubmissionRecord};
-use super::scheduler::{command_unavailable_detail, command_unavailable_error};
+use super::scheduler::{SchedulerCommandError, run_scheduler_command};
 use super::stats::{find_tres_value, parse_tres_map};
 
 /// Slurm accounting data returned by `stats --accounting`.
@@ -77,28 +77,29 @@ pub(super) fn build_accounting_snapshot(
         });
     }
 
-    let output = match Command::new(sacct_bin)
-        .args([
-            "-n",
-            "-j",
-            job_id,
-            "--parsable2",
-            "--noconvert",
-            &format!("--format={SACCT_ACCOUNTING_FORMAT}"),
-        ])
-        .output()
-    {
+    let mut command = Command::new(sacct_bin);
+    command.args([
+        "-n",
+        "-j",
+        job_id,
+        "--parsable2",
+        "--noconvert",
+        &format!("--format={SACCT_ACCOUNTING_FORMAT}"),
+    ]);
+    let output = match run_scheduler_command(&mut command, "sacct", sacct_bin) {
         Ok(output) => output,
-        Err(err) if command_unavailable_error(&err) => {
+        Err(SchedulerCommandError::Unavailable(err)) => {
             return Ok(AccountingSnapshot {
                 available: false,
-                reason: Some(command_unavailable_detail("sacct", sacct_bin, &err)),
+                reason: Some(err.detail().to_string()),
                 source: "sacct".to_string(),
                 summary: None,
                 rows: Vec::new(),
             });
         }
-        Err(err) => return Err(err).with_context(|| format!("failed to execute '{sacct_bin}'")),
+        Err(SchedulerCommandError::Io(err)) => {
+            return Err(err).with_context(|| format!("failed to execute '{sacct_bin}'"));
+        }
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

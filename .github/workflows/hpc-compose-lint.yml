@@ -5,10 +5,10 @@ name: hpc-compose lint
 #
 #   jobs:
 #     hpc-compose:
-#       uses: NicolasSchuler/hpc-compose/.github/workflows/hpc-compose-lint.yml@v0.1.50
+#       uses: NicolasSchuler/hpc-compose/.github/workflows/hpc-compose-lint.yml@v0.1.51
 #       with:
 #         compose-file: compose.yaml
-#         version: v0.1.50
+#         version: v0.1.51
 #         strict: true
 #
 # Pin `version` (and the `uses:` ref) to a release tag.
@@ -22,9 +22,9 @@ on:
         default: compose.yaml
         type: string
       version:
-        description: Pinned hpc-compose release tag to install (e.g. v0.1.50).
+        description: Pinned hpc-compose release tag to install (e.g. v0.1.51).
         required: false
-        default: v0.1.50
+        default: v0.1.51
         type: string
       strict:
         description: When true, lint warnings fail the job (no --allow-warnings).

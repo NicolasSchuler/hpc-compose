@@ -4,6 +4,141 @@ use super::runtime_state::{
 };
 use super::*;
 use crate::time_util::system_time_to_unix;
+use std::error::Error;
+use std::fmt;
+use std::process::{Output, Stdio};
+use std::time::{Duration, Instant};
+
+const DEFAULT_SCHEDULER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const SCHEDULER_COMMAND_TIMEOUT_ENV: &str = "HPC_COMPOSE_SCHEDULER_COMMAND_TIMEOUT_MS";
+const SCHEDULER_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Debug)]
+pub(crate) struct SchedulerCommandUnavailable {
+    detail: String,
+}
+
+impl SchedulerCommandUnavailable {
+    fn new(detail: String) -> Self {
+        Self { detail }
+    }
+
+    pub(crate) fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl fmt::Display for SchedulerCommandUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl Error for SchedulerCommandUnavailable {}
+
+#[derive(Debug)]
+pub(super) enum SchedulerCommandError {
+    Unavailable(SchedulerCommandUnavailable),
+    Io(std::io::Error),
+}
+
+impl SchedulerCommandError {
+    fn unavailable_detail(self) -> Option<String> {
+        match self {
+            Self::Unavailable(err) => Some(err.detail().to_string()),
+            Self::Io(_) => None,
+        }
+    }
+
+    pub(super) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Unavailable(err) => err.into(),
+            Self::Io(err) => err.into(),
+        }
+    }
+}
+
+fn scheduler_command_timeout() -> Duration {
+    std::env::var(SCHEDULER_COMMAND_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_SCHEDULER_COMMAND_TIMEOUT)
+}
+
+pub(super) fn run_scheduler_command(
+    command: &mut Command,
+    command_name: &str,
+    binary: &str,
+) -> std::result::Result<Output, SchedulerCommandError> {
+    run_scheduler_command_with_timeout(command, command_name, binary, scheduler_command_timeout())
+}
+
+fn run_scheduler_command_with_timeout(
+    command: &mut Command,
+    command_name: &str,
+    binary: &str,
+    timeout: Duration,
+) -> std::result::Result<Output, SchedulerCommandError> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|err| {
+        if command_unavailable_error(&err) {
+            SchedulerCommandError::Unavailable(SchedulerCommandUnavailable::new(
+                command_unavailable_detail(command_name, binary, &err),
+            ))
+        } else {
+            SchedulerCommandError::Io(err)
+        }
+    })?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = stdout.map(read_pipe_thread);
+    let stderr_handle = stderr.map(read_pipe_thread);
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait().map_err(SchedulerCommandError::Io)? {
+            Some(status) => break status,
+            None if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_pipe(stdout_handle);
+                let _ = join_pipe(stderr_handle);
+                return Err(SchedulerCommandError::Unavailable(
+                    SchedulerCommandUnavailable::new(format!(
+                        "{command_name} timed out after {:.1}s at '{binary}'",
+                        timeout.as_secs_f64()
+                    )),
+                ));
+            }
+            None => std::thread::sleep(SCHEDULER_COMMAND_POLL_INTERVAL),
+        }
+    };
+
+    Ok(Output {
+        status,
+        stdout: join_pipe(stdout_handle),
+        stderr: join_pipe(stderr_handle),
+    })
+}
+
+fn read_pipe_thread(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    })
+}
+
+fn join_pipe(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
+}
 
 /// Live walltime progress derived from a tracked job record and scheduler diagnostics.
 #[allow(missing_docs)]
@@ -538,17 +673,14 @@ pub(super) fn probe_squeue_queue_diagnostics(
 }
 
 fn probe_squeue_queue_diagnostics_result(job_id: &str, binary: &str) -> QueueProbeResult {
-    let output = match Command::new(binary)
-        .args(["-h", "-j", job_id, "-o", "%T|%r|%S"])
-        .output()
-    {
+    let mut command = Command::new(binary);
+    command.args(["-h", "-j", job_id, "-o", "%T|%r|%S"]);
+    let output = match run_scheduler_command(&mut command, "squeue", binary) {
         Ok(output) => output,
-        Err(err) if command_unavailable_error(&err) => {
-            return QueueProbeResult::Unavailable(command_unavailable_detail(
-                "squeue", binary, &err,
-            ));
-        }
-        Err(_) => return QueueProbeResult::Probe(None),
+        Err(err) => match err.unavailable_detail() {
+            Some(detail) => return QueueProbeResult::Unavailable(detail),
+            None => return QueueProbeResult::Probe(None),
+        },
     };
     if !output.status.success() {
         return QueueProbeResult::Probe(None);
@@ -586,24 +718,21 @@ enum QueueProbeResult {
 }
 
 fn probe_sacct_queue_diagnostics_result(job_id: &str, binary: &str) -> QueueProbeResult {
-    let output = match Command::new(binary)
-        .args([
-            "-n",
-            "-X",
-            "-j",
-            job_id,
-            "--format=State,Eligible,Start,Reason",
-            "--parsable2",
-        ])
-        .output()
-    {
+    let mut command = Command::new(binary);
+    command.args([
+        "-n",
+        "-X",
+        "-j",
+        job_id,
+        "--format=State,Eligible,Start,Reason",
+        "--parsable2",
+    ]);
+    let output = match run_scheduler_command(&mut command, "sacct", binary) {
         Ok(output) => output,
-        Err(err) if command_unavailable_error(&err) => {
-            return QueueProbeResult::Unavailable(command_unavailable_detail(
-                "sacct", binary, &err,
-            ));
-        }
-        Err(_) => return QueueProbeResult::Probe(None),
+        Err(err) => match err.unavailable_detail() {
+            Some(detail) => return QueueProbeResult::Unavailable(detail),
+            None => return QueueProbeResult::Probe(None),
+        },
     };
     if !output.status.success() {
         return QueueProbeResult::Probe(None);
@@ -716,17 +845,18 @@ fn probe_squeue_array_tasks(
     filtered_task_id: Option<u32>,
     binary: &str,
 ) -> Result<ArrayProbeResult> {
-    let output = match Command::new(binary)
-        .args(["--array", "-h", "-j", parent_job_id, "-o", "%i|%T|%M|%R"])
-        .output()
-    {
+    let mut command = Command::new(binary);
+    command.args(["--array", "-h", "-j", parent_job_id, "-o", "%i|%T|%M|%R"]);
+    let output = match run_scheduler_command(&mut command, "squeue", binary) {
         Ok(output) => output,
-        Err(err) if command_unavailable_error(&err) => {
-            return Ok(ArrayProbeResult::Unavailable(command_unavailable_detail(
-                "squeue", binary, &err,
-            )));
-        }
-        Err(err) => return Err(err).with_context(|| format!("failed to execute '{binary}'")),
+        Err(err) => match err {
+            SchedulerCommandError::Unavailable(err) => {
+                return Ok(ArrayProbeResult::Unavailable(err.detail().to_string()));
+            }
+            SchedulerCommandError::Io(err) => {
+                return Err(err).with_context(|| format!("failed to execute '{binary}'"));
+            }
+        },
     };
     if !output.status.success() {
         bail!(
@@ -768,25 +898,26 @@ fn probe_sacct_array_tasks(
     binary: &str,
     slurm_array: Option<&str>,
 ) -> Result<ArrayProbeResult> {
-    let output = match Command::new(binary)
-        .args([
-            "--array",
-            "-n",
-            "-X",
-            "-j",
-            parent_job_id,
-            "--parsable2",
-            "--format=JobIDRaw,State,ExitCode,ElapsedRaw",
-        ])
-        .output()
-    {
+    let mut command = Command::new(binary);
+    command.args([
+        "--array",
+        "-n",
+        "-X",
+        "-j",
+        parent_job_id,
+        "--parsable2",
+        "--format=JobIDRaw,State,ExitCode,ElapsedRaw",
+    ]);
+    let output = match run_scheduler_command(&mut command, "sacct", binary) {
         Ok(output) => output,
-        Err(err) if command_unavailable_error(&err) => {
-            return Ok(ArrayProbeResult::Unavailable(command_unavailable_detail(
-                "sacct", binary, &err,
-            )));
-        }
-        Err(err) => return Err(err).with_context(|| format!("failed to execute '{binary}'")),
+        Err(err) => match err {
+            SchedulerCommandError::Unavailable(err) => {
+                return Ok(ArrayProbeResult::Unavailable(err.detail().to_string()));
+            }
+            SchedulerCommandError::Io(err) => {
+                return Err(err).with_context(|| format!("failed to execute '{binary}'"));
+            }
+        },
     };
     if !output.status.success() {
         bail!(
@@ -1268,8 +1399,17 @@ mod tests {
 
     #[cfg(unix)]
     fn write_fake_probe(tmpdir: &Path, name: &str, stdout: &str) -> PathBuf {
+        write_fake_script(
+            tmpdir,
+            name,
+            &format!("#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\n"),
+        )
+    }
+
+    #[cfg(unix)]
+    fn write_fake_script(tmpdir: &Path, name: &str, body: &str) -> PathBuf {
         let path = tmpdir.join(name);
-        fs::write(&path, format!("#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\n")).expect("fake probe");
+        fs::write(&path, body).expect("fake probe");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         fs::set_permissions(&path, perms).expect("chmod");
@@ -1380,6 +1520,31 @@ mod tests {
             diagnostics.start_time.as_deref(),
             Some("2026-04-10T12:00:00")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_command_timeout_reports_unavailable() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let sleeper = write_fake_script(tmpdir.path(), "sleepy-squeue", "#!/bin/sh\nsleep 5\n");
+        let binary = sleeper.to_string_lossy().to_string();
+        let mut command = Command::new(&sleeper);
+
+        let err = run_scheduler_command_with_timeout(
+            &mut command,
+            "squeue",
+            &binary,
+            Duration::from_millis(50),
+        )
+        .expect_err("sleeping command should time out");
+
+        match err {
+            SchedulerCommandError::Unavailable(err) => {
+                assert!(err.detail().contains("squeue timed out"));
+                assert!(err.detail().contains(&binary));
+            }
+            SchedulerCommandError::Io(err) => panic!("expected timeout detail, got {err}"),
+        }
     }
 
     #[test]

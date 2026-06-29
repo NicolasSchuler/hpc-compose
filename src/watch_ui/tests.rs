@@ -1387,7 +1387,9 @@ fn render_watch_frame_includes_walltime_bar_when_available() {
 fn terminal_guard_and_run_watch_ui_cover_interactive_paths() {
     let guard = TerminalGuard::enter(false).expect("enter terminal guard");
     assert!(guard.panic_restore_armed());
+    let restore_armed = Arc::clone(&guard.restore_armed);
     drop(guard);
+    assert!(!restore_armed.load(Ordering::SeqCst));
 
     let model = WatchModel {
         snapshot: sample_snapshot(),
@@ -1757,6 +1759,22 @@ fn render_watch_frame_handles_tiny_terminal_without_overflow() {
     assert!(lines.len() <= 3);
     assert!(lines.iter().all(|line| visible_width(line) <= 12));
     assert!(frame.contains("hpc-compose"));
+}
+
+#[test]
+fn tail_lines_reads_large_log_suffix_and_decodes_lossily() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let log = tmpdir.path().join("watch.log");
+    let mut bytes = Vec::new();
+    for index in 0..5_000 {
+        bytes.extend_from_slice(format!("line-{index}\n").as_bytes());
+    }
+    bytes.extend_from_slice(b"bad-\xff\nlast\n");
+    fs::write(&log, bytes).expect("large log");
+
+    let tailed = tail_lines(&log, 2).expect("tail large log");
+
+    assert_eq!(tailed, vec!["bad-\u{fffd}".to_string(), "last".to_string()]);
 }
 
 #[test]
