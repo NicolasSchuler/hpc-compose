@@ -70,7 +70,55 @@ pub fn write_atomic(
     contents: impl AsRef<[u8]>,
     restricted: bool,
 ) -> io::Result<()> {
+    write_atomic_with_mode(
+        path.as_ref(),
+        contents,
+        AtomicFileMode::Restricted(restricted),
+    )
+}
+
+/// Atomically writes `contents` to `path`, preserving the existing file mode
+/// when replacing a regular file on Unix.
+///
+/// This is useful for user-authored inputs such as compose files: a private
+/// `0600` file must stay private after an atomic rewrite, while normal files
+/// should keep their original readability. If no regular destination exists,
+/// `restricted_if_new` controls the creation mode just like [`write_atomic`].
+pub fn write_atomic_preserving_mode(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+    restricted_if_new: bool,
+) -> io::Result<()> {
     let path = path.as_ref();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Ok(meta) = fs::symlink_metadata(path)
+            && meta.file_type().is_file()
+        {
+            return write_atomic_with_mode(
+                path,
+                contents,
+                AtomicFileMode::Unix(meta.permissions().mode() & 0o777),
+            );
+        }
+    }
+    write_atomic(path, contents, restricted_if_new)
+}
+
+#[derive(Clone, Copy)]
+enum AtomicFileMode {
+    Restricted(bool),
+    #[cfg(unix)]
+    Unix(u32),
+}
+
+fn write_atomic_with_mode(
+    path: &Path,
+    contents: impl AsRef<[u8]>,
+    mode: AtomicFileMode,
+) -> io::Result<()> {
     // Create the temp file with O_EXCL semantics (`create_new`) so a symlink or
     // entry pre-planted at the temp path by another user on a shared filesystem
     // fails loudly instead of being followed/reused. Retry with a fresh suffix
@@ -78,7 +126,7 @@ pub fn write_atomic(
     let mut last_err = None;
     for attempt in 0..16 {
         let tmp = unique_temp_path(path, attempt);
-        match create_exclusive(&tmp, restricted) {
+        match create_exclusive(&tmp, mode) {
             Ok(mut file) => {
                 use std::io::Write;
                 if let Err(err) = file.write_all(contents.as_ref()) {
@@ -108,19 +156,46 @@ pub fn write_atomic(
 /// Creates `path` with O_CREAT|O_EXCL (refuses to follow a symlink or reuse an
 /// existing entry), at `0o600` when `restricted` and `0o666` (umask-governed)
 /// otherwise.
-fn create_exclusive(path: &Path, restricted: bool) -> io::Result<fs::File> {
+fn create_exclusive(path: &Path, mode: AtomicFileMode) -> io::Result<fs::File> {
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(if restricted { 0o600 } else { 0o666 });
+        opts.mode(match mode {
+            AtomicFileMode::Restricted(true) => 0o600,
+            AtomicFileMode::Restricted(false) => 0o666,
+            AtomicFileMode::Unix(mode) => mode,
+        });
     }
     #[cfg(not(unix))]
     {
-        let _ = restricted;
+        let AtomicFileMode::Restricted(_) = mode;
     }
-    opts.open(path)
+    let file = opts.open(path)?;
+    force_created_mode(&file, mode)?;
+    Ok(file)
+}
+
+fn force_created_mode(file: &fs::File, mode: AtomicFileMode) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        match mode {
+            AtomicFileMode::Restricted(true) => {
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+            }
+            AtomicFileMode::Restricted(false) => Ok(()),
+            AtomicFileMode::Unix(mode) => file.set_permissions(fs::Permissions::from_mode(mode)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let AtomicFileMode::Restricted(_) = mode;
+        let _ = file;
+        Ok(())
+    }
 }
 
 /// Builds a unique temp path next to `path` (same directory, so the subsequent
@@ -183,6 +258,16 @@ pub enum LockKind {
 /// `f` may return any error type; `with_flock` never substitutes an error of its
 /// own (every lock failure degrades to running `f` directly), so the closure's
 /// `Result` flows straight through.
+/// Emits a one-line note when a lock could not be acquired, gated by
+/// `HPC_COMPOSE_DEBUG_LOCKS` so the best-effort degradation is observable while
+/// debugging without adding noise to normal runs (mirrors the
+/// `HPC_COMPOSE_DEBUG_STAGING` convention used by the source-snapshot path).
+fn debug_lock_note(lock_path: &Path, detail: &str) {
+    if std::env::var_os("HPC_COMPOSE_DEBUG_LOCKS").is_some() {
+        eprintln!("hpc-compose: lock {}: {detail}", lock_path.display());
+    }
+}
+
 pub fn with_flock<T, E>(
     lock_path: &Path,
     kind: LockKind,
@@ -226,6 +311,10 @@ pub fn with_flock<T, E>(
                 // then degrade to a lock-free run.
                 Some(code) if code == libc::EWOULDBLOCK => {
                     if start.elapsed() >= timeout {
+                        debug_lock_note(
+                            lock_path,
+                            "timed out waiting for the lock; proceeding unlocked (best-effort, may race a concurrent writer on a shared filesystem)",
+                        );
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -286,6 +375,23 @@ mod tests {
         write(&path, b"secret", true).expect("write");
         let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "restricted write must be owner-only");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_preserving_mode_keeps_private_destination_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("compose.yaml");
+        fs::write(&path, b"old").expect("seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("seed mode");
+
+        write_atomic_preserving_mode(&path, b"new", false).expect("rewrite");
+
+        assert_eq!(fs::read(&path).expect("read"), b"new");
+        let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "existing private mode must survive rewrite");
     }
 
     #[test]

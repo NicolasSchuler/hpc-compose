@@ -173,7 +173,7 @@ pub fn redact_freeform_string(
     if show_values {
         value.to_string()
     } else {
-        redact_secret_substrings(value, secret_values)
+        redact_secret_value(value, secret_values)
     }
 }
 
@@ -357,19 +357,34 @@ fn redact_string_for_key(
     if key.is_some_and(is_sensitive_name) {
         "<redacted>".to_string()
     } else {
+        redact_secret_value(value, secret_values)
+    }
+}
+
+fn redact_secret_value(value: &str, secret_values: &BTreeSet<String>) -> String {
+    if secret_values.contains(value) {
+        "<redacted>".to_string()
+    } else {
         redact_secret_substrings(value, secret_values)
     }
 }
+
+/// Minimum length for a secret *value* to be scrubbed as a free-form substring.
+/// Very short values (e.g. `1`, `dev`, a single path segment) are not
+/// meaningfully secret and a blind `String::replace` of them over-redacts
+/// unrelated diagnostic text. Name-matched sensitive keys are still fully
+/// redacted regardless of length (that path does not call this function).
+const MIN_SUBSTRING_REDACTION_LEN: usize = 4;
 
 fn redact_secret_substrings(value: &str, secret_values: &BTreeSet<String>) -> String {
     let mut redacted = value.to_string();
     let mut secrets = secret_values
         .iter()
-        .filter(|secret| !secret.is_empty())
+        .filter(|secret| secret.len() >= MIN_SUBSTRING_REDACTION_LEN)
         .collect::<Vec<_>>();
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     for secret in secrets {
-        redacted = redacted.replace(secret, "<redacted>");
+        redacted = redacted.replace(secret.as_str(), "<redacted>");
     }
     redacted
 }
@@ -409,6 +424,59 @@ mod tests {
         assert_eq!(
             redacted["NOTEBOOK"], "<redacted>",
             "value matching a secret must redact regardless of key name"
+        );
+    }
+
+    #[test]
+    fn short_secret_values_are_not_substring_redacted() {
+        let mut secret_values = BTreeSet::new();
+        secret_values.insert("ab".to_string());
+        secret_values.insert("supersecret".to_string());
+        // A short secret value would over-redact unrelated text (the "ab" in
+        // "cab"), so it is left alone...
+        assert_eq!(
+            redact_secret_substrings("the cab is here", &secret_values),
+            "the cab is here"
+        );
+        // ...while a sufficiently long secret value is still scrubbed.
+        assert_eq!(
+            redact_secret_substrings("token=supersecret", &secret_values),
+            "token=<redacted>"
+        );
+    }
+
+    #[test]
+    fn short_secret_values_are_redacted_when_the_entire_value_matches() {
+        let mut secret_values = BTreeSet::new();
+        secret_values.insert("123".to_string());
+
+        assert_eq!(
+            redact_freeform_string("123", &secret_values, false),
+            "<redacted>"
+        );
+        assert_eq!(
+            redact_freeform_string("pin=123", &secret_values, false),
+            "pin=123",
+            "short secrets should not be blind substring-replaced"
+        );
+
+        let value = serde_json::json!({
+            "services": {
+                "app": {
+                    "command": ["unlock", "123"],
+                    "note": "abc123"
+                }
+            }
+        });
+
+        let redacted = redacted_json_value(&value, &secret_values, false).expect("redact json");
+        assert_eq!(
+            redacted["services"]["app"]["command"][1],
+            serde_json::Value::String("<redacted>".to_string())
+        );
+        assert_eq!(
+            redacted["services"]["app"]["note"],
+            serde_json::Value::String("abc123".to_string())
         );
     }
 

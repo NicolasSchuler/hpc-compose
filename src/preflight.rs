@@ -19,33 +19,10 @@ use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{MetricsCollector, MpiProfile, ReadinessSpec, RuntimeBackend};
 use crate::term;
 
-/// Severity level for one preflight item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Level {
-    /// The check passed.
-    Ok,
-    /// The check found a non-fatal issue worth surfacing.
-    Warn,
-    /// The check found a blocking issue.
-    Error,
-}
-
-/// One preflight finding.
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
-pub struct Item {
-    pub level: Level,
-    pub message: String,
-    pub remediation: Option<String>,
-}
-
-/// Flat preflight report before items are grouped for display.
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
-pub struct Report {
-    pub items: Vec<Item>,
-}
+/// Shared findings model, re-exported so existing `preflight::{Item, Level,
+/// Report}` paths keep working after the move to [`crate::diagnostics`] (which
+/// breaks the former cluster <-> preflight import cycle).
+pub use crate::diagnostics::{Item, Level, Report};
 
 /// Count summary for a grouped preflight report.
 #[allow(missing_docs)]

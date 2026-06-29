@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::context::ResolvedBinaries;
+use crate::diagnostics::{Item, Level, Report};
 use crate::mpi_util::advertised_mpi_types;
-use crate::preflight::{Item, Level, Report};
 use crate::prepare::RuntimePlan;
 use crate::spec::{
     MpiImplementation, MpiProfile, RuntimeBackend, ScratchScope, parse_slurm_time_limit,

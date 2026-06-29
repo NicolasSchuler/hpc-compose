@@ -3538,6 +3538,17 @@ impl ServiceSlurmConfig {
             self.hint.as_deref(),
             &format!("service '{service_name}' x-slurm.hint"),
         )?;
+        // Match the top-level gres/submit_args treatment: a newline or null byte
+        // (e.g. injected via ${VAR} interpolation) must not reach the rendered
+        // `#SBATCH --gres=` directive or `srun` invocation.
+        validate_sbatch_safe_string(
+            self.gres.as_deref(),
+            &format!("service '{service_name}' x-slurm.gres"),
+        )?;
+        validate_sbatch_safe_strings(
+            self.extra_srun_args.iter().map(String::as_str),
+            &format!("service '{service_name}' x-slurm.extra_srun_args"),
+        )?;
         validate_extra_srun_arg_conflicts(self, service_name)?;
         if let Some(placement) = &self.placement {
             placement.validate(service_name)?;

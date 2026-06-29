@@ -142,7 +142,12 @@ pub(crate) fn lint(
         if dry_run {
             dry_run_diff = Some(lint_fix::unified_diff(&original_text, &new_text));
         } else {
-            fs::write(&context.compose_file.value, &new_text).with_context(|| {
+            crate::secure_io::write_atomic_preserving_mode(
+                &context.compose_file.value,
+                new_text.as_bytes(),
+                false,
+            )
+            .with_context(|| {
                 format!(
                     "failed to write fixes to {}",
                     context.compose_file.value.display()
@@ -166,7 +171,12 @@ pub(crate) fn lint(
                     displayed_findings = findings_after;
                 }
                 Err(err) => {
-                    fs::write(&context.compose_file.value, &original_text).with_context(|| {
+                    crate::secure_io::write_atomic_preserving_mode(
+                        &context.compose_file.value,
+                        original_text.as_bytes(),
+                        false,
+                    )
+                    .with_context(|| {
                         format!(
                             "failed to restore original compose file after --fix validation failure at {}",
                             context.compose_file.value.display()
@@ -319,7 +329,11 @@ pub(crate) fn render(
         },
     )?;
     if let Some(path) = output_path.as_ref() {
-        fs::write(path, &script)
+        // The rendered script can carry resolved `secrets:` values literally in
+        // its launch_env, so it must be owner-only like every real-submission
+        // path (secrets.md promises mode 0600). Plain fs::write would leave it
+        // group/world-readable on a shared cluster filesystem.
+        crate::secure_io::write(path, &script, true)
             .with_context(|| format!("failed to write rendered script to {}", path.display()))?;
     }
     match output_common::resolve_output_format(format, false) {

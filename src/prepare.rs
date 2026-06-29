@@ -1310,11 +1310,24 @@ fn base_image_cache_key_from_source(source: &ImageSource) -> String {
 }
 
 fn temporary_rootfs_name(service: &RuntimeService) -> String {
-    let ts = SystemTime::now()
+    // Collision-resistant across concurrent prepares of the same service: a
+    // whole-second timestamp alone let two processes derive the same name and
+    // clobber each other via `enroot create/remove --force`. Mix in the pid,
+    // sub-second nanos, and a per-process counter. The name is transient, so
+    // widening it has no downstream cost.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    format!("hpc-compose-{}-{}", sanitize_name(&service.name), ts)
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "hpc-compose-{}-{}-{}-{}",
+        sanitize_name(&service.name),
+        std::process::id(),
+        nanos,
+        seq
+    )
 }
 
 fn temporary_sandbox_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf {
