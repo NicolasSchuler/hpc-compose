@@ -204,7 +204,9 @@ fn experiment_next_commands(job_id: &str, export_dir_configured: bool) -> Vec<St
     if export_dir_configured {
         commands.push(format!("hpc-compose artifacts --job-id {job_id}"));
     }
-    commands.push(format!("hpc-compose pull --job-id {job_id} --into ./results"));
+    commands.push(format!(
+        "hpc-compose pull --job-id {job_id} --into ./results"
+    ));
     commands.push("hpc-compose down".to_string());
     commands.push(format!(
         "ssh {opts} <login-node>  # {note}",
