@@ -15,6 +15,123 @@ fn write_spec(tmpdir: &Path, body: &str) -> std::path::PathBuf {
     path
 }
 
+#[test]
+fn missing_top_level_spec_reports_not_found_with_scaffolding_hint() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let missing = tmpdir.path().join("compose.yaml");
+    let err = ComposeSpec::load(&missing).expect_err("missing spec");
+    assert!(format!("{err:#}").contains("not found"), "{err:#}");
+    // The diagnostic help steers first-run users to `new`/`evolve`, not the
+    // schema/validate hint used for a present-but-invalid file.
+    let help = crate::cli_error_report(err)
+        .help()
+        .map(|help| help.to_string())
+        .unwrap_or_default();
+    assert!(
+        help.contains("hpc-compose new") && help.contains("evolve"),
+        "help should point at scaffolding commands, got: {help}"
+    );
+}
+
+/// Returns the `pub <name>:` field names declared in the struct that opens with
+/// `marker`, stopping at the struct's closing brace. Used by the
+/// `effective_config` drift guard below.
+fn struct_field_names(source: &str, marker: &str) -> Vec<String> {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("struct marker not found: {marker}"));
+    let body = &source[start + marker.len()..];
+    let mut names = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed == "}" {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("pub ")
+            && let Some(colon) = rest.find(':')
+        {
+            let name = &rest[..colon];
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Returns true when `body` reads `<prefix><field>` as a whole field access
+/// (the following character is not a word character), so `gpus` does not match
+/// inside `gpus_per_node`.
+fn references_field(body: &str, prefix: &str, field: &str) -> bool {
+    let needle = format!("{prefix}{field}");
+    let mut from = 0;
+    while let Some(idx) = body[from..].find(&needle) {
+        let end = from + idx + needle.len();
+        let boundary = body[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+        if boundary {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+#[test]
+fn effective_config_maps_every_slurm_field_with_no_silent_drop() {
+    // Drift guard. `effective_config` hand-copies SlurmConfig / ServiceSlurmConfig
+    // into the Effective* mirror structs field by field. A new x-slurm field added
+    // to the struct but forgotten in the mapping silently drops from `config` and
+    // resume-diff output with no compiler help. This pins that every field is read
+    // in the mapping, so adding one forces a conscious decision: map it, or list it
+    // as intentionally excluded here.
+    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/spec/mod.rs"))
+        .expect("source");
+    let body = {
+        let start = source
+            .find("pub fn effective_config(")
+            .expect("effective_config present");
+        let rest = &source[start..];
+        // The method body closes at the first 4-space-indented `}` (impl method).
+        let end = rest.find("\n    }\n").map_or(rest.len(), |i| i + 6);
+        // Collapse whitespace so multi-line method chains like
+        // `self\n    .slurm\n    .after_job` match `self.slurm.after_job`.
+        rest[..end].split_whitespace().collect::<String>()
+    };
+
+    // Excluded from the materialized snapshot on purpose:
+    //  - software_env: #[serde(skip)] internal field, surfaced at the spec level.
+    //  - cache_dir:    replaced by the resolved `cache_dir` parameter.
+    //  - enroot_temp_dir: prepare-time scratch knob, not part of the run config.
+    let slurm_exempt = ["software_env", "cache_dir", "enroot_temp_dir"];
+    for field in struct_field_names(&source, "pub struct SlurmConfig {") {
+        if slurm_exempt.contains(&field.as_str()) {
+            continue;
+        }
+        assert!(
+            references_field(&body, "self.slurm.", &field),
+            "effective_config drops x-slurm.{field}: map it into EffectiveSlurmConfig, \
+             or add it to slurm_exempt if it is intentionally excluded from `config`"
+        );
+    }
+
+    //  - software_env: #[serde(skip)] internal field.
+    //  - failure_policy: derived from the normalized failure policies, not the raw field.
+    let service_exempt = ["software_env", "failure_policy"];
+    for field in struct_field_names(&source, "pub struct ServiceSlurmConfig {") {
+        if service_exempt.contains(&field.as_str()) {
+            continue;
+        }
+        assert!(
+            references_field(&body, "service.slurm.", &field),
+            "effective_config drops per-service x-slurm.{field}: map it into \
+             EffectiveServiceSlurmConfig, or add it to service_exempt if intentional"
+        );
+    }
+}
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -1753,6 +1870,34 @@ services:
     assert!(
         err.to_string()
             .contains("x-slurm.array cannot be combined with raw -a"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn service_level_gres_and_extra_srun_args_reject_line_breaks() {
+    // Regression: service-level gres / extra_srun_args were not sbatch-safe
+    // validated (unlike the top-level gres / submit_args), so an interpolated
+    // newline could split the rendered `#SBATCH --gres=` directive or srun line.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    let gres = write_spec(
+        tmpdir.path(),
+        "services:\n  app:\n    image: redis:7\n    x-slurm:\n      gres: \"gpu:1\\nbad\"\n",
+    );
+    let err = ComposeSpec::load(&gres).expect_err("newline in service gres");
+    assert!(
+        format!("{err:#}").contains("x-slurm.gres must not contain line breaks"),
+        "{err:#}"
+    );
+
+    let srun = write_spec(
+        tmpdir.path(),
+        "services:\n  app:\n    image: redis:7\n    x-slurm:\n      extra_srun_args:\n        - \"--foo\\nbar\"\n",
+    );
+    let err = ComposeSpec::load(&srun).expect_err("newline in service extra_srun_args");
+    assert!(
+        format!("{err:#}").contains("x-slurm.extra_srun_args[0] must not contain line breaks"),
         "{err:#}"
     );
 }

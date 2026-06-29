@@ -60,6 +60,21 @@ fn validate_and_render_commands_work() {
     let script = fs::read_to_string(&script_path).expect("script");
     assert!(script.contains("#SBATCH --job-name=demo"));
     assert!(script.contains("--container-image="));
+    // The rendered script can embed resolved secrets, so `render -o` must create
+    // it owner-only (0600) like real-submission paths, not with the default umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&script_path)
+            .expect("script meta")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "render -o must write the script as 0600"
+        );
+    }
 
     let render_json = run_cli(
         tmpdir.path(),
@@ -495,6 +510,13 @@ fn lint_fix_makes_depends_on_condition_explicit_and_preserves_comments() {
         after_dry.contains("- redis"),
         "dry-run must not rewrite the file"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&compose, fs::Permissions::from_mode(0o600))
+            .expect("make compose private");
+    }
 
     // Real fix writes the file. --allow-warnings keeps the exit code clean
     // because HPC001 (readiness mismatch) is advisory and stays after the fix.
@@ -519,6 +541,27 @@ fn lint_fix_makes_depends_on_condition_explicit_and_preserves_comments() {
     assert!(
         after.contains("redis:\n        condition: service_started"),
         "expected explicit condition after fix:\n{after}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = fs::metadata(&compose)
+            .expect("compose metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "lint --fix must preserve private mode");
+    }
+    let leftovers = fs::read_dir(tmpdir.path())
+        .expect("read temp dir")
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.contains(".tmp."))
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "lint --fix should not leave atomic write temp files behind: {leftovers:?}"
     );
     // Comments outside the rewritten block survive byte-for-byte.
     assert!(after.contains("# top-level comment"));

@@ -322,6 +322,12 @@ pub(super) fn interpolate_vec_strings(
 }
 
 pub(super) fn interpolate_string(input: &str, vars: &InterpolationVars) -> Result<String> {
+    // Interpolation only ever acts on `$` (`${VAR}`, `${VAR:-d}`, `$$`); the
+    // overwhelmingly common `$`-free string can skip the char-vector build and
+    // the char-by-char walk entirely.
+    if !input.contains('$') {
+        return Ok(input.to_string());
+    }
     let chars = input.chars().collect::<Vec<_>>();
     let mut out = String::new();
     let mut index = 0;

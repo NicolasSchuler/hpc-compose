@@ -19,8 +19,17 @@ pub(super) fn load_raw_spec(path: &Path) -> Result<ComposeSpec> {
         .with_context(|| format!("failed to deserialize spec at {}", path.display()))
 }
 
-fn load_value(path: &Path) -> Result<Value> {
+fn load_value(path: &Path, is_root: bool) -> Result<Value> {
     let raw = fs::read_to_string(path).map_err(|source| -> anyhow::Error {
+        // A missing top-level spec is the most common first-run failure; point at
+        // the scaffolding commands. Missing `extends` targets keep the generic load
+        // error, since the new/evolve hint would be misleading there.
+        if is_root && source.kind() == std::io::ErrorKind::NotFound {
+            return SpecError::SpecFileNotFound {
+                path: path.to_path_buf(),
+            }
+            .into();
+        }
         SpecError::LoadFailed {
             path: path.to_path_buf(),
             source: source.into(),
@@ -46,7 +55,8 @@ fn load_resolved_value(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
     }
     stack.push(identity);
     let result = (|| {
-        let mut value = load_value(path)?;
+        // `stack` already holds this path's identity, so len == 1 is the root spec.
+        let mut value = load_value(path, stack.len() == 1)?;
         resolve_top_level_extends(path, &mut value, stack)?;
         normalize_steps_alias(&mut value)?;
         resolve_service_extends(path, &mut value, stack)?;

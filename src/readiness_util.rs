@@ -274,13 +274,27 @@ fn wait_for_log(
     timeout: Duration,
     diagnostics: &mut Vec<String>,
 ) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
     let regex = Regex::new(pattern)
         .with_context(|| format!("log readiness pattern '{pattern}' is not a valid regex"))?;
     let started = Instant::now();
+    // Read only the appended tail each poll instead of re-reading the whole file,
+    // so total IO is O(file_size) rather than O(file_size x polls).
+    let mut content: Vec<u8> = Vec::new();
+    let mut offset: u64 = 0;
     loop {
-        match fs::read_to_string(path) {
-            Ok(content) => {
-                if regex.is_match(&content) {
+        match fs::File::open(path) {
+            Ok(mut file) => {
+                // Restart if the file was truncated/rotated below what we consumed.
+                let len = file.metadata().map(|meta| meta.len()).unwrap_or(offset);
+                if len < offset {
+                    content.clear();
+                    offset = 0;
+                }
+                if file.seek(SeekFrom::Start(offset)).is_ok() {
+                    offset += file.read_to_end(&mut content).unwrap_or(0) as u64;
+                }
+                if regex.is_match(&String::from_utf8_lossy(&content)) {
                     diagnostics.push(format!("matched pattern in {}", path.display()));
                     return Ok(true);
                 }

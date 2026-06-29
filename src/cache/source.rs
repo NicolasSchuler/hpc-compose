@@ -328,11 +328,29 @@ fn hash_source(entries: &[SourceEntry]) -> Result<String> {
             hasher.update(target.to_string_lossy().as_bytes());
             hasher.update([0]);
         } else {
-            let bytes = fs::read(&entry.abs)
-                .with_context(|| format!("failed to read {}", entry.abs.display()))?;
+            use std::io::Read;
+            // Stream the file in fixed chunks so peak memory stays O(buffer)
+            // regardless of file size (a forgotten-to-`.hpcignore` multi-GB data
+            // file would otherwise OOM the login node). The length prefix is taken
+            // from the same handle's metadata, preserving the existing framing.
+            let mut file = fs::File::open(&entry.abs)
+                .with_context(|| format!("failed to open {}", entry.abs.display()))?;
+            let len = file
+                .metadata()
+                .with_context(|| format!("failed to stat {}", entry.abs.display()))?
+                .len();
             hasher.update(if entry.is_exec { b"x\0" } else { b"f\0" });
-            hasher.update((bytes.len() as u64).to_le_bytes());
-            hasher.update(&bytes);
+            hasher.update(len.to_le_bytes());
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let read = file
+                    .read(&mut buf)
+                    .with_context(|| format!("failed to read {}", entry.abs.display()))?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buf[..read]);
+            }
         }
     }
     Ok(hex::encode(hasher.finalize()))

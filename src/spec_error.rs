@@ -245,6 +245,15 @@ pub(crate) enum SpecError {
         #[source]
         source: anyhow::Error,
     },
+
+    #[error("compose spec not found at {}", path.display())]
+    #[diagnostic(
+        code(hpc_compose::spec::file_not_found),
+        help(
+            "No spec file at that path. Create one with `hpc-compose new` (run `hpc-compose new --help` for templates) or scaffold it interactively with `hpc-compose evolve`. The default path is `compose.yaml`; pass `-f <path>` to point elsewhere."
+        )
+    )]
+    SpecFileNotFound { path: PathBuf },
 }
 
 pub(crate) fn cli_error_report(error: anyhow::Error) -> miette::Report {
