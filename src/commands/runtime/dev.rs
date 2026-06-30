@@ -154,7 +154,10 @@ fn collect_dev_snapshot_inner(root: &Path, snapshot: &mut DevWatchSnapshot) -> R
     Ok(())
 }
 
-fn write_dev_restart_request(control_dir: &Path, services: &BTreeSet<String>) -> Result<PathBuf> {
+pub(super) fn write_dev_restart_request(
+    control_dir: &Path,
+    services: &BTreeSet<String>,
+) -> Result<PathBuf> {
     let request_dir = control_dir.join("restart");
     fs::create_dir_all(&request_dir)
         .with_context(|| format!("failed to create {}", request_dir.display()))?;
@@ -164,7 +167,7 @@ fn write_dev_restart_request(control_dir: &Path, services: &BTreeSet<String>) ->
         .as_millis();
     let path = request_dir.join(format!("restart-{}-{millis}.request", std::process::id()));
     let body = services.iter().cloned().collect::<Vec<_>>().join("\n");
-    fs::write(&path, format!("{body}\n"))
+    crate::secure_io::write_atomic(&path, format!("{body}\n").as_bytes(), false)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }

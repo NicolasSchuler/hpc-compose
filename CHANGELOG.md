@@ -7,6 +7,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.52] - 2026-06-30
+
+### Fixed
+
+- Preserved existing user-managed file permission semantics for atomic rewrites
+  by rejecting read-only regular destinations before replacing them.
+
 ## [0.1.51] - 2026-06-29
 
 ### Added

@@ -2298,7 +2298,7 @@ fn request_service_restart(record: &SubmissionRecord, service: &str) -> Result<P
         .unwrap_or_default()
         .as_millis();
     let path = request_dir.join(format!("restart-{}-{millis}.request", std::process::id()));
-    fs::write(&path, format!("{service}\n"))
+    crate::secure_io::write_atomic(&path, format!("{service}\n").as_bytes(), false)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }

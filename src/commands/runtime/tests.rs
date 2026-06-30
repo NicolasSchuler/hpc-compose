@@ -126,6 +126,27 @@ fn detect_dev_changes_reports_modified_targets_once() {
 }
 
 #[test]
+fn dev_restart_request_is_published_atomically() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let services = BTreeSet::from(["api".to_string(), "worker".to_string()]);
+
+    let path = write_dev_restart_request(tmpdir.path(), &services).expect("write request");
+
+    assert!(path.parent().expect("request parent").ends_with("restart"));
+    assert_eq!(
+        fs::read_to_string(&path).expect("read request"),
+        "api\nworker\n"
+    );
+    assert!(
+        fs::read_dir(tmpdir.path().join("restart"))
+            .expect("read request dir")
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp.")),
+        "restart request writes should not leave visible temp files"
+    );
+}
+
+#[test]
 fn dev_watch_inference_uses_directory_mounts_and_explicit_roots() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");
@@ -500,6 +521,17 @@ fn local_helper_functions_cover_labels_ids_and_stub_state_paths() {
     assert_eq!(state["services"][0]["service_name"], "api");
     assert_eq!(state["services"][0]["readiness_configured"], true);
     assert_eq!(state["services"][1]["service_name"], "worker");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = fs::metadata(&state_path)
+            .expect("state metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "local runtime state should be owner-only");
+    }
 
     assert_eq!(
         read_local_supervisor_pid(&record).expect("supervisor pid"),

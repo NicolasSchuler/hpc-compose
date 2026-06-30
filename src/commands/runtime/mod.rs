@@ -1005,11 +1005,10 @@ fn write_local_runtime_state_stub(
         "resume_dir": serde_json::Value::Null,
         "services": services,
     });
-    fs::write(
-        &state_path,
-        serde_json::to_vec_pretty(&state).context("failed to serialize local runtime state")?,
-    )
-    .with_context(|| format!("failed to write {}", state_path.display()))
+    let serialized =
+        serde_json::to_vec_pretty(&state).context("failed to serialize local runtime state")?;
+    crate::secure_io::write_atomic(&state_path, &serialized, true)
+        .with_context(|| format!("failed to write {}", state_path.display()))
 }
 
 fn kill_pid(pid: u32) -> Result<()> {

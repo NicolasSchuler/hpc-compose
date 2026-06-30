@@ -591,7 +591,8 @@ pub fn write_cluster_profile(path: &Path, profile: &ClusterProfile) -> Result<()
     }
     let rendered =
         toml::to_string_pretty(profile).context("failed to serialize cluster profile")?;
-    fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))
+    crate::secure_io::write_atomic_preserving_mode(path, rendered.as_bytes(), false)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn validate_cluster_profile(profile: &ClusterProfile) -> Result<()> {
@@ -1502,6 +1503,16 @@ mod tests {
         assert_eq!(load_cluster_profile(&path).expect("load profile"), profile);
         assert_eq!(discover_cluster_profile_path(&nested), Some(path.clone()));
         assert_eq!(default_cluster_profile_path(&nested), path);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private mode");
+            write_cluster_profile(&path, &profile).expect("rewrite profile");
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "cluster profile rewrite should preserve mode");
+        }
 
         fs::write(&path, "schema_version = 2\n").expect("bad schema");
         let err = load_cluster_profile(&path).expect_err("schema rejected");

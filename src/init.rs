@@ -403,7 +403,8 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
-    fs::write(&output, rendered).context(format!("failed to write {}", output.display()))?;
+    crate::secure_io::write_atomic_preserving_mode(&output, rendered.as_bytes(), false)
+        .context(format!("failed to write {}", output.display()))?;
     Ok(output)
 }
 
@@ -762,5 +763,20 @@ mod tests {
             fs::read_to_string(&written).expect("read"),
             "name: forced\n"
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&written, fs::Permissions::from_mode(0o600)).expect("private mode");
+            write_initialized_template(&relative, "name: private\n", true)
+                .expect("private overwrite");
+            let mode = fs::metadata(&written)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "forced template writes should preserve mode");
+        }
     }
 }

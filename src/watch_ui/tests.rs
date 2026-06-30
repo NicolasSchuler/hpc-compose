@@ -715,6 +715,13 @@ fn request_service_restart_writes_named_request() {
         std::fs::read_to_string(&path).expect("read request").trim(),
         "api"
     );
+    assert!(
+        std::fs::read_dir(path.parent().expect("request parent"))
+            .expect("read request dir")
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp.")),
+        "restart request writes should not leave visible temp files"
+    );
     let display = path.to_string_lossy();
     assert!(display.contains("dev-control"));
     assert!(display.ends_with(".request"));

@@ -447,7 +447,8 @@ pub fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let rendered = toml::to_string_pretty(settings).context("failed to serialize settings")?;
-    fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
+    crate::secure_io::write_atomic(path, rendered.as_bytes(), true)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -1210,6 +1211,29 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("unsupported settings schema version")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_settings_restricts_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("settings.toml");
+        fs::write(&path, "version = 1\n").expect("seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("seed mode");
+
+        write_settings(&path, &Settings::default()).expect("write settings");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "settings.toml should be owner-only");
+        assert!(
+            fs::read_dir(tmp.path())
+                .expect("read tmpdir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp.")),
+            "settings writes should not leave atomic temp files behind"
         );
     }
 

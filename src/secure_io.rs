@@ -97,6 +97,7 @@ pub fn write_atomic_preserving_mode(
         if let Ok(meta) = fs::symlink_metadata(path)
             && meta.file_type().is_file()
         {
+            ensure_existing_destination_writable(path)?;
             return write_atomic_with_mode(
                 path,
                 contents,
@@ -105,6 +106,15 @@ pub fn write_atomic_preserving_mode(
         }
     }
     write_atomic(path, contents, restricted_if_new)
+}
+
+#[cfg(unix)]
+fn ensure_existing_destination_writable(path: &Path) -> io::Result<()> {
+    // Atomic replacement checks writability on the parent directory, while the
+    // old truncate-in-place path checked the destination file itself. Open the
+    // destination for write without truncating so read-only modes or ACLs are
+    // rejected before the rename swaps in a new inode.
+    fs::OpenOptions::new().write(true).open(path).map(|_| ())
 }
 
 #[derive(Clone, Copy)]
@@ -392,6 +402,25 @@ mod tests {
         assert_eq!(fs::read(&path).expect("read"), b"new");
         let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "existing private mode must survive rewrite");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_preserving_mode_rejects_read_only_destination() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("compose.yaml");
+        fs::write(&path, b"old").expect("seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).expect("read-only mode");
+
+        let err =
+            write_atomic_preserving_mode(&path, b"new", false).expect_err("read-only rejected");
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&path).expect("read"), b"old");
+        let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400, "rejected rewrite must leave mode unchanged");
     }
 
     #[test]
