@@ -226,6 +226,37 @@ pub(crate) enum SpecError {
     )]
     HealthcheckUnsupportedField { service: String, field: String },
 
+    #[error("{field} value '{value}' is not a valid Slurm time limit")]
+    #[diagnostic(
+        code(hpc_compose::spec::invalid_slurm_time),
+        help(
+            "Use one of Slurm's `--time` formats: minutes (`90`), MM:SS (`90:00`), HH:MM:SS (`1:00:00`), D-HH (`1-00`), D-HH:MM (`1-00:30`), or D-HH:MM:SS (`1-00:30:00`). A bare `1h`/`30m` is not accepted; write `1h` as `1:00:00` and `30m` as `30`."
+        )
+    )]
+    InvalidSlurmTime { field: String, value: String },
+
+    #[error("{field} has an invalid mount '{value}': {problem}")]
+    #[diagnostic(
+        code(hpc_compose::spec::invalid_mount_syntax),
+        help(
+            "Use `host_path:container_path[:ro|rw]`, e.g. `./data:/workspace/data` or `/scratch/models:/models:ro`. The container path must be absolute and the optional mode must be `ro` or `rw`."
+        )
+    )]
+    InvalidMountSyntax {
+        field: String,
+        value: String,
+        problem: String,
+    },
+
+    #[error("{scope} sets both gpus and a gpu gres request; they are contradictory")]
+    #[diagnostic(
+        code(hpc_compose::spec::gpus_gres_conflict),
+        help(
+            "Slurm renders `--gres` and ignores `gpus` when both are set. Keep only one: either `gpus: <n>` for a simple count, or `gres: gpu:<type?>:<n>` for a typed request."
+        )
+    )]
+    GpusGresConflict { scope: String },
+
     #[error("{field} must not be empty")]
     #[diagnostic(
         code(hpc_compose::spec::empty_field),

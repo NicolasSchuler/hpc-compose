@@ -2614,7 +2614,7 @@ services:
           bind_paths:
             - /opt/mpi:/opt/mpi:cached
 "#,
-            "uses unsupported mode 'cached'",
+            "unsupported mode 'cached'",
         ),
         (
             "bad env name",
@@ -5227,4 +5227,235 @@ services:
             .is_some_and(|se| matches!(se, SpecError::DuplicatePrepareHook { .. })),
         "expected DuplicatePrepareHook, got: {rendered}"
     );
+}
+
+// --- F1: x-slurm.time walltime format guarding ---
+
+#[test]
+fn slurm_time_accepts_full_sbatch_grammar() {
+    // Every documented sbatch --time shape, including edge-of-grammar values.
+    for value in [
+        "90",         // minutes
+        "0",          // zero minutes (Slurm treats --time=0 as unlimited)
+        "90:00",      // MM:SS
+        "1:00:00",    // HH:MM:SS
+        "100:00:00",  // HH unbounded in the leading slot
+        "1-00",       // D-HH
+        "1-23",       // D-HH at the hour bound
+        "1-00:30",    // D-HH:MM
+        "1-00:30:00", // D-HH:MM:SS
+    ] {
+        let config = SlurmConfig {
+            time: Some(value.to_string()),
+            ..SlurmConfig::default()
+        };
+        assert!(
+            config.validate().is_ok(),
+            "time '{value}' should be accepted",
+        );
+    }
+}
+
+#[test]
+fn slurm_time_rejects_bare_unit_suffixes_with_actionable_help() {
+    for value in ["1h", "30m", "2d", "1hour"] {
+        let config = SlurmConfig {
+            time: Some(value.to_string()),
+            ..SlurmConfig::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("bare-unit time must be rejected");
+        let se = err
+            .downcast_ref::<SpecError>()
+            .expect("time rejection should be a SpecError");
+        assert!(
+            se.code()
+                .is_some_and(|c| c.to_string() == "hpc_compose::spec::invalid_slurm_time"),
+            "time '{value}' should use the invalid_slurm_time code",
+        );
+        assert!(
+            se.help().is_some_and(|h| h.to_string().contains("1:00:00")),
+            "help should show the 1h -> 1:00:00 fix",
+        );
+    }
+}
+
+// --- F2: service volume mount-syntax guarding ---
+
+#[test]
+fn service_volumes_are_mount_syntax_validated() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    // Positive: valid host:container[:ro|rw] forms, including a relative host
+    // path (resolved at plan time) and both modes.
+    let ok = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: redis:7
+    volumes:
+      - ./data:/workspace/data
+      - /scratch/models:/models:ro
+      - /out:/out:rw
+"#,
+    );
+    assert!(ComposeSpec::load(&ok).is_ok(), "valid volumes should load");
+
+    // Negative cases, each with the distinct rejection reason.
+    let cases = [
+        ("- /only-host", "must use host_path:container_path"),
+        (
+            "- ./data:relative/container",
+            "container path must be absolute",
+        ),
+        ("- ./data:/mnt:cached", "unsupported mode 'cached'"),
+        ("- ':/mnt'", "host path must not be empty"),
+    ];
+    for (entry, expected) in cases {
+        let body = format!("services:\n  app:\n    image: redis:7\n    volumes:\n      {entry}\n");
+        let path = write_spec(tmpdir.path(), &body);
+        let err = ComposeSpec::load(&path).expect_err("bad volume must be rejected");
+        let se = err
+            .downcast_ref::<SpecError>()
+            .expect("volume rejection should be a SpecError");
+        assert!(
+            se.code()
+                .is_some_and(|c| c.to_string() == "hpc_compose::spec::invalid_mount_syntax"),
+            "volume '{entry}' should use the invalid_mount_syntax code",
+        );
+        assert!(
+            se.to_string().contains(expected),
+            "volume '{entry}' should mention '{expected}'; got {se}",
+        );
+    }
+}
+
+// --- F3: contradictory gpus + gres guard ---
+
+#[test]
+fn gpus_and_gpu_gres_together_are_rejected() {
+    let config = SlurmConfig {
+        gpus: Some(2),
+        gres: Some("gpu:a100:2".to_string()),
+        ..SlurmConfig::default()
+    };
+    let err = config
+        .validate()
+        .expect_err("gpus + gpu gres is contradictory");
+    assert!(
+        err.downcast_ref::<SpecError>()
+            .is_some_and(|se| matches!(se, SpecError::GpusGresConflict { .. })),
+        "expected GpusGresConflict",
+    );
+
+    // Per-service scope is guarded too.
+    let service = ServiceSlurmConfig {
+        gpus: Some(1),
+        gres: Some("gpu:1".to_string()),
+        ..ServiceSlurmConfig::default()
+    };
+    let err = service
+        .validate("trainer")
+        .expect_err("service gpus + gpu gres is contradictory");
+    assert!(err.to_string().contains("service 'trainer' x-slurm"));
+}
+
+#[test]
+fn gpus_with_non_gpu_gres_is_allowed() {
+    // A non-GPU gres (e.g. a licensed feature) does not conflict with gpus.
+    let config = SlurmConfig {
+        gpus: Some(2),
+        gres: Some("bandwidth:lustre:100".to_string()),
+        ..SlurmConfig::default()
+    };
+    assert!(
+        config.validate().is_ok(),
+        "gpus with a non-gpu gres should be allowed",
+    );
+}
+
+// --- F6: submit_args / extra_srun_args conflict coverage for newly-audited flags ---
+
+#[test]
+fn submit_args_conflict_covers_mem_time_partition_qos_and_short_forms() {
+    let cases = [
+        SlurmConfig {
+            mem: Some("4G".into()),
+            submit_args: vec!["--mem=8G".into()],
+            ..SlurmConfig::default()
+        },
+        SlurmConfig {
+            time: Some("2:00:00".into()),
+            submit_args: vec!["--time=1:00:00".into()],
+            ..SlurmConfig::default()
+        },
+        SlurmConfig {
+            partition: Some("cpu".into()),
+            submit_args: vec!["--partition=gpu".into()],
+            ..SlurmConfig::default()
+        },
+        SlurmConfig {
+            qos: Some("low".into()),
+            submit_args: vec!["--qos=high".into()],
+            ..SlurmConfig::default()
+        },
+        // Short forms are matched too.
+        SlurmConfig {
+            time: Some("2:00:00".into()),
+            submit_args: vec!["-t 1:00:00".into()],
+            ..SlurmConfig::default()
+        },
+        SlurmConfig {
+            partition: Some("cpu".into()),
+            submit_args: vec!["-p gpu".into()],
+            ..SlurmConfig::default()
+        },
+    ];
+    for config in cases {
+        let raw = config.submit_args[0].clone();
+        let err = config
+            .validate()
+            .expect_err("first-class field plus raw submit arg must conflict");
+        assert!(
+            err.to_string().contains("cannot be combined with raw"),
+            "raw '{raw}' should conflict; got {err}",
+        );
+    }
+}
+
+#[test]
+fn service_extra_srun_args_conflict_covers_nodes_ntasks_gres() {
+    let cases = [
+        ServiceSlurmConfig {
+            nodes: Some(1),
+            extra_srun_args: vec!["--nodes=2".into()],
+            ..ServiceSlurmConfig::default()
+        },
+        ServiceSlurmConfig {
+            ntasks: Some(2),
+            extra_srun_args: vec!["--ntasks=4".into()],
+            ..ServiceSlurmConfig::default()
+        },
+        ServiceSlurmConfig {
+            gres: Some("gpu:2".into()),
+            extra_srun_args: vec!["--gres=gpu:1".into()],
+            ..ServiceSlurmConfig::default()
+        },
+        ServiceSlurmConfig {
+            cpus_per_task: Some(2),
+            extra_srun_args: vec!["-c 4".into()],
+            ..ServiceSlurmConfig::default()
+        },
+    ];
+    for config in cases {
+        let raw = config.extra_srun_args[0].clone();
+        let err = config
+            .validate("worker")
+            .expect_err("service first-class field plus raw srun arg must conflict");
+        assert!(
+            err.to_string().contains("cannot be combined with raw"),
+            "raw '{raw}' should conflict; got {err}",
+        );
+    }
 }

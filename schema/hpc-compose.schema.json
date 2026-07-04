@@ -155,6 +155,32 @@
       ],
       "description": "Slurm array index spec such as 0, 1-10, 1-10:2, 0,3,8-12, or 0-99%10."
     },
+    "walltime": {
+      "type": "string",
+      "minLength": 1,
+      "allOf": [
+        { "$ref": "#/definitions/lineSafeString" },
+        {
+          "pattern": "^([0-9]+(:[0-9]{1,2}){0,2}|[0-9]+-[0-9]{1,2}(:[0-9]{1,2}){0,2})$"
+        }
+      ],
+      "description": "Slurm --time walltime: minutes (90), MM:SS (90:00), HH:MM:SS (1:00:00), D-HH (1-00), D-HH:MM (1-00:30), or D-HH:MM:SS. Bare 1h/30m is rejected."
+    },
+    "mountSpec": {
+      "type": "string",
+      "minLength": 1,
+      "allOf": [
+        { "$ref": "#/definitions/lineSafeString" },
+        {
+          "pattern": "^[^:\\u0000]+:/[^:\\u0000]*(:(ro|rw))?$"
+        }
+      ],
+      "description": "Bind mount host_path:container_path[:ro|rw]; the container path must be absolute and the optional mode must be ro or rw."
+    },
+    "mountSpecList": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/mountSpec" }
+    },
     "jobDependency": {
       "oneOf": [
         {
@@ -346,7 +372,7 @@
         "partition": { "$ref": "#/definitions/lineSafeString" },
         "account": { "$ref": "#/definitions/lineSafeString" },
         "qos": { "$ref": "#/definitions/lineSafeString" },
-        "time": { "$ref": "#/definitions/lineSafeString" },
+        "time": { "$ref": "#/definitions/walltime" },
         "nodes": { "$ref": "#/definitions/positiveInteger" },
         "ntasks": { "$ref": "#/definitions/positiveInteger" },
         "ntasks_per_node": { "$ref": "#/definitions/positiveInteger" },
@@ -688,7 +714,7 @@
           "$ref": "#/definitions/stringList",
           "description": "List-only shorthand for service x-env.modules.load."
         },
-        "volumes": { "$ref": "#/definitions/stringList" },
+        "volumes": { "$ref": "#/definitions/mountSpecList" },
         "working_dir": { "type": "string" },
         "depends_on": { "$ref": "#/definitions/dependsOn" },
         "readiness": { "$ref": "#/definitions/readiness" },
@@ -946,7 +972,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "bind_paths": { "$ref": "#/definitions/stringList" },
+        "bind_paths": { "$ref": "#/definitions/mountSpecList" },
         "env": { "$ref": "#/definitions/environment" }
       }
     },
