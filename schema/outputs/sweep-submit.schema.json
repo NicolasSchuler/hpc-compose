@@ -15,15 +15,38 @@
         "null"
       ]
     },
+    "resubmitted": {
+      "description": "Number of trials (re)submitted by a resume run. Omitted for a fresh submit.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "resumed": {
+      "description": "True when this run resumed an existing sweep (`--resume`) rather than\nsubmitting a fresh one.",
+      "type": "boolean"
+    },
     "schema_version": {
       "type": "integer",
       "format": "uint32",
+      "minimum": 0
+    },
+    "skipped_already_submitted": {
+      "description": "Number of trials a resume run left untouched because they already had a\njob. Omitted for a fresh submit.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
       "minimum": 0
     }
   },
   "required": [
     "schema_version",
     "dry_run",
+    "resumed",
     "manifest"
   ],
   "$defs": {

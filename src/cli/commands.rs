@@ -3116,6 +3116,18 @@ pub enum SweepCommands {
         force_rebuild: bool,
         #[arg(long, help = "Skip the preflight phase before submission")]
         no_preflight: bool,
+        #[arg(
+            long,
+            help = "Re-drive an existing sweep manifest, submitting only trials that never got a job (failed or unattempted); already-submitted trials are left untouched"
+        )]
+        resume: bool,
+        #[arg(
+            long,
+            value_name = "ID",
+            requires = "resume",
+            help = "Sweep id to resume; defaults to the latest sweep (requires --resume)"
+        )]
+        sweep_id: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(

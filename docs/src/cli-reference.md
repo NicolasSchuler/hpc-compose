@@ -193,6 +193,8 @@ hpc-compose germinate -f compose.yaml --format json
 hpc-compose germinate -f compose.yaml --dry-run --script-out canary.sbatch
 hpc-compose sweep submit -f compose.yaml --dry-run
 hpc-compose sweep submit -f compose.yaml --max-trials 200
+hpc-compose sweep submit -f compose.yaml --resume
+hpc-compose sweep submit -f compose.yaml --resume --sweep-id sweep-1700000000-1234 --dry-run
 hpc-compose sweep results -f compose.yaml --format csv > runs.csv
 hpc-compose sweep results -f compose.yaml --include score,energy --format json
 hpc-compose score --sweep sweep-1700000000-1234 -f compose.yaml --format json

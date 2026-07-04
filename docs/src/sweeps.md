@@ -241,12 +241,35 @@ scaling (minimize objective vs nodes):
 
 The report is purely read-only, post-hoc analysis over the persisted manifest and tracked local state: it reuses the same terminal-only scheduler/runtime probe as `sweep observe` and never opens a new connection. Runtime is taken from the maximum observed service duration of each terminal trial; trials that are non-terminal or report no runtime are skipped rather than zero-filled. The baseline is the smallest-axis group that has runtime data. The report is print/JSON-only and is never written back to the manifest, so omitting `--scaling` leaves observe output byte-identical.
 
+## Resume a Partial Sweep
+
+Trials submit sequentially, and if one submission fails, later trials are not submitted (see [Limitations](#limitations)). The partial manifest is kept, so a failed submission can be resumed with `sweep submit --resume`:
+
+```bash
+hpc-compose sweep submit -f train.yaml --resume
+hpc-compose sweep submit -f train.yaml --resume --sweep-id sweep-1700000000-1234
+```
+
+Resume re-drives the existing manifest and submits only the trials that never got a job: those that recorded a submit error and those that were never attempted. Already-submitted trials keep their job id untouched, and no new sweep id is minted, so the sweep keeps its identity and the `sweep status`/`observe`/`results` history stays continuous. Without `--sweep-id`, resume targets the latest sweep for the compose file.
+
+Before resubmitting anything, resume re-expands the current compose file's sweep block using the stored sweep id, so `matrix: random` samples and per-replicate seeds reproduce exactly. It then compares the re-expansion against the manifest. If the sweep block changed since the original submission (matrix mode, parameter combinations, trial count, per-trial variables, or seeds), resume refuses with a clear error rather than submit trials that no longer match the recorded plan; submit a new sweep instead. The same fanout guard as the original submit applies, so a sweep that expands to more than 100 trials still needs `--max-trials` on resume.
+
+Preview the resume set without submitting anything with `--dry-run`:
+
+```bash
+hpc-compose sweep submit -f train.yaml --resume --dry-run
+```
+
+This validates each pending trial's plan and reports how many trials would be resubmitted versus left in place, without writing scripts, submitting jobs, or touching the manifest. If every trial already has a job, resume exits successfully with a "nothing to resume" message. A resume run's JSON output adds `resumed`, `resubmitted`, and `skipped_already_submitted` fields alongside the usual manifest.
+
+A `--resume` run is itself re-runnable: if a resubmission fails again, the manifest records the new error and later trials are left for the next resume.
+
 ## Limitations
 
 - Sweeps must be embedded in the same compose file. `sweep.spec` is not supported.
 - Each trial is a separate Slurm allocation. Sweeps are not Slurm arrays.
 - `x-slurm.array` is rejected during `sweep submit`.
-- Trials submit sequentially. If a submission fails, later trials are not submitted and the partial manifest is kept.
+- Trials submit sequentially. If a submission fails, later trials are not submitted and the partial manifest is kept; resume it with `sweep submit --resume` (see [Resume a Partial Sweep](#resume-a-partial-sweep)).
 - `sweep status` summarizes scheduler/tracking state; use `sweep observe` to parse and rank objectives.
 
 ## Related Docs

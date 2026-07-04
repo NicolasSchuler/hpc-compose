@@ -1724,3 +1724,357 @@ fn sweep_observe_without_scaling_flag_omits_scaling_key() {
         "scaling key must be omitted when --scaling is not passed"
     );
 }
+
+/// Flattens a miette-rendered error into a single whitespace-collapsed line so
+/// substring assertions survive line wrapping and box-drawing gutters.
+fn flatten_err(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c == '\u{2502}' || c == '\u{00d7}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Runs a submit that fails on the second trial, leaving a partial manifest:
+/// t000 has job 11111, t001 recorded a submit error, t002 was never attempted.
+/// Returns the sweep id recorded in the partial manifest.
+fn submit_partial_sweep(tmpdir: &Path, compose: &Path) -> String {
+    let sbatch = write_failing_second_sbatch(tmpdir);
+    let submit = run_cli(
+        tmpdir,
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&submit);
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(tmpdir.join(".hpc-compose/sweeps/latest.json")).expect("read manifest"),
+    )
+    .expect("manifest json");
+    assert_eq!(manifest["trials"][0]["job_id"], Value::from("11111"));
+    assert!(manifest["trials"][1]["submit_error"].is_string());
+    assert_eq!(manifest["trials"][2]["job_id"], Value::Null);
+    manifest["sweep_id"].as_str().expect("sweep id").to_string()
+}
+
+#[test]
+fn sweep_resume_resubmits_only_failed_and_unattempted_trials() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01", "0.1"]);
+    let sweep_id = submit_partial_sweep(tmpdir.path(), &compose);
+
+    // A fresh, working sbatch: the two pending trials should pick up 22222/22223.
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 22222);
+    let resume = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&resume);
+    assert!(stdout_text(&resume).contains("2 resubmitted, 1 already submitted"));
+
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(tmpdir.path().join(".hpc-compose/sweeps/latest.json"))
+            .expect("read manifest"),
+    )
+    .expect("manifest json");
+    // Already-submitted trial keeps its original job id untouched.
+    assert_eq!(manifest["trials"][0]["job_id"], Value::from("11111"));
+    // The failed and unattempted trials gained job ids.
+    assert_eq!(manifest["trials"][1]["job_id"], Value::from("22222"));
+    assert_eq!(manifest["trials"][2]["job_id"], Value::from("22223"));
+    // The stale submit error was cleared on success.
+    assert_eq!(manifest["trials"][1]["submit_error"], Value::Null);
+    // No new sweep id was minted; latest.json still points at the same sweep.
+    assert_eq!(manifest["sweep_id"], Value::from(sweep_id.as_str()));
+    let per_id = tmpdir
+        .path()
+        .join(format!(".hpc-compose/sweeps/{sweep_id}/sweep.json"));
+    assert!(per_id.exists(), "per-id manifest should still exist");
+}
+
+#[test]
+fn sweep_resume_dry_run_previews_without_submitting() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01", "0.1"]);
+    submit_partial_sweep(tmpdir.path(), &compose);
+
+    let before = fs::read_to_string(tmpdir.path().join(".hpc-compose/sweeps/latest.json"))
+        .expect("read manifest before");
+
+    let dry_run = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--dry-run",
+            "--no-preflight",
+            "--skip-prepare",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&dry_run);
+    let payload: Value = serde_json::from_str(&stdout_text(&dry_run)).expect("dry-run json");
+    assert_eq!(payload["dry_run"], Value::from(true));
+    assert_eq!(payload["resumed"], Value::from(true));
+    assert_eq!(payload["resubmitted"], Value::from(2));
+    assert_eq!(payload["skipped_already_submitted"], Value::from(1));
+
+    // The manifest on disk is byte-for-byte unchanged by a dry-run resume.
+    let after = fs::read_to_string(tmpdir.path().join(".hpc-compose/sweeps/latest.json"))
+        .expect("read manifest after");
+    assert_eq!(before, after);
+}
+
+#[test]
+fn sweep_resume_nothing_to_resume_exits_zero() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01"]);
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 11111);
+    // A fully successful submit: every trial gets a job.
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let resume = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--no-preflight",
+            "--skip-prepare",
+        ],
+    );
+    assert_success(&resume);
+    assert!(stdout_text(&resume).contains("nothing to resume"));
+
+    let resume_json = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--no-preflight",
+            "--skip-prepare",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&resume_json);
+    let payload: Value = serde_json::from_str(&stdout_text(&resume_json)).expect("resume json");
+    assert_eq!(payload["resumed"], Value::from(true));
+    assert_eq!(payload["resubmitted"], Value::from(0));
+    assert_eq!(payload["skipped_already_submitted"], Value::from(2));
+    assert!(payload["schema_version"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn sweep_resume_refuses_when_sweep_block_drifted() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01", "0.1"]);
+    submit_partial_sweep(tmpdir.path(), &compose);
+
+    let before = fs::read_to_string(tmpdir.path().join(".hpc-compose/sweeps/latest.json"))
+        .expect("read manifest before");
+
+    // Mutate the sweep block: add a parameter value, changing the trial count.
+    write_sweep_compose(
+        tmpdir.path(),
+        cache.path(),
+        &["0.001", "0.01", "0.1", "1.0"],
+    );
+
+    let resume = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--no-preflight",
+            "--skip-prepare",
+        ],
+    );
+    assert_failure(&resume);
+    let stderr = flatten_err(&stderr_text(&resume));
+    assert!(
+        stderr.contains("changed since sweep"),
+        "unexpected: {stderr}"
+    );
+    assert!(
+        stderr.contains("resume cannot safely continue"),
+        "unexpected: {stderr}"
+    );
+
+    // The manifest is untouched by a refused resume.
+    let after = fs::read_to_string(tmpdir.path().join(".hpc-compose/sweeps/latest.json"))
+        .expect("read manifest after");
+    assert_eq!(before, after);
+}
+
+#[test]
+fn sweep_resume_refuses_stopped_sweep() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01", "0.1"]);
+    submit_partial_sweep(tmpdir.path(), &compose);
+
+    // Mark the sweep as explicitly stopped by editing the persisted manifest, the
+    // way the terminal state would be recorded by `sweep stop`.
+    let latest_path = tmpdir.path().join(".hpc-compose/sweeps/latest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&latest_path).expect("read manifest"))
+            .expect("manifest json");
+    manifest["stopped_at"] = Value::from(1700000000_u64);
+    manifest["stop_reason"] = Value::from("manual sweep stop");
+    let serialized = serde_json::to_string_pretty(&manifest).expect("serialize");
+    let sweep_id = manifest["sweep_id"].as_str().expect("sweep id").to_string();
+    fs::write(&latest_path, &serialized).expect("write latest");
+    fs::write(
+        tmpdir
+            .path()
+            .join(format!(".hpc-compose/sweeps/{sweep_id}/sweep.json")),
+        &serialized,
+    )
+    .expect("write per-id");
+
+    let resume = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--no-preflight",
+            "--skip-prepare",
+        ],
+    );
+    assert_failure(&resume);
+    let stderr = flatten_err(&stderr_text(&resume));
+    assert!(
+        stderr.contains("was explicitly stopped"),
+        "unexpected: {stderr}"
+    );
+    assert!(
+        stderr.contains("Submit a new sweep instead"),
+        "unexpected: {stderr}"
+    );
+}
+
+#[test]
+fn sweep_submit_sweep_id_without_resume_is_clap_error() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01"]);
+
+    let result = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--sweep-id",
+            "sweep-123",
+        ],
+    );
+    assert_failure(&result);
+    assert!(
+        stderr_text(&result).to_lowercase().contains("required"),
+        "expected a clap requires error, got: {}",
+        stderr_text(&result)
+    );
+}
+
+#[test]
+fn sweep_resume_json_reports_counts_and_schema_version() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01", "0.1"]);
+    let sweep_id = submit_partial_sweep(tmpdir.path(), &compose);
+
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 33333);
+    let resume = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--no-preflight",
+            "--skip-prepare",
+            "--format",
+            "json",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&resume);
+    let payload: Value = serde_json::from_str(&stdout_text(&resume)).expect("resume json");
+    assert_eq!(payload["resumed"], Value::from(true));
+    assert_eq!(payload["resubmitted"], Value::from(2));
+    assert_eq!(payload["skipped_already_submitted"], Value::from(1));
+    assert!(payload["schema_version"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(
+        payload["manifest"]["sweep_id"],
+        Value::from(sweep_id.as_str())
+    );
+    assert_eq!(
+        payload["manifest"]["trials"][1]["job_id"],
+        Value::from("33333")
+    );
+    assert_eq!(
+        payload["manifest"]["trials"][2]["job_id"],
+        Value::from("33334")
+    );
+}
