@@ -6186,20 +6186,20 @@ fn notebook_rejects_file_flag() {
 }
 
 #[test]
-fn notebook_rejects_invalid_ready_timeout() {
+fn notebook_rejects_invalid_timeout() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let output = run_cli(
         tmpdir.path(),
         &[
             "notebook",
-            "--ready-timeout",
+            "--timeout",
             "not-a-duration",
             "--dry-run",
             "--no-preflight",
         ],
     );
     assert_failure(&output);
-    assert!(stderr_text(&output).contains("--ready-timeout"));
+    assert!(stderr_text(&output).contains("--timeout"));
 }
 
 #[test]
@@ -6226,7 +6226,7 @@ fn notebook_local_submits_and_tracks_then_bails_on_readiness_timeout() {
             "--local",
             "--skip-prepare",
             "--no-preflight",
-            "--ready-timeout",
+            "--timeout",
             "1s",
             "--enroot-bin",
             enroot.to_str().expect("path"),

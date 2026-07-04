@@ -739,8 +739,8 @@ services:
             "germinate --canary-time is invalid",
         ),
         (
-            vec!["--pending-timeout", "not-a-duration"],
-            "germinate --pending-timeout is invalid",
+            vec!["--timeout", "not-a-duration"],
+            "germinate --timeout is invalid",
         ),
     ] {
         let mut args = vec![
@@ -855,7 +855,7 @@ fi
             compose.to_str().expect("path"),
             "--no-preflight",
             "--skip-prepare",
-            "--pending-timeout",
+            "--timeout",
             "1s",
             "--sbatch-bin",
             write_fake_sbatch(tmpdir.path()).to_str().expect("path"),

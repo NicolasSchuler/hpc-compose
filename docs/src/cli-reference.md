@@ -302,14 +302,14 @@ Settings profiles can also configure these via `[defaults.binaries]` or `[profil
 ```bash
 hpc-compose germinate -f compose.yaml
 hpc-compose germinate -f compose.yaml --canary-time 00:01:00 --metrics-interval 5
-hpc-compose germinate -f compose.yaml --pending-timeout 30m --format json
+hpc-compose germinate -f compose.yaml --timeout 30m --format json
 ```
 
 Useful options:
 
 - `--canary-time <TIME>` defaults to `00:01:00`.
 - `--metrics-interval <SECONDS>` defaults to `5` and is forced on in the canary plan.
-- `--pending-timeout <DURATION>` defaults to `30m`.
+- `--timeout <DURATION>` defaults to `30m`.
 - `--min-cpus <N>`, `--min-mem <MEM>`, and `--min-gpus <N>` set canary floors.
 - `--dry-run` renders the canary script without calling `sbatch`.
 - `--skip-prepare`, `--force-rebuild`, `--keep-failed-prep`, `--no-preflight`, and `--script-out` match the normal preparation flags.
@@ -457,7 +457,7 @@ Useful `test` options:
 | `--local` | Run the finite smoke spec through the local supervisor. |
 | `--submit` | Submit the finite smoke spec to Slurm; required before any scheduler submission happens. |
 | `--time <TIME>` | Override Slurm wall time for `--submit`; defaults to `00:01:00`. |
-| `--wait-timeout <DURATION>` (alias `--timeout`) | Stop waiting and best-effort cancel/cleanup after the timeout; defaults to `180s`. |
+| `--timeout <DURATION>` | Stop waiting and best-effort cancel/cleanup after the timeout; defaults to `180s`. |
 | `--format json` | Emit phase status, job id, script path, per-service results, and failure reason for automation. |
 
 `dev` is local-only and watches host directories from service `volumes`:
@@ -539,7 +539,7 @@ It calls `srun --pty` directly with Pyxis `--container-image` and defaults to `b
 ```bash
 hpc-compose notebook [--kind jupyter|vscode] [--image IMAGE] [--port N] [--token TOKEN]
                      [--volume HOST:CONTAINER]... [--working-dir PATH] [--tunnel-name NAME]
-                     [--ready-timeout DURATION] [--follow] [--dry-run] [--local] [-- ARGS...]
+                     [--timeout DURATION] [--follow] [--dry-run] [--local] [-- ARGS...]
                      [--resources NAME] [--time T] [--mem M] [--cpus-per-task N] [--gpus N]
                      [--partition P] [--env K=V]
 ```

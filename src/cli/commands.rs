@@ -300,12 +300,6 @@ pub enum Commands {
             help = "Refresh imported and prepared artifacts before running"
         )]
         force_rebuild: bool,
-        #[arg(
-            long = "force",
-            hide = true,
-            help = "Deprecated alias for --force-rebuild"
-        )]
-        force_deprecated: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -611,12 +605,12 @@ pub enum Commands {
         script_out: Option<PathBuf>,
         #[arg(
             long,
-            value_name = "SECONDS",
-            default_value_t = 300,
+            value_name = "DURATION",
+            default_value = "5m",
             help = "Timeout for a submitted MPI smoke job",
             hide = true
         )]
-        timeout_seconds: u64,
+        timeout: String,
         #[arg(
             long,
             value_name = "PATH",
@@ -893,7 +887,7 @@ pub enum Commands {
             default_value = "30m",
             help = "Give up if the canary remains non-terminal for this long"
         )]
-        pending_timeout: String,
+        timeout: String,
         #[arg(
             long,
             value_name = "CPUS",
@@ -985,13 +979,12 @@ pub enum Commands {
         )]
         time: String,
         #[arg(
-            long = "wait-timeout",
-            alias = "timeout",
+            long,
             value_name = "DURATION",
             default_value = "180s",
             help = "Maximum time to wait for the smoke test to reach a terminal result"
         )]
-        wait_timeout: String,
+        timeout: String,
         #[arg(
             long,
             value_name = "OUTPUT",
@@ -2254,7 +2247,7 @@ pub enum Commands {
             default_value = "10m",
             help = "Give up waiting for the notebook to become ready after this duration"
         )]
-        ready_timeout: String,
+        timeout: String,
         #[arg(
             long,
             help = "Stream service logs after readiness instead of detaching"
@@ -2724,11 +2717,11 @@ pub enum DoctorCommands {
         script_out: Option<PathBuf>,
         #[arg(
             long,
-            value_name = "SECONDS",
-            default_value_t = 300,
+            value_name = "DURATION",
+            default_value = "5m",
             help = "Timeout for a submitted MPI smoke job"
         )]
-        timeout_seconds: u64,
+        timeout: String,
     },
     #[command(about = "Render or run MPI and fabric smoke probes for one service")]
     FabricSmoke {
@@ -2761,11 +2754,11 @@ pub enum DoctorCommands {
         script_out: Option<PathBuf>,
         #[arg(
             long,
-            value_name = "SECONDS",
-            default_value_t = 300,
+            value_name = "DURATION",
+            default_value = "5m",
             help = "Timeout for a submitted fabric smoke job"
         )]
-        timeout_seconds: u64,
+        timeout: String,
     },
     #[command(about = "Explain or run one service readiness probe from the current host")]
     Readiness {
@@ -2792,10 +2785,10 @@ pub enum DoctorCommands {
         log_file: Option<PathBuf>,
         #[arg(
             long,
-            value_name = "SECONDS",
+            value_name = "DURATION",
             help = "Override the probe timeout for this doctor run only"
         )]
-        timeout_seconds: Option<u64>,
+        timeout: Option<String>,
     },
 }
 

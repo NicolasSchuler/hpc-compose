@@ -19,7 +19,7 @@ pub(crate) fn germinate(
     script_out: Option<PathBuf>,
     canary_time: String,
     metrics_interval: u64,
-    pending_timeout: String,
+    timeout: String,
     min_cpus: u32,
     min_mem: String,
     min_gpus: u32,
@@ -47,8 +47,8 @@ pub(crate) fn germinate(
         bail!("germinate --min-mem must not be empty");
     }
     parse_slurm_time_limit(&canary_time).context("germinate --canary-time is invalid")?;
-    let pending_timeout_seconds = parse_log_since_duration(&pending_timeout)
-        .context("germinate --pending-timeout is invalid")?;
+    let pending_timeout_seconds =
+        parse_log_since_duration(&timeout).context("germinate --timeout is invalid")?;
 
     let file = context.compose_file.value.clone();
     let output_format = output::resolve_output_format(format);

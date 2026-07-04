@@ -1423,7 +1423,6 @@ fn run_command_covers_success_and_error_arms() {
         huggingface_cli_bin: "huggingface-cli".into(),
         keep_failed_prep: false,
         force_rebuild: true,
-        force_deprecated: false,
         format: None,
     })
     .expect("prepare");

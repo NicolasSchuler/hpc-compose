@@ -101,15 +101,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             huggingface_cli_bin,
             keep_failed_prep,
             force_rebuild,
-            force_deprecated,
             format,
         } => {
-            if force_deprecated {
-                let _ = writeln!(
-                    io::stderr(),
-                    "warning: prepare --force is deprecated; use --force-rebuild instead"
-                );
-            }
             let context = resolve_ctx(
                 options,
                 file,
@@ -123,7 +116,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             spec::prepare(
                 context,
                 keep_failed_prep,
-                force_rebuild || force_deprecated,
+                force_rebuild,
                 format,
                 options.quiet,
             )
@@ -229,7 +222,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             service,
             submit,
             script_out,
-            timeout_seconds,
+            timeout,
             sbatch_bin,
             srun_bin,
             scontrol_bin,
@@ -260,6 +253,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             if mpi_smoke && fabric_smoke {
                 bail!("doctor --mpi-smoke cannot be combined with --fabric-smoke");
             }
+            let timeout_seconds = parse_doctor_timeout(&timeout)?;
             if mpi_smoke {
                 if cluster_report {
                     bail!("doctor --mpi-smoke cannot be combined with --cluster-report");
@@ -466,7 +460,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             local,
             submit,
             time,
-            wait_timeout,
+            timeout,
             script_out,
             sbatch_bin,
             srun_bin,
@@ -495,7 +489,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 local,
                 submit,
                 time,
-                wait_timeout,
+                timeout,
                 script_out,
                 runtime::PrepareFlags {
                     keep_failed_prep: launch.keep_failed_prep,
@@ -729,7 +723,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             script_out,
             canary_time,
             metrics_interval,
-            pending_timeout,
+            timeout,
             min_cpus,
             min_mem,
             min_gpus,
@@ -761,7 +755,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 script_out,
                 canary_time,
                 metrics_interval,
-                pending_timeout,
+                timeout,
                 min_cpus,
                 min_mem,
                 min_gpus,
@@ -1609,7 +1603,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             volumes,
             working_dir,
             tunnel_name,
-            ready_timeout,
+            timeout,
             follow,
             dry_run,
             args,
@@ -1639,10 +1633,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 NotebookKindArg::Jupyter => NotebookKind::Jupyter,
                 NotebookKindArg::Vscode => NotebookKind::VsCode,
             };
-            let ready_timeout_seconds =
-                parse_short_duration(&ready_timeout).with_context(|| {
-                    format!("--ready-timeout '{ready_timeout}' must be like 30s, 10m, or 1h")
-                })?;
+            let ready_timeout_seconds = parse_short_duration(&timeout)
+                .with_context(|| format!("--timeout '{timeout}' must be like 30s, 10m, or 1h"))?;
             let mut extra_args = args;
             if extra_args.first().is_some_and(|arg| arg == "--") {
                 extra_args.remove(0);
@@ -1866,8 +1858,9 @@ fn run_doctor_subcommand(
             service,
             submit,
             script_out,
-            timeout_seconds,
+            timeout,
         } => {
+            let timeout_seconds = parse_doctor_timeout(&timeout)?;
             let context = resolve_command_context(options, file, binary_overrides, None)?;
             doctor::doctor_mpi_smoke(
                 context,
@@ -1886,8 +1879,9 @@ fn run_doctor_subcommand(
             checks,
             submit,
             script_out,
-            timeout_seconds,
+            timeout,
         } => {
+            let timeout_seconds = parse_doctor_timeout(&timeout)?;
             let context = resolve_command_context(options, file, binary_overrides, None)?;
             doctor::doctor_fabric_smoke(
                 context,
@@ -1908,8 +1902,9 @@ fn run_doctor_subcommand(
             service,
             run,
             log_file,
-            timeout_seconds,
+            timeout,
         } => {
+            let timeout_seconds = timeout.as_deref().map(parse_doctor_timeout).transpose()?;
             let context = resolve_command_context(options, file, binary_overrides, None)?;
             doctor::doctor_readiness(
                 context,
@@ -1922,6 +1917,13 @@ fn run_doctor_subcommand(
             )
         }
     }
+}
+
+/// Parses a doctor `--timeout` DURATION string (`30s`, `5m`, `1h`, or a bare
+/// number of seconds) into whole seconds.
+fn parse_doctor_timeout(raw: &str) -> Result<u64> {
+    hpc_compose::spec::parse_short_duration(raw)
+        .with_context(|| format!("doctor --timeout '{raw}' must be like 30s or 5m"))
 }
 
 fn run_examples_subcommand(command: ExamplesCommands) -> Result<()> {

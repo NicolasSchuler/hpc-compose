@@ -98,7 +98,7 @@ For VS Code, `code tunnel` performs GitHub device-flow authentication the first 
 
 - **Images and users.** `jupyter/scipy-notebook` runs as the non-root `jovyan` user. Bind-mounted host directories must be writable by that user (typically uid 1000). Use `--working-dir` to point at your mounted workspace and adjust ownership on the host if needed.
 - **VS Code images.** There is no universal default `code` image; supply one with `--image` that contains the VS Code CLI.
-- **Readiness.** `hpc-compose` waits for a log pattern (`/lab?token=` for Jupyter, `vscode.dev/tunnel/` for VS Code) before printing the URL. Use `--ready-timeout` (default `10m`) to bound the wait; first-run image pulls happen during `prepare`, before the readiness clock starts.
+- **Readiness.** `hpc-compose` waits for a log pattern (`/lab?token=` for Jupyter, `vscode.dev/tunnel/` for VS Code) before printing the URL. Use `--timeout` (default `10m`) to bound the wait; first-run image pulls happen during `prepare`, before the readiness clock starts.
 - **Declarative counterpart.** The same workflow is available as a compose file via the `jupyter` template (`hpc-compose new --template jupyter`), so you can commit it to a repo and launch with `hpc-compose up`.
 
 ## Related Docs
