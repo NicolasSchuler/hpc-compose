@@ -326,19 +326,15 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
             force_rebuild: false,
             no_preflight: true,
         },
-        false,
-        false,
+        LaunchOptions {
+            dry_run: true,
+            ..LaunchOptions::default()
+        },
         None,
-        false,
-        false,
-        false,
-        true,
         None,
-        false,
         WatchMode::Auto,
         HoldOnExit::Failure,
         MetricsOverrides::default(),
-        false,
     )
     .expect("submit dry run");
     launch(
@@ -350,19 +346,15 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
             force_rebuild: false,
             no_preflight: true,
         },
-        false,
-        false,
+        LaunchOptions {
+            dry_run: true,
+            ..LaunchOptions::default()
+        },
         None,
-        false,
-        false,
-        false,
-        true,
         Some(OutputFormat::Json),
-        false,
         WatchMode::Auto,
         HoldOnExit::Failure,
         MetricsOverrides::default(),
-        false,
     )
     .expect("submit dry run json");
 
@@ -370,7 +362,6 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
         context.clone(),
         Some("12345".into()),
         Some(OutputFormat::Json),
-        false,
         false,
     )
     .expect_err("status should require tracked metadata");
@@ -389,7 +380,6 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
         context.clone(),
         None,
         Some(OutputFormat::Json),
-        false,
         Vec::new(),
         false,
     )
@@ -443,19 +433,12 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
             force_rebuild: false,
             no_preflight: true,
         },
-        false,
-        false,
+        LaunchOptions::default(),
         None,
-        false,
-        false,
-        false,
-        false,
         None,
-        false,
         WatchMode::Auto,
         HoldOnExit::Failure,
         MetricsOverrides::default(),
-        false,
     )
     .expect_err("sbatch failure");
     assert!(
@@ -1004,7 +987,6 @@ fn runtime_wrappers_cover_success_paths_with_local_tracking() {
         context.clone(),
         Some(record.job_id.clone()),
         Some(OutputFormat::Json),
-        false,
         false,
     )
     .expect("status");

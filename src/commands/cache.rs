@@ -11,7 +11,7 @@ use crate::output::{cache as output_cache, common as output_common};
 pub(crate) fn list(cache_dir: Option<PathBuf>, format: Option<OutputFormat>) -> Result<()> {
     let cache_dir = cache_dir.unwrap_or_else(output_common::default_cache_dir);
     let manifests = scan_cache(&cache_dir)?;
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             if manifests.is_empty() {
                 println!("no cache entries found in {}", cache_dir.display());
@@ -59,7 +59,7 @@ pub(crate) fn inspect(
             &context.resource_profiles,
         )?;
     let report = output_cache::build_cache_inspect_report(&runtime_plan, service.as_deref())?;
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => output_cache::print_cache_inspect(&report)?,
         OutputFormat::Json => {
             println!(
@@ -109,7 +109,7 @@ pub(crate) fn prune(
             removed_paths: result.removed,
         }
     };
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             output_cache::print_prune_result(&report.cache_dir, &report.removed_paths)
         }
@@ -152,7 +152,7 @@ pub(crate) fn prune_no_context(
         removed_count: result.removed.len(),
         removed_paths: result.removed,
     };
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             output_cache::print_prune_result(&report.cache_dir, &report.removed_paths)
         }

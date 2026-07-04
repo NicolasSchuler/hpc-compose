@@ -47,7 +47,6 @@ struct ExperimentService {
 pub(crate) fn experiment_show(
     context: ResolvedContext,
     job_id: Option<String>,
-    json: bool,
     format: Option<OutputFormat>,
     pue: f64,
     gpu_tdp_w: f64,
@@ -112,7 +111,7 @@ pub(crate) fn experiment_show(
         login_host.as_deref(),
     );
 
-    match output::resolve_output_format(format, json) {
+    match output::resolve_output_format(format) {
         OutputFormat::Json => {
             println!(
                 "{}",

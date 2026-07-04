@@ -4,7 +4,6 @@ pub(crate) fn status(
     context: ResolvedContext,
     job_id: Option<String>,
     format: Option<OutputFormat>,
-    json: bool,
     array: bool,
 ) -> Result<()> {
     let lookup_job_id = if array {
@@ -43,7 +42,7 @@ pub(crate) fn status(
             &scheduler_options,
         )?);
     }
-    match output::resolve_output_format(format, json) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             output::print_status_snapshot(&snapshot).context("failed to write status output")?;
             let job_id = snapshot.record.job_id.as_str();
@@ -137,7 +136,6 @@ pub(crate) fn metrics_probe(
 pub(crate) fn score(
     context: ResolvedContext,
     job_id: Option<String>,
-    json: bool,
     format: Option<OutputFormat>,
     pue: f64,
     gpu_tdp_w: f64,
@@ -173,7 +171,7 @@ pub(crate) fn score(
             cpu_watts_per_core,
         },
     )?;
-    match output::resolve_output_format(format, json) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             output::print_efficiency_score_report(&report)
                 .context("failed to write score output")?;
@@ -193,7 +191,6 @@ pub(crate) fn artifacts(
     context: ResolvedContext,
     job_id: Option<String>,
     format: Option<OutputFormat>,
-    json: bool,
     bundles: Vec<String>,
     tarball: bool,
 ) -> Result<()> {
@@ -205,7 +202,7 @@ pub(crate) fn artifacts(
             tarball,
         },
     )?;
-    match output::resolve_output_format(format, json) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             output::print_artifact_export_report(&report)
                 .context("failed to write artifacts output")?;
@@ -244,7 +241,7 @@ pub(crate) fn diff(
             sacct_bin: context.binaries.sacct.value,
         },
     );
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             output::print_job_diff_report(&report).context("failed to write diff output")?;
         }
@@ -371,7 +368,7 @@ pub(crate) fn ps(
             sacct_bin: context.binaries.sacct.value,
         },
     )?;
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             output::print_ps_snapshot(&snapshot).context("failed to write ps output")?;
         }
@@ -427,7 +424,7 @@ pub(crate) fn replay(
     let record = resolve_tracked_record(&context, job_id.as_deref())?
         .with_context(|| tracked_job_hint(job_id.as_deref()))?;
     let report = build_replay_report(&record, service.as_deref())?;
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Json => {
             println!(
                 "{}",

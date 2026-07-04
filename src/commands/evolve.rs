@@ -40,7 +40,7 @@ pub(crate) fn command(
         return print_lesson_description(lesson, format);
     }
 
-    let format = output_common::resolve_output_format(format, false);
+    let format = output_common::resolve_output_format(format);
     if format == OutputFormat::Json && !yes {
         bail!("hpc-compose evolve --format json requires --yes for noninteractive execution");
     }
@@ -418,7 +418,7 @@ struct StepDescriptionOutput {
 }
 
 fn print_lesson_list(format: Option<OutputFormat>) -> Result<()> {
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("lessons:");
             for lesson in lessons() {
@@ -445,7 +445,7 @@ fn print_lesson_list(format: Option<OutputFormat>) -> Result<()> {
 }
 
 fn print_lesson_description(lesson: &EvolveLesson, format: Option<OutputFormat>) -> Result<()> {
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("{}", term::styled_label("lesson", lesson.id()));
             println!("{}", term::styled_label("title", lesson.title()));

@@ -370,12 +370,8 @@ pub(crate) fn render_from_path(path: &Path) -> Result<String> {
     hpc_compose::render::render_script(&runtime)
 }
 
-pub(crate) fn resolve_output_format(format: Option<OutputFormat>, json: bool) -> OutputFormat {
-    if json {
-        OutputFormat::Json
-    } else {
-        format.unwrap_or(OutputFormat::Text)
-    }
+pub(crate) fn resolve_output_format(format: Option<OutputFormat>) -> OutputFormat {
+    format.unwrap_or(OutputFormat::Text)
 }
 
 pub(crate) fn resolve_stats_output_format(

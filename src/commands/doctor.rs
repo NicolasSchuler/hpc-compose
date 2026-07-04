@@ -38,7 +38,7 @@ pub(crate) fn doctor(
     cluster_report: bool,
     cluster_report_out: Option<PathBuf>,
 ) -> Result<()> {
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     if cluster_report {
         return doctor_cluster_report(output_format, binaries, cluster_report_out);
     }
@@ -68,7 +68,7 @@ pub(crate) fn doctor_mpi_smoke(
     if submit && timeout_seconds == 0 {
         bail!("doctor --mpi-smoke --timeout-seconds must be at least 1 when --submit is used");
     }
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
@@ -283,7 +283,7 @@ pub(crate) fn doctor_fabric_smoke(
         bail!("doctor --fabric-smoke --timeout-seconds must be at least 1 when --submit is used");
     }
     let selected_checks = FabricCheckSelection::parse(checks.as_deref())?;
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
@@ -507,7 +507,7 @@ pub(crate) fn doctor_readiness(
     if matches!(timeout_seconds, Some(0)) {
         bail!("doctor readiness --timeout-seconds must be at least 1");
     }
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
         &context.compose_file.value,
         &context.interpolation_vars,
