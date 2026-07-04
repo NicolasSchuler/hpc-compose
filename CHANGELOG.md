@@ -58,6 +58,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   explicit `array_tasks` modifier, and using `array_tasks` without `x-slurm.array`
   is rejected.
 
+### Fixed
+
+- `when --after-job` now treats `LAUNCH_FAILED` and `RECONFIG_FAIL` as terminal
+  states, matching the job tracker's `JobState::is_terminal`. Previously the
+  dependency resolver used a narrower terminal-state list that omitted these two,
+  so a dependency job that ended in either state was classified as still pending
+  and the `when` monitor polled forever (or exited with a timeout error) instead
+  of resolving the condition. Now `afterany`/`afternotok` are satisfied and
+  `afterok` fails fast with a "can never satisfy" error, as they already did for
+  every other failed terminal state.
+
 ## [0.1.52] - 2026-06-30
 
 ### Fixed

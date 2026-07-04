@@ -446,25 +446,14 @@ fn classify_job_state(raw: &str, condition: JobDependencyCondition) -> JobCondit
     }
 }
 
-// Intentionally NOT routed through `JobState::is_terminal`: the dependency
-// resolver treats a narrower set of states as terminal than the scheduler's
-// `is_terminal_state` (it omits LAUNCH_FAILED and RECONFIG_FAIL). Unifying it
-// with `JobState::is_terminal` would change which states satisfy an after-job
-// condition, i.e. a behaviour change this type-safety refactor must not make.
+// A Slurm state is terminal for dependency resolution exactly when the job has
+// stopped, so this routes through the shared `JobState::is_terminal` — the same
+// predicate the job tracker uses. Keeping a separate, narrower list here was a
+// latent bug: it omitted `LAUNCH_FAILED` and `RECONFIG_FAIL`, so a dependency
+// that ended in either state was classified `Pending` and the `when` monitor
+// polled forever (or timed out) instead of resolving the after-job condition.
 fn is_terminal_state(state: &str) -> bool {
-    matches!(
-        state,
-        "BOOT_FAIL"
-            | "CANCELLED"
-            | "COMPLETED"
-            | "DEADLINE"
-            | "FAILED"
-            | "NODE_FAIL"
-            | "OUT_OF_MEMORY"
-            | "PREEMPTED"
-            | "REVOKED"
-            | "TIMEOUT"
-    )
+    crate::job::JobState::parse(state).is_terminal()
 }
 
 fn first_state(raw: &str) -> Option<String> {
@@ -750,8 +739,34 @@ mod tests {
         assert!(is_terminal_state("COMPLETED"));
         assert!(is_terminal_state("OUT_OF_MEMORY"));
         assert!(is_terminal_state("TIMEOUT"));
+        // Unified with `JobState::is_terminal`: these two were previously (and
+        // wrongly) treated as non-terminal by the dependency resolver.
+        assert!(is_terminal_state("LAUNCH_FAILED"));
+        assert!(is_terminal_state("RECONFIG_FAIL"));
         assert!(!is_terminal_state("RUNNING"));
         assert!(!is_terminal_state("PENDING"));
+    }
+
+    #[test]
+    fn launch_failed_dependency_resolves_instead_of_polling_forever() {
+        // A dependency that lands in LAUNCH_FAILED has definitively stopped, so
+        // the after-job condition must resolve rather than stay `Pending`.
+        assert_eq!(
+            classify_job_state("LAUNCH_FAILED", JobDependencyCondition::AfterAny),
+            JobConditionOutcome::Satisfied
+        );
+        assert_eq!(
+            classify_job_state("LAUNCH_FAILED", JobDependencyCondition::AfterNotOk),
+            JobConditionOutcome::Satisfied
+        );
+        assert_eq!(
+            classify_job_state("LAUNCH_FAILED", JobDependencyCondition::AfterOk),
+            JobConditionOutcome::Impossible
+        );
+        assert_eq!(
+            classify_job_state("RECONFIG_FAIL", JobDependencyCondition::AfterAny),
+            JobConditionOutcome::Satisfied
+        );
     }
 
     #[test]
