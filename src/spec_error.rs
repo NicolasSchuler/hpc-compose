@@ -69,6 +69,15 @@ pub(crate) enum SpecError {
     )]
     ParallelismNonPositive { scope: String, field: String },
 
+    #[error("x-slurm.signal.at_seconds must be between 1 and 65535 seconds, got {value}")]
+    #[diagnostic(
+        code(hpc_compose::spec::signal_delay_out_of_range),
+        help(
+            "Slurm's --signal sig_time accepts 0-65535 seconds before the job's end time; hpc-compose requires at least 1 (0 defeats the point of an early-warning signal). Lower at_seconds or remove x-slurm.signal."
+        )
+    )]
+    SignalDelayOutOfRange { value: u64 },
+
     #[error(
         "{scope}.parallelism tensor({tensor}) * pipeline({pipeline}) = {product} must equal nodes({nodes}) * gpus_per_node({gpus_per_node}) = {expected}"
     )]

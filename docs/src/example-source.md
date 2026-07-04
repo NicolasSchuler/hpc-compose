@@ -409,3 +409,11 @@ Source: `examples/reservation-licenses.yaml`
 ```yaml
 {{#include ../../examples/reservation-licenses.yaml}}
 ```
+
+## Preemptible Checkpoint
+
+Source: `examples/preemptible-checkpoint.yaml`
+
+```yaml
+{{#include ../../examples/preemptible-checkpoint.yaml}}
+```

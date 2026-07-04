@@ -410,6 +410,11 @@
           "type": "string",
           "enum": ["singleton"]
         },
+        "requeue": {
+          "type": "boolean",
+          "description": "Render #SBATCH --requeue (true) or --no-requeue (false) to control whether Slurm requeues the whole job after node failure or preemption."
+        },
+        "signal": { "$ref": "#/definitions/signal" },
         "cache_dir": { "type": "string" },
         "enroot_temp_dir": {
           "type": "string",
@@ -992,6 +997,40 @@
         "pipeline": { "$ref": "#/definitions/positiveInteger" }
       },
       "description": "Descriptive tensor/pipeline parallelism geometry. Validation-only: no #SBATCH/srun flag is emitted; tensor * pipeline is cross-checked against nodes * gpus_per_node and surfaced as HPC_COMPOSE_TP_SIZE/HPC_COMPOSE_PP_SIZE."
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "at_seconds"],
+      "properties": {
+        "name": { "$ref": "#/definitions/signalName" },
+        "at_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Seconds before the job's time limit at which Slurm sends the signal."
+        },
+        "shell": {
+          "type": "string",
+          "enum": ["step", "batch"],
+          "default": "step",
+          "description": "Delivery target: step (default, no prefix) reaches each service's job step directly; batch (B: prefix) reaches only the batch shell and installs a non-exiting forwarding trap."
+        }
+      },
+      "description": "Renders #SBATCH --signal=[B:]<name>@<at_seconds> so a preemptible job receives an early-warning signal before its time limit."
+    },
+    "signalName": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["HUP", "INT", "QUIT", "USR1", "USR2", "TERM"]
+        },
+        {
+          "type": "integer",
+          "enum": [1, 2, 3, 10, 12, 15]
+        }
+      ],
+      "description": "Signal to deliver, given by name (USR1) or numeric alias (10)."
     },
     "hostMpi": {
       "type": "object",

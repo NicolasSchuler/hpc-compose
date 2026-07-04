@@ -790,6 +790,22 @@ const EXAMPLES: &[ExampleInfo] = &[
         start_when: "Ops handed you a reservation or your job must hold software licenses.",
         tags: &["reservation", "licenses", "sbatch", "scheduling"],
     },
+    ExampleInfo {
+        name: "preemptible-checkpoint",
+        path: "examples/preemptible-checkpoint.yaml",
+        availability: ExampleAvailability::RepositoryFile,
+        category: "workflow",
+        demonstrates: "Requeue-on-preemption plus an x-slurm.signal early-warning SIGUSR1 that drives checkpoint-and-resume.",
+        start_when: "Your training runs on a preemptible partition and must checkpoint before it is requeued.",
+        tags: &[
+            "training",
+            "preemption",
+            "requeue",
+            "signal",
+            "resume",
+            "checkpoints",
+        ],
+    },
 ];
 
 #[cfg(test)]

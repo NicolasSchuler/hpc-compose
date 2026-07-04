@@ -2303,6 +2303,8 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
                 "array",
                 "after_job",
                 "dependency",
+                "requeue",
+                "signal",
                 "cache_dir",
                 "enroot_temp_dir",
                 "runtime_root",
@@ -2391,6 +2393,7 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
         ),
         ("hostMpi", &["bind_paths", "env"]),
         ("parallelism", &["tensor", "pipeline"]),
+        ("signal", &["name", "at_seconds", "shell"]),
         (
             "failurePolicy",
             &[

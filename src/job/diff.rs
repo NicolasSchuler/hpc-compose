@@ -110,6 +110,8 @@ const RESOURCE_FIELDS: &[&[&str]] = &[
     &["x-slurm", "cpus_per_gpu"],
     &["x-slurm", "mem_per_gpu"],
     &["x-slurm", "constraint"],
+    &["x-slurm", "requeue"],
+    &["x-slurm", "signal"],
 ];
 
 const SERVICE_RESOURCE_FIELDS: &[&[&str]] = &[
@@ -1064,6 +1066,23 @@ mod tests {
                 && change.left.as_deref() == Some("ansys:2")
                 && change.right.as_deref() == Some("ansys:4,comsol:1")
         }));
+    }
+
+    #[test]
+    fn diff_resource_changes_reports_requeue_and_signal_updates() {
+        let left = serde_json::json!({
+            "x-slurm": {"requeue": false, "signal": {"name": "USR1", "at_seconds": 60}}
+        });
+        let right = serde_json::json!({
+            "x-slurm": {"requeue": true, "signal": {"name": "USR1", "at_seconds": 120}}
+        });
+        let changes = resource_changes(&left, &right);
+        assert!(changes.iter().any(|change| {
+            change.path == "x-slurm.requeue"
+                && change.left.as_deref() == Some("false")
+                && change.right.as_deref() == Some("true")
+        }));
+        assert!(changes.iter().any(|change| change.path == "x-slurm.signal"));
     }
 
     #[test]

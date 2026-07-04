@@ -258,6 +258,8 @@ These fields live under the top-level `x-slurm` block.
 | `array` | string | omitted | Slurm array spec such as `0`, `1-10`, `1-10:2`, `0,3,8-12`, or `0-99%10`. Rendered as `#SBATCH --array`. |
 | `after_job` | string or mapping | omitted | Scheduler dependency on a prior job id. String shorthand means `afterany:<id>`; mapping supports `{ id, condition }`. |
 | `dependency` | string | omitted | Currently supports `singleton`, combined with `after_job` when both are set. |
+| `requeue` | boolean | omitted | `true` renders `#SBATCH --requeue`; `false` renders `#SBATCH --no-requeue`. Controls whether Slurm requeues the whole job after node failure or preemption. See [`x-slurm.requeue`](#x-slurmrequeue). |
+| `signal` | mapping `{ name, at_seconds, shell? }` | omitted | Renders `#SBATCH --signal=[B:]<name>@<sec>` so a preemptible job gets an early-warning signal before its time limit. See [`x-slurm.signal`](#x-slurmsignal). |
 | `cache_dir` | string | settings profile, settings defaults, then `$HOME/.cache/hpc-compose` | Must resolve to shared storage visible from the login node and the compute nodes. |
 | `enroot_temp_dir` | string | `<cache_dir>/enroot/tmp` | Override for enroot's prepare-time temporary extraction scratch (`ENROOT_TEMP_PATH`), separate from `cache_dir`. Point it at fast node-local storage (e.g. `/tmp/${USER}-hpc-compose-enroot`) when the shared cache filesystem raises `Stale file handle` (ESTALE) errors during image import; the final image and layer cache still live under `cache_dir`. |
 | `runtime_root` | string | `<submit_dir>/.hpc-compose` | Directory that holds per-job runtime state (`<runtime_root>/<job_id>/{logs,metrics,state.json,artifacts}`). Relative values resolve against the submit directory. Must be visible from both login and compute nodes; node-local overrides are rejected by preflight. |
@@ -317,7 +319,7 @@ x-slurm:
   mem: 64G
 ```
 
-The profile fills only omitted resource fields. In the example above, `partition`, `time`, `gpus`, and `cpus_per_task` come from the profile, while the explicit `mem: 64G` wins. Profiles intentionally exclude behavior such as `job_name`, `cache_dir`, arrays, dependencies, `submit_args`, setup hooks, scratch/staging, artifacts, resume, notify, and metrics.
+The profile fills only omitted resource fields. In the example above, `partition`, `time`, `gpus`, and `cpus_per_task` come from the profile, while the explicit `mem: 64G` wins. Profiles intentionally exclude behavior such as `job_name`, `cache_dir`, arrays, dependencies, requeue, signal, `submit_args`, setup hooks, scratch/staging, artifacts, resume, notify, and metrics.
 
 Allowed profile fields are: `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, `gpus_per_node`, `gpus_per_task`, `cpus_per_gpu`, `mem_per_gpu`, `gpu_bind`, `cpu_bind`, `mem_bind`, `distribution`, `hint`, and `constraint`.
 
@@ -334,6 +336,49 @@ services:
 ```
 
 `array` accepts Slurm list, range, step, and concurrency forms such as `0`, `1-10`, `1-10:2`, `0,3,8-12`, and `0-99%10`. Values with spaces, null bytes, malformed ranges, negative numbers, zero step, or zero concurrency are rejected.
+
+### `x-slurm.requeue`
+
+```yaml
+x-slurm:
+  requeue: true
+```
+
+`requeue: true` renders `#SBATCH --requeue`; `requeue: false` renders `#SBATCH --no-requeue`. Omit it to inherit the partition/cluster default. Requeue is a whole-job, scheduler-level property: after a node failure or a preemption, Slurm puts the entire job back in the queue and reruns the batch script from the top. Slurm increments `SLURM_RESTART_COUNT` on each requeue, which hpc-compose already surfaces as `HPC_COMPOSE_ATTEMPT` / `HPC_COMPOSE_IS_RESUME`, so requeue composes with [`x-slurm.resume`](#x-slurmresume) with no extra configuration. Setting `requeue` alongside a raw `--requeue` / `--no-requeue` entry in `x-slurm.submit_args` is rejected.
+
+#### `requeue` vs. `failure_policy`
+
+`requeue` and [`services.<name>.x-slurm.failure_policy`](#servicesnamex-slurmfailure_policy) operate at different levels and compose cleanly:
+
+| | `x-slurm.requeue` | `services.<name>.x-slurm.failure_policy` |
+| --- | --- | --- |
+| Level | Whole job (scheduler) | One service (inside the allocation) |
+| Trigger | Node failure or preemption | A service process exits non-zero |
+| Mechanism | Slurm re-queues and re-runs the batch script | The in-job supervisor restarts the service in place |
+| Attempt counter | Bumps `SLURM_RESTART_COUNT` / `HPC_COMPOSE_ATTEMPT` | Bumps the per-service `restart_count` only |
+| State | Fresh allocation; reloads from `x-slurm.resume` | Same allocation; no reallocation |
+
+A requeued job re-runs each service's `failure_policy` from a clean slate. Use `requeue` to survive losing the node; use `failure_policy` to absorb transient per-service crashes without giving up the allocation.
+
+### `x-slurm.signal`
+
+```yaml
+x-slurm:
+  signal:
+    name: USR1      # HUP, INT, QUIT, USR1, USR2, TERM, or the numeric alias (10)
+    at_seconds: 60  # 1-65535 seconds before the time limit
+    shell: step     # step (default) or batch
+```
+
+`signal` renders `#SBATCH --signal=[B:]<name>@<at_seconds>`, asking Slurm to deliver `<name>` roughly `<at_seconds>` seconds before the job's time limit (and on some preemption paths). Use it to trigger an in-app checkpoint before the allocation ends.
+
+- `name` accepts the signal by name (`USR1`) or numeric alias (`10`); anything outside `HUP`/`INT`/`QUIT`/`USR1`/`USR2`/`TERM` is rejected.
+- `at_seconds` must be between `1` and `65535`.
+- `shell` selects the delivery target:
+  - `step` (default) delivers the signal straight to each service's job step. The application receives it directly — the checkpoint convention most trainers (for example, PyTorch Lightning's `SIGUSR1`) expect. No trap is added to the batch script.
+  - `batch` (`B:` prefix) delivers only to the batch shell. hpc-compose then installs a **non-exiting** forwarding trap that relays the signal to the running services; the job keeps running so it can checkpoint. `INT`/`TERM` in `batch` mode reuse the existing teardown traps and add no extra forwarding.
+
+Setting `signal` alongside a raw `--signal` entry in `x-slurm.submit_args` is rejected. See [Artifacts and Resume](artifacts-and-resume.md#requeue-and-the-resume-attempt-counter) for how signal-driven checkpoints pair with requeue.
 
 Array jobs currently require `hpc-compose up --detach`; live watch/log fan-out for per-task array elements is future work. `--local` rejects array specs. Slurm provides `SLURM_ARRAY_JOB_ID`, `SLURM_ARRAY_TASK_ID`, `SLURM_ARRAY_TASK_COUNT`, `SLURM_ARRAY_TASK_MAX`, `SLURM_ARRAY_TASK_MIN`, and `SLURM_ARRAY_TASK_STEP`; for Pyxis jobs, `hpc-compose` forwards these names into the container when `x-slurm.array` is set. Prefer output patterns such as `%A_%a` so task logs do not overwrite each other.
 

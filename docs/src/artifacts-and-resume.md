@@ -46,6 +46,16 @@ When `x-slurm.resume` is enabled, `hpc-compose`:
 
 Use the shared resume directory for the canonical checkpoint a restarted run should load next. Treat exported artifacts as retrieval and provenance output after the attempt finishes, not as the primary live resume source.
 
+## Requeue and the Resume Attempt Counter
+
+`HPC_COMPOSE_ATTEMPT` and `HPC_COMPOSE_IS_RESUME` derive from Slurm's `SLURM_RESTART_COUNT`, which counts **both** in-allocation restart loops and real scheduler requeues. That means [`x-slurm.requeue`](spec-reference.md#x-slurmrequeue) and [`x-slurm.signal`](spec-reference.md#x-slurmsignal) compose with resume with **zero** code changes:
+
+- Enable `x-slurm.requeue: true` so Slurm re-queues the whole job after a node failure or preemption instead of killing it.
+- Add `x-slurm.signal` (for example `name: USR1`, `at_seconds: 60`) so the job receives an early-warning signal before its time limit and can checkpoint into the shared resume path.
+- On the requeued attempt, `SLURM_RESTART_COUNT` is one higher, `HPC_COMPOSE_IS_RESUME` is `1`, and the service reloads the latest checkpoint exactly as it would after any restart.
+
+`hpc-compose checkpoints` reports requeues as `attempts - 1`, so a job that ran once and was requeued twice shows two requeues. Pair `requeue` with `resume` (and usually `signal`) whenever a run may be preempted; requeue alone re-runs the batch script but a run without a resume path starts from scratch each time.
+
 ## Useful Commands
 
 ```bash

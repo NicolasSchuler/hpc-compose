@@ -14,8 +14,9 @@ use crate::spec::{
     RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceAssertSpec,
     ServiceDependency, ServiceEnrootConfig, ServiceEventHookSpec, ServiceFailurePolicy,
     ServiceHookContext, ServiceHookEvent, ServiceHookSpec, ServiceRendezvousConfig,
-    ServiceRuntimeConfig, ServiceScratchConfig, ServiceSlurmConfig, ServiceSpec, SlurmConfig,
-    StageInConfig, StageMode, StageOutConfig, StageOutWhen,
+    ServiceRuntimeConfig, ServiceScratchConfig, ServiceSlurmConfig, ServiceSpec, SignalConfig,
+    SignalName, SignalShellTarget, SlurmConfig, StageInConfig, StageMode, StageOutConfig,
+    StageOutWhen,
 };
 
 fn runtime_service() -> RuntimeService {
@@ -1154,6 +1155,7 @@ fn render_covers_optional_slurm_fields_and_setup_lines() {
             output: Some("job.out".into()),
             error: Some("job.err".into()),
             chdir: Some("/work".into()),
+            requeue: Some(true),
             setup: vec!["module load enroot".into()],
             submit_args: vec!["--mail-type=END".into()],
             ..SlurmConfig::default()
@@ -1175,6 +1177,7 @@ fn render_covers_optional_slurm_fields_and_setup_lines() {
         "#SBATCH --output=job.out",
         "#SBATCH --error=job.err",
         "#SBATCH --chdir=/work",
+        "#SBATCH --requeue",
         "#SBATCH --mail-type=END",
         "module load enroot",
         "wait_for_log",
@@ -1189,6 +1192,94 @@ fn render_covers_optional_slurm_fields_and_setup_lines() {
         time_pos < strict_pos,
         "SBATCH header must precede shell commands"
     );
+}
+
+fn signal_plan(slurm: SlurmConfig) -> RuntimePlan {
+    RuntimePlan {
+        name: "preempt".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig::default(),
+        slurm,
+        ordered_services: vec![runtime_service()],
+    }
+}
+
+#[test]
+fn render_requeue_false_emits_no_requeue_directive() {
+    let script = render_script(&signal_plan(SlurmConfig {
+        requeue: Some(false),
+        ..SlurmConfig::default()
+    }))
+    .expect("script");
+    assert!(script.contains("#SBATCH --no-requeue"));
+    assert!(!script.contains("#SBATCH --requeue\n"));
+}
+
+#[test]
+fn render_signal_step_mode_omits_batch_prefix_and_installs_no_trap() {
+    let script = render_script(&signal_plan(SlurmConfig {
+        signal: Some(SignalConfig {
+            name: SignalName::Usr1,
+            at_seconds: 60,
+            shell: SignalShellTarget::Step,
+        }),
+        ..SlurmConfig::default()
+    }))
+    .expect("script");
+    // Step delivery reaches the job step directly: no B: prefix, no trap/fn.
+    assert!(script.contains("#SBATCH --signal=USR1@60"));
+    assert!(!script.contains("B:USR1"));
+    assert!(!script.contains("forward_configured_signal"));
+}
+
+#[test]
+fn render_signal_batch_mode_adds_b_prefix_and_forwarding_trap() {
+    let script = render_script(&signal_plan(SlurmConfig {
+        signal: Some(SignalConfig {
+            name: SignalName::Usr1,
+            at_seconds: 120,
+            shell: SignalShellTarget::Batch,
+        }),
+        ..SlurmConfig::default()
+    }))
+    .expect("script");
+    assert!(script.contains("#SBATCH --signal=B:USR1@120"));
+    // A non-exiting forwarding fn plus a trap that relays USR1 to services.
+    assert!(script.contains("forward_configured_signal() {"));
+    assert!(script.contains("kill -s \"$sig\" \"$pid\""));
+    assert!(script.contains("trap 'forward_configured_signal USR1' USR1"));
+    // The forwarding trap must not exit or set RECEIVED_SIGNAL (job keeps running).
+    assert!(!script.contains("forward_configured_signal USR1; exit"));
+}
+
+#[test]
+fn render_signal_batch_mode_skips_extra_trap_for_int_and_term() {
+    let script = render_script(&signal_plan(SlurmConfig {
+        signal: Some(SignalConfig {
+            name: SignalName::Term,
+            at_seconds: 90,
+            shell: SignalShellTarget::Batch,
+        }),
+        ..SlurmConfig::default()
+    }))
+    .expect("script");
+    assert!(script.contains("#SBATCH --signal=B:TERM@90"));
+    // The existing TERM teardown trap handles graceful shutdown; no extra fn/trap.
+    assert!(!script.contains("forward_configured_signal"));
+    assert_eq!(
+        script.matches("' TERM\n").count(),
+        1,
+        "only the existing teardown TERM trap should be installed"
+    );
+}
+
+#[test]
+fn render_omits_signal_and_requeue_directives_when_unset() {
+    let script = render_script(&signal_plan(SlurmConfig::default())).expect("script");
+    assert!(!script.contains("#SBATCH --requeue"));
+    assert!(!script.contains("#SBATCH --no-requeue"));
+    assert!(!script.contains("#SBATCH --signal"));
+    assert!(!script.contains("forward_configured_signal"));
 }
 
 #[test]

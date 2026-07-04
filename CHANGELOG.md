@@ -9,6 +9,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 
+- Added first-class `x-slurm.requeue` and `x-slurm.signal`. `requeue: true`/`false`
+  renders `#SBATCH --requeue`/`--no-requeue` to control whether Slurm re-queues the
+  whole job after node failure or preemption. `signal: { name, at_seconds, shell? }`
+  renders `#SBATCH --signal=[B:]<name>@<sec>`, delivering an early-warning signal
+  before the time limit so a job can checkpoint. `name` accepts a name (`USR1`) or
+  numeric alias (`10`) from the `HUP`/`INT`/`QUIT`/`USR1`/`USR2`/`TERM` whitelist;
+  `at_seconds` must be `1..=65535`. The default `shell: step` delivers straight to
+  each service's job step (no trap needed); `shell: batch` (`B:`) delivers only to
+  the batch shell and installs a non-exiting forwarding trap that relays the signal
+  to the running services. Both fields flow through validation and resume-diff, are
+  rejected alongside conflicting raw `--requeue`/`--no-requeue`/`--signal` in
+  `x-slurm.submit_args`, and compose with `x-slurm.resume` through
+  `SLURM_RESTART_COUNT` with no extra config. Ships the `preemptible-checkpoint`
+  example.
 - Added per-service `env_file:` (docker-compose compatibility). A string or list
   of dotenv-style files is read on the submit host, relative to the compose
   file's directory, and folded into the service `environment` at spec-load time.
