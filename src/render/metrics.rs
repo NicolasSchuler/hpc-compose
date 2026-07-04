@@ -27,6 +27,10 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("      [[ \"$CPU_WARNING_EMITTED\" == \"1\" ]] && return 0\n");
     out.push_str("      CPU_WARNING_EMITTED=1\n");
     out.push_str("      ;;\n");
+    out.push_str("    steps)\n");
+    out.push_str("      [[ \"$STEPS_WARNING_EMITTED\" == \"1\" ]] && return 0\n");
+    out.push_str("      STEPS_WARNING_EMITTED=1\n");
+    out.push_str("      ;;\n");
     out.push_str("  esac\n");
     out.push_str("  echo \"metrics warning [$collector]: $message\" >&2\n");
     out.push_str("}\n\n");
@@ -102,6 +106,48 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  write_metrics_meta\n");
     out.push_str("}\n\n");
 
+    // Best-effort per-PID attribution probes (cgroup + task environment).
+    // Shared verbatim with the self-contained per-node fanout script.
+    out.push_str(gpu_attribution_helpers_body());
+    out.push('\n');
+
+    // Captures the live Slurm step-id -> step-name map through squeue so
+    // post-processing (`hpc-compose stats`) can resolve a sampled GPU-process
+    // cgroup step back to the hpc-compose service that launched it. This must
+    // run while the job is alive: neither the step list nor /proc/<pid> survive
+    // job teardown. Rows are appended to steps.jsonl only when the map changes.
+    // Every failure path is best-effort (warn-once, never affects the job).
+    out.push_str("capture_step_map() {\n");
+    out.push_str("  [[ \"$GPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  [[ -n \"${SLURM_JOB_ID:-}\" ]] || return 0\n");
+    out.push_str("  if ! command -v squeue >/dev/null 2>&1; then\n");
+    out.push_str("    metrics_warning_once steps \"squeue is not available; per-service GPU attribution will stay null\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  local sampled_at\n");
+    out.push_str("  sampled_at=$(metrics_timestamp)\n");
+    out.push_str("  local output\n");
+    out.push_str("  if ! output=$(squeue --noheader --steps --jobs \"$SLURM_JOB_ID\" --format='%i|%j' 2>&1); then\n");
+    out.push_str("    metrics_warning_once steps \"squeue step query failed; per-service GPU attribution will stay null: $(trim_whitespace \"${output//$'\\n'/; }\")\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  [[ \"$output\" == \"$LAST_STEP_MAP\" ]] && return 0\n");
+    out.push_str("  LAST_STEP_MAP=$output\n");
+    out.push_str("  local line\n");
+    out.push_str("  while IFS= read -r line; do\n");
+    out.push_str("    [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
+    out.push_str("    local step_id step_name\n");
+    out.push_str("    step_id=$(trim_whitespace \"${line%%|*}\")\n");
+    out.push_str("    step_name=$(trim_whitespace \"${line#*|}\")\n");
+    out.push_str("    [[ -z \"$step_id\" ]] && continue\n");
+    out.push_str("    printf '{\"sampled_at\":\"%s\",\"step_id\":%s,\"step_name\":%s}\\n' \\\n");
+    out.push_str("      \"$(json_escape \"$sampled_at\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$step_id\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$step_name\")\" >> \"$STEP_MAP_FILE\"\n");
+    out.push_str("  done <<< \"$output\"\n");
+    out.push_str("  return 0\n");
+    out.push_str("}\n\n");
+
     out.push_str("sample_gpu_metrics_current_node() {\n");
     out.push_str("  [[ \"$GPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
     out.push_str("  if ! command -v nvidia-smi >/dev/null 2>&1; then\n");
@@ -157,14 +203,23 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("      pid=$(trim_whitespace \"$raw_pid\")\n");
     out.push_str("      process_name=$(trim_whitespace \"$raw_process_name\")\n");
     out.push_str("      used_memory=$(trim_whitespace \"$raw_used_memory\")\n");
-    out.push_str("      printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s}\\n' \\\n");
+    // Raw attribution facts captured while the PID is alive; the mapping to a
+    // service happens in `hpc-compose stats` (null there when unresolvable).
+    out.push_str("      local proc_cgroup proc_slurm_procid proc_slurm_localid\n");
+    out.push_str("      proc_cgroup=$(gpu_process_cgroup \"$pid\")\n");
+    out.push_str("      proc_slurm_procid=$(gpu_process_environ_value \"$pid\" SLURM_PROCID)\n");
+    out.push_str("      proc_slurm_localid=$(gpu_process_environ_value \"$pid\" SLURM_LOCALID)\n");
+    out.push_str("      printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s,\"cgroup\":%s,\"slurm_procid\":%s,\"slurm_localid\":%s}\\n' \\\n");
     out.push_str("        \"$(json_escape \"$sampled_at\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"$sample_node\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"$gpu_uuid\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"$pid\")\" \\\n");
     out.push_str("        \"$(json_string_or_null \"$process_name\")\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"$used_memory\")\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"$proc_cgroup\")\" \\\n");
+    out.push_str("        \"$(json_string_or_null \"$proc_slurm_procid\")\" \\\n");
     out.push_str(
-        "        \"$(json_string_or_null \"$used_memory\")\" >> \"$GPU_PROCESSES_FILE\"\n",
+        "        \"$(json_string_or_null \"$proc_slurm_localid\")\" >> \"$GPU_PROCESSES_FILE\"\n",
     );
     out.push_str("    done <<< \"$process_output\"\n");
     out.push_str("  else\n");
@@ -208,6 +263,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  value=${value%\"${value##*[![:space:]]}\"}\n");
     out.push_str("  printf '%s' \"$value\"\n");
     out.push_str("}\n");
+    out.push_str(gpu_attribution_helpers_body());
     out.push_str("if ! command -v nvidia-smi >/dev/null 2>&1; then\n");
     out.push_str(
         "  printf 'nvidia-smi unavailable on %s\\n' \"$node\" > \"$node_dir/status.txt\"\n",
@@ -246,8 +302,11 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("    pid=$(trim_whitespace \"$raw_pid\")\n");
     out.push_str("    process_name=$(trim_whitespace \"$raw_process_name\")\n");
     out.push_str("    used_memory=$(trim_whitespace \"$raw_used_memory\")\n");
-    out.push_str("    printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s}\\n' \\\n");
-    out.push_str("      \"$(json_escape \"$sampled_at\")\" \"$(json_string_or_null \"$node\")\" \"$(json_string_or_null \"$gpu_uuid\")\" \"$(json_string_or_null \"$pid\")\" \"$(json_string_or_null \"$process_name\")\" \"$(json_string_or_null \"$used_memory\")\" >> \"$node_dir/gpu_processes.jsonl\"\n");
+    out.push_str("    proc_cgroup=$(gpu_process_cgroup \"$pid\")\n");
+    out.push_str("    proc_slurm_procid=$(gpu_process_environ_value \"$pid\" SLURM_PROCID)\n");
+    out.push_str("    proc_slurm_localid=$(gpu_process_environ_value \"$pid\" SLURM_LOCALID)\n");
+    out.push_str("    printf '{\"sampled_at\":\"%s\",\"node\":%s,\"rank\":null,\"local_rank\":null,\"service\":null,\"collector\":\"nvidia-smi\",\"gpu_uuid\":%s,\"pid\":%s,\"process_name\":%s,\"used_memory_mib\":%s,\"cgroup\":%s,\"slurm_procid\":%s,\"slurm_localid\":%s}\\n' \\\n");
+    out.push_str("      \"$(json_escape \"$sampled_at\")\" \"$(json_string_or_null \"$node\")\" \"$(json_string_or_null \"$gpu_uuid\")\" \"$(json_string_or_null \"$pid\")\" \"$(json_string_or_null \"$process_name\")\" \"$(json_string_or_null \"$used_memory\")\" \"$(json_string_or_null \"$proc_cgroup\")\" \"$(json_string_or_null \"$proc_slurm_procid\")\" \"$(json_string_or_null \"$proc_slurm_localid\")\" >> \"$node_dir/gpu_processes.jsonl\"\n");
     out.push_str("  done <<< \"$process_output\"\n");
     out.push_str("fi\n");
     out.push_str("HPC_COMPOSE_GPU_SAMPLE_NODE\n");
@@ -299,6 +358,11 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("}\n\n");
 
     out.push_str("sample_gpu_metrics() {\n");
+    // The step map is job-global, so one batch-node squeue capture covers every
+    // node's process rows (including fanout rows on multi-node allocations).
+    out.push_str("  if [[ \"${BACKEND:-slurm}\" == \"slurm\" ]]; then\n");
+    out.push_str("    capture_step_map\n");
+    out.push_str("  fi\n");
     out.push_str("  if [[ \"${BACKEND:-slurm}\" == \"slurm\" && \"${HPC_COMPOSE_NODE_COUNT:-1}\" -gt 1 ]]; then\n");
     out.push_str("    sample_gpu_metrics_all_nodes\n");
     out.push_str("  else\n");
@@ -513,6 +577,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  : > \"$GPU_PROCESSES_FILE\"\n");
     out.push_str("  : > \"$SLURM_METRICS_FILE\"\n");
     out.push_str("  : > \"$CPU_METRICS_FILE\"\n");
+    out.push_str("  : > \"$STEP_MAP_FILE\"\n");
     out.push_str("  capture_metrics_diagnostics\n");
     out.push_str("  write_metrics_meta\n");
     out.push_str("  sample_metrics_once\n");
@@ -617,6 +682,43 @@ fn cpu_emit_fn_body() -> &'static str {
     "$(json_number_or_null "$util")" \
     "$(json_number_or_null "$cores")" \
     "$(json_number_or_null "$load")" >> "$output_file"
+  return 0
+}
+"##
+}
+
+/// Bash bodies of `gpu_process_cgroup` and `gpu_process_environ_value`, shared
+/// verbatim between the in-process GPU sampler and the self-contained per-node
+/// fanout script.
+///
+/// Both helpers are strictly best-effort: they print the raw value when it is
+/// readable and print nothing otherwise, and they always return 0 so a failed
+/// probe can never break a sampler tick (the fanout script runs under
+/// `set -euo pipefail`). `gpu_process_cgroup` captures the raw
+/// `/proc/<pid>/cgroup` content with newlines condensed to `;` — parsing the
+/// Slurm job/step out of it happens in Rust post-processing, where the cgroup
+/// v1/v2 layouts are unit-tested against fixtures. `gpu_process_environ_value`
+/// extracts one variable from `/proc/<pid>/environ` (same-user processes only,
+/// which covers every process this job can own).
+fn gpu_attribution_helpers_body() -> &'static str {
+    r##"gpu_process_cgroup() {
+  local pid=${1-}
+  if [[ -n "$pid" && -r "/proc/$pid/cgroup" ]]; then
+    tr '\n' ';' < "/proc/$pid/cgroup" 2>/dev/null || true
+  fi
+  return 0
+}
+gpu_process_environ_value() {
+  local pid=${1-}
+  local name=${2-}
+  if [[ -z "$pid" || -z "$name" || ! -r "/proc/$pid/environ" ]]; then
+    return 0
+  fi
+  local entry
+  entry=$( (tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -m1 "^$name=") 2>/dev/null || true)
+  if [[ -n "$entry" ]]; then
+    printf '%s' "${entry#*=}"
+  fi
   return 0
 }
 "##

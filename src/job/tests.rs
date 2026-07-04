@@ -945,7 +945,7 @@ fn load_sampler_snapshot_reads_latest_groups() {
         )
         .expect("slurm");
 
-    let outcome = load_sampler_snapshot(&metrics_dir);
+    let outcome = load_sampler_snapshot(&metrics_dir, None);
     assert!(outcome.notes.is_empty());
     let sampler = outcome.sampler.expect("sampler");
     assert_eq!(sampler.interval_seconds, 5);
@@ -992,7 +992,7 @@ fn load_sampler_snapshot_parses_cpu_nodes_and_summary() {
     )
     .expect("cpu");
 
-    let outcome = load_sampler_snapshot(&metrics_dir);
+    let outcome = load_sampler_snapshot(&metrics_dir, None);
     assert!(outcome.notes.is_empty());
     let sampler = outcome.sampler.expect("sampler");
     let cpu = sampler.cpu.expect("cpu");
@@ -1028,7 +1028,7 @@ fn load_sampler_snapshot_cpu_missing_file_and_malformed_row() {
 }"#,
     )
     .expect("meta");
-    let outcome = load_sampler_snapshot(&no_file_dir);
+    let outcome = load_sampler_snapshot(&no_file_dir, None);
     let sampler = outcome.sampler.expect("sampler");
     assert!(sampler.cpu.is_none());
     assert!(outcome.notes.is_empty());
@@ -1047,7 +1047,7 @@ fn load_sampler_snapshot_cpu_missing_file_and_malformed_row() {
     )
     .expect("meta");
     fs::write(broken_dir.join("cpu.jsonl"), "{not-json}\n").expect("cpu");
-    let outcome = load_sampler_snapshot(&broken_dir);
+    let outcome = load_sampler_snapshot(&broken_dir, None);
     assert!(
         outcome
             .notes
@@ -1063,7 +1063,7 @@ fn sampler_and_parser_error_paths_cover_remaining_functions() {
     let malformed_meta_dir = tmpdir.path().join("malformed-meta");
     fs::create_dir_all(&malformed_meta_dir).expect("dir");
     fs::write(malformed_meta_dir.join("meta.json"), "{not-json}\n").expect("meta");
-    let outcome = load_sampler_snapshot(&malformed_meta_dir);
+    let outcome = load_sampler_snapshot(&malformed_meta_dir, None);
     assert!(outcome.sampler.is_none());
     assert!(
         outcome
@@ -1085,7 +1085,7 @@ fn sampler_and_parser_error_paths_cover_remaining_functions() {
 }"#,
     )
     .expect("meta");
-    let outcome = load_sampler_snapshot(&disabled_dir);
+    let outcome = load_sampler_snapshot(&disabled_dir, None);
     let sampler = outcome.sampler.expect("sampler");
     assert!(sampler.gpu.is_none());
     assert!(sampler.slurm.is_none());
@@ -1110,7 +1110,7 @@ fn sampler_and_parser_error_paths_cover_remaining_functions() {
             "{\"sampled_at\":\"2026-04-05T10:00:00Z\",\"step_id\":null,\"ntasks\":\"1\",\"ave_cpu\":\"\",\"ave_rss\":\"\",\"max_rss\":\"\",\"alloc_tres\":\"cpu=1,broken\",\"tres_usage_in_ave\":\"cpu=00:00:01\"}\n",
         )
         .expect("slurm");
-    let outcome = load_sampler_snapshot(&broken_collectors_dir);
+    let outcome = load_sampler_snapshot(&broken_collectors_dir, None);
     assert!(
         outcome
             .notes

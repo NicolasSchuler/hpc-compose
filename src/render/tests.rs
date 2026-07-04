@@ -2271,6 +2271,7 @@ fn render_metrics_sampler_when_enabled() {
     };
 
     let script = render_script(&plan).expect("script");
+    assert_bash_syntax(&script);
     assert!(script.contains("METRICS_DIR=\"$JOB_TMP/metrics\""));
     assert!(script.contains("start_metrics_sampler"));
     assert!(script.contains("metrics_sampler_loop"));
@@ -2315,6 +2316,23 @@ fn render_metrics_sampler_when_enabled() {
     );
     assert!(script.contains("multi-node CPU fanout degraded to batch-node sampling"));
     assert!(script.contains(": > \"$CPU_METRICS_FILE\""));
+    // Per-service GPU attribution: process rows must carry the raw cgroup and
+    // SLURM_PROCID/SLURM_LOCALID captures (parsed later by `stats`), and the
+    // sampler must record the live step-id -> step-name map in steps.jsonl.
+    assert!(script.contains("STEP_MAP_FILE=\"$METRICS_DIR/steps.jsonl\""));
+    assert!(script.contains(": > \"$STEP_MAP_FILE\""));
+    assert!(script.contains("capture_step_map"));
+    assert!(script.contains("squeue --noheader --steps --jobs \"$SLURM_JOB_ID\""));
+    assert!(script.contains("gpu_process_cgroup"));
+    assert!(script.contains("gpu_process_environ_value"));
+    assert!(script.contains("\"cgroup\":%s,\"slurm_procid\":%s,\"slurm_localid\":%s"));
+    // The attribution probes appear in both the in-process sampler and the
+    // self-contained multi-node fanout script.
+    assert!(script.matches("gpu_process_cgroup() {").count() >= 2);
+    // Attribution capture failures use the warn-once diagnostics channel and
+    // must never fail the sampler tick or the job.
+    assert!(script.contains("STEPS_WARNING_EMITTED"));
+    assert!(script.contains("per-service GPU attribution will stay null"));
 }
 
 #[test]

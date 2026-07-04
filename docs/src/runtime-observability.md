@@ -184,6 +184,7 @@ When `x-slurm.metrics` is enabled, sampler files are written under:
   meta.json
   gpu.jsonl
   gpu_processes.jsonl
+  steps.jsonl
   slurm.jsonl
   cpu.jsonl
   diagnostics/
@@ -204,9 +205,27 @@ On a multi-node allocation the collector fans out through `srun` (the same mecha
 
 **First-sample caveat:** the very first sample for a given node has no previous counters to diff against, so its `cpu_util_pct` is `null`. Utilization appears from the second sample onward. `hpc-compose stats` surfaces the latest per-node `util`/`cores`/`load1` (plus a cross-node mean/max summary on multi-node jobs); the `--format json` snapshot exposes `sampler.cpu.nodes` and `sampler.cpu.summary`; the watch metrics line appends a compact `cpu: <mean>%` segment once utilization is available.
 
+### Per-service GPU attribution
+
+Because every service runs as its own Slurm step, sampled GPU processes can usually be attributed back to the service that owns them. Attribution is two-stage:
+
+1. **At sample time (in the job)** the sampler captures, per GPU process row, the raw `/proc/<pid>/cgroup` content plus `SLURM_PROCID`/`SLURM_LOCALID` from `/proc/<pid>/environ`, and records the live step-id to step-name map through `squeue` in `steps.jsonl`. These facts exist only while the job is alive, so they must be captured live; every probe is best-effort and can never affect the job.
+2. **At read time (`hpc-compose stats`)** the cgroup capture is parsed into the owning Slurm step (both the cgroup v2 `slurmstepd.scope/job_<id>/step_<sid>` and the cgroup v1 `/slurm/uid_<uid>/job_<id>/step_<sid>` layouts are recognized), the step is resolved to a service through `steps.jsonl` and the tracked step registry, and `gpu_processes.jsonl` rows get their `service` filled. A `gpu.jsonl` device row inherits a `service` only when **every** process observed on that GPU UUID resolves unanimously to one service.
+
+The rule everywhere is **null, never guess**. `service`, `rank`, and `local_rank` stay `null` when:
+
+- the GPU is shared by two services, by another job's process (`nvidia-smi` shows all processes on non-exclusive nodes), or by any process whose step could not be resolved;
+- the cgroup layout is unrecognized (non-cgroup `proctrack` plugins) or `squeue` was unavailable while the job ran;
+- the process belongs to a non-service step (the sampler's own multi-node fanout steps fall through to null by design);
+- the job ran under **MIG** — attribution on MIG-partitioned devices is out of scope and reports `null`;
+- the run predates this feature, or the PID exited between the `nvidia-smi` query and the `/proc/<pid>` probe.
+
+`rank` and `local_rank` are filled from the captured `SLURM_PROCID`/`SLURM_LOCALID` only for services with distributed placement, where a Slurm task rank is meaningful; other services keep them `null`.
+
+Per-backend reliability: enroot/pyxis, apptainer/singularity, and host services all run inside their step's cgroup with host-visible PIDs, so attribution behaves the same for all of them. Locally launched (non-Slurm) jobs have no steps and always report `null`.
+
 ### Known limitations
 
-- **Per-service and per-rank GPU attribution is not available.** GPU samples carry `service`, `rank`, and `local_rank` fields, but the sampler reads `nvidia-smi` at the node level and cannot map a device back to the service or distributed rank that is using it, so those fields are always `null`. Correlate GPU rows with a service through the `gpu_processes.jsonl` PID rows and your own launch layout rather than these fields.
 - **`sstat`-derived GPU utilization and memory require cluster `acct_gather` NVML.** The `slurm.jsonl` collector exposes whatever `sstat` reports, but live per-step GPU accounting depends on the cluster having the NVML `acct_gather` plugin enabled, which is rarely present. The GPU numbers you can rely on come from the `nvidia-smi` collector (`gpu.jsonl`), not from `sstat`.
 - **A final sample is flushed at job end.** When the sampler stops, it takes one extra synchronous sample before tearing down the periodic loop, so the window between the last interval tick and job teardown is captured. The final sample is time-bounded so a hung `nvidia-smi` or `sstat` cannot delay cleanup.
 - **Multi-node GPU fanout degrades to batch-node sampling.** On a multi-node allocation the sampler fans out to every node through `srun`. If that `srun` fails for a tick, the sampler falls back to sampling the batch node's own GPUs and records a degraded note on the GPU collector rather than dropping the whole tick.

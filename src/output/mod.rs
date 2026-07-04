@@ -1442,10 +1442,11 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
             for device in &gpu.gpus {
                 writeln!(
                     writer,
-                    "gpu {} on {}: name={}, util={}, mem util={}, mem={} / {}, temp={}, power={} / {}",
+                    "gpu {} on {}: name={}, service={}, util={}, mem util={}, mem={} / {}, temp={}, power={} / {}",
                     display_optional_stats_value(device.index.as_deref()),
                     display_optional_stats_value(device.node.as_deref()),
                     display_optional_stats_value(device.name.as_deref()),
+                    display_optional_stats_value(device.service.as_deref()),
                     display_optional_stats_value(device.utilization_gpu.as_deref()),
                     display_optional_stats_value(device.utilization_memory.as_deref()),
                     display_optional_stats_value(device.memory_used_mib.as_deref()),
@@ -1458,9 +1459,10 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
             for process in &gpu.processes {
                 writeln!(
                     writer,
-                    "gpu process: pid={}, name={}, gpu_uuid={}, mem={}",
+                    "gpu process: pid={}, name={}, service={}, gpu_uuid={}, mem={}",
                     display_optional_stats_value(process.pid.as_deref()),
                     display_optional_stats_value(process.process_name.as_deref()),
+                    display_optional_stats_value(process.service.as_deref()),
                     display_optional_stats_value(process.gpu_uuid.as_deref()),
                     display_optional_stats_value(process.used_memory_mib.as_deref()),
                 )?;

@@ -638,6 +638,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("METRICS_META_FILE=\"$METRICS_DIR/meta.json\"\n");
         out.push_str("GPU_METRICS_FILE=\"$METRICS_DIR/gpu.jsonl\"\n");
         out.push_str("GPU_PROCESSES_FILE=\"$METRICS_DIR/gpu_processes.jsonl\"\n");
+        out.push_str("STEP_MAP_FILE=\"$METRICS_DIR/steps.jsonl\"\n");
         out.push_str("SLURM_METRICS_FILE=\"$METRICS_DIR/slurm.jsonl\"\n");
         out.push_str("CPU_METRICS_FILE=\"$METRICS_DIR/cpu.jsonl\"\n");
         out.push_str("METRICS_DIAGNOSTICS_DIR=\"$METRICS_DIR/diagnostics\"\n");
@@ -844,6 +845,8 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("GPU_WARNING_EMITTED=0\n");
         out.push_str("SLURM_WARNING_EMITTED=0\n");
         out.push_str("CPU_WARNING_EMITTED=0\n");
+        out.push_str("STEPS_WARNING_EMITTED=0\n");
+        out.push_str("LAST_STEP_MAP=\"\"\n");
         out.push_str(&format!(
             "GPU_COLLECTOR_ENABLED={}\n",
             flag(
