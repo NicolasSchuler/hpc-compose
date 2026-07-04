@@ -1,16 +1,11 @@
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::{Mutex, OnceLock};
 
 use super::*;
 use crate::planner::{ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement};
 use crate::spec::{ServiceFailurePolicy, SlurmConfig};
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+use crate::test_support::env_lock;
 
 fn fake_service(tmpdir: &Path) -> RuntimeService {
     RuntimeService {

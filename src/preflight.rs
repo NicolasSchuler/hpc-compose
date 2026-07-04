@@ -1544,9 +1544,9 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Mutex, OnceLock};
 
     use super::*;
+    use crate::test_support::env_lock;
 
     #[cfg(unix)]
     #[test]
@@ -1578,11 +1578,6 @@ mod tests {
         MetricsCollector, MetricsConfig, MpiConfig, MpiProfile, MpiType, ReadinessSpec,
         ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
     };
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
         RuntimePlan {

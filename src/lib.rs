@@ -85,3 +85,24 @@ pub(crate) mod when;
 pub fn cli_error_report(error: anyhow::Error) -> miette::Report {
     spec_error::cli_error_report(error)
 }
+
+/// Test-only shared synchronization primitives.
+///
+/// Declared last so it does not trip `clippy::items-after-test-module`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, OnceLock};
+
+    /// Process-wide lock serializing tests that mutate global process state
+    /// (environment variables, `set_current_dir`, etc.).
+    ///
+    /// All in-crate unit tests share this single mutex so that env mutation is
+    /// serialized across modules within the one lib-test binary — per-module
+    /// mutexes cannot do this because each guards a distinct critical section.
+    /// Call sites acquire with `env_lock().lock().expect(..)`, matching the
+    /// prior per-module pattern (a poisoned lock surfaces as a test panic).
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+}

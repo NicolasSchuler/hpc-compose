@@ -1043,18 +1043,21 @@ fn render_watch_frame_normal_snapshot_stays_stable() {
     );
     let lines = canonical_frame_lines(&frame);
 
-    assert_snapshot_line(
+    assert_anchored_line(
         &lines,
-        0,
+        "hpc-compose watch",
         "hpc-compose watch | RUNNING (squeue) | job 12345",
     );
-    assert_snapshot_line(
+    assert_anchored_line(
         &lines,
-        1,
+        "services:",
         "services: 2 | selected: api | logs: selected FOLLOW",
     );
-    assert!(lines[4].contains("api"));
-    assert!(lines[5].contains("booting"));
+    // Body rows are addressed relative to the table header so an inserted
+    // status/notice line above it cannot silently shift these assertions.
+    let table_header = anchor_line(&lines, "svc              step");
+    assert!(lines[table_header + 1].contains("api")); // first service row
+    assert!(lines[table_header + 2].contains("booting")); // first streamed log line
     assert!(lines.last().unwrap_or(&String::new()).contains("q quit"));
 }
 
@@ -1203,12 +1206,36 @@ fn canonical_frame_lines(frame: &str) -> Vec<String> {
         .collect()
 }
 
-fn assert_snapshot_line(lines: &[String], index: usize, expected: &str) {
+/// Returns the index of the one rendered line containing `needle`, panicking if
+/// zero or more than one line matches. Anchoring on stable content keeps
+/// assertions valid when unrelated header/status lines shift absolute indices.
+fn anchor_line(lines: &[String], needle: &str) -> usize {
+    let matches: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(needle))
+        .map(|(index, _)| index)
+        .collect();
     assert_eq!(
-        lines.get(index).map(String::as_str),
-        Some(expected),
-        "unexpected snapshot line {index}"
+        matches.len(),
+        1,
+        "expected exactly one line containing {needle:?}, found indices {matches:?} in {lines:?}"
     );
+    matches[0]
+}
+
+/// Content-anchored replacement for absolute-index assertions: finds the unique
+/// line containing `needle` and asserts its full (trimmed) content equals
+/// `expected`. Returns the anchor index so callers can address neighbouring
+/// rows by relative offset.
+fn assert_anchored_line(lines: &[String], needle: &str, expected: &str) -> usize {
+    let index = anchor_line(lines, needle);
+    assert_eq!(
+        lines[index].as_str(),
+        expected,
+        "unexpected content on line anchored by {needle:?}"
+    );
+    index
 }
 
 #[test]
@@ -1626,14 +1653,14 @@ fn render_watch_frame_filtered_snapshot_stays_stable() {
     );
     let lines = canonical_frame_lines(&frame);
 
-    assert_snapshot_line(
+    assert_anchored_line(
         &lines,
-        0,
+        "hpc-compose watch",
         "hpc-compose watch | RUNNING (squeue) | job 12345 | filter: api",
     );
-    assert_snapshot_line(
+    assert_anchored_line(
         &lines,
-        1,
+        "services:",
         "services: 1 | selected: api | logs: selected FOLLOW",
     );
     assert!(lines.iter().any(|line| line.contains("> api")));
@@ -1739,15 +1766,18 @@ fn render_watch_frame_compact_snapshot_stays_stable() {
     );
     let lines = canonical_frame_lines(&frame);
 
-    assert_snapshot_line(&lines, 0, "hpc-compose watch | job 12345");
-    assert_snapshot_line(&lines, 2, "filter: api");
-    assert_snapshot_line(&lines, 3, "filter input: api");
-    assert_snapshot_line(
+    assert_anchored_line(&lines, "hpc-compose watch", "hpc-compose watch | job 12345");
+    assert_anchored_line(&lines, "filter: api", "filter: api");
+    assert_anchored_line(&lines, "filter input:", "filter input: api");
+    assert_anchored_line(
         &lines,
-        4,
+        "? help | /",
         "? help | / filter | f find | w wrap | o sort | q",
     );
-    assert_snapshot_line(&lines, 6, "> api OK ready=yes");
+    assert_anchored_line(&lines, "> api", "> api OK ready=yes");
+    // Exact height is load-bearing here: the compact layout must pack the whole
+    // UI (header, filter block, one service row, log title, footer) into exactly
+    // the 9 rows requested, with no blank padding or overflow.
     assert_eq!(lines.len(), 9);
 }
 
