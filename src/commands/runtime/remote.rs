@@ -375,6 +375,19 @@ fn rewrite_followup_args(
 /// dir and streams the output back. `pull --remote` therefore prints the rsync
 /// command from the login-node context; the user still runs that command from
 /// the laptop to copy artifacts locally.
+/// Dispatch helper for the read-only follow-up commands
+/// (`status`/`ps`/`stats`/`logs`/`score`/`pull`). When `--remote` was supplied,
+/// delegate to [`remote_followup`] and return `Some(result)`; otherwise return
+/// `None` so the caller runs the command against local tracking state. The
+/// caller resolves the context first, so context-dependent argument validation
+/// keeps running ahead of the remote branch exactly as before.
+pub(crate) fn maybe_remote_followup(
+    context: &ResolvedContext,
+    remote: Option<&str>,
+) -> Option<Result<()>> {
+    remote.map(|remote_flag| remote_followup(context, remote_flag))
+}
+
 pub(crate) fn remote_followup(context: &ResolvedContext, remote_flag: &str) -> Result<()> {
     let bare_host = resolve_remote_host(remote_flag, context.login_host.as_deref())?;
     let env_user = env::var(REMOTE_USER_ENV).ok();

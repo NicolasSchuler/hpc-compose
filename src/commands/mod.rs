@@ -919,8 +919,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 file,
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             )?;
-            if let Some(remote) = remote {
-                runtime::remote_followup(&context, &remote)
+            if let Some(result) = runtime::maybe_remote_followup(&context, remote.remote.as_deref())
+            {
+                result
             } else {
                 runtime::status(context, job_id, format, false, array)
             }
@@ -945,8 +946,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sacct-bin", &sacct_bin),
                 ],
             )?;
-            if let Some(remote) = remote {
-                runtime::remote_followup(&context, &remote)
+            if let Some(result) = runtime::maybe_remote_followup(&context, remote.remote.as_deref())
+            {
+                result
             } else if sweep.is_some() {
                 runtime::stats_sweep(context, sweep, format, accounting)
             } else {
@@ -980,8 +982,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--sacct-bin", &sacct_bin),
                 ],
             )?;
-            if let Some(remote) = remote {
-                runtime::remote_followup(&context, &remote)
+            if let Some(result) = runtime::maybe_remote_followup(&context, remote.remote.as_deref())
+            {
+                result
             } else if sweep.is_some() {
                 runtime::score_sweep(context, sweep, format, pue, gpu_tdp_w, cpu_watts_per_core)
             } else {
@@ -1036,8 +1039,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            if let Some(remote) = remote {
-                runtime::remote_followup(&context, &remote)
+            if let Some(result) = runtime::maybe_remote_followup(&context, remote.remote.as_deref())
+            {
+                result
             } else {
                 runtime::pull(context, job_id, into, format)
             }
@@ -1053,8 +1057,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             remote,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            if let Some(remote) = remote {
-                runtime::remote_followup(&context, &remote)
+            if let Some(result) = runtime::maybe_remote_followup(&context, remote.remote.as_deref())
+            {
+                result
             } else {
                 runtime::logs(context, job_id, service, follow, lines, grep, since)
             }
@@ -1072,8 +1077,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 file,
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             )?;
-            if let Some(remote) = remote {
-                runtime::remote_followup(&context, &remote)
+            if let Some(result) = runtime::maybe_remote_followup(&context, remote.remote.as_deref())
+            {
+                result
             } else {
                 runtime::ps(context, job_id, format)
             }

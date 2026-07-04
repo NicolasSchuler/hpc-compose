@@ -145,6 +145,24 @@ pub struct SlurmSubmitArgs {
     pub sacct_bin: String,
 }
 
+/// The `--remote[=HOST]` follow-up delegation flag shared by the read-only
+/// inspection commands (`status`, `stats`, `score`, `pull`, `logs`, `ps`). Runs
+/// the command on the login node's staged checkout from a prior `up --remote`.
+/// (`up`'s own `--remote` has different help and delegation semantics, so it
+/// keeps its own field rather than flattening this.)
+#[derive(Debug, clap::Args)]
+pub struct RemoteArgs {
+    #[arg(
+        long,
+        value_name = "HOST",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "",
+        help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
+    )]
+    pub remote: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     #[command(
@@ -1293,15 +1311,8 @@ pub enum Commands {
             help = "Tracked Slurm job id to inspect instead of the latest recorded submission"
         )]
         job_id: Option<String>,
-        #[arg(
-            long,
-            value_name = "HOST",
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "",
-            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
-        )]
-        remote: Option<String>,
+        #[command(flatten)]
+        remote: RemoteArgs,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
@@ -1353,15 +1364,8 @@ pub enum Commands {
             help = "Aggregate per-trial stats over all trials of this sweep id instead of a single job"
         )]
         sweep: Option<String>,
-        #[arg(
-            long,
-            value_name = "HOST",
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "",
-            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
-        )]
-        remote: Option<String>,
+        #[command(flatten)]
+        remote: RemoteArgs,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<StatsOutputFormat>,
         #[arg(
@@ -1440,15 +1444,8 @@ pub enum Commands {
             help = FILE_ARG_HELP
         )]
         file: Option<PathBuf>,
-        #[arg(
-            long,
-            value_name = "HOST",
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "",
-            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
-        )]
-        remote: Option<String>,
+        #[command(flatten)]
+        remote: RemoteArgs,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
@@ -1608,15 +1605,8 @@ pub enum Commands {
             help = "Local destination directory shown in the rsync command (default: .)"
         )]
         into: Option<PathBuf>,
-        #[arg(
-            long,
-            value_name = "HOST",
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "",
-            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
-        )]
-        remote: Option<String>,
+        #[command(flatten)]
+        remote: RemoteArgs,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -1667,15 +1657,8 @@ pub enum Commands {
             help = "Number of trailing log lines to show before follow mode begins"
         )]
         lines: usize,
-        #[arg(
-            long,
-            value_name = "HOST",
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "",
-            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
-        )]
-        remote: Option<String>,
+        #[command(flatten)]
+        remote: RemoteArgs,
     },
     #[command(
         display_order = 240,
@@ -1697,15 +1680,8 @@ pub enum Commands {
             help = "Tracked Slurm job id to inspect instead of the latest recorded submission"
         )]
         job_id: Option<String>,
-        #[arg(
-            long,
-            value_name = "HOST",
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "",
-            help = "Run this command on the login node's staged checkout from a prior `up --remote`, over SSH, streaming output back. With no value, uses the configured login_host; accepts user@host (otherwise HPC_COMPOSE_REMOTE_USER / login_user / ~/.ssh/config)"
-        )]
-        remote: Option<String>,
+        #[command(flatten)]
+        remote: RemoteArgs,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
