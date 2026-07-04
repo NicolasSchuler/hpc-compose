@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ValidateOutput",
+  "type": "object",
+  "properties": {
+    "cluster_warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "compose_file": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "service_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "valid": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "valid",
+    "compose_file",
+    "name",
+    "service_count",
+    "services"
+  ]
+}

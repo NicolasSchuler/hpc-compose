@@ -11,7 +11,7 @@ use super::*;
 
 /// Combined metrics and scheduler view returned by the `stats` command.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct StatsSnapshot {
     pub job_id: String,
     pub record: Option<SubmissionRecord>,
@@ -33,7 +33,7 @@ pub struct StatsSnapshot {
 
 /// Best-effort first service failure observed by the runtime supervisor.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct FirstFailure {
     pub service: String,
     pub exit_code: i32,
@@ -44,7 +44,7 @@ pub struct FirstFailure {
 
 /// One Slurm step metrics row as presented by `hpc-compose stats`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct StepStats {
     pub step_id: String,
     pub ntasks: String,
@@ -62,7 +62,7 @@ pub struct StepStats {
 
 /// Snapshot of the job-local metrics sampler outputs.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SamplerSnapshot {
     pub interval_seconds: u64,
     pub collectors: Vec<CollectorStatus>,
@@ -75,7 +75,7 @@ pub struct SamplerSnapshot {
 /// Sampled host CPU telemetry collected from `/proc/stat` by the job-local
 /// sampler.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CpuSnapshot {
     pub sampled_at: String,
     pub nodes: Vec<CpuNodeSample>,
@@ -84,7 +84,7 @@ pub struct CpuSnapshot {
 
 /// One node's latest sampled CPU utilization row.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct CpuNodeSample {
     pub node: Option<String>,
     pub cpu_util_pct: Option<f64>,
@@ -94,7 +94,7 @@ pub struct CpuNodeSample {
 
 /// Cross-node rollup of the latest CPU utilization sample.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct CpuSummary {
     pub node_count: usize,
     pub mean_util_pct: Option<f64>,
@@ -104,7 +104,7 @@ pub struct CpuSummary {
 
 /// Availability metadata for one configured metrics collector.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CollectorStatus {
     pub name: String,
     pub enabled: bool,
@@ -115,7 +115,7 @@ pub struct CollectorStatus {
 
 /// GPU telemetry snapshot collected by the job-local sampler.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct GpuSnapshot {
     pub sampled_at: String,
     pub nodes: Vec<GpuNodeSummary>,
@@ -125,7 +125,7 @@ pub struct GpuSnapshot {
 
 /// Per-node GPU summary derived from the latest sampler rows.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct GpuNodeSummary {
     pub node: Option<String>,
     pub gpu_count: usize,
@@ -138,7 +138,7 @@ pub struct GpuNodeSummary {
 
 /// One sampled GPU device record.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct GpuDeviceSample {
     pub node: Option<String>,
     pub rank: Option<String>,
@@ -159,7 +159,7 @@ pub struct GpuDeviceSample {
 
 /// One sampled GPU process record.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct GpuProcessSample {
     pub node: Option<String>,
     pub rank: Option<String>,
@@ -174,7 +174,7 @@ pub struct GpuProcessSample {
 
 /// Slurm metrics sampler output for all observed steps.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SlurmSamplerSnapshot {
     pub sampled_at: String,
     pub steps: Vec<StepStats>,

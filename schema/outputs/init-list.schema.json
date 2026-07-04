@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TemplateListOutput",
+  "description": "`init --list-templates` JSON output.",
+  "type": "object",
+  "properties": {
+    "cache_dir_placeholder": {
+      "type": "string"
+    },
+    "cache_dir_required": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "templates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TemplateInfoOutput"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "templates",
+    "cache_dir_required",
+    "cache_dir_placeholder"
+  ],
+  "$defs": {
+    "TemplateInfoOutput": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "category",
+        "description"
+      ]
+    }
+  }
+}

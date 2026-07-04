@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_CacheEntryManifest",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/CacheEntryManifest"
+  },
+  "$defs": {
+    "CacheEntryKind": {
+      "description": "The kind of artifact tracked in the cache manifest.",
+      "oneOf": [
+        {
+          "description": "A base image imported directly from a remote reference.",
+          "type": "string",
+          "const": "base"
+        },
+        {
+          "description": "A prepared runtime image derived from a base image.",
+          "type": "string",
+          "const": "prepared"
+        },
+        {
+          "description": "A staged dataset materialized into the content-addressed store.",
+          "type": "string",
+          "const": "dataset"
+        },
+        {
+          "description": "A staged model materialized into the content-addressed store.",
+          "type": "string",
+          "const": "model"
+        },
+        {
+          "description": "A content-addressed snapshot of a project's working-tree source.",
+          "type": "string",
+          "const": "source"
+        },
+        {
+          "description": "A kind produced by a newer (or older) tool version. Kept so that\n[`scan_cache`] never fails on a manifest it does not recognize and the\nentry still round-trips through deserialize/serialize.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "CacheEntryManifest": {
+      "description": "Metadata stored next to a cached artifact.",
+      "type": "object",
+      "properties": {
+        "artifact_path": {
+          "type": "string"
+        },
+        "cache_key": {
+          "type": "string"
+        },
+        "content_digest": {
+          "description": "Content digest recorded after a staged input is materialized, when the\nmaterializer can compute one. Only set for `Dataset`/`Model` entries;\nomitted when `None`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "force_rebuild_due_to_mounts": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/CacheEntryKind"
+        },
+        "last_used_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "prepare_commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prepare_env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prepare_mounts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prepare_root": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "registry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "description": "Pinned revision of a staged input (e.g. a git tag or commit). Only set\nfor `Dataset`/`Model` entries; omitted when `None`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_image": {
+          "type": "string"
+        },
+        "tool_version": {
+          "type": "string"
+        },
+        "uri": {
+          "description": "Source URI of a staged input (e.g. `hf://org/model`). Only set for\n`Dataset`/`Model` entries; omitted from image-manifest JSON so existing\n`Base`/`Prepared` manifests serialize byte-identically.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "artifact_path",
+        "service_names",
+        "cache_key",
+        "source_image",
+        "prepare_commands",
+        "prepare_env",
+        "prepare_mounts",
+        "force_rebuild_due_to_mounts",
+        "created_at",
+        "last_used_at",
+        "tool_version"
+      ]
+    }
+  }
+}

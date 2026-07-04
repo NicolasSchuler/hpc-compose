@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobListOutput",
+  "description": "`jobs list` / `ls` tracked-job inventory (`--format json`).",
+  "type": "object",
+  "properties": {
+    "jobs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobInventoryEntry"
+      }
+    },
+    "scan_root": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "scan_root",
+    "jobs"
+  ],
+  "$defs": {
+    "JobInventoryEntry": {
+      "description": "One tracked job discovered from recorded submission metadata.",
+      "type": "object",
+      "properties": {
+        "age_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "batch_log": {
+          "type": "string",
+          "default": ""
+        },
+        "batch_log_managed": {
+          "type": "boolean",
+          "default": false
+        },
+        "compose_file": {
+          "type": "string"
+        },
+        "compose_metadata_root": {
+          "type": "string"
+        },
+        "disk_usage_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "is_latest": {
+          "type": "boolean"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubmissionKind"
+        },
+        "legacy_runtime_job_root": {
+          "type": "string"
+        },
+        "legacy_runtime_job_root_present": {
+          "type": "boolean"
+        },
+        "record_path": {
+          "type": "string"
+        },
+        "runtime_cache_dir": {
+          "type": "string",
+          "default": ""
+        },
+        "runtime_cache_dir_present": {
+          "type": "boolean",
+          "default": false
+        },
+        "runtime_job_root": {
+          "type": "string"
+        },
+        "runtime_job_root_present": {
+          "type": "boolean"
+        },
+        "submit_dir": {
+          "type": "string"
+        },
+        "submitted_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "compose_file",
+        "compose_metadata_root",
+        "job_id",
+        "kind",
+        "is_latest",
+        "submitted_at",
+        "age_seconds",
+        "submit_dir",
+        "record_path",
+        "runtime_job_root",
+        "runtime_job_root_present",
+        "legacy_runtime_job_root",
+        "legacy_runtime_job_root_present"
+      ]
+    },
+    "SubmissionKind": {
+      "description": "High-level submission flow used to create a tracked job.",
+      "oneOf": [
+        {
+          "description": "A normal compose application submission from `up`.",
+          "type": "string",
+          "const": "main"
+        },
+        {
+          "description": "A one-off `run` submission scoped to one service.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "A short right-sizing probe submitted by `germinate`.",
+          "type": "string",
+          "const": "canary"
+        },
+        {
+          "description": "One trial submitted by `sweep submit`.",
+          "type": "string",
+          "const": "sweep_trial"
+        },
+        {
+          "description": "A tracked interactive notebook server submitted by `notebook`.",
+          "type": "string",
+          "const": "notebook"
+        }
+      ]
+    }
+  }
+}

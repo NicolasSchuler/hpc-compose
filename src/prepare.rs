@@ -24,7 +24,7 @@ use crate::spec::{
 
 /// A plan with concrete runtime image paths for every service.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RuntimePlan {
     pub name: String,
     pub cache_dir: PathBuf,
@@ -35,7 +35,7 @@ pub struct RuntimePlan {
 
 /// A runtime-ready service entry with resolved image artifact paths.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RuntimeService {
     pub name: String,
     pub runtime_image: PathBuf,
@@ -291,7 +291,7 @@ fn enrich_import_error(err: anyhow::Error, temp_dir: &Path) -> anyhow::Error {
 }
 
 /// How a runtime artifact was obtained during preparation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactAction {
     /// The artifact already existed and was used as-is.
@@ -304,7 +304,7 @@ pub enum ArtifactAction {
 
 /// Status for one concrete artifact path produced or reused during prepare.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ArtifactStatus {
     pub path: PathBuf,
     pub action: ArtifactAction,
@@ -313,7 +313,7 @@ pub struct ArtifactStatus {
 
 /// Preparation results for one service.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ServicePrepareResult {
     pub service_name: String,
     pub base_image: Option<ArtifactStatus>,
@@ -322,7 +322,7 @@ pub struct ServicePrepareResult {
 
 /// Summary of all service preparations in a runtime plan.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
 pub struct PrepareSummary {
     pub services: Vec<ServicePrepareResult>,
 }

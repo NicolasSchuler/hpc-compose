@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TemplateDescriptionOutput",
+  "type": "object",
+  "properties": {
+    "cache_dir_placeholder": {
+      "type": "string"
+    },
+    "cache_dir_required": {
+      "type": "boolean"
+    },
+    "command": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "template": {
+      "$ref": "#/$defs/TemplateInfoOutput"
+    }
+  },
+  "required": [
+    "schema_version",
+    "template",
+    "cache_dir_required",
+    "cache_dir_placeholder",
+    "command"
+  ],
+  "$defs": {
+    "TemplateInfoOutput": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "category",
+        "description"
+      ]
+    }
+  }
+}

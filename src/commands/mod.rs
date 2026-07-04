@@ -20,13 +20,13 @@ use hpc_compose::when::{
 
 mod cache;
 mod confirm;
-mod doctor;
-mod evolve;
-mod examples;
-mod init;
+pub(crate) mod doctor;
+pub(crate) mod evolve;
+pub(crate) mod examples;
+pub(crate) mod init;
 pub(crate) mod load;
-mod runtime;
-mod spec;
+pub(crate) mod runtime;
+pub(crate) mod spec;
 mod weather;
 
 #[derive(Debug, Clone, Default)]
@@ -196,7 +196,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::config(context, format, variables, show_values)
         }
-        Commands::Schema { kind } => print_schema(kind),
+        Commands::Schema { kind, output } => print_schema(kind, output),
         Commands::Plan {
             file,
             strict_env,
@@ -2154,7 +2154,25 @@ fn resolve_binary_overrides(
     overrides
 }
 
-fn print_schema(kind: Option<SchemaKind>) -> Result<()> {
+fn print_schema(kind: Option<SchemaKind>, output: Option<String>) -> Result<()> {
+    if let Some(command) = output {
+        let json = crate::output::contract::output_schema_json(&command).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown output schema '{command}'; known commands: {}",
+                crate::output::contract::output_schema_commands().join(", ")
+            )
+        })?;
+        let mut stdout = io::stdout();
+        stdout
+            .write_all(json.as_bytes())
+            .context("failed to write output schema to stdout")?;
+        if !json.ends_with('\n') {
+            stdout
+                .write_all(b"\n")
+                .context("failed to write output schema newline to stdout")?;
+        }
+        return Ok(());
+    }
     let json = match kind {
         Some(SchemaKind::Settings) => hpc_compose::schema::settings_schema_json(),
         _ => hpc_compose::schema::schema_json(),

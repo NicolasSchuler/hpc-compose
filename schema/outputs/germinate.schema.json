@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GerminateOutput",
+  "type": "object",
+  "properties": {
+    "cache_dir": {
+      "type": "string"
+    },
+    "compose_file": {
+      "type": "string"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "job_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "report": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RightsizeReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "script_path": {
+      "type": "string"
+    },
+    "tracked_metadata_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "yaml_patch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "compose_file",
+    "script_path",
+    "cache_dir",
+    "dry_run"
+  ],
+  "$defs": {
+    "RightsizeConfidence": {
+      "description": "Confidence label for a right-sizing observation or recommendation.",
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "RightsizeObservation": {
+      "description": "One resource usage observation used by the right-sizing assistant.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/RightsizeConfidence"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "target_path": {
+          "type": "string"
+        },
+        "utilization": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "resource",
+        "scope",
+        "target_path",
+        "source",
+        "confidence"
+      ]
+    },
+    "RightsizeRecommendation": {
+      "description": "One concrete resource setting recommendation.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/RightsizeConfidence"
+        },
+        "current": {
+          "type": "string"
+        },
+        "observed": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "suggested": {
+          "type": "string"
+        },
+        "target_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resource",
+        "scope",
+        "target_path",
+        "current",
+        "suggested",
+        "observed",
+        "reason",
+        "confidence"
+      ]
+    },
+    "RightsizeReport": {
+      "description": "Conservative resource right-sizing report for a completed tracked job.",
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RightsizeObservation"
+          }
+        },
+        "recommendations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RightsizeRecommendation"
+          }
+        },
+        "scheduler_source": {
+          "type": "string"
+        },
+        "scheduler_state": {
+          "type": "string"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "job_id",
+        "scheduler_state",
+        "scheduler_source",
+        "complete",
+        "sources",
+        "notes",
+        "observations",
+        "recommendations"
+      ]
+    }
+  }
+}

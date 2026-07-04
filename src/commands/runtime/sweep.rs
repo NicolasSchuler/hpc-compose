@@ -6,7 +6,7 @@ const DEFAULT_SWEEP_MAX_TRIALS: usize = 100;
 /// One per-config rollup row: the replicate objectives of a single parameter
 /// config summarized as mean±std(n). Emitted in the `groups` field of sweep
 /// status/observe/results output.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 struct SweepConfigGroup {
     config_key: String,
     variables: BTreeMap<String, String>,
@@ -112,15 +112,17 @@ fn best_group_mean(
     }
 }
 
-#[derive(Debug, Serialize)]
-struct SweepSubmitOutput<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SweepSubmitOutput<'a> {
+    pub(crate) schema_version: u32,
     dry_run: bool,
     manifest_path: Option<PathBuf>,
     manifest: &'a SweepManifest,
 }
 
-#[derive(Debug, Serialize)]
-struct SweepStatusOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SweepStatusOutput {
+    pub(crate) schema_version: u32,
     sweep_id: String,
     compose_file: PathBuf,
     submitted_at: u64,
@@ -132,7 +134,7 @@ struct SweepStatusOutput {
     trials: Vec<SweepStatusTrialOutput>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SweepStatusTrialOutput {
     trial_id: String,
     index: usize,
@@ -145,8 +147,9 @@ struct SweepStatusTrialOutput {
     detail: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct SweepListOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SweepListOutput {
+    pub(crate) schema_version: u32,
     compose_file: PathBuf,
     sweeps: Vec<SweepManifest>,
 }
@@ -507,6 +510,7 @@ fn print_sweep_submit_output(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&SweepSubmitOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     dry_run,
                     manifest_path,
                     manifest,
@@ -554,6 +558,7 @@ pub(crate) fn sweep_status(
         Vec::new()
     };
     let report = SweepStatusOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         sweep_id: manifest.sweep_id,
         compose_file: manifest.compose_file,
         submitted_at: manifest.submitted_at,
@@ -761,6 +766,7 @@ pub(crate) fn sweep_list(context: ResolvedContext, format: Option<OutputFormat>)
             println!(
                 "{}",
                 serde_json::to_string_pretty(&SweepListOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     compose_file: context.compose_file.value,
                     sweeps,
                 })
@@ -963,8 +969,9 @@ fn evaluate_stop_condition(expr: &str, best: Option<f64>) -> Result<bool> {
     bail!("--stop-when must look like `objective < 0.05` or `objective >= 0.9` (got '{expr}')");
 }
 
-#[derive(Debug, Serialize)]
-struct SweepObserveOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SweepObserveOutput {
+    pub(crate) schema_version: u32,
     sweep_id: String,
     objective_configured: bool,
     best_trial: Option<String>,
@@ -982,7 +989,7 @@ struct SweepObserveOutput {
     trials: Vec<SweepObserveTrial>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 struct SweepObserveTrial {
     trial_id: String,
     index: usize,
@@ -997,7 +1004,7 @@ struct SweepObserveTrial {
 /// plotted against a numeric sweep parameter (`scaling_axis`), summarized with a
 /// log-log least-squares slope and speedup/efficiency relative to a baseline
 /// group. Output-only (never persisted); see `sweep observe --scaling`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 struct ScalingReport {
     /// The sweep parameter used as the x-axis.
     axis: String,
@@ -1020,7 +1027,7 @@ struct ScalingReport {
 
 /// One config group's scaling sample: its axis value, group mean objective, and
 /// observed max runtime, plus speedup/efficiency relative to the baseline group.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 struct ScalingPoint {
     /// The numeric `scaling_axis` value for this group.
     axis_value: f64,
@@ -1301,6 +1308,7 @@ pub(crate) fn sweep_observe(
         };
 
         let report = SweepObserveOutput {
+            schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             sweep_id: manifest.sweep_id.clone(),
             objective_configured,
             best_trial: manifest.best_trial.clone(),
@@ -1504,8 +1512,9 @@ pub(crate) fn sweep_stop(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct SweepStopOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SweepStopOutput {
+    pub(crate) schema_version: u32,
     sweep_id: String,
     cancelled_count: usize,
     skipped_count: usize,
@@ -1572,6 +1581,7 @@ fn sweep_stop_inner(
         .unwrap_or_else(|| "manual sweep stop".to_string());
     write_sweep_manifest(&manifest)?;
     Ok(SweepStopOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         sweep_id: manifest.sweep_id,
         cancelled_count: cancelled.len(),
         skipped_count: skipped.len(),
@@ -1591,8 +1601,9 @@ fn print_sweep_stop_output(report: &SweepStopOutput) {
 
 // --- sweep results / score --sweep / stats --sweep -------------------------
 
-#[derive(Debug, Serialize)]
-struct SweepResultsOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SweepResultsOutput {
+    pub(crate) schema_version: u32,
     sweep_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     objective_direction: Option<String>,
@@ -1606,7 +1617,7 @@ struct SweepResultsOutput {
     rows: Vec<SweepResultRow>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SweepResultRow {
     trial_id: String,
     index: usize,
@@ -1802,6 +1813,7 @@ pub(crate) fn sweep_results(
         direction.and_then(|direction| best_config_trial_id(&groups, &trials_by_group, direction));
 
     let output = SweepResultsOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         sweep_id: manifest.sweep_id,
         objective_direction: direction.map(|direction| match direction {
             hpc_compose::spec::ObjectiveDirection::Minimize => "minimize".to_string(),
@@ -1919,8 +1931,9 @@ fn print_sweep_results_output(output: &SweepResultsOutput) {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct SweepScoreOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SweepScoreOutput {
+    pub(crate) schema_version: u32,
     sweep_id: String,
     /// Per-config rollup of the efficiency score (mean±std(n)) when the sweep
     /// used replicates. Omitted otherwise.
@@ -1929,7 +1942,7 @@ struct SweepScoreOutput {
     trials: Vec<SweepScoreTrial>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SweepScoreTrial {
     trial_id: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -1999,6 +2012,7 @@ pub(crate) fn score_sweep(
         Vec::new()
     };
     let output = SweepScoreOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         sweep_id: manifest.sweep_id,
         groups,
         trials,
@@ -2027,13 +2041,14 @@ pub(crate) fn score_sweep(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct SweepStatsOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SweepStatsOutput {
+    pub(crate) schema_version: u32,
     sweep_id: String,
     trials: Vec<SweepStatsTrial>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SweepStatsTrial {
     trial_id: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -2096,6 +2111,7 @@ pub(crate) fn stats_sweep(
         })
         .collect();
     let output = SweepStatsOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         sweep_id: manifest.sweep_id,
         trials,
     };
@@ -2228,6 +2244,7 @@ mod tests {
     #[test]
     fn sweep_results_csv_quotes_and_orders_columns() {
         let output = SweepResultsOutput {
+            schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             sweep_id: "s1".to_string(),
             objective_direction: Some("minimize".to_string()),
             best_trial: Some("t000".to_string()),
@@ -2264,6 +2281,7 @@ mod tests {
     #[test]
     fn sweep_results_csv_adds_replicate_columns_when_fanned_out() {
         let output = SweepResultsOutput {
+            schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             sweep_id: "s1".to_string(),
             objective_direction: Some("minimize".to_string()),
             best_trial: Some("t000r0".to_string()),

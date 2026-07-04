@@ -68,7 +68,7 @@ pub struct PlannedService {
 }
 
 /// Service placement mode inside one Slurm allocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ServicePlacementMode {
     /// The service is pinned to the allocation's primary node.
@@ -80,7 +80,7 @@ pub enum ServicePlacementMode {
 }
 
 /// The effective `srun` placement geometry for one service.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServicePlacement {
     /// Placement mode used for this service.
     pub mode: ServicePlacementMode,
@@ -116,7 +116,7 @@ impl Default for ServicePlacement {
 }
 
 /// Where a service image comes from after normalization.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ImageSource {
     /// A local `.sqsh` or `.squashfs` file used directly at runtime.
@@ -130,7 +130,7 @@ pub enum ImageSource {
 }
 
 /// The final command form passed to the runtime container.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutionSpec {
     /// Use the image's default entrypoint and command.
@@ -143,7 +143,7 @@ pub enum ExecutionSpec {
 
 /// A normalized image prepare block attached to a service.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PreparedImageSpec {
     pub commands: Vec<String>,
     pub mounts: Vec<String>,

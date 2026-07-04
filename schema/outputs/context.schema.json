@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextOutput",
+  "type": "object",
+  "properties": {
+    "binaries": {
+      "$ref": "#/$defs/ResolvedBinaries"
+    },
+    "compose_file": {
+      "$ref": "#/$defs/ResolvedValue"
+    },
+    "compose_load_error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "interpolation_var_sources": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ValueSource"
+      }
+    },
+    "interpolation_vars": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "runtime_paths": {
+      "$ref": "#/$defs/ContextRuntimePaths"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "selected_profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "settings_base_dir": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "settings_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "cwd",
+    "compose_file",
+    "binaries",
+    "interpolation_vars",
+    "interpolation_var_sources",
+    "runtime_paths"
+  ],
+  "$defs": {
+    "ContextRuntimePaths": {
+      "type": "object",
+      "properties": {
+        "artifact_export_dir": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cache_dir": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compose_dir": {
+          "type": "string"
+        },
+        "current_submit_dir": {
+          "type": "string"
+        },
+        "default_script_path": {
+          "type": "string"
+        },
+        "enroot_temp_dir": {
+          "description": "Resolved enroot prepare-time temporary scratch directory\n(`ENROOT_TEMP_PATH`).",
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "jobs_dir": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "metadata_root": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "resume_dir": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_job_root_pattern": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "compose_dir",
+        "current_submit_dir",
+        "default_script_path",
+        "runtime_job_root_pattern",
+        "enroot_temp_dir",
+        "metadata_root",
+        "jobs_dir"
+      ]
+    },
+    "ResolvedBinaries": {
+      "description": "Fully resolved binaries.",
+      "type": "object",
+      "properties": {
+        "apptainer": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "enroot": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "rsync": {
+          "description": "`rsync` used by `up --remote` to mirror the project to the login node.\nOverridable via the settings `binaries` block; defaults to bare `rsync`.",
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "sacct": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "salloc": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "sbatch": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "scancel": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "scontrol": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "sinfo": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "singularity": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "sprio": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "squeue": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "srun": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "ssh": {
+          "description": "`ssh` client for the remote delegation path (`up --remote`, follow-ups,\n`reach --open`). Overridable via the settings `binaries` block; defaults\nto bare `ssh` on `PATH`.",
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "sshare": {
+          "$ref": "#/$defs/ResolvedValue"
+        },
+        "sstat": {
+          "$ref": "#/$defs/ResolvedValue"
+        }
+      },
+      "required": [
+        "enroot",
+        "apptainer",
+        "singularity",
+        "salloc",
+        "sbatch",
+        "srun",
+        "scontrol",
+        "sinfo",
+        "squeue",
+        "sacct",
+        "sstat",
+        "scancel",
+        "sshare",
+        "sprio",
+        "ssh",
+        "rsync"
+      ]
+    },
+    "ResolvedValue": {
+      "description": "A resolved value and where it came from.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "description": "Source that won resolution.",
+          "$ref": "#/$defs/ValueSource"
+        },
+        "value": {
+          "description": "Final value.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "source"
+      ]
+    },
+    "ValueSource": {
+      "description": "Source that provided a resolved value.",
+      "oneOf": [
+        {
+          "description": "Explicit CLI argument.",
+          "type": "string",
+          "const": "cli"
+        },
+        {
+          "description": "Active profile in settings.",
+          "type": "string",
+          "const": "profile"
+        },
+        {
+          "description": "Shared defaults in settings.",
+          "type": "string",
+          "const": "defaults"
+        },
+        {
+          "description": "Compose file adjacency (for example `.env`).",
+          "type": "string",
+          "const": "compose"
+        },
+        {
+          "description": "Built-in fallback.",
+          "type": "string",
+          "const": "builtin"
+        },
+        {
+          "description": "Process environment variable.",
+          "type": "string",
+          "const": "process_env"
+        },
+        {
+          "description": "A value resolved through the top-level `secrets:` block (file or env).\nAlways treated as sensitive for redaction regardless of its name.",
+          "type": "string",
+          "const": "secret"
+        }
+      ]
+    }
+  }
+}

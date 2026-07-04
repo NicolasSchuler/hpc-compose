@@ -53,7 +53,7 @@ impl Default for EfficiencyScoreOptions {
 
 /// Confidence label for an efficiency score component.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EfficiencyScoreConfidence {
     High,
@@ -63,7 +63,7 @@ pub enum EfficiencyScoreConfidence {
 
 /// One scored efficiency dimension.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct EfficiencyScoreComponent {
     pub name: String,
     pub label: String,
@@ -80,7 +80,7 @@ pub struct EfficiencyScoreComponent {
 
 /// Post-run resource efficiency report for one tracked Slurm job.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct EfficiencyScoreReport {
     pub job_id: String,
     pub scheduler_state: String,

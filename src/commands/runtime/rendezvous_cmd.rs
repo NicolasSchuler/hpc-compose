@@ -1,7 +1,8 @@
 use super::*;
 
-#[derive(Debug, Serialize)]
-struct RendezvousRegisterOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct RendezvousRegisterOutput {
+    pub(crate) schema_version: u32,
     cache_dir: PathBuf,
     record_path: PathBuf,
     record: hpc_compose::rendezvous::RendezvousRecord,
@@ -47,6 +48,7 @@ pub(crate) fn rendezvous_register(
         OutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&RendezvousRegisterOutput {
+                schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                 cache_dir,
                 record_path,
                 record,
@@ -131,7 +133,7 @@ pub(crate) fn rendezvous_prune(cache_dir: PathBuf, format: Option<OutputFormat>)
         }
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&report)
+            serde_json::to_string_pretty(&output::contract::RendezvousPruneOutput::new(report))
                 .context("failed to serialize rendezvous prune output")?
         ),
     }

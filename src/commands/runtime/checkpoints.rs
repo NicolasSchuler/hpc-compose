@@ -19,7 +19,7 @@ pub(crate) fn checkpoints(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&history)
+                serde_json::to_string_pretty(&output::contract::CheckpointsOutput::new(history))
                     .context("failed to serialize checkpoints output")?
             );
             Ok(())

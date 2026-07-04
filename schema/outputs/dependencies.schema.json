@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DependencyGraphOutput",
+  "type": "object",
+  "properties": {
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DependencyGraphEdge"
+      }
+    },
+    "leaves": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DependencyGraphNode"
+      }
+    },
+    "roots": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "nodes",
+    "edges",
+    "roots",
+    "leaves"
+  ],
+  "$defs": {
+    "DependencyGraphEdge": {
+      "type": "object",
+      "properties": {
+        "condition": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "readiness": {
+          "type": "string"
+        },
+        "readiness_type": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "condition",
+        "readiness",
+        "readiness_type"
+      ]
+    },
+    "DependencyGraphNode": {
+      "type": "object",
+      "properties": {
+        "readiness": {
+          "type": "string"
+        },
+        "readiness_type": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "readiness",
+        "readiness_type"
+      ]
+    }
+  }
+}

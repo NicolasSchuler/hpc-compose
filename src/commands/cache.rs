@@ -86,6 +86,7 @@ pub(crate) fn prune(
         };
         let result = prune_by_age(&target, days)?;
         output_cache::CachePruneReport {
+            schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             cache_dir: target,
             mode: "age".to_string(),
             removed_count: result.removed.len(),
@@ -103,6 +104,7 @@ pub(crate) fn prune(
         let target = cache_dir.unwrap_or_else(|| runtime_plan.cache_dir.clone());
         let result = prune_all_unused(&target, &runtime_plan)?;
         output_cache::CachePruneReport {
+            schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             cache_dir: target,
             mode: "all_unused".to_string(),
             removed_count: result.removed.len(),
@@ -147,6 +149,7 @@ pub(crate) fn prune_no_context(
     let target = cache_dir.unwrap_or_else(output_common::default_cache_dir);
     let result = prune_by_age(&target, days)?;
     let report = output_cache::CachePruneReport {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         cache_dir: target,
         mode: "age".to_string(),
         removed_count: result.removed.len(),

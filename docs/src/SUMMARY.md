@@ -44,6 +44,8 @@
 # Reference
 
 - [CLI Reference](cli-reference.md)
+- [Exit Codes](exit-codes.md)
+- [JSON Output Stability](json-output-stability.md)
 - [Spec Reference](spec-reference.md)
 - [Files and Directories](files-and-directories.md)
 - [Glossary](glossary.md)

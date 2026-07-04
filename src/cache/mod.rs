@@ -16,7 +16,7 @@ use crate::prepare::{RuntimePlan, RuntimeService, base_image_path_for_backend};
 use crate::time_util::{SECONDS_PER_DAY, unix_timestamp_now};
 
 /// The kind of artifact tracked in the cache manifest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheEntryKind {
     /// A base image imported directly from a remote reference.
@@ -38,7 +38,7 @@ pub enum CacheEntryKind {
 
 /// Metadata stored next to a cached artifact.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CacheEntryManifest {
     pub kind: CacheEntryKind,
     pub artifact_path: String,

@@ -15,7 +15,7 @@ use crate::lint::SuggestedFix;
 use crate::spec::{DependencyCondition, DependsOnSpec};
 
 /// A fix that was successfully applied to the source text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppliedFix {
     /// Lint rule code that produced the fix.
     pub code: &'static str,

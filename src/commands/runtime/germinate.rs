@@ -1,7 +1,8 @@
 use super::*;
 
-#[derive(Debug, Serialize)]
-struct GerminateOutput<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct GerminateOutput<'a> {
+    pub(crate) schema_version: u32,
     compose_file: &'a Path,
     script_path: &'a Path,
     cache_dir: &'a Path,
@@ -171,6 +172,7 @@ pub(crate) fn germinate(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&GerminateOutput {
+                        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         compose_file: &file,
                         script_path: &script_path,
                         cache_dir: &canary_plan.cache_dir,
@@ -259,6 +261,7 @@ pub(crate) fn germinate(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&GerminateOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     compose_file: &file,
                     script_path: &script_path,
                     cache_dir: &canary_plan.cache_dir,

@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiffMatrixOutput",
+  "description": "`diff --matrix` N-way comparison (`--matrix-format json`).",
+  "type": "object",
+  "properties": {
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobMatrixRow"
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobMatrixRun"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "runs",
+    "rows",
+    "notes"
+  ],
+  "$defs": {
+    "JobMatrixRow": {
+      "description": "One differing field projected across every run; `values` is positionally\naligned to [`JobMatrixReport::runs`] (one cell per run, `None` when absent).",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "section": {
+          "type": "string"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "required": [
+        "section",
+        "path",
+        "values"
+      ]
+    },
+    "JobMatrixRun": {
+      "description": "Metadata for one column (run) of a [`JobMatrixReport`].",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/SubmissionBackend"
+        },
+        "compose_file": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubmissionKind"
+        },
+        "scheduler_failed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "scheduler_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "submitted_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "job_id",
+        "submitted_at",
+        "compose_file",
+        "backend",
+        "kind"
+      ]
+    },
+    "SubmissionBackend": {
+      "description": "Backend used to execute a tracked submission.",
+      "oneOf": [
+        {
+          "description": "The job was submitted to Slurm.",
+          "type": "string",
+          "const": "slurm"
+        },
+        {
+          "description": "The job was launched locally without Slurm.",
+          "type": "string",
+          "const": "local"
+        }
+      ]
+    },
+    "SubmissionKind": {
+      "description": "High-level submission flow used to create a tracked job.",
+      "oneOf": [
+        {
+          "description": "A normal compose application submission from `up`.",
+          "type": "string",
+          "const": "main"
+        },
+        {
+          "description": "A one-off `run` submission scoped to one service.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "A short right-sizing probe submitted by `germinate`.",
+          "type": "string",
+          "const": "canary"
+        },
+        {
+          "description": "One trial submitted by `sweep submit`.",
+          "type": "string",
+          "const": "sweep_trial"
+        },
+        {
+          "description": "A tracked interactive notebook server submitted by `notebook`.",
+          "type": "string",
+          "const": "notebook"
+        }
+      ]
+    }
+  }
+}

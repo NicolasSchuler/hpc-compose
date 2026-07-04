@@ -774,8 +774,9 @@ fn print_notebook_connection(connection: &notebook::NotebookConnection) {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct NotebookDryRunOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct NotebookDryRunOutput {
+    pub(crate) schema_version: u32,
     dry_run: bool,
     submitted: bool,
     kind: String,
@@ -940,6 +941,7 @@ pub(crate) fn notebook(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&NotebookDryRunOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     dry_run: true,
                     submitted: false,
                     kind: nb_args.kind.as_str().to_string(),

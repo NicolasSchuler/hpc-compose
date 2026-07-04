@@ -79,19 +79,19 @@ pub(crate) use resources::ResourceCliOptions;
 // the cross-cutting helpers stay in this facade module so the submodules can reach
 // them via `use super::*;`.
 mod checkpoints;
-mod debug;
+pub(crate) mod debug;
 mod dev;
-mod exec;
-mod experiment;
-mod germinate;
+pub(crate) mod exec;
+pub(crate) mod experiment;
+pub(crate) mod germinate;
 mod inspect;
 mod lifecycle;
-mod pull;
-mod reach;
+pub(crate) mod pull;
+pub(crate) mod reach;
 mod remote;
-mod rendezvous_cmd;
+pub(crate) mod rendezvous_cmd;
 mod ssh_hint;
-mod sweep;
+pub(crate) mod sweep;
 
 pub(crate) use checkpoints::*;
 pub(crate) use debug::*;
@@ -1377,6 +1377,7 @@ fn start_prepared_local_launch(prepared: &PreparedLocalLaunch) -> Result<LocalLa
     }
 
     let submit_output = output::SubmitOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         backend: SubmissionBackend::Local,
         compose_file: prepared.file.clone(),
         script_path: prepared.script_path.clone(),
@@ -1534,6 +1535,7 @@ fn submit_prepared_slurm_submission(
         .as_ref()
         .and_then(|(record, persisted)| persisted.then(|| latest_record_path(record)));
     let submit_output = output::SubmitOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         backend: SubmissionBackend::Slurm,
         compose_file: prepared.file.clone(),
         script_path: prepared.script_path.clone(),
@@ -1812,9 +1814,14 @@ fn validate_when_plan_conditions(plan: &RuntimePlan, conditions: &WhenConditions
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct WhenSubmitOutput<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct WhenSubmitOutput<'a> {
+    pub(crate) schema_version: u32,
     triggered: bool,
+    // `WhenConditionSummary` (in `hpc_compose::when`) does not derive `JsonSchema`
+    // and is outside this task's editable scope, so describe the array as
+    // permissive JSON values in the published schema. Serde output is unchanged.
+    #[schemars(with = "Vec<serde_json::Value>")]
     conditions: &'a [WhenConditionSummary],
     submission: &'a output::SubmitOutput,
 }
@@ -1886,6 +1893,7 @@ pub(crate) fn when(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&WhenSubmitOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     triggered: true,
                     conditions: &trigger.conditions,
                     submission: &outcome.submit_output,
@@ -2146,6 +2154,7 @@ pub(crate) fn launch(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output::SubmitOutput {
+                        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         backend,
                         compose_file: file,
                         script_path,
@@ -2219,6 +2228,7 @@ pub(crate) fn launch(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output::SubmitOutput {
+                        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         backend: SubmissionBackend::Local,
                         compose_file: file.clone(),
                         script_path: script_path.clone(),
@@ -2331,13 +2341,13 @@ pub(crate) fn up(
     )
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SmokePhase {
     name: &'static str,
     status: &'static str,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 struct SmokeServiceResult {
     service_name: String,
     appeared: bool,
@@ -2350,8 +2360,9 @@ struct SmokeServiceResult {
     failures: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct SmokeTestOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct SmokeTestOutput {
+    pub(crate) schema_version: u32,
     ok: bool,
     backend: SubmissionBackend,
     compose_file: PathBuf,
@@ -2598,6 +2609,7 @@ pub(crate) fn smoke_test(
         });
     }
     let report = SmokeTestOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         ok: evaluation.ok,
         backend,
         compose_file: record.compose_file.clone(),

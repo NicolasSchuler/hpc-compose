@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct DebugLogTail {
     service_name: Option<String>,
     path: PathBuf,
@@ -9,7 +9,7 @@ struct DebugLogTail {
     note: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct DebugSummary {
     scheduler_state: Option<String>,
     failed_service: Option<String>,
@@ -18,8 +18,9 @@ struct DebugSummary {
     next_command: String,
 }
 
-#[derive(Debug, Serialize)]
-struct DebugReport {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct DebugReport {
+    pub(crate) schema_version: u32,
     tracked: bool,
     compose_file: PathBuf,
     job_id: Option<String>,
@@ -106,6 +107,7 @@ pub(crate) fn debug(
 
     let Some(record) = record else {
         let report = DebugReport {
+            schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             tracked: false,
             compose_file: context.compose_file.value.clone(),
             job_id,
@@ -197,6 +199,7 @@ pub(crate) fn debug(
         &recommendation,
     );
     let report = DebugReport {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         tracked: true,
         compose_file: debug_compose_file,
         job_id: Some(record.job_id.clone()),

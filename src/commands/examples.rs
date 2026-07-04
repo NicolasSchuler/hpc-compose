@@ -41,17 +41,33 @@ pub(crate) fn recommend(
     )
 }
 
+/// `examples list` / `search` / `coverage` JSON output.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ExamplesListOutput<'a> {
+    pub(crate) schema_version: u32,
+    pub(crate) examples: &'a [ExampleInfo],
+}
+
+/// `examples recommend` JSON output.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ExamplesRecommendOutput<'a> {
+    pub(crate) schema_version: u32,
+    pub(crate) query: Option<&'a str>,
+    pub(crate) required_tags: &'a [String],
+    pub(crate) safe_authoring_note: &'static str,
+    pub(crate) recommendations: &'a [ExampleRecommendation],
+}
+
 fn print_examples(entries: &[ExampleInfo], format: ExamplesOutputFormat) -> Result<()> {
     match format {
         ExamplesOutputFormat::Text => print_text(entries),
         ExamplesOutputFormat::Json => {
-            #[derive(Serialize)]
-            struct Output<'a> {
-                examples: &'a [ExampleInfo],
-            }
             println!(
                 "{}",
-                serde_json::to_string_pretty(&Output { examples: entries })?
+                serde_json::to_string_pretty(&ExamplesListOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
+                    examples: entries,
+                })?
             );
         }
         ExamplesOutputFormat::Markdown => {
@@ -101,17 +117,10 @@ fn print_recommendations(
             print_recommendations_text(query, tags, recommendations);
         }
         OutputFormat::Json => {
-            #[derive(Serialize)]
-            struct Output<'a> {
-                query: Option<&'a str>,
-                required_tags: &'a [String],
-                safe_authoring_note: &'static str,
-                recommendations: &'a [ExampleRecommendation],
-            }
-
             println!(
                 "{}",
-                serde_json::to_string_pretty(&Output {
+                serde_json::to_string_pretty(&ExamplesRecommendOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     query,
                     required_tags: tags,
                     safe_authoring_note: "Recommendation commands only copy or scaffold a spec and run static plan checks; they do not contact Slurm.",

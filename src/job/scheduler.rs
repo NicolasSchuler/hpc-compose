@@ -164,7 +164,7 @@ pub struct WalltimeProgress {
 
 /// Scheduler state as observed by the tracker.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SchedulerStatus {
     pub state: String,
     pub source: SchedulerSource,
@@ -175,7 +175,7 @@ pub struct SchedulerStatus {
 
 /// Presence and freshness information for one tracked service log.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PsServiceRow {
     pub service_name: String,
     pub path: PathBuf,
@@ -234,7 +234,7 @@ pub struct PsServiceRow {
 
 /// Post-run assertion result for one tracked service.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ServiceAssertionStatus {
     pub configured: bool,
     pub status: Option<String>,
@@ -264,7 +264,7 @@ pub type ServiceLogStatus = PsServiceRow;
 
 /// Presence and freshness information for the top-level batch log.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BatchLogStatus {
     pub path: PathBuf,
     pub present: bool,
@@ -274,7 +274,7 @@ pub struct BatchLogStatus {
 
 /// Combined tracked-job status returned by the `status` command.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StatusSnapshot {
     pub record: SubmissionRecord,
     pub scheduler: SchedulerStatus,
@@ -292,7 +292,7 @@ pub struct StatusSnapshot {
 
 /// Slurm array task rows observed by `status --array`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArrayStatusSnapshot {
     pub available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,7 +306,7 @@ pub struct ArrayStatusSnapshot {
 
 /// One Slurm array task row.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArrayTaskStatus {
     pub task_id: Option<u32>,
     pub job_id_raw: String,
@@ -324,7 +324,7 @@ pub struct ArrayTaskStatus {
 
 /// Optional queue-facing scheduler diagnostics returned only by `status`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct QueueDiagnostics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_reason: Option<String>,

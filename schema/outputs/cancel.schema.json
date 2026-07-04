@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CancelOutput",
+  "type": "object",
+  "properties": {
+    "cancelled": {
+      "type": "boolean"
+    },
+    "command_stdout": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "purged_cache_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "tracking_removed": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "cancelled"
+  ]
+}

@@ -9,8 +9,9 @@
 use super::*;
 
 /// Machine-readable output for `reach --format json`.
-#[derive(Debug, Serialize)]
-struct ReachOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ReachOutput {
+    pub(crate) schema_version: u32,
     service: String,
     job_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +115,7 @@ pub(crate) fn reach(
 
     if json {
         let out = ReachOutput {
+            schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             service,
             job_id: record.job_id.clone(),
             compute_node,

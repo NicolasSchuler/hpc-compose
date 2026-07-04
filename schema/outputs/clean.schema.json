@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CleanOutput",
+  "description": "`clean` / `gc` tracked-job cleanup report (`--format json`).",
+  "type": "object",
+  "properties": {
+    "compose_file": {
+      "type": "string"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "jobs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CleanupJobReport"
+      }
+    },
+    "kept_job_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "latest_job_id_after": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "latest_job_id_before": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "latest_pointer_job_id_before": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "type": "string"
+    },
+    "removed_job_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "total_bytes_reclaimed": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "compose_file",
+    "mode",
+    "dry_run",
+    "removed_job_ids",
+    "kept_job_ids",
+    "jobs"
+  ],
+  "$defs": {
+    "CleanupJobReport": {
+      "description": "Cleanup planning details for one tracked job.",
+      "type": "object",
+      "properties": {
+        "age_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "batch_log": {
+          "type": "string",
+          "default": ""
+        },
+        "batch_log_managed": {
+          "type": "boolean",
+          "default": false
+        },
+        "bytes_reclaimed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "compose_file": {
+          "type": "string"
+        },
+        "compose_metadata_root": {
+          "type": "string"
+        },
+        "disk_usage_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "is_latest": {
+          "type": "boolean"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubmissionKind"
+        },
+        "legacy_runtime_job_root": {
+          "type": "string"
+        },
+        "legacy_runtime_job_root_present": {
+          "type": "boolean"
+        },
+        "record_path": {
+          "type": "string"
+        },
+        "runtime_cache_dir": {
+          "type": "string",
+          "default": ""
+        },
+        "runtime_cache_dir_present": {
+          "type": "boolean",
+          "default": false
+        },
+        "runtime_job_root": {
+          "type": "string"
+        },
+        "runtime_job_root_present": {
+          "type": "boolean"
+        },
+        "selected": {
+          "type": "boolean"
+        },
+        "submit_dir": {
+          "type": "string"
+        },
+        "submitted_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "compose_file",
+        "compose_metadata_root",
+        "job_id",
+        "kind",
+        "is_latest",
+        "submitted_at",
+        "age_seconds",
+        "submit_dir",
+        "record_path",
+        "runtime_job_root",
+        "runtime_job_root_present",
+        "legacy_runtime_job_root",
+        "legacy_runtime_job_root_present",
+        "selected"
+      ]
+    },
+    "SubmissionKind": {
+      "description": "High-level submission flow used to create a tracked job.",
+      "oneOf": [
+        {
+          "description": "A normal compose application submission from `up`.",
+          "type": "string",
+          "const": "main"
+        },
+        {
+          "description": "A one-off `run` submission scoped to one service.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "A short right-sizing probe submitted by `germinate`.",
+          "type": "string",
+          "const": "canary"
+        },
+        {
+          "description": "One trial submitted by `sweep submit`.",
+          "type": "string",
+          "const": "sweep_trial"
+        },
+        {
+          "description": "A tracked interactive notebook server submitted by `notebook`.",
+          "type": "string",
+          "const": "notebook"
+        }
+      ]
+    }
+  }
+}

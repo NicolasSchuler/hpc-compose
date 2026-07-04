@@ -11,7 +11,7 @@
 use serde::Serialize;
 
 /// Severity level for one diagnostic finding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Level {
     /// The check passed.
@@ -24,7 +24,7 @@ pub enum Level {
 
 /// One diagnostic finding.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Item {
     pub level: Level,
     pub message: String,
@@ -33,7 +33,7 @@ pub struct Item {
 
 /// A flat diagnostic report before items are grouped for display.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Report {
     pub items: Vec<Item>,
 }

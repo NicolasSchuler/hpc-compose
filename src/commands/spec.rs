@@ -80,8 +80,9 @@ pub(crate) fn validate(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct LintOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct LintOutput {
+    pub(crate) schema_version: u32,
     passed: bool,
     compose_file: PathBuf,
     warning_count: usize,
@@ -209,6 +210,7 @@ pub(crate) fn lint(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&LintOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     passed,
                     compose_file: plan.spec_path,
                     warning_count,
@@ -223,9 +225,9 @@ pub(crate) fn lint(
     }
 
     if !passed {
-        bail!(
-            "lint found {warning_count} warning(s) and {error_count} error(s); pass --allow-warnings to allow warnings"
-        );
+        // Lint findings failed the gate: exit 4 so CI can distinguish advisory
+        // findings from a spec error (2) or a generic failure (1).
+        return Err(crate::exit::LintFindingsError::new(warning_count, error_count).into());
     }
     Ok(())
 }
@@ -347,6 +349,7 @@ pub(crate) fn render(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output_spec::RenderOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     compose_file: plan.spec_path,
                     output_path,
                     script,
@@ -358,8 +361,9 @@ pub(crate) fn render(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct PlanOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct PlanOutput {
+    pub(crate) schema_version: u32,
     valid: bool,
     compose_file: PathBuf,
     runtime_plan: hpc_compose::prepare::RuntimePlan,
@@ -368,7 +372,7 @@ struct PlanOutput {
     script: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 struct PlanHint {
     level: &'static str,
     message: String,
@@ -469,6 +473,7 @@ pub(crate) fn plan(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&PlanOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     valid: true,
                     compose_file: plan.spec_path,
                     runtime_plan: redacted_runtime_plan,
@@ -628,7 +633,7 @@ pub(crate) fn prepare(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&summary)
+                serde_json::to_string_pretty(&output::contract::PrepareOutput::new(summary))
                     .context("failed to serialize prepare output")?
             );
         }
@@ -683,16 +688,19 @@ pub(crate) fn preflight(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report.grouped())
-                    .context("failed to serialize preflight report")?
+                serde_json::to_string_pretty(&output::contract::PreflightOutput::new(
+                    report.grouped(),
+                ))
+                .context("failed to serialize preflight report")?
             );
         }
     }
     if report.has_errors() {
-        bail!("preflight failed");
+        // The environment is not ready for a run: exit 3.
+        return Err(crate::exit::EnvironmentError::new("preflight failed").into());
     }
     if strict && report.has_warnings() {
-        bail!("preflight reported warnings");
+        return Err(crate::exit::EnvironmentError::new("preflight reported warnings").into());
     }
     // Reached only on a clean pass; point at the run.
     if output_format == OutputFormat::Text && !quiet {
@@ -754,7 +762,7 @@ pub(crate) fn inspect(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&report)
+                    serde_json::to_string_pretty(&output::contract::RightsizeOutput::new(report))
                         .context("failed to serialize rightsize output")?
                 );
             }
@@ -865,6 +873,7 @@ pub(crate) fn config(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output_spec::InterpolationVarsOutput {
+                        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         variables: vars,
                         sources: sources
                             .iter()
@@ -902,7 +911,7 @@ pub(crate) fn config(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct ContextRuntimePaths {
     compose_dir: PathBuf,
     current_submit_dir: PathBuf,
@@ -918,8 +927,9 @@ struct ContextRuntimePaths {
     jobs_dir: ResolvedValue<PathBuf>,
 }
 
-#[derive(Debug, Serialize)]
-struct ContextOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ContextOutput {
+    pub(crate) schema_version: u32,
     cwd: PathBuf,
     settings_path: Option<PathBuf>,
     settings_base_dir: Option<PathBuf>,
@@ -1039,6 +1049,7 @@ pub(crate) fn context(
         show_values,
     );
     let output = ContextOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         cwd: context.cwd,
         settings_path: context.settings_path,
         settings_base_dir: context.settings_base_dir,

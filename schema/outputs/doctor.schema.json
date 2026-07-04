@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DoctorOutput",
+  "description": "`doctor` grouped environment diagnostics (`--format json`).",
+  "type": "object",
+  "properties": {
+    "actionable_warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
+    "contextual_warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
+    "passed_checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "summary": {
+      "$ref": "#/$defs/ReportSummary"
+    }
+  },
+  "required": [
+    "schema_version",
+    "summary",
+    "blockers",
+    "actionable_warnings",
+    "contextual_warnings",
+    "passed_checks"
+  ],
+  "$defs": {
+    "Item": {
+      "description": "One diagnostic finding.",
+      "type": "object",
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/Level"
+        },
+        "message": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "level",
+        "message"
+      ]
+    },
+    "Level": {
+      "description": "Severity level for one diagnostic finding.",
+      "oneOf": [
+        {
+          "description": "The check passed.",
+          "type": "string",
+          "const": "ok"
+        },
+        {
+          "description": "The check found a non-fatal issue worth surfacing.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "The check found a blocking issue.",
+          "type": "string",
+          "const": "error"
+        }
+      ]
+    },
+    "ReportSummary": {
+      "description": "Count summary for a grouped preflight report.",
+      "type": "object",
+      "properties": {
+        "actionable_warnings": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "blockers": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "contextual_warnings": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "passed_checks": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "blockers",
+        "actionable_warnings",
+        "contextual_warnings",
+        "passed_checks"
+      ]
+    }
+  }
+}

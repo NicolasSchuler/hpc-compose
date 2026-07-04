@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SweepScoreOutput",
+  "type": "object",
+  "properties": {
+    "groups": {
+      "description": "Per-config rollup of the efficiency score (mean±std(n)) when the sweep\nused replicates. Omitted otherwise.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepConfigGroup"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "sweep_id": {
+      "type": "string"
+    },
+    "trials": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepScoreTrial"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "sweep_id",
+    "groups",
+    "trials"
+  ],
+  "$defs": {
+    "EfficiencyScoreComponent": {
+      "description": "One scored efficiency dimension.",
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "$ref": "#/$defs/EfficiencyScoreConfidence"
+        },
+        "label": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "score": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "source": {
+          "type": "string"
+        },
+        "utilization": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "weight": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "name",
+        "label",
+        "available",
+        "weight",
+        "source",
+        "confidence"
+      ]
+    },
+    "EfficiencyScoreConfidence": {
+      "description": "Confidence label for an efficiency score component.",
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "EfficiencyScoreReport": {
+      "description": "Post-run resource efficiency report for one tracked Slurm job.",
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EfficiencyScoreComponent"
+          }
+        },
+        "confidence": {
+          "$ref": "#/$defs/EfficiencyScoreConfidence"
+        },
+        "energy_basis": {
+          "type": "string"
+        },
+        "energy_kwh": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "grade": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scheduler_source": {
+          "type": "string"
+        },
+        "scheduler_state": {
+          "type": "string"
+        },
+        "score": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tips": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "job_id",
+        "scheduler_state",
+        "scheduler_source",
+        "complete",
+        "score",
+        "grade",
+        "components",
+        "energy_basis",
+        "confidence",
+        "tips",
+        "sources",
+        "notes"
+      ]
+    },
+    "SweepConfigGroup": {
+      "description": "One per-config rollup row: the replicate objectives of a single parameter\nconfig summarized as mean±std(n). Emitted in the `groups` field of sweep\nstatus/observe/results output.",
+      "type": "object",
+      "properties": {
+        "config_key": {
+          "type": "string"
+        },
+        "mean": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "n": {
+          "description": "Number of replicates with an observed objective contributing to the rollup.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "replicates": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "std": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "config_key",
+        "variables",
+        "replicates",
+        "n"
+      ]
+    },
+    "SweepScoreTrial": {
+      "type": "object",
+      "properties": {
+        "config_key": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replicate": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EfficiencyScoreReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trial_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "trial_id",
+        "config_key",
+        "replicate"
+      ]
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NotebookDryRunOutput",
+  "type": "object",
+  "properties": {
+    "cache_dir": {
+      "type": "string"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "script_path": {
+      "type": "string"
+    },
+    "submitted": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "dry_run",
+    "submitted",
+    "kind",
+    "script_path",
+    "cache_dir"
+  ]
+}

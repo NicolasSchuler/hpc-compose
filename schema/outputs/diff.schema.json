@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiffOutput",
+  "description": "`diff` two-run comparison (`--format json`).",
+  "type": "object",
+  "properties": {
+    "config_changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobDiffChange"
+      }
+    },
+    "left": {
+      "$ref": "#/$defs/JobDiffSide"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "outcome_changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobDiffChange"
+      }
+    },
+    "provenance_changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobDiffChange"
+      }
+    },
+    "resource_changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobDiffChange"
+      }
+    },
+    "right": {
+      "$ref": "#/$defs/JobDiffSide"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "left",
+    "right",
+    "outcome_changes",
+    "provenance_changes",
+    "resource_changes",
+    "config_changes",
+    "notes"
+  ],
+  "$defs": {
+    "FirstFailure": {
+      "description": "Best-effort first service failure observed by the runtime supervisor.",
+      "type": "object",
+      "properties": {
+        "at_unix": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "exit_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "node": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rank": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "exit_code"
+      ]
+    },
+    "GitProvenance": {
+      "description": "Git state captured at submit time; only populated inside a working tree.",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "dirty"
+      ]
+    },
+    "JobDiffChange": {
+      "description": "One value-level difference.",
+      "type": "object",
+      "properties": {
+        "left": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "right": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "JobDiffServiceStatus": {
+      "description": "Service status projected into a diff report.",
+      "type": "object",
+      "properties": {
+        "last_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "service_name": {
+          "type": "string"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "service_name"
+      ]
+    },
+    "JobDiffSide": {
+      "description": "One side of a tracked job diff.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/SubmissionBackend"
+        },
+        "compose_file": {
+          "type": "string"
+        },
+        "first_failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FirstFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubmissionKind"
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scheduler_failed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "scheduler_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JobDiffServiceStatus"
+          }
+        },
+        "submitted_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "job_id",
+        "submitted_at",
+        "compose_file",
+        "backend",
+        "kind",
+        "services"
+      ]
+    },
+    "JobProvenance": {
+      "description": "Provenance pinned into a tracked submission record. Descriptive only.",
+      "type": "object",
+      "properties": {
+        "git": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image_refs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "source_content_hash": {
+          "description": "Content hash of the working-tree source snapshot captured at submit (the\nCAS key from [`crate::cache::source::stage_source`]). Populated only on\nthe approval-gated submit path; `None` when source was not snapshotted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_version"
+      ]
+    },
+    "SubmissionBackend": {
+      "description": "Backend used to execute a tracked submission.",
+      "oneOf": [
+        {
+          "description": "The job was submitted to Slurm.",
+          "type": "string",
+          "const": "slurm"
+        },
+        {
+          "description": "The job was launched locally without Slurm.",
+          "type": "string",
+          "const": "local"
+        }
+      ]
+    },
+    "SubmissionKind": {
+      "description": "High-level submission flow used to create a tracked job.",
+      "oneOf": [
+        {
+          "description": "A normal compose application submission from `up`.",
+          "type": "string",
+          "const": "main"
+        },
+        {
+          "description": "A one-off `run` submission scoped to one service.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "A short right-sizing probe submitted by `germinate`.",
+          "type": "string",
+          "const": "canary"
+        },
+        {
+          "description": "One trial submitted by `sweep submit`.",
+          "type": "string",
+          "const": "sweep_trial"
+        },
+        {
+          "description": "A tracked interactive notebook server submitted by `notebook`.",
+          "type": "string",
+          "const": "notebook"
+        }
+      ]
+    }
+  }
+}

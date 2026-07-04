@@ -38,12 +38,20 @@ use serde::Serialize;
 
 pub(crate) mod cache;
 pub(crate) mod common;
+pub(crate) mod contract;
 pub(crate) mod init;
 pub(crate) mod runtime;
 pub(crate) mod spec;
 
-#[derive(Debug, Serialize)]
+/// Version stamped into every owned command output DTO's `schema_version`
+/// field. Bump only on a breaking (removal/rename) change to any such output;
+/// see `docs/src/json-output-stability.md`. Envelopes over foreign/persisted
+/// types carry their own per-type constant in `contract`.
+pub(crate) const OUTPUT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct ValidateOutput {
+    pub(crate) schema_version: u32,
     pub(crate) valid: bool,
     pub(crate) compose_file: PathBuf,
     pub(crate) name: String,
@@ -53,14 +61,15 @@ pub(crate) struct ValidateOutput {
     pub(crate) cluster_warnings: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct RenderOutput {
+    pub(crate) schema_version: u32,
     pub(crate) compose_file: PathBuf,
     pub(crate) output_path: Option<PathBuf>,
     pub(crate) script: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct CacheArtifactInspect {
     pub(crate) path: PathBuf,
     pub(crate) artifact_present: bool,
@@ -68,7 +77,7 @@ pub(crate) struct CacheArtifactInspect {
     pub(crate) manifest: Option<hpc_compose::cache::CacheEntryManifest>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct CacheInspectService {
     pub(crate) service_name: String,
     pub(crate) source_image: String,
@@ -79,22 +88,25 @@ pub(crate) struct CacheInspectService {
     pub(crate) note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct CacheInspectReport {
+    pub(crate) schema_version: u32,
     pub(crate) cache_dir: PathBuf,
     pub(crate) services: Vec<CacheInspectService>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct CachePruneReport {
+    pub(crate) schema_version: u32,
     pub(crate) cache_dir: PathBuf,
     pub(crate) mode: String,
     pub(crate) removed_count: usize,
     pub(crate) removed_paths: Vec<PathBuf>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct SubmitOutput {
+    pub(crate) schema_version: u32,
     pub(crate) backend: SubmissionBackend,
     pub(crate) compose_file: PathBuf,
     pub(crate) script_path: PathBuf,
@@ -118,7 +130,7 @@ pub(crate) struct SubmitOutput {
 /// One readiness-derived service endpoint surfaced in `up` output. Descriptive
 /// only — derived statically from the plan's readiness specs, never probed and
 /// never opened.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct SubmitEndpoint {
     pub(crate) service: String,
     pub(crate) host: String,
@@ -289,22 +301,23 @@ fn http_host_port(url: &str) -> (String, u16) {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct DependencyGraphOutput {
+    pub(crate) schema_version: u32,
     pub(crate) nodes: Vec<DependencyGraphNode>,
     pub(crate) edges: Vec<DependencyGraphEdge>,
     pub(crate) roots: Vec<String>,
     pub(crate) leaves: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct DependencyGraphNode {
     pub(crate) service: String,
     pub(crate) readiness: String,
     pub(crate) readiness_type: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct DependencyGraphEdge {
     pub(crate) from: String,
     pub(crate) to: String,
@@ -313,8 +326,9 @@ pub(crate) struct DependencyGraphEdge {
     pub(crate) readiness_type: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct CancelOutput {
+    pub(crate) schema_version: u32,
     pub(crate) job_id: String,
     pub(crate) cancelled: bool,
     pub(crate) command_stdout: Option<String>,
@@ -324,23 +338,25 @@ pub(crate) struct CancelOutput {
     pub(crate) purged_cache_paths: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(crate) struct TemplateInfoOutput {
     pub(crate) name: String,
     pub(crate) category: String,
     pub(crate) description: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct TemplateDescriptionOutput {
+    pub(crate) schema_version: u32,
     pub(crate) template: TemplateInfoOutput,
     pub(crate) cache_dir_required: bool,
     pub(crate) cache_dir_placeholder: String,
     pub(crate) command: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct TemplateWriteOutput {
+    pub(crate) schema_version: u32,
     pub(crate) template_name: String,
     pub(crate) app_name: String,
     pub(crate) cache_dir: Option<String>,
@@ -348,8 +364,9 @@ pub(crate) struct TemplateWriteOutput {
     pub(crate) next_commands: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct SetupOutput {
+    pub(crate) schema_version: u32,
     pub(crate) settings_path: PathBuf,
     pub(crate) profile: String,
     pub(crate) default_profile: String,
@@ -399,6 +416,7 @@ pub(crate) fn resolve_diff_matrix_format(format: Option<DiffMatrixFormat>) -> Di
 
 pub(crate) fn build_validate_output(plan: &Plan, cluster_warnings: Vec<String>) -> ValidateOutput {
     ValidateOutput {
+        schema_version: OUTPUT_SCHEMA_VERSION,
         valid: true,
         compose_file: plan.spec_path.clone(),
         name: plan.name.clone(),
@@ -2322,6 +2340,7 @@ pub(crate) fn build_dependency_graph(
         .collect();
 
     DependencyGraphOutput {
+        schema_version: OUTPUT_SCHEMA_VERSION,
         nodes,
         edges,
         roots,
@@ -2882,6 +2901,7 @@ pub(crate) fn build_cache_inspect_report(
     }
 
     Ok(CacheInspectReport {
+        schema_version: OUTPUT_SCHEMA_VERSION,
         cache_dir: plan.cache_dir.clone(),
         services,
     })
@@ -3098,6 +3118,15 @@ fn service_names(plan: &RuntimePlan) -> Vec<&str> {
         .collect()
 }
 
+/// `init --list-templates` JSON output.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct TemplateListOutput {
+    pub(crate) schema_version: u32,
+    pub(crate) templates: Vec<TemplateInfoOutput>,
+    pub(crate) cache_dir_required: bool,
+    pub(crate) cache_dir_placeholder: String,
+}
+
 pub(crate) fn template_infos() -> Vec<TemplateInfoOutput> {
     templates()
         .iter()
@@ -3133,6 +3162,7 @@ pub(crate) fn print_template_list() {
 pub(crate) fn build_template_description(template_name: &str) -> Result<TemplateDescriptionOutput> {
     let template = resolve_template(template_name)?;
     Ok(TemplateDescriptionOutput {
+        schema_version: OUTPUT_SCHEMA_VERSION,
         template: TemplateInfoOutput {
             name: template.name.to_string(),
             category: template_category(template.name).to_string(),
@@ -3292,8 +3322,9 @@ pub(crate) fn print_submit_summary_box(
 
 use hpc_compose::context::ValueSource;
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
 pub(crate) struct InterpolationVarsOutput {
+    pub schema_version: u32,
     pub variables: BTreeMap<String, String>,
     pub sources: BTreeMap<String, String>,
 }

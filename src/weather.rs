@@ -18,7 +18,7 @@ pub struct WeatherOptions<'a> {
     pub cwd: &'a Path,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct WeatherReport {
     pub timestamp_unix: u64,
     pub cluster: Option<String>,
@@ -32,7 +32,7 @@ pub struct WeatherReport {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WeatherCondition {
     Clear,
@@ -55,7 +55,7 @@ impl WeatherCondition {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NodeSummary {
     pub total_nodes: u32,
     pub free_nodes: u32,
@@ -64,13 +64,13 @@ pub struct NodeSummary {
     pub gpu: GpuSummary,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NodeClassSummary {
     pub total_nodes: u32,
     pub free_nodes: u32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct GpuSummary {
     pub total_nodes: u32,
     pub free_nodes: u32,
@@ -79,7 +79,7 @@ pub struct GpuSummary {
     pub models: Vec<GpuModelSummary>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct GpuModelSummary {
     pub model: String,
     pub total_nodes: u32,
@@ -88,7 +88,7 @@ pub struct GpuModelSummary {
     pub free_devices: u32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct QueueSummary {
     pub total_jobs: u32,
     pub running_jobs: u32,
@@ -98,7 +98,7 @@ pub struct QueueSummary {
     pub start_sample_count: u32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct UserJobSummary {
     pub user: Option<String>,
     pub total_jobs: u32,
@@ -107,14 +107,14 @@ pub struct UserJobSummary {
     pub other_jobs: u32,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct FairshareSummary {
     pub account: Option<String>,
     pub user: Option<String>,
     pub fairshare: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct PrioritySummary {
     pub pending_jobs: u32,
     pub top_job_id: Option<String>,
@@ -122,7 +122,7 @@ pub struct PrioritySummary {
     pub average_priority: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct MaintenanceNote {
     pub partition: Option<String>,
     pub state: String,

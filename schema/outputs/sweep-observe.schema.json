@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SweepObserveOutput",
+  "type": "object",
+  "properties": {
+    "best_objective": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "best_trial": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "groups": {
+      "description": "Per-config replicate rollup (mean±std(n)). The best trial is selected by\nthe best group MEAN, not the single luckiest replicate. Omitted when the\nsweep did not use replicates.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepConfigGroup"
+      }
+    },
+    "objective_configured": {
+      "type": "boolean"
+    },
+    "scaling": {
+      "description": "Post-hoc scaling report (objective vs `scaling_axis`). Present only when\n`--scaling` was requested and `sweep.objective.scaling_axis` is set;\notherwise omitted so the default observe output is byte-unchanged.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScalingReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "sweep_id": {
+      "type": "string"
+    },
+    "trials": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepObserveTrial"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "sweep_id",
+    "objective_configured",
+    "groups",
+    "trials"
+  ],
+  "$defs": {
+    "ScalingPoint": {
+      "description": "One config group's scaling sample: its axis value, group mean objective, and\nobserved max runtime, plus speedup/efficiency relative to the baseline group.",
+      "type": "object",
+      "properties": {
+        "axis_value": {
+          "description": "The numeric `scaling_axis` value for this group.",
+          "type": "number",
+          "format": "double"
+        },
+        "config_key": {
+          "description": "The config_key identifying the group.",
+          "type": "string"
+        },
+        "efficiency": {
+          "description": "`speedup * baseline_axis / axis_value` (parallel efficiency). `None`\nunless `speedup` is defined and `axis_value > 0`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "n": {
+          "description": "Number of replicates contributing to this group's mean.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "objective_mean": {
+          "description": "The group mean objective (mean over the group's terminal replicates).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "runtime_seconds_max": {
+          "description": "The maximum observed runtime (seconds) across the group's trials.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "speedup": {
+          "description": "`baseline_runtime / this_runtime`. `None` unless both this point and the\nbaseline have runtime.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "axis_value",
+        "config_key",
+        "n"
+      ]
+    },
+    "ScalingReport": {
+      "description": "Post-hoc descriptive scaling report: the per-config group objective means\nplotted against a numeric sweep parameter (`scaling_axis`), summarized with a\nlog-log least-squares slope and speedup/efficiency relative to a baseline\ngroup. Output-only (never persisted); see `sweep observe --scaling`.",
+      "type": "object",
+      "properties": {
+        "axis": {
+          "description": "The sweep parameter used as the x-axis.",
+          "type": "string"
+        },
+        "baseline_axis": {
+          "description": "The axis value of the baseline group (the smallest axis value with\nterminal runtime data) used for speedup/efficiency. `None` when no point\nhas runtime.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "direction": {
+          "description": "The objective optimization direction, echoed for interpretation.",
+          "type": "string"
+        },
+        "loglog_slope": {
+          "description": "Least-squares slope of `ln(objective_mean)` vs `ln(axis_value)` over the\npoints with positive axis and mean. `None` when fewer than two such\npoints exist.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "points": {
+          "description": "One row per config group that has both a numeric axis value and a group\nmean objective, sorted ascending by axis value.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScalingPoint"
+          }
+        }
+      },
+      "required": [
+        "axis",
+        "direction",
+        "points"
+      ]
+    },
+    "SweepConfigGroup": {
+      "description": "One per-config rollup row: the replicate objectives of a single parameter\nconfig summarized as mean±std(n). Emitted in the `groups` field of sweep\nstatus/observe/results output.",
+      "type": "object",
+      "properties": {
+        "config_key": {
+          "type": "string"
+        },
+        "mean": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "n": {
+          "description": "Number of replicates with an observed objective contributing to the rollup.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "replicates": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "std": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "config_key",
+        "variables",
+        "replicates",
+        "n"
+      ]
+    },
+    "SweepObserveTrial": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "objective": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "objective_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "trial_id": {
+          "type": "string"
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "trial_id",
+        "index",
+        "variables",
+        "status"
+      ]
+    }
+  }
+}

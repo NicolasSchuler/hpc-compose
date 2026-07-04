@@ -7,7 +7,7 @@ use super::*;
 
 /// Compact comparison between two tracked job submissions.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct JobDiffReport {
     pub left: JobDiffSide,
     pub right: JobDiffSide,
@@ -20,7 +20,7 @@ pub struct JobDiffReport {
 
 /// One side of a tracked job diff.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct JobDiffSide {
     pub job_id: String,
     pub submitted_at: u64,
@@ -37,7 +37,7 @@ pub struct JobDiffSide {
 
 /// Service status projected into a diff report.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JobDiffServiceStatus {
     pub service_name: String,
     pub status: Option<String>,
@@ -46,7 +46,7 @@ pub struct JobDiffServiceStatus {
 
 /// One value-level difference.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JobDiffChange {
     pub path: String,
     pub left: Option<String>,
@@ -59,7 +59,7 @@ pub struct JobDiffChange {
 /// field that differs in at least one run; fields identical across every run are
 /// collapsed (omitted).
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JobMatrixReport {
     pub runs: Vec<JobMatrixRun>,
     pub rows: Vec<JobMatrixRow>,
@@ -68,7 +68,7 @@ pub struct JobMatrixReport {
 
 /// Metadata for one column (run) of a [`JobMatrixReport`].
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JobMatrixRun {
     pub job_id: String,
     pub submitted_at: u64,
@@ -82,7 +82,7 @@ pub struct JobMatrixRun {
 /// One differing field projected across every run; `values` is positionally
 /// aligned to [`JobMatrixReport::runs`] (one cell per run, `None` when absent).
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JobMatrixRow {
     pub section: String,
     pub path: String,

@@ -29,7 +29,7 @@ const TIME_ROUNDING_SECONDS: u64 = 5 * 60;
 
 /// Conservative resource right-sizing report for a completed tracked job.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct RightsizeReport {
     pub job_id: String,
     pub scheduler_state: String,
@@ -43,7 +43,7 @@ pub struct RightsizeReport {
 
 /// One resource usage observation used by the right-sizing assistant.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct RightsizeObservation {
     pub resource: String,
     pub scope: String,
@@ -58,7 +58,7 @@ pub struct RightsizeObservation {
 
 /// One concrete resource setting recommendation.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct RightsizeRecommendation {
     pub resource: String,
     pub scope: String,
@@ -72,7 +72,7 @@ pub struct RightsizeRecommendation {
 
 /// Confidence label for a right-sizing observation or recommendation.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RightsizeConfidence {
     High,

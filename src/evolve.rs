@@ -87,7 +87,7 @@ impl EvolveStep {
 
 /// Validation facts captured after a candidate step plans successfully.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct EvolveValidationSummary {
     pub service_count: usize,
     pub services: Vec<String>,
@@ -97,7 +97,7 @@ pub struct EvolveValidationSummary {
 
 /// One accepted evolve step in a run report.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct EvolveAcceptedStep {
     pub id: String,
     pub title: String,
@@ -106,7 +106,7 @@ pub struct EvolveAcceptedStep {
 
 /// Machine-readable output for a completed evolve run.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct EvolveRunReport {
     pub lesson_id: String,
     pub lesson_title: String,

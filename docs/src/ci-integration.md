@@ -108,6 +108,8 @@ hpc-compose-lint:
 - **pre-commit / local:** `lint --allow-warnings` (fast feedback, advisory).
 - **CI (merge gate):** `lint` without `--allow-warnings`, or `strict: true` (enforce).
 
+To branch on *why* a command failed — an invalid spec, an unreachable cluster, or lint findings — read its exit code. `validate` exits `2` on an invalid spec, `lint` exits `4` on findings, and the environment checks exit `3` when the cluster is unreachable. See [Exit Codes](exit-codes.md) for the full catalog and CI scripting patterns.
+
 See [CLI Reference](cli-reference.md#lint-rules) for the full lint rule table and [Troubleshooting](troubleshooting.md) for related workflows.
 
 ## Related Docs
