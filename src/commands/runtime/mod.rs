@@ -12,8 +12,7 @@ pub(super) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) use anyhow::{Context, Result, bail};
 pub(super) use hpc_compose::cli::{
-    DiffMatrixFormat, HoldOnExit, OutputFormat, RemoteInstallMode, StatsOutputFormat,
-    SweepResultsFormat, WatchMode,
+    CsvOutputFormat, HoldOnExit, OutputFormat, RemoteInstallMode, StatsOutputFormat, WatchMode,
 };
 pub(super) use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 pub(super) use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};

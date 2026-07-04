@@ -40,6 +40,27 @@ Release archives install them under `share/man/man1/`. From a source checkout, r
 | `--quiet` | Suppress non-essential progress labels | Useful when a wrapper only needs command output and errors. |
 | `--format json` | Machine-readable output | Preferred on non-streaming commands. |
 
+### Color environment variables
+
+When `--color auto` (the default) is in effect, `hpc-compose` honors the
+[`NO_COLOR`](https://no-color.org/) and [CLICOLORS](https://bixense.com/clicolors/)
+conventions. `--color always` or `--color never` always wins over every
+environment variable below. The `auto` policy resolves in this precedence order
+(highest first):
+
+| # | Signal | Effect |
+| --- | --- | --- |
+| 1 | `NO_COLOR` set (any value) | Color off. Wins over `CLICOLOR_FORCE`: a color-off signal dominates a color-on one. |
+| 2 | `CLICOLOR_FORCE` set to a value other than `0` | Color on, even when the stream is not a terminal and even under `TERM=dumb`. |
+| 3 | `TERM=dumb` | Color off. |
+| 4 | Stream is not a terminal | Color off. |
+| 5 | `CLICOLOR=0` | Color off on a terminal. |
+| 6 | Otherwise (a terminal; `CLICOLOR` unset or non-zero) | Color on. |
+
+The CLICOLORS spec predates `NO_COLOR` and does not itself mention it; letting
+`NO_COLOR` win the `NO_COLOR` vs `CLICOLOR_FORCE` conflict follows no-color.org
+and common practice.
+
 ## Authoring and Setup
 
 | Command | Use it for | Notes |

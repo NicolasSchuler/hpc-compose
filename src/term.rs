@@ -55,26 +55,68 @@ fn auto_detect_color(stream: OutputStream) -> bool {
     auto_detect_color_with_terminal_state(
         stream,
         std::env::var_os("NO_COLOR").is_some(),
+        clicolor_force_active(std::env::var_os("CLICOLOR_FORCE")),
+        clicolor_disabled(std::env::var_os("CLICOLOR")),
         std::env::var("TERM").ok().as_deref(),
         io::stdout().is_terminal(),
         io::stderr().is_terminal(),
     )
 }
 
+/// `CLICOLOR_FORCE` is "active" when it is set to any value other than `0`,
+/// per the CLICOLORS informal spec (<https://bixense.com/clicolors/>).
+fn clicolor_force_active(value: Option<std::ffi::OsString>) -> bool {
+    matches!(value, Some(v) if v != "0")
+}
+
+/// `CLICOLOR=0` explicitly disables color. Any other value (or unset) leaves
+/// the auto/tty behavior intact, per the CLICOLORS informal spec.
+fn clicolor_disabled(value: Option<std::ffi::OsString>) -> bool {
+    matches!(value, Some(v) if v == "0")
+}
+
+/// Resolve color for the `auto` policy, honoring `NO_COLOR`, the CLICOLORS
+/// spec (`CLICOLOR` / `CLICOLOR_FORCE`), `TERM=dumb`, and tty state.
+///
+/// Precedence (highest first). `--color always|never` is resolved by the
+/// caller before this function is reached, so the explicit flag always wins:
+/// 1. `NO_COLOR` set (any value) -> disabled. We let `NO_COLOR` win over
+///    `CLICOLOR_FORCE`: the CLICOLORS spec itself is silent on `NO_COLOR`
+///    (it predates it), and the no-color.org convention plus most
+///    implementations treat a color-*off* signal as dominant when it conflicts
+///    with a color-*on* one.
+/// 2. `CLICOLOR_FORCE` != 0 -> forced on, even when not a tty and even under
+///    `TERM=dumb`.
+/// 3. `TERM=dumb` -> disabled.
+/// 4. Not a terminal -> disabled.
+/// 5. `CLICOLOR=0` -> disabled.
+/// 6. Otherwise (a tty, `CLICOLOR` unset or non-zero) -> enabled.
 fn auto_detect_color_with_terminal_state(
     stream: OutputStream,
     no_color: bool,
+    clicolor_force: bool,
+    clicolor_off: bool,
     term: Option<&str>,
     stdout_is_terminal: bool,
     stderr_is_terminal: bool,
 ) -> bool {
-    if no_color || term == Some("dumb") {
+    if no_color {
         return false;
     }
-    match stream {
+    if clicolor_force {
+        return true;
+    }
+    if term == Some("dumb") {
+        return false;
+    }
+    let is_terminal = match stream {
         OutputStream::Stdout => stdout_is_terminal,
         OutputStream::Stderr => stderr_is_terminal,
+    };
+    if !is_terminal {
+        return false;
     }
+    !clicolor_off
 }
 
 macro_rules! styled_fn {
@@ -352,25 +394,35 @@ mod tests {
         result
     }
 
+    /// Convenience wrapper for the common case in these tests: no `NO_COLOR`,
+    /// no CLICOLOR overrides.
+    fn detect(
+        stream: OutputStream,
+        term: Option<&str>,
+        stdout_tty: bool,
+        stderr_tty: bool,
+    ) -> bool {
+        auto_detect_color_with_terminal_state(
+            stream, false, false, false, term, stdout_tty, stderr_tty,
+        )
+    }
+
     #[test]
     fn auto_color_detection_tracks_each_stream_independently() {
-        assert!(auto_detect_color_with_terminal_state(
+        assert!(detect(
             OutputStream::Stdout,
-            false,
             Some("xterm-256color"),
             true,
             false,
         ));
-        assert!(!auto_detect_color_with_terminal_state(
+        assert!(!detect(
             OutputStream::Stdout,
-            false,
             Some("xterm-256color"),
             false,
             true,
         ));
-        assert!(auto_detect_color_with_terminal_state(
+        assert!(detect(
             OutputStream::Stderr,
-            false,
             Some("xterm-256color"),
             false,
             true,
@@ -382,14 +434,121 @@ mod tests {
         assert!(!auto_detect_color_with_terminal_state(
             OutputStream::Stdout,
             true,
+            false,
+            false,
             Some("xterm-256color"),
             true,
             true,
         ));
-        assert!(!auto_detect_color_with_terminal_state(
-            OutputStream::Stderr,
+        assert!(!detect(OutputStream::Stderr, Some("dumb"), true, true,));
+    }
+
+    #[test]
+    fn clicolor_env_parsing_follows_spec() {
+        // CLICOLOR_FORCE active for any non-"0" value; inactive when unset or "0".
+        assert!(clicolor_force_active(Some("1".into())));
+        assert!(clicolor_force_active(Some("yes".into())));
+        assert!(!clicolor_force_active(Some("0".into())));
+        assert!(!clicolor_force_active(None));
+
+        // CLICOLOR disables only for the exact value "0".
+        assert!(clicolor_disabled(Some("0".into())));
+        assert!(!clicolor_disabled(Some("1".into())));
+        assert!(!clicolor_disabled(None));
+    }
+
+    #[test]
+    fn clicolor_force_enables_color_when_not_a_tty() {
+        // CLICOLOR_FORCE forces color on even without a terminal...
+        assert!(auto_detect_color_with_terminal_state(
+            OutputStream::Stdout,
+            false,
+            true, // CLICOLOR_FORCE
+            false,
+            Some("xterm-256color"),
+            false, // not a tty
+            false,
+        ));
+        // ...and even under TERM=dumb.
+        assert!(auto_detect_color_with_terminal_state(
+            OutputStream::Stdout,
+            false,
+            true,
             false,
             Some("dumb"),
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn clicolor_zero_disables_color_on_a_tty() {
+        assert!(!auto_detect_color_with_terminal_state(
+            OutputStream::Stdout,
+            false,
+            false,
+            true, // CLICOLOR=0
+            Some("xterm-256color"),
+            true, // is a tty
+            true,
+        ));
+    }
+
+    /// Pins the full precedence order documented on
+    /// `auto_detect_color_with_terminal_state`.
+    #[test]
+    fn color_precedence_order_is_pinned() {
+        // 1. NO_COLOR wins over CLICOLOR_FORCE.
+        assert!(!auto_detect_color_with_terminal_state(
+            OutputStream::Stdout,
+            true, // NO_COLOR
+            true, // CLICOLOR_FORCE
+            false,
+            Some("xterm-256color"),
+            true,
+            true,
+        ));
+        // 2. CLICOLOR_FORCE wins over TERM=dumb, not-a-tty, and CLICOLOR=0.
+        assert!(auto_detect_color_with_terminal_state(
+            OutputStream::Stdout,
+            false,
+            true, // CLICOLOR_FORCE
+            true, // CLICOLOR=0 (ignored under force)
+            Some("dumb"),
+            false, // not a tty
+            false,
+        ));
+        // 3. TERM=dumb wins over a live tty and CLICOLOR (non-force).
+        assert!(!auto_detect_color_with_terminal_state(
+            OutputStream::Stdout,
+            false,
+            false,
+            false,
+            Some("dumb"),
+            true, // tty, but dumb
+            true,
+        ));
+        // 4. not-a-tty wins over CLICOLOR=0 being absent (still off).
+        assert!(!detect(
+            OutputStream::Stdout,
+            Some("xterm-256color"),
+            false, // not a tty
+            false,
+        ));
+        // 5. CLICOLOR=0 disables an otherwise-colorable tty.
+        assert!(!auto_detect_color_with_terminal_state(
+            OutputStream::Stdout,
+            false,
+            false,
+            true, // CLICOLOR=0
+            Some("xterm-256color"),
+            true,
+            true,
+        ));
+        // 6. Default: tty with no overrides -> color on.
+        assert!(detect(
+            OutputStream::Stdout,
+            Some("xterm-256color"),
             true,
             true,
         ));

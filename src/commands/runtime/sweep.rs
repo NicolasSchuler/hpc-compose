@@ -1723,7 +1723,7 @@ fn trial_efficiency_report(
 pub(crate) fn sweep_results(
     context: ResolvedContext,
     sweep_id: Option<String>,
-    format: Option<SweepResultsFormat>,
+    format: Option<CsvOutputFormat>,
     include: Vec<String>,
 ) -> Result<()> {
     let (want_score, want_energy) = parse_sweep_include(&include)?;
@@ -1826,15 +1826,15 @@ pub(crate) fn sweep_results(
     };
 
     match output::resolve_sweep_results_format(format) {
-        SweepResultsFormat::Json => {
+        CsvOutputFormat::Json => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output)
                     .context("failed to serialize sweep results output")?
             );
         }
-        SweepResultsFormat::Csv => println!("{}", sweep_results_csv(&output)),
-        SweepResultsFormat::Text => print_sweep_results_output(&output),
+        CsvOutputFormat::Csv => println!("{}", sweep_results_csv(&output)),
+        CsvOutputFormat::Text => print_sweep_results_output(&output),
     }
     Ok(())
 }

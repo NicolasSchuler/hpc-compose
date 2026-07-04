@@ -262,7 +262,7 @@ pub(crate) fn diff_matrix(
     context: ResolvedContext,
     across: Option<String>,
     jobs: Vec<String>,
-    format: Option<DiffMatrixFormat>,
+    format: Option<CsvOutputFormat>,
 ) -> Result<()> {
     let options = SchedulerOptions {
         squeue_bin: context.binaries.squeue.value.clone(),
@@ -307,11 +307,11 @@ pub(crate) fn diff_matrix(
     report.notes.splice(0..0, notes);
 
     match output::resolve_diff_matrix_format(format) {
-        DiffMatrixFormat::Text => {
+        CsvOutputFormat::Text => {
             output::print_job_matrix_report(&report).context("failed to write diff matrix")?;
         }
-        DiffMatrixFormat::Csv => println!("{}", output::job_matrix_csv(&report)),
-        DiffMatrixFormat::Json => {
+        CsvOutputFormat::Csv => println!("{}", output::job_matrix_csv(&report)),
+        CsvOutputFormat::Json => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output::contract::DiffMatrixOutput::new(report))
