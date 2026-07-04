@@ -27,8 +27,9 @@ use hpc_compose::render::{
 };
 use hpc_compose::spec::{MpiProfile, ServiceFailurePolicy, SlurmConfig};
 
+use crate::commands::load;
 use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description, resolved_rank_count};
-use crate::output::{self, common as output_common};
+use crate::output;
 use crate::time_util::unix_timestamp_millis;
 
 pub(crate) fn doctor(
@@ -68,13 +69,12 @@ pub(crate) fn doctor_mpi_smoke(
         bail!("doctor --mpi-smoke --timeout-seconds must be at least 1 when --submit is used");
     }
     let output_format = output::resolve_output_format(format, false);
-    let plan =
-        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-            &context.compose_file.value,
-            &context.interpolation_vars,
-            Some(&context.cache_dir.value),
-            &context.resource_profiles,
-        )?;
+    let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
+    )?;
     let runtime_plan = build_runtime_plan(&plan);
     let service = select_mpi_service(&runtime_plan, service_name.as_deref())?;
     let expected_ranks = mpi_expected_ranks(service);
@@ -284,13 +284,12 @@ pub(crate) fn doctor_fabric_smoke(
     }
     let selected_checks = FabricCheckSelection::parse(checks.as_deref())?;
     let output_format = output::resolve_output_format(format, false);
-    let plan =
-        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-            &context.compose_file.value,
-            &context.interpolation_vars,
-            Some(&context.cache_dir.value),
-            &context.resource_profiles,
-        )?;
+    let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
+    )?;
     let runtime_plan = build_runtime_plan(&plan);
     let service = select_mpi_service(&runtime_plan, service_name.as_deref())?;
     let expected_ranks = mpi_expected_ranks(service);
@@ -509,13 +508,12 @@ pub(crate) fn doctor_readiness(
         bail!("doctor readiness --timeout-seconds must be at least 1");
     }
     let output_format = output::resolve_output_format(format, false);
-    let plan =
-        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-            &context.compose_file.value,
-            &context.interpolation_vars,
-            Some(&context.cache_dir.value),
-            &context.resource_profiles,
-        )?;
+    let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
+    )?;
     let runtime_plan = build_runtime_plan(&plan);
     let service = select_readiness_service(&runtime_plan, service_name.as_deref())?;
     let readiness = service

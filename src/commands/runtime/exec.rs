@@ -22,7 +22,7 @@ pub(crate) fn alloc(
         no_preflight,
     } = flags;
     let runtime_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -139,7 +139,7 @@ pub(crate) fn run_service(
     let progress = ProgressReporter::new(!quiet);
     let active_allocation_job_id = active_allocation_job_id();
     let mut runtime_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),

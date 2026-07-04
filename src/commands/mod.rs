@@ -24,6 +24,7 @@ mod doctor;
 mod evolve;
 mod examples;
 mod init;
+pub(crate) mod load;
 mod runtime;
 mod spec;
 mod weather;

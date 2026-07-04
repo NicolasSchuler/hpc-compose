@@ -42,13 +42,12 @@ pub(crate) fn reach(
     let record = resolve_tracked_record(&context, job_id.as_deref())?
         .with_context(|| tracked_job_hint(job_id.as_deref()))?;
 
-    let plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-            &record.compose_file,
-            &context.interpolation_vars,
-            Some(&context.cache_dir.value),
-            &context.resource_profiles,
-        )?;
+    let plan = load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        &record.compose_file,
+        &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
+    )?;
     if !plan.ordered_services.iter().any(|s| s.name == service) {
         let available: Vec<&str> = plan
             .ordered_services

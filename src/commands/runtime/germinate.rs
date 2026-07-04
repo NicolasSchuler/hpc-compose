@@ -52,7 +52,7 @@ pub(crate) fn germinate(
     let file = context.compose_file.value.clone();
     let output_format = output::resolve_output_format(format, false);
     let effective_config =
-        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -66,7 +66,7 @@ pub(crate) fn germinate(
         ),
     )?;
     let original_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),

@@ -117,7 +117,7 @@ pub(crate) fn cancel(
 
     match output::resolve_output_format(format, false) {
         OutputFormat::Text => {
-            output::cancel_job(&resolved_job_id, &context.binaries.scancel.value)?;
+            crate::job::cancel_job(&resolved_job_id, &context.binaries.scancel.value)?;
             let tracking_removed = if let Some(record) = record.as_ref() {
                 remove_submission_record(record)?;
                 println!(

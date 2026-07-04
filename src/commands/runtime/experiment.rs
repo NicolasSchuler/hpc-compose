@@ -57,7 +57,7 @@ pub(crate) fn experiment_show(
         .with_context(|| tracked_job_hint(job_id.as_deref()))?;
 
     let runtime_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &record.compose_file,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),

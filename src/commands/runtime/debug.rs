@@ -73,7 +73,7 @@ pub(crate) fn debug(
             None => &context,
         };
         let runtime_plan =
-            output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
                 &preflight_context.compose_file.value,
                 &preflight_context.interpolation_vars,
                 Some(&preflight_context.cache_dir.value),

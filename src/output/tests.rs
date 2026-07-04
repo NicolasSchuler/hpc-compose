@@ -311,7 +311,7 @@ fn finish_watch_requires_a_terminal_scheduler_result() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache = safe_cache_dir();
     let compose = write_valid_compose(tmpdir.path(), cache.path());
-    let plan = load_runtime_plan(&compose).expect("runtime plan");
+    let plan = crate::commands::load::load_runtime_plan(&compose).expect("runtime plan");
     let record = submission_record(tmpdir.path(), &plan, "12345");
     finish_watch(
         &record,
@@ -1099,7 +1099,8 @@ fn resolve_init_answers_and_cancel_job_cover_remaining_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let empty_fail = tmpdir.path().join("scancel-empty");
     write_script(&empty_fail, "#!/bin/bash\nset -euo pipefail\nexit 1\n");
-    let err = cancel_job("42", empty_fail.to_str().expect("path")).expect_err("empty fail");
+    let err =
+        crate::job::cancel_job("42", empty_fail.to_str().expect("path")).expect_err("empty fail");
     assert_eq!(err.to_string(), "scancel failed for job 42");
 
     let stderr_fail = tmpdir.path().join("scancel-stderr");
@@ -1107,10 +1108,11 @@ fn resolve_init_answers_and_cancel_job_cover_remaining_paths() {
         &stderr_fail,
         "#!/bin/bash\nset -euo pipefail\necho boom >&2\nexit 1\n",
     );
-    let err = cancel_job("42", stderr_fail.to_str().expect("path")).expect_err("stderr fail");
+    let err =
+        crate::job::cancel_job("42", stderr_fail.to_str().expect("path")).expect_err("stderr fail");
     assert!(err.to_string().contains("scancel failed for job 42: boom"));
 
-    let err = cancel_job(
+    let err = crate::job::cancel_job(
         "42",
         tmpdir.path().join("missing-bin").to_str().expect("path"),
     )
@@ -1124,8 +1126,8 @@ fn stdout_entrypoints_cover_public_output_wrappers() {
     let cache_root = safe_cache_dir();
     let cache_dir = cache_root.path().to_path_buf();
     let compose = write_valid_compose(tmpdir.path(), &cache_dir);
-    let plan = load_plan(&compose).expect("plan");
-    let runtime = build_runtime_plan(&plan);
+    let plan = crate::commands::load::load_plan(&compose).expect("plan");
+    let runtime = hpc_compose::prepare::build_runtime_plan(&plan);
     let record = submission_record(tmpdir.path(), &runtime, "12345");
 
     let status = StatusSnapshot {
@@ -1742,8 +1744,8 @@ services:
         condition: service_started
 "#,
     );
-    let plan = load_plan(&compose).expect("plan");
-    let runtime_plan = build_runtime_plan(&plan);
+    let plan = crate::commands::load::load_plan(&compose).expect("plan");
+    let runtime_plan = hpc_compose::prepare::build_runtime_plan(&plan);
     let mut out = Vec::new();
     write_plan_inspect_tree(&mut out, &plan, &runtime_plan).expect("tree");
     let text = String::from_utf8(out).expect("utf8");

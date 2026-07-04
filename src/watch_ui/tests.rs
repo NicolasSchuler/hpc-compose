@@ -1,5 +1,4 @@
 use super::*;
-use crate::output;
 use hpc_compose::job::{
     GpuNodeSummary, PsSnapshot, QueueDiagnostics, ReplayArtifactPaths, ReplayEvent,
     ReplayEventKind, ReplayFrame, ReplayReport, ReplayServiceFrame, RequestedWalltime,
@@ -742,7 +741,7 @@ fn watch_loop_restart_writes_request_for_local_job() {
             ),
         )
         .expect("compose");
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = crate::commands::load::load_runtime_plan(&compose).expect("runtime plan");
     let script_path = tmpdir.path().join("job.local.sh");
     let record = build_submission_record_with_backend(
         &compose,
@@ -813,7 +812,7 @@ fn watch_loop_navigates_services_via_injected_events() {
             ),
         )
         .expect("compose");
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = crate::commands::load::load_runtime_plan(&compose).expect("runtime plan");
     let script_path = tmpdir.path().join("job.local.sh");
     let record = build_submission_record_with_backend(
         &compose,
@@ -1443,7 +1442,7 @@ fn terminal_guard_and_run_watch_ui_cover_interactive_paths() {
             ),
         )
         .expect("compose");
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = crate::commands::load::load_runtime_plan(&compose).expect("runtime plan");
     let script_path = tmpdir.path().join("job.local.sh");
     let record = build_submission_record_with_backend(
         &compose,
