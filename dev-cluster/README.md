@@ -216,6 +216,39 @@ unit-suite gap: it exercises the scheduler/cluster code paths the unit tests
 mock out. The `host`-backend scope above still applies — the e2e check does
 **not** cover the `pyxis`/`enroot` runtime layer or GPU execution.
 
+## Manual real-GPU check (metrics pipeline)
+
+The dev cluster is GPU-less by design (no NVIDIA on a Mac), so the one gap the
+automated harnesses cannot close is the **real-GPU metrics pipeline**:
+`gpu.jsonl`, the sampler's `gpu` node in `stats --format json`, and a populated
+`gpu_count`. `scripts/remote_gpu_e2e.sh` (also `just remote-gpu-e2e`) closes it
+against a real cluster (HAICORE by default). It is **opt-in and manual**: it
+needs a live login node, a real GPU allocation, and **one** interactive OTP, so
+it is deliberately **not** part of `just ci` and never runs in CI.
+
+It drives the thin laptop client end to end over a **single OTP session**: it
+opens one SSH ControlMaster up front (the only prompt), then `up --remote`s a
+tiny 1-GPU `cuda-probe`-style job (`examples/cuda-probe.yaml`), watches it to
+COMPLETED, reads `stats --remote --format json` (asserting `sampler.cpu`, gpu
+`nodes`, and `gpu_count >= 1`), and `rsync`s the job-local `gpu.jsonl` /
+`cpu.jsonl` over the shared master to assert non-null GPU
+utilization/memory and non-null CPU utilization rows. Every later
+`ssh`/`rsync`/`--remote` reuses the one master, so the whole run costs one OTP.
+
+Run it by hand (defaults `HPC_REMOTE_HOST=haicore`, `HPC_SLURM_ACCOUNT=kastel`,
+`HPC_SLURM_PARTITION=normal`, `HPC_SLURM_GRES=gpu:1` — HAICORE has `gpu:1`, not
+`gpu:full`):
+
+```sh
+# Uses your ~/.ssh config alias for the login host (hostname/user/OTP).
+HPC_REMOTE_HOST=haicore just remote-gpu-e2e
+```
+
+Safety and cleanup (EXIT trap, safe to re-run): it cancels **only** the job id
+this run submitted — never a blanket `scancel`, since a real cluster may hold
+unrelated production jobs — removes this run's remote stage dir
+(`~/.hpc-compose-remote/remote-gpu-e2e`), and closes the ControlMaster.
+
 ## Files
 
 | File | Purpose |
@@ -251,3 +284,4 @@ mock out. The `host`-backend scope above still applies — the e2e check does
 | `../scripts/devcluster_e2e.sh` | UC1 end-to-end harness (generic loop + `_extra/` dedicated blocks; checks `sacct`/`status`/`ps`/`score`/`pull`) |
 | `../scripts/devcluster_remote_e2e.sh` | UC2 end-to-end harness: drives `up --remote` from the host against this node as an SSH login-node stand-in (`sshd` + `rsync` in the image; port `2222`); also asserts remote `--dry-run` stages-but-doesn't-submit |
 | `../scripts/devcluster_otp_e2e.sh` | UC3 end-to-end harness: flips the stand-in into an OTP/2FA-requiring sshd and proves a multi-command laptop session authenticates exactly once via SSH ControlMaster multiplexing |
+| `../scripts/remote_gpu_e2e.sh` | Opt-in **real-GPU** manual check (`just remote-gpu-e2e`, HAICORE by default; **not** in CI): one-OTP session that `up --remote`s a 1-GPU job and asserts the metrics pipeline (`gpu.jsonl`, `cpu.jsonl`, `stats --format json` sampler nodes + `gpu_count`) against real hardware |
