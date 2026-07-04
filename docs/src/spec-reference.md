@@ -812,10 +812,24 @@ Rules:
 - List items must use `KEY=VALUE` syntax.
 - `.env` from the compose file directory is loaded automatically when present.
 - Shell environment variables override `.env`; `.env` fills only missing variables.
-- `environment`, `x-runtime.prepare.env`, and compatibility `x-enroot.prepare.env` values support `$VAR`, `${VAR}`, `${VAR:-default}`, and `${VAR-default}` interpolation.
+- `environment`, `x-runtime.prepare.env`, and compatibility `x-enroot.prepare.env` values support `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:?message}`, and `${VAR?message}` interpolation.
 - Missing variables without defaults are errors.
+- Required-variable forms fail at spec-load time with your own message: `${VAR:?message}` errors when `VAR` is unset **or** empty, while `${VAR?message}` errors only when `VAR` is unset (an empty value passes). The `message` is itself interpolated, and an empty message (`${VAR:?}`) falls back to a generic `'VAR' is required` diagnostic. Use these to fail fast at `validate`/`config` time instead of submitting a job that dies later on a missing credential.
 - Use `$$` for a literal dollar sign in interpolated fields.
 - String-form shell snippets are still literal. For example, `$PATH` inside a string-form `command` is not expanded at plan time.
+
+For example, guarding a deployment target:
+
+```yaml
+environment:
+  DEPLOY_ENV: "${DEPLOY_ENV:?set DEPLOY_ENV to staging or prod}"
+```
+
+With `DEPLOY_ENV` unset or empty, `hpc-compose validate` fails before submission:
+
+```text
+'DEPLOY_ENV' is required: set DEPLOY_ENV to staging or prod
+```
 
 ## `volumes`
 

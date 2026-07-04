@@ -9,6 +9,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 
+- Added `${VAR:?message}` / `${VAR?message}` required-variable interpolation.
+  `${VAR:?message}` fails at spec-load time when `VAR` is unset or empty, and
+  `${VAR?message}` fails only when `VAR` is unset; the message is interpolated
+  and an empty message falls back to a generic diagnostic. Unsatisfied required
+  variables surface as a `SpecError::RequiredVariableUnset` miette diagnostic
+  with `export`/`.env` help. The `secrets-hf-token` example now guards its token
+  with this form.
 - Added first-class `x-slurm.reservation` and `x-slurm.licenses` fields that
   render `#SBATCH --reservation` / `--licenses` directives, feed the interactive
   `alloc`/`shell` option builder, and keep validation, interpolation, redaction,

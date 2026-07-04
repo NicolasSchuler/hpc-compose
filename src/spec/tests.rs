@@ -4003,6 +4003,55 @@ services:
 }
 
 #[test]
+fn referenced_variables_sees_required_variable_names_and_their_message_vars() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      A: "${REQUIRED_A:?msg}"
+      B: "${REQUIRED_B?msg}"
+      C: "${REQUIRED_C:?need ${NESTED_REF}}"
+"#,
+    );
+
+    let referenced = referenced_variables(&path, &BTreeMap::new()).expect("scan");
+    assert_eq!(
+        referenced,
+        BTreeSet::from([
+            "REQUIRED_A".to_string(),
+            "REQUIRED_B".to_string(),
+            "REQUIRED_C".to_string(),
+            "NESTED_REF".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn missing_defaulted_variables_does_not_report_required_variables_but_walks_their_messages() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: redis:7
+    environment:
+      A: "${REQUIRED_VAR:?please set me}"
+      B: "${REQUIRED_VAR2:?fallback is ${NESTED:-default-text}}"
+"#,
+    );
+
+    let missing = missing_defaulted_variables(&path, &BTreeMap::new()).expect("scan");
+    assert!(!missing.contains("REQUIRED_VAR"));
+    assert!(!missing.contains("REQUIRED_VAR2"));
+    assert_eq!(missing, BTreeSet::from(["NESTED".to_string()]));
+}
+
+#[test]
 fn strict_env_scanner_reports_malformed_placeholders_without_panicking() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let path = write_spec(

@@ -273,6 +273,14 @@ pub(crate) enum SpecError {
     )]
     EmptyField { field: String },
 
+    #[error("{message}")]
+    #[diagnostic(code(hpc_compose::spec::required_variable_unset), help("{help_text}"))]
+    RequiredVariableUnset {
+        name: String,
+        message: String,
+        help_text: String,
+    },
+
     #[error("failed to load compose spec from {}", path.display())]
     #[diagnostic(
         code(hpc_compose::spec::load_failed),
@@ -440,6 +448,26 @@ mod tests {
                 .expect("unsupported key help")
                 .to_string(),
             "Use image instead."
+        );
+    }
+
+    #[test]
+    fn required_variable_unset_variant_exposes_message_and_help() {
+        let err = SpecError::RequiredVariableUnset {
+            name: "HF_TOKEN".into(),
+            message: "'HF_TOKEN' is required: set a token".into(),
+            help_text: "Set `HF_TOKEN` before running this command.".into(),
+        };
+        assert_eq!(err.to_string(), "'HF_TOKEN' is required: set a token");
+        assert_eq!(
+            err.code().expect("required variable code").to_string(),
+            "hpc_compose::spec::required_variable_unset"
+        );
+        assert!(
+            err.help()
+                .expect("required variable help")
+                .to_string()
+                .contains("HF_TOKEN")
         );
     }
 
