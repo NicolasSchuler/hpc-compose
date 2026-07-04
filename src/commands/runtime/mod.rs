@@ -63,6 +63,7 @@ pub(super) use hpc_compose::when::{
 pub(super) use serde::Serialize;
 pub(super) use sha2::{Digest, Sha256};
 
+pub(super) use crate::commands::load;
 pub(super) use crate::output;
 pub(super) use crate::progress::{PrepareProgress, ProgressReporter};
 pub(super) use crate::term;
@@ -1178,7 +1179,7 @@ where
     } = flags;
     let file = context.compose_file.value.clone();
     let effective_config =
-        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -1192,7 +1193,7 @@ where
         ),
     )?;
     let runtime_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -1620,7 +1621,7 @@ where
     } = flags;
     let file = context.compose_file.value.clone();
     let effective_config =
-        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -1634,7 +1635,7 @@ where
         ),
     )?;
     let mut runtime_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -1911,7 +1912,7 @@ pub(crate) fn launch(
     } = flags;
     let file = context.compose_file.value.clone();
     let effective_config =
-        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -1925,7 +1926,7 @@ pub(crate) fn launch(
         ),
     )?;
     let mut runtime_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),

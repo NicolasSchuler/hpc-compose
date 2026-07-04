@@ -703,7 +703,8 @@ mod tests {
             ),
         )
         .expect("compose");
-        let runtime_plan = crate::output::load_runtime_plan(&compose).expect("runtime plan");
+        let runtime_plan =
+            crate::commands::load::load_runtime_plan(&compose).expect("runtime plan");
         let script_path = tmpdir.path().join("job.local.sh");
         let record = build_submission_record_with_backend(
             &compose,

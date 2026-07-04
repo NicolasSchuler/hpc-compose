@@ -95,6 +95,7 @@ pub use rightsize::{
     RightsizeConfidence, RightsizeObservation, RightsizeRecommendation, RightsizeReport,
     build_rightsize_report,
 };
+pub(crate) use scheduler::cancel_job;
 pub(crate) use scheduler::pid_is_running;
 pub use scheduler::{
     ArrayStatusSnapshot, ArrayTaskStatus, BatchLogStatus, JobState, PsServiceRow, QueueDiagnostics,

@@ -3,13 +3,11 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
 use hpc_compose::cli::{DiffMatrixFormat, OutputFormat, StatsOutputFormat, SweepResultsFormat};
 use hpc_compose::cluster::ClusterProfile;
-use hpc_compose::context::ResourceProfile;
 use hpc_compose::init::{
     cache_dir_placeholder as init_cache_dir_placeholder, resolve_template, template_category,
     templates,
@@ -23,18 +21,16 @@ use hpc_compose::job::{
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, registry_host_for_remote,
 };
-use hpc_compose::planner::{PlanOptions, build_plan_with_options};
 use hpc_compose::preflight::Report;
 use hpc_compose::prepare::{
     ArtifactAction, PrepareSummary, RuntimePlan, RuntimeService, base_image_path_for_backend,
-    build_runtime_plan,
 };
 use hpc_compose::render::{
     display_srun_command_for_backend, distributed_environment_names_for_service, execution_argv,
     log_file_name_for_service, parallelism_environment_names_for_service,
 };
 use hpc_compose::spec::{
-    ComposeSpec, DependencyCondition, EffectiveComposeConfig, ReadinessSpec, ServiceDependency,
+    DependencyCondition, EffectiveComposeConfig, ReadinessSpec, ServiceDependency,
     parse_slurm_time_limit,
 };
 use hpc_compose::term;
@@ -370,7 +366,7 @@ pub(crate) struct SetupOutput {
 
 #[cfg(test)]
 pub(crate) fn render_from_path(path: &Path) -> Result<String> {
-    let runtime = load_runtime_plan(path)?;
+    let runtime = crate::commands::load::load_runtime_plan(path)?;
     hpc_compose::render::render_script(&runtime)
 }
 
@@ -420,114 +416,6 @@ pub(crate) fn build_validate_output(plan: &Plan, cluster_warnings: Vec<String>) 
     }
 }
 
-#[cfg(test)]
-pub(crate) fn load_plan(path: &Path) -> Result<Plan> {
-    let spec = ComposeSpec::load(path)?;
-    hpc_compose::planner::build_plan(path, spec)
-}
-
-#[allow(dead_code)]
-pub(crate) fn load_plan_with_interpolation_vars_and_cache_default(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-) -> Result<Plan> {
-    load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-        path,
-        vars,
-        cache_dir_default,
-        &BTreeMap::new(),
-    )
-}
-
-pub(crate) fn load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-    resource_profiles: &BTreeMap<String, ResourceProfile>,
-) -> Result<Plan> {
-    let spec = ComposeSpec::load_with_interpolation_vars(path, vars)?;
-    build_plan_with_options(
-        path,
-        spec,
-        PlanOptions {
-            cache_dir_default: cache_dir_default.map(Path::to_path_buf),
-            resource_profiles: resource_profiles.clone(),
-            ..PlanOptions::default()
-        },
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn load_runtime_plan(path: &Path) -> Result<RuntimePlan> {
-    let plan = load_plan(path)?;
-    Ok(build_runtime_plan(&plan))
-}
-
-#[allow(dead_code)]
-pub(crate) fn load_runtime_plan_with_interpolation_vars_and_cache_default(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-) -> Result<RuntimePlan> {
-    let plan = load_plan_with_interpolation_vars_and_cache_default(path, vars, cache_dir_default)?;
-    Ok(build_runtime_plan(&plan))
-}
-
-pub(crate) fn load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-    resource_profiles: &BTreeMap<String, ResourceProfile>,
-) -> Result<RuntimePlan> {
-    let plan = load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-        path,
-        vars,
-        cache_dir_default,
-        resource_profiles,
-    )?;
-    Ok(build_runtime_plan(&plan))
-}
-
-#[allow(dead_code)]
-pub(crate) fn load_effective_config_with_interpolation_vars_and_cache_default(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-) -> Result<EffectiveComposeConfig> {
-    load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
-        path,
-        vars,
-        cache_dir_default,
-        &BTreeMap::new(),
-    )
-}
-
-pub(crate) fn load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-    resource_profiles: &BTreeMap<String, ResourceProfile>,
-) -> Result<EffectiveComposeConfig> {
-    let mut spec = ComposeSpec::load_with_interpolation_vars(path, vars)?;
-    let plan = build_plan_with_options(
-        path,
-        spec.clone(),
-        PlanOptions {
-            cache_dir_default: cache_dir_default.map(Path::to_path_buf),
-            resource_profiles: resource_profiles.clone(),
-            ..PlanOptions::default()
-        },
-    )?;
-    spec.slurm = plan.slurm.clone();
-    let normalized_policies = plan
-        .ordered_services
-        .iter()
-        .map(|service| (service.name.clone(), service.failure_policy.clone()))
-        .collect::<BTreeMap<_, _>>();
-    spec.effective_config(&plan.cache_dir, &normalized_policies)
-}
-
 /// Serializes the effective config as YAML for the persisted job-state
 /// snapshot (and `diff` comparisons), redacting resolved secret values first.
 ///
@@ -544,33 +432,6 @@ pub(crate) fn effective_config_yaml(
     let value = crate::redaction::redacted_yaml_value(config, secret_values, false)
         .context("failed to redact effective config for snapshot")?;
     serde_norway::to_string(&value).context("failed to serialize effective config as yaml")
-}
-
-#[allow(dead_code)]
-pub(crate) fn load_plan_and_runtime_with_interpolation_vars_and_cache_default(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-) -> Result<(Plan, RuntimePlan)> {
-    let plan = load_plan_with_interpolation_vars_and_cache_default(path, vars, cache_dir_default)?;
-    let runtime_plan = build_runtime_plan(&plan);
-    Ok((plan, runtime_plan))
-}
-
-pub(crate) fn load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-    resource_profiles: &BTreeMap<String, ResourceProfile>,
-) -> Result<(Plan, RuntimePlan)> {
-    let plan = load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-        path,
-        vars,
-        cache_dir_default,
-        resource_profiles,
-    )?;
-    let runtime_plan = build_runtime_plan(&plan);
-    Ok((plan, runtime_plan))
 }
 
 pub(crate) fn default_script_path(spec_path: &Path) -> PathBuf {
@@ -3438,29 +3299,6 @@ pub(crate) fn print_prune_result(cache_dir: &Path, removed: &[PathBuf]) {
             term::styled_dim(&path.display().to_string())
         );
     }
-}
-
-pub(crate) fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
-    let output = Command::new(scancel_bin)
-        .arg(job_id)
-        .output()
-        .context(format!("failed to execute '{scancel_bin}'"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() { stderr } else { stdout };
-        if detail.is_empty() {
-            bail!("scancel failed for job {job_id}");
-        }
-        bail!("scancel failed for job {job_id}: {detail}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        println!("{stdout}");
-    }
-    println!("cancelled job: {job_id}");
-    Ok(())
 }
 
 pub(crate) fn finish_watch(

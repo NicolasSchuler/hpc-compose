@@ -1686,6 +1686,29 @@ pub(crate) fn is_terminal_state(state: &str) -> bool {
     JobState::parse(state).is_terminal()
 }
 
+pub(crate) fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
+    let output = Command::new(scancel_bin)
+        .arg(job_id)
+        .output()
+        .context(format!("failed to execute '{scancel_bin}'"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        if detail.is_empty() {
+            bail!("scancel failed for job {job_id}");
+        }
+        bail!("scancel failed for job {job_id}: {detail}");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        println!("{stdout}");
+    }
+    println!("cancelled job: {job_id}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::job::runtime_state::{ServiceRuntimeStateEntry, ServiceRuntimeStateFile};

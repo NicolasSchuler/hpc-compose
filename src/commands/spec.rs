@@ -21,6 +21,7 @@ use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
 use serde::Serialize;
 
+use crate::commands::load;
 use crate::output::{self, common as output_common, spec as output_spec};
 use crate::progress::{PrepareProgress, ProgressReporter};
 
@@ -29,13 +30,12 @@ pub(crate) fn validate(
     strict_env: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let plan =
-        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-            &context.compose_file.value,
-            &context.interpolation_vars,
-            Some(&context.cache_dir.value),
-            &context.resource_profiles,
-        )?;
+    let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
+    )?;
     let runtime_plan = build_runtime_plan(&plan);
     let cluster_warnings = load_discovered_cluster_profile(&context)?
         .map(|profile| {
@@ -101,7 +101,7 @@ pub(crate) fn lint(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let (plan, runtime_plan) =
-        output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -155,7 +155,7 @@ pub(crate) fn lint(
             })?;
             // Safety gate: reload the spec to confirm the rewrite is still
             // valid and to refresh findings. Roll back on any failure.
-            let reload = output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+            let reload = load::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
                 &context.compose_file.value,
                 &context.interpolation_vars,
                 Some(&context.cache_dir.value),
@@ -309,13 +309,12 @@ pub(crate) fn render(
     output_path: Option<PathBuf>,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let plan =
-        output_common::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-            &context.compose_file.value,
-            &context.interpolation_vars,
-            Some(&context.cache_dir.value),
-            &context.resource_profiles,
-        )?;
+    let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
+    )?;
     let runtime_plan = build_runtime_plan(&plan);
     let cluster_profile = load_discovered_cluster_profile(&context)?;
     let script = render_script_with_options(
@@ -385,7 +384,7 @@ pub(crate) fn plan(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let (plan, runtime_plan) =
-        output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -596,12 +595,13 @@ pub(crate) fn prepare(
     quiet: bool,
 ) -> Result<()> {
     let output_format = output_common::resolve_output_format(format, false);
-    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-        Some(&context.cache_dir.value),
-        &context.resource_profiles,
-    )?;
+    let runtime_plan =
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let prepare_progress =
         PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
     let summary = prepare_progress.run("Preparing runtime artifacts", || {
@@ -649,12 +649,13 @@ pub(crate) fn preflight(
 ) -> Result<()> {
     let output_format = output_common::resolve_output_format(format, json);
     let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
-    let runtime_plan = output_common::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-        Some(&context.cache_dir.value),
-        &context.resource_profiles,
-    )?;
+    let runtime_plan =
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     let cluster_profile = load_discovered_cluster_profile(&context)?;
     let report = progress.run_checked_result(
         "Running preflight checks",
@@ -719,7 +720,7 @@ pub(crate) fn inspect(
     json: bool,
 ) -> Result<()> {
     let (plan, runtime_plan) =
-        output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),
@@ -841,12 +842,13 @@ pub(crate) fn config(
     variables: bool,
     show_values: bool,
 ) -> Result<()> {
-    let mut config = output_common::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
-        &context.compose_file.value,
-        &context.interpolation_vars,
-        Some(&context.cache_dir.value),
-        &context.resource_profiles,
-    )?;
+    let mut config =
+        load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
     // Redact sensitive service env values before any output. Secrets declared
     // via the top-level `secrets:` block (ValueSource::Secret) and any value
     // matching a resolved secret are hidden unless --show-values is passed.
@@ -978,7 +980,7 @@ pub(crate) fn context(
         .to_path_buf();
     let current_submit_dir = context.cwd.clone();
     let (cache_dir, spec_enroot_temp, plan_cache_dir, resume_dir, artifact_export_dir, compose_load_error) =
-        match output_common::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
+        match load::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &context.interpolation_vars,
             Some(&context.cache_dir.value),

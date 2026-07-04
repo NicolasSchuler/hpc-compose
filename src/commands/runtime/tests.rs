@@ -178,7 +178,7 @@ fn dev_watch_inference_uses_directory_mounts_and_explicit_roots() {
             ),
         )
         .expect("compose");
-    let plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let plan = load::load_runtime_plan(&compose).expect("runtime plan");
     let targets =
         infer_dev_watch_targets(&plan, tmpdir.path(), std::slice::from_ref(&explicit_dir))
             .expect("watch targets");
@@ -469,7 +469,7 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
 fn local_helper_functions_cover_labels_ids_and_stub_state_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose_with_services(tmpdir.path());
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
     let script_path = tmpdir.path().join("job.local.sh");
     let record = build_submission_record_with_backend(
         &compose,
@@ -552,7 +552,7 @@ fn local_helper_functions_cover_labels_ids_and_stub_state_paths() {
 fn process_helpers_cover_spawn_kill_and_pid_reader_edges() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose(tmpdir.path());
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
     let script_path = tmpdir.path().join("job.local.sh");
     let record = build_submission_record_with_backend(
         &compose,
@@ -593,7 +593,7 @@ fn process_helpers_cover_spawn_kill_and_pid_reader_edges() {
 fn tracking_resolution_and_cache_purge_helpers_cover_edge_cases() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose(tmpdir.path());
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
     let context = context_for(&compose, tmpdir.path());
     let script_path = tmpdir.path().join("job.local.sh");
     let mut older = build_submission_record_with_backend(
@@ -676,7 +676,7 @@ fn tracking_resolution_and_cache_purge_helpers_cover_edge_cases() {
 fn checkpoints_command_resolves_and_bails_on_unknown_job() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose(tmpdir.path());
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
     let context = context_for(&compose, tmpdir.path());
 
     // Unknown --job-id bails with the shared tracked-job hint.
@@ -734,7 +734,7 @@ fn checkpoints_command_resolves_and_bails_on_unknown_job() {
 fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose(tmpdir.path());
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
 
     warn_local_ignored_scheduler_settings(&runtime_plan);
 
@@ -750,7 +750,7 @@ fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
             ),
         )
         .expect("distributed compose");
-    let distributed_plan = output::load_runtime_plan(&distributed).expect("distributed plan");
+    let distributed_plan = load::load_runtime_plan(&distributed).expect("distributed plan");
     let distributed_err =
         ensure_local_plan_supported(&distributed_plan).expect_err("distributed unsupported");
     assert!(
@@ -769,7 +769,7 @@ fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
             ),
         )
         .expect("extra args compose");
-    let extra_args_plan = output::load_runtime_plan(&extra_args).expect("extra args plan");
+    let extra_args_plan = load::load_runtime_plan(&extra_args).expect("extra args plan");
     let extra_args_err =
         ensure_local_plan_supported(&extra_args_plan).expect_err("extra args unsupported");
     assert!(extra_args_err.to_string().contains("extra_srun_args"));
@@ -784,7 +784,7 @@ fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
             ),
         )
         .expect("mpi compose");
-    let mpi_plan = output::load_runtime_plan(&mpi).expect("mpi plan");
+    let mpi_plan = load::load_runtime_plan(&mpi).expect("mpi plan");
     let mpi_err = ensure_local_plan_supported(&mpi_plan).expect_err("mpi unsupported");
     assert!(mpi_err.to_string().contains("x-slurm.mpi"));
 
@@ -798,7 +798,7 @@ fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
             ),
         )
         .expect("multi-node compose");
-    let multi_node_plan = output::load_runtime_plan(&multi_node).expect("multi-node plan");
+    let multi_node_plan = load::load_runtime_plan(&multi_node).expect("multi-node plan");
     let multi_node_err =
         ensure_local_plan_supported(&multi_node_plan).expect_err("multi-node unsupported");
     assert!(
@@ -817,7 +817,7 @@ fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
 fn local_watch_cancel_and_rollback_helpers_cover_terminal_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose(tmpdir.path());
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
     let script_path = tmpdir.path().join("watch.local.sh");
     let record = build_submission_record_with_backend(
         &compose,
@@ -918,7 +918,7 @@ fn local_watch_cancel_and_rollback_helpers_cover_terminal_paths() {
         )
         .expect("reservation compose");
     let reservation_plan =
-        output::load_runtime_plan(&reservation_compose).expect("reservation runtime plan");
+        load::load_runtime_plan(&reservation_compose).expect("reservation runtime plan");
     warn_local_ignored_scheduler_settings(&reservation_plan);
 
     let mut sleeper = Command::new("sleep")
@@ -938,7 +938,7 @@ fn runtime_wrappers_cover_success_paths_with_local_tracking() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose_with_services(tmpdir.path());
     let context = context_for(&compose, tmpdir.path());
-    let runtime_plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
     let script_path = tmpdir.path().join("local-wrapper.sh");
     let record = build_submission_record_with_backend(
         &compose,
@@ -1262,7 +1262,7 @@ fn condition_descriptions_renders_free_nodes_and_after_job() {
 fn requested_walltime_parses_time_and_ignores_invalid() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_compose(tmpdir.path());
-    let mut plan = output::load_runtime_plan(&compose).expect("runtime plan");
+    let mut plan = load::load_runtime_plan(&compose).expect("runtime plan");
 
     plan.slurm.time = None;
     assert!(requested_walltime(&plan).is_none());
@@ -1353,7 +1353,7 @@ fn metrics_overrides_validate_and_apply() {
         ),
     )
     .expect("with metrics compose");
-    let mut plan = output::load_runtime_plan(&with).expect("plan with metrics");
+    let mut plan = load::load_runtime_plan(&with).expect("plan with metrics");
     MetricsOverrides {
         disable: true,
         interval_seconds: None,
@@ -1375,7 +1375,7 @@ fn metrics_overrides_validate_and_apply() {
         ),
     )
     .expect("no metrics compose");
-    let mut plan2 = output::load_runtime_plan(&without).expect("plan without metrics");
+    let mut plan2 = load::load_runtime_plan(&without).expect("plan without metrics");
     assert!(plan2.slurm.metrics.is_none());
     MetricsOverrides {
         disable: false,

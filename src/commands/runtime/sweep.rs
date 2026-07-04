@@ -280,7 +280,7 @@ fn validate_sweep_trial_plan(
 ) -> Result<()> {
     let vars = sweep_interpolation_vars(context, sweep_id, trial);
     let runtime_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
             &vars,
             Some(&context.cache_dir.value),
@@ -325,7 +325,7 @@ fn submit_sweep_trial(
     let vars = sweep_interpolation_vars(context, sweep_id, trial);
     let file = context.compose_file.value.clone();
     let effective_config =
-        output::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,
             &vars,
             Some(&context.cache_dir.value),
@@ -339,7 +339,7 @@ fn submit_sweep_trial(
         ),
     )?;
     let runtime_plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,
             &vars,
             Some(&context.cache_dir.value),
@@ -1555,7 +1555,7 @@ fn sweep_stop_inner(
             skipped.push(trial.trial_id.clone());
             continue;
         }
-        match output::cancel_job(job_id, &context.binaries.scancel.value) {
+        match crate::job::cancel_job(job_id, &context.binaries.scancel.value) {
             Ok(()) => cancelled.push(trial.trial_id.clone()),
             Err(err) => {
                 skipped.push(trial.trial_id.clone());
@@ -1703,13 +1703,12 @@ fn trial_efficiency_report(
         .with_context(|| format!("no tracked record for trial job {job_id}"))?;
     let vars =
         manifest_trial_interpolation_vars(&context.interpolation_vars, &manifest.sweep_id, trial);
-    let plan =
-        output::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-            &record.compose_file,
-            &vars,
-            Some(&context.cache_dir.value),
-            &context.resource_profiles,
-        )?;
+    let plan = load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        &record.compose_file,
+        &vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
+    )?;
     build_efficiency_score_report(&plan, &record, options)
 }
 
