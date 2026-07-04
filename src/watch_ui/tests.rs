@@ -34,6 +34,43 @@ fn format_gpu_metrics_includes_power_when_reported() {
     );
 }
 
+#[test]
+fn aggregate_gpu_nodes_sums_fleet_and_marks_node_count() {
+    let node_a = GpuNodeSummary {
+        node: Some("node01".into()),
+        gpu_count: 2,
+        avg_utilization_gpu: Some(80.0),
+        memory_used_mib: Some(1000),
+        memory_total_mib: Some(40000),
+        power_draw_w: Some(100.0),
+        power_limit_w: Some(500.0),
+    };
+    let node_b = GpuNodeSummary {
+        node: Some("node02".into()),
+        gpu_count: 4,
+        avg_utilization_gpu: Some(50.0),
+        memory_used_mib: Some(3000),
+        memory_total_mib: Some(80000),
+        power_draw_w: Some(300.0),
+        power_limit_w: Some(1000.0),
+    };
+    let nodes = [node_a, node_b];
+
+    let aggregate = aggregate_gpu_nodes(&nodes);
+    assert_eq!(aggregate.gpu_count, 6);
+    // Unweighted mean across all six devices: (80*2 + 50*4) / 6 = 60.
+    assert_eq!(aggregate.avg_utilization_gpu, Some(60.0));
+    assert_eq!(aggregate.memory_used_mib, Some(4000));
+    assert_eq!(aggregate.memory_total_mib, Some(120000));
+    assert_eq!(aggregate.power_draw_w, Some(400.0));
+
+    // The rendered multi-node line sums the fleet and marks the node count.
+    assert_eq!(
+        format!("{} x{} nodes", format_gpu_metrics(&aggregate), nodes.len()),
+        "gpu: 6 util=60% mem=4000/120000 MiB power=400W x2 nodes"
+    );
+}
+
 fn sample_snapshot() -> PsSnapshot {
     PsSnapshot {
         record: SubmissionRecord {

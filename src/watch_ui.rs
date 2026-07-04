@@ -2631,6 +2631,49 @@ fn format_gpu_metrics(node: &GpuNodeSummary) -> String {
     line
 }
 
+/// Sums a sequence of optional counts, yielding `None` only when every value is
+/// absent (matching the per-node `sum_optional_stats` convention in `stats.rs`).
+fn sum_optional_u64(values: impl Iterator<Item = Option<u64>>) -> Option<u64> {
+    values
+        .flatten()
+        .fold(None, |total, value| Some(total.unwrap_or(0) + value))
+}
+
+/// Sums a sequence of optional power readings, yielding `None` only when every
+/// value is absent.
+fn sum_optional_f64(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
+    values
+        .flatten()
+        .fold(None, |total, value| Some(total.unwrap_or(0.0) + value))
+}
+
+/// Collapses the per-node GPU summaries into one fleet-wide summary for the
+/// watch metrics line. Device counts, memory (used/total), and power are summed
+/// across nodes; utilization is the unweighted mean across every device (each
+/// node's average weighted by its device count). Mirrors the summing convention
+/// in `summarize_gpu_nodes`.
+fn aggregate_gpu_nodes(nodes: &[GpuNodeSummary]) -> GpuNodeSummary {
+    let gpu_count = nodes.iter().map(|node| node.gpu_count).sum();
+    let mut util_weight = 0usize;
+    let mut util_total = 0.0f64;
+    for node in nodes {
+        if let Some(util) = node.avg_utilization_gpu {
+            util_total += util * node.gpu_count as f64;
+            util_weight += node.gpu_count;
+        }
+    }
+    let avg_utilization_gpu = (util_weight > 0).then(|| util_total / util_weight as f64);
+    GpuNodeSummary {
+        node: None,
+        gpu_count,
+        avg_utilization_gpu,
+        memory_used_mib: sum_optional_u64(nodes.iter().map(|node| node.memory_used_mib)),
+        memory_total_mib: sum_optional_u64(nodes.iter().map(|node| node.memory_total_mib)),
+        power_draw_w: sum_optional_f64(nodes.iter().map(|node| node.power_draw_w)),
+        power_limit_w: sum_optional_f64(nodes.iter().map(|node| node.power_limit_w)),
+    }
+}
+
 fn format_watch_metrics_line(snapshot: &StatsSnapshot) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(failure) = &snapshot.first_failure {
@@ -2643,9 +2686,21 @@ fn format_watch_metrics_line(snapshot: &StatsSnapshot) -> Option<String> {
         .sampler
         .as_ref()
         .and_then(|sampler| sampler.gpu.as_ref())
-        && let Some(node) = gpu.nodes.first()
+        && !gpu.nodes.is_empty()
     {
-        parts.push(format_gpu_metrics(node));
+        // Single node keeps the exact existing rendering (byte-identical); on
+        // multi-node jobs aggregate across the fleet and mark the node count so
+        // the line reflects the whole allocation rather than only the first node.
+        if gpu.nodes.len() == 1 {
+            parts.push(format_gpu_metrics(&gpu.nodes[0]));
+        } else {
+            let aggregate = aggregate_gpu_nodes(&gpu.nodes);
+            parts.push(format!(
+                "{} x{} nodes",
+                format_gpu_metrics(&aggregate),
+                gpu.nodes.len()
+            ));
+        }
     }
     if snapshot.available {
         parts.push(format!("stats: {}", snapshot.source));
