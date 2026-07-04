@@ -190,6 +190,13 @@ When `x-slurm.metrics` is enabled, sampler files are written under:
 
 The sampler can collect GPU snapshots through `nvidia-smi` and job-step CPU/memory snapshots through `sstat`. Collector failures are best-effort: missing `nvidia-smi`, missing `sstat`, or unsupported queries do not fail the batch job itself.
 
+### Known limitations
+
+- **Per-service and per-rank GPU attribution is not available.** GPU samples carry `service`, `rank`, and `local_rank` fields, but the sampler reads `nvidia-smi` at the node level and cannot map a device back to the service or distributed rank that is using it, so those fields are always `null`. Correlate GPU rows with a service through the `gpu_processes.jsonl` PID rows and your own launch layout rather than these fields.
+- **`sstat`-derived GPU utilization and memory require cluster `acct_gather` NVML.** The `slurm.jsonl` collector exposes whatever `sstat` reports, but live per-step GPU accounting depends on the cluster having the NVML `acct_gather` plugin enabled, which is rarely present. The GPU numbers you can rely on come from the `nvidia-smi` collector (`gpu.jsonl`), not from `sstat`.
+- **A final sample is flushed at job end.** When the sampler stops, it takes one extra synchronous sample before tearing down the periodic loop, so the window between the last interval tick and job teardown is captured. The final sample is time-bounded so a hung `nvidia-smi` or `sstat` cannot delay cleanup.
+- **Multi-node GPU fanout degrades to batch-node sampling.** On a multi-node allocation the sampler fans out to every node through `srun`. If that `srun` fails for a tick, the sampler falls back to sampling the batch node's own GPUs and records a degraded note on the GPU collector rather than dropping the whole tick.
+
 Add `--accounting` to `stats` when you need post-run `sacct` rollups for reporting. The accounting summary includes allocated CPU-hours, total CPU-hours when available, allocated GPU-hours, allocation-based memory byte-seconds, and observed maximum RSS. Memory byte-seconds are labeled as allocation-based because Slurm's standard accounting fields do not reliably provide true per-line memory-seconds across all clusters.
 
 Use `hpc-compose inspect --rightsize -f compose.yaml` after a tracked Slurm run to convert those observations into conservative resource suggestions. The assistant requires tracked submission metadata and compares explicit requests such as `x-slurm.mem`, `x-slurm.time`, `x-slurm.gpus`, and service `x-slurm.cpus_per_task` against `sacct`, `sstat`, and `nvidia-smi` sampler evidence. It only reports suggestions; it does not rewrite the compose file.
