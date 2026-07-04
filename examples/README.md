@@ -17,6 +17,9 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 - [`dev-python-smoke.yaml`](dev-python-smoke.yaml)
 - [`cuda-probe.yaml`](cuda-probe.yaml)
 - [`restart-policy.yaml`](restart-policy.yaml)
+- [`notify-mail.yaml`](notify-mail.yaml)
+- [`healthcheck-compat.yaml`](healthcheck-compat.yaml)
+- [`secrets-hf-token.yaml`](secrets-hf-token.yaml)
 
 ## Model serving and LLM workflows
 
@@ -58,6 +61,7 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 
 - [`multi-stage-pipeline.yaml`](multi-stage-pipeline.yaml)
 - [`pipeline-dag.yaml`](pipeline-dag.yaml)
+- [`deps-and-assert.yaml`](deps-and-assert.yaml)
 - [`postgres-etl.yaml`](postgres-etl.yaml)
 - [`fairseq-preprocess.yaml`](fairseq-preprocess.yaml)
 - [`nextflow-bridge.yaml`](nextflow-bridge.yaml)
@@ -68,6 +72,7 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 - [`training-checkpoints.yaml`](training-checkpoints.yaml)
 - [`training-resume.yaml`](training-resume.yaml)
 - [`training-sweep.yaml`](training-sweep.yaml)
+- [`array-sweep-lite.yaml`](array-sweep-lite.yaml)
 - [`training-tensorboard.yaml`](training-tensorboard.yaml)
 - [`canary-right-size.yaml`](canary-right-size.yaml)
 

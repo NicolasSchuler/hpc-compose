@@ -1,0 +1,54 @@
+name: deps-and-assert
+
+# Job-to-job dependency plus in-job assertions.
+#
+# `x-slurm.after_job` renders `#SBATCH --dependency=<condition>:<job-id>`, so
+# this whole submission stays PENDING until an EARLIER, separately-submitted job
+# reaches the requested state. The object form carries the condition:
+#   afterok    -> only start if the upstream job succeeded
+#   afternotok -> only start if it failed
+#   afterany   -> start once it finishes, success or not
+# Replace the id below with the real upstream job id (e.g. the one printed by a
+# prior `hpc-compose up`); a bare string like "12345" is the shorthand for
+# afterok:12345.
+#
+# `assert:` runs post-conditions after a service's command exits and fails the
+# job if they do not hold. `artifacts_contain` is a glob that must match at least
+# one path, RE-ROOTED under `/hpc-compose/job` — a relative pattern like
+# `out/*.txt` is resolved as `/hpc-compose/job/out/*.txt`. Combine it with
+# `exit_code` and `max_duration_seconds` as needed.
+x-slurm:
+  job_name: deps-and-assert
+  time: "00:15:00"
+  mem: 4G
+  cpus_per_task: 1
+  after_job:
+    id: "12345"
+    condition: afterok
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  produce:
+    image: alpine:3.20
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        mkdir -p /hpc-compose/job/out
+        printf 'result=42\n' > /hpc-compose/job/out/result.txt
+
+  verify:
+    image: alpine:3.20
+    depends_on:
+      produce:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        grep -q 'result=' /hpc-compose/job/out/result.txt
+    assert:
+      exit_code: 0
+      # Glob is resolved under /hpc-compose/job, so this checks out/result.txt.
+      artifacts_contain: "out/*.txt"
+      max_duration_seconds: 120

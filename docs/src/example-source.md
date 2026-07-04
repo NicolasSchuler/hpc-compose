@@ -353,3 +353,43 @@ Source: `examples/cuda-probe.yaml`
 ```yaml
 {{#include ../../examples/cuda-probe.yaml}}
 ```
+
+## Array Sweep Lite
+
+Source: `examples/array-sweep-lite.yaml`
+
+```yaml
+{{#include ../../examples/array-sweep-lite.yaml}}
+```
+
+## Notify Mail
+
+Source: `examples/notify-mail.yaml`
+
+```yaml
+{{#include ../../examples/notify-mail.yaml}}
+```
+
+## Healthcheck Compat
+
+Source: `examples/healthcheck-compat.yaml`
+
+```yaml
+{{#include ../../examples/healthcheck-compat.yaml}}
+```
+
+## Secrets HF Token
+
+Source: `examples/secrets-hf-token.yaml`
+
+```yaml
+{{#include ../../examples/secrets-hf-token.yaml}}
+```
+
+## Deps And Assert
+
+Source: `examples/deps-and-assert.yaml`
+
+```yaml
+{{#include ../../examples/deps-and-assert.yaml}}
+```
