@@ -146,6 +146,29 @@ pub(crate) enum SpecError {
     )]
     ScriptCommandConflict { service: String, conflict: String },
 
+    #[error("service '{service}' env_file '{}' does not exist", path.display())]
+    #[diagnostic(
+        code(hpc_compose::spec::env_file_not_found),
+        help(
+            "env_file paths are read relative to the compose file's directory, on the machine running `hpc-compose` (the submit host) -- not inside the container and not staged to the compute node. Check the path, or commit the file if it is missing from version control."
+        )
+    )]
+    EnvFileNotFound { service: String, path: PathBuf },
+
+    #[error("service '{service}' env_file '{}' line {line}: {reason}", path.display())]
+    #[diagnostic(
+        code(hpc_compose::spec::env_file_malformed_line),
+        help(
+            "Each non-empty, non-comment line must be `KEY=VALUE`, optionally prefixed with `export `. Quote values containing spaces with single or double quotes."
+        )
+    )]
+    EnvFileMalformedLine {
+        service: String,
+        path: PathBuf,
+        line: usize,
+        reason: String,
+    },
+
     #[error(
         "service '{service}' sets both x-runtime.prepare and x-enroot.prepare; use only x-runtime.prepare for new specs"
     )]

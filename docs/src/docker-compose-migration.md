@@ -10,6 +10,7 @@ This guide helps you convert an existing `docker-compose.yaml` into an `hpc-comp
 | `command` | `command` (string or list, same syntax) |
 | `entrypoint` | `entrypoint` (string or list, same syntax) |
 | `environment` | `environment` (map or list, same syntax) |
+| `env_file` | `env_file` (string or list, same syntax; read on the submit host, later files win, inline `environment` wins) |
 | `volumes` | `volumes` (host:container bind mounts, same syntax) |
 | `depends_on` | `depends_on` (list or map with `condition: service_started` / `service_healthy` / `service_completed_successfully`) |
 | `working_dir` | `working_dir` (requires explicit `command` or `entrypoint`) |
@@ -222,6 +223,25 @@ Practical mapping:
 - Compose `restart: always` / `unless-stopped` -> no direct equivalent; `hpc-compose` intentionally keeps restart handling bounded within one batch job
 
 The rolling-window fields have no direct Docker Compose equivalent. They exist to stop fast crash loops inside one Slurm allocation without giving up a larger lifetime retry budget for transient failures.
+
+### Per-service env_file
+
+`env_file:` is supported with docker-compose semantics: a single path or a list of paths, read on the **submit host** relative to the compose file's directory, and folded into the service `environment` at load time.
+
+```yaml
+services:
+  trainer:
+    image: myrepo/trainer:1.2
+    env_file:
+      - config/base.env       # applied first
+      - config/train.env      # later file wins
+    environment:
+      RUN_ID: ${RUN_ID}       # inline environment wins over env_file
+```
+
+Precedence is lowest-to-highest: `env_file` entries in list order, then inline `environment:`. File **contents are literal** (no `${...}` expansion, matching docker-compose and the `.env` loader), while the env_file **paths are interpolated** so `config/${STAGE}.env` works. A missing file or a malformed line fails at load with a diagnostic. See [`spec-reference.md`](spec-reference.md#env_file) for the full rules.
+
+Unlike the `.env` loader, `env_file:` values are per-service and do **not** feed the global interpolation map, so you cannot reference them as `${VAR}` elsewhere in the spec.
 
 ## What to do about unsupported features
 

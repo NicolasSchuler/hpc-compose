@@ -329,7 +329,7 @@ fn serde_deny_unknown_fields<T: DeserializeOwned>() -> BTreeSet<String> {
 /// - Scalar / array / enum / `oneOf` definitions with no single `properties`
 ///   object: rootExtends, serviceExtends, stringList, nonNegativeInteger,
 ///   positiveInteger, lineSafeString, arraySpec, jobDependency, command,
-///   environment, duration, secrets, sweepParameterValue, sweepMatrix,
+///   envFile, environment, duration, secrets, sweepParameterValue, sweepMatrix,
 ///   stageMode, rendezvousName, rendezvousClient, dependsOn, readiness,
 ///   serviceHook. Their Rust mirrors are custom untagged/tagged enums or
 ///   newtypes with no derived `deny_unknown_fields` field list to compare.

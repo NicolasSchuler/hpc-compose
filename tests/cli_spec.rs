@@ -2243,6 +2243,7 @@ fn schema_root_and_service_keys_match_parser_whitelists() {
         "command",
         "entrypoint",
         "script",
+        "env_file",
         "environment",
         "modules",
         "volumes",

@@ -173,6 +173,7 @@ pub fn build_notebook_service_spec(
         command: Some(CommandSpec::Vec(command)),
         entrypoint: None,
         script: None,
+        env_file: None,
         environment: EnvironmentSpec::Map(env),
         volumes: args.volumes.clone(),
         working_dir: args.working_dir.clone(),

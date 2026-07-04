@@ -213,6 +213,15 @@
         }
       ]
     },
+    "envFile": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      ]
+    },
     "environment": {
       "oneOf": [
         {
@@ -724,6 +733,7 @@
         "command": { "$ref": "#/definitions/command" },
         "entrypoint": { "$ref": "#/definitions/command" },
         "script": { "type": "string", "minLength": 1 },
+        "env_file": { "$ref": "#/definitions/envFile" },
         "environment": { "$ref": "#/definitions/environment" },
         "modules": {
           "$ref": "#/definitions/stringList",

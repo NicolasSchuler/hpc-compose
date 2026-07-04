@@ -5739,3 +5739,285 @@ fn service_extra_srun_args_conflict_covers_nodes_ntasks_gres() {
         );
     }
 }
+
+#[test]
+fn env_file_string_form_merges_into_environment() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::write(
+        tmpdir.path().join("service.env"),
+        "# base config\nexport BASE_ONLY=from-base\nSHARED='shared value'\n",
+    )
+    .expect("env file");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: service.env
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("load");
+    let app = spec.services.get("app").expect("app");
+    // env_file is resolved away into `environment` at load time.
+    assert!(app.env_file.is_none());
+    assert_eq!(
+        app.environment.to_pairs().expect("env"),
+        vec![
+            ("BASE_ONLY".to_string(), "from-base".to_string()),
+            ("SHARED".to_string(), "shared value".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn env_file_redacts_like_inline_environment_not_in_bulk() {
+    // env_file entries become `environment` pairs, so they redact exactly like
+    // inline `environment:`: a sensitive-looking key is masked by name while a
+    // benign value is shown verbatim. This locks the policy that env_file values
+    // are NOT redacted in bulk just because they were externalized.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::write(
+        tmpdir.path().join("service.env"),
+        "API_TOKEN=abc12345\nLOG_LEVEL=info\n",
+    )
+    .expect("env file");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: service.env
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("load");
+    let app = spec.services.get("app").expect("app");
+    let merged: BTreeMap<String, String> = app
+        .environment
+        .to_pairs()
+        .expect("env")
+        .into_iter()
+        .collect();
+    // No declared `secrets:` values, so only name-based redaction applies.
+    let redacted = crate::redaction::redact_env_map(&merged, &BTreeSet::new(), false);
+    assert_eq!(redacted["API_TOKEN"], "<redacted>");
+    assert_eq!(redacted["LOG_LEVEL"], "info");
+}
+
+#[test]
+fn env_file_list_form_later_file_wins() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::write(
+        tmpdir.path().join("base.env"),
+        "BASE_ONLY=from-base\nOVERRIDDEN=from-base\n",
+    )
+    .expect("base env");
+    fs::write(
+        tmpdir.path().join("override.env"),
+        "OVERRIDDEN=from-override\nOVERRIDE_ONLY=yes\n",
+    )
+    .expect("override env");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: [base.env, override.env]
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("load");
+    let app = spec.services.get("app").expect("app");
+    assert_eq!(
+        app.environment.to_pairs().expect("env"),
+        vec![
+            ("BASE_ONLY".to_string(), "from-base".to_string()),
+            ("OVERRIDDEN".to_string(), "from-override".to_string()),
+            ("OVERRIDE_ONLY".to_string(), "yes".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn env_file_inline_environment_overrides_env_file() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::write(
+        tmpdir.path().join("service.env"),
+        "OVERRIDDEN=from-env-file\nENV_FILE_ONLY=kept\n",
+    )
+    .expect("env file");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: service.env
+    environment:
+      OVERRIDDEN: from-inline
+      INLINE_ONLY: yes
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("load");
+    let app = spec.services.get("app").expect("app");
+    assert_eq!(
+        app.environment.to_pairs().expect("env"),
+        vec![
+            ("ENV_FILE_ONLY".to_string(), "kept".to_string()),
+            ("INLINE_ONLY".to_string(), "yes".to_string()),
+            ("OVERRIDDEN".to_string(), "from-inline".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn env_file_values_are_literal_not_interpolated() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    // The dollar-sign expression must survive verbatim; if env_file contents
+    // were interpolated, `${BAR}` (BAR is unset) would either error or expand.
+    fs::write(tmpdir.path().join("service.env"), "FOO=${BAR}\n").expect("env file");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: service.env
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("load");
+    let app = spec.services.get("app").expect("app");
+    assert_eq!(
+        app.environment.to_pairs().expect("env"),
+        vec![("FOO".to_string(), "${BAR}".to_string())]
+    );
+}
+
+#[test]
+fn env_file_path_is_interpolated_but_contents_are_not() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let config_dir = tmpdir.path().join("config");
+    fs::create_dir(&config_dir).expect("config dir");
+    fs::write(config_dir.join("prod.env"), "STAGE_VALUE=${NOT_EXPANDED}\n").expect("stage env");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: config/${STAGE}.env
+"#,
+    );
+    // Provide STAGE explicitly (no process-env or .env dependency).
+    let vars = BTreeMap::from([("STAGE".to_string(), "prod".to_string())]);
+    let spec = ComposeSpec::load_with_interpolation_vars(&path, &vars).expect("load");
+    let app = spec.services.get("app").expect("app");
+    assert_eq!(
+        app.environment.to_pairs().expect("env"),
+        vec![("STAGE_VALUE".to_string(), "${NOT_EXPANDED}".to_string())]
+    );
+}
+
+#[test]
+fn env_file_missing_file_reports_spec_error_with_submit_host_help() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: does-not-exist.env
+"#,
+    );
+    let err = ComposeSpec::load(&path).expect_err("missing env_file");
+    assert!(
+        err.downcast_ref::<SpecError>()
+            .is_some_and(|se| matches!(se, SpecError::EnvFileNotFound { .. })),
+        "{err:#}"
+    );
+    assert!(err.to_string().contains("does-not-exist.env"), "{err}");
+    let help = err
+        .downcast_ref::<SpecError>()
+        .and_then(Diagnostic::help)
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    assert!(help.contains("submit host"), "help was: {help}");
+}
+
+#[test]
+fn env_file_malformed_line_reports_spec_error_with_help() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::write(tmpdir.path().join("service.env"), "BROKEN\n").expect("env file");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: service.env
+"#,
+    );
+    let err = ComposeSpec::load(&path).expect_err("malformed env_file");
+    assert!(
+        err.downcast_ref::<SpecError>()
+            .is_some_and(|se| matches!(se, SpecError::EnvFileMalformedLine { line: 1, .. })),
+        "{err:#}"
+    );
+    assert!(err.to_string().contains("line 1"), "{err}");
+    let help = err
+        .downcast_ref::<SpecError>()
+        .and_then(Diagnostic::help)
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    assert!(help.contains("KEY=VALUE"), "help was: {help}");
+}
+
+#[test]
+fn env_file_paths_resolve_relative_to_compose_directory() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let project_dir = tmpdir.path().join("project");
+    fs::create_dir(&project_dir).expect("project dir");
+    fs::write(project_dir.join("service.env"), "FROM_PROJECT=yes\n").expect("env file");
+    let path = write_spec(
+        &project_dir,
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: service.env
+"#,
+    );
+    // Load by absolute path; the env_file resolves next to the compose file,
+    // not next to the process working directory.
+    let spec = ComposeSpec::load(&path).expect("load");
+    let app = spec.services.get("app").expect("app");
+    assert_eq!(
+        app.environment.to_pairs().expect("env"),
+        vec![("FROM_PROJECT".to_string(), "yes".to_string())]
+    );
+}
+
+#[test]
+fn env_file_rejects_unsafe_variable_names_same_as_inline() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    // A leading digit is rejected by validate_safe_env_name; this only fires if
+    // env_file entries are merged BEFORE name validation runs.
+    fs::write(tmpdir.path().join("service.env"), "1BAD=x\n").expect("env file");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: service.env
+"#,
+    );
+    let err = ComposeSpec::load(&path).expect_err("unsafe env name");
+    assert!(
+        err.to_string()
+            .contains("is not a safe environment variable name"),
+        "{err}"
+    );
+}

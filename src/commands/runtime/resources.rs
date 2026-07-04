@@ -118,6 +118,7 @@ pub(super) fn build_ephemeral_runtime_plan(
         command: Some(CommandSpec::Vec(command)),
         entrypoint: None,
         script: None,
+        env_file: None,
         environment: EnvironmentSpec::Map(env),
         volumes,
         working_dir: None,

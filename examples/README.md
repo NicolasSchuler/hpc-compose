@@ -16,6 +16,7 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 - [`dev-python-app.yaml`](dev-python-app.yaml)
 - [`dev-python-smoke.yaml`](dev-python-smoke.yaml)
 - [`cuda-probe.yaml`](cuda-probe.yaml)
+- [`env-file.yaml`](env-file.yaml)
 - [`restart-policy.yaml`](restart-policy.yaml)
 - [`notify-mail.yaml`](notify-mail.yaml)
 - [`healthcheck-compat.yaml`](healthcheck-compat.yaml)

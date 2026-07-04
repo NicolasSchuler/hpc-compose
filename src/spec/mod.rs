@@ -1185,6 +1185,8 @@ pub struct ServiceSpec {
     #[serde(default)]
     pub script: Option<String>,
     #[serde(default)]
+    pub env_file: Option<EnvFileSpec>,
+    #[serde(default)]
     pub environment: EnvironmentSpec,
     #[serde(default)]
     pub volumes: Vec<String>,
@@ -2048,6 +2050,41 @@ pub enum CommandSpec {
     Vec(Vec<String>),
 }
 
+/// Accepted `env_file:` syntaxes (docker-compose compatible): a single file
+/// path or a list of paths applied in order.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum EnvFileSpec {
+    /// String form such as `env_file: config/train.env`.
+    Single(String),
+    /// List form such as `env_file: [base.env, train.env]` (later wins).
+    List(Vec<String>),
+}
+
+impl EnvFileSpec {
+    /// Returns the declared file paths in application order.
+    #[must_use]
+    pub fn paths(&self) -> Vec<&str> {
+        match self {
+            EnvFileSpec::Single(path) => vec![path.as_str()],
+            EnvFileSpec::List(paths) => paths.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// Interpolates `${VAR}` references in the declared *paths* (not the file
+    /// contents, which are read literally to match docker-compose and the
+    /// `.env` loader).
+    fn interpolate_paths(&mut self, vars: &InterpolationVars) -> Result<()> {
+        match self {
+            EnvFileSpec::Single(path) => {
+                *path = interpolate_string(path, vars)?;
+                Ok(())
+            }
+            EnvFileSpec::List(paths) => interpolate_vec_strings(paths, vars),
+        }
+    }
+}
+
 /// Readiness checks supported by `hpc-compose`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -2189,6 +2226,15 @@ impl ComposeSpec {
     ) -> Result<Self> {
         let mut spec = load_raw_spec(path)?;
         spec.interpolate_with_vars(vars)?;
+        // Fold each service's `env_file:` into its `environment` before
+        // validation so the merged keys are name-checked and the planner,
+        // redaction, and `config` all see a single environment. Done only on
+        // the load path (like interpolation), not in `validate()`/the planner,
+        // which must stay path-free and idempotent.
+        let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        for (name, service) in &mut spec.services {
+            service.resolve_env_file(name, project_dir)?;
+        }
         spec.validate()?;
         Ok(spec)
     }
@@ -2663,6 +2709,31 @@ fn validate_safe_env_name(name: &str, field: &str) -> Result<()> {
         bail!("{field}.{name} is not a safe environment variable name");
     }
     Ok(())
+}
+
+/// Maps a low-level [`interpolate::ParseEnvFileError`] to a user-facing error
+/// for a specific service's `env_file:` entry. Malformed lines become a
+/// miette [`SpecError::EnvFileMalformedLine`] carrying the line number and
+/// reason; a post-existence-check I/O failure (e.g. a race or a permissions
+/// problem) is reported with the file path for context.
+fn map_env_file_parse_error(
+    service: &str,
+    path: &Path,
+    error: interpolate::ParseEnvFileError,
+) -> anyhow::Error {
+    match error {
+        interpolate::ParseEnvFileError::Io(io) => anyhow::Error::new(io).context(format!(
+            "service '{service}' env_file '{}' could not be read",
+            path.display()
+        )),
+        interpolate::ParseEnvFileError::Line(line_error) => SpecError::EnvFileMalformedLine {
+            service: service.to_string(),
+            path: path.to_path_buf(),
+            line: line_error.line,
+            reason: line_error.kind.reason().to_string(),
+        }
+        .into(),
+    }
 }
 
 impl CommandSpec {
@@ -3314,6 +3385,9 @@ impl ServiceSpec {
             entrypoint.interpolate_if_vec(vars)?;
         }
         self.environment.interpolate_values(vars)?;
+        if let Some(env_file) = &mut self.env_file {
+            env_file.interpolate_paths(vars)?;
+        }
         interpolate_vec_strings(&mut self.volumes, vars)?;
         interpolate_optional_string(&mut self.working_dir, vars)?;
         if let Some(healthcheck) = &mut self.healthcheck {
@@ -3326,6 +3400,50 @@ impl ServiceSpec {
         self.slurm.interpolate(vars)?;
         self.runtime.interpolate(vars)?;
         self.enroot.interpolate(vars)?;
+        Ok(())
+    }
+
+    /// Folds any declared `env_file:` into [`Self::environment`] and clears the
+    /// field, so the rest of the pipeline (planner, redaction, `config`) sees a
+    /// single merged environment. Files are read from the submit host relative
+    /// to `project_dir` (the compose file's directory) with **literal**
+    /// contents. Merge precedence, lowest to highest: env_file entries in list
+    /// order, then inline `environment:` (docker-compose compatible).
+    ///
+    /// Paths must already be interpolated (see [`Self::interpolate`]); the
+    /// contents are never interpolated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpecError::EnvFileNotFound`] when a referenced file is missing
+    /// and [`SpecError::EnvFileMalformedLine`] when a line is not `KEY=VALUE`.
+    fn resolve_env_file(&mut self, service_name: &str, project_dir: &Path) -> Result<()> {
+        // Snapshot the (already-interpolated) paths so the borrow of
+        // `self.env_file` ends before we overwrite `self.environment`.
+        let paths: Vec<String> = match &self.env_file {
+            None => return Ok(()),
+            Some(env_file) => env_file.paths().into_iter().map(str::to_string).collect(),
+        };
+        let mut merged: BTreeMap<String, String> = BTreeMap::new();
+        for rel in paths {
+            let path = project_dir.join(&rel);
+            if !path.exists() {
+                return Err(SpecError::EnvFileNotFound {
+                    service: service_name.to_string(),
+                    path,
+                }
+                .into());
+            }
+            let vars = interpolate::parse_env_file(&path)
+                .map_err(|error| map_env_file_parse_error(service_name, &path, error))?;
+            merged.extend(vars);
+        }
+        // Inline `environment:` overrides env_file values.
+        for (key, value) in self.environment.to_pairs()? {
+            merged.insert(key, value);
+        }
+        self.env_file = None;
+        self.environment = EnvironmentSpec::Map(merged);
         Ok(())
     }
 
