@@ -18,6 +18,17 @@ x-slurm:
   mem: 4G
   cpus_per_task: 1
   array: "0-3"
+  # `array_tasks` asks Slurm to send one mail per array task instead of a single
+  # mail for the whole array. It is a modifier, not a standalone trigger, so it
+  # only makes sense with `x-slurm.array` above — hpc-compose rejects it when
+  # `array` is unset.
+  notify:
+    email:
+      to: you@example.edu
+      on:
+        - end
+        - fail
+        - array_tasks
   cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
 
 services:

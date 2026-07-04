@@ -2582,6 +2582,194 @@ services:
     assert_eq!(spec.slurm.notify_mail_type_value().as_deref(), Some("ALL"));
 }
 
+// --- richer mail events: canonical ordering, `all` modifier, serde renames,
+// and the `array_tasks`-requires-`array` guard ---
+
+#[test]
+fn notify_email_events_apply_stable_canonical_order_and_dedupe_full_variant_set() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    // Every non-`all` token, scrambled and with duplicates, and `array` set so
+    // the `array_tasks` guard is satisfied. Output must be canonical + deduped.
+    let spec = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  array: "0-9"
+  notify:
+    email:
+      to: ops@example.com
+      on:
+        - array_tasks
+        - time_limit_50
+        - fail
+        - start
+        - time_limit
+        - requeue
+        - end
+        - time_limit_80
+        - stage_out
+        - invalid_depend
+        - time_limit_90
+        - fail
+        - array_tasks
+        - start
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&spec).expect("full notify event set");
+    assert_eq!(
+        spec.slurm.notify_email_events(),
+        vec![
+            NotifyEvent::Start,
+            NotifyEvent::End,
+            NotifyEvent::Fail,
+            NotifyEvent::Requeue,
+            NotifyEvent::InvalidDepend,
+            NotifyEvent::StageOut,
+            NotifyEvent::TimeLimit,
+            NotifyEvent::TimeLimit90,
+            NotifyEvent::TimeLimit80,
+            NotifyEvent::TimeLimit50,
+            NotifyEvent::ArrayTasks,
+        ]
+    );
+    assert_eq!(
+        spec.slurm.notify_mail_type_value().as_deref(),
+        Some(
+            "BEGIN,END,FAIL,REQUEUE,INVALID_DEPEND,STAGE_OUT,TIME_LIMIT,TIME_LIMIT_90,TIME_LIMIT_80,TIME_LIMIT_50,ARRAY_TASKS"
+        )
+    );
+}
+
+#[test]
+fn notify_all_shorthand_preserves_explicit_array_tasks_modifier() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    // `all` collapses everything else, but `array_tasks` is an independent
+    // modifier Slurm accepts alongside `ALL`, so it must survive.
+    let with_modifier = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  array: "0-3"
+  notify:
+    email:
+      to: ops@example.com
+      on:
+        - start
+        - all
+        - array_tasks
+        - fail
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&with_modifier).expect("all + array_tasks");
+    assert_eq!(
+        spec.slurm.notify_email_events(),
+        vec![NotifyEvent::All, NotifyEvent::ArrayTasks]
+    );
+    assert_eq!(
+        spec.slurm.notify_mail_type_value().as_deref(),
+        Some("ALL,ARRAY_TASKS")
+    );
+
+    let plain_all = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  notify:
+    email:
+      to: ops@example.com
+      on:
+        - all
+        - end
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&plain_all).expect("all only");
+    assert_eq!(spec.slurm.notify_email_events(), vec![NotifyEvent::All]);
+    assert_eq!(spec.slurm.notify_mail_type_value().as_deref(), Some("ALL"));
+}
+
+#[test]
+fn notify_time_limit_variants_deserialize_with_underscored_digits() {
+    // Guards the explicit `#[serde(rename = "time_limit_NN")]`: serde's
+    // snake_case does NOT insert `_` before digits, so without the renames
+    // `time_limit_90` would fail to deserialize.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let spec = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  notify:
+    email:
+      to: ops@example.com
+      on:
+        - time_limit_90
+        - time_limit_80
+        - time_limit_50
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&spec).expect("time_limit_NN tokens deserialize");
+    assert_eq!(
+        spec.slurm.notify_email_events(),
+        vec![
+            NotifyEvent::TimeLimit90,
+            NotifyEvent::TimeLimit80,
+            NotifyEvent::TimeLimit50,
+        ]
+    );
+    assert_eq!(
+        spec.slurm.notify_mail_type_value().as_deref(),
+        Some("TIME_LIMIT_90,TIME_LIMIT_80,TIME_LIMIT_50")
+    );
+}
+
+#[test]
+fn notify_array_tasks_without_array_is_rejected() {
+    let config = SlurmConfig {
+        notify: Some(NotifyConfig {
+            email: Some(EmailNotifyConfig {
+                to: "ops@example.com".to_string(),
+                on: vec![NotifyEvent::End, NotifyEvent::ArrayTasks],
+            }),
+        }),
+        ..SlurmConfig::default()
+    };
+    let err = config
+        .validate()
+        .expect_err("array_tasks without x-slurm.array is rejected");
+    assert!(
+        err.downcast_ref::<SpecError>()
+            .is_some_and(|se| matches!(se, SpecError::ArrayTasksRequiresArray)),
+        "expected ArrayTasksRequiresArray, got {err:#}",
+    );
+
+    // The same config with an array index range set validates cleanly.
+    let config = SlurmConfig {
+        array: Some("0-9".to_string()),
+        notify: Some(NotifyConfig {
+            email: Some(EmailNotifyConfig {
+                to: "ops@example.com".to_string(),
+                on: vec![NotifyEvent::End, NotifyEvent::ArrayTasks],
+            }),
+        }),
+        ..SlurmConfig::default()
+    };
+    assert!(
+        config.validate().is_ok(),
+        "array_tasks with x-slurm.array set should validate",
+    );
+}
+
 #[test]
 fn service_mpi_host_config_validation_covers_bind_paths_env_and_profile_conflicts() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");

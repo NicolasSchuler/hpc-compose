@@ -257,6 +257,15 @@ pub(crate) enum SpecError {
     )]
     GpusGresConflict { scope: String },
 
+    #[error("x-slurm.notify.email.on includes 'array_tasks', but x-slurm.array is not set")]
+    #[diagnostic(
+        code(hpc_compose::spec::array_tasks_requires_array),
+        help(
+            "`array_tasks` tells Slurm to mail once per array task, so it only makes sense for a job array. Add `x-slurm.array: \"0-9\"` (or your index range), or remove `array_tasks` from `x-slurm.notify.email.on`."
+        )
+    )]
+    ArrayTasksRequiresArray,
+
     #[error("{field} must not be empty")]
     #[diagnostic(
         code(hpc_compose::spec::empty_field),

@@ -5,7 +5,14 @@ name: notify-mail
 # `x-slurm.notify.email` renders `#SBATCH --mail-user` plus a `--mail-type`
 # derived from the `on:` list, so Slurm itself sends the mail — nothing runs
 # inside your container. The events map to Slurm mail types:
-#   start -> BEGIN, end -> END, fail -> FAIL, all -> ALL.
+#   start -> BEGIN, end -> END, fail -> FAIL, requeue -> REQUEUE,
+#   invalid_depend -> INVALID_DEPEND, stage_out -> STAGE_OUT,
+#   time_limit -> TIME_LIMIT, time_limit_90/_80/_50 -> TIME_LIMIT_90/_80/_50,
+#   array_tasks -> ARRAY_TASKS (one mail per array task; needs x-slurm.array),
+#   all -> ALL.
+# `time_limit_90` mails you when the run reaches 90% of its wall clock — enough
+# warning to checkpoint or extend before Slurm kills it. Events are emitted in a
+# stable canonical order regardless of how you list them.
 # Delivery depends on the cluster's MTA being configured; on many sites mail to
 # an external address is dropped, so prefer your on-cluster/institutional
 # address. Only `to:` is required; omit `on:` to accept the site default.
@@ -21,9 +28,11 @@ x-slurm:
         - start
         - end
         - fail
+        - requeue
+        - time_limit_90
   cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
 
 services:
   work:
     image: python:3.11-slim
-    command: python -c "print('job body ran; Slurm will mail start/end/fail')"
+    command: python -c "print('job body ran; Slurm will mail start/end/fail/requeue/time_limit_90')"

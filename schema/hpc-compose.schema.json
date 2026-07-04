@@ -677,7 +677,20 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["start", "end", "fail", "all"]
+            "enum": [
+              "start",
+              "end",
+              "fail",
+              "requeue",
+              "invalid_depend",
+              "stage_out",
+              "time_limit",
+              "time_limit_90",
+              "time_limit_80",
+              "time_limit_50",
+              "array_tasks",
+              "all"
+            ]
           }
         }
       }
