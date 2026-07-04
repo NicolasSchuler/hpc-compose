@@ -89,7 +89,7 @@ docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "typos" "markdownlint-c
 examples-check: (_require-tools "shellcheck")
     cargo build --locked
     for f in examples/*.yaml; do echo "Validating $f"; env -u CACHE_DIR cargo run --locked -- validate -f "$f"; done
-    shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh scripts/devcluster_otp_e2e.sh dev-cluster/otp-sim.sh
+    shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh scripts/devcluster_otp_e2e.sh scripts/remote_gpu_e2e.sh dev-cluster/otp-sim.sh
     tmpdir="$(mktemp -d)"; trap 'rm -rf "$tmpdir"' EXIT; for f in examples/*.yaml; do echo "Shellchecking rendered $f"; out="$tmpdir/$(basename "$f" .yaml).sbatch"; env -u CACHE_DIR cargo run --locked -- render -f "$f" --output "$out"; shellcheck -e SC2034 -x -s bash "$out"; done
 
 # Boot the local single-node Slurm dev cluster and run the real
@@ -106,6 +106,17 @@ dev-cluster-e2e:
 # container requirements as dev-cluster-e2e; CI runs it in the same job.
 dev-cluster-remote-e2e:
     scripts/devcluster_remote_e2e.sh
+
+# Opt-in REAL-GPU end-to-end check for the metrics pipeline against a real
+# cluster (HAICORE by default). Drives the thin laptop client (`up --remote`) to
+# submit a tiny 1-GPU cuda-probe job, watches it to COMPLETED, then asserts the
+# collected GPU/CPU sampler output (gpu.jsonl, cpu.jsonl, `stats --format json`).
+# Needs a live login node, a real GPU allocation, and ONE interactive OTP, so it
+# is deliberately NOT part of `ci` and never runs in CI — run it by hand.
+# Override the host/account/partition via env (see the script header):
+#   HPC_REMOTE_HOST=haicore HPC_SLURM_ACCOUNT=kastel just remote-gpu-e2e
+remote-gpu-e2e:
+    scripts/remote_gpu_e2e.sh
 
 # Flip the login-node stand-in into an OTP/2FA-requiring mode and prove the
 # laptop thin client's SSH ControlMaster multiplexing authenticates a whole
