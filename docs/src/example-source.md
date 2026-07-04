@@ -393,3 +393,11 @@ Source: `examples/deps-and-assert.yaml`
 ```yaml
 {{#include ../../examples/deps-and-assert.yaml}}
 ```
+
+## Reservation Licenses
+
+Source: `examples/reservation-licenses.yaml`
+
+```yaml
+{{#include ../../examples/reservation-licenses.yaml}}
+```

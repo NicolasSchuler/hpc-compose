@@ -953,6 +953,12 @@ fn warn_local_ignored_scheduler_settings(plan: &RuntimePlan) {
             "warning: --local ignores reservation-related x-slurm.submit_args"
         );
     }
+    if plan.slurm.reservation.is_some() {
+        let _ = writeln!(io::stderr(), "warning: --local ignores x-slurm.reservation");
+    }
+    if plan.slurm.licenses.is_some() {
+        let _ = writeln!(io::stderr(), "warning: --local ignores x-slurm.licenses");
+    }
     if plan.slurm.error.is_some() {
         let _ = writeln!(
             io::stderr(),

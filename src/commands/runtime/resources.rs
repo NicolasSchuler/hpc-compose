@@ -224,6 +224,12 @@ fn push_common_slurm_options(
     if let Some(qos) = &slurm.qos {
         args.push(format!("--qos={qos}"));
     }
+    if let Some(reservation) = &slurm.reservation {
+        args.push(format!("--reservation={reservation}"));
+    }
+    if let Some(licenses) = &slurm.licenses {
+        args.push(format!("--licenses={licenses}"));
+    }
     if let Some(time) = &slurm.time {
         args.push(format!("--time={time}"));
     }
@@ -326,6 +332,8 @@ mod tests {
     fn slurm_arg_builders_preserve_shell_and_alloc_defaults() {
         let mut slurm = SlurmConfig {
             partition: Some("debug".to_string()),
+            reservation: Some("maint_2026".to_string()),
+            licenses: Some("ansys:2,comsol:1".to_string()),
             time: Some("00:05:00".to_string()),
             cpus_per_task: Some(2),
             gpus: Some(1),
@@ -338,6 +346,8 @@ mod tests {
         assert_eq!(srun_args[0], "--job-name=hpc-compose-shell");
         assert!(srun_args.contains(&"--ntasks=1".to_string()));
         assert!(srun_args.contains(&"--partition=debug".to_string()));
+        assert!(srun_args.contains(&"--reservation=maint_2026".to_string()));
+        assert!(srun_args.contains(&"--licenses=ansys:2,comsol:1".to_string()));
         assert!(srun_args.contains(&"--gpus=1".to_string()));
         assert!(!srun_args.contains(&"--mail-type=END".to_string()));
 

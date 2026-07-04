@@ -1207,6 +1207,8 @@ fn build_smoke_plan(
         partition: plan.slurm.partition.clone(),
         account: plan.slurm.account.clone(),
         qos: plan.slurm.qos.clone(),
+        reservation: plan.slurm.reservation.clone(),
+        licenses: plan.slurm.licenses.clone(),
         time: plan.slurm.time.clone(),
         nodes: plan.slurm.nodes,
         ntasks: plan.slurm.ntasks,

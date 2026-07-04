@@ -232,6 +232,8 @@ These fields live under the top-level `x-slurm` block.
 | `partition` | string | omitted | Passed through to `#SBATCH --partition`. |
 | `account` | string | omitted | Passed through to `#SBATCH --account`. |
 | `qos` | string | omitted | Passed through to `#SBATCH --qos`. |
+| `reservation` | string | omitted | Passed through to `#SBATCH --reservation`. Validated for transport safety only (no line breaks or null bytes); the reservation must already exist on the cluster. |
+| `licenses` | string | omitted | Passed through to `#SBATCH --licenses`. Use Slurm's `name[:count][,name[:count]…]` grammar (e.g. `ansys:2,comsol:1`); validated for transport safety only, Slurm checks the grammar and availability. |
 | `time` | string | omitted | Passed through to `#SBATCH --time`. Must use a Slurm walltime format: minutes (`90`), `MM:SS` (`90:00`), `HH:MM:SS` (`1:00:00`), `D-HH` (`1-00`), `D-HH:MM`, or `D-HH:MM:SS`. A bare `1h`/`30m` is rejected at `validate` time (write `1h` as `1:00:00`). |
 | `nodes` | positive integer | omitted | Slurm allocation node count. Defaults to `1` when omitted. |
 | `ntasks` | positive integer | omitted | Passed through to `#SBATCH --ntasks`. |
@@ -374,7 +376,7 @@ x-slurm:
   submit_args:
     - "--mail-type=END"
     - "--mail-user=user@example.com"
-    - "--reservation=gpu-reservation"
+    - "--comment=deadline run"
 ```
 
 - Shape: list of strings
@@ -383,7 +385,7 @@ x-slurm:
   - Each entry is emitted as `#SBATCH {arg}`.
   - Entries are rejected if they contain line breaks or null bytes.
   - Entries are not validated against Slurm option syntax.
-  - First-class fields reject conflicting raw entries for the same option. Use `x-slurm.array`, `x-slurm.after_job`, or `x-slurm.dependency` instead of raw `--array` or `--dependency`.
+  - First-class fields reject conflicting raw entries for the same option. Prefer `x-slurm.reservation` and `x-slurm.licenses` over raw `--reservation`/`--licenses` (`-L`), and use `x-slurm.array`, `x-slurm.after_job`, or `x-slurm.dependency` instead of raw `--array` or `--dependency`.
 
 ### `x-slurm.notify`
 

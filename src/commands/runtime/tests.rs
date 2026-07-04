@@ -904,6 +904,23 @@ fn local_watch_cancel_and_rollback_helpers_cover_terminal_paths() {
         load::load_runtime_plan(&reservation_compose).expect("reservation runtime plan");
     warn_local_ignored_scheduler_settings(&reservation_plan);
 
+    // First-class reservation/licenses exercise their own --local ignore warnings.
+    // Kept separate from `reservation_compose` above, whose `submit_args` entry
+    // would trip the first-class/raw conflict guard if combined here.
+    let first_class_compose = tmpdir.path().join("compose-first-class.yaml");
+    fs::write(
+            &first_class_compose,
+            format!(
+                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n  reservation: maint_2026\n  licenses: ansys:2,comsol:1\n",
+                local_image.display(),
+                tmpdir.path().join("cache-first-class").display()
+            ),
+        )
+        .expect("first-class compose");
+    let first_class_plan =
+        load::load_runtime_plan(&first_class_compose).expect("first-class runtime plan");
+    warn_local_ignored_scheduler_settings(&first_class_plan);
+
     let mut sleeper = Command::new("sleep")
         .arg("30")
         .spawn()

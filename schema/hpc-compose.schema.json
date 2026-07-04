@@ -372,6 +372,8 @@
         "partition": { "$ref": "#/definitions/lineSafeString" },
         "account": { "$ref": "#/definitions/lineSafeString" },
         "qos": { "$ref": "#/definitions/lineSafeString" },
+        "reservation": { "$ref": "#/definitions/lineSafeString" },
+        "licenses": { "$ref": "#/definitions/lineSafeString" },
         "time": { "$ref": "#/definitions/walltime" },
         "nodes": { "$ref": "#/definitions/positiveInteger" },
         "ntasks": { "$ref": "#/definitions/positiveInteger" },

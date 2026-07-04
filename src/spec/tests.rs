@@ -4170,14 +4170,38 @@ fn slurm_config_rejects_newlines_in_sbatch_fields() {
     assert!(err.to_string().contains("x-slurm.output"));
 
     let config = SlurmConfig {
-        submit_args: vec![
-            "--reservation=ok".to_string(),
-            "--comment=bad\narg".to_string(),
-        ],
+        reservation: Some("bad\nreservation".to_string()),
+        ..SlurmConfig::default()
+    };
+    let err = config.validate().expect_err("newline in reservation");
+    assert!(err.to_string().contains("x-slurm.reservation"));
+
+    let config = SlurmConfig {
+        licenses: Some("bad\0licenses".to_string()),
+        ..SlurmConfig::default()
+    };
+    let err = config.validate().expect_err("null in licenses");
+    assert!(err.to_string().contains("x-slurm.licenses"));
+
+    let config = SlurmConfig {
+        submit_args: vec!["--comment=ok".to_string(), "--comment=bad\narg".to_string()],
         ..SlurmConfig::default()
     };
     let err = config.validate().expect_err("line break in submit arg");
     assert!(err.to_string().contains("x-slurm.submit_args[1]"));
+}
+
+#[test]
+fn slurm_config_accepts_reservation_and_licenses_pass_through() {
+    let config = SlurmConfig {
+        reservation: Some("maint_2026".to_string()),
+        licenses: Some("ansys:2,comsol:1".to_string()),
+        ..SlurmConfig::default()
+    };
+    assert!(
+        config.validate().is_ok(),
+        "comma/colon license grammar and a plain reservation name should pass transport-safety validation"
+    );
 }
 
 #[test]
@@ -5404,6 +5428,16 @@ fn submit_args_conflict_covers_mem_time_partition_qos_and_short_forms() {
             submit_args: vec!["--qos=high".into()],
             ..SlurmConfig::default()
         },
+        SlurmConfig {
+            reservation: Some("maint_2026".into()),
+            submit_args: vec!["--reservation=debug".into()],
+            ..SlurmConfig::default()
+        },
+        SlurmConfig {
+            licenses: Some("ansys:2".into()),
+            submit_args: vec!["--licenses=comsol:1".into()],
+            ..SlurmConfig::default()
+        },
         // Short forms are matched too.
         SlurmConfig {
             time: Some("2:00:00".into()),
@@ -5413,6 +5447,11 @@ fn submit_args_conflict_covers_mem_time_partition_qos_and_short_forms() {
         SlurmConfig {
             partition: Some("cpu".into()),
             submit_args: vec!["-p gpu".into()],
+            ..SlurmConfig::default()
+        },
+        SlurmConfig {
+            licenses: Some("ansys:2".into()),
+            submit_args: vec!["-L comsol:1".into()],
             ..SlurmConfig::default()
         },
     ];

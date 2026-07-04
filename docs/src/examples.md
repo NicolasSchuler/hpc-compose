@@ -151,6 +151,7 @@ The matrix below covers the broader set of runnable examples beyond the four pro
 | [`healthcheck-compat.yaml`](example-source.md#healthcheck-compat) | Repository file | `healthcheck`, `readiness`, `compose-compat`, `depends-on` | docker-compose healthcheck sugar normalized into readiness plus service_healthy gating. | You are migrating a docker-compose healthcheck and want the supported nc/curl subset. |
 | [`secrets-hf-token.yaml`](example-source.md#secrets-hf-token) | Repository file | `secrets`, `redaction`, `huggingface`, `env` | File-sourced secret interpolated into env and redacted in config/context output. | You need to feed a token into a service without leaking it into human-facing dumps. |
 | [`deps-and-assert.yaml`](example-source.md#deps-and-assert) | Repository file | `dependency`, `after-job`, `assert`, `artifacts` | Cross-job after_job dependency plus in-job assert with artifacts_contain. | You need to gate on an earlier job and assert post-conditions on outputs. |
+| [`reservation-licenses.yaml`](example-source.md#reservation-licenses) | Repository file | `reservation`, `licenses`, `sbatch`, `scheduling` | First-class x-slurm.reservation and x-slurm.licenses rendered as #SBATCH directives. | Ops handed you a reservation or your job must hold software licenses. |
 
 ## Which Example Should I Start From?
 

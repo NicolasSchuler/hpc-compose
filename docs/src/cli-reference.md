@@ -408,7 +408,7 @@ Current constraints:
 - no `services.<name>.x-slurm.mpi`
 - no `x-slurm.array`
 - no scheduler dependencies from `x-slurm.after_job` or `x-slurm.dependency`
-- reservation-related `x-slurm.submit_args` are ignored
+- `x-slurm.reservation`, `x-slurm.licenses`, and reservation-related `x-slurm.submit_args` are ignored
 - `x-slurm.error` is ignored, and local batch stderr is written into the tracked local batch log
 
 `up --local` follows the tracked local launch immediately, just like `up` does for a submitted job. Add `--detach` when you want to launch and return.

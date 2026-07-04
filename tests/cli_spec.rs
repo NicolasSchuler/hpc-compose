@@ -2200,6 +2200,8 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
                 "partition",
                 "account",
                 "qos",
+                "reservation",
+                "licenses",
                 "time",
                 "nodes",
                 "ntasks",

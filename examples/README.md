@@ -20,6 +20,7 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 - [`notify-mail.yaml`](notify-mail.yaml)
 - [`healthcheck-compat.yaml`](healthcheck-compat.yaml)
 - [`secrets-hf-token.yaml`](secrets-hf-token.yaml)
+- [`reservation-licenses.yaml`](reservation-licenses.yaml)
 
 ## Model serving and LLM workflows
 
