@@ -2174,7 +2174,19 @@ impl ComposeSpec {
         Ok(())
     }
 
-    fn validate(&mut self) -> Result<()> {
+    /// Runs full semantic validation and normalization of the spec.
+    ///
+    /// This is the interpolation-independent half of `load`: it validates every
+    /// invariant the planner and renderer assume and normalizes services
+    /// (script/command promotion, healthcheck-into-readiness). It is idempotent
+    /// -- running it again on an already-normalized spec is a no-op and never
+    /// errors -- so the planner can re-run it as an enforcement chokepoint even
+    /// after `load` already validated once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any semantic validation rule is violated.
+    pub(crate) fn validate(&mut self) -> Result<()> {
         self.software_env.validate("x-env")?;
         if let Some(sweep) = &self.sweep {
             sweep.validate()?;

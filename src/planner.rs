@@ -176,7 +176,14 @@ pub fn build_plan_with_options(
     options: PlanOptions,
 ) -> Result<Plan> {
     apply_resource_profile_defaults(&mut spec.slurm, &options.resource_profiles)?;
-    spec.slurm.validate()?;
+    // Enforcement chokepoint: run the full spec validation + normalization here,
+    // not just the slurm sub-check. `ComposeSpec` has all-public fields and a
+    // derived `Deserialize`, so a serde-constructed or hand-built spec can reach
+    // the planner without ever going through `load`. Validating here guarantees
+    // every invariant the renderer assumes holds regardless of how the spec was
+    // built. `validate` is idempotent, so re-running it after `load` already
+    // validated (the CLI path) is a harmless no-op.
+    spec.validate()?;
     let spec_path = if options.allow_missing_spec_path {
         crate::path_util::absolute_path(
             spec_path,
