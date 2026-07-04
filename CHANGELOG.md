@@ -7,8 +7,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.53] - 2026-07-04
+
 ### Added
 
+- Added a versioned JSON output-schema contract for `--format json`. Every JSON
+  command output is now backed by a `schemars`-pinned schema, and a new `schema`
+  subcommand emits the JSON Schemas (`schema --output <dir>`) so downstream
+  tooling can validate hpc-compose output against a stable, checked-in contract.
+- Added sampled CPU utilization to the metrics pipeline. `stats`, `watch`, and
+  the metrics JSONL now carry per-sample CPU usage alongside the existing GPU and
+  memory samples.
+- Added examples for arrays, mail notifications, healthcheck sugar, and secrets.
 - Reject per-service `x-slurm.partition`, `.qos`, and `.account` with a teaching
   error. A single hpc-compose allocation runs in one partition/account/qos, so
   these cannot be routed per service. Instead of serde's opaque "unknown field",
@@ -57,6 +67,49 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   canonical (`man sbatch`) order, `all` still collapses to `ALL` while keeping an
   explicit `array_tasks` modifier, and using `array_tasks` without `x-slurm.array`
   is rejected.
+
+### Changed
+
+- **Spec validation is now enforced at the planner chokepoint and covers more
+  cases.** The full validator runs before any plan/render/submit, and it now
+  guards Slurm time formats, `volumes:` short syntax (`host:container[:ro|rw]`),
+  conflicting `gpus:`/`x-slurm.gres` GPU requests, memory-unit strings, and
+  overlaps between first-class fields and raw `x-slurm.submit_args`. **Behavior
+  change:** specs that earlier slipped through (invalid durations, malformed
+  volume/memory strings, or a GPU count declared both ways) are now rejected with
+  a miette diagnostic instead of being accepted and mis-rendered. Review specs
+  that previously validated only by luck.
+- `sweep stop` now routes through the shared destructive-action confirmation
+  prompt, matching `down`/`cancel`, so stopping a running sweep asks before
+  cancelling its trials (bypass with the standard non-interactive/force path).
+- Scheduler probes for `sweep` and `diff` are batched and redundant `sacct`
+  calls are gated, reducing the number and latency of scheduler queries on those
+  paths.
+- The `watch` TUI moves its scheduler probes onto a background worker thread, so
+  the UI keeps repainting and stays responsive while probes are in flight.
+- Documented and pinned the precedence of global versus per-service `x-slurm`
+  settings so the resolution order is unambiguous and regression-tested.
+
+### Fixed
+
+- Restore the terminal on `SIGTERM`/`SIGHUP` while the `watch` TUI is in the
+  alternate screen, so an interrupted watch no longer leaves the shell in a
+  broken state.
+- Warn instead of silently ignoring corrupt state files and truncated scheduler
+  output, so partial/damaged runtime state surfaces a diagnostic rather than
+  being dropped.
+- Flush a final metrics sample at job end and degrade GPU fanout gracefully when
+  a device query fails, so end-of-run metrics are complete and a single failing
+  GPU probe no longer aborts collection.
+- Populate `gpu_count` from device samples and aggregate the `watch` GPU line so
+  multi-GPU utilization is reported correctly.
+
+### Security
+
+- Redact secret values in `plan` output paths. Secret values (by sensitive key
+  name and declared `secrets:` values) are now masked in `plan` text and
+  `--format json` output the same way they are elsewhere, closing a path that
+  could echo secrets into logs or captured command output.
 
 ## [0.1.52] - 2026-06-30
 
