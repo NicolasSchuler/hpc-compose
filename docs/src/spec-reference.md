@@ -988,6 +988,27 @@ These fields live under `services.<name>.x-slurm`.
 | `rendezvous` | mapping | omitted | Provider registration config for cross-job service discovery. |
 | `parallelism` | mapping `{ tensor, pipeline }` | omitted | Descriptive per-service tensor/pipeline geometry. Validation-only and cross-checked against this service's `gpus_per_node`. See [`x-slurm.parallelism`](#x-slurmparallelism). |
 
+### Global vs. per-service `x-slurm` precedence
+
+Fifteen resource fields exist in **both** the top-level `x-slurm` block and each `services.<name>.x-slurm` block: `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gpus`, `gres`, `gpus_per_node`, `gpus_per_task`, `cpus_per_gpu`, `mem_per_gpu`, `gpu_bind`, `cpu_bind`, `mem_bind`, `distribution`, and `hint`. They are **not** merged field-by-field into a single effective value. Instead they target two independent scopes:
+
+- **Top-level `x-slurm`** renders the job's `#SBATCH` allocation header (the whole-job `sbatch` request).
+- **Per-service `x-slurm`** renders that service's own `srun` step line inside the allocation.
+
+The rule per field is:
+
+| Field(s) | `#SBATCH` header (from top-level) | Service `srun` line (from per-service) |
+| --- | --- | --- |
+| `cpus_per_task`, `gpus`, `gres`, `gpus_per_node`, `gpus_per_task`, `cpus_per_gpu`, `mem_per_gpu`, `gpu_bind`, `cpu_bind`, `mem_bind`, `distribution`, `hint` | Top-level value only. | Per-service value only. If the service omits the field, its `srun` line omits the flag — the top-level value is **not** inherited onto the `srun` line. |
+| `ntasks`, `ntasks_per_node` | Top-level value only. | Per-service value if set, otherwise the top-level value is inherited (per-service **overrides** global, then falls back to it). |
+| `nodes` | Top-level value sizes the allocation (`#SBATCH --nodes`). | Per-service value selects how many of the already-allocated nodes the step spans (validated to be ≤ the allocation); it never enlarges the allocation. See [Multi-node placement rules](#multi-node-placement-rules). |
+
+Consequences worth noting:
+
+- A top-level `cpus_per_task`, `gpus`, `gres`, or the other GPU/binding/distribution fields sets the `#SBATCH` header but does **not** flow onto any service's `srun` line. Set these under `services.<name>.x-slurm` when a step needs the corresponding `srun` flag.
+- `gres` still takes priority over `gpus` on the `srun` line: when a service sets `gres`, its `gpus` is ignored for the `--gpus`/`--gres` choice.
+- The torchrun `--nproc-per-node` helper export (`HPC_COMPOSE_DIST_NPROC_PER_NODE`) is derived separately and *does* fall back from the service's `gpus_per_node`/`gres`/`gpus` to the top-level values; this affects only that descriptive env var, not the `srun` resource flags.
+
 ### `services.<name>.x-slurm.rendezvous`
 
 Provider-side registration writes an atomic shared-cache record after readiness succeeds when readiness is configured:

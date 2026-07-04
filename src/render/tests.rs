@@ -9,12 +9,13 @@ use super::*;
 use crate::cluster::{ClusterProfile, DistributedProfile, RuntimeAvailability};
 use crate::planner::ServicePlacement;
 use crate::spec::{
-    DependencyCondition, MpiConfig, MpiProfile, MpiType, ParallelismConfig, ReadinessSpec,
-    RendezvousRegisterConfig, ResumeConfig, RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy,
-    ScratchConfig, ServiceAssertSpec, ServiceDependency, ServiceEventHookSpec,
-    ServiceFailurePolicy, ServiceHookContext, ServiceHookEvent, ServiceHookSpec,
-    ServiceRendezvousConfig, ServiceScratchConfig, ServiceSlurmConfig, SlurmConfig, StageInConfig,
-    StageMode, StageOutConfig, StageOutWhen,
+    ComposeSpec, DependencyCondition, DependsOnSpec, EnvironmentSpec, MpiConfig, MpiProfile,
+    MpiType, ParallelismConfig, ReadinessSpec, RendezvousRegisterConfig, ResumeConfig,
+    RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceAssertSpec,
+    ServiceDependency, ServiceEnrootConfig, ServiceEventHookSpec, ServiceFailurePolicy,
+    ServiceHookContext, ServiceHookEvent, ServiceHookSpec, ServiceRendezvousConfig,
+    ServiceRuntimeConfig, ServiceScratchConfig, ServiceSlurmConfig, ServiceSpec, SlurmConfig,
+    StageInConfig, StageMode, StageOutConfig, StageOutWhen,
 };
 
 fn runtime_service() -> RuntimeService {
@@ -3280,5 +3281,195 @@ fn parallelism_environment_names_surface_only_when_declared() {
             "HPC_COMPOSE_TP_SIZE".to_string(),
             "HPC_COMPOSE_PP_SIZE".to_string()
         ]
+    );
+}
+
+// Pins the global vs. per-service `x-slurm` precedence rule documented in
+// docs/src/spec-reference.md ("Global vs. per-service `x-slurm` precedence"):
+//   * The `#SBATCH` allocation header is rendered from the top-level `x-slurm`
+//     block ONLY; per-service overrides never reach it.
+//   * Each service's `srun` line is rendered from that service's per-service
+//     `x-slurm` block; for the GPU/CPU/binding/distribution fields the global
+//     value is NOT inherited onto the `srun` line.
+//   * `ntasks` / `ntasks_per_node` DO inherit from the global block when the
+//     service omits them (per-service overrides, then falls back to global).
+fn plan_service_spec(image: &str, slurm: ServiceSlurmConfig) -> ServiceSpec {
+    ServiceSpec {
+        image: Some(image.to_string()),
+        command: None,
+        entrypoint: None,
+        script: None,
+        environment: EnvironmentSpec::None,
+        volumes: Vec::new(),
+        working_dir: None,
+        depends_on: DependsOnSpec::None,
+        readiness: None,
+        healthcheck: None,
+        assertions: None,
+        software_env: crate::spec::SoftwareEnvConfig::default(),
+        slurm,
+        runtime: ServiceRuntimeConfig::default(),
+        enroot: ServiceEnrootConfig::default(),
+    }
+}
+
+fn render_from_spec(global: SlurmConfig, services: BTreeMap<String, ServiceSpec>) -> String {
+    let spec = ComposeSpec {
+        secrets: BTreeMap::new(),
+        name: Some("precedence-demo".into()),
+        runtime: RuntimeConfig::default(),
+        software_env: crate::spec::SoftwareEnvConfig::default(),
+        slurm: global,
+        services,
+        sweep: None,
+    };
+    let plan = crate::planner::build_plan_with_options(
+        std::path::Path::new("."),
+        spec,
+        crate::planner::PlanOptions::default(),
+    )
+    .expect("plan");
+    let runtime = crate::prepare::build_runtime_plan(&plan);
+    render_script(&runtime).expect("script")
+}
+
+fn sbatch_header_lines(script: &str) -> Vec<&str> {
+    script
+        .lines()
+        .filter(|line| line.starts_with("#SBATCH "))
+        .collect()
+}
+
+fn srun_cmd_line(script: &str) -> &str {
+    script
+        .lines()
+        .find(|line| line.contains("srun_cmd="))
+        .expect("service srun_cmd line")
+}
+
+#[test]
+fn global_and_per_service_x_slurm_precedence_is_pinned() {
+    // --- Scope separation: header from global, srun line from per-service. ---
+    let global = SlurmConfig {
+        cpus_per_task: Some(8),
+        gres: Some("gpu:global:4".into()),
+        distribution: Some("cyclic".into()),
+        gpus: Some(4),
+        ..SlurmConfig::default()
+    };
+    let worker = plan_service_spec(
+        "alpine:latest",
+        ServiceSlurmConfig {
+            cpus_per_task: Some(2),
+            gres: Some("gpu:svc:1".into()),
+            distribution: Some("block:block".into()),
+            gpus: Some(1),
+            ..ServiceSlurmConfig::default()
+        },
+    );
+    let script = render_from_spec(global, BTreeMap::from([("worker".to_string(), worker)]));
+
+    // The #SBATCH header carries the GLOBAL values, and only those.
+    let header = sbatch_header_lines(&script).join("\n");
+    assert!(
+        header.contains("#SBATCH --cpus-per-task=8"),
+        "header cpus: {header}"
+    );
+    assert!(
+        header.contains("#SBATCH --gres=gpu:global:4"),
+        "header gres: {header}"
+    );
+    assert!(
+        header.contains("#SBATCH --distribution=cyclic"),
+        "header dist: {header}"
+    );
+    // Per-service overrides never reach the allocation header.
+    assert!(
+        !header.contains("--cpus-per-task=2"),
+        "header leaked svc cpus: {header}"
+    );
+    assert!(
+        !header.contains("gpu:svc:1"),
+        "header leaked svc gres: {header}"
+    );
+    assert!(
+        !header.contains("--distribution=block:block"),
+        "header leaked svc dist: {header}"
+    );
+    // `gres` wins over `gpus` on the header, so no plain `--gpus`.
+    assert!(
+        !header.contains("#SBATCH --gpus="),
+        "header should prefer gres: {header}"
+    );
+
+    // The service srun line carries the PER-SERVICE values, and only those.
+    let srun = srun_cmd_line(&script);
+    assert!(srun.contains("--cpus-per-task=2"), "srun cpus: {srun}");
+    assert!(srun.contains("--gres=gpu:svc:1"), "srun gres: {srun}");
+    assert!(
+        srun.contains("--distribution=block:block"),
+        "srun dist: {srun}"
+    );
+    // Global values are NOT inherited onto the srun line for these fields.
+    assert!(
+        !srun.contains("--cpus-per-task=8"),
+        "srun leaked global cpus: {srun}"
+    );
+    assert!(
+        !srun.contains("gpu:global:4"),
+        "srun leaked global gres: {srun}"
+    );
+    assert!(
+        !srun.contains("--distribution=cyclic"),
+        "srun leaked global dist: {srun}"
+    );
+    // `gres` wins over `gpus` on the srun line too.
+    assert!(!srun.contains("--gpus="), "srun should prefer gres: {srun}");
+
+    // --- ntasks_per_node: inherited from global when the service omits it. ---
+    let global = SlurmConfig {
+        nodes: Some(2),
+        ntasks_per_node: Some(3),
+        ..SlurmConfig::default()
+    };
+    let inheritor = plan_service_spec("alpine:latest", ServiceSlurmConfig::default());
+    let script = render_from_spec(
+        global.clone(),
+        BTreeMap::from([("worker".to_string(), inheritor)]),
+    );
+    let header = sbatch_header_lines(&script).join("\n");
+    assert!(
+        header.contains("#SBATCH --ntasks-per-node=3"),
+        "header tpn: {header}"
+    );
+    let srun = srun_cmd_line(&script);
+    assert!(
+        srun.contains("--ntasks-per-node=3"),
+        "srun should inherit global ntasks-per-node: {srun}"
+    );
+
+    // --- ntasks_per_node: per-service value overrides the global one. ---
+    let overrider = plan_service_spec(
+        "alpine:latest",
+        ServiceSlurmConfig {
+            ntasks_per_node: Some(1),
+            ..ServiceSlurmConfig::default()
+        },
+    );
+    let script = render_from_spec(global, BTreeMap::from([("worker".to_string(), overrider)]));
+    let header = sbatch_header_lines(&script).join("\n");
+    // Header still reflects the global allocation request.
+    assert!(
+        header.contains("#SBATCH --ntasks-per-node=3"),
+        "header tpn override: {header}"
+    );
+    let srun = srun_cmd_line(&script);
+    assert!(
+        srun.contains("--ntasks-per-node=1"),
+        "srun should use per-service ntasks-per-node: {srun}"
+    );
+    assert!(
+        !srun.contains("--ntasks-per-node=3"),
+        "srun should not inherit global when overridden: {srun}"
     );
 }
