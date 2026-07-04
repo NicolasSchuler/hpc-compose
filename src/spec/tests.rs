@@ -5127,3 +5127,109 @@ fn parallelism_cross_check_does_not_overflow_u32() {
         })
     }));
 }
+
+/// `ComposeSpec::validate` normalizes services (script/command promotion,
+/// healthcheck-into-readiness) as well as validating them. Because the planner
+/// now re-runs it as an enforcement chokepoint after `load` already ran it once
+/// on the CLI path, validation+normalization MUST be idempotent: a second pass
+/// over an already-normalized spec must change nothing and error nothing.
+///
+/// This exercises every normalize step at once: a `script`, a multi-line
+/// `command` string with a string `entrypoint` (the array-promotion path), a
+/// healthcheck consumed into readiness, and a runtime prepare hook.
+#[test]
+fn validate_is_idempotent_across_repeated_passes() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  worker:
+    image: redis:7
+    script: |
+      echo starting
+      exec worker
+    x-runtime:
+      prepare:
+        commands:
+          - echo prep
+  api:
+    image: python:3.11
+    entrypoint: "python -u"
+    command: "app.py\n--serve"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --silent --fail http://127.0.0.1:8080/health
+      timeout: 2m
+"#,
+    );
+    // `load_raw_spec` parses without running the semantic validate/normalize, so
+    // the first `validate` call below performs the real normalization work.
+    let mut spec = load_raw_spec(&path).expect("parse raw spec");
+
+    spec.validate()
+        .expect("first validate/normalize must succeed");
+    let after_first = format!("{spec:?}");
+
+    // Sanity: normalization actually happened on the first pass, so the second
+    // pass is genuinely re-running over already-normalized state.
+    let worker = spec.services.get("worker").expect("worker");
+    assert!(worker.script.is_none(), "script must be consumed");
+    assert!(
+        matches!(worker.command, Some(CommandSpec::Vec(_))),
+        "script must be promoted to a /bin/sh -lc array"
+    );
+    let api = spec.services.get("api").expect("api");
+    assert!(api.healthcheck.is_none(), "healthcheck must be consumed");
+    assert!(api.readiness.is_some(), "healthcheck must become readiness");
+    assert!(
+        matches!(api.command, Some(CommandSpec::Vec(_))) && api.entrypoint.is_none(),
+        "multi-line command+entrypoint must be promoted to a single array"
+    );
+
+    spec.validate()
+        .expect("second validate/normalize must also succeed (idempotent)");
+    let after_second = format!("{spec:?}");
+
+    assert_eq!(
+        after_first, after_second,
+        "re-running validate/normalize must be a no-op"
+    );
+}
+
+/// The planner is the enforcement chokepoint: a `ComposeSpec` built by any route
+/// other than `load` (here, a direct serde deserialize that skips the semantic
+/// `validate`) must still be fully validated when it reaches `build_plan`. This
+/// pins that a spec `load` would reject is rejected by the planner too, with the
+/// same diagnostic.
+#[test]
+fn build_plan_enforces_full_spec_validation() {
+    // Both x-runtime.prepare and x-enroot.prepare set: `load` rejects this with
+    // DuplicatePrepareHook. serde deserializes it fine, bypassing validation.
+    let yaml = r#"
+services:
+  app:
+    image: redis:7
+    x-runtime:
+      prepare:
+        commands: ["echo runtime"]
+    x-enroot:
+      prepare:
+        commands: ["echo enroot"]
+"#;
+    let spec: ComposeSpec = serde_norway::from_str(yaml).expect("deserialize spec");
+
+    let err = crate::planner::build_plan(Path::new("."), spec)
+        .expect_err("planner must reject the duplicate prepare hook");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("prepare"),
+        "planner should surface the duplicate-prepare-hook diagnostic, got: {rendered}"
+    );
+    assert!(
+        err.downcast_ref::<SpecError>()
+            .is_some_and(|se| matches!(se, SpecError::DuplicatePrepareHook { .. })),
+        "expected DuplicatePrepareHook, got: {rendered}"
+    );
+}
