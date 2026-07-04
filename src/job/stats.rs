@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
 use super::runtime_state::load_runtime_state;
 use super::scheduler::{
@@ -367,6 +369,24 @@ fn build_stats_snapshot_core(
                 sstat_unavailable_reason = Some(reason);
             }
             Err(err) => return Err(err),
+        }
+    }
+
+    // Backfill the allocation-derived GPU count from observed nvidia-smi device
+    // samples when TRES data is absent. On clusters where sstat rejects
+    // AllocTRES the TRES-parsed gpu_count is always None, yet the sampler still
+    // records the real device list; surface that count so `stats` output and CSV
+    // are not permanently blank. Only fills steps missing a count, never
+    // overwrites a genuine TRES-derived value.
+    if let Some(observed) = sampler
+        .as_ref()
+        .and_then(|snapshot| snapshot.gpu.as_ref())
+        .and_then(observed_gpu_device_count)
+    {
+        for step in &mut steps {
+            if step.gpu_count.is_none() {
+                step.gpu_count = Some(observed.to_string());
+            }
         }
     }
 
@@ -831,6 +851,34 @@ fn summarize_gpu_nodes(devices: &[GpuDeviceSample]) -> Vec<GpuNodeSummary> {
         .collect()
 }
 
+/// Counts the distinct GPU devices observed by the nvidia-smi sampler across
+/// every node, summing per-node distinct device identities. Each device is keyed
+/// by its UUID when present, falling back to its index, so repeated sample rows
+/// for the same device are not double-counted. Returns `None` when no devices
+/// were observed. Used to backfill the allocation-derived `StepStats::gpu_count`
+/// on clusters where `sstat` rejects `AllocTRES` (so TRES data is absent).
+fn observed_gpu_device_count(gpu: &GpuSnapshot) -> Option<usize> {
+    let mut per_node: BTreeMap<Option<String>, BTreeSet<String>> = BTreeMap::new();
+    for device in &gpu.gpus {
+        let identity = device
+            .uuid
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or(device
+                .index
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()));
+        if let Some(identity) = identity {
+            per_node
+                .entry(device.node.clone())
+                .or_default()
+                .insert(identity.trim().to_string());
+        }
+    }
+    let total: usize = per_node.values().map(BTreeSet::len).sum();
+    (total > 0).then_some(total)
+}
+
 fn parse_u64_stats(value: Option<&str>) -> Option<u64> {
     value?.trim().parse::<u64>().ok()
 }
@@ -1147,6 +1195,55 @@ mod tests {
         let slurm = sampler.slurm.expect("slurm snapshot");
         assert_eq!(slurm.sampled_at, "2026-04-10T10:00:00Z");
         assert_eq!(slurm.steps.len(), 2);
+    }
+
+    #[test]
+    fn observed_gpu_device_count_sums_distinct_devices_per_node() {
+        fn device(node: Option<&str>, index: &str, uuid: Option<&str>) -> GpuDeviceSample {
+            GpuDeviceSample {
+                node: node.map(str::to_string),
+                rank: None,
+                local_rank: None,
+                service: None,
+                collector: None,
+                index: Some(index.to_string()),
+                uuid: uuid.map(str::to_string),
+                name: None,
+                utilization_gpu: None,
+                utilization_memory: None,
+                memory_used_mib: None,
+                memory_total_mib: None,
+                temperature_c: None,
+                power_draw_w: None,
+                power_limit_w: None,
+            }
+        }
+
+        // Two nodes with two devices each; the repeated uuid on node02 must not
+        // be double-counted, and the missing-uuid device falls back to index.
+        let gpu = GpuSnapshot {
+            sampled_at: "2026-04-10T10:00:00Z".into(),
+            nodes: Vec::new(),
+            gpus: vec![
+                device(Some("node01"), "0", Some("gpu-a")),
+                device(Some("node01"), "1", Some("gpu-b")),
+                device(Some("node02"), "0", Some("gpu-c")),
+                device(Some("node02"), "0", Some("gpu-c")),
+                device(Some("node02"), "1", None),
+            ],
+            processes: Vec::new(),
+        };
+        // node01: {gpu-a, gpu-b} = 2; node02: {gpu-c, index "1"} = 2 (dup gpu-c
+        // collapses). Total distinct devices across the fleet = 4.
+        assert_eq!(observed_gpu_device_count(&gpu), Some(4));
+
+        let empty = GpuSnapshot {
+            sampled_at: "2026-04-10T10:00:00Z".into(),
+            nodes: Vec::new(),
+            gpus: Vec::new(),
+            processes: Vec::new(),
+        };
+        assert_eq!(observed_gpu_device_count(&empty), None);
     }
 
     #[test]
