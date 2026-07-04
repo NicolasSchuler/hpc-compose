@@ -286,9 +286,16 @@ struct SelectedLogBuffer {
     capacity: usize,
 }
 
+/// Armed while a `TerminalGuard` holds the terminal in raw / alternate-screen
+/// mode. The panic hook, `Drop`, and the SIGTERM/SIGHUP handlers each try to
+/// claim the restore with `swap(false)`; the first to win performs it, so the
+/// terminal is restored exactly once regardless of which path fires. This is a
+/// process-global rather than a per-guard flag because the C signal handler
+/// cannot capture guard state, and watch/replay never nest guards.
+static TERMINAL_RESTORE_ARMED: AtomicBool = AtomicBool::new(false);
+
 struct TerminalGuard {
     entered_terminal: bool,
-    restore_armed: Arc<AtomicBool>,
     previous_hook: Option<SharedPanicHook>,
 }
 
@@ -321,27 +328,35 @@ impl TerminalGuard {
     }
 
     fn new(entered_terminal: bool) -> Self {
-        let restore_armed = Arc::new(AtomicBool::new(true));
-        let previous_hook =
-            install_terminal_panic_hook(entered_terminal, Arc::clone(&restore_armed));
+        // Arm the shared restore guard before installing any handler so a panic
+        // or signal that fires immediately still finds the flag set.
+        TERMINAL_RESTORE_ARMED.store(true, Ordering::SeqCst);
+        let previous_hook = install_terminal_panic_hook(entered_terminal);
+        if entered_terminal {
+            signal_restore::install();
+        }
         Self {
             entered_terminal,
-            restore_armed,
             previous_hook,
         }
     }
 
     #[cfg(test)]
     fn panic_restore_armed(&self) -> bool {
-        self.restore_armed.load(Ordering::SeqCst)
+        TERMINAL_RESTORE_ARMED.load(Ordering::SeqCst)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        self.restore_armed.store(false, Ordering::SeqCst);
-        if self.entered_terminal {
+        // Claim the restore first so our still-installed signal handler cannot
+        // repeat it; then neutralize the handlers now that no guard is live.
+        let claimed = TERMINAL_RESTORE_ARMED.swap(false, Ordering::SeqCst);
+        if self.entered_terminal && claimed {
             restore_terminal_best_effort();
+        }
+        if self.entered_terminal {
+            signal_restore::remove();
         }
         if let Some(previous_hook) = self.previous_hook.take() {
             restore_previous_panic_hook(previous_hook);
@@ -350,15 +365,12 @@ impl Drop for TerminalGuard {
 }
 
 #[cfg(not(test))]
-fn install_terminal_panic_hook(
-    entered_terminal: bool,
-    restore_armed: Arc<AtomicBool>,
-) -> Option<SharedPanicHook> {
+fn install_terminal_panic_hook(entered_terminal: bool) -> Option<SharedPanicHook> {
     let previous_hook = std::panic::take_hook();
     let previous_hook = Arc::new(Mutex::new(Some(previous_hook)));
     let hook_previous = Arc::clone(&previous_hook);
     std::panic::set_hook(Box::new(move |info| {
-        if entered_terminal && restore_armed.swap(false, Ordering::SeqCst) {
+        if entered_terminal && TERMINAL_RESTORE_ARMED.swap(false, Ordering::SeqCst) {
             restore_terminal_best_effort();
         }
         if let Ok(guard) = hook_previous.lock()
@@ -371,11 +383,66 @@ fn install_terminal_panic_hook(
 }
 
 #[cfg(test)]
-fn install_terminal_panic_hook(
-    _entered_terminal: bool,
-    _restore_armed: Arc<AtomicBool>,
-) -> Option<SharedPanicHook> {
+fn install_terminal_panic_hook(_entered_terminal: bool) -> Option<SharedPanicHook> {
     None
+}
+
+/// SIGTERM/SIGHUP handling that restores the terminal before the process dies.
+///
+/// An external `kill` or a terminal-close (SIGHUP) takes the default
+/// termination action, so neither `Drop` nor the panic hook runs and the
+/// terminal is left in raw + alternate-screen mode. While a `TerminalGuard`
+/// holds the terminal we install a handler that performs the same best-effort
+/// restore, then resets the disposition to default and re-raises the signal so
+/// the exit status still reflects the signal. `restore_terminal_best_effort`
+/// only writes escape sequences and calls `tcsetattr`, the accepted pattern for
+/// this class of TUI signal handler. libc is used directly (already a direct
+/// dependency, and the mechanism `dev.rs` uses) so no new dependency is added.
+#[cfg(all(unix, not(test)))]
+mod signal_restore {
+    use super::{Ordering, TERMINAL_RESTORE_ARMED, restore_terminal_best_effort};
+    use std::sync::atomic::AtomicUsize;
+
+    // Previous dispositions, restored when the guard drops so normal exit does
+    // not leave our handler installed for the next command.
+    static PREV_SIGTERM: AtomicUsize = AtomicUsize::new(0);
+    static PREV_SIGHUP: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn handle_terminal_signal(signum: libc::c_int) {
+        // Whoever claims the flag owns the single restore; Drop/panic are gated
+        // on the same flag so this cannot double-restore.
+        if TERMINAL_RESTORE_ARMED.swap(false, Ordering::SeqCst) {
+            restore_terminal_best_effort();
+        }
+        // Preserve exit-status semantics: default the disposition and re-raise.
+        unsafe {
+            libc::signal(signum, libc::SIG_DFL);
+            libc::raise(signum);
+        }
+    }
+
+    pub(super) fn install() {
+        let handler = handle_terminal_signal as *const () as usize;
+        unsafe {
+            PREV_SIGTERM.store(libc::signal(libc::SIGTERM, handler), Ordering::SeqCst);
+            PREV_SIGHUP.store(libc::signal(libc::SIGHUP, handler), Ordering::SeqCst);
+        }
+    }
+
+    pub(super) fn remove() {
+        unsafe {
+            libc::signal(libc::SIGTERM, PREV_SIGTERM.load(Ordering::SeqCst));
+            libc::signal(libc::SIGHUP, PREV_SIGHUP.load(Ordering::SeqCst));
+        }
+    }
+}
+
+/// Non-Unix / test builds have no signal restore; `Drop` and the panic hook
+/// remain the only restore paths.
+#[cfg(not(all(unix, not(test))))]
+mod signal_restore {
+    pub(super) fn install() {}
+    pub(super) fn remove() {}
 }
 
 #[cfg(not(test))]
