@@ -2812,6 +2812,73 @@ services:
 }
 
 #[test]
+fn plan_redacts_secret_values_in_all_output_paths() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    fs::write(tmpdir.path().join("token.txt"), "hf-secret-value-123\n").expect("secret file");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: secrets-plan-demo
+x-slurm:
+  cache_dir: {}
+secrets:
+  hf_token:
+    file: ./token.txt
+services:
+  app:
+    image: redis:7
+    environment:
+      HF_TOKEN: ${{hf_token}}
+      MODEL: llama
+    command: ["/bin/sh", "-lc", "echo prefix-${{hf_token}}"]
+"#,
+            cache_root.path().display()
+        ),
+    );
+
+    // plan --format json must redact the resolved secret in the runtime plan.
+    let plan_json = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&plan_json);
+    let plan_json_stdout = stdout_text(&plan_json);
+    assert!(
+        !plan_json_stdout.contains("hf-secret-value-123"),
+        "plan JSON must not leak raw secret values:\n{plan_json_stdout}"
+    );
+    assert!(
+        plan_json_stdout.contains("echo prefix-<redacted>"),
+        "plan runtime plan command should redact secret interpolation:\n{plan_json_stdout}"
+    );
+
+    // plan --verbose text must redact resolved argv too.
+    let plan_verbose = run_cli(
+        tmpdir.path(),
+        &["plan", "-f", compose.to_str().expect("path"), "--verbose"],
+    );
+    assert_success(&plan_verbose);
+    let plan_verbose_stdout = stdout_text(&plan_verbose);
+    assert!(
+        !plan_verbose_stdout.contains("hf-secret-value-123"),
+        "plan verbose text must not leak raw secret values:\n{plan_verbose_stdout}"
+    );
+    assert!(
+        plan_verbose_stdout.contains("echo prefix-<redacted>"),
+        "plan verbose command should redact secret interpolation:\n{plan_verbose_stdout}"
+    );
+}
+
+#[test]
 fn secrets_from_env_resolve_via_process_env() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
