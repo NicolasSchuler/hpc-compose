@@ -2528,7 +2528,7 @@ pub(crate) fn smoke_test(
     local: bool,
     submit: bool,
     time: String,
-    wait_timeout: String,
+    timeout: String,
     script_out: Option<PathBuf>,
     flags: PrepareFlags,
     format: Option<OutputFormat>,
@@ -2541,7 +2541,7 @@ pub(crate) fn smoke_test(
         parse_slurm_time_limit(&time).context("test --time is invalid")?;
     }
     let timeout_seconds =
-        parse_log_since_duration(&wait_timeout).context("test --wait-timeout is invalid")?;
+        parse_log_since_duration(&timeout).context("test --timeout is invalid")?;
     let output_format = output::resolve_output_format(format);
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     let scheduler_options = SchedulerOptions {

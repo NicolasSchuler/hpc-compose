@@ -68,7 +68,7 @@ pub(crate) fn doctor_mpi_smoke(
     quiet: bool,
 ) -> Result<()> {
     if submit && timeout_seconds == 0 {
-        bail!("doctor --mpi-smoke --timeout-seconds must be at least 1 when --submit is used");
+        bail!("doctor --mpi-smoke --timeout must be at least 1s when --submit is used");
     }
     let output_format = output::resolve_output_format(format);
     let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -284,7 +284,7 @@ pub(crate) fn doctor_fabric_smoke(
         quiet,
     } = options;
     if submit && timeout_seconds == 0 {
-        bail!("doctor --fabric-smoke --timeout-seconds must be at least 1 when --submit is used");
+        bail!("doctor --fabric-smoke --timeout must be at least 1s when --submit is used");
     }
     let selected_checks = FabricCheckSelection::parse(checks.as_deref())?;
     let output_format = output::resolve_output_format(format);
@@ -511,7 +511,7 @@ pub(crate) fn doctor_readiness(
     quiet: bool,
 ) -> Result<()> {
     if matches!(timeout_seconds, Some(0)) {
-        bail!("doctor readiness --timeout-seconds must be at least 1");
+        bail!("doctor readiness --timeout must be at least 1s");
     }
     let output_format = output::resolve_output_format(format);
     let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(

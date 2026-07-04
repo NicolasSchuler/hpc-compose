@@ -6,6 +6,18 @@ use serde_json::Value;
 use support::*;
 
 #[test]
+fn prepare_rejects_removed_force_alias() {
+    // `--force` was a deprecated alias for `prepare --force-rebuild`; it has
+    // been removed so `--force` only ever means "overwrite file" (new/evolve).
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output = run_cli(tmpdir.path(), &["prepare", "--force"]);
+    assert_failure(&output);
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("unexpected argument '--force'"));
+    assert!(stderr.contains("--force-rebuild"));
+}
+
+#[test]
 fn prepare_and_cache_commands_manage_artifacts() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
