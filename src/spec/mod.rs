@@ -1070,6 +1070,8 @@ pub enum MetricsCollector {
     Gpu,
     /// Collect Slurm step metrics through `sstat`.
     Slurm,
+    /// Collect sampled host CPU utilization through `/proc/stat`.
+    Cpu,
 }
 
 /// Top-level `x-slurm.metrics` configuration.
@@ -2713,7 +2715,11 @@ impl SlurmConfig {
             return Vec::new();
         };
         if metrics.collectors.is_empty() {
-            vec![MetricsCollector::Gpu, MetricsCollector::Slurm]
+            vec![
+                MetricsCollector::Gpu,
+                MetricsCollector::Slurm,
+                MetricsCollector::Cpu,
+            ]
         } else {
             metrics.collectors.clone()
         }

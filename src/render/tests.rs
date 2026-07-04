@@ -2164,7 +2164,11 @@ fn render_metrics_sampler_when_enabled() {
             metrics: Some(crate::spec::MetricsConfig {
                 enabled: Some(true),
                 interval_seconds: Some(3),
-                collectors: vec![MetricsCollector::Gpu, MetricsCollector::Slurm],
+                collectors: vec![
+                    MetricsCollector::Gpu,
+                    MetricsCollector::Slurm,
+                    MetricsCollector::Cpu,
+                ],
             }),
             ..SlurmConfig::default()
         },
@@ -2202,6 +2206,20 @@ fn render_metrics_sampler_when_enabled() {
     assert!(script.contains("local fallback_status=$?"));
     assert!(script.contains("METRICS_DIAGNOSTICS_DIR=\"$METRICS_DIR/diagnostics\""));
     assert!(script.contains("nvidia-smi topo -m"));
+    // Sampled CPU collector: enabled flag, /proc/stat source, cpu.jsonl output,
+    // wired into sample_metrics_once, plus its own multi-node fanout + fallback.
+    assert!(script.contains("CPU_COLLECTOR_ENABLED=1"));
+    assert!(script.contains("CPU_METRICS_FILE=\"$METRICS_DIR/cpu.jsonl\""));
+    assert!(script.contains("emit_cpu_sample_row"));
+    assert!(script.contains("${HPC_COMPOSE_PROC_STAT_PATH:-/proc/stat}"));
+    assert!(script.contains("  sample_cpu_metrics\n"));
+    assert!(script.contains("sample_cpu_metrics_all_nodes"));
+    assert!(script.contains("write_cpu_sample_node_script"));
+    assert!(
+        script.contains("multi-node CPU fanout failed through srun; sampling the batch node only")
+    );
+    assert!(script.contains("multi-node CPU fanout degraded to batch-node sampling"));
+    assert!(script.contains(": > \"$CPU_METRICS_FILE\""));
 }
 
 #[test]
@@ -3087,6 +3105,10 @@ SLURM_COLLECTOR_ENABLED=1
 SLURM_COLLECTOR_AVAILABLE=1
 SLURM_COLLECTOR_NOTE=""
 SLURM_COLLECTOR_LAST_SAMPLED_AT="2024-01-01T00:00:00Z"
+CPU_COLLECTOR_ENABLED=1
+CPU_COLLECTOR_AVAILABLE=1
+CPU_COLLECTOR_NOTE=""
+CPU_COLLECTOR_LAST_SAMPLED_AT="2024-01-01T00:00:05Z"
 write_metrics_meta
 "#,
         meta = meta.display()
@@ -3103,7 +3125,7 @@ write_metrics_meta
     assert_eq!(value["sampler_pid"], 4242);
     assert_eq!(value["interval_seconds"], 5);
     let collectors = value["collectors"].as_array().expect("collectors array");
-    assert_eq!(collectors.len(), 2);
+    assert_eq!(collectors.len(), 3);
     assert_eq!(collectors[0]["name"], "gpu");
     assert_eq!(collectors[0]["enabled"], true);
     assert_eq!(collectors[0]["available"], false);
@@ -3115,6 +3137,89 @@ write_metrics_meta
     assert_eq!(collectors[1]["name"], "slurm");
     assert_eq!(collectors[1]["available"], true);
     assert_eq!(collectors[1]["note"], serde_json::Value::Null);
+    assert_eq!(collectors[2]["name"], "cpu");
+    assert_eq!(collectors[2]["enabled"], true);
+    assert_eq!(collectors[2]["available"], true);
+    assert_eq!(collectors[2]["note"], serde_json::Value::Null);
+    assert_eq!(collectors[2]["last_sampled_at"], "2024-01-01T00:00:05Z");
+}
+
+#[test]
+fn emit_cpu_sample_row_computes_delta_across_two_proc_stat_snapshots() {
+    // Drive the generated cpu sampling function against two fixture /proc/stat
+    // snapshots (path override), sharing one state file so the second call sees
+    // the first call's counters and computes a non-idle/total delta.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let stat1 = tmpdir.path().join("stat1");
+    let stat2 = tmpdir.path().join("stat2");
+    let loadavg = tmpdir.path().join("loadavg");
+    let state = tmpdir.path().join("cpu.state");
+    let out = tmpdir.path().join("cpu.jsonl");
+    // Aggregate cpu line: user nice system idle iowait irq softirq steal ...
+    // Sample1: idle_all=800, non_idle=200, total=1000.
+    fs::write(&stat1, "cpu  100 0 100 700 100 0 0 0 0 0\ncpu0 50 0 50 350 50 0 0 0 0 0\ncpu1 50 0 50 350 50 0 0 0 0 0\nintr 12345\n").expect("stat1");
+    // Sample2: idle_all=1400, non_idle=400, total=1800. dt=800, di=600 -> 25.0%.
+    fs::write(&stat2, "cpu  200 0 200 1300 100 0 0 0 0 0\ncpu0 100 0 100 650 50 0 0 0 0 0\ncpu1 100 0 100 650 50 0 0 0 0 0\nintr 99999\n").expect("stat2");
+    fs::write(&loadavg, "0.50 0.40 0.30 1/234 5678\n").expect("loadavg");
+    let driver = format!(
+        r#"
+emit_cpu_sample_row "2024-01-01T00:00:00Z" "nodeA" "{stat1}" "{loadavg}" "{state}" "{out}"
+emit_cpu_sample_row "2024-01-01T00:00:05Z" "nodeA" "{stat2}" "{loadavg}" "{state}" "{out}"
+"#,
+        stat1 = stat1.display(),
+        stat2 = stat2.display(),
+        loadavg = loadavg.display(),
+        state = state.display(),
+        out = out.display(),
+    );
+    let output = run_metrics_bash(tmpdir.path(), &driver);
+    assert!(
+        output.status.success(),
+        "emit_cpu_sample_row failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = fs::read_to_string(&out)
+        .expect("read cpu.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("cpu row must be valid JSON"))
+        .collect();
+    assert_eq!(rows.len(), 2, "one row per sample");
+    // First sample has no prior counters: util is null, but cores/load present.
+    assert_eq!(rows[0]["node"], "nodeA");
+    assert_eq!(rows[0]["cpu_util_pct"], serde_json::Value::Null);
+    assert_eq!(rows[0]["core_count"], 2);
+    assert_eq!(rows[0]["loadavg_1m"], 0.5);
+    // Second sample computes the delta.
+    assert_eq!(rows[1]["cpu_util_pct"], 25.0);
+    assert_eq!(rows[1]["core_count"], 2);
+}
+
+#[test]
+fn emit_cpu_sample_row_marks_missing_proc_stat_unavailable() {
+    // A missing /proc/stat must make the function return non-zero (so the
+    // collector is marked unavailable) rather than erroring.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let out = tmpdir.path().join("cpu.jsonl");
+    let driver = format!(
+        r#"
+if emit_cpu_sample_row "2024-01-01T00:00:00Z" "nodeA" "{missing}" "/nonexistent/loadavg" "{state}" "{out}"; then
+  echo "unexpected-success"
+else
+  echo "unavailable rc=$?"
+fi
+"#,
+        missing = tmpdir.path().join("does-not-exist").display(),
+        state = tmpdir.path().join("cpu.state").display(),
+        out = out.display(),
+    );
+    let output = run_metrics_bash(tmpdir.path(), &driver);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("unavailable rc=1"),
+        "missing /proc/stat should return non-zero: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!out.exists(), "no cpu row should be written");
 }
 
 #[test]

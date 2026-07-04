@@ -528,7 +528,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["gpu", "slurm"]
+            "enum": ["gpu", "slurm", "cpu"]
           }
         }
       }

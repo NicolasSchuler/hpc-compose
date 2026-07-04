@@ -551,7 +551,7 @@ services:
 x-slurm:
   metrics:
     interval_seconds: 5
-    collectors: [gpu, slurm]
+    collectors: [gpu, slurm, cpu]
 ```
 
 - Shape: mapping
@@ -560,11 +560,12 @@ x-slurm:
   - Omitting the block disables runtime metrics sampling.
   - If the block is present and `enabled` is omitted, metrics sampling is enabled.
   - `interval_seconds` defaults to `5` and must be at least `1`.
-  - `collectors` defaults to `[gpu, slurm]`.
+  - `collectors` defaults to `[gpu, slurm, cpu]`.
   - Supported collectors:
     - `gpu` samples device and process telemetry through `nvidia-smi`
     - `slurm` samples job-step CPU and memory data through `sstat`
-  - In multi-node jobs, `gpu` sampling launches one best-effort sampler task per allocated node and writes node metadata into GPU rows; legacy rows without `node` remain readable as primary-node samples.
+    - `cpu` samples host CPU utilization, core count, and 1-minute load from `/proc/stat` and `/proc/loadavg`
+  - In multi-node jobs, `gpu` and `cpu` sampling each launch one best-effort sampler task per allocated node and write node metadata into their rows; legacy GPU rows without `node` remain readable as primary-node samples.
   - Sampler files are written under the active job workspace's `metrics/` directory and are also visible inside containers at `/hpc-compose/job/metrics`. For ordinary runs that is `<runtime-root>/<job-id>/metrics`; for resume-aware attempts it is `<runtime-root>/<job-id>/attempts/<attempt>/metrics`.
   - Diagnostics are written under `metrics/diagnostics/` when available, including `nvidia-smi topo -m`, `nvidia-smi -q`, selected fabric/GPU environment variables, and best-effort `ibstat`, `ibv_devinfo`, `ucx_info -v`, and `fi_info` output.
 

@@ -2679,7 +2679,11 @@ services:
     assert_eq!(spec.slurm.metrics_interval_seconds(), 5);
     assert_eq!(
         spec.slurm.metrics_collectors(),
-        vec![MetricsCollector::Gpu, MetricsCollector::Slurm]
+        vec![
+            MetricsCollector::Gpu,
+            MetricsCollector::Slurm,
+            MetricsCollector::Cpu
+        ]
     );
 }
 

@@ -962,6 +962,102 @@ fn load_sampler_snapshot_reads_latest_groups() {
 }
 
 #[test]
+fn load_sampler_snapshot_parses_cpu_nodes_and_summary() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let metrics_dir = tmpdir.path().join("metrics");
+    fs::create_dir_all(&metrics_dir).expect("metrics dir");
+    fs::write(
+        metrics_dir.join("meta.json"),
+        r#"{
+  "interval_seconds": 5,
+  "collectors": [
+    {"name":"gpu","enabled":false,"available":false,"note":null,"last_sampled_at":null},
+    {"name":"slurm","enabled":false,"available":false,"note":null,"last_sampled_at":null},
+    {"name":"cpu","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:10Z"}
+  ]
+}"#,
+    )
+    .expect("meta");
+    // Two sample groups; only the latest (10:00:10) group is surfaced. The
+    // latest group spans three nodes: two with a computed util, one with a
+    // null util (its first sample) and a partial row missing loadavg_1m.
+    fs::write(
+        metrics_dir.join("cpu.jsonl"),
+        concat!(
+            "{\"sampled_at\":\"2026-04-05T10:00:00Z\",\"node\":\"nodeA\",\"cpu_util_pct\":null,\"core_count\":64,\"loadavg_1m\":10.0}\n",
+            "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"node\":\"nodeA\",\"cpu_util_pct\":40.0,\"core_count\":64,\"loadavg_1m\":12.5}\n",
+            "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"node\":\"nodeB\",\"cpu_util_pct\":60.0,\"core_count\":32}\n",
+            "{\"sampled_at\":\"2026-04-05T10:00:10Z\",\"node\":\"nodeC\",\"cpu_util_pct\":null,\"core_count\":16,\"loadavg_1m\":1.0}\n"
+        ),
+    )
+    .expect("cpu");
+
+    let outcome = load_sampler_snapshot(&metrics_dir);
+    assert!(outcome.notes.is_empty());
+    let sampler = outcome.sampler.expect("sampler");
+    let cpu = sampler.cpu.expect("cpu");
+    assert_eq!(cpu.sampled_at, "2026-04-05T10:00:10Z");
+    assert_eq!(cpu.nodes.len(), 3);
+    assert_eq!(cpu.nodes[0].node.as_deref(), Some("nodeA"));
+    assert_eq!(cpu.nodes[0].cpu_util_pct, Some(40.0));
+    assert_eq!(cpu.nodes[0].loadavg_1m, Some(12.5));
+    // Partial row: loadavg_1m absent -> None.
+    assert_eq!(cpu.nodes[1].node.as_deref(), Some("nodeB"));
+    assert_eq!(cpu.nodes[1].loadavg_1m, None);
+    // Null util row is retained but excluded from the util rollup.
+    assert_eq!(cpu.nodes[2].cpu_util_pct, None);
+    assert_eq!(cpu.summary.node_count, 3);
+    assert_eq!(cpu.summary.mean_util_pct, Some(50.0));
+    assert_eq!(cpu.summary.max_util_pct, Some(60.0));
+    assert_eq!(cpu.summary.total_core_count, Some(112));
+}
+
+#[test]
+fn load_sampler_snapshot_cpu_missing_file_and_malformed_row() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    // Enabled collector but no cpu.jsonl -> cpu is None with no note.
+    let no_file_dir = tmpdir.path().join("no-cpu-file");
+    fs::create_dir_all(&no_file_dir).expect("dir");
+    fs::write(
+        no_file_dir.join("meta.json"),
+        r#"{
+  "interval_seconds": 5,
+  "collectors": [
+    {"name":"cpu","enabled":true,"available":true,"note":null,"last_sampled_at":null}
+  ]
+}"#,
+    )
+    .expect("meta");
+    let outcome = load_sampler_snapshot(&no_file_dir);
+    let sampler = outcome.sampler.expect("sampler");
+    assert!(sampler.cpu.is_none());
+    assert!(outcome.notes.is_empty());
+
+    // Malformed cpu row -> parse note, cpu None.
+    let broken_dir = tmpdir.path().join("broken-cpu");
+    fs::create_dir_all(&broken_dir).expect("dir");
+    fs::write(
+        broken_dir.join("meta.json"),
+        r#"{
+  "interval_seconds": 5,
+  "collectors": [
+    {"name":"cpu","enabled":true,"available":true,"note":null,"last_sampled_at":null}
+  ]
+}"#,
+    )
+    .expect("meta");
+    fs::write(broken_dir.join("cpu.jsonl"), "{not-json}\n").expect("cpu");
+    let outcome = load_sampler_snapshot(&broken_dir);
+    assert!(
+        outcome
+            .notes
+            .iter()
+            .any(|note| note.contains("failed to parse CPU sampler data"))
+    );
+    assert!(outcome.sampler.expect("sampler").cpu.is_none());
+}
+
+#[test]
 fn sampler_and_parser_error_paths_cover_remaining_functions() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let malformed_meta_dir = tmpdir.path().join("malformed-meta");

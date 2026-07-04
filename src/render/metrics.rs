@@ -23,6 +23,10 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("      [[ \"$SLURM_WARNING_EMITTED\" == \"1\" ]] && return 0\n");
     out.push_str("      SLURM_WARNING_EMITTED=1\n");
     out.push_str("      ;;\n");
+    out.push_str("    cpu)\n");
+    out.push_str("      [[ \"$CPU_WARNING_EMITTED\" == \"1\" ]] && return 0\n");
+    out.push_str("      CPU_WARNING_EMITTED=1\n");
+    out.push_str("      ;;\n");
     out.push_str("  esac\n");
     out.push_str("  echo \"metrics warning [$collector]: $message\" >&2\n");
     out.push_str("}\n\n");
@@ -41,11 +45,16 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("      \"$(json_bool_from_flag \"$GPU_COLLECTOR_AVAILABLE\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$GPU_COLLECTOR_NOTE\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$GPU_COLLECTOR_LAST_SAMPLED_AT\")\"\n");
-    out.push_str("    printf '    {\"name\":\"slurm\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s}\\n' \\\n");
+    out.push_str("    printf '    {\"name\":\"slurm\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s},\\n' \\\n");
     out.push_str("      \"$(json_bool_from_flag \"$SLURM_COLLECTOR_ENABLED\")\" \\\n");
     out.push_str("      \"$(json_bool_from_flag \"$SLURM_COLLECTOR_AVAILABLE\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$SLURM_COLLECTOR_NOTE\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$SLURM_COLLECTOR_LAST_SAMPLED_AT\")\"\n");
+    out.push_str("    printf '    {\"name\":\"cpu\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s}\\n' \\\n");
+    out.push_str("      \"$(json_bool_from_flag \"$CPU_COLLECTOR_ENABLED\")\" \\\n");
+    out.push_str("      \"$(json_bool_from_flag \"$CPU_COLLECTOR_AVAILABLE\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$CPU_COLLECTOR_NOTE\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$CPU_COLLECTOR_LAST_SAMPLED_AT\")\"\n");
     out.push_str("    printf '  ]\\n}\\n'\n");
     out.push_str("  } > \"$tmp_meta\"\n");
     out.push_str("  mv \"$tmp_meta\" \"$METRICS_META_FILE\"\n");
@@ -76,6 +85,20 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  SLURM_COLLECTOR_AVAILABLE=1\n");
     out.push_str("  SLURM_COLLECTOR_NOTE=\"\"\n");
     out.push_str("  SLURM_COLLECTOR_LAST_SAMPLED_AT=$1\n");
+    out.push_str("  write_metrics_meta\n");
+    out.push_str("}\n\n");
+
+    out.push_str("mark_cpu_collector_unavailable() {\n");
+    out.push_str("  CPU_COLLECTOR_AVAILABLE=0\n");
+    out.push_str("  CPU_COLLECTOR_NOTE=$1\n");
+    out.push_str("  write_metrics_meta\n");
+    out.push_str("  metrics_warning_once cpu \"$1\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("mark_cpu_collector_success() {\n");
+    out.push_str("  CPU_COLLECTOR_AVAILABLE=1\n");
+    out.push_str("  CPU_COLLECTOR_NOTE=\"\"\n");
+    out.push_str("  CPU_COLLECTOR_LAST_SAMPLED_AT=$1\n");
     out.push_str("  write_metrics_meta\n");
     out.push_str("}\n\n");
 
@@ -335,6 +358,108 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  mark_slurm_collector_success \"$sampled_at\"\n");
     out.push_str("}\n\n");
 
+    // CPU utilization collector. Reads /proc/stat (the aggregate `cpu` line)
+    // and keeps the previous tick's counters in a per-node state file so the
+    // sample function computes a non-idle/total delta without an extra sleep.
+    // The first sample for a given state file has no prior counters and emits a
+    // null `cpu_util_pct`. /proc/stat is Linux-only: a missing/unreadable path
+    // marks the collector unavailable through warn-once diagnostics instead of
+    // failing the job.
+    out.push_str(cpu_emit_fn_body());
+    out.push('\n');
+
+    out.push_str("sample_cpu_metrics_current_node() {\n");
+    out.push_str("  [[ \"$CPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  local sampled_at\n");
+    out.push_str("  sampled_at=$(metrics_timestamp)\n");
+    out.push_str("  local sample_node=\"${HPC_COMPOSE_CPU_SAMPLE_NODE:-${SLURMD_NODENAME:-${HOSTNAME:-}}}\"\n");
+    out.push_str("  local stat_path=\"${HPC_COMPOSE_PROC_STAT_PATH:-/proc/stat}\"\n");
+    out.push_str("  local loadavg_path=\"${HPC_COMPOSE_PROC_LOADAVG_PATH:-/proc/loadavg}\"\n");
+    out.push_str("  local state_dir=\"$METRICS_DIR/cpu-state\"\n");
+    out.push_str("  mkdir -p \"$state_dir\"\n");
+    out.push_str("  if ! emit_cpu_sample_row \"$sampled_at\" \"$sample_node\" \"$stat_path\" \"$loadavg_path\" \"$state_dir/batch-node.state\" \"$CPU_METRICS_FILE\"; then\n");
+    out.push_str(
+        "    mark_cpu_collector_unavailable \"/proc/stat is not readable on this node\"\n",
+    );
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  mark_cpu_collector_success \"$sampled_at\"\n");
+    out.push_str("}\n\n");
+
+    // Per-node CPU sampler script fanned out through srun on multi-node jobs, so
+    // cpu.jsonl rows carry a `node` field the way GPU rows do. Transient per-node
+    // cpu.jsonl outputs land under `output_root` (cleared each tick); the delta
+    // state files live under a separate persistent `state_root` so per-node
+    // counters survive between ticks.
+    out.push_str("write_cpu_sample_node_script() {\n");
+    out.push_str("  local script_path=\"$METRICS_DIR/cpu-sample-node.sh\"\n");
+    out.push_str("  cat > \"$script_path\" <<'HPC_COMPOSE_CPU_SAMPLE_NODE'\n");
+    out.push_str("#!/bin/bash\n");
+    out.push_str("set -euo pipefail\n");
+    out.push_str("sampled_at=$1\n");
+    out.push_str("output_root=$2\n");
+    out.push_str("state_root=$3\n");
+    out.push_str("node=\"${SLURMD_NODENAME:-${HOSTNAME:-}}\"\n");
+    out.push_str("if [[ -z \"$node\" ]]; then node=$(hostname); fi\n");
+    out.push_str("node_dir=\"$output_root/$node\"\n");
+    out.push_str("state_dir=\"$state_root/$node\"\n");
+    out.push_str("mkdir -p \"$node_dir\" \"$state_dir\"\n");
+    out.push_str(cpu_node_json_helpers());
+    out.push_str(cpu_emit_fn_body());
+    out.push_str("emit_cpu_sample_row \"$sampled_at\" \"$node\" \"/proc/stat\" \"/proc/loadavg\" \"$state_dir/cpu.state\" \"$node_dir/cpu.jsonl\" || printf 'proc-stat unavailable on %s\\n' \"$node\" > \"$node_dir/status.txt\"\n");
+    out.push_str("HPC_COMPOSE_CPU_SAMPLE_NODE\n");
+    out.push_str("  chmod +x \"$script_path\"\n");
+    out.push_str("  printf '%s' \"$script_path\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("sample_cpu_metrics_all_nodes() {\n");
+    out.push_str("  [[ \"$CPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  local sampled_at\n");
+    out.push_str("  sampled_at=$(metrics_timestamp)\n");
+    // Transient per-node output is cleared each tick (like the GPU fanout); the
+    // delta state root is kept so per-node counters persist between ticks.
+    out.push_str("  local sample_root=\"$METRICS_DIR/cpu-node-samples\"\n");
+    out.push_str("  local state_root=\"$METRICS_DIR/cpu-node-state\"\n");
+    out.push_str("  rm -rf \"$sample_root\"\n");
+    out.push_str("  mkdir -p \"$sample_root\" \"$state_root\"\n");
+    out.push_str("  local script_path\n");
+    out.push_str("  script_path=$(write_cpu_sample_node_script)\n");
+    out.push_str("  if ! srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 --exact --overlap bash \"$script_path\" \"$sampled_at\" \"$sample_root\" \"$state_root\" >/dev/null 2>&1; then\n");
+    // srun fanout failure does not kill the collector: the batch node can still
+    // sample its own /proc/stat. Degrade to the single-node path and record it.
+    out.push_str("    metrics_warning_once cpu \"multi-node CPU fanout failed through srun; sampling the batch node only\"\n");
+    out.push_str("    sample_cpu_metrics_current_node\n");
+    out.push_str("    local fallback_status=$?\n");
+    out.push_str(
+        "    if (( fallback_status == 0 )) && [[ \"$CPU_COLLECTOR_AVAILABLE\" == \"1\" ]]; then\n",
+    );
+    out.push_str(
+        "      CPU_COLLECTOR_NOTE=\"multi-node CPU fanout degraded to batch-node sampling\"\n",
+    );
+    out.push_str("      write_metrics_meta\n");
+    out.push_str("    fi\n");
+    out.push_str("    return \"$fallback_status\"\n");
+    out.push_str("  fi\n");
+    out.push_str("  shopt -s nullglob\n");
+    out.push_str("  local cpu_files=(\"$sample_root\"/*/cpu.jsonl)\n");
+    out.push_str("  local status_files=(\"$sample_root\"/*/status.txt)\n");
+    out.push_str("  if (( ${#cpu_files[@]} == 0 )); then\n");
+    out.push_str("    mark_cpu_collector_unavailable \"/proc/stat produced no CPU samples on allocation nodes\"\n");
+    out.push_str("    return 0\n");
+    out.push_str("  fi\n");
+    out.push_str("  cat \"${cpu_files[@]}\" >> \"$CPU_METRICS_FILE\"\n");
+    out.push_str("  if (( ${#status_files[@]} > 0 )); then CPU_COLLECTOR_NOTE=\"$(paste -sd '; ' \"${status_files[@]}\" 2>/dev/null || true)\"; fi\n");
+    out.push_str("  mark_cpu_collector_success \"$sampled_at\"\n");
+    out.push_str("}\n\n");
+
+    out.push_str("sample_cpu_metrics() {\n");
+    out.push_str("  if [[ \"${BACKEND:-slurm}\" == \"slurm\" && \"${HPC_COMPOSE_NODE_COUNT:-1}\" -gt 1 ]]; then\n");
+    out.push_str("    sample_cpu_metrics_all_nodes\n");
+    out.push_str("  else\n");
+    out.push_str("    sample_cpu_metrics_current_node\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
     out.push_str("write_metrics_diagnostics_node_script() {\n");
     out.push_str("  local script_path=\"$METRICS_DIR/diagnostics-node.sh\"\n");
     out.push_str("  cat > \"$script_path\" <<'HPC_COMPOSE_DIAGNOSTICS_NODE'\n");
@@ -372,6 +497,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("sample_metrics_once() {\n");
     out.push_str("  sample_gpu_metrics\n");
     out.push_str("  sample_slurm_metrics\n");
+    out.push_str("  sample_cpu_metrics\n");
     out.push_str("}\n\n");
 
     out.push_str("metrics_sampler_loop() {\n");
@@ -386,6 +512,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  : > \"$GPU_METRICS_FILE\"\n");
     out.push_str("  : > \"$GPU_PROCESSES_FILE\"\n");
     out.push_str("  : > \"$SLURM_METRICS_FILE\"\n");
+    out.push_str("  : > \"$CPU_METRICS_FILE\"\n");
     out.push_str("  capture_metrics_diagnostics\n");
     out.push_str("  write_metrics_meta\n");
     out.push_str("  sample_metrics_once\n");
@@ -425,4 +552,96 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("    wait \"$SAMPLER_PID\" 2>/dev/null || true\n");
     out.push_str("  fi\n");
     out.push_str("}\n\n");
+}
+
+/// Bash body of `emit_cpu_sample_row`, shared verbatim between the in-process
+/// helpers and the self-contained per-node fanout script.
+///
+/// Reads the aggregate `cpu` line from `stat_path`, counts per-core lines for
+/// `core_count`, computes the non-idle/total delta against the counters stored
+/// in `state_file` (empty util on the first sample for that state file), reads
+/// the 1-minute load from `loadavg_path`, then appends one JSON row to
+/// `output_file`. Returns non-zero when `stat_path` is unreadable or has no
+/// aggregate line so callers can mark the collector unavailable.
+fn cpu_emit_fn_body() -> &'static str {
+    r##"emit_cpu_sample_row() {
+  local sampled_at=$1
+  local node=$2
+  local stat_path=$3
+  local loadavg_path=$4
+  local state_file=$5
+  local output_file=$6
+  [[ -r "$stat_path" ]] || return 1
+  local cpu_line=""
+  local cores=0
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "cpu "*) if [[ -z "$cpu_line" ]]; then cpu_line=$line; fi ;;
+      cpu[0-9]*) cores=$((cores + 1)) ;;
+    esac
+  done < "$stat_path"
+  [[ -n "$cpu_line" ]] || return 1
+  local -a fields=()
+  read -r -a fields <<< "$cpu_line"
+  local user=${fields[1]:-0}
+  local nice_time=${fields[2]:-0}
+  local system=${fields[3]:-0}
+  local idle=${fields[4]:-0}
+  local iowait=${fields[5]:-0}
+  local irq=${fields[6]:-0}
+  local softirq=${fields[7]:-0}
+  local steal=${fields[8]:-0}
+  local idle_all=$((idle + iowait))
+  local non_idle=$((user + nice_time + system + irq + softirq + steal))
+  local total=$((idle_all + non_idle))
+  local util=""
+  if [[ -r "$state_file" ]]; then
+    local prev_total=0
+    local prev_idle=0
+    read -r prev_total prev_idle < "$state_file" || true
+    local dt=$((total - ${prev_total:-0}))
+    local di=$((idle_all - ${prev_idle:-0}))
+    if (( dt > 0 )); then
+      util=$(LC_ALL=C awk -v dt="$dt" -v di="$di" 'BEGIN { u = (dt - di) * 100.0 / dt; if (u < 0) u = 0; if (u > 100) u = 100; printf "%.1f", u }')
+    fi
+  fi
+  printf '%s %s\n' "$total" "$idle_all" > "$state_file"
+  local load=""
+  if [[ -r "$loadavg_path" ]]; then
+    read -r load _ < "$loadavg_path" || load=""
+  fi
+  printf '{"sampled_at":"%s","node":%s,"cpu_util_pct":%s,"core_count":%s,"loadavg_1m":%s}\n' \
+    "$(json_escape "$sampled_at")" \
+    "$(json_string_or_null "$node")" \
+    "$(json_number_or_null "$util")" \
+    "$(json_number_or_null "$cores")" \
+    "$(json_number_or_null "$load")" >> "$output_file"
+  return 0
+}
+"##
+}
+
+/// JSON escaping helpers embedded verbatim in the self-contained per-node CPU
+/// fanout script (which runs in a fresh `bash` and cannot see the launcher's
+/// helper definitions).
+fn cpu_node_json_helpers() -> &'static str {
+    r##"json_escape() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+json_string_or_null() {
+  local value=${1-}
+  if [[ -z "$value" ]]; then printf null; else printf '"%s"' "$(json_escape "$value")"; fi
+}
+json_number_or_null() {
+  local value=${1-}
+  if [[ -z "$value" ]]; then printf null; else printf '%s' "$value"; fi
+}
+"##
 }

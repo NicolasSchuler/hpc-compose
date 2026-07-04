@@ -68,6 +68,38 @@ pub struct SamplerSnapshot {
     pub collectors: Vec<CollectorStatus>,
     pub gpu: Option<GpuSnapshot>,
     pub slurm: Option<SlurmSamplerSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<CpuSnapshot>,
+}
+
+/// Sampled host CPU telemetry collected from `/proc/stat` by the job-local
+/// sampler.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize)]
+pub struct CpuSnapshot {
+    pub sampled_at: String,
+    pub nodes: Vec<CpuNodeSample>,
+    pub summary: CpuSummary,
+}
+
+/// One node's latest sampled CPU utilization row.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CpuNodeSample {
+    pub node: Option<String>,
+    pub cpu_util_pct: Option<f64>,
+    pub core_count: Option<u64>,
+    pub loadavg_1m: Option<f64>,
+}
+
+/// Cross-node rollup of the latest CPU utilization sample.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CpuSummary {
+    pub node_count: usize,
+    pub mean_util_pct: Option<f64>,
+    pub max_util_pct: Option<f64>,
+    pub total_core_count: Option<u64>,
 }
 
 /// Availability metadata for one configured metrics collector.
@@ -232,6 +264,18 @@ pub(super) struct GpuProcessSampleRow {
     pub(super) pid: Option<String>,
     pub(super) process_name: Option<String>,
     pub(super) used_memory_mib: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct CpuSampleRow {
+    #[serde(default)]
+    pub(super) node: Option<String>,
+    #[serde(default)]
+    pub(super) cpu_util_pct: Option<f64>,
+    #[serde(default)]
+    pub(super) core_count: Option<u64>,
+    #[serde(default)]
+    pub(super) loadavg_1m: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -566,14 +610,82 @@ pub(crate) fn load_sampler_snapshot(metrics_dir: &Path) -> SamplerLoadOutcome {
         None
     };
 
+    let cpu = if collector_enabled(&meta.collectors, "cpu") {
+        match load_cpu_snapshot(metrics_dir) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                notes.push(format!(
+                    "failed to parse CPU sampler data under {}: {err}",
+                    metrics_dir.display()
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     SamplerLoadOutcome {
         sampler: Some(SamplerSnapshot {
             interval_seconds: meta.interval_seconds,
             collectors: meta.collectors,
             gpu,
             slurm,
+            cpu,
         }),
         notes,
+    }
+}
+
+/// Loads the latest per-node CPU sample group from `cpu.jsonl` and rolls it up
+/// into a cross-node summary. Multiple rows share the newest `sampled_at` (one
+/// per node on multi-node jobs); the last row seen for a node wins.
+fn load_cpu_snapshot(metrics_dir: &Path) -> Result<Option<CpuSnapshot>> {
+    let path = metrics_dir.join("cpu.jsonl");
+    let lines = latest_ordered_jsonl_group(&path)?;
+    let Some(first_line) = lines.first() else {
+        return Ok(None);
+    };
+    let sampled_at = first_line.sampled_at.clone();
+    let mut nodes: BTreeMap<Option<String>, CpuNodeSample> = BTreeMap::new();
+    for line in lines {
+        let row: CpuSampleRow = serde_json::from_str(&line.text).context(format!(
+            "failed to parse {} line {}",
+            path.display(),
+            line.number
+        ))?;
+        nodes.insert(
+            row.node.clone(),
+            CpuNodeSample {
+                node: row.node,
+                cpu_util_pct: row.cpu_util_pct,
+                core_count: row.core_count,
+                loadavg_1m: row.loadavg_1m,
+            },
+        );
+    }
+    let nodes: Vec<CpuNodeSample> = nodes.into_values().collect();
+    let summary = summarize_cpu_nodes(&nodes);
+    Ok(Some(CpuSnapshot {
+        sampled_at,
+        nodes,
+        summary,
+    }))
+}
+
+fn summarize_cpu_nodes(nodes: &[CpuNodeSample]) -> CpuSummary {
+    let utils: Vec<f64> = nodes.iter().filter_map(|node| node.cpu_util_pct).collect();
+    let mean_util_pct = (!utils.is_empty()).then(|| utils.iter().sum::<f64>() / utils.len() as f64);
+    let max_util_pct = utils.iter().copied().fold(None, |acc, value| {
+        Some(acc.map_or(value, |m: f64| m.max(value)))
+    });
+    let cores: Vec<u64> = nodes.iter().filter_map(|node| node.core_count).collect();
+    let total_core_count = (!cores.is_empty()).then(|| cores.iter().sum());
+    CpuSummary {
+        node_count: nodes.len(),
+        mean_util_pct,
+        max_util_pct,
+        total_core_count,
     }
 }
 

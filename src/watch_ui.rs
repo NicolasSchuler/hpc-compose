@@ -2702,6 +2702,17 @@ fn format_watch_metrics_line(snapshot: &StatsSnapshot) -> Option<String> {
             ));
         }
     }
+    if let Some(cpu) = snapshot
+        .sampler
+        .as_ref()
+        .and_then(|sampler| sampler.cpu.as_ref())
+        && let Some(mean) = cpu.summary.mean_util_pct
+    {
+        // Aggregate mean utilization across every sampled node. Absent when the
+        // fixture carries no CPU data (or only a first, util-less sample), so
+        // the segment does not appear and existing lines stay byte-identical.
+        parts.push(format!("cpu: {mean:.0}%"));
+    }
     if snapshot.available {
         parts.push(format!("stats: {}", snapshot.source));
     }

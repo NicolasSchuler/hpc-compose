@@ -1114,6 +1114,12 @@ fn check_metrics_collectors(report: &mut Report, plan: &RuntimePlan) {
                     "Step-level CPU and memory telemetry is best-effort. This is expected on some login nodes; verify that compute nodes provide sstat and that Slurm accounting is enabled if you want runtime stats.",
                 );
             }
+            MetricsCollector::Cpu => {
+                // The CPU collector reads /proc/stat and /proc/loadavg on the
+                // compute nodes; there is no external binary to probe. Missing
+                // /proc (non-Linux nodes) marks the collector unavailable at
+                // runtime via warn-once diagnostics rather than failing preflight.
+            }
         }
     }
 }

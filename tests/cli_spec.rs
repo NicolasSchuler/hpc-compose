@@ -1315,7 +1315,7 @@ services:
         serde_json::json!({
             "enabled": true,
             "interval_seconds": 5,
-            "collectors": ["gpu", "slurm"]
+            "collectors": ["gpu", "slurm", "cpu"]
         })
     );
     assert_eq!(
@@ -2466,7 +2466,7 @@ fn schema_enum_values_match_rust_variants() {
         (
             "metrics.collectors[item]",
             value["definitions"]["metrics"]["properties"]["collectors"]["items"]["enum"].clone(),
-            &["gpu", "slurm"],
+            &["gpu", "slurm", "cpu"],
         ),
         // artifacts
         (

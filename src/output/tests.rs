@@ -11,10 +11,10 @@ use hpc_compose::cli::{
 };
 use hpc_compose::job::{
     ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
-    CollectorStatus, GpuDeviceSample, GpuProcessSample, GpuSnapshot, JobInventoryEntry,
-    JobInventoryScan, QueueDiagnostics, SamplerSnapshot, SchedulerSource, SchedulerStatus,
-    ServiceAssertionStatus, ServiceLogStatus, StatsSnapshot, StatusSnapshot, StepStats,
-    SubmissionKind, SubmissionRecord,
+    CollectorStatus, CpuNodeSample, CpuSnapshot, CpuSummary, GpuDeviceSample, GpuProcessSample,
+    GpuSnapshot, JobInventoryEntry, JobInventoryScan, QueueDiagnostics, SamplerSnapshot,
+    SchedulerSource, SchedulerStatus, ServiceAssertionStatus, ServiceLogStatus, StatsSnapshot,
+    StatusSnapshot, StepStats, SubmissionKind, SubmissionRecord,
 };
 use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
 use hpc_compose::spec::{
@@ -570,6 +570,84 @@ fn print_helpers_cover_manifest_and_summary_paths() {
 }
 
 #[test]
+fn stats_snapshot_surfaces_cpu_nodes_and_multi_node_summary() {
+    let cpu = CpuSnapshot {
+        sampled_at: "2026-04-05T10:00:10Z".into(),
+        nodes: vec![
+            CpuNodeSample {
+                node: Some("node01".into()),
+                cpu_util_pct: Some(40.0),
+                core_count: Some(64),
+                loadavg_1m: Some(12.5),
+            },
+            CpuNodeSample {
+                node: Some("node02".into()),
+                cpu_util_pct: Some(60.0),
+                core_count: Some(32),
+                loadavg_1m: Some(8.0),
+            },
+        ],
+        summary: CpuSummary {
+            node_count: 2,
+            mean_util_pct: Some(50.0),
+            max_util_pct: Some(60.0),
+            total_core_count: Some(96),
+        },
+    };
+    let stats = StatsSnapshot {
+        job_id: "12345".into(),
+        record: None,
+        metrics_dir: None,
+        scheduler: SchedulerStatus {
+            state: "RUNNING".into(),
+            source: SchedulerSource::Squeue,
+            terminal: false,
+            failed: false,
+            detail: None,
+        },
+        available: true,
+        reason: None,
+        source: "sampler".into(),
+        notes: vec![],
+        sampler: Some(SamplerSnapshot {
+            interval_seconds: 5,
+            collectors: vec![],
+            gpu: None,
+            slurm: None,
+            cpu: Some(cpu),
+        }),
+        steps: vec![],
+        accounting: None,
+        first_failure: None,
+        attempt: None,
+        is_resume: None,
+        resume_dir: None,
+    };
+
+    let mut stats_out = Vec::new();
+    write_stats_snapshot(&mut stats_out, &stats).expect("stats");
+    let text = String::from_utf8(stats_out).expect("utf8");
+    assert!(text.contains("cpu snapshot: 2026-04-05T10:00:10Z"));
+    assert!(text.contains("cpu node node01: util=40.0% cores=64 load1=12.50"));
+    assert!(text.contains("cpu node node02: util=60.0% cores=32 load1=8.00"));
+    assert!(text.contains("cpu summary: nodes=2 mean_util=50.0% max_util=60.0% cores=96"));
+
+    let mut jsonl_out = Vec::new();
+    write_stats_snapshot_jsonl(&mut jsonl_out, &stats).expect("jsonl");
+    let jsonl = String::from_utf8(jsonl_out).expect("utf8");
+    assert!(jsonl.contains("\"record_type\":\"cpu_node\""));
+    assert!(jsonl.contains("\"record_type\":\"cpu_summary\""));
+    assert!(jsonl.contains("\"cpu_util_pct\":40.0"));
+
+    // stats --format json (serde) exposes the new nested cpu fields.
+    let json = serde_json::to_value(&stats).expect("json");
+    let summary = &json["sampler"]["cpu"]["summary"];
+    assert_eq!(summary["mean_util_pct"], 50.0);
+    assert_eq!(summary["total_core_count"], 96);
+    assert_eq!(json["sampler"]["cpu"]["nodes"][0]["core_count"], 64);
+}
+
+#[test]
 fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let runtime_image = tmpdir.path().join("prepared.sqsh");
@@ -805,6 +883,7 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
                 }],
             }),
             slurm: None,
+            cpu: None,
         }),
         steps: vec![sample_step()],
         accounting: None,

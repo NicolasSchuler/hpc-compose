@@ -1,11 +1,106 @@
 use super::*;
 use hpc_compose::job::{
-    GpuNodeSummary, PsSnapshot, QueueDiagnostics, ReplayArtifactPaths, ReplayEvent,
-    ReplayEventKind, ReplayFrame, ReplayReport, ReplayServiceFrame, RequestedWalltime,
-    SchedulerOptions, SchedulerSource, SchedulerStatus, SubmissionBackend, SubmissionKind,
-    SubmissionRecord, WalltimeProgress, WatchOutcome, build_submission_record_with_backend,
-    state_path_for_record, write_submission_record,
+    CpuNodeSample, CpuSnapshot, CpuSummary, GpuNodeSummary, PsSnapshot, QueueDiagnostics,
+    ReplayArtifactPaths, ReplayEvent, ReplayEventKind, ReplayFrame, ReplayReport,
+    ReplayServiceFrame, RequestedWalltime, SamplerSnapshot, SchedulerOptions, SchedulerSource,
+    SchedulerStatus, StatsSnapshot, SubmissionBackend, SubmissionKind, SubmissionRecord,
+    WalltimeProgress, WatchOutcome, build_submission_record_with_backend, state_path_for_record,
+    write_submission_record,
 };
+
+fn stats_snapshot_with_cpu(cpu: Option<CpuSnapshot>, available: bool) -> StatsSnapshot {
+    StatsSnapshot {
+        job_id: "12345".into(),
+        record: None,
+        metrics_dir: None,
+        scheduler: SchedulerStatus {
+            state: "RUNNING".into(),
+            source: SchedulerSource::Squeue,
+            terminal: false,
+            failed: false,
+            detail: None,
+        },
+        available,
+        reason: None,
+        source: "sampler".into(),
+        notes: vec![],
+        sampler: Some(SamplerSnapshot {
+            interval_seconds: 5,
+            collectors: vec![],
+            gpu: None,
+            slurm: None,
+            cpu,
+        }),
+        steps: vec![],
+        accounting: None,
+        first_failure: None,
+        attempt: None,
+        is_resume: None,
+        resume_dir: None,
+    }
+}
+
+#[test]
+fn format_watch_metrics_line_appends_cpu_segment_when_present() {
+    let cpu = CpuSnapshot {
+        sampled_at: "2026-04-05T10:00:10Z".into(),
+        nodes: vec![
+            CpuNodeSample {
+                node: Some("nodeA".into()),
+                cpu_util_pct: Some(40.0),
+                core_count: Some(64),
+                loadavg_1m: Some(12.5),
+            },
+            CpuNodeSample {
+                node: Some("nodeB".into()),
+                cpu_util_pct: Some(45.4),
+                core_count: Some(32),
+                loadavg_1m: Some(8.0),
+            },
+        ],
+        summary: CpuSummary {
+            node_count: 2,
+            mean_util_pct: Some(42.7),
+            max_util_pct: Some(45.4),
+            total_core_count: Some(96),
+        },
+    };
+    // available=false isolates the cpu segment (no trailing "stats:" part).
+    let snapshot = stats_snapshot_with_cpu(Some(cpu), false);
+    assert_eq!(
+        format_watch_metrics_line(&snapshot).as_deref(),
+        Some("cpu: 43%"),
+        "mean util is rounded and rendered as a compact segment"
+    );
+}
+
+#[test]
+fn format_watch_metrics_line_omits_cpu_segment_when_absent_or_util_less() {
+    // No cpu data at all: the line carries no cpu segment (here: nothing).
+    let no_cpu = stats_snapshot_with_cpu(None, false);
+    assert_eq!(format_watch_metrics_line(&no_cpu), None);
+
+    // CPU present but every node is a util-less first sample: still no segment.
+    let util_less = CpuSnapshot {
+        sampled_at: "2026-04-05T10:00:10Z".into(),
+        nodes: vec![CpuNodeSample {
+            node: Some("nodeA".into()),
+            cpu_util_pct: None,
+            core_count: Some(64),
+            loadavg_1m: Some(12.5),
+        }],
+        summary: CpuSummary {
+            node_count: 1,
+            mean_util_pct: None,
+            max_util_pct: None,
+            total_core_count: Some(64),
+        },
+    };
+    assert_eq!(
+        format_watch_metrics_line(&stats_snapshot_with_cpu(Some(util_less), false)),
+        None
+    );
+}
 
 #[test]
 fn format_gpu_metrics_includes_power_when_reported() {

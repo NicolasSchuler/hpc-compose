@@ -1447,6 +1447,45 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
                 )?;
             }
         }
+        if let Some(cpu) = &sampler.cpu {
+            writeln!(writer)?;
+            writeln!(writer, "cpu snapshot: {}", cpu.sampled_at)?;
+            for node in &cpu.nodes {
+                writeln!(
+                    writer,
+                    "cpu node {}: util={} cores={} load1={}",
+                    display_optional_stats_value(node.node.as_deref()),
+                    node.cpu_util_pct
+                        .map(|value| format!("{value:.1}%"))
+                        .unwrap_or_else(|| "-".to_string()),
+                    node.core_count
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    node.loadavg_1m
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_else(|| "-".to_string()),
+                )?;
+            }
+            if cpu.summary.node_count > 1 {
+                writeln!(
+                    writer,
+                    "cpu summary: nodes={} mean_util={} max_util={} cores={}",
+                    cpu.summary.node_count,
+                    cpu.summary
+                        .mean_util_pct
+                        .map(|value| format!("{value:.1}%"))
+                        .unwrap_or_else(|| "-".to_string()),
+                    cpu.summary
+                        .max_util_pct
+                        .map(|value| format!("{value:.1}%"))
+                        .unwrap_or_else(|| "-".to_string()),
+                    cpu.summary
+                        .total_core_count
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                )?;
+            }
+        }
     }
     if !snapshot.available {
         return Ok(());
@@ -1848,6 +1887,28 @@ pub(crate) fn write_stats_snapshot_jsonl(
                     }),
                 )?;
             }
+        }
+        if let Some(cpu) = &sampler.cpu {
+            for node in &cpu.nodes {
+                write_jsonl_record(
+                    writer,
+                    &serde_json::json!({
+                        "record_type": "cpu_node",
+                        "job_id": snapshot.job_id,
+                        "sampled_at": cpu.sampled_at,
+                        "node": node,
+                    }),
+                )?;
+            }
+            write_jsonl_record(
+                writer,
+                &serde_json::json!({
+                    "record_type": "cpu_summary",
+                    "job_id": snapshot.job_id,
+                    "sampled_at": cpu.sampled_at,
+                    "summary": cpu.summary,
+                }),
+            )?;
         }
     }
     for step in &snapshot.steps {

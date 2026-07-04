@@ -619,6 +619,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("GPU_METRICS_FILE=\"$METRICS_DIR/gpu.jsonl\"\n");
         out.push_str("GPU_PROCESSES_FILE=\"$METRICS_DIR/gpu_processes.jsonl\"\n");
         out.push_str("SLURM_METRICS_FILE=\"$METRICS_DIR/slurm.jsonl\"\n");
+        out.push_str("CPU_METRICS_FILE=\"$METRICS_DIR/cpu.jsonl\"\n");
         out.push_str("METRICS_DIAGNOSTICS_DIR=\"$METRICS_DIR/diagnostics\"\n");
     }
     out.push_str(&format!(
@@ -822,6 +823,7 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
         out.push_str("SAMPLER_PID=\"\"\n");
         out.push_str("GPU_WARNING_EMITTED=0\n");
         out.push_str("SLURM_WARNING_EMITTED=0\n");
+        out.push_str("CPU_WARNING_EMITTED=0\n");
         out.push_str(&format!(
             "GPU_COLLECTOR_ENABLED={}\n",
             flag(
@@ -834,12 +836,23 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
             "SLURM_COLLECTOR_ENABLED={}\n",
             flag(slurm_collector_enabled)
         ));
+        out.push_str(&format!(
+            "CPU_COLLECTOR_ENABLED={}\n",
+            flag(
+                plan.slurm
+                    .metrics_collectors()
+                    .contains(&MetricsCollector::Cpu)
+            )
+        ));
         out.push_str("GPU_COLLECTOR_AVAILABLE=1\n");
         out.push_str("SLURM_COLLECTOR_AVAILABLE=1\n");
+        out.push_str("CPU_COLLECTOR_AVAILABLE=1\n");
         out.push_str("GPU_COLLECTOR_NOTE=\"\"\n");
         out.push_str("SLURM_COLLECTOR_NOTE=\"\"\n");
+        out.push_str("CPU_COLLECTOR_NOTE=\"\"\n");
         out.push_str("GPU_COLLECTOR_LAST_SAMPLED_AT=\"\"\n");
-        out.push_str("SLURM_COLLECTOR_LAST_SAMPLED_AT=\"\"\n\n");
+        out.push_str("SLURM_COLLECTOR_LAST_SAMPLED_AT=\"\"\n");
+        out.push_str("CPU_COLLECTOR_LAST_SAMPLED_AT=\"\"\n\n");
         out.push_str("if [[ -n \"${HPC_COMPOSE_SLURM_COLLECTOR_ENABLED_OVERRIDE:-}\" ]]; then\n");
         out.push_str(
             "  SLURM_COLLECTOR_ENABLED=\"$HPC_COMPOSE_SLURM_COLLECTOR_ENABLED_OVERRIDE\"\n",

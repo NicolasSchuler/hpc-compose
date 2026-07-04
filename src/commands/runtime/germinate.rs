@@ -315,7 +315,11 @@ fn minimized_canary_plan(
     plan.slurm.metrics = Some(MetricsConfig {
         enabled: Some(true),
         interval_seconds: Some(metrics_interval),
-        collectors: vec![MetricsCollector::Gpu, MetricsCollector::Slurm],
+        collectors: vec![
+            MetricsCollector::Gpu,
+            MetricsCollector::Slurm,
+            MetricsCollector::Cpu,
+        ],
     });
     for service in &mut plan.ordered_services {
         if service.slurm.cpus_per_task.is_some() {

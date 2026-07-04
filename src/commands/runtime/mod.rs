@@ -194,7 +194,11 @@ impl MetricsOverrides {
             metrics.enabled = Some(true);
             metrics.interval_seconds = Some(interval);
             if metrics.collectors.is_empty() {
-                metrics.collectors = vec![MetricsCollector::Gpu, MetricsCollector::Slurm];
+                metrics.collectors = vec![
+                    MetricsCollector::Gpu,
+                    MetricsCollector::Slurm,
+                    MetricsCollector::Cpu,
+                ];
             }
         }
     }

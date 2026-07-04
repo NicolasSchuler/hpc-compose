@@ -185,10 +185,24 @@ When `x-slurm.metrics` is enabled, sampler files are written under:
   gpu.jsonl
   gpu_processes.jsonl
   slurm.jsonl
+  cpu.jsonl
   diagnostics/
 ```
 
-The sampler can collect GPU snapshots through `nvidia-smi` and job-step CPU/memory snapshots through `sstat`. Collector failures are best-effort: missing `nvidia-smi`, missing `sstat`, or unsupported queries do not fail the batch job itself.
+The sampler can collect GPU snapshots through `nvidia-smi`, job-step CPU/memory snapshots through `sstat`, and sampled host CPU utilization from `/proc/stat`. Collector failures are best-effort: missing `nvidia-smi`, missing `sstat`, an unreadable `/proc/stat`, or unsupported queries do not fail the batch job itself.
+
+### Sampled CPU utilization
+
+The `cpu` collector writes one `cpu.jsonl` row per node per interval with:
+
+- `cpu_util_pct` — busy percentage (0–100, one decimal). It is computed as the non-idle over total delta of the aggregate `cpu` line in `/proc/stat` between the current and previous sample. The collector keeps the previous tick's counters in a per-node state file, so no extra sleep is spent inside a sample.
+- `core_count` — the number of logical cores (per-core `cpuN` lines in `/proc/stat`).
+- `loadavg_1m` — the 1-minute load average from `/proc/loadavg`.
+- `node` — the sampling node, populated the same way GPU rows are, so multi-node allocations carry one row per node each tick.
+
+On a multi-node allocation the collector fans out through `srun` (the same mechanism the GPU collector uses) and, if that `srun` fails for a tick, degrades to sampling the batch node's own `/proc/stat` rather than dropping the tick. `/proc/stat` is Linux-only; a node without it marks the CPU collector unavailable through the warn-once diagnostics instead of failing the job.
+
+**First-sample caveat:** the very first sample for a given node has no previous counters to diff against, so its `cpu_util_pct` is `null`. Utilization appears from the second sample onward. `hpc-compose stats` surfaces the latest per-node `util`/`cores`/`load1` (plus a cross-node mean/max summary on multi-node jobs); the `--format json` snapshot exposes `sampler.cpu.nodes` and `sampler.cpu.summary`; the watch metrics line appends a compact `cpu: <mean>%` segment once utilization is available.
 
 ### Known limitations
 
