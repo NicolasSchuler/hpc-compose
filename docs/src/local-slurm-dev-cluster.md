@@ -69,6 +69,33 @@ that each spec has an explicit expected outcome, and verifies scheduler-backed
 commands such as `status`, `ps`, `logs`, and `score` where applicable. CI runs
 the same harness as a separate `Dev Cluster E2E` job with a cached image build.
 
+### Remote and OTP Harnesses
+
+The same image doubles as an SSH-reachable login-node stand-in (`sshd` + `rsync`,
+host port `2222`), so two further harnesses exercise the laptop thin client:
+
+```bash
+just dev-cluster-remote-e2e   # scripts/devcluster_remote_e2e.sh
+just dev-cluster-otp-e2e      # scripts/devcluster_otp_e2e.sh
+```
+
+- **Remote submit** (`devcluster_remote_e2e.sh`) drives `hpc-compose up --remote`
+  from the host and proves the thin remote-submit path: the project is staged
+  over `rsync`, a real `sbatch` runs on the node and tracks to `COMPLETED`, and
+  `up --remote --dry-run` stages-but-doesn't-submit. It injects a throwaway
+  per-run SSH key, so no credentials are baked into the image.
+- **One OTP per session** (`devcluster_otp_e2e.sh`) flips the stand-in into an
+  OTP/2FA-requiring sshd, then runs a multi-command laptop session
+  (`up --remote`, a second `up --remote --dry-run`, and a `pull`-style transfer)
+  and asserts it authenticates **exactly once** — the SSH ControlMaster
+  multiplexing hpc-compose relies on so a real login node prompts only on the
+  first connection.
+
+Both harnesses require the same privileged container as `dev-cluster-e2e` and
+route the ControlMaster socket through a per-run temp dir (nothing is written to
+your `~/.ssh`). The host SSH port is configurable with `DEVCLUSTER_SSH_PORT`
+(default `2222`) if `2222` is already in use.
+
 ## Scope
 
 Validated locally:

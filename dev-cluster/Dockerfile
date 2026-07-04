@@ -22,6 +22,14 @@ RUN cargo build --release --locked --bin hpc-compose
 # --- Stage 2: Slurm controller + worker + accounting + hpc-compose ----------
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
+# Pin the Slurm packages for reproducible image builds. slurm-wlm and slurmdbd
+# ship from the same source package, so they share one version string.
+# To bump: query the current candidate in the base image and update the default:
+#   docker run --rm ubuntu:24.04 sh -c 'apt-get update && apt-cache policy slurm-wlm'
+# The ubuntu:24.04 archive occasionally supersedes this version (security
+# updates); if the pinned build fails with "Version ... not found", either bump
+# the ARG or unpin for this build: `--build-arg SLURM_VERSION=` (empty = no pin).
+ARG SLURM_VERSION=23.11.4-1.2ubuntu5
 # slurm-wlm: slurmctld/slurmd/client commands. slurmdbd + mariadb-server give
 # `sacct` accounting so `up`/`stats`/`score` track jobs to a terminal state.
 # munge: auth. Extra tools let host-backend example services actually run.
@@ -30,7 +38,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # pre-generates host keys so sshd can start at boot.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      slurm-wlm slurmdbd munge mariadb-server \
+      "slurm-wlm${SLURM_VERSION:+=$SLURM_VERSION}" "slurmdbd${SLURM_VERSION:+=$SLURM_VERSION}" munge mariadb-server \
       ca-certificates procps iproute2 tini \
       python3 curl redis-server socat \
       openssh-server rsync \

@@ -28,7 +28,16 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 container="hpc-compose-devcluster"
 work_dir="$repo_root/.tmp/devcluster-remote-e2e"
 spec="$repo_root/dev-cluster/specs/hello.yaml"
-ssh_port=2222
+ssh_port="${DEVCLUSTER_SSH_PORT:-2222}"
+
+# Per-run dir for the SSH ControlMaster socket, so nothing lands in the
+# developer's real ~/.ssh (removed in the EXIT trap). Based under /tmp (not
+# $TMPDIR): macOS $TMPDIR lives under a long /var/folders/... path that, plus the
+# `cm-root@localhost:PORT` socket name and the random suffix ssh appends while
+# opening the master, overruns the ~104-char sun_path limit. The binary honours
+# the ControlPath we inject below via HPC_COMPOSE_REMOTE_SSH_OPTS (those env opts
+# come first and win ssh's first-value-wins order over its built-in default).
+ssh_ctl_dir="$(mktemp -d /tmp/hcdc-ssh.XXXXXX)"
 
 red='\033[31m'; green='\033[32m'; bold='\033[1m'; reset='\033[0m'
 note() { printf '%b==>%b %s\n' "$bold" "$reset" "$*"; }
@@ -71,9 +80,10 @@ resolve_binary() {
 }
 
 remote_jobid=""
-# up --remote always multiplexes over ~/.ssh/cm-%r@%h:%p, which for root@localhost
-# -p 2222 is this socket; close + remove it so no live master is left on a laptop.
-control_socket="$HOME/.ssh/cm-root@localhost:$ssh_port"
+# up --remote multiplexes over the ControlPath we inject below; for root@localhost
+# -p $ssh_port that expands to this socket. Close + remove it (and its dir) so no
+# live master is left behind and nothing is written to the developer's ~/.ssh.
+control_socket="$ssh_ctl_dir/cm-root@localhost:$ssh_port"
 finish() {
   # Cancel a leaked remote job, drop the staged tree, and clean the work dir.
   if [[ -n "$remote_jobid" ]]; then
@@ -85,7 +95,7 @@ finish() {
   if [[ -S "$control_socket" ]]; then
     ssh -o ControlPath="$control_socket" -O exit root@localhost >/dev/null 2>&1 || true
   fi
-  rm -f "$control_socket" 2>/dev/null || true
+  rm -rf "$ssh_ctl_dir" 2>/dev/null || true
   inctr rm -rf /root/.hpc-compose-remote >/dev/null 2>&1 || true
   rm -rf "$work_dir" 2>/dev/null || true
   if [[ "${DEVCLUSTER_E2E_DOWN:-0}" == "1" ]]; then
@@ -124,7 +134,10 @@ ssh-keygen -t ed25519 -N '' -f "$key" -q
 
 # Ad-hoc ssh options for a host not in ~/.ssh/config (port + key + no host-key
 # prompt). hpc-compose's remote path appends these to every ssh/rsync it runs.
-export HPC_COMPOSE_REMOTE_SSH_OPTS="-p $ssh_port -i $key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+# The explicit ControlPath redirects the binary's ControlMaster socket into our
+# per-run temp dir instead of ~/.ssh: these env opts come FIRST in the binary's
+# arg vector and win ssh's first-value-wins precedence over its built-in default.
+export HPC_COMPOSE_REMOTE_SSH_OPTS="-p $ssh_port -i $key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ControlPath=$ssh_ctl_dir/cm-%r@%h:%p"
 
 note "Waiting for sshd to accept the key"
 reachable=0
