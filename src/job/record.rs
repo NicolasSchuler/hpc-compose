@@ -482,6 +482,39 @@ pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<
     validate_submission_record(read_json(&path)?, &path)
 }
 
+/// Like [`load_submission_record`], but a legitimately absent record is a silent
+/// `None` while a present-but-broken record (corrupt JSON or failed validation) is
+/// a *degraded* `None`: one `WARN` line to stderr naming the path, then `None`.
+///
+/// Read-only callers (e.g. `stats`) use this so a truncated record no longer makes
+/// a tracked job silently vanish, without turning an ordinary "no such job yet" into
+/// a hard error.
+pub fn load_submission_record_optional(
+    spec_path: &Path,
+    job_id: Option<&str>,
+) -> Option<SubmissionRecord> {
+    let compose_file = absolute_path(spec_path).ok()?;
+    let path = match job_id {
+        Some(job_id) => jobs_dir_for(&compose_file).join(format!("{job_id}.json")),
+        None => latest_record_path_for(&compose_file),
+    };
+    if !path.exists() {
+        return None;
+    }
+    let record = read_json_optional::<SubmissionRecord>(&path)?;
+    match validate_submission_record(record, &path) {
+        Ok(record) => Some(record),
+        Err(err) => {
+            eprintln!(
+                "{} {}: {err:#}",
+                crate::term::styled_warning("WARN"),
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 fn validate_submission_record(record: SubmissionRecord, path: &Path) -> Result<SubmissionRecord> {
     // Guard teardown/cleanup against a corrupt or hand-tampered record: an empty
     // job id would collapse the per-job runtime/enroot paths to their shared
@@ -703,9 +736,7 @@ fn read_latest_pointer_job_id(metadata_root: &Path, kind: SubmissionKind) -> Opt
         }
         SubmissionKind::SweepTrial => return None,
     };
-    read_json::<SubmissionRecord>(&latest_path)
-        .ok()
-        .map(|record| record.job_id)
+    read_json_optional::<SubmissionRecord>(&latest_path).map(|record| record.job_id)
 }
 
 fn resolved_latest_job_id(
@@ -977,6 +1008,45 @@ mod tests {
         fs::write(dir.join("inner.txt"), "x").expect("write");
         remove_path_if_present(&dir).expect("remove dir");
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn read_json_optional_returns_none_for_missing() {
+        let missing = PathBuf::from("/definitely/does/not/exist/state.json");
+        let value: Option<SubmissionRecord> = read_json_optional(&missing);
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn read_json_optional_returns_none_for_corrupt() {
+        // A present-but-truncated JSON must degrade to None without panicking (the
+        // caller keeps its fall-through), while still being distinguishable from the
+        // legitimately-absent case handled above.
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = tmpdir.path().join("state.json");
+        fs::write(&path, b"{ \"job_id\": \"42\", ").expect("write corrupt");
+        let value: Option<SubmissionRecord> = read_json_optional(&path);
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn load_submission_record_optional_missing_is_none() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let spec = tmpdir.path().join("compose.yaml");
+        // No job records written at all: absent, so a silent None.
+        assert!(load_submission_record_optional(&spec, Some("42")).is_none());
+    }
+
+    #[test]
+    fn load_submission_record_optional_corrupt_is_none() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let spec = tmpdir.path().join("compose.yaml");
+        let jobs_dir = jobs_dir_for(&spec);
+        fs::create_dir_all(&jobs_dir).expect("jobs dir");
+        fs::write(jobs_dir.join("42.json"), b"{ truncated").expect("write corrupt record");
+        // Present-but-broken: degrades to None (warns) rather than vanishing silently
+        // or hard-failing.
+        assert!(load_submission_record_optional(&spec, Some("42")).is_none());
     }
 
     #[test]

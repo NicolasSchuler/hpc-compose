@@ -121,23 +121,35 @@ fn run_scheduler_command_with_timeout(
 
     Ok(Output {
         status,
-        stdout: join_pipe(stdout_handle),
-        stderr: join_pipe(stderr_handle),
+        // A failed pipe read must not silently yield truncated output that then
+        // gets parsed into a confident-but-wrong scheduler state: route it through
+        // the same Io failure path the rest of this runner uses.
+        stdout: join_pipe(stdout_handle).map_err(SchedulerCommandError::Io)?,
+        stderr: join_pipe(stderr_handle).map_err(SchedulerCommandError::Io)?,
     })
 }
 
-fn read_pipe_thread(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+fn read_pipe_thread(
+    mut pipe: impl Read + Send + 'static,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = pipe.read_to_end(&mut bytes);
-        bytes
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
     })
 }
 
-fn join_pipe(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    handle
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default()
+fn join_pipe(
+    handle: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> std::io::Result<Vec<u8>> {
+    match handle {
+        Some(handle) => handle.join().unwrap_or_else(|_| {
+            Err(std::io::Error::other(
+                "scheduler output reader thread panicked",
+            ))
+        }),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Live walltime progress derived from a tracked job record and scheduler diagnostics.
@@ -1523,6 +1535,33 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_command_reads_full_output() {
+        // Regression guard for the pipe-read refactor: a successful command's stdout
+        // must be captured in full. A genuine `read_to_end` error can't be forced
+        // deterministically via the fake-binary fixtures (a closed pipe yields EOF,
+        // i.e. `Ok(0)`, not an error), so we assert the happy path stays intact and
+        // rely on the type system to route any real read error into `Io`.
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let printer = write_fake_probe(tmpdir.path(), "printy-squeue", "JOBID STATE\n42 RUNNING");
+        let binary = printer.to_string_lossy().to_string();
+        let mut command = Command::new(&printer);
+
+        let output = run_scheduler_command_with_timeout(
+            &mut command,
+            "squeue",
+            &binary,
+            Duration::from_secs(5),
+        )
+        .expect("fake command should succeed");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("JOBID STATE"));
+        assert!(stdout.contains("42 RUNNING"));
+    }
+
     #[test]
     fn scheduler_command_timeout_reports_unavailable() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
