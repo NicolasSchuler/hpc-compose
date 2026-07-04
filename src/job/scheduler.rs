@@ -449,7 +449,7 @@ pub fn build_status_snapshot(
     job_id: Option<&str>,
     options: &SchedulerOptions,
 ) -> Result<StatusSnapshot> {
-    build_status_snapshot_with_array(spec_path, job_id, options, false)
+    build_status_snapshot_core(spec_path, job_id, options, false, None)
 }
 
 /// Builds the tracked status snapshot, optionally including Slurm array rows.
@@ -459,13 +459,39 @@ pub fn build_status_snapshot_with_array(
     options: &SchedulerOptions,
     include_array: bool,
 ) -> Result<StatusSnapshot> {
+    build_status_snapshot_core(spec_path, job_id, options, include_array, None)
+}
+
+/// Builds the tracked status snapshot reusing an already-probed raw Slurm
+/// scheduler status (from [`probe_scheduler_status_many`]) instead of re-probing.
+///
+/// The prefetched pair is used only for Slurm-backed records; local records
+/// derive their status from runtime state as usual. Callers that batch probes
+/// over many jobs (sweep status, `diff --across`) thread the batched result
+/// through here so each snapshot avoids a per-job squeue/sacct spawn.
+pub fn build_status_snapshot_with_status(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &SchedulerOptions,
+    prefetched: Option<(SchedulerStatus, Option<QueueDiagnostics>)>,
+) -> Result<StatusSnapshot> {
+    build_status_snapshot_core(spec_path, job_id, options, false, prefetched)
+}
+
+fn build_status_snapshot_core(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &SchedulerOptions,
+    include_array: bool,
+    prefetched: Option<(SchedulerStatus, Option<QueueDiagnostics>)>,
+) -> Result<StatusSnapshot> {
     let record = load_submission_record(spec_path, job_id)?;
     let now = unix_timestamp_now();
     let runtime_state = load_runtime_state(&record);
     let (scheduler, queue_diagnostics) = match record.backend {
         SubmissionBackend::Slurm => {
             let (raw_scheduler, queue_diagnostics) =
-                probe_status_components(&record.job_id, options);
+                prefetched.unwrap_or_else(|| probe_status_components(&record.job_id, options));
             (
                 reconcile_scheduler_status(raw_scheduler, record.submitted_at, None, now),
                 queue_diagnostics,
@@ -628,8 +654,12 @@ fn derive_service_status(
 }
 
 /// Probes scheduler state using `squeue` first and `sacct` as fallback.
+///
+/// This returns only the state (no queue diagnostics), so sacct is skipped
+/// whenever squeue already resolved a live state — no user-visible field is
+/// derived from the discarded sacct probe in that case.
 pub fn probe_scheduler_status(job_id: &str, options: &SchedulerOptions) -> SchedulerStatus {
-    probe_status_components(job_id, options).0
+    probe_status_components_inner(job_id, options, false).0
 }
 
 /// Probes scheduler state and returns queue-facing diagnostics when available.
@@ -1119,22 +1149,49 @@ fn probe_status_components(
     job_id: &str,
     options: &SchedulerOptions,
 ) -> (SchedulerStatus, Option<QueueDiagnostics>) {
+    // The status/watch surfaces render sacct-sourced queue diagnostics
+    // (eligible time) even for live jobs, so this entry point always probes
+    // sacct to keep that output intact.
+    probe_status_components_inner(job_id, options, true)
+}
+
+fn probe_status_components_inner(
+    job_id: &str,
+    options: &SchedulerOptions,
+    always_probe_sacct: bool,
+) -> (SchedulerStatus, Option<QueueDiagnostics>) {
     let (squeue, squeue_unavailable) =
         match probe_squeue_queue_diagnostics_result(job_id, &options.squeue_bin) {
             QueueProbeResult::Probe(probe) => (probe, None),
             QueueProbeResult::Unavailable(reason) => (None, Some(reason)),
         };
     let (sacct, sacct_unavailable) =
-        match probe_sacct_queue_diagnostics_result(job_id, &options.sacct_bin) {
-            QueueProbeResult::Probe(probe) => (probe, None),
-            QueueProbeResult::Unavailable(reason) => (None, Some(reason)),
+        if always_probe_sacct || squeue_state_needs_sacct(squeue.as_ref()) {
+            match probe_sacct_queue_diagnostics_result(job_id, &options.sacct_bin) {
+                QueueProbeResult::Probe(probe) => (probe, None),
+                QueueProbeResult::Unavailable(reason) => (None, Some(reason)),
+            }
+        } else {
+            (None, None)
         };
     let unavailable = [squeue_unavailable, sacct_unavailable]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let scheduler = scheduler_status_from_probe(squeue.as_ref(), SchedulerSource::Squeue)
-        .or_else(|| scheduler_status_from_probe(sacct.as_ref(), SchedulerSource::Sacct))
+    assemble_status_components(squeue.as_ref(), sacct.as_ref(), &unavailable)
+}
+
+/// Assembles the raw `(SchedulerStatus, QueueDiagnostics)` pair from an optional
+/// squeue probe (authoritative for live jobs) and sacct probe (authoritative for
+/// terminal accounting). A job resolved by neither yields the shared
+/// "scheduler state is unavailable" status.
+fn assemble_status_components(
+    squeue: Option<&QueueDiagnosticsProbe>,
+    sacct: Option<&QueueDiagnosticsProbe>,
+    unavailable: &[String],
+) -> (SchedulerStatus, Option<QueueDiagnostics>) {
+    let scheduler = scheduler_status_from_probe(squeue, SchedulerSource::Squeue)
+        .or_else(|| scheduler_status_from_probe(sacct, SchedulerSource::Sacct))
         .unwrap_or_else(|| SchedulerStatus {
             state: "unknown".to_string(),
             source: SchedulerSource::LocalOnly,
@@ -1150,9 +1207,161 @@ fn probe_status_components(
                 )
             }),
         });
-    let queue_diagnostics =
-        build_status_queue_diagnostics(&scheduler, squeue.as_ref(), sacct.as_ref());
+    let queue_diagnostics = build_status_queue_diagnostics(&scheduler, squeue, sacct);
     (scheduler, queue_diagnostics)
+}
+
+/// Returns `true` when sacct is still required after a squeue probe: squeue
+/// reports live (queued/running) jobs, so any state it returns that is not
+/// terminal is authoritative and lets us skip sacct. When squeue is empty (job
+/// left the queue) or the state is terminal, accounting remains authoritative.
+fn squeue_state_needs_sacct(squeue: Option<&QueueDiagnosticsProbe>) -> bool {
+    match squeue.and_then(|probe| probe.state.as_deref()) {
+        Some(state) => is_terminal_state(state),
+        None => true,
+    }
+}
+
+/// Batched raw scheduler probe. Issues ONE squeue for every job id and, only for
+/// the jobs squeue did not resolve to a live state, ONE sacct. Returns the same
+/// raw `(SchedulerStatus, Option<QueueDiagnostics>)` pair `probe_scheduler_status`
+/// / `probe_status_components` yield per job (before reconciliation). A job id
+/// absent from all probe output maps to the same "scheduler state is unavailable"
+/// status the single-job probe produces.
+///
+/// sacct is gated here (skipped for jobs squeue already reports as live): the
+/// batched callers — sweep status/stats and `diff --across` — never render the
+/// sacct-only `eligible_time` diagnostic, so gating is output-neutral for them.
+pub fn probe_scheduler_status_many(
+    job_ids: &[&str],
+    options: &SchedulerOptions,
+) -> BTreeMap<String, (SchedulerStatus, Option<QueueDiagnostics>)> {
+    let mut result = BTreeMap::new();
+    if job_ids.is_empty() {
+        return result;
+    }
+    // Preserve order while de-duplicating for the comma-joined `-j` list.
+    let mut unique = Vec::new();
+    for id in job_ids {
+        if !unique.contains(id) {
+            unique.push(*id);
+        }
+    }
+
+    let (squeue_map, squeue_unavailable) = probe_squeue_batch(&unique, &options.squeue_bin);
+    let sacct_ids = unique
+        .iter()
+        .copied()
+        .filter(|id| squeue_state_needs_sacct(squeue_map.get(*id)))
+        .collect::<Vec<_>>();
+    let (sacct_map, sacct_unavailable) = if sacct_ids.is_empty() {
+        (BTreeMap::new(), None)
+    } else {
+        probe_sacct_batch(&sacct_ids, &options.sacct_bin)
+    };
+
+    for id in unique {
+        let unavailable = [squeue_unavailable.clone(), sacct_unavailable.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let components =
+            assemble_status_components(squeue_map.get(id), sacct_map.get(id), &unavailable);
+        result.insert(id.to_string(), components);
+    }
+    result
+}
+
+fn probe_squeue_batch(
+    job_ids: &[&str],
+    binary: &str,
+) -> (BTreeMap<String, QueueDiagnosticsProbe>, Option<String>) {
+    let joined = job_ids.join(",");
+    let mut command = Command::new(binary);
+    command.args(["-h", "-j", &joined, "-o", "%i|%T|%r|%S"]);
+    let output = match run_scheduler_command(&mut command, "squeue", binary) {
+        Ok(output) => output,
+        Err(err) => match err.unavailable_detail() {
+            Some(detail) => return (BTreeMap::new(), Some(detail)),
+            None => return (BTreeMap::new(), None),
+        },
+    };
+    if !output.status.success() {
+        return (BTreeMap::new(), None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut map = BTreeMap::new();
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let mut fields = line.split('|').map(str::trim);
+        let Some(job_id) = fields.next().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let state = fields.next().and_then(normalize_scheduler_state_field);
+        let pending_reason = fields.next().and_then(normalize_scheduler_metadata);
+        let start_time = fields.next().and_then(normalize_scheduler_metadata);
+        map.entry(job_id.to_string())
+            .or_insert(QueueDiagnosticsProbe {
+                state,
+                pending_reason,
+                start_time,
+                ..QueueDiagnosticsProbe::default()
+            });
+    }
+    (map, None)
+}
+
+fn probe_sacct_batch(
+    job_ids: &[&str],
+    binary: &str,
+) -> (BTreeMap<String, QueueDiagnosticsProbe>, Option<String>) {
+    let joined = job_ids.join(",");
+    let mut command = Command::new(binary);
+    command.args([
+        "-n",
+        "-X",
+        "-j",
+        &joined,
+        "--format=JobID,State,Eligible,Start,Reason",
+        "--parsable2",
+    ]);
+    let output = match run_scheduler_command(&mut command, "sacct", binary) {
+        Ok(output) => output,
+        Err(err) => match err.unavailable_detail() {
+            Some(detail) => return (BTreeMap::new(), Some(detail)),
+            None => return (BTreeMap::new(), None),
+        },
+    };
+    if !output.status.success() {
+        return (BTreeMap::new(), None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut map = BTreeMap::new();
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let mut fields = line.split('|').map(str::trim);
+        let Some(job_id) = fields.next().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let state = fields.next().and_then(normalize_scheduler_state_field);
+        let eligible_time = fields.next().and_then(normalize_scheduler_metadata);
+        let start_time = fields.next().and_then(normalize_scheduler_metadata);
+        let pending_reason = fields.next().and_then(normalize_scheduler_metadata);
+        map.entry(job_id.to_string())
+            .or_insert(QueueDiagnosticsProbe {
+                state,
+                pending_reason,
+                eligible_time,
+                start_time,
+            });
+    }
+    (map, None)
 }
 
 fn build_status_queue_diagnostics(
@@ -1476,6 +1685,130 @@ mod tests {
         let present = build_log_status(&log, unix_timestamp_now());
         assert!(present.present);
         assert!(present.updated_at.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_scheduler_status_many_batches_and_maps_states() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        // squeue emits one `%i|%T|%r|%S` row per requested id (skipping the
+        // ones it does not know), recording its argv so we can assert a single
+        // comma-joined invocation.
+        let squeue_log = tmpdir.path().join("squeue.argv");
+        let squeue = write_fake_script(
+            tmpdir.path(),
+            "squeue",
+            &format!(
+                r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+job=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-j" ]]; then job="$arg"; fi
+  prev="$arg"
+done
+IFS=',' read -ra ids <<< "$job"
+for id in "${{ids[@]}}"; do
+  case "$id" in
+    100) echo "100|RUNNING|N/A|N/A" ;;
+    101) echo "101|PENDING|Resources|N/A" ;;
+  esac
+done
+"#,
+                squeue_log.display()
+            ),
+        );
+        // sacct records any invocation and resolves only the terminal id (102).
+        let sacct_log = tmpdir.path().join("sacct.argv");
+        let sacct = write_fake_script(
+            tmpdir.path(),
+            "sacct",
+            &format!(
+                r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+job=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-j" ]]; then job="$arg"; fi
+  prev="$arg"
+done
+IFS=',' read -ra ids <<< "$job"
+for id in "${{ids[@]}}"; do
+  case "$id" in
+    102) echo "102|COMPLETED|2026-01-01T00:00:00|2026-01-01T00:01:00|None" ;;
+  esac
+done
+"#,
+                sacct_log.display()
+            ),
+        );
+
+        let options = SchedulerOptions {
+            squeue_bin: squeue.to_string_lossy().to_string(),
+            sacct_bin: sacct.to_string_lossy().to_string(),
+        };
+        let result = probe_scheduler_status_many(&["100", "101", "102", "103"], &options);
+        assert_eq!(result["100"].0.state, "RUNNING");
+        assert_eq!(result["100"].0.source, SchedulerSource::Squeue);
+        assert_eq!(result["101"].0.state, "PENDING");
+        assert_eq!(result["102"].0.state, "COMPLETED");
+        assert_eq!(result["102"].0.source, SchedulerSource::Sacct);
+        // 103 is absent from both probes -> shared "unavailable" status.
+        assert_eq!(result["103"].0.state, "unknown");
+        assert_eq!(result["103"].0.source, SchedulerSource::LocalOnly);
+
+        // squeue ran exactly once with a comma-joined `-j` list of every id.
+        let squeue_calls = fs::read_to_string(&squeue_log).expect("squeue log");
+        assert_eq!(squeue_calls.lines().count(), 1);
+        assert!(squeue_calls.contains("100,101,102,103"));
+        // sacct ran exactly once, only for the ids squeue left unresolved
+        // (the two live states are gated out).
+        let sacct_calls = fs::read_to_string(&sacct_log).expect("sacct log");
+        assert_eq!(sacct_calls.lines().count(), 1);
+        assert!(sacct_calls.contains("102,103"));
+        assert!(!sacct_calls.contains("-j 100"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_scheduler_status_skips_sacct_for_live_squeue_state() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let squeue = write_fake_probe(tmpdir.path(), "squeue", "RUNNING|N/A|N/A");
+        let sacct_log = tmpdir.path().join("sacct.argv");
+        let sacct = write_fake_script(
+            tmpdir.path(),
+            "sacct",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\necho 'RUNNING|2026-01-01T00:00:00|2026-01-01T00:01:00|None'\n",
+                sacct_log.display()
+            ),
+        );
+        let options = SchedulerOptions {
+            squeue_bin: squeue.to_string_lossy().to_string(),
+            sacct_bin: sacct.to_string_lossy().to_string(),
+        };
+
+        // State-only probe: squeue already reports RUNNING, so sacct is skipped.
+        let status = probe_scheduler_status("100", &options);
+        assert_eq!(status.state, "RUNNING");
+        assert_eq!(status.source, SchedulerSource::Squeue);
+        assert!(
+            !sacct_log.exists(),
+            "sacct must not run when squeue reports a live state for a state-only probe"
+        );
+
+        // The status/watch path keeps probing sacct so eligible-time diagnostics
+        // survive for live jobs.
+        let (with_diag, diagnostics) =
+            probe_scheduler_status_with_queue_diagnostics("100", &options);
+        assert_eq!(with_diag.state, "RUNNING");
+        assert!(sacct_log.exists(), "status path must still probe sacct");
+        assert_eq!(
+            diagnostics.and_then(|queue| queue.eligible_time).as_deref(),
+            Some("2026-01-01T00:00:00")
+        );
     }
 
     #[cfg(unix)]

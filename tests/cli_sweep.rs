@@ -302,24 +302,26 @@ fn sweep_status_aggregates_scheduler_and_submit_states() {
     );
     assert_success(&submit);
 
+    // Batched probes pass a comma-joined job list to a single `-j`; emit one
+    // row per requested id, keyed by job id (squeue `%i|%T|%r|%S`).
     let squeue = tmpdir.path().join("squeue-by-job");
     write_script(
         &squeue,
         r#"#!/bin/bash
 set -euo pipefail
 job=""
-format_string=""
 prev=""
 for arg in "$@"; do
   if [[ "$prev" == "-j" ]]; then job="$arg"; fi
-  if [[ "$prev" == "-o" || "$prev" == "--format" ]]; then format_string="$arg"; fi
   prev="$arg"
 done
-case "$job" in
-  11112) [[ "$format_string" == *"%T|%r|%S"* ]] && echo "RUNNING|N/A|N/A" || echo "RUNNING" ;;
-  11113) [[ "$format_string" == *"%T|%r|%S"* ]] && echo "PENDING|Resources|N/A" || echo "PENDING" ;;
-  *) exit 0 ;;
-esac
+IFS=',' read -ra ids <<< "$job"
+for id in "${ids[@]}"; do
+  case "$id" in
+    11112) echo "11112|RUNNING|N/A|N/A" ;;
+    11113) echo "11113|PENDING|Resources|N/A" ;;
+  esac
+done
 "#,
     );
     let sacct = tmpdir.path().join("sacct-by-job");
@@ -328,18 +330,18 @@ esac
         r#"#!/bin/bash
 set -euo pipefail
 job=""
-format_string=""
 prev=""
 for arg in "$@"; do
   if [[ "$prev" == "-j" || "$prev" == "--jobs" ]]; then job="$arg"; fi
-  if [[ "$prev" == "--format" ]]; then format_string="$arg"; fi
   prev="$arg"
 done
-case "$job" in
-  11111) [[ "$format_string" == *"State,Eligible,Start,Reason"* ]] && echo "COMPLETED|Unknown|Unknown|None" || echo "COMPLETED" ;;
-  11114) [[ "$format_string" == *"State,Eligible,Start,Reason"* ]] && echo "FAILED|Unknown|Unknown|None" || echo "FAILED" ;;
-  *) exit 0 ;;
-esac
+IFS=',' read -ra ids <<< "$job"
+for id in "${ids[@]}"; do
+  case "$id" in
+    11111) echo "11111|COMPLETED|Unknown|Unknown|None" ;;
+    11114) echo "11114|FAILED|Unknown|Unknown|None" ;;
+  esac
+done
 "#,
     );
 
@@ -364,6 +366,138 @@ esac
     assert_eq!(payload["summary"]["running"], Value::from(1));
     assert_eq!(payload["summary"]["pending"], Value::from(1));
     assert_eq!(payload["summary"]["failed"], Value::from(1));
+}
+
+#[test]
+fn sweep_status_and_stats_batch_scheduler_probes_into_one_squeue_call() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01", "0.1"]);
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 31111);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&submit);
+    let submit_payload: Value = serde_json::from_str(&stdout_text(&submit)).expect("submit json");
+    let sweep_id = submit_payload["manifest"]["sweep_id"]
+        .as_str()
+        .expect("sweep id")
+        .to_string();
+    let job_ids = submit_payload["manifest"]["trials"]
+        .as_array()
+        .expect("trials")
+        .iter()
+        .map(|trial| trial["job_id"].as_str().expect("job id").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(job_ids.len(), 3);
+
+    // Every trial reports RUNNING via a single batched squeue; a comma-joined
+    // `-j` list must therefore appear in exactly one squeue invocation, and the
+    // gated sacct must never run for these live jobs.
+    let squeue_state = tmpdir.path().join("squeue.state");
+    let sacct_state = tmpdir.path().join("sacct.state");
+    fs::write(&squeue_state, "RUNNING\n").expect("squeue state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let squeue_log = tmpdir.path().join("squeue.argv");
+    let sacct_log = tmpdir.path().join("sacct.argv");
+
+    for subcommand in ["status", "stats"] {
+        let _ = fs::remove_file(&squeue_log);
+        let _ = fs::remove_file(&sacct_log);
+        // The batched squeue emits one `%i|...` row per requested id.
+        let squeue = tmpdir.path().join(format!("squeue-batch-{subcommand}"));
+        write_script(
+            &squeue,
+            &format!(
+                r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+job=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-j" ]]; then job="$arg"; fi
+  prev="$arg"
+done
+IFS=',' read -ra ids <<< "$job"
+for id in "${{ids[@]}}"; do
+  echo "$id|RUNNING|N/A|N/A"
+done
+"#,
+                squeue_log.display()
+            ),
+        );
+        let sacct = write_fake_sacct_with_argv_log(tmpdir.path(), &sacct_state, &sacct_log);
+        let sstat_out = tmpdir.path().join("sstat.out");
+        fs::write(&sstat_out, "").expect("sstat out");
+        let sstat = write_fake_sstat(tmpdir.path(), &sstat_out);
+
+        // `sweep status` is a sweep subcommand; `sweep stats` is `stats --sweep`.
+        let args = if subcommand == "status" {
+            vec![
+                "sweep",
+                "status",
+                "-f",
+                compose.to_str().expect("path"),
+                "--format",
+                "json",
+                "--squeue-bin",
+                squeue.to_str().expect("path"),
+                "--sacct-bin",
+                sacct.to_str().expect("path"),
+            ]
+        } else {
+            vec![
+                "stats",
+                "--sweep",
+                &sweep_id,
+                "-f",
+                compose.to_str().expect("path"),
+                "--format",
+                "json",
+                "--squeue-bin",
+                squeue.to_str().expect("path"),
+                "--sacct-bin",
+                sacct.to_str().expect("path"),
+                "--sstat-bin",
+                sstat.to_str().expect("path"),
+            ]
+        };
+        let output = run_cli(tmpdir.path(), &args);
+        assert_success(&output);
+
+        let squeue_calls = fs::read_to_string(&squeue_log).expect("squeue log");
+        assert_eq!(
+            squeue_calls.lines().count(),
+            1,
+            "{subcommand}: squeue must run exactly once, saw:\n{squeue_calls}"
+        );
+        for job_id in &job_ids {
+            assert!(
+                squeue_calls.contains(job_id),
+                "{subcommand}: squeue argv missing job {job_id}: {squeue_calls}"
+            );
+        }
+        assert!(
+            squeue_calls.contains(&format!("{},{}", job_ids[0], job_ids[1])),
+            "{subcommand}: squeue -j must be comma-joined: {squeue_calls}"
+        );
+        assert!(
+            !sacct_log.exists(),
+            "{subcommand}: sacct must be gated out when squeue reports RUNNING"
+        );
+    }
 }
 
 #[test]

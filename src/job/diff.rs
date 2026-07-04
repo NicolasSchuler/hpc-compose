@@ -127,6 +127,21 @@ const SERVICE_RESOURCE_FIELDS: &[&[&str]] = &[
     &["x-slurm", "placement"],
 ];
 
+/// Batches the raw scheduler probe over the Slurm-backed records in `records`
+/// (one squeue + one gated sacct total). Local records probe no scheduler, so
+/// they are excluded; the returned map is keyed by job id.
+fn batch_scheduler_probes(
+    records: &[&SubmissionRecord],
+    options: &SchedulerOptions,
+) -> BTreeMap<String, (SchedulerStatus, Option<QueueDiagnostics>)> {
+    let job_ids = records
+        .iter()
+        .filter(|record| record.backend == SubmissionBackend::Slurm)
+        .map(|record| record.job_id.as_str())
+        .collect::<Vec<_>>();
+    probe_scheduler_status_many(&job_ids, options)
+}
+
 /// Builds a compact diff report for two tracked jobs.
 pub fn build_job_diff_report(
     left: &SubmissionRecord,
@@ -134,24 +149,36 @@ pub fn build_job_diff_report(
     options: &SchedulerOptions,
 ) -> JobDiffReport {
     let mut notes = Vec::new();
-    let left_status = match build_status_snapshot(&left.compose_file, Some(&left.job_id), options) {
+    // One squeue + (when needed) one sacct for both jobs instead of a probe pair
+    // per side.
+    let probes = batch_scheduler_probes(&[left, right], options);
+    let left_status = match build_status_snapshot_with_status(
+        &left.compose_file,
+        Some(&left.job_id),
+        options,
+        probes.get(&left.job_id).cloned(),
+    ) {
         Ok(snapshot) => Some(snapshot),
         Err(err) => {
             notes.push(format!("status unavailable for job {}: {err}", left.job_id));
             None
         }
     };
-    let right_status =
-        match build_status_snapshot(&right.compose_file, Some(&right.job_id), options) {
-            Ok(snapshot) => Some(snapshot),
-            Err(err) => {
-                notes.push(format!(
-                    "status unavailable for job {}: {err}",
-                    right.job_id
-                ));
-                None
-            }
-        };
+    let right_status = match build_status_snapshot_with_status(
+        &right.compose_file,
+        Some(&right.job_id),
+        options,
+        probes.get(&right.job_id).cloned(),
+    ) {
+        Ok(snapshot) => Some(snapshot),
+        Err(err) => {
+            notes.push(format!(
+                "status unavailable for job {}: {err}",
+                right.job_id
+            ));
+            None
+        }
+    };
     let left_side = diff_side(left, left_status.as_ref());
     let right_side = diff_side(right, right_status.as_ref());
     let outcome_changes = outcome_changes(&left_side, &right_side);
@@ -203,20 +230,27 @@ pub fn build_job_matrix_report(
 
     // Project each record into the same per-side view the pairwise diff uses,
     // and parse its config snapshot once. Both reuse the existing primitives.
+    // One squeue + (when needed) one sacct across every run instead of a probe
+    // pair per record.
+    let probes = batch_scheduler_probes(&records.iter().collect::<Vec<_>>(), options);
     let mut sides = Vec::with_capacity(records.len());
     let mut configs = Vec::with_capacity(records.len());
     for record in records {
-        let status =
-            match build_status_snapshot(&record.compose_file, Some(&record.job_id), options) {
-                Ok(snapshot) => Some(snapshot),
-                Err(err) => {
-                    notes.push(format!(
-                        "status unavailable for job {}: {err}",
-                        record.job_id
-                    ));
-                    None
-                }
-            };
+        let status = match build_status_snapshot_with_status(
+            &record.compose_file,
+            Some(&record.job_id),
+            options,
+            probes.get(&record.job_id).cloned(),
+        ) {
+            Ok(snapshot) => Some(snapshot),
+            Err(err) => {
+                notes.push(format!(
+                    "status unavailable for job {}: {err}",
+                    record.job_id
+                ));
+                None
+            }
+        };
         sides.push(diff_side(record, status.as_ref()));
         configs.push(parse_config_snapshot(record, &mut notes));
     }

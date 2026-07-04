@@ -100,9 +100,10 @@ pub use scheduler::{
     ArrayStatusSnapshot, ArrayTaskStatus, BatchLogStatus, PsServiceRow, QueueDiagnostics,
     SchedulerStatus, ServiceAssertionStatus, ServiceLogStatus, StatusSnapshot, WalltimeProgress,
     build_array_status_snapshot, build_status_snapshot, build_status_snapshot_with_array,
-    format_walltime_duration, format_walltime_summary, parse_scheduler_timestamp,
-    probe_scheduler_status, probe_scheduler_status_with_queue_diagnostics, scheduler_source_label,
-    walltime_progress, walltime_progress_percent,
+    build_status_snapshot_with_status, format_walltime_duration, format_walltime_summary,
+    parse_scheduler_timestamp, probe_scheduler_status, probe_scheduler_status_many,
+    probe_scheduler_status_with_queue_diagnostics, scheduler_source_label, walltime_progress,
+    walltime_progress_percent,
 };
 pub use score::{
     EfficiencyScoreComponent, EfficiencyScoreConfidence, EfficiencyScoreOptions,
@@ -111,7 +112,7 @@ pub use score::{
 pub use stats::{
     CollectorStatus, FirstFailure, GpuDeviceSample, GpuNodeSummary, GpuProcessSample, GpuSnapshot,
     SamplerSnapshot, SchedulerOptions, SlurmSamplerSnapshot, StatsOptions, StatsSnapshot,
-    StepStats, build_stats_snapshot, metrics_dir_for_record,
+    StepStats, build_stats_snapshot, build_stats_snapshot_with_status, metrics_dir_for_record,
 };
 pub use stats_rollup::{ReplicateStats, group_by_config, replicate_rollup};
 pub use sweep::{
