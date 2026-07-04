@@ -896,7 +896,7 @@ env_file:                           # list form, later file wins
 Rules:
 
 - Files are read on the **submit host** (the machine running `hpc-compose`), relative to the compose file's directory — the same base as the `.env` loader. They are baked into the rendered submission script; they are **not** re-read inside the job and **not** staged to the compute node.
-- Each line uses dotenv grammar: `KEY=VALUE`, optionally prefixed with `export `, with `#` comments and blank lines ignored and single/double quotes stripped. This is the same parser as `.env`.
+- Each line uses dotenv grammar: `KEY=VALUE`, optionally prefixed with `export`, with `#` comments and blank lines ignored and single/double quotes stripped. This is the same parser as `.env`.
 - Merge precedence, lowest to highest: `env_file` entries in list order, then inline `environment:`. A later file overrides an earlier one; inline `environment:` overrides anything from `env_file`.
 - File **contents are literal**: a value like `FOO=${BAR}` is kept verbatim with no `${...}` expansion (matching docker-compose and the `.env` loader). The env_file **paths are interpolated**, so `env_file: config/${STAGE}.env` resolves `${STAGE}` before the file is read.
 - The merged keys are name-validated exactly like inline `environment`, so an unsafe name (e.g. a leading digit) is rejected.
