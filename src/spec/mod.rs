@@ -523,6 +523,10 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub qos: Option<String>,
     #[serde(default)]
+    pub reservation: Option<String>,
+    #[serde(default)]
+    pub licenses: Option<String>,
+    #[serde(default)]
     pub time: Option<String>,
     #[serde(default)]
     pub nodes: Option<u32>,
@@ -1655,6 +1659,10 @@ pub struct EffectiveSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qos: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub licenses: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nodes: Option<u32>,
@@ -2356,6 +2364,8 @@ impl ComposeSpec {
                 partition: self.slurm.partition.clone(),
                 account: self.slurm.account.clone(),
                 qos: self.slurm.qos.clone(),
+                reservation: self.slurm.reservation.clone(),
+                licenses: self.slurm.licenses.clone(),
                 time: self.slurm.time.clone(),
                 nodes: self.slurm.nodes,
                 ntasks: self.slurm.ntasks,
@@ -2838,6 +2848,8 @@ impl SlurmConfig {
         validate_sbatch_safe_string(self.partition.as_deref(), "x-slurm.partition")?;
         validate_sbatch_safe_string(self.account.as_deref(), "x-slurm.account")?;
         validate_sbatch_safe_string(self.qos.as_deref(), "x-slurm.qos")?;
+        validate_sbatch_safe_string(self.reservation.as_deref(), "x-slurm.reservation")?;
+        validate_sbatch_safe_string(self.licenses.as_deref(), "x-slurm.licenses")?;
         validate_sbatch_safe_string(self.constraint.as_deref(), "x-slurm.constraint")?;
         validate_sbatch_safe_string(self.time.as_deref(), "x-slurm.time")?;
         validate_slurm_time_format(self.time.as_deref(), "x-slurm.time")?;
@@ -2945,6 +2957,8 @@ impl SlurmConfig {
         interpolate_optional_string(&mut self.partition, vars)?;
         interpolate_optional_string(&mut self.account, vars)?;
         interpolate_optional_string(&mut self.qos, vars)?;
+        interpolate_optional_string(&mut self.reservation, vars)?;
+        interpolate_optional_string(&mut self.licenses, vars)?;
         interpolate_optional_string(&mut self.time, vars)?;
         interpolate_optional_string(&mut self.mem, vars)?;
         interpolate_optional_string(&mut self.gres, vars)?;
@@ -4273,6 +4287,9 @@ const FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS: &[(&str, &str)] = &[
     ("account", "-A"),
     ("qos", "--qos"),
     ("qos", "-q"),
+    ("reservation", "--reservation"),
+    ("licenses", "--licenses"),
+    ("licenses", "-L"),
     ("time", "--time"),
     ("time", "-t"),
     ("cpus_per_task", "--cpus-per-task"),
@@ -4368,6 +4385,8 @@ fn top_level_slurm_field_is_set(slurm: &SlurmConfig, field: &str) -> bool {
         "partition" => slurm.partition.is_some(),
         "account" => slurm.account.is_some(),
         "qos" => slurm.qos.is_some(),
+        "reservation" => slurm.reservation.is_some(),
+        "licenses" => slurm.licenses.is_some(),
         "time" => slurm.time.is_some(),
         "cpus_per_task" => slurm.cpus_per_task.is_some(),
         "mem" => slurm.mem.is_some(),

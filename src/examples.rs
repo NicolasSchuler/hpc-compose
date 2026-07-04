@@ -772,6 +772,15 @@ const EXAMPLES: &[ExampleInfo] = &[
         start_when: "You need to gate on an earlier job and assert post-conditions on outputs.",
         tags: &["dependency", "after-job", "assert", "artifacts"],
     },
+    ExampleInfo {
+        name: "reservation-licenses",
+        path: "examples/reservation-licenses.yaml",
+        availability: ExampleAvailability::RepositoryFile,
+        category: "basics",
+        demonstrates: "First-class x-slurm.reservation and x-slurm.licenses rendered as #SBATCH directives.",
+        start_when: "Ops handed you a reservation or your job must hold software licenses.",
+        tags: &["reservation", "licenses", "sbatch", "scheduling"],
+    },
 ];
 
 #[cfg(test)]

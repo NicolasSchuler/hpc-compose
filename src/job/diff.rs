@@ -95,6 +95,8 @@ const RESOURCE_FIELDS: &[&[&str]] = &[
     &["x-slurm", "partition"],
     &["x-slurm", "account"],
     &["x-slurm", "qos"],
+    &["x-slurm", "reservation"],
+    &["x-slurm", "licenses"],
     &["x-slurm", "time"],
     &["x-slurm", "nodes"],
     &["x-slurm", "ntasks"],
@@ -1041,6 +1043,27 @@ mod tests {
                 .iter()
                 .any(|change| change.path == "services.app.image")
         );
+    }
+
+    #[test]
+    fn diff_resource_changes_reports_reservation_and_licenses() {
+        let left = serde_json::json!({
+            "x-slurm": {"reservation": "maint_2026", "licenses": "ansys:2"}
+        });
+        let right = serde_json::json!({
+            "x-slurm": {"reservation": "maint_2027", "licenses": "ansys:4,comsol:1"}
+        });
+        let changes = resource_changes(&left, &right);
+        assert!(changes.iter().any(|change| {
+            change.path == "x-slurm.reservation"
+                && change.left.as_deref() == Some("maint_2026")
+                && change.right.as_deref() == Some("maint_2027")
+        }));
+        assert!(changes.iter().any(|change| {
+            change.path == "x-slurm.licenses"
+                && change.left.as_deref() == Some("ansys:2")
+                && change.right.as_deref() == Some("ansys:4,comsol:1")
+        }));
     }
 
     #[test]

@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+
+- Added first-class `x-slurm.reservation` and `x-slurm.licenses` fields that
+  render `#SBATCH --reservation` / `--licenses` directives, feed the interactive
+  `alloc`/`shell` option builder, and keep validation, interpolation, redaction,
+  and resume-diff on the values. Setting either field alongside a conflicting raw
+  `--reservation`/`--licenses` (`-L`) entry in `x-slurm.submit_args` is rejected.
+
 ## [0.1.52] - 2026-06-30
 
 ### Fixed

@@ -1,0 +1,26 @@
+name: reservation-licenses
+
+# First-class Slurm reservation and software-license requests.
+#
+# `x-slurm.reservation` renders `#SBATCH --reservation=<name>` and
+# `x-slurm.licenses` renders `#SBATCH --licenses=<name[:count][,...]>`. Prefer
+# these fields over hand-rolling `submit_args: ["--reservation=...", ...]`: you
+# keep validation, env interpolation, redaction, and resume-diff on the values,
+# and hpc-compose rejects setting the same flag twice via raw `submit_args`.
+#
+# Both are passed through verbatim (transport safety only) — Slurm validates the
+# reservation name and the `name[:count]` license grammar at submit time. The
+# reservation itself is created out-of-band by your site's ops team.
+x-slurm:
+  job_name: reservation-licenses
+  time: "00:30:00"
+  mem: 8G
+  cpus_per_task: 4
+  reservation: maint_2026
+  licenses: "ansys:2,comsol:1"
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  work:
+    image: python:3.11-slim
+    command: python -c "print('running inside reservation maint_2026 with ansys/comsol licenses held')"

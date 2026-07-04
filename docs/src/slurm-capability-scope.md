@@ -11,7 +11,7 @@ These capabilities are modeled, validated, and intentionally supported by the pl
 | Allocation model | One Slurm allocation per application |
 | Submission flow | `new`, `plan`, `validate`, `config`, `inspect`, `preflight`, `prepare`, `render`, `up`, `when`, `alloc`, `run`, `debug` |
 | Tracked job workflow | `status`, `ps`, `watch`, `stats`, `score`, `logs`, `down`, `cancel`, `artifacts`, `clean`, cache inspection/pruning |
-| Top-level Slurm fields | `job_name`, `partition`, `account`, `qos`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, GPU/CPU binding fields, `constraint`, `output`, `error`, `chdir` |
+| Top-level Slurm fields | `job_name`, `partition`, `account`, `qos`, `reservation`, `licenses`, `time`, `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `mem`, `gres`, `gpus`, GPU/CPU binding fields, `constraint`, `output`, `error`, `chdir` |
 | Service step fields | `nodes`, `placement`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gres`, `gpus`, GPU/CPU binding fields, `mpi` |
 | Multi-node model | Single-node jobs, full-allocation distributed steps, and explicit node-index partitioning within one allocation |
 | Runtime orchestration | `depends_on`, readiness checks, one-shot completion dependencies, service failure policies, primary-node helper placement, explicit co-location through `placement.share_with` |
@@ -31,9 +31,8 @@ These capabilities are usable, but `hpc-compose` does not model or validate thei
 
 | Mechanism | What it allows |
 | --- | --- |
-| `x-slurm.submit_args` | Raw `#SBATCH ...` lines for site-specific flags such as mail settings, reservations, or other submit-time options |
+| `x-slurm.submit_args` | Raw `#SBATCH ...` lines for site-specific flags such as `--comment` or other submit-time options |
 | `services.<name>.x-slurm.extra_srun_args` | Raw `srun` arguments for site-specific launch flags such as exclusivity settings |
-| Existing reservations | Joining an already-created reservation through raw submit args is supported as pass-through |
 
 Pass-through is appropriate when a site-specific flag is useful but does not justify a first-class schema field. `hpc-compose` rejects line breaks and null bytes in raw `#SBATCH` entries so one list entry cannot emit multiple directives, but it does not validate the Slurm semantics of those flags.
 

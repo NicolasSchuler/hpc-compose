@@ -384,6 +384,12 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     if let Some(qos) = &plan.slurm.qos {
         sbatch::push_directive(&mut out, "qos", qos);
     }
+    if let Some(reservation) = &plan.slurm.reservation {
+        sbatch::push_directive(&mut out, "reservation", reservation);
+    }
+    if let Some(licenses) = &plan.slurm.licenses {
+        sbatch::push_directive(&mut out, "licenses", licenses);
+    }
     if let Some(mail_user) = plan.slurm.notify_email_recipient() {
         sbatch::push_directive(&mut out, "mail-user", mail_user);
     }
