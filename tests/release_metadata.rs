@@ -284,6 +284,87 @@ fn coverage_gate_strict_and_broad_run_in_both_justfile_and_ci() {
     }
 }
 
+/// Collapse a shell snippet to a single canonical line so the same pinned
+/// literal matches both the one-line `justfile` recipe and the backslash-
+/// continued multi-line `ci.yml` step. Line-continuation `\` + newline pairs
+/// are dropped first (the coverage regexes themselves only ever use `\.`/`\$`,
+/// never `\` immediately before a newline), then all remaining whitespace runs
+/// collapse to single spaces.
+fn normalize_shell_command(content: &str) -> String {
+    content
+        .replace("\\\r\n", " ")
+        .replace("\\\n", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn coverage_gate_exclusion_lists_are_pinned_verbatim() {
+    // The exclusion list is the load-bearing part of each gate: every file added
+    // to it silently shrinks the coverage denominator. These literals are pinned
+    // on purpose. Any addition/removal is a DELIBERATE, REVIEWED decision --
+    // update this test in the SAME PR that changes the gate and justify the
+    // exclusion in the commit message. Do not "just make the test pass".
+    let broad_exclusion = "--ignore-filename-regex 'commands/|output/mod\\.rs|watch_ui\\.rs|term\\.rs|progress\\.rs|manpages\\.rs|main\\.rs|cli/|job/model\\.rs'";
+    let strict_exclusion = "--ignore-filename-regex '(^|/)commands/mod\\.rs$|(^|/)cli/commands\\.rs$|(^|/)main\\.rs$|(^|/)job/model\\.rs$'";
+
+    let justfile = normalize_shell_command(
+        &fs::read_to_string(repo_root().join("justfile")).expect("read justfile"),
+    );
+    let ci_workflow = normalize_shell_command(
+        &fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml"),
+    );
+
+    for (label, content) in [("justfile", &justfile), ("ci.yml", &ci_workflow)] {
+        assert!(
+            content.contains(broad_exclusion),
+            "{label} broad-gate exclusion list drifted from the pinned value. If this \
+             was intentional, update coverage_gate_exclusion_lists_are_pinned_verbatim \
+             in this PR and justify the exclusion change in the commit message."
+        );
+        assert!(
+            content.contains(strict_exclusion),
+            "{label} strict-gate exclusion list drifted from the pinned value. If this \
+             was intentional, update coverage_gate_exclusion_lists_are_pinned_verbatim \
+             in this PR and justify the exclusion change in the commit message."
+        );
+    }
+}
+
+#[test]
+fn coverage_gate_thresholds_are_pinned_against_silent_lowering() {
+    // Pin each gate's exclusion regex TOGETHER WITH its numeric floors as one
+    // contiguous command, so silently lowering a `--fail-under-*` threshold (or
+    // attaching the wrong regex to a set of floors) breaks the build. To
+    // deliberately RAISE a floor (ratcheting is future work), update only the
+    // pinned numbers below -- that is the sole intended edit to this test.
+    let broad_gate = "--ignore-filename-regex 'commands/|output/mod\\.rs|watch_ui\\.rs|term\\.rs|progress\\.rs|manpages\\.rs|main\\.rs|cli/|job/model\\.rs' --fail-under-lines 92 --fail-under-regions 91 --fail-under-functions 88";
+    let strict_gate = "--ignore-filename-regex '(^|/)commands/mod\\.rs$|(^|/)cli/commands\\.rs$|(^|/)main\\.rs$|(^|/)job/model\\.rs$' --fail-under-lines 87 --fail-under-regions 87 --fail-under-functions 85";
+
+    let justfile = normalize_shell_command(
+        &fs::read_to_string(repo_root().join("justfile")).expect("read justfile"),
+    );
+    let ci_workflow = normalize_shell_command(
+        &fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml"),
+    );
+
+    for (label, content) in [("justfile", &justfile), ("ci.yml", &ci_workflow)] {
+        assert!(
+            content.contains(broad_gate),
+            "{label} broad gate must keep floors lines>=92/regions>=91/functions>=88 on \
+             its pinned exclusion regex; a threshold was lowered or the regex changed. \
+             Raising a floor is fine -- update the pinned numbers here in the same PR."
+        );
+        assert!(
+            content.contains(strict_gate),
+            "{label} strict gate must keep floors lines>=87/regions>=87/functions>=85 on \
+             its pinned exclusion regex; a threshold was lowered or the regex changed. \
+             Raising a floor is fine -- update the pinned numbers here in the same PR."
+        );
+    }
+}
+
 #[test]
 fn linux_package_metadata_matches_release_layout() {
     let manifest = cargo_manifest();
