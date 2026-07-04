@@ -35,6 +35,12 @@ const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "x-enroot",
 ];
 
+/// Per-service `x-slurm` fields that select the allocation's partition/account/qos.
+/// These are job-level attributes fixed at submission: one hpc-compose allocation
+/// runs in a single partition/account/qos, so they cannot be routed per service.
+/// Rejected with a teaching error instead of serde's opaque "unknown field".
+const SERVICE_SLURM_ALLOCATION_ROUTING_FIELDS: &[&str] = &["partition", "qos", "account"];
+
 pub(super) fn validate_positive_u32(value: Option<u32>, field: &str) -> Result<()> {
     if matches!(value, Some(0)) {
         bail!("{field} must be at least 1");
@@ -552,6 +558,7 @@ pub(super) fn validate_root(value: &Value) -> Result<()> {
         )?;
         validate_modules_alias_conflict(&format!("service '{service_name}'"), service_mapping)?;
         validate_script_conflicts(service_name, service_mapping)?;
+        validate_service_slurm_allocation_routing_fields(service_name, service_mapping)?;
     }
     Ok(())
 }
@@ -667,6 +674,37 @@ fn validate_script_conflicts(service_name: &str, mapping: &Mapping) -> Result<()
             conflict: "entrypoint".into(),
         }
         .into());
+    }
+    Ok(())
+}
+
+/// Rejects per-service `x-slurm.partition`/`qos`/`account`. A single hpc-compose
+/// allocation runs in one partition/account/qos, so these cannot be routed per
+/// service. Descends only into the service's own `x-slurm` mapping and never
+/// touches the top-level `x-slurm` (where `SlurmConfig` legitimately owns these
+/// fields). Runs in `validate_root` on the raw YAML, before serde's
+/// `deny_unknown_fields` would emit an opaque "unknown field" error.
+fn validate_service_slurm_allocation_routing_fields(
+    service_name: &str,
+    mapping: &Mapping,
+) -> Result<()> {
+    let Some(x_slurm) = mapping.get(Value::String("x-slurm".into())) else {
+        return Ok(());
+    };
+    let Some(x_slurm) = x_slurm.as_mapping() else {
+        return Ok(());
+    };
+    for field in SERVICE_SLURM_ALLOCATION_ROUTING_FIELDS {
+        if x_slurm.contains_key(Value::String((*field).to_string())) {
+            return Err(SpecError::UnsupportedServiceKey {
+                scope: format!("service '{service_name}'"),
+                key: format!("x-slurm.{field}"),
+                help_text: format!(
+                    "service '{service_name}' sets x-slurm.{field}, but a single hpc-compose allocation runs in one partition/account/qos. Set x-slurm.{field} at the top level, or use a heterogeneous job (see Roadmap: hetjob) to route components to different partitions."
+                ),
+            }
+            .into());
+        }
     }
     Ok(())
 }

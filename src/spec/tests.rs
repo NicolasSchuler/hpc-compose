@@ -273,6 +273,137 @@ services:
     assert!(err.to_string().contains("unsupported key 'mystery'"));
 }
 
+/// Loads a spec that sets `x-slurm.<field>` on a service, asserts the guard fires
+/// with a teaching error (not serde's opaque unknown-field error), and returns the
+/// downcast `SpecError`'s help text for further assertions.
+fn expect_service_x_slurm_routing_help(field: &str) -> String {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        &format!(
+            r#"
+services:
+  worker:
+    image: redis:7
+    x-slurm:
+      {field}: some-value
+"#
+        ),
+    );
+    let err = ComposeSpec::load(&path).expect_err("should fail");
+    let message = err.to_string();
+    assert!(
+        message.contains(&format!("unsupported key 'x-slurm.{field}'")),
+        "expected teaching error for x-slurm.{field}, got: {message}"
+    );
+    // Must be the guard, not serde's deny_unknown_fields firing after typed parse.
+    assert!(
+        !message.contains("unknown field") && !message.contains("failed to deserialize"),
+        "guard must pre-empt serde's opaque error, got: {message}"
+    );
+    err.downcast_ref::<SpecError>()
+        .expect("SpecError")
+        .help()
+        .expect("help text")
+        .to_string()
+}
+
+#[test]
+fn rejects_service_x_slurm_partition_with_teaching_error() {
+    let help = expect_service_x_slurm_routing_help("partition");
+    assert!(
+        help.contains("service 'worker' sets x-slurm.partition"),
+        "{help}"
+    );
+    assert!(help.contains("one partition/account/qos"), "{help}");
+    assert!(help.contains("heterogeneous job"), "{help}");
+    assert!(help.contains("Roadmap: hetjob"), "{help}");
+}
+
+#[test]
+fn rejects_service_x_slurm_qos_with_teaching_error() {
+    let help = expect_service_x_slurm_routing_help("qos");
+    assert!(help.contains("service 'worker' sets x-slurm.qos"), "{help}");
+    assert!(help.contains("one partition/account/qos"), "{help}");
+    assert!(help.contains("heterogeneous job"), "{help}");
+    assert!(help.contains("Roadmap: hetjob"), "{help}");
+}
+
+#[test]
+fn rejects_service_x_slurm_account_with_teaching_error() {
+    let help = expect_service_x_slurm_routing_help("account");
+    assert!(
+        help.contains("service 'worker' sets x-slurm.account"),
+        "{help}"
+    );
+    assert!(help.contains("one partition/account/qos"), "{help}");
+    assert!(help.contains("heterogeneous job"), "{help}");
+    assert!(help.contains("Roadmap: hetjob"), "{help}");
+}
+
+#[test]
+fn rejects_service_x_slurm_partition_inherited_via_extends() {
+    // The guard runs on the extends-merged YAML. The offending x-slurm.partition
+    // lives only in an external base file, so the sole service in the root spec is
+    // `worker` and it acquires the field purely through the merge — proving the
+    // guard fires post-merge, not just on a literal per-service key.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::write(
+        tmpdir.path().join("base.yaml"),
+        r#"
+services:
+  base:
+    image: redis:7
+    x-slurm:
+      partition: gpu
+"#,
+    )
+    .expect("write base");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  worker:
+    extends:
+      file: base.yaml
+      service: base
+"#,
+    );
+    let err = ComposeSpec::load(&path).expect_err("should fail");
+    let message = err.to_string();
+    assert!(
+        message.contains("service 'worker'"),
+        "expected the guard to name the inheriting service, got: {message}"
+    );
+    assert!(
+        message.contains("unsupported key 'x-slurm.partition'"),
+        "expected the guard to fire post-merge, got: {message}"
+    );
+}
+
+#[test]
+fn top_level_x_slurm_partition_qos_account_still_accepted() {
+    // Negative control: the guard must only descend into per-service x-slurm.
+    // Top-level x-slurm legitimately owns partition/qos/account.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  partition: gpu
+  qos: high
+  account: proj-42
+services:
+  worker:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("top-level allocation fields load");
+    assert_eq!(spec.slurm.partition.as_deref(), Some("gpu"));
+    assert_eq!(spec.slurm.qos.as_deref(), Some("high"));
+    assert_eq!(spec.slurm.account.as_deref(), Some("proj-42"));
+}
+
 #[test]
 fn service_hooks_accept_shorthand_and_explicit_context() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
