@@ -37,7 +37,7 @@ pub(crate) fn rendezvous_register(
         now,
     )?;
     let record_path = rendezvous::register(&cache_dir, &record)?;
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("registered rendezvous: {}", record.name);
             println!("url: {}", record.url);
@@ -70,7 +70,7 @@ pub(crate) fn rendezvous_resolve(
             rendezvous::root_dir(&cache_dir).display()
         );
     };
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("name: {}", record.name);
             println!("url: {}", record.url);
@@ -98,7 +98,7 @@ pub(crate) fn rendezvous_resolve(
 
 pub(crate) fn rendezvous_list(cache_dir: PathBuf, format: Option<OutputFormat>) -> Result<()> {
     let records = rendezvous::list(&cache_dir, rendezvous::unix_timestamp_now())?;
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             if records.is_empty() {
                 println!(
@@ -122,7 +122,7 @@ pub(crate) fn rendezvous_list(cache_dir: PathBuf, format: Option<OutputFormat>) 
 
 pub(crate) fn rendezvous_prune(cache_dir: PathBuf, format: Option<OutputFormat>) -> Result<()> {
     let report = rendezvous::prune(&cache_dir, rendezvous::unix_timestamp_now())?;
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("removed {} rendezvous record(s)", report.removed.len());
             for path in &report.removed {

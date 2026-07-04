@@ -31,10 +31,7 @@ pub(crate) fn reach(
     open: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let json = matches!(
-        output::resolve_output_format(format, false),
-        OutputFormat::Json
-    );
+    let json = matches!(output::resolve_output_format(format), OutputFormat::Json);
     if open && json {
         bail!("reach --open cannot be combined with --format json (it runs an interactive ssh)");
     }

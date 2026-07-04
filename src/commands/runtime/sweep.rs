@@ -173,7 +173,7 @@ pub(crate) fn sweep_submit(
     let max_trials = max_trials.unwrap_or(DEFAULT_SWEEP_MAX_TRIALS);
     let expansion = expand_sweep_with_limit(&sweep, &sweep_id, Some(max_trials))?;
 
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let manifest_path = sweep_manifest_path_for(&file, &sweep_id);
     let sweep_root = manifest_path
@@ -566,7 +566,7 @@ pub(crate) fn sweep_status(
         groups,
         trials,
     };
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => print_sweep_status_output(&report),
         OutputFormat::Json => {
             println!(
@@ -748,7 +748,7 @@ fn print_sweep_status_output(report: &SweepStatusOutput) -> Result<()> {
 
 pub(crate) fn sweep_list(context: ResolvedContext, format: Option<OutputFormat>) -> Result<()> {
     let sweeps = scan_sweep_manifests(&context.compose_file.value)?;
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("compose: {}", context.compose_file.value.display());
             println!("sweeps: {}", sweeps.len());
@@ -1180,7 +1180,7 @@ pub(crate) fn sweep_observe(
         squeue_bin: context.binaries.squeue.value.clone(),
         sacct_bin: context.binaries.sacct.value.clone(),
     };
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let deadline = timeout
         .filter(|t| *t > Duration::ZERO)
         .map(|t| Instant::now() + t);
@@ -1494,7 +1494,7 @@ pub(crate) fn sweep_stop(
     reason: Option<String>,
     format: Option<OutputFormat>,
 ) -> Result<()> {
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let report = sweep_stop_inner(&context, sweep_id.as_deref(), yes, reason)?;
     match output_format {
         OutputFormat::Text => print_sweep_stop_output(&report),
@@ -2008,7 +2008,7 @@ pub(crate) fn score_sweep(
         groups,
         trials,
     };
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&output)

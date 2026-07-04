@@ -43,7 +43,7 @@ pub(crate) fn debug(
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let mut notes = Vec::new();
     let mut preflight_json = None;
     let mut preflight_failed = false;

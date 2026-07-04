@@ -806,10 +806,7 @@ pub(crate) fn notebook(
     // JSON output emits a single document on stdout, so every human-readable
     // print on the submit path is gated on `!json_mode`. `--follow` streams a
     // live log view that cannot coexist with a single JSON document.
-    let json_mode = matches!(
-        output::resolve_output_format(format, false),
-        OutputFormat::Json
-    );
+    let json_mode = matches!(output::resolve_output_format(format), OutputFormat::Json);
     if json_mode && follow {
         bail!("--format json is incompatible with --follow (which streams a live log view)");
     }

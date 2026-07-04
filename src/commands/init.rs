@@ -33,7 +33,7 @@ pub(crate) fn new_command(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     if list_templates {
-        match output_common::resolve_output_format(format, false) {
+        match output_common::resolve_output_format(format) {
             OutputFormat::Text => output_init::print_template_list(),
             OutputFormat::Json => {
                 println!(
@@ -50,7 +50,7 @@ pub(crate) fn new_command(
         return Ok(());
     }
     if let Some(template_name) = describe_template {
-        match output_common::resolve_output_format(format, false) {
+        match output_common::resolve_output_format(format) {
             OutputFormat::Text => output_init::print_template_description(&template_name)?,
             OutputFormat::Json => {
                 println!(
@@ -75,7 +75,7 @@ pub(crate) fn new_command(
     )?;
     let path = write_initialized_template(&output_path, &rendered, force)?;
     let next_commands = next_commands(&path);
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("wrote {}", path.display());
             for command in next_commands {
@@ -317,7 +317,7 @@ pub(crate) fn setup(
     settings.version = 1;
 
     write_settings(&settings_path, &settings)?;
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("wrote {}", settings_path.display());
             println!("profile: {}", selected_profile);

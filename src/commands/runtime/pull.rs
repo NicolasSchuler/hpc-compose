@@ -111,7 +111,7 @@ pub(crate) fn pull(
     let (cluster_path, suggested_command) =
         pull_rsync_command(login_host.as_deref(), &payload_dir, &into_display);
 
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Json => {
             let out = PullOutput {
                 job_id: record.job_id.clone(),

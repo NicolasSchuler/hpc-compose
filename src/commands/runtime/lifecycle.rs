@@ -82,7 +82,7 @@ pub(crate) fn cancel(
         } else {
             Vec::new()
         };
-        return match output::resolve_output_format(format, false) {
+        return match output::resolve_output_format(format) {
             OutputFormat::Text => {
                 if cancelled {
                     println!("cancelled job: {resolved_job_id}");
@@ -115,7 +115,7 @@ pub(crate) fn cancel(
         };
     }
 
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             crate::job::cancel_job(&resolved_job_id, &context.binaries.scancel.value)?;
             let tracking_removed = if let Some(record) = record.as_ref() {
@@ -189,7 +189,7 @@ pub(crate) fn cancel(
 pub(crate) fn jobs_list(disk_usage: bool, format: Option<OutputFormat>) -> Result<()> {
     let cwd = env::current_dir().context("failed to determine current working directory")?;
     let report = scan_job_inventory(&cwd, disk_usage)?;
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             output::print_job_inventory_scan(&report, disk_usage)
                 .context("failed to write jobs list output")?;
@@ -222,7 +222,7 @@ pub(crate) fn clean(
     if !dry_run {
         run_cleanup_report(&report)?;
     }
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => {
             output::print_cleanup_report(&report, disk_usage)
                 .context("failed to write clean output")?;

@@ -119,6 +119,44 @@ pub(crate) struct PrepareFlags {
     pub no_preflight: bool,
 }
 
+/// The eight boolean toggles that drive the internal `launch` core. Bundling
+/// them into a named struct keeps the constructor sites self-documenting instead
+/// of an unlabeled positional-bool run.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LaunchOptions {
+    pub watch: bool,
+    pub watch_queue: bool,
+    pub local: bool,
+    pub allow_resume_changes: bool,
+    pub resume_diff_only: bool,
+    pub dry_run: bool,
+    pub print_endpoints: bool,
+    pub quiet: bool,
+}
+
+/// The eight boolean toggles of the public `up` command. `up` forwards to
+/// `launch` and inverts `detach` into `launch`'s `watch`; naming the fields
+/// makes that inversion explicit at the constructor site.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct UpOptions {
+    pub local: bool,
+    pub allow_resume_changes: bool,
+    pub resume_diff_only: bool,
+    pub dry_run: bool,
+    pub detach: bool,
+    pub watch_queue: bool,
+    pub print_endpoints: bool,
+    pub quiet: bool,
+}
+
+/// The three boolean toggles of the `when` command.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WhenOptions {
+    pub allow_resume_changes: bool,
+    pub detach: bool,
+    pub quiet: bool,
+}
+
 /// Per-run overrides for runtime metrics sampling, from `up --metrics-interval`
 /// / `up --no-metrics`. They override the compose's `x-slurm.metrics` for this
 /// invocation only (and, for `up --remote`, are forwarded to the login node).
@@ -1789,14 +1827,17 @@ pub(crate) fn when(
     timeout: Option<std::time::Duration>,
     script_out: Option<PathBuf>,
     flags: PrepareFlags,
-    allow_resume_changes: bool,
-    detach: bool,
+    options: WhenOptions,
     watch_mode: WatchMode,
     hold_on_exit: HoldOnExit,
     format: Option<OutputFormat>,
-    quiet: bool,
 ) -> Result<()> {
-    let output_format = output::resolve_output_format(format, false);
+    let WhenOptions {
+        allow_resume_changes,
+        detach,
+        quiet,
+    } = options;
+    let output_format = output::resolve_output_format(format);
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     let prepared = prepare_slurm_submission(
         &context,
@@ -1890,19 +1931,12 @@ pub(crate) fn launch(
     context: ResolvedContext,
     script_out: Option<PathBuf>,
     flags: PrepareFlags,
-    watch: bool,
-    watch_queue: bool,
+    options: LaunchOptions,
     queue_warn_after_seconds: Option<u64>,
-    local: bool,
-    allow_resume_changes: bool,
-    resume_diff_only: bool,
-    dry_run: bool,
     format: Option<OutputFormat>,
-    print_endpoints: bool,
     watch_mode: WatchMode,
     hold_on_exit: HoldOnExit,
     metrics_overrides: MetricsOverrides,
-    quiet: bool,
 ) -> Result<()> {
     let PrepareFlags {
         keep_failed_prep,
@@ -1910,6 +1944,16 @@ pub(crate) fn launch(
         force_rebuild,
         no_preflight,
     } = flags;
+    let LaunchOptions {
+        watch,
+        watch_queue,
+        local,
+        allow_resume_changes,
+        resume_diff_only,
+        dry_run,
+        print_endpoints,
+        quiet,
+    } = options;
     let file = context.compose_file.value.clone();
     let effective_config =
         load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -1936,7 +1980,7 @@ pub(crate) fn launch(
     // before preflight/prepare/render so they take effect for this invocation.
     metrics_overrides.apply(&mut runtime_plan);
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
     let backend = if local {
         SubmissionBackend::Local
@@ -2252,38 +2296,43 @@ pub(crate) fn up(
     context: ResolvedContext,
     script_out: Option<PathBuf>,
     flags: PrepareFlags,
-    local: bool,
-    allow_resume_changes: bool,
-    resume_diff_only: bool,
-    dry_run: bool,
-    detach: bool,
-    watch_queue: bool,
+    options: UpOptions,
     queue_warn_after_seconds: Option<u64>,
     watch_mode: WatchMode,
     hold_on_exit: HoldOnExit,
     format: Option<OutputFormat>,
-    print_endpoints: bool,
     metrics_overrides: MetricsOverrides,
-    quiet: bool,
 ) -> Result<()> {
+    let UpOptions {
+        local,
+        allow_resume_changes,
+        resume_diff_only,
+        dry_run,
+        detach,
+        watch_queue,
+        print_endpoints,
+        quiet,
+    } = options;
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     launch(
         context,
         script_out,
         flags,
-        !detach,
-        watch_queue,
+        LaunchOptions {
+            watch: !detach,
+            watch_queue,
+            local,
+            allow_resume_changes,
+            resume_diff_only,
+            dry_run,
+            print_endpoints,
+            quiet,
+        },
         queue_warn_after_seconds,
-        local,
-        allow_resume_changes,
-        resume_diff_only,
-        dry_run,
         format.or(Some(OutputFormat::Text)),
-        print_endpoints,
         watch_mode,
         hold_on_exit,
         metrics_overrides,
-        quiet,
     )
 }
 
@@ -2488,7 +2537,7 @@ pub(crate) fn smoke_test(
     }
     let timeout_seconds =
         parse_log_since_duration(&wait_timeout).context("test --wait-timeout is invalid")?;
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     let scheduler_options = SchedulerOptions {
         squeue_bin: context.binaries.squeue.value.clone(),

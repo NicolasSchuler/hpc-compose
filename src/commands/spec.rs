@@ -56,7 +56,7 @@ pub(crate) fn validate(
             );
         }
     }
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("{}", term::styled_success("spec is valid"));
             for warning in &cluster_warnings {
@@ -200,7 +200,7 @@ pub(crate) fn lint(
         .count();
     let passed = error_count == 0 && (allow_warnings || warning_count == 0);
 
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             print_lint_findings(&displayed_findings, passed);
             print_fix_summary(fix, dry_run, &applied_fixes, dry_run_diff.as_deref());
@@ -335,7 +335,7 @@ pub(crate) fn render(
         crate::secure_io::write(path, &script, true)
             .with_context(|| format!("failed to write rendered script to {}", path.display()))?;
     }
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             if let Some(path) = output_path {
                 println!("{}", path.display());
@@ -439,7 +439,7 @@ pub(crate) fn plan(
     let redacted_runtime_plan =
         crate::redaction::redacted_runtime_plan(&runtime_plan, &secret_values, false);
 
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             println!("{}", term::styled_success("spec is valid"));
             for warning in &cluster_warnings {
@@ -594,7 +594,7 @@ pub(crate) fn prepare(
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
-    let output_format = output_common::resolve_output_format(format, false);
+    let output_format = output_common::resolve_output_format(format);
     let runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -644,10 +644,9 @@ pub(crate) fn preflight(
     strict: bool,
     verbose: bool,
     format: Option<OutputFormat>,
-    json: bool,
     quiet: bool,
 ) -> Result<()> {
-    let output_format = output_common::resolve_output_format(format, json);
+    let output_format = output_common::resolve_output_format(format);
     let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
     let runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -717,7 +716,6 @@ pub(crate) fn inspect(
     dependencies_format: DependencyOutputFormat,
     job_id: Option<String>,
     format: Option<OutputFormat>,
-    json: bool,
 ) -> Result<()> {
     let (plan, runtime_plan) =
         load::load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -753,7 +751,7 @@ pub(crate) fn inspect(
                 accounting: false,
             },
         )?;
-        match output_common::resolve_output_format(format, json) {
+        match output_common::resolve_output_format(format) {
             OutputFormat::Text => output_spec::print_rightsize_report(&report)
                 .context("failed to write rightsize output")?,
             OutputFormat::Json => {
@@ -767,7 +765,7 @@ pub(crate) fn inspect(
         return Ok(());
     }
     if dependencies {
-        let output_format = output_common::resolve_output_format(format, json);
+        let output_format = output_common::resolve_output_format(format);
         if output_format == OutputFormat::Json && dependencies_format == DependencyOutputFormat::Dot
         {
             bail!(
@@ -799,7 +797,7 @@ pub(crate) fn inspect(
     let redacted_runtime_plan =
         crate::redaction::redacted_runtime_plan(&runtime_plan, &secret_values, false);
 
-    match output_common::resolve_output_format(format, json) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
             if tree {
                 output_spec::print_plan_inspect_tree(&plan, &redacted_runtime_plan)
@@ -860,7 +858,7 @@ pub(crate) fn config(
         service.environment =
             crate::redaction::redact_env_map(&service.environment, &secret_values, show_values);
     }
-    let output_format = output_common::resolve_output_format(format, false);
+    let output_format = output_common::resolve_output_format(format);
     if variables {
         let referenced =
             referenced_variables(&context.compose_file.value, &context.interpolation_vars)?;
@@ -1062,7 +1060,7 @@ pub(crate) fn context(
         runtime_paths,
     };
 
-    match output_common::resolve_output_format(format, false) {
+    match output_common::resolve_output_format(format) {
         OutputFormat::Json => {
             println!(
                 "{}",
@@ -1564,7 +1562,6 @@ services:
             true,
             Some(OutputFormat::Json),
             false,
-            false,
         )
         .expect("preflight json");
         inspect(
@@ -1576,7 +1573,6 @@ services:
             DependencyOutputFormat::Text,
             None,
             Some(OutputFormat::Json),
-            false,
         )
         .expect("inspect json");
         context(resolved_context.clone(), Some(OutputFormat::Json), false).expect("context json");
@@ -1612,8 +1608,8 @@ services:
 
         let remote_compose = write_remote_compose(tmpdir.path());
         let strict_warning_context = context_for(&remote_compose, tmpdir.path());
-        let strict_warning = preflight(strict_warning_context, true, false, None, false, false)
-            .expect_err("warnings");
+        let strict_warning =
+            preflight(strict_warning_context, true, false, None, false).expect_err("warnings");
         assert!(
             strict_warning
                 .to_string()
@@ -1622,8 +1618,8 @@ services:
 
         let missing_compose = write_missing_image_compose(tmpdir.path());
         let missing_context = context_for(&missing_compose, tmpdir.path());
-        let preflight_err = preflight(missing_context, false, false, None, false, false)
-            .expect_err("missing image");
+        let preflight_err =
+            preflight(missing_context, false, false, None, false).expect_err("missing image");
         assert!(preflight_err.to_string().contains("preflight failed"));
 
         let context_compose = write_context_compose(tmpdir.path());
@@ -1659,7 +1655,6 @@ services:
             DependencyOutputFormat::Text,
             None,
             None,
-            false,
         )
         .expect("inspect verbose text");
 

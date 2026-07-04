@@ -152,7 +152,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--singularity-bin", &singularity_bin),
                 ],
             )?;
-            spec::preflight(context, strict, verbose, format, false, options.quiet)
+            spec::preflight(context, strict, verbose, format, options.quiet)
         }
         Commands::Inspect {
             file,
@@ -185,7 +185,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 dependencies_format,
                 job_id,
                 format,
-                false,
             )
         }
         Commands::Config {
@@ -445,19 +444,21 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     force_rebuild: launch.force_rebuild,
                     no_preflight: launch.no_preflight,
                 },
-                local,
-                allow_resume_changes,
-                resume_diff_only,
-                dry_run,
-                detach,
-                watch_queue,
+                runtime::UpOptions {
+                    local,
+                    allow_resume_changes,
+                    resume_diff_only,
+                    dry_run,
+                    detach,
+                    watch_queue,
+                    print_endpoints,
+                    quiet: options.quiet,
+                },
                 queue_warn_after_seconds,
                 watch_mode,
                 hold_on_exit,
                 format,
-                print_endpoints,
                 metrics_overrides,
-                options.quiet,
             )
         }
         Commands::Test {
@@ -863,12 +864,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     force_rebuild: launch.force_rebuild,
                     no_preflight: launch.no_preflight,
                 },
-                allow_resume_changes,
-                detach,
+                runtime::WhenOptions {
+                    allow_resume_changes,
+                    detach,
+                    quiet: options.quiet,
+                },
                 watch_mode,
                 hold_on_exit,
                 format,
-                options.quiet,
             )
         }
         Commands::Alloc {
@@ -924,7 +927,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             {
                 result
             } else {
-                runtime::status(context, job_id, format, false, array)
+                runtime::status(context, job_id, format, array)
             }
         }
         Commands::Stats {
@@ -989,15 +992,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             } else if sweep.is_some() {
                 runtime::score_sweep(context, sweep, format, pue, gpu_tdp_w, cpu_watts_per_core)
             } else {
-                runtime::score(
-                    context,
-                    job_id,
-                    false,
-                    format,
-                    pue,
-                    gpu_tdp_w,
-                    cpu_watts_per_core,
-                )
+                runtime::score(context, job_id, format, pue, gpu_tdp_w, cpu_watts_per_core)
             }
         }
         Commands::Diff {
@@ -1030,7 +1025,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             tarball,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            runtime::artifacts(context, job_id, format, false, bundles, tarball)
+            runtime::artifacts(context, job_id, format, bundles, tarball)
         }
         Commands::Pull {
             file,
@@ -1743,7 +1738,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 runtime::experiment_show(
                     context,
                     job_id,
-                    false,
                     format,
                     pue,
                     gpu_tdp_w,

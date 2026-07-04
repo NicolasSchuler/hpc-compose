@@ -15,7 +15,7 @@ pub(crate) fn checkpoints(
         .with_context(|| tracked_job_hint(job_id.as_deref()))?;
     let history = hpc_compose::job::collect_checkpoint_history(&record);
 
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Json => {
             println!(
                 "{}",

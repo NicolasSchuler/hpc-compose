@@ -50,7 +50,7 @@ pub(crate) fn germinate(
         .context("germinate --pending-timeout is invalid")?;
 
     let file = context.compose_file.value.clone();
-    let output_format = output::resolve_output_format(format, false);
+    let output_format = output::resolve_output_format(format);
     let effective_config =
         load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,

@@ -11,7 +11,7 @@ pub(crate) fn weather(format: Option<OutputFormat>, binaries: &ResolvedBinaries)
         binaries,
         cwd: &cwd,
     })?;
-    match output::resolve_output_format(format, false) {
+    match output::resolve_output_format(format) {
         OutputFormat::Text => print_weather_report(&report),
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report)?);
