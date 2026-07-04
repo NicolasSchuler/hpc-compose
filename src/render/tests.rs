@@ -2182,10 +2182,23 @@ fn render_metrics_sampler_when_enabled() {
     assert!(script.contains("--format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve"));
     assert!(script.contains("(( ${#fields[@]} != 6 ))"));
     assert!(script.contains("stop_metrics_sampler"));
+    // E1: stop must flush one final synchronous sample, bounded so a hung
+    // nvidia-smi/sstat cannot delay job teardown, before killing the loop.
+    assert!(script.contains("final_metrics_sample"));
+    assert!(script.contains("  final_metrics_sample\n"));
+    assert!(script.contains("local budget_seconds=10"));
+    assert!(script.contains("sample_metrics_once &"));
     assert!(script.contains("GPU_COLLECTOR_ENABLED=1"));
     assert!(script.contains("SLURM_COLLECTOR_ENABLED=1"));
     assert!(script.contains("sample_gpu_metrics_all_nodes"));
     assert!(script.contains("--ntasks-per-node=1 --exact --overlap bash \"$script_path\""));
+    // E6: multi-node GPU fanout must degrade to batch-node sampling on srun
+    // failure rather than marking the whole collector unavailable.
+    assert!(
+        script.contains("multi-node GPU fanout failed through srun; sampling the batch node only")
+    );
+    assert!(script.contains("multi-node GPU fanout degraded to batch-node sampling"));
+    assert!(script.contains("local fallback_status=$?"));
     assert!(script.contains("METRICS_DIAGNOSTICS_DIR=\"$METRICS_DIR/diagnostics\""));
     assert!(script.contains("nvidia-smi topo -m"));
 }
@@ -3101,6 +3114,37 @@ write_metrics_meta
     assert_eq!(collectors[1]["name"], "slurm");
     assert_eq!(collectors[1]["available"], true);
     assert_eq!(collectors[1]["note"], serde_json::Value::Null);
+}
+
+#[test]
+fn final_metrics_sample_flushes_and_returns_promptly() {
+    // E1: final_metrics_sample must run one synchronous sample and return once
+    // it is flush-complete. With both collectors disabled the sample is a
+    // near-instant no-op, so the bounded wait must not spin for its full budget.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let driver = r#"
+GPU_COLLECTOR_ENABLED=0
+SLURM_COLLECTOR_ENABLED=0
+final_metrics_sample
+echo "final-sample-returned rc=$?"
+"#;
+    let start = std::time::Instant::now();
+    let output = run_metrics_bash(tmpdir.path(), driver);
+    let elapsed = start.elapsed();
+    assert!(
+        output.status.success(),
+        "final_metrics_sample failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("final-sample-returned rc=0"),
+        "final_metrics_sample did not return cleanly: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        elapsed.as_secs() < 8,
+        "final_metrics_sample should not spin its full budget on a no-op sample (took {elapsed:?})"
+    );
 }
 
 fn run_artifact_bash(tmpdir: &std::path::Path, driver: &str) -> std::process::Output {

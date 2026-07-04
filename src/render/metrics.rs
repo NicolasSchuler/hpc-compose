@@ -245,10 +245,21 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  local script_path\n");
     out.push_str("  script_path=$(write_gpu_sample_node_script)\n");
     out.push_str("  if ! srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 --exact --overlap bash \"$script_path\" \"$sampled_at\" \"$sample_root\" >/dev/null 2>&1; then\n");
+    // srun fanout failure does not mean the collector is dead: the batch node
+    // can still sample its own GPUs. Degrade to the single-node path and record
+    // the degradation (warn-once) instead of marking the collector unavailable.
+    out.push_str("    metrics_warning_once gpu \"multi-node GPU fanout failed through srun; sampling the batch node only\"\n");
+    out.push_str("    sample_gpu_metrics_current_node\n");
+    out.push_str("    local fallback_status=$?\n");
     out.push_str(
-        "    mark_gpu_collector_unavailable \"all-node nvidia-smi sampling failed through srun\"\n",
+        "    if (( fallback_status == 0 )) && [[ \"$GPU_COLLECTOR_AVAILABLE\" == \"1\" ]]; then\n",
     );
-    out.push_str("    return 0\n");
+    out.push_str(
+        "      GPU_COLLECTOR_NOTE=\"multi-node GPU fanout degraded to batch-node sampling\"\n",
+    );
+    out.push_str("      write_metrics_meta\n");
+    out.push_str("    fi\n");
+    out.push_str("    return \"$fallback_status\"\n");
     out.push_str("  fi\n");
     out.push_str("  shopt -s nullglob\n");
     out.push_str("  local gpu_files=(\"$sample_root\"/*/gpu.jsonl)\n");
@@ -383,8 +394,32 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("  write_metrics_meta\n");
     out.push_str("}\n\n");
 
+    // Capture the window between the last periodic tick and job end with one
+    // extra synchronous sample. The sample runs in the background so the wait
+    // can be bounded: a hung nvidia-smi/sstat must never delay job teardown.
+    // The generated script does not otherwise assume coreutils `timeout`, so
+    // the ~10s budget is enforced with a portable kill-after-deadline loop.
+    out.push_str("final_metrics_sample() {\n");
+    out.push_str("  local budget_seconds=10\n");
+    out.push_str("  sample_metrics_once &\n");
+    out.push_str("  local sample_pid=$!\n");
+    out.push_str("  local start\n");
+    out.push_str("  start=$(date +%s)\n");
+    out.push_str("  while kill -0 \"$sample_pid\" 2>/dev/null; do\n");
+    out.push_str("    if (( $(date +%s) - start >= budget_seconds )); then\n");
+    out.push_str("      kill \"$sample_pid\" 2>/dev/null || true\n");
+    out.push_str("      break\n");
+    out.push_str("    fi\n");
+    out.push_str("    sleep 1\n");
+    out.push_str("  done\n");
+    out.push_str("  wait \"$sample_pid\" 2>/dev/null || true\n");
+    out.push_str("}\n\n");
+
     out.push_str("stop_metrics_sampler() {\n");
     out.push_str("  [[ -n \"$SAMPLER_PID\" ]] || return 0\n");
+    // Flush a final sample before tearing the loop down so cleanup only
+    // proceeds once the last-tick..job-end window has been recorded.
+    out.push_str("  final_metrics_sample\n");
     out.push_str("  if kill -0 \"$SAMPLER_PID\" 2>/dev/null; then\n");
     out.push_str("    kill \"$SAMPLER_PID\" 2>/dev/null || true\n");
     out.push_str("    wait \"$SAMPLER_PID\" 2>/dev/null || true\n");
