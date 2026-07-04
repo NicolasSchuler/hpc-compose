@@ -135,7 +135,13 @@ pub(crate) fn reach(
     }
 
     if open {
-        return run_reach_forward(local_port, remote_port, compute, login);
+        return run_reach_forward(
+            &context.binaries.ssh.value,
+            local_port,
+            remote_port,
+            compute,
+            login,
+        );
     }
 
     println!("{}", term::styled_section_header("Reach service"));
@@ -150,7 +156,13 @@ pub(crate) fn reach(
 }
 
 /// Runs the port-forward in the foreground (Ctrl-C to stop). Never daemonized.
-fn run_reach_forward(local_port: u16, remote_port: u16, compute: &str, login: &str) -> Result<()> {
+fn run_reach_forward(
+    ssh_bin: &str,
+    local_port: u16,
+    remote_port: u16,
+    compute: &str,
+    login: &str,
+) -> Result<()> {
     println!(
         "forwarding 127.0.0.1:{local_port} -> {compute}:{remote_port} via {login} (Ctrl-C to stop)"
     );
@@ -158,7 +170,7 @@ fn run_reach_forward(local_port: u16, remote_port: u16, compute: &str, login: &s
     let mut args: Vec<&str> = vec!["-N"];
     args.extend(CONTROL_MASTER_SSH_OPTS);
     args.extend(["-L", forward.as_str(), login]);
-    let status = std::process::Command::new("ssh")
+    let status = std::process::Command::new(ssh_bin)
         .args(&args)
         .status()
         .context("failed to execute 'ssh'")?;

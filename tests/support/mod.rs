@@ -867,6 +867,93 @@ exec '{}' "$@"
     path
 }
 
+/// Fake `ssh` that records its full argv (one line per invocation) to `log_path`
+/// and, for each invocation, emits canned stdout / exit codes driven by a simple
+/// response-rule directory (`rules_dir`).
+///
+/// Each regular file in `rules_dir` is one rule (processed in filename order,
+/// first match wins):
+///   line 1: a substring to match against the delegated remote command (the last
+///           ssh argument, e.g. the `mkdir -p ...`, probe, or `... up -f ...`
+///           command),
+///   line 2: the exit code to return on a match,
+///   line 3+: the stdout to print on a match.
+/// With no matching rule the fake is permissive: it records the argv and exits 0.
+pub(crate) fn write_fake_ssh(tmpdir: &Path, log_path: &Path, rules_dir: &Path) -> PathBuf {
+    fs::create_dir_all(rules_dir).expect("ssh rules dir");
+    let path = tmpdir.join("ssh");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+# Permissive-but-recording fake ssh: log argv, then consult response rules.
+printf '%s\n' "$*" >> '{log}'
+remote_cmd="${{@: -1}}"
+rules_dir='{rules}'
+if [ -d "$rules_dir" ]; then
+  for rule in "$rules_dir"/*; do
+    [ -f "$rule" ] || continue
+    pattern="$(sed -n '1p' "$rule")"
+    code="$(sed -n '2p' "$rule")"
+    case "$remote_cmd" in
+      *"$pattern"*)
+        sed -n '3,$p' "$rule"
+        exit "${{code:-0}}"
+        ;;
+    esac
+  done
+fi
+exit 0
+"#,
+            log = log_path.display(),
+            rules = rules_dir.display(),
+        ),
+    );
+    path
+}
+
+/// Writes one [`write_fake_ssh`] response rule: match `pattern` (a substring of
+/// the delegated remote command), print `stdout`, and exit with `exit_code`.
+/// `name` sets the filename, which controls match precedence (filename order).
+pub(crate) fn write_ssh_rule(
+    rules_dir: &Path,
+    name: &str,
+    pattern: &str,
+    exit_code: i32,
+    stdout: &str,
+) {
+    fs::create_dir_all(rules_dir).expect("ssh rules dir");
+    fs::write(
+        rules_dir.join(name),
+        format!("{pattern}\n{exit_code}\n{stdout}"),
+    )
+    .expect("write ssh rule");
+}
+
+/// Fake `rsync` that records its full argv (one line per invocation) to
+/// `log_path` and simulates a successful sync (exit 0). When the destination
+/// argument is a local path (no `host:` prefix) it is created so downstream
+/// steps see a populated tree.
+pub(crate) fn write_fake_rsync(tmpdir: &Path, log_path: &Path) -> PathBuf {
+    let path = tmpdir.join("rsync");
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+printf '%s\n' "$*" >> '{log}'
+dest="${{@: -1}}"
+case "$dest" in
+  *:*) : ;;            # remote destination: nothing to create locally
+  *) mkdir -p "$dest" ;;
+esac
+exit 0
+"#,
+            log = log_path.display(),
+        ),
+    );
+    path
+}
+
 pub(crate) fn write_fake_sacct(tmpdir: &Path, state_file: &Path) -> PathBuf {
     let path = tmpdir.join("sacct");
     write_script(

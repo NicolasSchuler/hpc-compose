@@ -246,6 +246,8 @@ fn resolved_binary_overrides(context: &ResolvedContext) -> BinaryOverrides {
         scancel: Some(context.binaries.scancel.value.clone()),
         sshare: Some(context.binaries.sshare.value.clone()),
         sprio: Some(context.binaries.sprio.value.clone()),
+        ssh: Some(context.binaries.ssh.value.clone()),
+        rsync: Some(context.binaries.rsync.value.clone()),
     }
 }
 
