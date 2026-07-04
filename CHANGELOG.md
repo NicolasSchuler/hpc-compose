@@ -9,6 +9,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 
+- Reject per-service `x-slurm.partition`, `.qos`, and `.account` with a teaching
+  error. A single hpc-compose allocation runs in one partition/account/qos, so
+  these cannot be routed per service. Instead of serde's opaque "unknown field",
+  the validator now points at the top-level `x-slurm` fields and the roadmap's new
+  [Heterogeneous Jobs](docs/src/roadmap.md) section, which describes the planned
+  hetjob mechanism for routing components to different partitions.
 - Added first-class `x-slurm.requeue` and `x-slurm.signal`. `requeue: true`/`false`
   renders `#SBATCH --requeue`/`--no-requeue` to control whether Slurm re-queues the
   whole job after node failure or preemption. `signal: { name, at_seconds, shell? }`

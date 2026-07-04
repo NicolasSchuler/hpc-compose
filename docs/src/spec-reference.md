@@ -1092,6 +1092,8 @@ These fields live under `services.<name>.x-slurm`.
 | `rendezvous` | mapping | omitted | Provider registration config for cross-job service discovery. |
 | `parallelism` | mapping `{ tensor, pipeline }` | omitted | Descriptive per-service tensor/pipeline geometry. Validation-only and cross-checked against this service's `gpus_per_node`. See [`x-slurm.parallelism`](#x-slurmparallelism). |
 
+`partition`, `qos`, and `account` are deliberately **absent** from this table. They are job-level attributes fixed at submission: a single hpc-compose allocation runs in exactly one partition/account/qos, so they cannot be routed per service. Setting `services.<name>.x-slurm.partition`/`qos`/`account` is a validation error that points you at the top-level [`x-slurm`](#x-slurm) fields. Routing different components to different partitions/accounts is a heterogeneous-job feature; see [Heterogeneous Jobs](roadmap.md#heterogeneous-jobs) on the roadmap.
+
 ### Global vs. per-service `x-slurm` precedence
 
 Fifteen resource fields exist in **both** the top-level `x-slurm` block and each `services.<name>.x-slurm` block: `nodes`, `ntasks`, `ntasks_per_node`, `cpus_per_task`, `gpus`, `gres`, `gpus_per_node`, `gpus_per_task`, `cpus_per_gpu`, `mem_per_gpu`, `gpu_bind`, `cpu_bind`, `mem_bind`, `distribution`, and `hint`. They are **not** merged field-by-field into a single effective value. Instead they target two independent scopes:
@@ -1407,6 +1409,8 @@ These keys are rejected with explicit messages:
 - `deploy`
 
 Any other unknown key at the service level is also rejected.
+
+Separately, `services.<name>.x-slurm.partition`, `.qos`, and `.account` are rejected — not for Compose-compatibility reasons, but because a single hpc-compose allocation runs in one partition/account/qos and these cannot be routed per service. Set them at the top-level [`x-slurm`](#x-slurm), or see [Heterogeneous Jobs](roadmap.md#heterogeneous-jobs) for the planned mechanism to route components to different partitions.
 
 ## Related Docs
 
