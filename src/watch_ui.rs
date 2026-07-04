@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -22,10 +24,10 @@ use crossterm::execute;
 use crossterm::terminal::{self, Clear, ClearType};
 use hpc_compose::cli::HoldOnExit;
 use hpc_compose::job::{
-    GpuNodeSummary, PsServiceRow, PsSnapshot, ReplayReport, SchedulerOptions, StatsOptions,
-    StatsSnapshot, SubmissionBackend, SubmissionRecord, WalltimeProgress, WatchOutcome,
-    build_ps_snapshot, build_stats_snapshot, format_walltime_summary, runtime_job_root_for_record,
-    walltime_progress, walltime_progress_percent,
+    GpuNodeSummary, PsServiceRow, PsSnapshot, ReplayReport, SchedulerOptions, SchedulerStatus,
+    StatsOptions, StatsSnapshot, SubmissionBackend, SubmissionRecord, WalltimeProgress,
+    WatchOutcome, build_ps_snapshot, build_stats_snapshot_with_status, format_walltime_summary,
+    runtime_job_root_for_record, walltime_progress, walltime_progress_percent,
 };
 
 const DATA_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -39,6 +41,14 @@ const DATA_REFRESH_ENV: &str = "HPC_COMPOSE_WATCH_REFRESH_MS";
 const METRICS_REFRESH_ENV: &str = "HPC_COMPOSE_WATCH_METRICS_REFRESH_MS";
 const NOTICE_DURATION: Duration = Duration::from_secs(4);
 const WATCH_MOUSE_ENV: &str = "HPC_COMPOSE_WATCH_MOUSE";
+/// How often the background probe worker wakes to check its refresh timers and
+/// the shutdown flag between probes. Small enough that quit is observed
+/// promptly, large enough to avoid a busy-loop.
+const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Upper bound the UI thread waits for the probe worker to finish on shutdown
+/// before detaching it. Kept short so a worker parked in a ~10s sstat/squeue
+/// timeout never delays terminal restore.
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_millis(200);
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 type SharedPanicHook = Arc<Mutex<Option<PanicHook>>>;
@@ -870,6 +880,149 @@ fn walltime_changed(
     previous != current
 }
 
+/// A refresh produced by the background probe worker and handed to the UI thread
+/// over an [`mpsc`] channel. Keeping data and metrics as separate variants lets
+/// the two run on their own cadence while the UI applies whichever is freshest.
+enum WatchWorkerMsg {
+    /// A new `ps`-style snapshot (squeue/sacct + service rows). Carries the fetch
+    /// `Result` so a probe failure propagates to the UI thread exactly as the old
+    /// inline `build_ps_snapshot(...)?` did. Boxed to keep the enum small since a
+    /// `PsSnapshot` dwarfs the metrics variant.
+    Data(Result<Box<PsSnapshot>>),
+    /// A refreshed metrics line (sstat + sampler summary), or `None` when nothing
+    /// is available. Errors are swallowed here just as the old inline path did.
+    Metrics(Option<String>),
+}
+
+/// The freshest data/metrics drained from the worker channel in one UI tick.
+struct DrainedWorker {
+    /// The last data message seen this tick, if any.
+    data: Option<Result<Box<PsSnapshot>>>,
+    /// The last metrics message seen this tick, if any.
+    metrics: Option<Option<String>>,
+}
+
+/// Collapses every message currently queued from the worker down to the freshest
+/// of each kind (last write wins). The UI thread applies only the newest, so a
+/// backlog of stale snapshots never causes redundant reseeding or a visible
+/// rewind — it jumps straight to the latest state.
+fn drain_worker_messages<I>(messages: I) -> DrainedWorker
+where
+    I: IntoIterator<Item = WatchWorkerMsg>,
+{
+    let mut data = None;
+    let mut metrics = None;
+    for message in messages {
+        match message {
+            WatchWorkerMsg::Data(snapshot) => data = Some(snapshot),
+            WatchWorkerMsg::Metrics(line) => metrics = Some(line),
+        }
+    }
+    DrainedWorker { data, metrics }
+}
+
+/// Applies a freshly drained metrics line to the current value, reporting whether
+/// it changed (and therefore whether a repaint is warranted). Mirrors the old
+/// inline `if refreshed != metrics_line` gate so idle metrics ticks stay quiet.
+fn apply_worker_metrics(metrics_line: &mut Option<String>, incoming: Option<String>) -> bool {
+    if *metrics_line != incoming {
+        *metrics_line = incoming;
+        true
+    } else {
+        false
+    }
+}
+
+/// Owns the background probe worker and guarantees it is torn down when the watch
+/// loop exits by any path (quit key, terminal state, error, panic). On drop it
+/// signals shutdown then waits a bounded time for the worker to finish; if the
+/// worker is parked mid-probe (a scheduler probe can block up to ~10s), it
+/// detaches rather than joining so quit — and the terminal restore that follows —
+/// is never held hostage to a hung sstat/squeue call.
+struct WatchWorker {
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for WatchWorker {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let deadline = Instant::now() + WORKER_JOIN_TIMEOUT;
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if handle.is_finished() {
+            let _ = handle.join();
+        }
+        // Otherwise detach: dropping `handle` here lets the worker keep running
+        // until its in-flight probe returns and observes `shutdown`, so a stuck
+        // sstat/squeue never blocks exit.
+    }
+}
+
+/// Background probe loop: fetches `ps` snapshots on the data cadence and metrics
+/// lines on the metrics cadence, sending each over `tx`. Runs off the UI thread
+/// so keystrokes and redraw never wait on a scheduler probe.
+fn run_watch_worker(
+    record: SubmissionRecord,
+    options: SchedulerOptions,
+    data_refresh: Duration,
+    metrics_refresh: Duration,
+    initial_scheduler: SchedulerStatus,
+    tx: mpsc::Sender<WatchWorkerMsg>,
+    shutdown: Arc<AtomicBool>,
+) {
+    let stats_options = StatsOptions {
+        scheduler: options.clone(),
+        sstat_bin: "sstat".to_string(),
+        accounting: false,
+    };
+    // The UI thread already fetched an initial snapshot synchronously, so start
+    // the data timer now. Seed the metrics timer in the past so the first metrics
+    // line is produced immediately, mirroring the old inline cadence.
+    let mut last_data = Instant::now();
+    let mut last_metrics = Instant::now()
+        .checked_sub(metrics_refresh)
+        .unwrap_or_else(Instant::now);
+    // Reuse the scheduler status the data probe already fetched for the metrics
+    // snapshot so the metrics path never re-runs squeue/sacct (the old
+    // `build_stats_snapshot` did). Seeded from the UI thread's initial snapshot.
+    let mut last_scheduler = initial_scheduler;
+    while !shutdown.load(Ordering::Relaxed) {
+        if last_data.elapsed() >= data_refresh {
+            let snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), &options);
+            if let Ok(snapshot) = &snapshot {
+                last_scheduler = snapshot.scheduler.clone();
+            }
+            if tx
+                .send(WatchWorkerMsg::Data(snapshot.map(Box::new)))
+                .is_err()
+            {
+                return; // UI thread dropped the receiver; nothing left to do.
+            }
+            last_data = Instant::now();
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+        if last_metrics.elapsed() >= metrics_refresh {
+            let metrics =
+                load_watch_metrics_line(&record, &stats_options, Some(last_scheduler.clone()));
+            if tx.send(WatchWorkerMsg::Metrics(metrics)).is_err() {
+                return;
+            }
+            last_metrics = Instant::now();
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+        std::thread::sleep(WORKER_POLL_INTERVAL);
+    }
+}
+
 fn run_watch_ui_loop(
     record: &SubmissionRecord,
     options: &SchedulerOptions,
@@ -908,11 +1061,37 @@ fn run_watch_ui_loop(
         log_capacity(height),
     );
     let mut all_log_lines = build_all_log_lines(&snapshot, lines, log_capacity(height));
-    let mut last_refresh = Instant::now();
-    let mut last_metrics_refresh = Instant::now()
-        .checked_sub(metrics_refresh)
-        .unwrap_or_else(Instant::now);
     let mut metrics_line = None;
+
+    // Move the periodic scheduler probes (squeue/sacct for data, sstat for
+    // metrics) onto a background worker so the UI thread never blocks on IO. The
+    // worker sends refreshes over `worker_rx`; the UI drains them non-blockingly
+    // each iteration. `worker_rx` is declared before `_worker` so the guard's
+    // drop (which joins/detaches the thread) runs before the receiver is dropped.
+    let (worker_tx, worker_rx) = mpsc::channel::<WatchWorkerMsg>();
+    let worker_shutdown = Arc::new(AtomicBool::new(false));
+    let _worker = WatchWorker {
+        shutdown: Arc::clone(&worker_shutdown),
+        handle: Some({
+            let record = record.clone();
+            let options = options.clone();
+            let initial_scheduler = snapshot.scheduler.clone();
+            std::thread::Builder::new()
+                .name("hpc-watch-probe".to_string())
+                .spawn(move || {
+                    run_watch_worker(
+                        record,
+                        options,
+                        data_refresh,
+                        metrics_refresh,
+                        initial_scheduler,
+                        worker_tx,
+                        worker_shutdown,
+                    )
+                })
+                .context("failed to spawn watch probe worker")?
+        }),
+    };
     let mut show_help = false;
     let mut input_mode = InputMode::Normal;
     let mut search_buffer = String::new();
@@ -936,7 +1115,16 @@ fn run_watch_ui_loop(
     let mut last_render_size: Option<(usize, usize)> = None;
 
     let (outcome, command_hint) = loop {
-        if last_refresh.elapsed() >= data_refresh {
+        // Drain everything the worker queued since the last iteration, keeping
+        // only the freshest data/metrics. This never blocks: `try_iter` yields
+        // just the already-delivered messages so keystrokes and redraw are never
+        // held up by an in-flight probe.
+        let drained = drain_worker_messages(worker_rx.try_iter());
+        if let Some(result) = drained.data {
+            // A probe failure propagates exactly as the old inline
+            // `build_ps_snapshot(...)?` did; the worker guard's drop still tears
+            // the thread down on this early return.
+            let new_snapshot = result?;
             dirty = true;
             let selected_name = selected_service_name(
                 &snapshot.services,
@@ -944,7 +1132,7 @@ fn run_watch_ui_loop(
                 sort_mode,
                 selected_index,
             );
-            snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), options)?;
+            snapshot = *new_snapshot;
             let effective = effective_services(&snapshot.services, filter.as_deref(), sort_mode);
             selected_index =
                 preserve_selected_index_raw(&effective, selected_name.as_deref(), selected_index);
@@ -966,15 +1154,11 @@ fn run_watch_ui_loop(
                 all_log_lines = build_all_log_lines(&snapshot, lines, log_capacity(height));
                 log_scroll = 0;
             }
-            last_refresh = Instant::now();
         }
-        if last_metrics_refresh.elapsed() >= metrics_refresh {
-            let refreshed = load_watch_metrics_line(record, options);
-            if refreshed != metrics_line {
-                metrics_line = refreshed;
-                dirty = true;
-            }
-            last_metrics_refresh = Instant::now();
+        if let Some(refreshed) = drained.metrics
+            && apply_worker_metrics(&mut metrics_line, refreshed)
+        {
+            dirty = true;
         }
         let walltime_progress = walltime_progress(
             &snapshot.record,
@@ -2409,18 +2593,20 @@ fn should_hold_on_exit(policy: HoldOnExit, outcome: &WatchOutcome) -> bool {
     }
 }
 
+/// Loads the compact watch metrics line, reusing an already-probed scheduler
+/// status so the metrics path never re-runs squeue/sacct (only sstat + the
+/// sampler are read here). `prefetched` carries the status the data probe just
+/// fetched; passing `None` falls back to probing, matching the old behavior.
 fn load_watch_metrics_line(
     record: &SubmissionRecord,
-    scheduler: &SchedulerOptions,
+    stats_options: &StatsOptions,
+    prefetched: Option<SchedulerStatus>,
 ) -> Option<String> {
-    let snapshot = build_stats_snapshot(
+    let snapshot = build_stats_snapshot_with_status(
         &record.compose_file,
         Some(&record.job_id),
-        &StatsOptions {
-            scheduler: scheduler.clone(),
-            sstat_bin: "sstat".to_string(),
-            accounting: false,
-        },
+        stats_options,
+        prefetched,
     )
     .ok()?;
     format_watch_metrics_line(&snapshot)

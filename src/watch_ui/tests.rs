@@ -1810,3 +1810,75 @@ fn search_keys_parse_correctly() {
     let keys = parse_search_keys(&mut cancel_buf);
     assert_eq!(keys, vec![SearchKey::Cancel]);
 }
+
+fn snapshot_with_job(job_id: &str) -> Box<PsSnapshot> {
+    let mut snapshot = sample_snapshot();
+    snapshot.record.job_id = job_id.into();
+    Box::new(snapshot)
+}
+
+#[test]
+fn drain_worker_messages_keeps_freshest_of_each_kind() {
+    // Queue three data snapshots and two metrics lines; the drain must collapse
+    // them to only the newest of each so the UI never applies stale state.
+    let messages = vec![
+        WatchWorkerMsg::Data(Ok(snapshot_with_job("first"))),
+        WatchWorkerMsg::Metrics(Some("stale metrics".into())),
+        WatchWorkerMsg::Data(Ok(snapshot_with_job("second"))),
+        WatchWorkerMsg::Metrics(Some("fresh metrics".into())),
+        WatchWorkerMsg::Data(Ok(snapshot_with_job("third"))),
+    ];
+
+    let drained = drain_worker_messages(messages);
+    let data = drained.data.expect("data present").expect("snapshot ok");
+    assert_eq!(
+        data.record.job_id, "third",
+        "the newest snapshot must win over queued stale ones"
+    );
+    assert_eq!(drained.metrics, Some(Some("fresh metrics".into())));
+}
+
+#[test]
+fn drain_worker_messages_empty_yields_nothing() {
+    let drained = drain_worker_messages(Vec::new());
+    assert!(drained.data.is_none());
+    assert!(drained.metrics.is_none());
+}
+
+#[test]
+fn drain_worker_messages_propagates_freshest_data_error() {
+    // An error queued after an ok snapshot is still the freshest data message and
+    // must be the one surfaced (so the loop propagates it just like the old
+    // inline `build_ps_snapshot(...)?`).
+    let messages = vec![
+        WatchWorkerMsg::Data(Ok(snapshot_with_job("ok"))),
+        WatchWorkerMsg::Data(Err(anyhow::anyhow!("probe failed"))),
+    ];
+    let drained = drain_worker_messages(messages);
+    let data = drained.data.expect("data present");
+    assert!(data.is_err(), "freshest (error) data message must win");
+}
+
+#[test]
+fn apply_worker_metrics_updates_watch_model_on_change() {
+    let mut model = sample_watch_model();
+    assert!(model.metrics_line.is_none());
+
+    // A new value updates the model and reports a repaint is warranted.
+    assert!(apply_worker_metrics(
+        &mut model.metrics_line,
+        Some("gpu: 1 util=50%".into())
+    ));
+    assert_eq!(model.metrics_line.as_deref(), Some("gpu: 1 util=50%"));
+
+    // Re-applying the same value is a no-op and reports no change.
+    assert!(!apply_worker_metrics(
+        &mut model.metrics_line,
+        Some("gpu: 1 util=50%".into())
+    ));
+    assert_eq!(model.metrics_line.as_deref(), Some("gpu: 1 util=50%"));
+
+    // Clearing to `None` is a change.
+    assert!(apply_worker_metrics(&mut model.metrics_line, None));
+    assert!(model.metrics_line.is_none());
+}
