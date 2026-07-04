@@ -104,7 +104,7 @@ pub(super) fn load_runtime_state(record: &SubmissionRecord) -> Option<ServiceRun
     // Honor an explicit x-slurm.runtime_root override (schema v3+) exactly like
     // state_path_for_record does. Rebuilding the default root here silently lost
     // all runtime state for override jobs.
-    read_json::<ServiceRuntimeStateFile>(&state_path_for_record(record)).ok()
+    read_json_optional::<ServiceRuntimeStateFile>(&state_path_for_record(record))
 }
 
 pub(super) fn active_restart_failures_in_window(

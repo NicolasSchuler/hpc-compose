@@ -82,10 +82,10 @@ pub use record::{
     build_submission_record_with_backend_and_options, build_submission_record_with_options,
     clean_all_except_latest, clean_by_age, find_submission_record_in_repo, jobs_dir_for,
     latest_canary_record_path_for, latest_notebook_record_path_for, latest_record_path_for,
-    latest_run_record_path_for, load_submission_record, log_dir_for_record, metadata_root_for,
-    persist_submission_record, remove_submission_record, run_cleanup_report,
-    runtime_job_root_for_record, scan_job_inventory, scan_job_records, state_path_for_record,
-    write_submission_record,
+    latest_run_record_path_for, load_submission_record, load_submission_record_optional,
+    log_dir_for_record, metadata_root_for, persist_submission_record, remove_submission_record,
+    run_cleanup_report, runtime_job_root_for_record, scan_job_inventory, scan_job_records,
+    state_path_for_record, write_submission_record,
 };
 pub use replay::{
     ReplayArtifactPaths, ReplayEvent, ReplayEventKind, ReplayFrame, ReplayReport,
@@ -149,6 +149,32 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let raw = fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
     serde_json::from_str(&raw).context(format!("failed to parse {}", path.display()))
+}
+
+/// Read an optional JSON file, distinguishing "legitimately absent" from "broken".
+///
+/// A missing file (`NotFound`) is an expected, silent `None`. A corrupt/truncated
+/// file or any other IO error is a *degraded* `None`: we emit a single `WARN` line
+/// naming the path and error so tracked jobs no longer vanish silently, then return
+/// `None` to preserve the caller's fall-through behavior.
+fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+    match read_json::<T>(path) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            let is_not_found = err
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .any(|io_err| io_err.kind() == std::io::ErrorKind::NotFound);
+            if !is_not_found {
+                eprintln!(
+                    "{} {}: {err:#}",
+                    crate::term::styled_warning("WARN"),
+                    path.display()
+                );
+            }
+            None
+        }
+    }
 }
 
 fn batch_log_path_for_backend(

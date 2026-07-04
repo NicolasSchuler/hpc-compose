@@ -273,7 +273,7 @@ pub fn build_stats_snapshot(
     let (job_id, record) = match job_id {
         Some(job_id) => (
             job_id.to_string(),
-            load_submission_record(spec_path, Some(job_id)).ok(),
+            load_submission_record_optional(spec_path, Some(job_id)),
         ),
         None => {
             let record = load_submission_record(spec_path, None)?;
