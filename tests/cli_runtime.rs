@@ -4927,7 +4927,6 @@ x-slurm:
   job_name: gres-demo
   time: "00:02:00"
   cache_dir: {}
-  gpus: 8
   gres: gpu:h100:4
 services:
   trainer:
@@ -4936,7 +4935,6 @@ services:
       - python
       - train.py
     x-slurm:
-      gpus: 2
       gres: gpu:h100:1
 "#,
             tmpdir.path().join("cache").display(),

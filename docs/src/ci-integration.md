@@ -103,7 +103,7 @@ hpc-compose-lint:
 
 ## Strict vs. warnings
 
-`validate` always fails on structural spec errors. `lint` emits advisory findings (`HPC001`–`HPC007`, `HPC900`); by default these fail the command, so add `--allow-warnings` for advisory-only runs. A common setup is:
+`validate` always fails on structural spec errors. `lint` emits advisory findings (`HPC001`–`HPC009`, `HPC900`); by default these fail the command, so add `--allow-warnings` for advisory-only runs. A common setup is:
 
 - **pre-commit / local:** `lint --allow-warnings` (fast feedback, advisory).
 - **CI (merge gate):** `lint` without `--allow-warnings`, or `strict: true` (enforce).

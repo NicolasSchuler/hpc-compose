@@ -2212,6 +2212,9 @@ impl ComposeSpec {
                 }
                 .into());
             }
+            for (index, volume) in service.volumes.iter().enumerate() {
+                validate_mount_syntax(volume, &format!("service '{name}' volumes[{index}]"))?;
+            }
             service
                 .environment
                 .validate_names(&format!("service '{name}' environment"))?;
@@ -2831,6 +2834,7 @@ impl SlurmConfig {
         validate_sbatch_safe_string(self.qos.as_deref(), "x-slurm.qos")?;
         validate_sbatch_safe_string(self.constraint.as_deref(), "x-slurm.constraint")?;
         validate_sbatch_safe_string(self.time.as_deref(), "x-slurm.time")?;
+        validate_slurm_time_format(self.time.as_deref(), "x-slurm.time")?;
         validate_sbatch_safe_string(self.mem.as_deref(), "x-slurm.mem")?;
         validate_sbatch_safe_string(self.gres.as_deref(), "x-slurm.gres")?;
         validate_sbatch_safe_string(self.mem_per_gpu.as_deref(), "x-slurm.mem_per_gpu")?;
@@ -2853,6 +2857,7 @@ impl SlurmConfig {
             "x-slurm.submit_args",
         )?;
         validate_submit_arg_conflicts(self)?;
+        validate_gpus_gres_conflict(self.gpus, self.gres.as_deref(), "x-slurm")?;
         if let Some(scratch) = &self.scratch {
             scratch.validate()?;
         }
@@ -3114,31 +3119,92 @@ fn validate_stage_path(value: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validates a Slurm `--time` walltime value against Slurm's documented
+/// `sbatch --time` grammar (minutes, MM:SS, HH:MM:SS, D-HH, D-HH:MM,
+/// D-HH:MM:SS). Rejects convenience spellings like `1h`/`30m` that `sbatch`
+/// does not accept, so they surface at `validate` time rather than dying at
+/// submission.
+fn validate_slurm_time_format(value: Option<&str>, field: &str) -> Result<()> {
+    let Some(raw) = value else {
+        return Ok(());
+    };
+    if raw.trim().is_empty() {
+        // Empty/whitespace values are caught by other validation paths; do not
+        // shadow those messages with a time-format complaint.
+        return Ok(());
+    }
+    if parse_slurm_time_limit(raw).is_err() {
+        return Err(SpecError::InvalidSlurmTime {
+            field: field.to_string(),
+            value: raw.to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Returns true when a `gres` string requests GPUs (any comma-separated entry
+/// whose resource name is `gpu`, e.g. `gpu:2` or `gpu:a100:4`). Case-insensitive
+/// to mirror the renderer's GPU detection.
+fn gres_requests_gpu(gres: &str) -> bool {
+    gres.split(',').any(|part| {
+        part.trim()
+            .split(':')
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("gpu"))
+    })
+}
+
+/// Hard-errors when both a plain `gpus` count and a GPU-carrying `gres` request
+/// are set: the renderer emits `--gres` and silently drops `gpus`, so the two
+/// together express a contradictory allocation.
+fn validate_gpus_gres_conflict(gpus: Option<u32>, gres: Option<&str>, scope: &str) -> Result<()> {
+    if gpus.is_some() && gres.is_some_and(gres_requests_gpu) {
+        return Err(SpecError::GpusGresConflict {
+            scope: scope.to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Rule derived from the renderer/planner (`planner::ParsedMount::parse` and
+/// `render::build_pyxis_mounts`): a mount is `host_path:container_path[:ro|rw]`
+/// with non-empty host and container, an absolute container path, an optional
+/// `ro`/`rw` mode, and no embedded null bytes. Relative host paths are allowed
+/// (they resolve against the project directory at plan time).
 fn validate_mount_syntax(value: &str, field: &str) -> Result<()> {
+    let invalid = |problem: &str| -> anyhow::Error {
+        SpecError::InvalidMountSyntax {
+            field: field.to_string(),
+            value: value.to_string(),
+            problem: problem.to_string(),
+        }
+        .into()
+    };
     match split_mount_parts(value) {
         MountParts::HostContainer {
             host, container, ..
         } => {
             if host.trim().is_empty() {
-                bail!("{field} host path must not be empty");
+                return Err(invalid("host path must not be empty"));
             }
             if container.trim().is_empty() {
-                bail!("{field} container path must not be empty");
+                return Err(invalid("container path must not be empty"));
             }
-            let container_path = Path::new(container.trim());
-            if !container_path.is_absolute() {
-                bail!("{field} container path must be absolute");
+            if !Path::new(container.trim()).is_absolute() {
+                return Err(invalid("container path must be absolute"));
             }
             if value.contains('\0') {
-                bail!("{field} must not contain null bytes");
+                return Err(invalid("must not contain null bytes"));
             }
             Ok(())
         }
         MountParts::UnsupportedMode(mode) => {
-            bail!("{field} uses unsupported mode '{mode}'; use ro or rw")
+            Err(invalid(&format!("unsupported mode '{mode}'; use ro or rw")))
         }
         MountParts::InvalidShape => {
-            bail!("{field} must use host_path:container_path[:ro|rw] syntax")
+            Err(invalid("must use host_path:container_path[:ro|rw] syntax"))
         }
     }
 }
@@ -3562,6 +3628,11 @@ impl ServiceSlurmConfig {
             &format!("service '{service_name}' x-slurm.extra_srun_args"),
         )?;
         validate_extra_srun_arg_conflicts(self, service_name)?;
+        validate_gpus_gres_conflict(
+            self.gpus,
+            self.gres.as_deref(),
+            &format!("service '{service_name}' x-slurm"),
+        )?;
         if let Some(placement) = &self.placement {
             placement.validate(service_name)?;
         }
@@ -4177,7 +4248,41 @@ fn validate_mpi_type_token(value: &str) -> Result<()> {
     Ok(())
 }
 
+// Every first-class top-level `x-slurm` field that the renderer turns into an
+// sbatch flag, paired with each `sbatch` spelling (long form plus short form
+// where Slurm has one). Setting the field and also passing the raw flag in
+// `submit_args` is a conflict. `mail-user`/`mail-type` are intentionally absent:
+// they derive from `x-slurm.notify`, which has its own dedicated conflict guard.
 const FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS: &[(&str, &str)] = &[
+    ("job_name", "--job-name"),
+    ("job_name", "-J"),
+    ("nodes", "--nodes"),
+    ("nodes", "-N"),
+    ("ntasks", "--ntasks"),
+    ("ntasks", "-n"),
+    ("ntasks_per_node", "--ntasks-per-node"),
+    ("partition", "--partition"),
+    ("partition", "-p"),
+    ("account", "--account"),
+    ("account", "-A"),
+    ("qos", "--qos"),
+    ("qos", "-q"),
+    ("time", "--time"),
+    ("time", "-t"),
+    ("cpus_per_task", "--cpus-per-task"),
+    ("cpus_per_task", "-c"),
+    ("mem", "--mem"),
+    ("gres", "--gres"),
+    ("gpus", "--gpus"),
+    ("gpus", "-G"),
+    ("constraint", "--constraint"),
+    ("constraint", "-C"),
+    ("output", "--output"),
+    ("output", "-o"),
+    ("error", "--error"),
+    ("error", "-e"),
+    ("chdir", "--chdir"),
+    ("chdir", "-D"),
     ("array", "--array"),
     ("array", "-a"),
     ("after_job", "--dependency"),
@@ -4193,7 +4298,20 @@ const FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS: &[(&str, &str)] = &[
     ("hint", "--hint"),
 ];
 
+// Every first-class service-level `x-slurm` field that the renderer turns into
+// an `srun` flag, paired with each spelling. `time_limit` is intentionally
+// absent: it is advisory and never rendered onto the `srun` command line.
 const FIRST_CLASS_SERVICE_SLURM_FLAGS: &[(&str, &str)] = &[
+    ("nodes", "--nodes"),
+    ("nodes", "-N"),
+    ("ntasks", "--ntasks"),
+    ("ntasks", "-n"),
+    ("ntasks_per_node", "--ntasks-per-node"),
+    ("cpus_per_task", "--cpus-per-task"),
+    ("cpus_per_task", "-c"),
+    ("gres", "--gres"),
+    ("gpus", "--gpus"),
+    ("gpus", "-G"),
     ("gpus_per_node", "--gpus-per-node"),
     ("gpus_per_task", "--gpus-per-task"),
     ("cpus_per_gpu", "--cpus-per-gpu"),
@@ -4237,6 +4355,22 @@ fn validate_extra_srun_arg_conflicts(slurm: &ServiceSlurmConfig, service_name: &
 
 fn top_level_slurm_field_is_set(slurm: &SlurmConfig, field: &str) -> bool {
     match field {
+        "job_name" => slurm.job_name.is_some(),
+        "nodes" => slurm.nodes.is_some(),
+        "ntasks" => slurm.ntasks.is_some(),
+        "ntasks_per_node" => slurm.ntasks_per_node.is_some(),
+        "partition" => slurm.partition.is_some(),
+        "account" => slurm.account.is_some(),
+        "qos" => slurm.qos.is_some(),
+        "time" => slurm.time.is_some(),
+        "cpus_per_task" => slurm.cpus_per_task.is_some(),
+        "mem" => slurm.mem.is_some(),
+        "gres" => slurm.gres.is_some(),
+        "gpus" => slurm.gpus.is_some(),
+        "constraint" => slurm.constraint.is_some(),
+        "output" => slurm.output.is_some(),
+        "error" => slurm.error.is_some(),
+        "chdir" => slurm.chdir.is_some(),
         "gpus_per_node" => slurm.gpus_per_node.is_some(),
         "gpus_per_task" => slurm.gpus_per_task.is_some(),
         "cpus_per_gpu" => slurm.cpus_per_gpu.is_some(),
@@ -4255,6 +4389,12 @@ fn top_level_slurm_field_is_set(slurm: &SlurmConfig, field: &str) -> bool {
 
 fn service_slurm_field_is_set(slurm: &ServiceSlurmConfig, field: &str) -> bool {
     match field {
+        "nodes" => slurm.nodes.is_some(),
+        "ntasks" => slurm.ntasks.is_some(),
+        "ntasks_per_node" => slurm.ntasks_per_node.is_some(),
+        "cpus_per_task" => slurm.cpus_per_task.is_some(),
+        "gres" => slurm.gres.is_some(),
+        "gpus" => slurm.gpus.is_some(),
         "gpus_per_node" => slurm.gpus_per_node.is_some(),
         "gpus_per_task" => slurm.gpus_per_task.is_some(),
         "cpus_per_gpu" => slurm.cpus_per_gpu.is_some(),

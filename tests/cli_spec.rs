@@ -771,7 +771,7 @@ services:
 }
 
 #[test]
-fn render_cli_applies_gres_precedence_from_compose() {
+fn render_cli_renders_gpu_gres_requests() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_compose(
         tmpdir.path(),
@@ -780,14 +780,12 @@ fn render_cli_applies_gres_precedence_from_compose() {
 name: gres-demo
 x-slurm:
   gres: gpu:h100:4
-  gpus: 8
 services:
   trainer:
     image: redis:7
     command: /bin/true
     x-slurm:
       gres: gpu:h100:2
-      gpus: 4
 "#,
     );
 
@@ -798,9 +796,40 @@ services:
     assert_success(&render);
     let script = stdout_text(&render);
     assert!(script.contains("#SBATCH --gres=gpu:h100:4"));
-    assert!(!script.contains("#SBATCH --gpus=8"));
     assert!(script.contains("--gres=gpu:h100:2"));
-    assert!(!script.contains("--gpus=4"));
+}
+
+#[test]
+fn validate_cli_rejects_contradictory_gpus_and_gpu_gres() {
+    // A plain `gpus` count together with a GPU-carrying `gres` is contradictory:
+    // Slurm renders `--gres` and silently drops `gpus`. Rejected at validate time
+    // at both the top level and per service.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "gres-conflict.yaml",
+        r#"
+name: gres-demo
+x-slurm:
+  gres: gpu:h100:4
+  gpus: 8
+services:
+  trainer:
+    image: redis:7
+    command: /bin/true
+"#,
+    );
+
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    let combined = format!("{}\n{}", stdout_text(&validate), stderr_text(&validate));
+    assert!(
+        combined.contains("gpus_gres_conflict") || combined.contains("contradictory"),
+        "expected a gpus/gres conflict diagnostic:\n{combined}"
+    );
 }
 
 #[test]

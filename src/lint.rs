@@ -114,6 +114,8 @@ pub fn lint_plan(
     lint_dependency_readiness(plan, &mut findings);
     lint_implicit_dependency_condition(plan, &mut findings);
     lint_memory_cpu_ratio(plan, &mut findings);
+    lint_task_geometry(plan, runtime_plan, &mut findings);
+    lint_bare_memory_units(plan, runtime_plan, &mut findings);
     lint_ignore_shared_writes(plan, runtime_plan, cluster_profile, &mut findings);
     lint_cache_path_policy(runtime_plan, &mut findings);
     lint_node_local_volumes(runtime_plan, &mut findings);
@@ -329,6 +331,128 @@ fn lint_memory_cpu_ratio(plan: &Plan, findings: &mut Vec<LintFinding>) {
         Some("x-slurm.mem".to_string()),
         recommendation,
     ));
+}
+
+/// HPC008: `nodes`, `ntasks`, and `ntasks_per_node` are all set but
+/// `nodes * ntasks_per_node != ntasks`. Slurm accepts this (one value wins per
+/// its own precedence), so it is a warning rather than an error, but the
+/// mismatch is almost always an authoring mistake.
+fn lint_task_geometry(plan: &Plan, runtime_plan: &RuntimePlan, findings: &mut Vec<LintFinding>) {
+    check_task_geometry(
+        plan.slurm.nodes,
+        plan.slurm.ntasks,
+        plan.slurm.ntasks_per_node,
+        None,
+        "x-slurm",
+        findings,
+    );
+    for service in &runtime_plan.ordered_services {
+        check_task_geometry(
+            service.slurm.nodes,
+            service.slurm.ntasks,
+            service.slurm.ntasks_per_node,
+            Some(&service.name),
+            &format!("services.{}.x-slurm", service.name),
+            findings,
+        );
+    }
+}
+
+fn check_task_geometry(
+    nodes: Option<u32>,
+    ntasks: Option<u32>,
+    ntasks_per_node: Option<u32>,
+    service: Option<&str>,
+    field: &str,
+    findings: &mut Vec<LintFinding>,
+) {
+    let (Some(nodes), Some(ntasks), Some(ntasks_per_node)) = (nodes, ntasks, ntasks_per_node)
+    else {
+        return;
+    };
+    let expected = u64::from(nodes) * u64::from(ntasks_per_node);
+    if expected == u64::from(ntasks) {
+        return;
+    }
+    let scope = service.map_or_else(String::new, |name| format!("service '{name}' "));
+    findings.push(LintFinding::warning(
+        "HPC008",
+        format!(
+            "{scope}sets nodes({nodes}) * ntasks_per_node({ntasks_per_node}) = {expected}, which conflicts with ntasks({ntasks})"
+        ),
+        service.map(str::to_string),
+        Some(field.to_string()),
+        "Set ntasks = nodes * ntasks_per_node, or drop one of the three so Slurm's own precedence is unambiguous.",
+    ));
+}
+
+/// HPC009: a memory value (`mem` or `mem_per_gpu`) is a bare number with no unit
+/// suffix. Slurm interprets an unsuffixed `--mem`/`--mem-per-gpu` as megabytes,
+/// which is a frequent surprise; suggest an explicit unit.
+fn lint_bare_memory_units(
+    plan: &Plan,
+    runtime_plan: &RuntimePlan,
+    findings: &mut Vec<LintFinding>,
+) {
+    check_bare_memory_unit(plan.slurm.mem.as_deref(), None, "x-slurm.mem", findings);
+    check_bare_memory_unit(
+        plan.slurm.mem_per_gpu.as_deref(),
+        None,
+        "x-slurm.mem_per_gpu",
+        findings,
+    );
+    for service in &runtime_plan.ordered_services {
+        check_bare_memory_unit(
+            service.slurm.mem_per_gpu.as_deref(),
+            Some(&service.name),
+            &format!("services.{}.x-slurm.mem_per_gpu", service.name),
+            findings,
+        );
+    }
+}
+
+fn check_bare_memory_unit(
+    value: Option<&str>,
+    service: Option<&str>,
+    field: &str,
+    findings: &mut Vec<LintFinding>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    if !value_is_bare_number(value) {
+        return;
+    }
+    let scope = service.map_or_else(String::new, |name| format!("service '{name}' "));
+    findings.push(LintFinding::warning(
+        "HPC009",
+        format!(
+            "{scope}{field} is '{}', a bare number Slurm reads as megabytes (MB)",
+            value.trim()
+        ),
+        service.map(str::to_string),
+        Some(field.to_string()),
+        "Add an explicit unit suffix (e.g. '4G', '512M') so the memory request is unambiguous.",
+    ));
+}
+
+/// Returns true when a memory string is a non-empty run of digits (with an
+/// optional single decimal point) and no unit suffix — the form Slurm silently
+/// reads as megabytes.
+fn value_is_bare_number(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut seen_dot = false;
+    for ch in trimmed.chars() {
+        match ch {
+            '0'..='9' => {}
+            '.' if !seen_dot => seen_dot = true,
+            _ => return false,
+        }
+    }
+    trimmed.chars().any(|ch| ch.is_ascii_digit())
 }
 
 fn allocation_cpu_count(plan: &Plan) -> u32 {
@@ -562,6 +686,40 @@ mod tests {
         assert!(host_looks_shared("/shared/data", &roots));
         assert!(host_looks_shared("/projects", &roots));
         assert!(!host_looks_shared("/local/tmp", &roots));
+    }
+
+    #[test]
+    fn hpc008_flags_only_inconsistent_task_geometry() {
+        let mut findings = Vec::new();
+        // Consistent: 2 * 4 == 8 -> no finding.
+        check_task_geometry(Some(2), Some(8), Some(4), None, "x-slurm", &mut findings);
+        assert!(findings.is_empty());
+        // Any field missing -> no finding.
+        check_task_geometry(Some(2), None, Some(4), None, "x-slurm", &mut findings);
+        assert!(findings.is_empty());
+        // Inconsistent: 2 * 4 == 8 != 4 -> warning.
+        check_task_geometry(Some(2), Some(4), Some(4), None, "x-slurm", &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "HPC008");
+        assert_eq!(findings[0].level, LintLevel::Warning);
+    }
+
+    #[test]
+    fn hpc009_flags_only_bare_memory_numbers() {
+        assert!(value_is_bare_number("1000"));
+        assert!(value_is_bare_number("1.5"));
+        assert!(!value_is_bare_number("4G"));
+        assert!(!value_is_bare_number("512M"));
+        assert!(!value_is_bare_number(""));
+        assert!(!value_is_bare_number("."));
+
+        let mut findings = Vec::new();
+        check_bare_memory_unit(Some("2000"), None, "x-slurm.mem", &mut findings);
+        check_bare_memory_unit(Some("4G"), None, "x-slurm.mem", &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "HPC009");
+        assert_eq!(findings[0].level, LintLevel::Warning);
+        assert!(findings[0].message.contains("megabytes"));
     }
 
     #[test]

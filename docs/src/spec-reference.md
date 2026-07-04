@@ -232,7 +232,7 @@ These fields live under the top-level `x-slurm` block.
 | `partition` | string | omitted | Passed through to `#SBATCH --partition`. |
 | `account` | string | omitted | Passed through to `#SBATCH --account`. |
 | `qos` | string | omitted | Passed through to `#SBATCH --qos`. |
-| `time` | string | omitted | Passed through to `#SBATCH --time`. |
+| `time` | string | omitted | Passed through to `#SBATCH --time`. Must use a Slurm walltime format: minutes (`90`), `MM:SS` (`90:00`), `HH:MM:SS` (`1:00:00`), `D-HH` (`1-00`), `D-HH:MM`, or `D-HH:MM:SS`. A bare `1h`/`30m` is rejected at `validate` time (write `1h` as `1:00:00`). |
 | `nodes` | positive integer | omitted | Slurm allocation node count. Defaults to `1` when omitted. |
 | `ntasks` | positive integer | omitted | Passed through to `#SBATCH --ntasks`. |
 | `ntasks_per_node` | positive integer | omitted | Passed through to `#SBATCH --ntasks-per-node`. |
