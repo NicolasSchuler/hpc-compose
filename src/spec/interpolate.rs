@@ -6,6 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_norway::Value;
 
+use crate::spec_error::SpecError;
+
 pub(super) type InterpolationVars = BTreeMap<String, String>;
 
 pub(super) fn interpolation_vars(path: &Path) -> Result<InterpolationVars> {
@@ -142,6 +144,15 @@ fn collect_referenced_from_braced_expr(
 
     match suffix {
         "" => {}
+        _ if suffix.starts_with(":?") => {
+            let required_but_missing = match vars.get(name) {
+                Some(value) => value.is_empty(),
+                None => true,
+            };
+            if required_but_missing {
+                collect_referenced_variables_in_string(&suffix[2..], vars, out)?;
+            }
+        }
         _ if suffix.starts_with(":-") => {
             let default_used = match vars.get(name) {
                 Some(value) => value.is_empty(),
@@ -149,6 +160,11 @@ fn collect_referenced_from_braced_expr(
             };
             if default_used {
                 collect_referenced_variables_in_string(&suffix[2..], vars, out)?;
+            }
+        }
+        _ if suffix.starts_with('?') => {
+            if !vars.contains_key(name) {
+                collect_referenced_variables_in_string(&suffix[1..], vars, out)?;
             }
         }
         _ if suffix.starts_with('-') => {
@@ -233,6 +249,18 @@ fn collect_missing_from_braced_expr(
 
     match suffix {
         "" => {}
+        _ if suffix.starts_with(":?") => {
+            // A required variable is a hard error, not a silent default, so it is
+            // never reported as "consumed a default" (mirrors bare `${VAR}`). The
+            // message may still contain real `:-`/`-` defaults, so walk it.
+            let required_but_missing = match vars.get(name) {
+                Some(value) => value.is_empty(),
+                None => true,
+            };
+            if required_but_missing {
+                collect_missing_defaulted_variables_in_string(&suffix[2..], vars, out)?;
+            }
+        }
         _ if suffix.starts_with(":-") => {
             let default_used = match vars.get(name) {
                 Some(value) => value.is_empty(),
@@ -243,6 +271,11 @@ fn collect_missing_from_braced_expr(
             }
             if default_used {
                 collect_missing_defaulted_variables_in_string(&suffix[2..], vars, out)?;
+            }
+        }
+        _ if suffix.starts_with('?') => {
+            if !vars.contains_key(name) {
+                collect_missing_defaulted_variables_in_string(&suffix[1..], vars, out)?;
             }
         }
         _ if suffix.starts_with('-') => {
@@ -438,12 +471,18 @@ fn resolve_braced_variable(
 
     match suffix {
         "" => resolve_required_variable(name, vars),
+        _ if suffix.starts_with(":?") => {
+            resolve_required_variable_with_message(name, &suffix[2..], vars, true)
+        }
         _ if suffix.starts_with(":-") => {
             let default = &suffix[2..];
             match vars.get(name) {
                 Some(value) if !value.is_empty() => Ok(value.clone()),
                 _ => interpolate_string(default, vars),
             }
+        }
+        _ if suffix.starts_with('?') => {
+            resolve_required_variable_with_message(name, &suffix[1..], vars, false)
         }
         _ if suffix.starts_with('-') => match vars.get(name) {
             Some(value) => Ok(value.clone()),
@@ -457,6 +496,47 @@ fn resolve_required_variable(name: &str, vars: &InterpolationVars) -> Result<Str
     vars.get(name)
         .cloned()
         .context(format!("missing variable '{name}'"))
+}
+
+/// Resolves a `${VAR:?message}` (`require_non_empty`) or `${VAR?message}`
+/// (`!require_non_empty`) required-variable expression.
+///
+/// Returns the value when the variable satisfies the requirement, otherwise a
+/// [`SpecError::RequiredVariableUnset`] miette diagnostic whose message echoes
+/// the (interpolated) user message. The error is boxed through `anyhow` so the
+/// diagnostic metadata survives the downcast in `cli_error_report`.
+fn resolve_required_variable_with_message(
+    name: &str,
+    raw_message: &str,
+    vars: &InterpolationVars,
+    require_non_empty: bool,
+) -> Result<String> {
+    let value = vars.get(name);
+    if let Some(value) = value.filter(|value| !(require_non_empty && value.is_empty())) {
+        return Ok(value.clone());
+    }
+
+    let message = if raw_message.is_empty() {
+        if value.is_some() {
+            format!("'{name}' is required but empty")
+        } else {
+            format!("'{name}' is required but not set")
+        }
+    } else {
+        let user_message = interpolate_string(raw_message, vars)?;
+        format!("'{name}' is required: {user_message}")
+    };
+
+    let help_text = format!(
+        "Set `{name}` before running this command, e.g. `export {name}=...`, add it to the `.env` file next to the compose file, or pass it however this command's caller supplies interpolation variables."
+    );
+
+    Err(SpecError::RequiredVariableUnset {
+        name: name.to_string(),
+        message,
+        help_text,
+    }
+    .into())
 }
 
 fn is_var_start(ch: char) -> bool {
@@ -536,20 +616,108 @@ mod tests {
             interpolate_string("literal $9 and $$FOO", &vars).expect("literal dollars"),
             "literal $9 and $FOO"
         );
+        assert_eq!(
+            interpolate_string("${FOO?bad}", &vars).expect("required var satisfied"),
+            "value"
+        );
 
-        for input in [
-            "$MISSING",
-            "${MISSING}",
-            "${}",
-            "${1BAD}",
-            "${FOO?bad}",
-            "${FOO",
-        ] {
+        for input in ["$MISSING", "${MISSING}", "${}", "${1BAD}", "${FOO"] {
             assert!(
                 interpolate_string(input, &vars).is_err(),
                 "{input} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn interpolate_string_required_colon_question_errors_on_unset_or_empty() {
+        let vars = BTreeMap::from([
+            ("FOO".to_string(), "value".to_string()),
+            ("EMPTY".to_string(), String::new()),
+            ("INNER".to_string(), "inner".to_string()),
+        ]);
+
+        assert_eq!(
+            interpolate_string("${FOO:?bad}", &vars).expect("set variable passes"),
+            "value"
+        );
+        assert_eq!(
+            interpolate_string("${EMPTY:?bad}", &vars)
+                .expect_err("empty rejected")
+                .to_string(),
+            "'EMPTY' is required: bad"
+        );
+        assert!(interpolate_string("${MISSING:?bad}", &vars).is_err());
+        assert_eq!(
+            interpolate_string("${MISSING:?}", &vars)
+                .expect_err("unset rejected")
+                .to_string(),
+            "'MISSING' is required but not set"
+        );
+        assert_eq!(
+            interpolate_string("${EMPTY:?}", &vars)
+                .expect_err("empty rejected")
+                .to_string(),
+            "'EMPTY' is required but empty"
+        );
+        assert_eq!(
+            interpolate_string("${MISSING:?need ${INNER}}", &vars)
+                .expect_err("message is interpolated")
+                .to_string(),
+            "'MISSING' is required: need inner"
+        );
+        assert_eq!(
+            interpolate_string("${MISSING:?need ${ALSO_MISSING:-fallback-msg}}", &vars)
+                .expect_err("message default is interpolated")
+                .to_string(),
+            "'MISSING' is required: need fallback-msg"
+        );
+    }
+
+    #[test]
+    fn interpolate_string_required_bare_question_allows_empty_but_not_unset() {
+        let vars = BTreeMap::from([
+            ("FOO".to_string(), "value".to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ]);
+
+        assert_eq!(
+            interpolate_string("${FOO?bad}", &vars).expect("set variable passes"),
+            "value"
+        );
+        assert_eq!(
+            interpolate_string("${EMPTY?bad}", &vars).expect("empty passes for bare ?"),
+            ""
+        );
+        assert!(interpolate_string("${MISSING?bad}", &vars).is_err());
+        assert_eq!(
+            interpolate_string("${MISSING?}", &vars)
+                .expect_err("unset rejected")
+                .to_string(),
+            "'MISSING' is required but not set"
+        );
+    }
+
+    #[test]
+    fn interpolate_string_required_operators_do_not_collide_with_default_operators() {
+        let vars = BTreeMap::from([("EMPTY".to_string(), String::new())]);
+
+        assert_eq!(
+            interpolate_string("${EMPTY:-?}", &vars).expect("colon-dash default keeps '?'"),
+            "?"
+        );
+        assert_eq!(
+            interpolate_string("${MISSING:?-}", &vars)
+                .expect_err("colon-question rejected")
+                .to_string(),
+            "'MISSING' is required: -"
+        );
+        assert_eq!(
+            interpolate_string("${MISSING?-}", &vars)
+                .expect_err("bare question rejected")
+                .to_string(),
+            "'MISSING' is required: -"
+        );
     }
 
     #[test]

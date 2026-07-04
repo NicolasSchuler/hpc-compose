@@ -759,9 +759,9 @@ const EXAMPLES: &[ExampleInfo] = &[
         path: "examples/secrets-hf-token.yaml",
         availability: ExampleAvailability::RepositoryFile,
         category: "basics",
-        demonstrates: "File-sourced secret interpolated into env and redacted in config/context output.",
-        start_when: "You need to feed a token into a service without leaking it into human-facing dumps.",
-        tags: &["secrets", "redaction", "huggingface", "env"],
+        demonstrates: "File-sourced secret interpolated into env, redacted in config/context output, and guarded by a ${VAR:?message} required-variable check.",
+        start_when: "You need to feed a token into a service without leaking it into dumps, and fail fast if the token is missing or empty.",
+        tags: &["secrets", "redaction", "huggingface", "env", "required-var"],
     },
     ExampleInfo {
         name: "deps-and-assert",
