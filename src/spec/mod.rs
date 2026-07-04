@@ -1053,6 +1053,25 @@ pub enum NotifyEvent {
     End,
     /// Send mail when the job fails.
     Fail,
+    /// Send mail when the job is requeued.
+    Requeue,
+    /// Send mail when the job cannot start due to an invalid dependency.
+    InvalidDepend,
+    /// Send mail when burst-buffer stage-out completes.
+    StageOut,
+    /// Send mail when the job reaches its time limit.
+    TimeLimit,
+    /// Send mail when the job reaches 90% of its time limit.
+    #[serde(rename = "time_limit_90")]
+    TimeLimit90,
+    /// Send mail when the job reaches 80% of its time limit.
+    #[serde(rename = "time_limit_80")]
+    TimeLimit80,
+    /// Send mail when the job reaches 50% of its time limit.
+    #[serde(rename = "time_limit_50")]
+    TimeLimit50,
+    /// Send mail once per array task (a modifier; requires `x-slurm.array`).
+    ArrayTasks,
     /// Use Slurm's `ALL` shorthand.
     All,
 }
@@ -2938,6 +2957,9 @@ impl SlurmConfig {
                     "x-slurm.notify.email cannot be combined with raw --mail-type/--mail-user submit args"
                 );
             }
+            if email.on.contains(&NotifyEvent::ArrayTasks) && self.array.is_none() {
+                return Err(SpecError::ArrayTasksRequiresArray.into());
+            }
         }
         if let Some(rendezvous) = &self.rendezvous {
             rendezvous.validate()?;
@@ -4224,21 +4246,43 @@ fn validate_walltime_ranges(parts: &[u64], has_days: bool, input: &str) -> Resul
     Ok(())
 }
 
+/// Stable ordering for normalized mail-type output, matching the
+/// `man sbatch` `--mail-type` documentation order. `All` is handled
+/// separately as a shorthand and is not part of this ordering.
+const NOTIFY_EVENT_CANONICAL_ORDER: [NotifyEvent; 11] = [
+    NotifyEvent::Start,
+    NotifyEvent::End,
+    NotifyEvent::Fail,
+    NotifyEvent::Requeue,
+    NotifyEvent::InvalidDepend,
+    NotifyEvent::StageOut,
+    NotifyEvent::TimeLimit,
+    NotifyEvent::TimeLimit90,
+    NotifyEvent::TimeLimit80,
+    NotifyEvent::TimeLimit50,
+    NotifyEvent::ArrayTasks,
+];
+
 fn normalize_notify_events(events: &[NotifyEvent]) -> Vec<NotifyEvent> {
     if events.is_empty() {
         return vec![NotifyEvent::End, NotifyEvent::Fail];
     }
+    let array_tasks = events.contains(&NotifyEvent::ArrayTasks);
     if events.contains(&NotifyEvent::All) {
-        return vec![NotifyEvent::All];
+        // `all` short-circuits to Slurm's `ALL` shorthand, but `array_tasks`
+        // is an independent modifier that Slurm accepts alongside it
+        // (`ALL,ARRAY_TASKS`), so keep it rather than silently dropping it.
+        let mut normalized = vec![NotifyEvent::All];
+        if array_tasks {
+            normalized.push(NotifyEvent::ArrayTasks);
+        }
+        return normalized;
     }
 
-    let mut normalized = Vec::new();
-    for event in [NotifyEvent::Start, NotifyEvent::End, NotifyEvent::Fail] {
-        if events.contains(&event) {
-            normalized.push(event);
-        }
-    }
-    normalized
+    NOTIFY_EVENT_CANONICAL_ORDER
+        .into_iter()
+        .filter(|event| events.contains(event))
+        .collect()
 }
 
 fn notify_event_mail_type(event: NotifyEvent) -> &'static str {
@@ -4246,6 +4290,14 @@ fn notify_event_mail_type(event: NotifyEvent) -> &'static str {
         NotifyEvent::Start => "BEGIN",
         NotifyEvent::End => "END",
         NotifyEvent::Fail => "FAIL",
+        NotifyEvent::Requeue => "REQUEUE",
+        NotifyEvent::InvalidDepend => "INVALID_DEPEND",
+        NotifyEvent::StageOut => "STAGE_OUT",
+        NotifyEvent::TimeLimit => "TIME_LIMIT",
+        NotifyEvent::TimeLimit90 => "TIME_LIMIT_90",
+        NotifyEvent::TimeLimit80 => "TIME_LIMIT_80",
+        NotifyEvent::TimeLimit50 => "TIME_LIMIT_50",
+        NotifyEvent::ArrayTasks => "ARRAY_TASKS",
         NotifyEvent::All => "ALL",
     }
 }

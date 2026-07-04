@@ -258,6 +258,38 @@ services:
 }
 
 #[test]
+fn notify_array_tasks_without_array_reports_helpful_validate_error() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "array-tasks.yaml",
+        r#"
+name: array-tasks
+x-slurm:
+  notify:
+    email:
+      to: user@example.com
+      on:
+        - end
+        - array_tasks
+services:
+  app:
+    image: redis:7
+    command: /bin/true
+"#,
+    );
+
+    let validate = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_failure(&validate);
+    let stderr = stderr_text(&validate);
+    assert!(stderr.contains("array_tasks"), "stderr: {stderr}");
+    assert!(stderr.contains("x-slurm.array"), "stderr: {stderr}");
+}
+
+#[test]
 fn validate_rejects_unsupported_spec_version_with_migration_hint() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_compose(
@@ -768,6 +800,50 @@ services:
     let script = stdout_text(&render);
     assert!(script.contains("#SBATCH --mail-user=user@example.com"));
     assert!(script.contains("#SBATCH --mail-type=BEGIN,END,FAIL"));
+}
+
+#[test]
+fn notify_email_renders_full_mail_type_event_set_in_canonical_order() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    // Every non-`all` token, scrambled, with `array` set for `array_tasks`.
+    let compose = write_compose(
+        tmpdir.path(),
+        "notify-full.yaml",
+        r#"
+name: notify-full
+x-slurm:
+  array: "0-9"
+  notify:
+    email:
+      to: user@example.com
+      on:
+        - array_tasks
+        - time_limit_50
+        - fail
+        - start
+        - time_limit
+        - requeue
+        - end
+        - time_limit_80
+        - stage_out
+        - invalid_depend
+        - time_limit_90
+services:
+  app:
+    image: redis:7
+    command: /bin/true
+"#,
+    );
+
+    let render = run_cli(
+        tmpdir.path(),
+        &["render", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&render);
+    let script = stdout_text(&render);
+    assert!(script.contains(
+        "#SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE,INVALID_DEPEND,STAGE_OUT,TIME_LIMIT,TIME_LIMIT_90,TIME_LIMIT_80,TIME_LIMIT_50,ARRAY_TASKS"
+    ));
 }
 
 #[test]
@@ -2480,7 +2556,20 @@ fn schema_enum_values_match_rust_variants() {
         (
             "email.on[item]",
             value["definitions"]["emailNotify"]["properties"]["on"]["items"]["enum"].clone(),
-            &["start", "end", "fail", "all"],
+            &[
+                "start",
+                "end",
+                "fail",
+                "requeue",
+                "invalid_depend",
+                "stage_out",
+                "time_limit",
+                "time_limit_90",
+                "time_limit_80",
+                "time_limit_50",
+                "array_tasks",
+                "all",
+            ],
         ),
         // failure_policy
         (
@@ -2534,6 +2623,66 @@ fn schema_enum_values_match_rust_variants() {
             &Value::from(expected_json),
             "enum value drift for `{label}`"
         );
+    }
+}
+
+#[test]
+fn schema_email_notify_on_enum_lists_every_mail_type_token() {
+    let tokens = [
+        "start",
+        "end",
+        "fail",
+        "requeue",
+        "invalid_depend",
+        "stage_out",
+        "time_limit",
+        "time_limit_90",
+        "time_limit_80",
+        "time_limit_50",
+        "array_tasks",
+        "all",
+    ];
+
+    let value = load_schema_json();
+    let enum_json =
+        value["definitions"]["emailNotify"]["properties"]["on"]["items"]["enum"].clone();
+    let expected: Vec<Value> = tokens.iter().map(|s| Value::from(*s)).collect();
+    assert_eq!(
+        enum_json,
+        Value::from(expected),
+        "emailNotify.on enum drifted from the NotifyEvent variant set"
+    );
+
+    // Every schema token must also parse through the real deserializer. Each
+    // token is loaded on its own so `array_tasks` gets a matching `array`.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    for token in tokens {
+        let array_line = if token == "array_tasks" {
+            "  array: \"0-3\"\n"
+        } else {
+            ""
+        };
+        let body = format!(
+            r#"
+name: notify-token
+x-slurm:
+{array_line}  notify:
+    email:
+      to: user@example.com
+      on:
+        - {token}
+services:
+  app:
+    image: redis:7
+    command: /bin/true
+"#,
+        );
+        let compose = write_compose(tmpdir.path(), "notify-token.yaml", &body);
+        let validate = run_cli(
+            tmpdir.path(),
+            &["validate", "-f", compose.to_str().expect("path")],
+        );
+        assert_success(&validate);
     }
 }
 

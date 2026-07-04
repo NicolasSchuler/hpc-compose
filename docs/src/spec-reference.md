@@ -410,12 +410,26 @@ Supported events:
 | `start` | `BEGIN` |
 | `end` | `END` |
 | `fail` | `FAIL` |
+| `requeue` | `REQUEUE` |
+| `invalid_depend` | `INVALID_DEPEND` |
+| `stage_out` | `STAGE_OUT` |
+| `time_limit` | `TIME_LIMIT` |
+| `time_limit_90` | `TIME_LIMIT_90` |
+| `time_limit_80` | `TIME_LIMIT_80` |
+| `time_limit_50` | `TIME_LIMIT_50` |
+| `array_tasks` | `ARRAY_TASKS` |
 | `all` | `ALL` |
 
 Rules:
 
 - When `on` is omitted or empty, defaults to `[end, fail]`.
-- If `all` is present, it replaces all other events.
+- Events render in a stable canonical order (the `man sbatch` `--mail-type`
+  order) regardless of how they are listed, so `--mail-type` output is
+  deterministic.
+- If `all` is present, it replaces all other events, except `array_tasks`,
+  which is a modifier Slurm accepts alongside `ALL` (renders `ALL,ARRAY_TASKS`).
+- `array_tasks` mails once per array task, so it is only meaningful for a job
+  array; using it without [`x-slurm.array`](#x-slurmarray) is rejected.
 - Cannot be combined with raw `--mail-type` or `--mail-user` in `x-slurm.submit_args`.
 
 ### `x-slurm.cache_dir`

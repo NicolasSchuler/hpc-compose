@@ -14,6 +14,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `alloc`/`shell` option builder, and keep validation, interpolation, redaction,
   and resume-diff on the values. Setting either field alongside a conflicting raw
   `--reservation`/`--licenses` (`-L`) entry in `x-slurm.submit_args` is rejected.
+- Extended `x-slurm.notify.email.on` with the richer Slurm mail-type events
+  `time_limit`, `time_limit_90`, `time_limit_80`, `time_limit_50`, `requeue`,
+  `invalid_depend`, `stage_out`, and `array_tasks`. Events now render in a stable
+  canonical (`man sbatch`) order, `all` still collapses to `ALL` while keeping an
+  explicit `array_tasks` modifier, and using `array_tasks` without `x-slurm.array`
+  is rejected.
 
 ## [0.1.52] - 2026-06-30
 
