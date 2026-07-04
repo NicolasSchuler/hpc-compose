@@ -436,7 +436,7 @@ fn classify_job_state(raw: &str, condition: JobDependencyCondition) -> JobCondit
     if !is_terminal_state(&state) {
         return JobConditionOutcome::Pending;
     }
-    let success = state == "COMPLETED";
+    let success = crate::job::JobState::parse(&state).is_success();
     match condition {
         JobDependencyCondition::AfterAny => JobConditionOutcome::Satisfied,
         JobDependencyCondition::AfterOk if success => JobConditionOutcome::Satisfied,
@@ -446,6 +446,11 @@ fn classify_job_state(raw: &str, condition: JobDependencyCondition) -> JobCondit
     }
 }
 
+// Intentionally NOT routed through `JobState::is_terminal`: the dependency
+// resolver treats a narrower set of states as terminal than the scheduler's
+// `is_terminal_state` (it omits LAUNCH_FAILED and RECONFIG_FAIL). Unifying it
+// with `JobState::is_terminal` would change which states satisfy an after-job
+// condition, i.e. a behaviour change this type-safety refactor must not make.
 fn is_terminal_state(state: &str) -> bool {
     matches!(
         state,

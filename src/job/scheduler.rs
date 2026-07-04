@@ -426,7 +426,7 @@ pub fn walltime_progress(
     queue_diagnostics: Option<&QueueDiagnostics>,
     now: u64,
 ) -> Option<WalltimeProgress> {
-    if scheduler.state != "RUNNING" {
+    if JobState::parse(&scheduler.state) != JobState::Running {
         return None;
     }
     let requested = record.requested_walltime.as_ref()?;
@@ -1057,9 +1057,10 @@ fn command_failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 pub(super) fn build_scheduler_status(state: String, source: SchedulerSource) -> SchedulerStatus {
-    let terminal = is_terminal_state(&state);
+    let parsed = JobState::parse(&state);
+    let terminal = parsed.is_terminal();
     SchedulerStatus {
-        failed: terminal && state != "COMPLETED",
+        failed: terminal && !parsed.is_success(),
         terminal,
         source,
         state,
@@ -1086,7 +1087,7 @@ pub(crate) fn reconcile_scheduler_status(
 
     if now.saturating_sub(submitted_at) <= INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS {
         return SchedulerStatus {
-            state: "WAITING_FOR_SCHEDULER".to_string(),
+            state: JobState::WaitingForScheduler.as_str().to_string(),
             source: SchedulerSource::LocalOnly,
             terminal: false,
             failed: false,
@@ -1101,7 +1102,7 @@ pub(crate) fn reconcile_scheduler_status(
         && now.saturating_sub(last_visible_at) <= ACCOUNTING_GAP_GRACE_SECONDS
     {
         return SchedulerStatus {
-            state: "WAITING_FOR_ACCOUNTING".to_string(),
+            state: JobState::WaitingForAccounting.as_str().to_string(),
             source: SchedulerSource::LocalOnly,
             terminal: false,
             failed: false,
@@ -1118,17 +1119,17 @@ pub(crate) fn reconcile_scheduler_status(
 pub(crate) fn is_transitional_local_only(status: &SchedulerStatus) -> bool {
     status.source == SchedulerSource::LocalOnly
         && matches!(
-            status.state.as_str(),
-            "WAITING_FOR_SCHEDULER" | "WAITING_FOR_ACCOUNTING"
+            JobState::parse(&status.state),
+            JobState::WaitingForScheduler | JobState::WaitingForAccounting
         )
 }
 
 pub(crate) fn stats_unavailable_reason(scheduler: &SchedulerStatus) -> String {
-    match scheduler.state.as_str() {
-        "PENDING" | "CONFIGURING" | "WAITING_FOR_SCHEDULER" => {
+    match JobState::parse(&scheduler.state) {
+        JobState::Pending | JobState::Configuring | JobState::WaitingForScheduler => {
             "live step statistics are not available because the job is not running yet".to_string()
         }
-        "WAITING_FOR_ACCOUNTING" => {
+        JobState::WaitingForAccounting => {
             "live step statistics are unavailable while Slurm accounting data is catching up"
                 .to_string()
         }
@@ -1136,7 +1137,9 @@ pub(crate) fn stats_unavailable_reason(scheduler: &SchedulerStatus) -> String {
             "live step statistics are not available because the job is no longer running"
                 .to_string()
         }
-        "RUNNING" => "sstat did not report any numbered job steps for this running job".to_string(),
+        JobState::Running => {
+            "sstat did not report any numbered job steps for this running job".to_string()
+        }
         _ => "sstat did not report any numbered job steps for this job".to_string(),
     }
 }
@@ -1193,7 +1196,7 @@ fn assemble_status_components(
     let scheduler = scheduler_status_from_probe(squeue, SchedulerSource::Squeue)
         .or_else(|| scheduler_status_from_probe(sacct, SchedulerSource::Sacct))
         .unwrap_or_else(|| SchedulerStatus {
-            state: "unknown".to_string(),
+            state: JobState::Unknown.as_str().to_string(),
             source: SchedulerSource::LocalOnly,
             terminal: false,
             failed: false,
@@ -1369,12 +1372,17 @@ fn build_status_queue_diagnostics(
     squeue: Option<&QueueDiagnosticsProbe>,
     sacct: Option<&QueueDiagnosticsProbe>,
 ) -> Option<QueueDiagnostics> {
-    let pending_reason = if scheduler.state == "PENDING" {
+    let pending_reason = if JobState::parse(&scheduler.state) == JobState::Pending {
         squeue
             .and_then(|probe| probe.pending_reason.clone())
-            .or_else(|| match sacct.and_then(|probe| probe.state.as_deref()) {
-                Some("PENDING") => sacct.and_then(|probe| probe.pending_reason.clone()),
-                _ => None,
+            .or_else(|| {
+                match sacct
+                    .and_then(|probe| probe.state.as_deref())
+                    .map(JobState::parse)
+                {
+                    Some(JobState::Pending) => sacct.and_then(|probe| probe.pending_reason.clone()),
+                    _ => None,
+                }
             })
     } else {
         None
@@ -1420,7 +1428,7 @@ pub(crate) fn build_local_scheduler_status(
         let state = runtime_state
             .and_then(|state| state.job_status.clone())
             .map(|state| normalize_scheduler_state(&state))
-            .unwrap_or_else(|| "RUNNING".to_string());
+            .unwrap_or_else(|| JobState::Running.as_str().to_string());
         return SchedulerStatus {
             state,
             source: SchedulerSource::LocalOnly,
@@ -1433,10 +1441,11 @@ pub(crate) fn build_local_scheduler_status(
     if let Some(exit_code) = runtime_state.and_then(|state| state.job_exit_code) {
         return build_scheduler_status(
             if exit_code == 0 {
-                "COMPLETED"
+                JobState::Completed
             } else {
-                "FAILED"
+                JobState::Failed
             }
+            .as_str()
             .to_string(),
             SchedulerSource::LocalOnly,
         );
@@ -1444,7 +1453,7 @@ pub(crate) fn build_local_scheduler_status(
 
     if let Some(pid) = supervisor_pid {
         return SchedulerStatus {
-            state: "FAILED".to_string(),
+            state: JobState::Failed.as_str().to_string(),
             source: SchedulerSource::LocalOnly,
             terminal: true,
             failed: true,
@@ -1456,7 +1465,7 @@ pub(crate) fn build_local_scheduler_status(
 
     if runtime_state.is_some() {
         return SchedulerStatus {
-            state: "WAITING_FOR_LOCAL_RUNTIME".to_string(),
+            state: JobState::WaitingForLocalRuntime.as_str().to_string(),
             source: SchedulerSource::LocalOnly,
             terminal: false,
             failed: false,
@@ -1468,7 +1477,7 @@ pub(crate) fn build_local_scheduler_status(
     }
 
     SchedulerStatus {
-        state: "WAITING_FOR_LOCAL_RUNTIME".to_string(),
+        state: JobState::WaitingForLocalRuntime.as_str().to_string(),
         source: SchedulerSource::LocalOnly,
         terminal: false,
         failed: false,
@@ -1532,22 +1541,149 @@ fn normalize_scheduler_state(raw: &str) -> String {
         .to_ascii_uppercase()
 }
 
+/// A Slurm scheduler job state, parsed from raw squeue/sacct output or an
+/// internal tracker sentinel.
+///
+/// Slurm reports job state as a free-form string; this enum models every state
+/// the tracker's logic branches on: the terminal states (mirroring the historic
+/// `is_terminal_state` list), the live states we name, and the internal
+/// `WAITING_FOR_*` / `unknown` sentinels the tracker synthesizes when the
+/// scheduler cannot answer. Any state Slurm emits that we do not model is
+/// preserved verbatim — uppercased, exactly as [`JobState::parse`] normalizes —
+/// in [`JobState::Other`], so it round-trips through serialization unchanged.
+///
+/// The serialized structs ([`SchedulerStatus`], [`ArrayTaskStatus`], the array
+/// `state_counts` map) keep storing `state` as a `String`; `JobState` is the
+/// typed lens used at comparison boundaries. [`JobState::as_str`] returns the
+/// byte-identical wire string for every variant so converting in either
+/// direction never perturbs on-disk state files or `--format json` output.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobState {
+    BootFail,
+    Cancelled,
+    Completed,
+    Deadline,
+    Failed,
+    LaunchFailed,
+    NodeFail,
+    OutOfMemory,
+    Preempted,
+    ReconfigFail,
+    Revoked,
+    Timeout,
+    Pending,
+    Running,
+    Configuring,
+    Completing,
+    WaitingForScheduler,
+    WaitingForAccounting,
+    WaitingForLocalRuntime,
+    Unknown,
+    /// Any state we do not model, preserved uppercased (as today's normalize).
+    Other(String),
+}
+
+impl JobState {
+    /// Parses a raw scheduler state, absorbing the historic
+    /// `normalize_scheduler_state` behaviour: take the first whitespace-delimited
+    /// token (so sacct suffixes like `CANCELLED by 43` collapse to `CANCELLED`),
+    /// trim a trailing `+`, and uppercase.
+    pub fn parse(raw: &str) -> Self {
+        Self::from_normalized(normalize_scheduler_state(raw))
+    }
+
+    fn from_normalized(normalized: String) -> Self {
+        match normalized.as_str() {
+            "BOOT_FAIL" => Self::BootFail,
+            "CANCELLED" => Self::Cancelled,
+            "COMPLETED" => Self::Completed,
+            "DEADLINE" => Self::Deadline,
+            "FAILED" => Self::Failed,
+            "LAUNCH_FAILED" => Self::LaunchFailed,
+            "NODE_FAIL" => Self::NodeFail,
+            "OUT_OF_MEMORY" => Self::OutOfMemory,
+            "PREEMPTED" => Self::Preempted,
+            "RECONFIG_FAIL" => Self::ReconfigFail,
+            "REVOKED" => Self::Revoked,
+            "TIMEOUT" => Self::Timeout,
+            "PENDING" => Self::Pending,
+            "RUNNING" => Self::Running,
+            "CONFIGURING" => Self::Configuring,
+            "COMPLETING" => Self::Completing,
+            "WAITING_FOR_SCHEDULER" => Self::WaitingForScheduler,
+            "WAITING_FOR_ACCOUNTING" => Self::WaitingForAccounting,
+            "WAITING_FOR_LOCAL_RUNTIME" => Self::WaitingForLocalRuntime,
+            "UNKNOWN" => Self::Unknown,
+            _ => Self::Other(normalized),
+        }
+    }
+
+    /// Returns the exact wire string for this state — byte-identical to the
+    /// strings the tracker has always stored and serialized. The `unknown`
+    /// sentinel deliberately keeps its historic lowercase spelling.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::BootFail => "BOOT_FAIL",
+            Self::Cancelled => "CANCELLED",
+            Self::Completed => "COMPLETED",
+            Self::Deadline => "DEADLINE",
+            Self::Failed => "FAILED",
+            Self::LaunchFailed => "LAUNCH_FAILED",
+            Self::NodeFail => "NODE_FAIL",
+            Self::OutOfMemory => "OUT_OF_MEMORY",
+            Self::Preempted => "PREEMPTED",
+            Self::ReconfigFail => "RECONFIG_FAIL",
+            Self::Revoked => "REVOKED",
+            Self::Timeout => "TIMEOUT",
+            Self::Pending => "PENDING",
+            Self::Running => "RUNNING",
+            Self::Configuring => "CONFIGURING",
+            Self::Completing => "COMPLETING",
+            Self::WaitingForScheduler => "WAITING_FOR_SCHEDULER",
+            Self::WaitingForAccounting => "WAITING_FOR_ACCOUNTING",
+            Self::WaitingForLocalRuntime => "WAITING_FOR_LOCAL_RUNTIME",
+            Self::Unknown => "unknown",
+            Self::Other(state) => state,
+        }
+    }
+
+    /// Returns `true` for terminal Slurm states (the job has stopped). Matches
+    /// the historic `is_terminal_state` set exactly.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::BootFail
+                | Self::Cancelled
+                | Self::Completed
+                | Self::Deadline
+                | Self::Failed
+                | Self::LaunchFailed
+                | Self::NodeFail
+                | Self::OutOfMemory
+                | Self::Preempted
+                | Self::ReconfigFail
+                | Self::Revoked
+                | Self::Timeout
+        )
+    }
+
+    /// Returns `true` for live Slurm states (the job is queued or executing).
+    pub fn is_live(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending | Self::Running | Self::Configuring | Self::Completing
+        )
+    }
+
+    /// Returns `true` only for the successful terminal state (`COMPLETED`).
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Completed)
+    }
+}
+
 pub(crate) fn is_terminal_state(state: &str) -> bool {
-    matches!(
-        state,
-        "BOOT_FAIL"
-            | "CANCELLED"
-            | "COMPLETED"
-            | "DEADLINE"
-            | "FAILED"
-            | "LAUNCH_FAILED"
-            | "NODE_FAIL"
-            | "OUT_OF_MEMORY"
-            | "PREEMPTED"
-            | "RECONFIG_FAIL"
-            | "REVOKED"
-            | "TIMEOUT"
-    )
+    JobState::parse(state).is_terminal()
 }
 
 #[cfg(test)]
@@ -2180,5 +2316,133 @@ done
             derive_service_duration_seconds(Some(10), None, 100, false),
             None
         );
+    }
+
+    #[test]
+    fn job_state_round_trips_every_variant() {
+        let variants = [
+            JobState::BootFail,
+            JobState::Cancelled,
+            JobState::Completed,
+            JobState::Deadline,
+            JobState::Failed,
+            JobState::LaunchFailed,
+            JobState::NodeFail,
+            JobState::OutOfMemory,
+            JobState::Preempted,
+            JobState::ReconfigFail,
+            JobState::Revoked,
+            JobState::Timeout,
+            JobState::Pending,
+            JobState::Running,
+            JobState::Configuring,
+            JobState::Completing,
+            JobState::WaitingForScheduler,
+            JobState::WaitingForAccounting,
+            JobState::WaitingForLocalRuntime,
+            JobState::Unknown,
+            // Other must carry the uppercased form parse would produce.
+            JobState::Other("SUSPENDED".to_string()),
+        ];
+        for variant in variants {
+            assert_eq!(
+                JobState::parse(variant.as_str()),
+                variant.clone(),
+                "round-trip failed for {variant:?} (as_str {:?})",
+                variant.as_str()
+            );
+        }
+        // The `unknown` sentinel keeps its historic lowercase wire spelling.
+        assert_eq!(JobState::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn job_state_parse_absorbs_normalize_and_preserves_unknown_states() {
+        // Absorbs normalize_scheduler_state: first token, trailing '+', uppercase.
+        assert_eq!(JobState::parse("running"), JobState::Running);
+        assert_eq!(JobState::parse("RUNNING+"), JobState::Running);
+        assert_eq!(JobState::parse("CANCELLED by 43"), JobState::Cancelled);
+        // Unmodeled states round-trip verbatim (uppercased), exactly as the old
+        // normalize_scheduler_state produced them.
+        assert_eq!(
+            JobState::parse("suspended"),
+            JobState::Other("SUSPENDED".to_string())
+        );
+        assert_eq!(
+            JobState::parse("suspended").as_str(),
+            normalize_scheduler_state("suspended")
+        );
+    }
+
+    #[test]
+    fn job_state_terminal_and_live_agree_with_legacy_oracle() {
+        // Oracle: the exact literal list the historic is_terminal_state matched.
+        fn legacy_is_terminal(state: &str) -> bool {
+            matches!(
+                state,
+                "BOOT_FAIL"
+                    | "CANCELLED"
+                    | "COMPLETED"
+                    | "DEADLINE"
+                    | "FAILED"
+                    | "LAUNCH_FAILED"
+                    | "NODE_FAIL"
+                    | "OUT_OF_MEMORY"
+                    | "PREEMPTED"
+                    | "RECONFIG_FAIL"
+                    | "REVOKED"
+                    | "TIMEOUT"
+            )
+        }
+        let all_states = [
+            "BOOT_FAIL",
+            "CANCELLED",
+            "COMPLETED",
+            "DEADLINE",
+            "FAILED",
+            "LAUNCH_FAILED",
+            "NODE_FAIL",
+            "OUT_OF_MEMORY",
+            "PREEMPTED",
+            "RECONFIG_FAIL",
+            "REVOKED",
+            "TIMEOUT",
+            "PENDING",
+            "RUNNING",
+            "CONFIGURING",
+            "COMPLETING",
+            "WAITING_FOR_SCHEDULER",
+            "WAITING_FOR_ACCOUNTING",
+            "WAITING_FOR_LOCAL_RUNTIME",
+            "unknown",
+            "SUSPENDED",
+        ];
+        for state in all_states {
+            let parsed = JobState::parse(state);
+            assert_eq!(
+                parsed.is_terminal(),
+                legacy_is_terminal(state),
+                "is_terminal disagreed with legacy oracle for {state}"
+            );
+            // The is_terminal_state wrapper must agree with the enum too.
+            assert_eq!(is_terminal_state(state), parsed.is_terminal());
+        }
+        for state in ["PENDING", "RUNNING", "CONFIGURING", "COMPLETING"] {
+            assert!(JobState::parse(state).is_live(), "{state} should be live");
+        }
+        for state in [
+            "COMPLETED",
+            "FAILED",
+            "WAITING_FOR_SCHEDULER",
+            "unknown",
+            "SUSPENDED",
+        ] {
+            assert!(
+                !JobState::parse(state).is_live(),
+                "{state} should not be live"
+            );
+        }
+        assert!(JobState::parse("COMPLETED").is_success());
+        assert!(!JobState::parse("FAILED").is_success());
     }
 }

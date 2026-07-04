@@ -88,7 +88,7 @@ pub fn wait_for_job_start(
             last_state = Some(state_key);
         }
 
-        if status.state == "PENDING"
+        if JobState::parse(&status.state) == JobState::Pending
             && !pending_warning_emitted
             && pending_warn_after_seconds.is_some_and(|seconds| {
                 seconds > 0 && now.saturating_sub(record.submitted_at) >= seconds
@@ -102,7 +102,7 @@ pub fn wait_for_job_start(
             pending_warning_emitted = true;
         }
 
-        if status.state == "RUNNING" || status.terminal {
+        if JobState::parse(&status.state) == JobState::Running || status.terminal {
             return Ok(status);
         }
         match status.source {

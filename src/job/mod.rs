@@ -97,7 +97,7 @@ pub use rightsize::{
 };
 pub(crate) use scheduler::pid_is_running;
 pub use scheduler::{
-    ArrayStatusSnapshot, ArrayTaskStatus, BatchLogStatus, PsServiceRow, QueueDiagnostics,
+    ArrayStatusSnapshot, ArrayTaskStatus, BatchLogStatus, JobState, PsServiceRow, QueueDiagnostics,
     SchedulerStatus, ServiceAssertionStatus, ServiceLogStatus, StatusSnapshot, WalltimeProgress,
     build_array_status_snapshot, build_status_snapshot, build_status_snapshot_with_array,
     build_status_snapshot_with_status, format_walltime_duration, format_walltime_summary,

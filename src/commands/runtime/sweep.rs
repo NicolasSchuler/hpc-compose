@@ -671,10 +671,11 @@ fn status_for_sweep_trial_with(
 }
 
 fn categorize_sweep_status(snapshot: &hpc_compose::job::StatusSnapshot) -> String {
-    if snapshot.scheduler.state == "PENDING" {
+    let scheduler_state = hpc_compose::job::JobState::parse(&snapshot.scheduler.state);
+    if scheduler_state == hpc_compose::job::JobState::Pending {
         return "pending".to_string();
     }
-    if snapshot.scheduler.state == "RUNNING" {
+    if scheduler_state == hpc_compose::job::JobState::Running {
         return "running".to_string();
     }
     let service_failed = snapshot.services.iter().any(|service| {
