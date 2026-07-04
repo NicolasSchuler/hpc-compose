@@ -608,6 +608,51 @@ exit 1
     path
 }
 
+/// Fake `salloc` that records its full argv (one line per invocation) to
+/// `log_path`, then emulates `salloc [opts] command...`: it shifts past the
+/// leading `--flag[=value]` options the CLI passes, exports a synthetic
+/// `SLURM_JOB_ID` (plus nodelist / node count / submit dir so the allocation
+/// bootstrap script can populate `HPC_COMPOSE_*`), and `exec`s the remaining
+/// command so the inner program actually runs under the allocation.
+///
+/// When `exit_override` is `Some(code)` the fake records its argv and then
+/// exits with `code` *without* running the inner command, simulating salloc
+/// itself failing so callers can assert exit-code propagation. The paired
+/// `scontrol` fake is written alongside because the bootstrap resolves node
+/// names through it.
+pub(crate) fn write_fake_salloc(
+    tmpdir: &Path,
+    log_path: &Path,
+    exit_override: Option<i32>,
+) -> PathBuf {
+    let path = tmpdir.join("salloc");
+    let exit_line = match exit_override {
+        Some(code) => format!("exit {code}\n"),
+        None => String::new(),
+    };
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{log}'
+{exit_line}while [[ $# -gt 0 && "$1" == --* ]]; do
+  shift
+done
+export SLURM_JOB_ID=4242
+export SLURM_JOB_NODELIST='node01'
+export SLURM_JOB_NUM_NODES=1
+export SLURM_SUBMIT_DIR="$PWD"
+exec "$@"
+"#,
+            log = log_path.display(),
+            exit_line = exit_line,
+        ),
+    );
+    write_fake_scontrol(tmpdir);
+    path
+}
+
 pub(crate) fn write_fake_sbatch(tmpdir: &Path) -> PathBuf {
     let path = tmpdir.join("sbatch");
     write_script(
