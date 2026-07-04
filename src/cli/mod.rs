@@ -44,20 +44,13 @@ pub enum StatsOutputFormat {
     Jsonl,
 }
 
-/// Output format for `sweep results`. CSV is sweep-results-specific and cannot
-/// live on the shared [`OutputFormat`] (which is Text/Json only).
+/// Output format for tabular commands that additionally support CSV, i.e.
+/// `sweep results` (row-per-run) and the N-way `diff --across`/`--jobs` matrix
+/// (column-per-run). CSV is table-specific and cannot live on the shared
+/// [`OutputFormat`] (which is Text/Json only); both commands share the exact
+/// same Text/Json/Csv variant set, so they share one enum.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
-pub enum SweepResultsFormat {
-    Text,
-    Json,
-    Csv,
-}
-
-/// Output format for the N-way `diff --across`/`--jobs` matrix. CSV is
-/// matrix-specific (column-per-run) and cannot live on the shared
-/// [`OutputFormat`] (which is Text/Json only).
-#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
-pub enum DiffMatrixFormat {
+pub enum CsvOutputFormat {
     Text,
     Json,
     Csv,

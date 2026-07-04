@@ -5,8 +5,8 @@ use clap_complete::Shell;
 
 use super::help::*;
 use super::{
-    ColorPolicy, DependencyOutputFormat, DiffMatrixFormat, ExamplesOutputFormat, HoldOnExit,
-    OutputFormat, RemoteInstallMode, SchemaKind, StatsOutputFormat, SweepResultsFormat, WatchMode,
+    ColorPolicy, CsvOutputFormat, DependencyOutputFormat, ExamplesOutputFormat, HoldOnExit,
+    OutputFormat, RemoteInstallMode, SchemaKind, StatsOutputFormat, WatchMode,
 };
 
 #[derive(Debug, Parser)]
@@ -1541,7 +1541,7 @@ pub enum Commands {
             value_name = "FORMAT",
             help = "N-way matrix output format (text, csv, json)"
         )]
-        matrix_format: Option<DiffMatrixFormat>,
+        matrix_format: Option<CsvOutputFormat>,
         #[arg(
             long,
             value_name = "PATH",
@@ -3363,7 +3363,7 @@ pub enum SweepCommands {
         )]
         sweep_id: Option<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
-        format: Option<SweepResultsFormat>,
+        format: Option<CsvOutputFormat>,
         #[arg(
             long,
             value_name = "METRIC",

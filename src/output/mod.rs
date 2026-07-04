@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
-use hpc_compose::cli::{DiffMatrixFormat, OutputFormat, StatsOutputFormat, SweepResultsFormat};
+use hpc_compose::cli::{CsvOutputFormat, OutputFormat, StatsOutputFormat};
 use hpc_compose::cluster::ClusterProfile;
 use hpc_compose::init::{
     cache_dir_placeholder as init_cache_dir_placeholder, resolve_template, template_category,
@@ -403,15 +403,13 @@ pub(crate) fn resolve_stats_output_format(
 }
 
 /// Resolves the `sweep results` output format, defaulting to text.
-pub(crate) fn resolve_sweep_results_format(
-    format: Option<SweepResultsFormat>,
-) -> SweepResultsFormat {
-    format.unwrap_or(SweepResultsFormat::Text)
+pub(crate) fn resolve_sweep_results_format(format: Option<CsvOutputFormat>) -> CsvOutputFormat {
+    format.unwrap_or(CsvOutputFormat::Text)
 }
 
 /// Resolves the N-way `diff` matrix output format, defaulting to text.
-pub(crate) fn resolve_diff_matrix_format(format: Option<DiffMatrixFormat>) -> DiffMatrixFormat {
-    format.unwrap_or(DiffMatrixFormat::Text)
+pub(crate) fn resolve_diff_matrix_format(format: Option<CsvOutputFormat>) -> CsvOutputFormat {
+    format.unwrap_or(CsvOutputFormat::Text)
 }
 
 pub(crate) fn build_validate_output(plan: &Plan, cluster_warnings: Vec<String>) -> ValidateOutput {
