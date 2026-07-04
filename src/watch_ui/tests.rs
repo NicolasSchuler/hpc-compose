@@ -1391,12 +1391,20 @@ fn render_watch_frame_includes_walltime_bar_when_available() {
 }
 
 #[test]
+fn restore_terminal_best_effort_is_idempotent() {
+    // Drop, the panic hook, and the SIGTERM/SIGHUP handler can each reach the
+    // restore; the AtomicBool guard makes only one win, but restoring twice must
+    // still be harmless. Off a tty (CI) the crossterm calls may warn, never panic.
+    restore_terminal_best_effort();
+    restore_terminal_best_effort();
+}
+
+#[test]
 fn terminal_guard_and_run_watch_ui_cover_interactive_paths() {
     let guard = TerminalGuard::enter(false).expect("enter terminal guard");
     assert!(guard.panic_restore_armed());
-    let restore_armed = Arc::clone(&guard.restore_armed);
     drop(guard);
-    assert!(!restore_armed.load(Ordering::SeqCst));
+    assert!(!TERMINAL_RESTORE_ARMED.load(Ordering::SeqCst));
 
     let model = WatchModel {
         snapshot: sample_snapshot(),
