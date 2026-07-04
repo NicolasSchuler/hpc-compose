@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LintOutput",
+  "type": "object",
+  "properties": {
+    "applied_fixes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AppliedFix"
+      }
+    },
+    "compose_file": {
+      "type": "string"
+    },
+    "error_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LintFinding"
+      }
+    },
+    "fixable_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "warning_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "passed",
+    "compose_file",
+    "warning_count",
+    "error_count",
+    "fixable_count",
+    "findings",
+    "applied_fixes"
+  ],
+  "$defs": {
+    "AppliedFix": {
+      "description": "A fix that was successfully applied to the source text.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Lint rule code that produced the fix.",
+          "type": "string"
+        },
+        "description": {
+          "description": "One-line human description of the change.",
+          "type": "string"
+        },
+        "field": {
+          "description": "Dotted spec field that was rewritten.",
+          "type": "string"
+        },
+        "service": {
+          "description": "Service owning the rewritten field.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "service",
+        "field",
+        "description"
+      ]
+    },
+    "LintFinding": {
+      "description": "One stable lint finding emitted by `hpc-compose lint`.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable lint rule identifier.",
+          "type": "string"
+        },
+        "field": {
+          "description": "Spec field associated with this finding, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fix": {
+          "description": "Machine-readable fix `lint --fix` can apply, when available.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SuggestedFix"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "level": {
+          "description": "Finding severity.",
+          "$ref": "#/$defs/LintLevel"
+        },
+        "message": {
+          "description": "Human-readable finding message.",
+          "type": "string"
+        },
+        "recommendation": {
+          "description": "Suggested remediation, when available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service": {
+          "description": "Service associated with this finding, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "level",
+        "code",
+        "message"
+      ]
+    },
+    "LintLevel": {
+      "description": "Severity for a lint finding.",
+      "oneOf": [
+        {
+          "description": "Advisory finding that is worth reviewing.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Finding severe enough to reject a spec.",
+          "type": "string",
+          "const": "error"
+        }
+      ]
+    },
+    "SuggestedFix": {
+      "description": "A machine-readable remediation that `lint --fix` can apply to the source\ncompose file.\n\nOnly findings whose fix is deterministic and semantics-preserving carry a\n[`SuggestedFix`]; everything else stays advisory.",
+      "oneOf": [
+        {
+          "description": "Rewrite a `depends_on` edge so its condition is explicit instead of\nrelying on the implicit `service_started` default.",
+          "type": "object",
+          "properties": {
+            "condition": {
+              "description": "Condition to write into the source file.",
+              "type": "string"
+            },
+            "dependency": {
+              "description": "Dependency edge whose condition should be made explicit.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "depends_on_condition"
+            },
+            "service": {
+              "description": "Service that owns the `depends_on` block.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "service",
+            "dependency",
+            "condition"
+          ]
+        }
+      ]
+    }
+  }
+}

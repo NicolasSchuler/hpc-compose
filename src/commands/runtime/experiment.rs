@@ -16,8 +16,9 @@ use hpc_compose::job::{
 use super::*;
 
 /// One JSON object aggregating the read-only state of a single tracked run.
-#[derive(Debug, Serialize)]
-struct ExperimentShowOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ExperimentShowOutput {
+    pub(crate) schema_version: u32,
     job_id: String,
     name: String,
     state: String,
@@ -33,7 +34,7 @@ struct ExperimentShowOutput {
 
 /// Per-service slice of the aggregate: tracked placement plus a printable tunnel
 /// hint when the service exposes a TCP/HTTP readiness port.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 struct ExperimentService {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -178,6 +179,7 @@ fn build_experiment_show_output(
         .collect();
 
     ExperimentShowOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         job_id: job_id.to_string(),
         name: plan.name.clone(),
         state: snapshot.scheduler.state.clone(),

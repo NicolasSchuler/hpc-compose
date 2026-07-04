@@ -87,7 +87,7 @@ impl SecretSpec {
 
 /// Embedded hyperparameter sweep metadata.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SweepConfig {
     pub parameters: BTreeMap<String, Vec<SweepParameterValue>>,
@@ -107,7 +107,7 @@ pub struct SweepConfig {
 }
 
 /// Optimization direction for a sweep objective.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectiveDirection {
     /// Lower objective values are better.
@@ -120,7 +120,7 @@ pub enum ObjectiveDirection {
 ///
 /// Exactly one parse source is set: a regex against the trial's service log,
 /// or a JSON field read from an artifact-collected file.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SweepObjective {
     /// Whether lower or higher objective values are better.
@@ -292,7 +292,7 @@ fn validate_sweep_parameter_name(name: &str) -> Result<()> {
 
 /// One scalar sweep parameter value, stored as the string passed to interpolation.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct SweepParameterValue(String);
 
@@ -373,7 +373,7 @@ impl<'de> Deserialize<'de> for SweepParameterValue {
 
 /// Sweep matrix expansion strategy.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SweepMatrix {
     Full,
@@ -437,7 +437,7 @@ impl<'de> Deserialize<'de> for SweepMatrix {
 
 /// Top-level runtime backend configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     #[serde(default)]
@@ -447,7 +447,9 @@ pub struct RuntimeConfig {
 }
 
 /// Runtime backend used to launch each service inside a Slurm step.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeBackend {
     /// Pyxis/Enroot through Slurm `srun --container-*` flags.
@@ -493,7 +495,9 @@ impl RuntimeBackend {
 }
 
 /// GPU passthrough policy for container backends that need an explicit flag.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeGpuPolicy {
     /// Enable backend GPU passthrough when the job or service requests GPUs.
@@ -507,7 +511,7 @@ pub enum RuntimeGpuPolicy {
 
 /// Top-level `x-slurm` configuration shared by all services.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SlurmConfig {
     #[serde(skip)]
@@ -625,7 +629,7 @@ pub struct SlurmConfig {
 
 /// Top-level client-side cross-job rendezvous discovery config.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RendezvousClientConfig {
     pub discover: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -696,7 +700,7 @@ impl<'de> Deserialize<'de> for RendezvousClientConfig {
 
 /// Per-service provider-side rendezvous config.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceRendezvousConfig {
     #[serde(default)]
@@ -705,7 +709,7 @@ pub struct ServiceRendezvousConfig {
 
 /// Service registration written under `<cache_dir>/rendezvous/<name>/`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RendezvousRegisterConfig {
     pub name: String,
@@ -721,7 +725,7 @@ pub struct RendezvousRegisterConfig {
 }
 
 /// Accepted `x-slurm.after_job` syntaxes.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum JobDependencySpec {
     /// Shorthand job id form, equivalent to `afterany:<id>`.
@@ -769,7 +773,7 @@ impl JobDependencySpec {
 
 /// Slurm job dependency mapping form.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JobDependency {
     pub id: String,
@@ -778,7 +782,9 @@ pub struct JobDependency {
 }
 
 /// Slurm job dependency condition for id-based dependencies.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 pub enum JobDependencyCondition {
     /// Start after the target job terminates in any state.
     #[default]
@@ -805,7 +811,7 @@ impl JobDependencyCondition {
 }
 
 /// Slurm dependency mode that does not require an explicit job id.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobDependencyMode {
     /// Slurm singleton dependency.
@@ -823,7 +829,9 @@ impl JobDependencyMode {
 }
 
 /// Scratch storage scope requested for a job.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ScratchScope {
     /// Shared scratch path visible across all allocation nodes.
@@ -834,7 +842,9 @@ pub enum ScratchScope {
 }
 
 /// Scratch cleanup policy during batch teardown.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ScratchCleanupPolicy {
     /// Remove scratch on every exit path after stage-out.
@@ -853,7 +863,9 @@ pub enum ScratchCleanupPolicy {
 /// namespaced by `${SLURM_JOB_ID}`). Defaults to `Never` because
 /// cancelled/crashed jobs never run the trap; host-side `clean`/`down` reaping
 /// is the authoritative reclaimer.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeCacheCleanupPolicy {
     /// Leave the per-job runtime cache for host-side reaping (default).
@@ -867,7 +879,7 @@ pub enum RuntimeCacheCleanupPolicy {
 
 /// Top-level `x-slurm.cleanup` configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CleanupConfig {
     #[serde(default)]
@@ -880,7 +892,7 @@ fn is_default_cleanup(cleanup: &CleanupConfig) -> bool {
 
 /// Top-level scratch configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScratchConfig {
     #[serde(default)]
@@ -892,7 +904,9 @@ pub struct ScratchConfig {
 }
 
 /// File transfer implementation for stage-in and stage-out.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum StageMode {
     /// Use `rsync -a`.
@@ -903,7 +917,9 @@ pub enum StageMode {
 }
 
 /// Whether an `hf://` stage-in source is a model or a dataset.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HfStageKind {
     /// A model repository (no `--repo-type`).
@@ -931,7 +947,7 @@ impl HfStageKind {
 /// `revision` must be an immutable pin (commit SHA or explicit immutable tag);
 /// floating refs are rejected at validation time.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HfStageSource {
     pub repo: String,
@@ -945,7 +961,7 @@ pub struct HfStageSource {
 /// Either a filesystem `from` path or a typed `hf://` source (`hf`) is staged
 /// into `to`; exactly one of the two must be set.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StageInConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -958,7 +974,9 @@ pub struct StageInConfig {
 }
 
 /// Stage-out policy for one path mapping.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum StageOutWhen {
     /// Stage out on every exit path.
@@ -972,7 +990,7 @@ pub enum StageOutWhen {
 
 /// Stage-out path mapping run during batch teardown.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StageOutConfig {
     pub from: String,
@@ -985,7 +1003,7 @@ pub struct StageOutConfig {
 
 /// Raw site-specific burst-buffer directives emitted into the batch script.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BurstBufferConfig {
     #[serde(default)]
@@ -993,7 +1011,9 @@ pub struct BurstBufferConfig {
 }
 
 /// Artifact collection policy applied during batch teardown.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactCollectPolicy {
     /// Export artifacts after every job.
@@ -1007,7 +1027,7 @@ pub enum ArtifactCollectPolicy {
 
 /// Top-level `x-slurm.artifacts` configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactsConfig {
     #[serde(default)]
@@ -1022,7 +1042,7 @@ pub struct ArtifactsConfig {
 
 /// Top-level `x-slurm.resume` configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeConfig {
     pub path: String,
@@ -1030,7 +1050,7 @@ pub struct ResumeConfig {
 
 /// Top-level `x-slurm.notify` configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NotifyConfig {
     #[serde(default)]
@@ -1039,7 +1059,7 @@ pub struct NotifyConfig {
 
 /// First-class Slurm email notification configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EmailNotifyConfig {
     pub to: String,
@@ -1048,7 +1068,7 @@ pub struct EmailNotifyConfig {
 }
 
 /// Email lifecycle events supported by Slurm mail hooks.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NotifyEvent {
     /// Send mail when the job begins executing.
@@ -1082,7 +1102,7 @@ pub enum NotifyEvent {
 
 /// Named artifact bundle under `x-slurm.artifacts.bundles`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactBundleSpec {
     #[serde(default)]
@@ -1090,7 +1110,7 @@ pub struct ArtifactBundleSpec {
 }
 
 /// Runtime metrics collector supported by the job sampler.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricsCollector {
     /// Collect GPU telemetry through `nvidia-smi`.
@@ -1103,7 +1123,7 @@ pub enum MetricsCollector {
 
 /// Top-level `x-slurm.metrics` configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     #[serde(default)]
@@ -1117,7 +1137,7 @@ pub struct MetricsConfig {
 /// Structured host-side software environment setup for modules, Spack views,
 /// and exported environment variables.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SoftwareEnvConfig {
     #[serde(default)]
@@ -1129,7 +1149,7 @@ pub struct SoftwareEnvConfig {
 }
 
 /// Accepted `x-env.modules` syntaxes.
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ModuleEnvSpec {
     /// Whether to run `module purge` before loading modules.
     pub purge: bool,
@@ -1170,7 +1190,7 @@ impl<'de> Deserialize<'de> for ModuleEnvSpec {
 
 /// Spack environment view configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpackEnvSpec {
     pub view: String,
@@ -1216,7 +1236,7 @@ pub struct ServiceSpec {
 
 /// Per-service post-run assertion contract.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceAssertSpec {
     #[serde(default)]
@@ -1249,7 +1269,7 @@ impl ServiceAssertSpec {
 
 /// Per-service `x-slurm` overrides.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSlurmConfig {
     #[serde(skip)]
@@ -1310,7 +1330,7 @@ pub struct ServiceSlurmConfig {
 
 /// Per-service scratch mount override.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceScratchConfig {
     #[serde(default)]
@@ -1318,7 +1338,9 @@ pub struct ServiceScratchConfig {
 }
 
 /// Where a per-service hook runs.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceHookContext {
     /// Run the hook in the generated batch-script supervisor on the host.
@@ -1332,7 +1354,7 @@ pub enum ServiceHookContext {
 ///
 /// YAML accepts either a string shorthand, which defaults to host execution, or
 /// an object with explicit `context` and `script` fields.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ServiceHookSpec {
     /// Execution context for this hook.
     pub context: ServiceHookContext,
@@ -1341,7 +1363,7 @@ pub struct ServiceHookSpec {
 }
 
 /// Event emitted by the service failure-policy supervisor.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceHookEvent {
     /// A failed service is about to be relaunched by `restart_on_failure`.
@@ -1352,7 +1374,7 @@ pub enum ServiceHookEvent {
 
 /// Per-service failure-policy event hook.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceEventHookSpec {
     pub on: ServiceHookEvent,
@@ -1396,7 +1418,7 @@ impl<'de> Deserialize<'de> for ServiceHookSpec {
 
 /// First-class service placement selector inside one Slurm allocation.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServicePlacementSpec {
     #[serde(default)]
@@ -1417,7 +1439,7 @@ pub struct ServicePlacementSpec {
 
 /// First-class MPI launch configuration for one service step.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MpiConfig {
     #[serde(rename = "type")]
@@ -1441,7 +1463,7 @@ pub struct MpiConfig {
 /// `HPC_COMPOSE_TP_SIZE`/`HPC_COMPOSE_PP_SIZE` launch-environment variables and
 /// is cross-checked against `gpus_per_node` at validation time.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ParallelismConfig {
     pub tensor: u32,
@@ -1450,7 +1472,11 @@ pub struct ParallelismConfig {
 
 /// POSIX signal that Slurm's `--signal` may deliver to a job before its time
 /// limit, restricted to the safe early-warning set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Manual `Serialize`/`Deserialize` below emit/accept uppercase names; keep the
+// generated JSON Schema's enum values in sync so a published output schema
+// matches the real serialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
+#[schemars(rename_all = "UPPERCASE")]
 pub enum SignalName {
     /// `SIGHUP` (1).
     Hup,
@@ -1563,7 +1589,9 @@ impl<'de> Deserialize<'de> for SignalName {
 }
 
 /// Which process the `--signal` reaches.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalShellTarget {
     /// Deliver straight to each service's job step (no directive prefix). The
@@ -1577,7 +1605,7 @@ pub enum SignalShellTarget {
 
 /// First-class Slurm `--signal` early-warning configuration.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SignalConfig {
     pub name: SignalName,
@@ -1614,7 +1642,7 @@ impl SignalConfig {
 }
 
 /// MPI compatibility profile used for validation and diagnostics.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MpiProfile {
     /// Open MPI with Slurm PMI/PMIx launch.
@@ -1648,7 +1676,7 @@ impl MpiProfile {
 }
 
 /// Slurm MPI plugin type used for `srun --mpi=<type>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct MpiType(String);
 
 impl MpiType {
@@ -1696,7 +1724,9 @@ impl MpiLauncher {
 }
 
 /// MPI implementation family used by a service image or host bind path.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MpiImplementation {
     /// Open MPI.
@@ -1733,7 +1763,9 @@ impl MpiImplementation {
 }
 
 /// MPI process launcher selected for the service.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MpiLauncher {
     /// Slurm launches ranks directly with `srun --mpi=...`.
@@ -1743,7 +1775,7 @@ pub enum MpiLauncher {
 
 /// Host MPI installation bindings injected into a containerized MPI service.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HostMpiConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1753,7 +1785,9 @@ pub struct HostMpiConfig {
 }
 
 /// Per-service failure mode inside a single batch job.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceFailureMode {
     /// Any non-zero service exit fails the whole job.
@@ -1767,7 +1801,7 @@ pub enum ServiceFailureMode {
 
 /// Raw per-service failure policy declaration under `x-slurm.failure_policy`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceFailurePolicySpec {
     #[serde(default)]
@@ -1796,7 +1830,7 @@ impl Default for ServiceFailurePolicySpec {
 
 /// Normalized per-service failure policy with defaults resolved.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ServiceFailurePolicy {
     pub mode: ServiceFailureMode,
     pub max_restarts: u32,
@@ -1820,7 +1854,7 @@ impl Default for ServiceFailurePolicy {
 /// Stable, fully interpolated config surface used by `hpc-compose config`
 /// and persisted for resume-diff checks.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveComposeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -1836,7 +1870,7 @@ pub struct EffectiveComposeConfig {
 
 /// Stable top-level `x-slurm` config with defaults materialized.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<String>,
@@ -1937,7 +1971,7 @@ pub struct EffectiveSlurmConfig {
 
 /// Stable effective representation of an id-based Slurm dependency.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveJobDependency {
     pub id: String,
     pub condition: JobDependencyCondition,
@@ -1945,7 +1979,7 @@ pub struct EffectiveJobDependency {
 
 /// Stable effective metrics config with defaults applied.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveMetricsConfig {
     pub enabled: bool,
     pub interval_seconds: u64,
@@ -1954,7 +1988,7 @@ pub struct EffectiveMetricsConfig {
 
 /// Stable effective artifacts config with defaults applied.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveArtifactsConfig {
     pub collect: ArtifactCollectPolicy,
     pub export_dir: String,
@@ -1966,7 +2000,7 @@ pub struct EffectiveArtifactsConfig {
 
 /// Stable effective notify config with defaults applied.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveNotifyConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<EffectiveEmailNotifyConfig>,
@@ -1974,7 +2008,7 @@ pub struct EffectiveNotifyConfig {
 
 /// Stable effective email notify config with normalized event order.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveEmailNotifyConfig {
     pub to: String,
     pub on: Vec<NotifyEvent>,
@@ -1982,7 +2016,7 @@ pub struct EffectiveEmailNotifyConfig {
 
 /// Stable service config surface with defaults applied where needed.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveServiceConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -2014,14 +2048,14 @@ pub struct EffectiveServiceConfig {
 
 /// Stable dependency representation used by effective config output.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveDependsOnCondition {
     pub condition: DependencyCondition,
 }
 
 /// Stable per-service `x-slurm` config with advisory defaults applied.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveServiceSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nodes: Option<u32>,
@@ -2078,7 +2112,7 @@ pub struct EffectiveServiceSlurmConfig {
 
 /// Stable effective `x-runtime` service config.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveServiceRuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepare: Option<EffectivePrepareSpec>,
@@ -2086,7 +2120,7 @@ pub struct EffectiveServiceRuntimeConfig {
 
 /// Stable effective per-service failure policy.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveFailurePolicyConfig {
     pub mode: ServiceFailureMode,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2101,7 +2135,7 @@ pub struct EffectiveFailurePolicyConfig {
 
 /// Stable effective `x-enroot` config.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectiveServiceEnrootConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepare: Option<EffectivePrepareSpec>,
@@ -2109,7 +2143,7 @@ pub struct EffectiveServiceEnrootConfig {
 
 /// Stable effective prepare config with defaults applied.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EffectivePrepareSpec {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub commands: Vec<String>,
@@ -2176,7 +2210,7 @@ pub struct DependsOnConditionSpec {
 }
 
 /// Normalized dependency conditions understood by the planner.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyCondition {
     /// Wait only until the upstream service is started.
@@ -2189,7 +2223,7 @@ pub enum DependencyCondition {
 
 /// A normalized service dependency edge.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ServiceDependency {
     pub name: String,
     pub condition: DependencyCondition,
@@ -2201,7 +2235,7 @@ pub struct ServiceDependency {
 }
 
 /// Accepted environment syntaxes for service or prepare environments.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum EnvironmentSpec {
     /// No environment variables were declared.
@@ -2214,7 +2248,7 @@ pub enum EnvironmentSpec {
 }
 
 /// Accepted command or entrypoint syntaxes.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CommandSpec {
     /// Shell form command.
@@ -2259,7 +2293,7 @@ impl EnvFileSpec {
 }
 
 /// Readiness checks supported by `hpc-compose`.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReadinessSpec {
     /// Wait for a fixed amount of time.

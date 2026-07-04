@@ -430,6 +430,14 @@ services:
         &["lint", "-f", compose.to_str().expect("path")],
     );
     assert_failure(&lint);
+    // Lint findings that fail the gate exit 4 (the exit-code catalog).
+    assert_eq!(
+        lint.status.code(),
+        Some(4),
+        "lint findings should exit 4\nstdout:\n{}\nstderr:\n{}",
+        stdout_text(&lint),
+        stderr_text(&lint),
+    );
     let stdout = stdout_text(&lint);
     let stderr = stderr_text(&lint);
     assert!(

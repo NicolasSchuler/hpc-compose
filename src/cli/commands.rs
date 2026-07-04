@@ -496,6 +496,12 @@ pub enum Commands {
             help = "Which schema to print: 'compose' (default) or 'settings'"
         )]
         kind: Option<SchemaKind>,
+        #[arg(
+            long,
+            value_name = "COMMAND",
+            help = "Print the JSON Schema for a command's --format json output (e.g. score, jobs-list)"
+        )]
+        output: Option<String>,
     },
     #[command(
         display_order = 100,

@@ -48,8 +48,10 @@ pub(crate) fn doctor(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report.grouped())
-                    .map_err(|e| anyhow::anyhow!("failed to serialize doctor report: {e}"))?
+                serde_json::to_string_pretty(&crate::output::contract::DoctorOutput::new(
+                    report.grouped(),
+                ))
+                .map_err(|e| anyhow::anyhow!("failed to serialize doctor report: {e}"))?
             );
         }
     }
@@ -238,6 +240,7 @@ pub(crate) fn doctor_mpi_smoke(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&MpiSmokeJsonOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     service: service.name.clone(),
                     requested_mpi_type,
                     selected_mpi_profile,
@@ -261,7 +264,8 @@ pub(crate) fn doctor_mpi_smoke(
     if let Some(result) = submit_result
         && !result.success
     {
-        bail!("MPI smoke probe failed");
+        // The environment failed a readiness probe: exit 3.
+        return Err(crate::exit::EnvironmentError::new("MPI smoke probe failed").into());
     }
     Ok(())
 }
@@ -465,6 +469,7 @@ pub(crate) fn doctor_fabric_smoke(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&FabricSmokeJsonOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     service: service.name.clone(),
                     requested_mpi_type,
                     selected_mpi_profile,
@@ -490,7 +495,8 @@ pub(crate) fn doctor_fabric_smoke(
     if let Some(result) = submit_result
         && !result.success
     {
-        bail!("fabric smoke probe failed");
+        // The environment failed a readiness probe: exit 3.
+        return Err(crate::exit::EnvironmentError::new("fabric smoke probe failed").into());
     }
     Ok(())
 }
@@ -540,18 +546,24 @@ pub(crate) fn doctor_readiness(
     }
 
     if run && !output.passed {
-        bail!("readiness probe failed");
+        // The readiness target is not reachable/ready: exit 3.
+        return Err(crate::exit::EnvironmentError::new("readiness probe failed").into());
     }
     Ok(())
 }
 
-#[derive(Debug, serde::Serialize)]
-struct ReadinessDoctorOutput {
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ReadinessDoctorOutput {
+    pub(crate) schema_version: u32,
     ok: bool,
     service: String,
     #[serde(rename = "type")]
     probe_type: &'static str,
     mode: &'static str,
+    // `ReadinessProbeTarget` (in `hpc_compose::readiness_util`) does not derive
+    // `JsonSchema` and is outside this task's editable scope, so describe it as a
+    // permissive JSON value in the published schema. Serde output is unchanged.
+    #[schemars(with = "serde_json::Value")]
     target: hpc_compose::readiness_util::ReadinessProbeTarget,
     timeout_seconds: u64,
     ran: bool,
@@ -582,6 +594,7 @@ impl ReadinessDoctorOutput {
             );
         }
         Self {
+            schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             ok: !ran || passed,
             service,
             probe_type: description.probe_type,
@@ -686,6 +699,17 @@ pub(crate) struct FabricSmokeOptions {
     pub(crate) quiet: bool,
 }
 
+/// `doctor --cluster-report --format json` output. Hoisted from a
+/// function-local struct so it is a published-schema-ready named DTO.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ClusterReportJsonOutput<'a> {
+    pub(crate) schema_version: u32,
+    path: Option<&'a Path>,
+    wrote: bool,
+    profile: &'a ClusterProfile,
+    diagnostics: hpc_compose::preflight::GroupedReport,
+}
+
 fn doctor_cluster_report(
     output_format: OutputFormat,
     binaries: &ResolvedBinaries,
@@ -711,16 +735,10 @@ fn doctor_cluster_report(
             }
         }
         OutputFormat::Json => {
-            #[derive(serde::Serialize)]
-            struct JsonOutput<'a> {
-                path: Option<&'a Path>,
-                wrote: bool,
-                profile: &'a ClusterProfile,
-                diagnostics: hpc_compose::preflight::GroupedReport,
-            }
             println!(
                 "{}",
-                serde_json::to_string_pretty(&JsonOutput {
+                serde_json::to_string_pretty(&ClusterReportJsonOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     path: (!print_toml).then_some(out_path.as_path()),
                     wrote: !print_toml,
                     profile: &generated.profile,
@@ -783,7 +801,7 @@ fn mpi_profile_warnings(
     warnings
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 struct MpiSmokeSubmitResult {
     success: bool,
     status: Option<i32>,
@@ -845,7 +863,7 @@ impl MpiSmokeSubmitResult {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq, schemars::JsonSchema)]
 struct SmokeCheckRecord {
     name: String,
     status: SmokeCheckStatus,
@@ -854,7 +872,7 @@ struct SmokeCheckRecord {
     stderr: String,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum SmokeCheckStatus {
     Passed,
@@ -881,8 +899,9 @@ impl SmokeCheckStatus {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
-struct MpiSmokeJsonOutput {
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct MpiSmokeJsonOutput {
+    pub(crate) schema_version: u32,
     service: String,
     requested_mpi_type: String,
     selected_mpi_profile: Option<String>,
@@ -900,8 +919,9 @@ struct MpiSmokeJsonOutput {
     result: Option<MpiSmokeSubmitResult>,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct FabricSmokeJsonOutput {
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct FabricSmokeJsonOutput {
+    pub(crate) schema_version: u32,
     service: String,
     requested_mpi_type: String,
     selected_mpi_profile: Option<String>,

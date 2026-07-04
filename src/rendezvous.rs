@@ -17,7 +17,7 @@ const RECORD_SCHEMA_VERSION: u32 = 1;
 
 /// One provider registration stored in the shared cache.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RendezvousRecord {
     pub schema_version: u32,
     pub name: String,
@@ -54,7 +54,7 @@ pub struct RendezvousRegisterRequest {
 
 /// Summary returned by pruning expired records.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RendezvousPruneReport {
     pub cache_dir: PathBuf,
     pub removed: Vec<PathBuf>,

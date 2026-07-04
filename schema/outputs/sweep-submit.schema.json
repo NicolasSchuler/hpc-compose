@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SweepSubmitOutput",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "manifest": {
+      "$ref": "#/$defs/SweepManifest"
+    },
+    "manifest_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "dry_run",
+    "manifest"
+  ],
+  "$defs": {
+    "ObjectiveDirection": {
+      "description": "Optimization direction for a sweep objective.",
+      "oneOf": [
+        {
+          "description": "Lower objective values are better.",
+          "type": "string",
+          "const": "minimize"
+        },
+        {
+          "description": "Higher objective values are better.",
+          "type": "string",
+          "const": "maximize"
+        }
+      ]
+    },
+    "SweepManifest": {
+      "description": "Persisted sweep run metadata.",
+      "type": "object",
+      "properties": {
+        "best_trial": {
+          "description": "Trial id of the best trial observed so far, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compose_file": {
+          "type": "string"
+        },
+        "matrix": {
+          "type": "string"
+        },
+        "objective": {
+          "description": "Snapshot of the sweep objective, if configured, used by `sweep observe`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SweepObjective"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "seed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stop_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopped_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "submitted_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sweep_id": {
+          "type": "string"
+        },
+        "total_combinations": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "trials": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SweepManifestTrial"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "sweep_id",
+        "compose_file",
+        "submitted_at",
+        "matrix",
+        "total_combinations",
+        "trials"
+      ]
+    },
+    "SweepManifestTrial": {
+      "description": "Persisted metadata for one sweep trial.",
+      "type": "object",
+      "properties": {
+        "config_key": {
+          "description": "Stable key grouping replicates of the same parameter config.",
+          "type": "string",
+          "default": ""
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "objective": {
+          "description": "Objective value parsed by `sweep observe`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "objective_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "record_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replicate": {
+          "description": "Zero-based replicate index within this config (`0` when replicates == 1).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "script_path": {
+          "type": "string"
+        },
+        "seed": {
+          "description": "Deterministic per-replicate seed, present only when replicates > 1.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "submit_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "submitted_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "trial_id": {
+          "type": "string"
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "trial_id",
+        "index",
+        "variables",
+        "script_path"
+      ]
+    },
+    "SweepObjective": {
+      "description": "How a trial's objective value is parsed from its tracked outputs.\n\nExactly one parse source is set: a regex against the trial's service log,\nor a JSON field read from an artifact-collected file.",
+      "type": "object",
+      "properties": {
+        "direction": {
+          "description": "Whether lower or higher objective values are better.",
+          "$ref": "#/$defs/ObjectiveDirection"
+        },
+        "group": {
+          "description": "Capture group index for `log_pattern` (1-based); defaults to 1.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "json_field": {
+          "description": "Field name to read from the JSON file when `json_path` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "json_path": {
+          "description": "Artifact-collected JSON file (relative to the trial job's artifact\ntree) whose `json_field` holds the objective.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "log_pattern": {
+          "description": "Regex matched against the trial's primary service log; the capture\ngroup `group` (default 1) is parsed as `f64`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scaling_axis": {
+          "description": "Name of a sweep parameter (e.g. `nodes`, `model_size`) to use as the\nx-axis for the post-hoc scaling report printed by `sweep observe\n--scaling`. Must name a key under `sweep.parameters` whose values parse\nas `f64`. Purely a report/CLI knob: it is never consumed during\nsubmission or rendering and the scaling report itself is never persisted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "direction"
+      ]
+    }
+  }
+}

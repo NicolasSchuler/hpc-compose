@@ -102,6 +102,7 @@ pub(crate) fn cancel(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output::CancelOutput {
+                        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         job_id: resolved_job_id,
                         cancelled,
                         command_stdout: None,
@@ -173,6 +174,7 @@ pub(crate) fn cancel(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output::CancelOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     job_id: resolved_job_id,
                     cancelled: true,
                     command_stdout: (!stdout.is_empty()).then_some(stdout),
@@ -197,7 +199,7 @@ pub(crate) fn jobs_list(disk_usage: bool, format: Option<OutputFormat>) -> Resul
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report)
+                serde_json::to_string_pretty(&output::contract::JobListOutput::new(report))
                     .context("failed to serialize jobs list output")?
             );
         }
@@ -230,7 +232,7 @@ pub(crate) fn clean(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report)
+                serde_json::to_string_pretty(&output::contract::CleanOutput::new(report))
                     .context("failed to serialize clean output")?
             );
         }

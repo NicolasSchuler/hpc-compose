@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SweepStatusOutput",
+  "type": "object",
+  "properties": {
+    "compose_file": {
+      "type": "string"
+    },
+    "groups": {
+      "description": "Per-config replicate rollup (mean±std(n) over the trial objectives of\neach parameter config). Omitted when no replicates are configured.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepConfigGroup"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "submitted_at": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0
+      }
+    },
+    "sweep_id": {
+      "type": "string"
+    },
+    "trials": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepStatusTrialOutput"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "sweep_id",
+    "compose_file",
+    "submitted_at",
+    "summary",
+    "groups",
+    "trials"
+  ],
+  "$defs": {
+    "SweepConfigGroup": {
+      "description": "One per-config rollup row: the replicate objectives of a single parameter\nconfig summarized as mean±std(n). Emitted in the `groups` field of sweep\nstatus/observe/results output.",
+      "type": "object",
+      "properties": {
+        "config_key": {
+          "type": "string"
+        },
+        "mean": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "n": {
+          "description": "Number of replicates with an observed objective contributing to the rollup.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "replicates": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "std": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "config_key",
+        "variables",
+        "replicates",
+        "n"
+      ]
+    },
+    "SweepStatusTrialOutput": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "record_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scheduler_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "submit_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trial_id": {
+          "type": "string"
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "trial_id",
+        "index",
+        "variables",
+        "status"
+      ]
+    }
+  }
+}

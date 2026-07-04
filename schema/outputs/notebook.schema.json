@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NotebookConnectionOutput",
+  "description": "Machine-readable form of [`NotebookConnection`] for `--format json`.\n\nMirrors the human-readable output. `compute_node` and `login_host` are the\nresolved hosts used to render the tunnel hint; they are descriptive only —\nnothing here opens a connection.",
+  "type": "object",
+  "properties": {
+    "compute_node": {
+      "description": "Resolved compute node the server runs on.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "job_id": {
+      "description": "Tracked Slurm (or local) job id.",
+      "type": "string"
+    },
+    "login_host": {
+      "description": "Resolved SSH login/jump host.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "next_commands": {
+      "description": "Suggested follow-up commands an agent can run next.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema_version": {
+      "description": "Version of this output document's schema.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "tunnel_hint": {
+      "description": "SSH tunnel hint, when one is needed.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "url": {
+      "description": "The URL to open (localhost for Jupyter, scraped link for VS Code).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "url",
+    "job_id",
+    "next_commands"
+  ]
+}

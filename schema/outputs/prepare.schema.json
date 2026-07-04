@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PrepareOutput",
+  "description": "`spec prepare` image-preparation summary (`--format json`).",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ServicePrepareResult"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "services"
+  ],
+  "$defs": {
+    "ArtifactAction": {
+      "description": "How a runtime artifact was obtained during preparation.",
+      "oneOf": [
+        {
+          "description": "The artifact already existed and was used as-is.",
+          "type": "string",
+          "const": "present"
+        },
+        {
+          "description": "The artifact existed in cache and was refreshed for tracking purposes.",
+          "type": "string",
+          "const": "reused"
+        },
+        {
+          "description": "The artifact was built or imported during this run.",
+          "type": "string",
+          "const": "built"
+        }
+      ]
+    },
+    "ArtifactStatus": {
+      "description": "Status for one concrete artifact path produced or reused during prepare.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ArtifactAction"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "action"
+      ]
+    },
+    "ServicePrepareResult": {
+      "description": "Preparation results for one service.",
+      "type": "object",
+      "properties": {
+        "base_image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_image": {
+          "$ref": "#/$defs/ArtifactStatus"
+        },
+        "service_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "service_name",
+        "runtime_image"
+      ]
+    }
+  }
+}

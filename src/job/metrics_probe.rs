@@ -30,7 +30,7 @@ pub struct MetricsProbeOptions {
 }
 
 /// Top-level report produced by `hpc-compose metrics-probe`.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct MetricsProbeReport {
     pub schema_version: u32,
     pub generated_at_unix: u64,
@@ -40,21 +40,21 @@ pub struct MetricsProbeReport {
     pub recommendation: MetricsProbeRecommendation,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct MetricsProbeCapabilities {
     pub perf_event_open: PerfEventOpenCapability,
     pub nvml: NvmlCapability,
     pub tracepoints: TracepointCapability,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct MetricsProbeMeasurements {
     pub perf: Option<PerfMeasurement>,
     pub nvml: Option<NvmlMeasurement>,
     pub nvidia_smi: Option<NvidiaSmiComparison>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricsProbeRecommendation {
     PerfOnly,
@@ -63,7 +63,7 @@ pub enum MetricsProbeRecommendation {
     NotViable,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PerfEventOpenCapability {
     pub available: bool,
     pub perf_event_paranoid: Option<String>,
@@ -72,7 +72,7 @@ pub struct PerfEventOpenCapability {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct PerfMeasurement {
     pub cycles: u64,
     pub instructions: u64,
@@ -83,7 +83,7 @@ pub struct PerfMeasurement {
     pub workload_iterations: u64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NvmlCapability {
     pub available: bool,
     pub library: String,
@@ -93,12 +93,12 @@ pub struct NvmlCapability {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NvmlMeasurement {
     pub devices: Vec<NvmlDeviceMeasurement>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NvmlDeviceMeasurement {
     pub index: u32,
     pub utilization_gpu_percent: Option<u32>,
@@ -110,7 +110,7 @@ pub struct NvmlDeviceMeasurement {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NvidiaSmiComparison {
     pub available: bool,
     pub elapsed_ns: Option<u128>,
@@ -118,7 +118,7 @@ pub struct NvidiaSmiComparison {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct TracepointCapability {
     pub tracing_root: Option<PathBuf>,
     pub available_events_readable: bool,
@@ -127,7 +127,7 @@ pub struct TracepointCapability {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct TracepointProbe {
     pub name: String,
     pub available: bool,

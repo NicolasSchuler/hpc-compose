@@ -12,7 +12,7 @@ use super::stats::{find_tres_value, parse_tres_map};
 
 /// Slurm accounting data returned by `stats --accounting`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct AccountingSnapshot {
     pub available: bool,
     pub reason: Option<String>,
@@ -23,7 +23,7 @@ pub struct AccountingSnapshot {
 
 /// Grant-report friendly accounting rollup.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct AccountingSummary {
     pub allocated_cpu_hours: Option<f64>,
     pub total_cpu_hours: Option<f64>,
@@ -35,7 +35,7 @@ pub struct AccountingSummary {
 
 /// One parsed `sacct` row.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct AccountingRow {
     pub job_id_raw: String,
     pub job_name: String,

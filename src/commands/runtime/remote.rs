@@ -770,10 +770,13 @@ fn probe_remote_binary_with_preference(
     // so a non-zero exit is a real SSH/shell failure — surface it instead of
     // silently treating the host as having no hpc-compose.
     if !output.status.success() {
-        bail!(
+        // Could not reach/probe the login node: an unreachable cluster is an
+        // environment failure, so exit 3.
+        return Err(crate::exit::EnvironmentError::new(format!(
             "failed to probe the remote hpc-compose on {host}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        );
+        ))
+        .into());
     }
     Ok(select_probe_candidate(
         &String::from_utf8_lossy(&output.stdout),
@@ -811,11 +814,13 @@ fn install_remote_binary(ssh_bin: &str, base_ssh_args: &[String], host: &str) ->
         .status()
         .context("failed to run ssh while installing hpc-compose on the login node")?;
     if !status.success() {
-        bail!(
-            "failed to install hpc-compose on {host} (no outbound network from the login node?); \
-             {}",
+        // The login node could not fetch the release (no outbound network): an
+        // environment readiness failure, so exit 3.
+        return Err(crate::exit::EnvironmentError::new(format!(
+            "failed to install hpc-compose on {host} (no outbound network from the login node?); {}",
             manual_install_hint()
-        );
+        ))
+        .into());
     }
     Ok(())
 }
@@ -1109,7 +1114,12 @@ pub(crate) fn remote_up(
         .status()
         .context("failed to run ssh")?;
     if !mkdir_status.success() {
-        bail!("failed to create remote stage dir '{stage}' on {host}; check your ~/.ssh/config");
+        // The first ssh connection failed: the login node is unreachable, so
+        // exit 3 rather than the generic 1.
+        return Err(crate::exit::EnvironmentError::new(format!(
+            "failed to create remote stage dir '{stage}' on {host}; check your ~/.ssh/config"
+        ))
+        .into());
     }
 
     // 2. With the ControlMaster connection already open (the mkdir prompted for
@@ -1123,7 +1133,11 @@ pub(crate) fn remote_up(
         .status()
         .context("failed to run rsync (is rsync installed on this host?)")?;
     if !rsync_status.success() {
-        bail!("rsync to {host} failed; check the destination and your ~/.ssh/config");
+        // The transport to the login node failed: exit 3.
+        return Err(crate::exit::EnvironmentError::new(format!(
+            "rsync to {host} failed; check the destination and your ~/.ssh/config"
+        ))
+        .into());
     }
 
     // 3. Delegate to the login node's hpc-compose, streaming output back.

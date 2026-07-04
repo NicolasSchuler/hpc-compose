@@ -1,0 +1,437 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExperimentShowOutput",
+  "description": "One JSON object aggregating the read-only state of a single tracked run.",
+  "type": "object",
+  "properties": {
+    "efficiency": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EfficiencyScoreReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "next_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JobProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "results": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactManifest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExperimentService"
+      }
+    },
+    "state": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "name",
+    "state",
+    "services",
+    "next_commands"
+  ],
+  "$defs": {
+    "ArtifactBundleManifest": {
+      "description": "Bundle-specific entries tracked in an artifact manifest.",
+      "type": "object",
+      "properties": {
+        "copied_relative_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "declared_source_patterns": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "matched_source_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ArtifactManifest": {
+      "description": "Manifest produced when teardown exports tracked artifacts.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ArtifactBundleManifest"
+          },
+          "default": {}
+        },
+        "collect_policy": {
+          "type": "string"
+        },
+        "collected_at": {
+          "type": "string"
+        },
+        "copied_relative_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "declared_source_patterns": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "is_resume": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "job_outcome": {
+          "type": "string"
+        },
+        "matched_source_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "resume_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "job_id",
+        "collect_policy",
+        "collected_at",
+        "job_outcome"
+      ]
+    },
+    "EfficiencyScoreComponent": {
+      "description": "One scored efficiency dimension.",
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "$ref": "#/$defs/EfficiencyScoreConfidence"
+        },
+        "label": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "score": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "source": {
+          "type": "string"
+        },
+        "utilization": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "weight": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "name",
+        "label",
+        "available",
+        "weight",
+        "source",
+        "confidence"
+      ]
+    },
+    "EfficiencyScoreConfidence": {
+      "description": "Confidence label for an efficiency score component.",
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "EfficiencyScoreReport": {
+      "description": "Post-run resource efficiency report for one tracked Slurm job.",
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EfficiencyScoreComponent"
+          }
+        },
+        "confidence": {
+          "$ref": "#/$defs/EfficiencyScoreConfidence"
+        },
+        "energy_basis": {
+          "type": "string"
+        },
+        "energy_kwh": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "grade": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scheduler_source": {
+          "type": "string"
+        },
+        "scheduler_state": {
+          "type": "string"
+        },
+        "score": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tips": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "job_id",
+        "scheduler_state",
+        "scheduler_source",
+        "complete",
+        "score",
+        "grade",
+        "components",
+        "energy_basis",
+        "confidence",
+        "tips",
+        "sources",
+        "notes"
+      ]
+    },
+    "ExperimentService": {
+      "description": "Per-service slice of the aggregate: tracked placement plus a printable tunnel\nhint when the service exposes a TCP/HTTP readiness port.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "nodelist": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tunnel_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "GitProvenance": {
+      "description": "Git state captured at submit time; only populated inside a working tree.",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "dirty"
+      ]
+    },
+    "JobProvenance": {
+      "description": "Provenance pinned into a tracked submission record. Descriptive only.",
+      "type": "object",
+      "properties": {
+        "git": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image_refs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "source_content_hash": {
+          "description": "Content hash of the working-tree source snapshot captured at submit (the\nCAS key from [`crate::cache::source::stage_source`]). Populated only on\nthe approval-gated submit path; `None` when source was not snapshotted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_version"
+      ]
+    }
+  }
+}

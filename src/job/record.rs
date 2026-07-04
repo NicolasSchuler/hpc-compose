@@ -8,7 +8,7 @@ use super::*;
 
 /// One tracked job discovered from recorded submission metadata.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JobInventoryEntry {
     pub compose_file: PathBuf,
     pub compose_metadata_root: PathBuf,
@@ -37,7 +37,7 @@ pub struct JobInventoryEntry {
 
 /// Repo-tree scan result returned by `jobs list`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JobInventoryScan {
     pub scan_root: PathBuf,
     pub jobs: Vec<JobInventoryEntry>,
@@ -45,7 +45,7 @@ pub struct JobInventoryScan {
 
 /// Planned or executed tracked-job cleanup report.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CleanupReport {
     pub compose_file: PathBuf,
     pub mode: String,
@@ -61,7 +61,7 @@ pub struct CleanupReport {
 
 /// Cleanup planning details for one tracked job.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CleanupJobReport {
     #[serde(flatten)]
     pub inventory: JobInventoryEntry,

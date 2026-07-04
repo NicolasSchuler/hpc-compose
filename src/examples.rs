@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, fmt};
 
 /// How a shipped example can be used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExampleAvailability {
     /// The example can be rendered by `hpc-compose new --template`.
@@ -30,7 +30,7 @@ impl fmt::Display for ExampleAvailability {
 }
 
 /// A shipped runnable example or starter template.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, schemars::JsonSchema)]
 pub struct ExampleInfo {
     /// Stable example id without the `.yaml` suffix.
     pub name: &'static str,
@@ -131,7 +131,7 @@ impl ExampleInfo {
 }
 
 /// A ranked example recommendation with the explanation and safe next commands.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct ExampleRecommendation {
     /// Existing registry metadata for the recommended example.
     pub example: ExampleInfo,

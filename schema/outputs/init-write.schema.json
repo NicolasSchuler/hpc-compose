@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TemplateWriteOutput",
+  "type": "object",
+  "properties": {
+    "app_name": {
+      "type": "string"
+    },
+    "cache_dir": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "next_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "output_path": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "template_name": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "template_name",
+    "app_name",
+    "output_path",
+    "next_commands"
+  ]
+}

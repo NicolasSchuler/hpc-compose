@@ -3,7 +3,7 @@ use super::*;
 
 /// Compose-style per-service snapshot returned by `ps`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PsSnapshot {
     pub record: SubmissionRecord,
     pub scheduler: SchedulerStatus,

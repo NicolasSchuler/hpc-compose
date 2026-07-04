@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RendezvousRegisterOutput",
+  "type": "object",
+  "properties": {
+    "cache_dir": {
+      "type": "string"
+    },
+    "record": {
+      "$ref": "#/$defs/RendezvousRecord"
+    },
+    "record_path": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "cache_dir",
+    "record_path",
+    "record"
+  ],
+  "$defs": {
+    "RendezvousRecord": {
+      "description": "One provider registration stored in the shared cache.",
+      "type": "object",
+      "properties": {
+        "cache_dir": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "registered_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "service": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "name",
+        "job_id",
+        "host",
+        "port",
+        "protocol",
+        "url",
+        "registered_at",
+        "ttl_seconds",
+        "cache_dir"
+      ]
+    }
+  }
+}

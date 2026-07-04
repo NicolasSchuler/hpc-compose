@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SmokeTestOutput",
+  "type": "object",
+  "properties": {
+    "backend": {
+      "$ref": "#/$defs/SubmissionBackend"
+    },
+    "compose_file": {
+      "type": "string"
+    },
+    "failure_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "phases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SmokePhase"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "script_path": {
+      "type": "string"
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SmokeServiceResult"
+      }
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "ok",
+    "backend",
+    "compose_file",
+    "job_id",
+    "script_path",
+    "timeout_seconds",
+    "phases",
+    "services"
+  ],
+  "$defs": {
+    "SmokePhase": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ]
+    },
+    "SmokeServiceResult": {
+      "type": "object",
+      "properties": {
+        "appeared": {
+          "type": "boolean"
+        },
+        "completed_successfully": {
+          "type": "boolean"
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "last_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "launched": {
+          "type": "boolean"
+        },
+        "readiness_configured": {
+          "type": "boolean"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "service_name": {
+          "type": "string"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "service_name",
+        "appeared",
+        "launched",
+        "readiness_configured",
+        "ready",
+        "completed_successfully",
+        "failures"
+      ]
+    },
+    "SubmissionBackend": {
+      "description": "Backend used to execute a tracked submission.",
+      "oneOf": [
+        {
+          "description": "The job was submitted to Slurm.",
+          "type": "string",
+          "const": "slurm"
+        },
+        {
+          "description": "The job was launched locally without Slurm.",
+          "type": "string",
+          "const": "local"
+        }
+      ]
+    }
+  }
+}

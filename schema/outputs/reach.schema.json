@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReachOutput",
+  "description": "Machine-readable output for `reach --format json`.",
+  "type": "object",
+  "properties": {
+    "compute_node": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "local_port": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "login_host": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remote_port": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "service": {
+      "type": "string"
+    },
+    "ssh_command": {
+      "type": "string"
+    },
+    "url": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "service",
+    "job_id",
+    "local_port",
+    "remote_port",
+    "url",
+    "ssh_command"
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReadinessDoctorOutput",
+  "type": "object",
+  "properties": {
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "elapsed_seconds": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "generated_behavior": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string"
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "ran": {
+      "type": "boolean"
+    },
+    "required_tool": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "service": {
+      "type": "string"
+    },
+    "target": true,
+    "timeout_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "type": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "ok",
+    "service",
+    "type",
+    "mode",
+    "target",
+    "timeout_seconds",
+    "ran",
+    "passed",
+    "diagnostics",
+    "next_steps",
+    "generated_behavior"
+  ]
+}

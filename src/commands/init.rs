@@ -38,11 +38,12 @@ pub(crate) fn new_command(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "templates": output_init::template_infos(),
-                        "cache_dir_required": false,
-                        "cache_dir_placeholder": init_cache_dir_placeholder(),
-                    }))
+                    serde_json::to_string_pretty(&output_init::TemplateListOutput {
+                        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
+                        templates: output_init::template_infos(),
+                        cache_dir_required: false,
+                        cache_dir_placeholder: init_cache_dir_placeholder().to_string(),
+                    })
                     .context("failed to serialize template list output")?
                 );
             }
@@ -86,6 +87,7 @@ pub(crate) fn new_command(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output_init::TemplateWriteOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     template_name: answers.template_name,
                     app_name: answers.app_name,
                     cache_dir: answers.cache_dir,
@@ -302,6 +304,7 @@ pub(crate) fn setup(
     profile.login_host = login_host_value;
     profile.login_user = login_user_value;
     let setup_output = output_init::SetupOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         settings_path: settings_path.clone(),
         profile: selected_profile.clone(),
         default_profile: selected_default_profile.clone(),

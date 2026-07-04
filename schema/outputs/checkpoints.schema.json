@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CheckpointsOutput",
+  "description": "`checkpoints` attempt/requeue history (`--format json`).",
+  "type": "object",
+  "properties": {
+    "attempts": {
+      "description": "Number of attempts observed: `max(attempt dir count, latest.attempt + 1)`,\nor `1` for the single-state fallback.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "compose_file": {
+      "type": "string"
+    },
+    "current_attempt": {
+      "description": "The highest attempt index observed (0-based), if any attempt was read.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "degraded": {
+      "description": "Non-fatal degradation notes (missing/unreadable state, count\ndisagreements, truncated history).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CheckpointAttempt"
+      }
+    },
+    "is_resume": {
+      "description": "`is_resume` flag of the latest readable attempt state, if present.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "requeues": {
+      "description": "Requeues = `attempts - 1` (never underflows).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "resume_configured": {
+      "description": "True when per-attempt directories exist (i.e. `x-slurm.resume` produced a\nrequeue layout) or the record pins a resume directory.",
+      "type": "boolean"
+    },
+    "resume_dir": {
+      "description": "Resume directory pinned in the latest readable attempt state, if present.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "submitted_at": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "compose_file",
+    "submitted_at",
+    "resume_configured",
+    "attempts",
+    "requeues",
+    "entries",
+    "degraded"
+  ],
+  "$defs": {
+    "CheckpointAttempt": {
+      "description": "One reconstructed attempt derived from a single `state.json`.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "description": "0-based attempt index. For the single-state fallback this is the state's\nown `attempt` field when present, otherwise `0`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "duration_seconds": {
+          "description": "`finished_at - started_at` when both bounds are known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "finished_at": {
+          "description": "Latest `finished_at` over the attempt's services.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "is_resume": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "job_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "job_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckpointAttemptService"
+          }
+        },
+        "started_at": {
+          "description": "Earliest `started_at` over the attempt's services.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "attempt",
+        "services"
+      ]
+    },
+    "CheckpointAttemptService": {
+      "description": "Per-service timing for one attempt.",
+      "type": "object",
+      "properties": {
+        "duration_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "finished_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "last_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "restart_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "service_name": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "service_name"
+      ]
+    }
+  }
+}

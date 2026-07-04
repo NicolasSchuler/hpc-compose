@@ -1,0 +1,988 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReplayOutput",
+  "description": "`replay` reconstructed run timeline (`--format json`).",
+  "type": "object",
+  "properties": {
+    "artifacts": {
+      "$ref": "#/$defs/ReplayArtifactPaths"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReplayEvent"
+      }
+    },
+    "fidelity": {
+      "type": "string"
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReplayFrame"
+      }
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "record": {
+      "$ref": "#/$defs/SubmissionRecord"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "timeline_end_unix": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "timeline_start_unix": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "record",
+    "fidelity",
+    "notes",
+    "artifacts",
+    "events",
+    "frames"
+  ],
+  "$defs": {
+    "GitProvenance": {
+      "description": "Git state captured at submit time; only populated inside a working tree.",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "dirty"
+      ]
+    },
+    "JobProvenance": {
+      "description": "Provenance pinned into a tracked submission record. Descriptive only.",
+      "type": "object",
+      "properties": {
+        "git": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image_refs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "source_content_hash": {
+          "description": "Content hash of the working-tree source snapshot captured at submit (the\nCAS key from [`crate::cache::source::stage_source`]). Populated only on\nthe approval-gated submit path; `None` when source was not snapshotted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_version"
+      ]
+    },
+    "PsServiceRow": {
+      "description": "Presence and freshness information for one tracked service log.",
+      "type": "object",
+      "properties": {
+        "assertions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceAssertionStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "completed_successfully": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "duration_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "failure_policy_mode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "finished_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "healthy": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "last_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "launch_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "launcher_pid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "log_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "max_restarts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "max_restarts_in_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "nodelist": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "nodes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "ntasks": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "ntasks_per_node": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        },
+        "placement_mode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "readiness_configured": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "restart_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "restart_failures_in_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "service_name": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "step_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "updated_age_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "window_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "service_name",
+        "path",
+        "present"
+      ]
+    },
+    "PsSnapshot": {
+      "description": "Compose-style per-service snapshot returned by `ps`.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "is_resume": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "log_dir": {
+          "type": "string"
+        },
+        "queue_diagnostics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueueDiagnostics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "record": {
+          "$ref": "#/$defs/SubmissionRecord"
+        },
+        "resume_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scheduler": {
+          "$ref": "#/$defs/SchedulerStatus"
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PsServiceRow"
+          }
+        }
+      },
+      "required": [
+        "record",
+        "scheduler",
+        "log_dir",
+        "services"
+      ]
+    },
+    "QueueDiagnostics": {
+      "description": "Optional queue-facing scheduler diagnostics returned only by `status`.",
+      "type": "object",
+      "properties": {
+        "eligible_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pending_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ReplayArtifactPaths": {
+      "description": "Runtime artifact paths consulted by replay.",
+      "type": "object",
+      "properties": {
+        "log_dirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "metrics_dirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "runtime_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "service_exit_dirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "runtime_roots",
+        "state_paths",
+        "service_exit_dirs",
+        "metrics_dirs",
+        "log_dirs"
+      ]
+    },
+    "ReplayEvent": {
+      "description": "One point on the reconstructed replay timeline.",
+      "type": "object",
+      "properties": {
+        "at_unix": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "kind": {
+          "$ref": "#/$defs/ReplayEventKind"
+        },
+        "service": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at_unix",
+        "kind"
+      ]
+    },
+    "ReplayEventKind": {
+      "description": "Timeline event categories used for stable ordering.",
+      "type": "string",
+      "enum": [
+        "attempt_start",
+        "service_start",
+        "metrics_sample",
+        "service_exit",
+        "final_snapshot"
+      ]
+    },
+    "ReplayFrame": {
+      "description": "One renderable watch-style frame at a replay event boundary.",
+      "type": "object",
+      "properties": {
+        "cursor_unix": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "event": {
+          "$ref": "#/$defs/ReplayEvent"
+        },
+        "event_index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "fidelity_note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metrics_line": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReplayServiceFrame"
+          }
+        },
+        "snapshot": {
+          "$ref": "#/$defs/PsSnapshot",
+          "writeOnly": true
+        }
+      },
+      "required": [
+        "cursor_unix",
+        "event_index",
+        "event",
+        "services",
+        "snapshot"
+      ]
+    },
+    "ReplayServiceFrame": {
+      "description": "Reconstructed service state for one replay frame.",
+      "type": "object",
+      "properties": {
+        "finished_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "last_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "restart_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "service_name": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "service_name",
+        "status"
+      ]
+    },
+    "RequestedWalltime": {
+      "description": "Parsed requested allocation walltime persisted with a tracked record.",
+      "type": "object",
+      "properties": {
+        "original": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "original",
+        "seconds"
+      ]
+    },
+    "SchedulerSource": {
+      "description": "Source used to determine scheduler state.",
+      "oneOf": [
+        {
+          "description": "State came from `squeue`.",
+          "type": "string",
+          "const": "squeue"
+        },
+        {
+          "description": "State came from `sacct`.",
+          "type": "string",
+          "const": "sacct"
+        },
+        {
+          "description": "No scheduler data was available; only local tracking data exists.",
+          "type": "string",
+          "const": "local_only"
+        }
+      ]
+    },
+    "SchedulerStatus": {
+      "description": "Scheduler state as observed by the tracker.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/SchedulerSource"
+        },
+        "state": {
+          "type": "string"
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "state",
+        "source",
+        "terminal",
+        "failed"
+      ]
+    },
+    "ServiceAssertionStatus": {
+      "description": "Post-run assertion result for one tracked service.",
+      "type": "object",
+      "properties": {
+        "artifacts_contain": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "duration_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expected_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_duration_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "configured",
+        "failures"
+      ]
+    },
+    "SubmissionBackend": {
+      "description": "Backend used to execute a tracked submission.",
+      "oneOf": [
+        {
+          "description": "The job was submitted to Slurm.",
+          "type": "string",
+          "const": "slurm"
+        },
+        {
+          "description": "The job was launched locally without Slurm.",
+          "type": "string",
+          "const": "local"
+        }
+      ]
+    },
+    "SubmissionKind": {
+      "description": "High-level submission flow used to create a tracked job.",
+      "oneOf": [
+        {
+          "description": "A normal compose application submission from `up`.",
+          "type": "string",
+          "const": "main"
+        },
+        {
+          "description": "A one-off `run` submission scoped to one service.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "A short right-sizing probe submitted by `germinate`.",
+          "type": "string",
+          "const": "canary"
+        },
+        {
+          "description": "One trial submitted by `sweep submit`.",
+          "type": "string",
+          "const": "sweep_trial"
+        },
+        {
+          "description": "A tracked interactive notebook server submitted by `notebook`.",
+          "type": "string",
+          "const": "notebook"
+        }
+      ]
+    },
+    "SubmissionRecord": {
+      "description": "Metadata persisted for a submitted job tracked under `.hpc-compose/`.",
+      "type": "object",
+      "properties": {
+        "artifact_export_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "backend": {
+          "$ref": "#/$defs/SubmissionBackend",
+          "default": "slurm"
+        },
+        "batch_log": {
+          "type": "string"
+        },
+        "batch_log_managed": {
+          "description": "True when `batch_log` is the hpc-compose-owned default path and can be\nremoved by tracked-job cleanup. False for user-pinned `x-slurm.output`.",
+          "type": "boolean"
+        },
+        "cache_dir": {
+          "type": "string"
+        },
+        "cached_artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "command_override": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "compose_file": {
+          "type": "string"
+        },
+        "config_snapshot_yaml": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubmissionKind",
+          "default": "main"
+        },
+        "provenance": {
+          "description": "Best-effort provenance pinned at submit time (tool version, git state,\nper-service image refs). Optional and additive; legacy records load with\n`None`. Descriptive only — capturing it contacts no scheduler.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested_walltime": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestedWalltime"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resume_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "runtime_root": {
+          "description": "Resolved `x-slurm.runtime_root` override (the parent of `<job_id>/`).\n`None` when the default `<submit_dir>/.hpc-compose` layout is used;\nreaders fall back to that default via `runtime_job_root_for_record`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "script_path": {
+          "type": "string"
+        },
+        "service_logs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "service_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "slurm_array": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "submit_dir": {
+          "type": "string"
+        },
+        "submitted_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sweep": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SweepTrialMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "job_id",
+        "submitted_at",
+        "compose_file",
+        "submit_dir",
+        "script_path",
+        "cache_dir",
+        "batch_log",
+        "service_logs"
+      ]
+    },
+    "SweepTrialMetadata": {
+      "description": "Sweep metadata attached to a trial submission record.",
+      "type": "object",
+      "properties": {
+        "sweep_id": {
+          "type": "string"
+        },
+        "trial_id": {
+          "type": "string"
+        },
+        "trial_index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "sweep_id",
+        "trial_id",
+        "trial_index",
+        "variables"
+      ]
+    }
+  }
+}

@@ -32,7 +32,7 @@ const DEFAULT_SSH_BIN: &str = "ssh";
 const DEFAULT_RSYNC_BIN: &str = "rsync";
 
 /// Source that provided a resolved value.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ValueSource {
     /// Explicit CLI argument.
@@ -53,7 +53,7 @@ pub enum ValueSource {
 }
 
 /// A resolved value and where it came from.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ResolvedValue<T> {
     /// Final value.
     pub value: T,
@@ -63,7 +63,7 @@ pub struct ResolvedValue<T> {
 
 /// Binary override settings.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BinaryOverrides {
     #[serde(default)]
@@ -288,7 +288,7 @@ fn default_settings_schema_version() -> u32 {
 
 /// Fully resolved binaries.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ResolvedBinaries {
     pub enroot: ResolvedValue<String>,
     pub apptainer: ResolvedValue<String>,

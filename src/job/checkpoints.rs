@@ -13,7 +13,7 @@ use super::*;
 /// Attempt/requeue history for one tracked job, derived purely from local
 /// tracked state. Hand-rolled output (not a [`StatusSnapshot`]); read-only.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CheckpointHistory {
     pub job_id: String,
     pub compose_file: PathBuf,
@@ -40,7 +40,7 @@ pub struct CheckpointHistory {
 
 /// One reconstructed attempt derived from a single `state.json`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CheckpointAttempt {
     /// 0-based attempt index. For the single-state fallback this is the state's
     /// own `attempt` field when present, otherwise `0`.
@@ -59,7 +59,7 @@ pub struct CheckpointAttempt {
 
 /// Per-service timing for one attempt.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CheckpointAttemptService {
     pub service_name: String,
     pub started_at: Option<u64>,

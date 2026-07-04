@@ -3,7 +3,7 @@ use super::*;
 
 /// Manifest produced when teardown exports tracked artifacts.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArtifactManifest {
     #[serde(default = "default_artifact_manifest_schema_version")]
     pub schema_version: u32,
@@ -31,7 +31,7 @@ pub struct ArtifactManifest {
 
 /// Bundle-specific entries tracked in an artifact manifest.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArtifactBundleManifest {
     #[serde(default)]
     pub declared_source_patterns: Vec<String>,
@@ -45,7 +45,7 @@ pub struct ArtifactBundleManifest {
 
 /// Result of copying tracked artifacts into the configured export directory.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ArtifactExportReport {
     pub record: SubmissionRecord,
     pub manifest_path: PathBuf,
@@ -61,7 +61,7 @@ pub struct ArtifactExportReport {
 
 /// Export result for one artifact bundle.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct BundleExportReport {
     pub name: String,
     pub export_dir: PathBuf,
@@ -74,7 +74,7 @@ pub struct BundleExportReport {
 
 /// One exported artifact entry captured in provenance output.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ArtifactEntryMetadata {
     pub relative_path: String,
     pub entry_type: String,

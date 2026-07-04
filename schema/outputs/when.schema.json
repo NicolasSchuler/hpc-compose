@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhenSubmitOutput",
+  "type": "object",
+  "properties": {
+    "conditions": {
+      "type": "array",
+      "items": true
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "submission": {
+      "$ref": "#/$defs/SubmitOutput"
+    },
+    "triggered": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "triggered",
+    "conditions",
+    "submission"
+  ],
+  "$defs": {
+    "SubmissionBackend": {
+      "description": "Backend used to execute a tracked submission.",
+      "oneOf": [
+        {
+          "description": "The job was submitted to Slurm.",
+          "type": "string",
+          "const": "slurm"
+        },
+        {
+          "description": "The job was launched locally without Slurm.",
+          "type": "string",
+          "const": "local"
+        }
+      ]
+    },
+    "SubmitEndpoint": {
+      "description": "One readiness-derived service endpoint surfaced in `up` output. Descriptive\nonly — derived statically from the plan's readiness specs, never probed and\nnever opened.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "service": {
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "service",
+        "host",
+        "port"
+      ]
+    },
+    "SubmitOutput": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/SubmissionBackend"
+        },
+        "cache_dir": {
+          "type": "string"
+        },
+        "compose_file": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "endpoints": {
+          "description": "Readiness-derived service endpoints (TCP/HTTP only). Empty unless the\ncaller opted in via `--print-endpoints`; omitted from JSON when empty.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubmitEndpoint"
+          }
+        },
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "launched": {
+          "type": "boolean"
+        },
+        "next_commands": {
+          "description": "Suggested follow-up commands. Empty unless opted in; omitted when empty.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sbatch_stdout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "script_path": {
+          "type": "string"
+        },
+        "submitted": {
+          "type": "boolean"
+        },
+        "tracked_metadata_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tracking_persisted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "backend",
+        "compose_file",
+        "script_path",
+        "cache_dir",
+        "dry_run",
+        "launched",
+        "submitted",
+        "tracking_persisted",
+        "endpoints",
+        "next_commands"
+      ]
+    }
+  }
+}

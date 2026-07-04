@@ -80,7 +80,7 @@ pub(crate) fn command(
         OutputFormat::Text => print_run_report(&report),
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&report)
+            serde_json::to_string_pretty(&crate::output::contract::EvolveOutput::new(report))
                 .context("failed to serialize evolve run output")?
         ),
     }
@@ -394,13 +394,15 @@ fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct LessonListOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct LessonListOutput {
+    pub(crate) schema_version: u32,
     lessons: Vec<LessonDescriptionOutput>,
 }
 
-#[derive(Debug, Serialize)]
-struct LessonDescriptionOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct LessonDescriptionOutput {
+    pub(crate) schema_version: u32,
     id: String,
     title: String,
     description: String,
@@ -408,7 +410,7 @@ struct LessonDescriptionOutput {
     steps: Vec<StepDescriptionOutput>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct StepDescriptionOutput {
     id: String,
     title: String,
@@ -435,6 +437,7 @@ fn print_lesson_list(format: Option<OutputFormat>) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&LessonListOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     lessons: lessons().iter().map(describe_lesson_output).collect(),
                 })
                 .context("failed to serialize evolve lesson list")?
@@ -482,6 +485,7 @@ fn print_lesson_description(lesson: &EvolveLesson, format: Option<OutputFormat>)
 
 fn describe_lesson_output(lesson: &EvolveLesson) -> LessonDescriptionOutput {
     LessonDescriptionOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         id: lesson.id().to_string(),
         title: lesson.title().to_string(),
         description: lesson.description().to_string(),

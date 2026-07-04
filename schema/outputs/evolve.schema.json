@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvolveOutput",
+  "description": "`evolve` optimization run report (`--format json`).",
+  "type": "object",
+  "properties": {
+    "accepted_steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EvolveAcceptedStep"
+      }
+    },
+    "app_name": {
+      "type": "string"
+    },
+    "cache_dir": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "final_step": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lesson_id": {
+      "type": "string"
+    },
+    "lesson_title": {
+      "type": "string"
+    },
+    "next_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "output_path": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "skipped_steps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "lesson_id",
+    "lesson_title",
+    "app_name",
+    "output_path",
+    "accepted_steps",
+    "skipped_steps",
+    "next_commands"
+  ],
+  "$defs": {
+    "EvolveAcceptedStep": {
+      "description": "One accepted evolve step in a run report.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "validation": {
+          "$ref": "#/$defs/EvolveValidationSummary"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "validation"
+      ]
+    },
+    "EvolveValidationSummary": {
+      "description": "Validation facts captured after a candidate step plans successfully.",
+      "type": "object",
+      "properties": {
+        "allocation_nodes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "placement_modes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "service_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "service_count",
+        "services",
+        "allocation_nodes",
+        "placement_modes"
+      ]
+    }
+  }
+}

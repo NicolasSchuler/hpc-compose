@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FabricSmokeJsonOutput",
+  "type": "object",
+  "properties": {
+    "advertised_mpi_types": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SmokeCheckRecord"
+      }
+    },
+    "discovered_mpi_installations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MpiInstallationProfile"
+      }
+    },
+    "expected_ranks": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "host_mpi_bind_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "host_mpi_env": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "profile_warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rendered_srun": {
+      "type": "string"
+    },
+    "requested_mpi_type": {
+      "type": "string"
+    },
+    "result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MpiSmokeSubmitResult"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "script": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "script_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selected_checks": {
+      "type": "string"
+    },
+    "selected_implementation": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selected_mpi_profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "service": {
+      "type": "string"
+    },
+    "submitted": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "service",
+    "requested_mpi_type",
+    "advertised_mpi_types",
+    "discovered_mpi_installations",
+    "profile_warnings",
+    "expected_ranks",
+    "host_mpi_bind_paths",
+    "host_mpi_env",
+    "rendered_srun",
+    "selected_checks",
+    "checks",
+    "submitted"
+  ],
+  "$defs": {
+    "MpiImplementation": {
+      "description": "MPI implementation family used by a service image or host bind path.",
+      "oneOf": [
+        {
+          "description": "Open MPI.",
+          "type": "string",
+          "const": "openmpi"
+        },
+        {
+          "description": "MPICH.",
+          "type": "string",
+          "const": "mpich"
+        },
+        {
+          "description": "Intel MPI.",
+          "type": "string",
+          "const": "intel_mpi"
+        },
+        {
+          "description": "MVAPICH2.",
+          "type": "string",
+          "const": "mvapich2"
+        },
+        {
+          "description": "Cray MPI.",
+          "type": "string",
+          "const": "cray_mpi"
+        },
+        {
+          "description": "HPE MPI.",
+          "type": "string",
+          "const": "hpe_mpi"
+        },
+        {
+          "description": "Implementation is intentionally unspecified.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "MpiInstallationProfile": {
+      "description": "Best-effort MPI installation snapshot discovered from the login-node environment.",
+      "type": "object",
+      "properties": {
+        "bin_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "bind_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "implementation": {
+          "$ref": "#/$defs/MpiImplementation",
+          "default": "unknown"
+        },
+        "lib_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mpi_types": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string",
+          "default": ""
+        },
+        "pmi_library": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "MpiSmokeSubmitResult": {
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SmokeCheckRecord"
+          }
+        },
+        "service_log": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "timed_out": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success",
+        "stdout",
+        "stderr",
+        "checks",
+        "timed_out"
+      ]
+    },
+    "SmokeCheckRecord": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/SmokeCheckStatus"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "stdout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "reason",
+        "stdout",
+        "stderr"
+      ]
+    },
+    "SmokeCheckStatus": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "skipped"
+      ]
+    }
+  }
+}

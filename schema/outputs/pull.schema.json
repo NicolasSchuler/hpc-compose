@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PullOutput",
+  "description": "Machine-readable output for `pull --format json`.",
+  "type": "object",
+  "properties": {
+    "bundles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "cluster_path": {
+      "type": "string"
+    },
+    "files": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "into": {
+      "type": "string"
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "login_host": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "ssh_multiplex_hint": {
+      "type": "string"
+    },
+    "suggested_command": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "bundles",
+    "cluster_path",
+    "into",
+    "files",
+    "bytes",
+    "suggested_command",
+    "ssh_multiplex_hint"
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExamplesListOutput",
+  "description": "`examples list` / `search` / `coverage` JSON output.",
+  "type": "object",
+  "properties": {
+    "examples": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExampleInfo"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "examples"
+  ],
+  "$defs": {
+    "ExampleAvailability": {
+      "description": "How a shipped example can be used.",
+      "oneOf": [
+        {
+          "description": "The example can be rendered by `hpc-compose new --template`.",
+          "type": "string",
+          "const": "built-in-template"
+        },
+        {
+          "description": "The example is a repository YAML file users copy directly.",
+          "type": "string",
+          "const": "repository-file"
+        }
+      ]
+    },
+    "ExampleInfo": {
+      "description": "A shipped runnable example or starter template.",
+      "type": "object",
+      "properties": {
+        "availability": {
+          "description": "Whether `hpc-compose new` can scaffold this example directly.",
+          "$ref": "#/$defs/ExampleAvailability"
+        },
+        "category": {
+          "description": "Broad workflow category used for grouping.",
+          "type": "string"
+        },
+        "demonstrates": {
+          "description": "Short description of the feature or workflow demonstrated.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Stable example id without the `.yaml` suffix.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Repository path to the YAML file.",
+          "type": "string"
+        },
+        "start_when": {
+          "description": "User-facing guidance for when this is a good starting point.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Searchable tags.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "availability",
+        "category",
+        "demonstrates",
+        "start_when",
+        "tags"
+      ]
+    }
+  }
+}

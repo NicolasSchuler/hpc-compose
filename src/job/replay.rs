@@ -7,7 +7,7 @@ const REPLAY_FIDELITY: &str = "best-effort";
 
 /// Reconstructed best-effort replay timeline for one tracked job.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ReplayReport {
     pub job_id: String,
     pub record: SubmissionRecord,
@@ -22,7 +22,7 @@ pub struct ReplayReport {
 
 /// Runtime artifact paths consulted by replay.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
 pub struct ReplayArtifactPaths {
     pub runtime_roots: Vec<PathBuf>,
     pub state_paths: Vec<PathBuf>,
@@ -33,7 +33,7 @@ pub struct ReplayArtifactPaths {
 
 /// One point on the reconstructed replay timeline.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ReplayEvent {
     pub at_unix: u64,
     pub attempt: Option<u32>,
@@ -45,7 +45,7 @@ pub struct ReplayEvent {
 
 /// Timeline event categories used for stable ordering.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayEventKind {
     AttemptStart,
@@ -57,7 +57,7 @@ pub enum ReplayEventKind {
 
 /// One renderable watch-style frame at a replay event boundary.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ReplayFrame {
     pub cursor_unix: u64,
     pub event_index: usize,
@@ -71,7 +71,7 @@ pub struct ReplayFrame {
 
 /// Reconstructed service state for one replay frame.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ReplayServiceFrame {
     pub service_name: String,
     pub status: String,

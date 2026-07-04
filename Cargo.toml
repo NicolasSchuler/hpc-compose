@@ -47,6 +47,7 @@ libc = "0.2.186"
 miette = { version = "7", features = ["fancy"] }
 owo-colors = "4"
 regex = "1"
+schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_norway = "0.9.42"

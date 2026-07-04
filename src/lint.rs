@@ -12,7 +12,7 @@ const LOW_MEMORY_PER_CPU_BYTES: u64 = 512 * 1_024 * 1_024;
 const HIGH_MEMORY_PER_CPU_BYTES: u64 = 512 * 1_024 * 1_024 * 1_024;
 
 /// Severity for a lint finding.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LintLevel {
     /// Advisory finding that is worth reviewing.
@@ -26,7 +26,7 @@ pub enum LintLevel {
 ///
 /// Only findings whose fix is deterministic and semantics-preserving carry a
 /// [`SuggestedFix`]; everything else stays advisory.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SuggestedFix {
     /// Rewrite a `depends_on` edge so its condition is explicit instead of
@@ -42,7 +42,7 @@ pub enum SuggestedFix {
 }
 
 /// One stable lint finding emitted by `hpc-compose lint`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct LintFinding {
     /// Finding severity.
     pub level: LintLevel,

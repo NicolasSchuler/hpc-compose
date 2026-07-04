@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SetupOutput",
+  "type": "object",
+  "properties": {
+    "binaries": {
+      "$ref": "#/$defs/BinaryOverrides"
+    },
+    "cache_dir": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "compose_file": {
+      "type": "string"
+    },
+    "default_profile": {
+      "type": "string"
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "env_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "login_host": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "login_user": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profile": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "settings_path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "settings_path",
+    "profile",
+    "default_profile",
+    "compose_file",
+    "env_files",
+    "env",
+    "binaries"
+  ],
+  "$defs": {
+    "BinaryOverrides": {
+      "description": "Binary override settings.",
+      "type": "object",
+      "properties": {
+        "apptainer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "enroot": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rsync": {
+          "description": "Path to `rsync`, used by `up --remote` to mirror the project to the login\nnode. Defaults to `rsync` on `PATH`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sacct": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "salloc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sbatch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scancel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scontrol": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sinfo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "singularity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sprio": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "squeue": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "srun": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "ssh": {
+          "description": "Path to the `ssh` client used by the `up --remote` / follow-up delegation\npath (mkdir, probe, install, delegate) and the `reach --open` forward.\nDefaults to `ssh` on `PATH`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sshare": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sstat": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

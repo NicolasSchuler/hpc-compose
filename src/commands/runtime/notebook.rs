@@ -274,8 +274,10 @@ pub fn jupyter_tunnel_hint(
 /// Mirrors the human-readable output. `compute_node` and `login_host` are the
 /// resolved hosts used to render the tunnel hint; they are descriptive only —
 /// nothing here opens a connection.
-#[derive(Debug, Clone, Serialize)]
-pub struct NotebookConnectionOutput {
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub(crate) struct NotebookConnectionOutput {
+    /// Version of this output document's schema.
+    pub(crate) schema_version: u32,
     /// The URL to open (localhost for Jupyter, scraped link for VS Code).
     pub url: String,
     /// SSH tunnel hint, when one is needed.
@@ -304,6 +306,7 @@ pub fn build_connection_output(
 ) -> NotebookConnectionOutput {
     let file = file.display();
     NotebookConnectionOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         url: connection.url.clone(),
         tunnel_hint: connection.tunnel_hint.clone(),
         compute_node: compute_node.map(str::to_string),

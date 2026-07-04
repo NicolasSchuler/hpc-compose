@@ -1,0 +1,2443 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RuntimePlan",
+  "description": "A plan with concrete runtime image paths for every service.",
+  "type": "object",
+  "properties": {
+    "cache_dir": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "ordered_services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RuntimeService"
+      }
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeConfig"
+    },
+    "slurm": {
+      "$ref": "#/$defs/SlurmConfig"
+    }
+  },
+  "required": [
+    "name",
+    "cache_dir",
+    "runtime",
+    "slurm",
+    "ordered_services"
+  ],
+  "$defs": {
+    "ArtifactBundleSpec": {
+      "description": "Named artifact bundle under `x-slurm.artifacts.bundles`.",
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArtifactCollectPolicy": {
+      "description": "Artifact collection policy applied during batch teardown.",
+      "oneOf": [
+        {
+          "description": "Export artifacts after every job.",
+          "type": "string",
+          "const": "always"
+        },
+        {
+          "description": "Export artifacts only for successful jobs.",
+          "type": "string",
+          "const": "on_success"
+        },
+        {
+          "description": "Export artifacts only for failed jobs.",
+          "type": "string",
+          "const": "on_failure"
+        }
+      ]
+    },
+    "ArtifactsConfig": {
+      "description": "Top-level `x-slurm.artifacts` configuration.",
+      "type": "object",
+      "properties": {
+        "bundles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ArtifactBundleSpec"
+          },
+          "default": {}
+        },
+        "collect": {
+          "$ref": "#/$defs/ArtifactCollectPolicy",
+          "default": "always"
+        },
+        "export_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "BurstBufferConfig": {
+      "description": "Raw site-specific burst-buffer directives emitted into the batch script.",
+      "type": "object",
+      "properties": {
+        "directives": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CleanupConfig": {
+      "description": "Top-level `x-slurm.cleanup` configuration.",
+      "type": "object",
+      "properties": {
+        "runtime_cache": {
+          "$ref": "#/$defs/RuntimeCacheCleanupPolicy",
+          "default": "never"
+        }
+      },
+      "additionalProperties": false
+    },
+    "DependencyCondition": {
+      "description": "Normalized dependency conditions understood by the planner.",
+      "oneOf": [
+        {
+          "description": "Wait only until the upstream service is started.",
+          "type": "string",
+          "const": "service_started"
+        },
+        {
+          "description": "Wait until the upstream service reports readiness.",
+          "type": "string",
+          "const": "service_healthy"
+        },
+        {
+          "description": "Wait until the upstream service exits successfully.",
+          "type": "string",
+          "const": "service_completed_successfully"
+        }
+      ]
+    },
+    "EmailNotifyConfig": {
+      "description": "First-class Slurm email notification configuration.",
+      "type": "object",
+      "properties": {
+        "on": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NotifyEvent"
+          }
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "to"
+      ]
+    },
+    "EnvironmentSpec": {
+      "description": "Accepted environment syntaxes for service or prepare environments.",
+      "anyOf": [
+        {
+          "description": "No environment variables were declared.",
+          "type": "null"
+        },
+        {
+          "description": "Mapping form such as `{ FOO: bar }`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "List form such as `[\"FOO=bar\"]`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "ExecutionSpec": {
+      "description": "The final command form passed to the runtime container.",
+      "oneOf": [
+        {
+          "description": "Use the image's default entrypoint and command.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "image_default"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Run a shell-form command.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "Run an exec-form argv vector.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "exec"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "HfStageKind": {
+      "description": "Whether an `hf://` stage-in source is a model or a dataset.",
+      "oneOf": [
+        {
+          "description": "A model repository (no `--repo-type`).",
+          "type": "string",
+          "const": "model"
+        },
+        {
+          "description": "A dataset repository (`--repo-type dataset`).",
+          "type": "string",
+          "const": "dataset"
+        }
+      ]
+    },
+    "HfStageSource": {
+      "description": "A typed HuggingFace stage-in source.\n\nThe download runs cluster-side inside the Slurm allocation (the compute node\nhas network); hpc-compose never downloads on the laptop or over SSH. The\n`revision` must be an immutable pin (commit SHA or explicit immutable tag);\nfloating refs are rejected at validation time.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/HfStageKind",
+          "default": "model"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "revision"
+      ]
+    },
+    "HostMpiConfig": {
+      "description": "Host MPI installation bindings injected into a containerized MPI service.",
+      "type": "object",
+      "properties": {
+        "bind_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "$ref": "#/$defs/EnvironmentSpec"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ImageSource": {
+      "description": "Where a service image comes from after normalization.",
+      "oneOf": [
+        {
+          "description": "A local `.sqsh` or `.squashfs` file used directly at runtime.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "local_sqsh"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A local Apptainer/Singularity `.sif` file used directly at runtime.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "local_sif"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A remote image reference imported through Enroot.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "remote"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "No container image because the service runs on the host runtime.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "host"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "JobDependency": {
+      "description": "Slurm job dependency mapping form.",
+      "type": "object",
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobDependencyCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ]
+    },
+    "JobDependencyCondition": {
+      "description": "Slurm job dependency condition for id-based dependencies.",
+      "oneOf": [
+        {
+          "description": "Start after the target job terminates in any state.",
+          "type": "string",
+          "const": "afterany"
+        },
+        {
+          "description": "Start after the target job succeeds.",
+          "type": "string",
+          "const": "afterok"
+        },
+        {
+          "description": "Start after the target job fails.",
+          "type": "string",
+          "const": "afternotok"
+        }
+      ]
+    },
+    "JobDependencyMode": {
+      "description": "Slurm dependency mode that does not require an explicit job id.",
+      "oneOf": [
+        {
+          "description": "Slurm singleton dependency.",
+          "type": "string",
+          "const": "singleton"
+        }
+      ]
+    },
+    "JobDependencySpec": {
+      "description": "Accepted `x-slurm.after_job` syntaxes.",
+      "anyOf": [
+        {
+          "description": "Shorthand job id form, equivalent to `afterany:<id>`.",
+          "type": "string"
+        },
+        {
+          "description": "Mapping form with an explicit condition.",
+          "$ref": "#/$defs/JobDependency"
+        }
+      ]
+    },
+    "MetricsCollector": {
+      "description": "Runtime metrics collector supported by the job sampler.",
+      "oneOf": [
+        {
+          "description": "Collect GPU telemetry through `nvidia-smi`.",
+          "type": "string",
+          "const": "gpu"
+        },
+        {
+          "description": "Collect Slurm step metrics through `sstat`.",
+          "type": "string",
+          "const": "slurm"
+        },
+        {
+          "description": "Collect sampled host CPU utilization through `/proc/stat`.",
+          "type": "string",
+          "const": "cpu"
+        }
+      ]
+    },
+    "MetricsConfig": {
+      "description": "Top-level `x-slurm.metrics` configuration.",
+      "type": "object",
+      "properties": {
+        "collectors": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MetricsCollector"
+          }
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "interval_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MpiConfig": {
+      "description": "First-class MPI launch configuration for one service step.",
+      "type": "object",
+      "properties": {
+        "expected_ranks": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "host_mpi": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostMpiConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "implementation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MpiImplementation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "launcher": {
+          "$ref": "#/$defs/MpiLauncher"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MpiProfile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "$ref": "#/$defs/MpiType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
+    },
+    "MpiImplementation": {
+      "description": "MPI implementation family used by a service image or host bind path.",
+      "oneOf": [
+        {
+          "description": "Open MPI.",
+          "type": "string",
+          "const": "openmpi"
+        },
+        {
+          "description": "MPICH.",
+          "type": "string",
+          "const": "mpich"
+        },
+        {
+          "description": "Intel MPI.",
+          "type": "string",
+          "const": "intel_mpi"
+        },
+        {
+          "description": "MVAPICH2.",
+          "type": "string",
+          "const": "mvapich2"
+        },
+        {
+          "description": "Cray MPI.",
+          "type": "string",
+          "const": "cray_mpi"
+        },
+        {
+          "description": "HPE MPI.",
+          "type": "string",
+          "const": "hpe_mpi"
+        },
+        {
+          "description": "Implementation is intentionally unspecified.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "MpiLauncher": {
+      "description": "MPI process launcher selected for the service.",
+      "oneOf": [
+        {
+          "description": "Slurm launches ranks directly with `srun --mpi=...`.",
+          "type": "string",
+          "const": "srun"
+        }
+      ]
+    },
+    "MpiProfile": {
+      "description": "MPI compatibility profile used for validation and diagnostics.",
+      "oneOf": [
+        {
+          "description": "Open MPI with Slurm PMI/PMIx launch.",
+          "type": "string",
+          "const": "openmpi"
+        },
+        {
+          "description": "MPICH with Slurm PMI/PMIx launch.",
+          "type": "string",
+          "const": "mpich"
+        },
+        {
+          "description": "Intel MPI with Slurm PMI-2 launch.",
+          "type": "string",
+          "const": "intel_mpi"
+        }
+      ]
+    },
+    "MpiType": {
+      "description": "Slurm MPI plugin type used for `srun --mpi=<type>`.",
+      "type": "string"
+    },
+    "NotifyConfig": {
+      "description": "Top-level `x-slurm.notify` configuration.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmailNotifyConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "NotifyEvent": {
+      "description": "Email lifecycle events supported by Slurm mail hooks.",
+      "oneOf": [
+        {
+          "description": "Send mail when the job begins executing.",
+          "type": "string",
+          "const": "start"
+        },
+        {
+          "description": "Send mail when the job completes.",
+          "type": "string",
+          "const": "end"
+        },
+        {
+          "description": "Send mail when the job fails.",
+          "type": "string",
+          "const": "fail"
+        },
+        {
+          "description": "Send mail when the job is requeued.",
+          "type": "string",
+          "const": "requeue"
+        },
+        {
+          "description": "Send mail when the job cannot start due to an invalid dependency.",
+          "type": "string",
+          "const": "invalid_depend"
+        },
+        {
+          "description": "Send mail when burst-buffer stage-out completes.",
+          "type": "string",
+          "const": "stage_out"
+        },
+        {
+          "description": "Send mail when the job reaches its time limit.",
+          "type": "string",
+          "const": "time_limit"
+        },
+        {
+          "description": "Send mail when the job reaches 90% of its time limit.",
+          "type": "string",
+          "const": "time_limit_90"
+        },
+        {
+          "description": "Send mail when the job reaches 80% of its time limit.",
+          "type": "string",
+          "const": "time_limit_80"
+        },
+        {
+          "description": "Send mail when the job reaches 50% of its time limit.",
+          "type": "string",
+          "const": "time_limit_50"
+        },
+        {
+          "description": "Send mail once per array task (a modifier; requires `x-slurm.array`).",
+          "type": "string",
+          "const": "array_tasks"
+        },
+        {
+          "description": "Use Slurm's `ALL` shorthand.",
+          "type": "string",
+          "const": "all"
+        }
+      ]
+    },
+    "ParallelismConfig": {
+      "description": "Descriptive tensor/pipeline parallelism geometry for one Slurm scope.\n\nThis is advisory metadata only. It emits no `#SBATCH`/`srun` flag and does\nnot change allocation or placement; it surfaces as the\n`HPC_COMPOSE_TP_SIZE`/`HPC_COMPOSE_PP_SIZE` launch-environment variables and\nis cross-checked against `gpus_per_node` at validation time.",
+      "type": "object",
+      "properties": {
+        "pipeline": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tensor": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tensor",
+        "pipeline"
+      ]
+    },
+    "PreparedImageSpec": {
+      "description": "A normalized image prepare block attached to a service.",
+      "type": "object",
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "force_rebuild": {
+          "type": "boolean"
+        },
+        "mounts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "root": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "commands",
+        "mounts",
+        "env",
+        "root",
+        "force_rebuild"
+      ]
+    },
+    "ReadinessSpec": {
+      "description": "Readiness checks supported by `hpc-compose`.",
+      "oneOf": [
+        {
+          "description": "Wait for a fixed amount of time.",
+          "type": "object",
+          "properties": {
+            "seconds": {
+              "description": "Number of seconds to sleep.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "sleep"
+            }
+          },
+          "required": [
+            "type",
+            "seconds"
+          ]
+        },
+        {
+          "description": "Poll a TCP port.",
+          "type": "object",
+          "properties": {
+            "host": {
+              "description": "Optional host; defaults to localhost inside the job.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "port": {
+              "description": "Port to connect to.",
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "timeout_seconds": {
+              "description": "Optional readiness timeout.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "default": null,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "tcp"
+            }
+          },
+          "required": [
+            "type",
+            "port"
+          ]
+        },
+        {
+          "description": "Wait until a pattern appears in the service log.",
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "description": "Literal pattern to look for in the log.",
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "description": "Optional readiness timeout.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "default": null,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "log"
+            }
+          },
+          "required": [
+            "type",
+            "pattern"
+          ]
+        },
+        {
+          "description": "Poll an HTTP endpoint.",
+          "type": "object",
+          "properties": {
+            "status_code": {
+              "description": "Expected success status code.",
+              "type": "integer",
+              "format": "uint16",
+              "default": 200,
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "timeout_seconds": {
+              "description": "Optional readiness timeout.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "default": null,
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "http"
+            },
+            "url": {
+              "description": "URL to request.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ]
+        }
+      ]
+    },
+    "RendezvousClientConfig": {
+      "description": "Top-level client-side cross-job rendezvous discovery config.",
+      "type": "object",
+      "properties": {
+        "discover": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "require": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "discover"
+      ]
+    },
+    "RendezvousRegisterConfig": {
+      "description": "Service registration written under `<cache_dir>/rendezvous/<name>/`.",
+      "type": "object",
+      "properties": {
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "protocol": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "ttl_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "port"
+      ]
+    },
+    "ResumeConfig": {
+      "description": "Top-level `x-slurm.resume` configuration.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "RuntimeBackend": {
+      "description": "Runtime backend used to launch each service inside a Slurm step.",
+      "oneOf": [
+        {
+          "description": "Pyxis/Enroot through Slurm `srun --container-*` flags.",
+          "type": "string",
+          "const": "pyxis"
+        },
+        {
+          "description": "Apptainer SIF images launched through `apptainer exec/run`.",
+          "type": "string",
+          "const": "apptainer"
+        },
+        {
+          "description": "Singularity SIF images launched through `singularity exec/run`.",
+          "type": "string",
+          "const": "singularity"
+        },
+        {
+          "description": "Host runtime without a container image.",
+          "type": "string",
+          "const": "host"
+        }
+      ]
+    },
+    "RuntimeCacheCleanupPolicy": {
+      "description": "Per-job runtime-cache cleanup policy applied in the batch teardown trap.\n\nControls whether the rendered `cleanup` trap removes the per-job enroot\nruntime dirs (`$ENROOT_CACHE_PATH`/`$ENROOT_DATA_PATH`/`$ENROOT_TEMP_PATH`,\nnamespaced by `${SLURM_JOB_ID}`). Defaults to `Never` because\ncancelled/crashed jobs never run the trap; host-side `clean`/`down` reaping\nis the authoritative reclaimer.",
+      "oneOf": [
+        {
+          "description": "Leave the per-job runtime cache for host-side reaping (default).",
+          "type": "string",
+          "const": "never"
+        },
+        {
+          "description": "Remove the per-job runtime cache only when the job exits successfully.",
+          "type": "string",
+          "const": "on_success"
+        },
+        {
+          "description": "Remove the per-job runtime cache on every trap-reached exit path.",
+          "type": "string",
+          "const": "always"
+        }
+      ]
+    },
+    "RuntimeConfig": {
+      "description": "Top-level runtime backend configuration.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/RuntimeBackend",
+          "default": "pyxis"
+        },
+        "gpu": {
+          "$ref": "#/$defs/RuntimeGpuPolicy",
+          "default": "auto"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeGpuPolicy": {
+      "description": "GPU passthrough policy for container backends that need an explicit flag.",
+      "oneOf": [
+        {
+          "description": "Enable backend GPU passthrough when the job or service requests GPUs.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Do not add backend GPU passthrough flags.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Always use NVIDIA GPU passthrough flags for supported backends.",
+          "type": "string",
+          "const": "nvidia"
+        }
+      ]
+    },
+    "RuntimeService": {
+      "description": "A runtime-ready service entry with resolved image artifact paths.",
+      "type": "object",
+      "properties": {
+        "assertions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceAssertSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServiceDependency"
+          }
+        },
+        "environment": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "execution": {
+          "$ref": "#/$defs/ExecutionSpec"
+        },
+        "failure_policy": {
+          "$ref": "#/$defs/ServiceFailurePolicy"
+        },
+        "name": {
+          "type": "string"
+        },
+        "placement": {
+          "$ref": "#/$defs/ServicePlacement"
+        },
+        "prepare": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreparedImageSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReadinessSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_image": {
+          "type": "string"
+        },
+        "slurm": {
+          "$ref": "#/$defs/ServiceSlurmConfig"
+        },
+        "source": {
+          "$ref": "#/$defs/ImageSource"
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "working_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "runtime_image",
+        "execution",
+        "environment",
+        "volumes",
+        "depends_on",
+        "failure_policy",
+        "placement",
+        "slurm",
+        "source"
+      ]
+    },
+    "ScratchCleanupPolicy": {
+      "description": "Scratch cleanup policy during batch teardown.",
+      "oneOf": [
+        {
+          "description": "Remove scratch on every exit path after stage-out.",
+          "type": "string",
+          "const": "always"
+        },
+        {
+          "description": "Remove scratch only when the job exits successfully.",
+          "type": "string",
+          "const": "on_success"
+        },
+        {
+          "description": "Leave scratch behind for manual inspection or site cleanup.",
+          "type": "string",
+          "const": "never"
+        }
+      ]
+    },
+    "ScratchConfig": {
+      "description": "Top-level scratch configuration.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "type": "string"
+        },
+        "cleanup": {
+          "$ref": "#/$defs/ScratchCleanupPolicy",
+          "default": "always"
+        },
+        "mount": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/ScratchScope",
+          "default": "node_local"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "base",
+        "mount"
+      ]
+    },
+    "ScratchScope": {
+      "description": "Scratch storage scope requested for a job.",
+      "oneOf": [
+        {
+          "description": "Shared scratch path visible across all allocation nodes.",
+          "type": "string",
+          "const": "shared"
+        },
+        {
+          "description": "Node-local scratch path on each allocated node.",
+          "type": "string",
+          "const": "node_local"
+        }
+      ]
+    },
+    "ServiceAssertSpec": {
+      "description": "Per-service post-run assertion contract.",
+      "type": "object",
+      "properties": {
+        "artifacts_contain": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "max_duration_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServiceDependency": {
+      "description": "A normalized service dependency edge.",
+      "type": "object",
+      "properties": {
+        "condition": {
+          "$ref": "#/$defs/DependencyCondition"
+        },
+        "implicit": {
+          "description": "`true` when the author omitted the condition (list-form `depends_on` or\nmapping form without an explicit `condition:` key). Lint uses this to\nrecommend making the implicit `service_started` default explicit.",
+          "type": "boolean",
+          "default": false
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "condition"
+      ]
+    },
+    "ServiceEventHookSpec": {
+      "description": "Per-service failure-policy event hook.",
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/ServiceHookContext",
+          "default": "host"
+        },
+        "on": {
+          "$ref": "#/$defs/ServiceHookEvent"
+        },
+        "script": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "on",
+        "script"
+      ]
+    },
+    "ServiceFailureMode": {
+      "description": "Per-service failure mode inside a single batch job.",
+      "oneOf": [
+        {
+          "description": "Any non-zero service exit fails the whole job.",
+          "type": "string",
+          "const": "fail_job"
+        },
+        {
+          "description": "Non-zero exits are recorded but do not fail the whole job.",
+          "type": "string",
+          "const": "ignore"
+        },
+        {
+          "description": "Non-zero exits trigger bounded restarts before failing the job.",
+          "type": "string",
+          "const": "restart_on_failure"
+        }
+      ]
+    },
+    "ServiceFailurePolicy": {
+      "description": "Normalized per-service failure policy with defaults resolved.",
+      "type": "object",
+      "properties": {
+        "backoff_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_restarts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_restarts_in_window": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mode": {
+          "$ref": "#/$defs/ServiceFailureMode"
+        },
+        "window_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "mode",
+        "max_restarts",
+        "backoff_seconds",
+        "window_seconds",
+        "max_restarts_in_window"
+      ]
+    },
+    "ServiceFailurePolicySpec": {
+      "description": "Raw per-service failure policy declaration under `x-slurm.failure_policy`.",
+      "type": "object",
+      "properties": {
+        "backoff_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "max_restarts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "max_restarts_in_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "mode": {
+          "$ref": "#/$defs/ServiceFailureMode",
+          "default": "fail_job"
+        },
+        "window_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServiceHookContext": {
+      "description": "Where a per-service hook runs.",
+      "oneOf": [
+        {
+          "description": "Run the hook in the generated batch-script supervisor on the host.",
+          "type": "string",
+          "const": "host"
+        },
+        {
+          "description": "Run the hook inside the service container.",
+          "type": "string",
+          "const": "container"
+        }
+      ]
+    },
+    "ServiceHookEvent": {
+      "description": "Event emitted by the service failure-policy supervisor.",
+      "oneOf": [
+        {
+          "description": "A failed service is about to be relaunched by `restart_on_failure`.",
+          "type": "string",
+          "const": "restart"
+        },
+        {
+          "description": "A failed service exceeded the rolling restart-window guard.",
+          "type": "string",
+          "const": "window_exhausted"
+        }
+      ]
+    },
+    "ServiceHookSpec": {
+      "description": "Per-service prologue or epilogue hook.\n\nYAML accepts either a string shorthand, which defaults to host execution, or\nan object with explicit `context` and `script` fields.",
+      "type": "object",
+      "properties": {
+        "context": {
+          "description": "Execution context for this hook.",
+          "$ref": "#/$defs/ServiceHookContext"
+        },
+        "script": {
+          "description": "Shell script body to run for this hook.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "context",
+        "script"
+      ]
+    },
+    "ServicePlacement": {
+      "description": "The effective `srun` placement geometry for one service.",
+      "type": "object",
+      "properties": {
+        "allow_overlap": {
+          "description": "Whether this step is allowed to overlap another service placement.",
+          "type": "boolean"
+        },
+        "exclude_indices": {
+          "description": "Zero-based allocation node indices excluded from this step.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "mode": {
+          "description": "Placement mode used for this service.",
+          "$ref": "#/$defs/ServicePlacementMode"
+        },
+        "node_indices": {
+          "description": "Zero-based allocation node indices selected for this step when known.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "nodes": {
+          "description": "Number of nodes requested for the step.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ntasks": {
+          "description": "Explicit task count for the step when one is requested.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ntasks_per_node": {
+          "description": "Explicit tasks-per-node count for the step when one is requested.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pin_to_primary_node": {
+          "description": "Whether this step should be pinned to the primary node.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode",
+        "nodes",
+        "pin_to_primary_node",
+        "exclude_indices",
+        "allow_overlap"
+      ]
+    },
+    "ServicePlacementMode": {
+      "description": "Service placement mode inside one Slurm allocation.",
+      "oneOf": [
+        {
+          "description": "The service is pinned to the allocation's primary node.",
+          "type": "string",
+          "const": "primary_node"
+        },
+        {
+          "description": "The service is pinned to an explicit subset of allocation nodes.",
+          "type": "string",
+          "const": "partitioned"
+        },
+        {
+          "description": "The service spans the full allocation.",
+          "type": "string",
+          "const": "distributed"
+        }
+      ]
+    },
+    "ServicePlacementSpec": {
+      "description": "First-class service placement selector inside one Slurm allocation.",
+      "type": "object",
+      "properties": {
+        "allow_overlap": {
+          "type": "boolean",
+          "default": false
+        },
+        "exclude": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "node_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "node_percent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "node_range": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "share_with": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "start_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServiceRendezvousConfig": {
+      "description": "Per-service provider-side rendezvous config.",
+      "type": "object",
+      "properties": {
+        "register": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RendezvousRegisterConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServiceScratchConfig": {
+      "description": "Per-service scratch mount override.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServiceSlurmConfig": {
+      "description": "Per-service `x-slurm` overrides.",
+      "type": "object",
+      "properties": {
+        "cpu_bind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cpus_per_gpu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "cpus_per_task": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "distribution": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "epilogue": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceHookSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "extra_srun_args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "failure_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceFailurePolicySpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gpu_bind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "gpus": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "gpus_per_node": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "gpus_per_task": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "gres": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "hooks": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ServiceEventHookSpec"
+          }
+        },
+        "mem_bind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mem_per_gpu": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mpi": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MpiConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nodes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "ntasks": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "ntasks_per_node": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "parallelism": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParallelismConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServicePlacementSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "prologue": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceHookSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rendezvous": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceRendezvousConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scratch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceScratchConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "time_limit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "SignalConfig": {
+      "description": "First-class Slurm `--signal` early-warning configuration.",
+      "type": "object",
+      "properties": {
+        "at_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "name": {
+          "$ref": "#/$defs/SignalName"
+        },
+        "shell": {
+          "$ref": "#/$defs/SignalShellTarget",
+          "default": "step"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "at_seconds"
+      ]
+    },
+    "SignalName": {
+      "description": "POSIX signal that Slurm's `--signal` may deliver to a job before its time\nlimit, restricted to the safe early-warning set.",
+      "oneOf": [
+        {
+          "description": "`SIGHUP` (1).",
+          "type": "string",
+          "const": "HUP"
+        },
+        {
+          "description": "`SIGINT` (2).",
+          "type": "string",
+          "const": "INT"
+        },
+        {
+          "description": "`SIGQUIT` (3).",
+          "type": "string",
+          "const": "QUIT"
+        },
+        {
+          "description": "`SIGUSR1` (10) — the conventional checkpoint/preemption signal.",
+          "type": "string",
+          "const": "USR1"
+        },
+        {
+          "description": "`SIGUSR2` (12).",
+          "type": "string",
+          "const": "USR2"
+        },
+        {
+          "description": "`SIGTERM` (15).",
+          "type": "string",
+          "const": "TERM"
+        }
+      ]
+    },
+    "SignalShellTarget": {
+      "description": "Which process the `--signal` reaches.",
+      "oneOf": [
+        {
+          "description": "Deliver straight to each service's job step (no directive prefix). The\napplication handles the signal itself; no trap is rendered.",
+          "type": "string",
+          "const": "step"
+        },
+        {
+          "description": "Deliver only to the batch shell (`B:` prefix); a non-exiting forwarding\ntrap relays the signal to the running services.",
+          "type": "string",
+          "const": "batch"
+        }
+      ]
+    },
+    "SlurmConfig": {
+      "description": "Top-level `x-slurm` configuration shared by all services.",
+      "type": "object",
+      "properties": {
+        "account": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "after_job": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobDependencySpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "array": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "artifacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "burst_buffer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BurstBufferConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cache_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "chdir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cleanup": {
+          "$ref": "#/$defs/CleanupConfig",
+          "default": {
+            "runtime_cache": "never"
+          }
+        },
+        "constraint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cpu_bind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cpus_per_gpu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "cpus_per_task": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "dependency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobDependencyMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "distribution": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "enroot_temp_dir": {
+          "description": "Optional override for enroot's prepare-time temporary extraction scratch\ndirectory (`ENROOT_TEMP_PATH`), separate from the persistent\n[`Self::cache_dir`]. Point it at fast node-local storage (e.g.\n`/tmp/${USER}-hpc-compose-enroot`) when the shared cache filesystem causes\n`Stale file handle` errors during image import; the final image and layer\ncache still live under `cache_dir`. Interpolated; defaults to\n`<cache_dir>/enroot/tmp` when unset.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "gpu_bind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "gpus": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "gpus_per_node": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "gpus_per_task": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "gres": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "job_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "licenses": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mem": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mem_bind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mem_per_gpu": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MetricsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nodes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "notify": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotifyConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ntasks": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "ntasks_per_node": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "output": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "parallelism": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParallelismConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "partition": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "qos": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rendezvous": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RendezvousClientConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "requeue": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "reservation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "resources": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "resume": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResumeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "runtime_root": {
+          "description": "Optional override for the directory that holds per-job runtime state\n(`<runtime_root>/<job_id>/{logs,metrics,state.json,artifacts}`). Defaults\nto `<submit_dir>/.hpc-compose`. Relative values resolve against the submit\ndirectory. Must be visible from both login and compute nodes.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scratch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScratchConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "setup": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "signal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignalConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stage_in": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StageInConfig"
+          }
+        },
+        "stage_out": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StageOutConfig"
+          }
+        },
+        "submit_args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "time": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "StageInConfig": {
+      "description": "Stage-in path mapping run before service launch.\n\nEither a filesystem `from` path or a typed `hf://` source (`hf`) is staged\ninto `to`; exactly one of the two must be set.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hf": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HfStageSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/StageMode",
+          "default": "rsync"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "to"
+      ]
+    },
+    "StageMode": {
+      "description": "File transfer implementation for stage-in and stage-out.",
+      "oneOf": [
+        {
+          "description": "Use `rsync -a`.",
+          "type": "string",
+          "const": "rsync"
+        },
+        {
+          "description": "Use portable `cp -R`/`cp`.",
+          "type": "string",
+          "const": "copy"
+        }
+      ]
+    },
+    "StageOutConfig": {
+      "description": "Stage-out path mapping run during batch teardown.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/StageMode",
+          "default": "rsync"
+        },
+        "to": {
+          "type": "string"
+        },
+        "when": {
+          "$ref": "#/$defs/StageOutWhen",
+          "default": "always"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "StageOutWhen": {
+      "description": "Stage-out policy for one path mapping.",
+      "oneOf": [
+        {
+          "description": "Stage out on every exit path.",
+          "type": "string",
+          "const": "always"
+        },
+        {
+          "description": "Stage out only when the job exits successfully.",
+          "type": "string",
+          "const": "on_success"
+        },
+        {
+          "description": "Stage out only when the job fails.",
+          "type": "string",
+          "const": "on_failure"
+        }
+      ]
+    }
+  }
+}

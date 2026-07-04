@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExamplesRecommendOutput",
+  "description": "`examples recommend` JSON output.",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExampleRecommendation"
+      }
+    },
+    "required_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "safe_authoring_note": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "required_tags",
+    "safe_authoring_note",
+    "recommendations"
+  ],
+  "$defs": {
+    "ExampleAvailability": {
+      "description": "How a shipped example can be used.",
+      "oneOf": [
+        {
+          "description": "The example can be rendered by `hpc-compose new --template`.",
+          "type": "string",
+          "const": "built-in-template"
+        },
+        {
+          "description": "The example is a repository YAML file users copy directly.",
+          "type": "string",
+          "const": "repository-file"
+        }
+      ]
+    },
+    "ExampleInfo": {
+      "description": "A shipped runnable example or starter template.",
+      "type": "object",
+      "properties": {
+        "availability": {
+          "description": "Whether `hpc-compose new` can scaffold this example directly.",
+          "$ref": "#/$defs/ExampleAvailability"
+        },
+        "category": {
+          "description": "Broad workflow category used for grouping.",
+          "type": "string"
+        },
+        "demonstrates": {
+          "description": "Short description of the feature or workflow demonstrated.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Stable example id without the `.yaml` suffix.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Repository path to the YAML file.",
+          "type": "string"
+        },
+        "start_when": {
+          "description": "User-facing guidance for when this is a good starting point.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Searchable tags.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "availability",
+        "category",
+        "demonstrates",
+        "start_when",
+        "tags"
+      ]
+    },
+    "ExampleRecommendation": {
+      "description": "A ranked example recommendation with the explanation and safe next commands.",
+      "type": "object",
+      "properties": {
+        "example": {
+          "description": "Existing registry metadata for the recommended example.",
+          "$ref": "#/$defs/ExampleInfo"
+        },
+        "next_commands": {
+          "description": "Commands that stay in the safe authoring path and do not submit to Slurm.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prerequisites": {
+          "description": "Static prerequisites to review before moving from authoring to a real run.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reasons": {
+          "description": "Human-readable reasons this example matched the request.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "score": {
+          "description": "Relative score used only to sort recommendations.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "example",
+        "score",
+        "reasons",
+        "prerequisites",
+        "next_commands"
+      ]
+    }
+  }
+}

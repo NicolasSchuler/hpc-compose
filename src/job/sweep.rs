@@ -44,7 +44,7 @@ pub struct SweepExpansion {
 
 /// Persisted sweep run metadata.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SweepManifest {
     pub schema_version: u32,
     pub sweep_id: String,
@@ -69,7 +69,7 @@ pub struct SweepManifest {
 
 /// Persisted metadata for one sweep trial.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SweepManifestTrial {
     pub trial_id: String,
     pub index: usize,

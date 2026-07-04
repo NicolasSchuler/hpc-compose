@@ -27,7 +27,7 @@ const DEFAULT_RDZV_PORT_SPAN: u16 = 1_000;
 
 /// Complete generated cluster profile.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClusterProfile {
     #[serde(default = "default_schema_version")]
@@ -70,7 +70,7 @@ pub struct ClusterProfile {
 
 /// Best-effort MPI installation snapshot discovered from the login-node environment.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MpiInstallationProfile {
     #[serde(default)]
@@ -95,7 +95,7 @@ pub struct MpiInstallationProfile {
 
 /// Per-partition capability snapshot.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PartitionProfile {
     pub name: String,
@@ -121,7 +121,7 @@ pub struct PartitionProfile {
 
 /// Runtime backend availability snapshot.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeAvailability {
     #[serde(default)]
@@ -138,7 +138,7 @@ pub struct RuntimeAvailability {
 
 /// Distributed ML launch defaults and fabric environment captured for a cluster.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DistributedProfile {
     #[serde(default)]
@@ -153,7 +153,7 @@ pub struct DistributedProfile {
 
 /// Human-maintained site metadata for support-team distributed profiles.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SiteProfile {
     #[serde(default)]
@@ -168,7 +168,7 @@ pub struct SiteProfile {
 
 /// Site software stacks that can be loaded through modules or path views.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SoftwareProfile {
     #[serde(default)]
@@ -177,7 +177,7 @@ pub struct SoftwareProfile {
 
 /// One module or software stack advertised by a site profile.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SoftwareModuleProfile {
     pub name: String,
@@ -191,7 +191,7 @@ pub struct SoftwareModuleProfile {
 
 /// Shared filesystem or scratch hint advertised by a site profile.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FilesystemProfile {
     pub path: String,
@@ -205,7 +205,7 @@ pub struct FilesystemProfile {
 
 /// GPU and accelerator facts that are stable enough to document for users.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GpuProfile {
     #[serde(default)]
@@ -222,7 +222,7 @@ pub struct GpuProfile {
 
 /// Network fabric hints for distributed frameworks and collectives.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkProfile {
     #[serde(default)]
@@ -241,7 +241,7 @@ pub struct NetworkProfile {
 
 /// Container runtime and registry policy hints.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerPolicyProfile {
     #[serde(default)]
@@ -256,7 +256,7 @@ pub struct ContainerPolicyProfile {
 
 /// Slurm defaults and requirements recommended by the site profile.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SlurmPolicyProfile {
     #[serde(default)]

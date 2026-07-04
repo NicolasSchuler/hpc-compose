@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SweepResultsOutput",
+  "type": "object",
+  "properties": {
+    "best_trial": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "groups": {
+      "description": "Per-config replicate rollup (mean±std(n)). The best trial is selected by\nthe best group MEAN. Omitted when the sweep did not use replicates.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepConfigGroup"
+      }
+    },
+    "objective_direction": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepResultRow"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "sweep_id": {
+      "type": "string"
+    },
+    "variable_columns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "sweep_id",
+    "variable_columns",
+    "groups",
+    "rows"
+  ],
+  "$defs": {
+    "SweepConfigGroup": {
+      "description": "One per-config rollup row: the replicate objectives of a single parameter\nconfig summarized as mean±std(n). Emitted in the `groups` field of sweep\nstatus/observe/results output.",
+      "type": "object",
+      "properties": {
+        "config_key": {
+          "type": "string"
+        },
+        "mean": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "n": {
+          "description": "Number of replicates with an observed objective contributing to the rollup.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "replicates": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "std": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "config_key",
+        "variables",
+        "replicates",
+        "n"
+      ]
+    },
+    "SweepResultRow": {
+      "type": "object",
+      "properties": {
+        "config_key": {
+          "description": "Stable key grouping replicates of the same parameter config.",
+          "type": "string"
+        },
+        "energy_kwh": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "objective": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "objective_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replicate": {
+          "description": "Zero-based replicate index within this config.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "scheduler_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "score": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "status": {
+          "type": "string"
+        },
+        "trial_id": {
+          "type": "string"
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "trial_id",
+        "index",
+        "variables",
+        "config_key",
+        "replicate",
+        "status"
+      ]
+    }
+  }
+}

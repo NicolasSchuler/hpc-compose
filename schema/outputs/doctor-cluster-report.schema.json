@@ -1,0 +1,818 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClusterReportJsonOutput",
+  "description": "`doctor --cluster-report --format json` output. Hoisted from a\nfunction-local struct so it is a published-schema-ready named DTO.",
+  "type": "object",
+  "properties": {
+    "diagnostics": {
+      "$ref": "#/$defs/GroupedReport"
+    },
+    "path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profile": {
+      "$ref": "#/$defs/ClusterProfile"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "wrote": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "wrote",
+    "profile",
+    "diagnostics"
+  ],
+  "$defs": {
+    "ClusterProfile": {
+      "description": "Complete generated cluster profile.",
+      "type": "object",
+      "properties": {
+        "containers": {
+          "$ref": "#/$defs/ContainerPolicyProfile",
+          "default": {
+            "approved_backends": [],
+            "registry_mirrors": {},
+            "required_bind_paths": [],
+            "required_env": {}
+          }
+        },
+        "distributed": {
+          "$ref": "#/$defs/DistributedProfile",
+          "default": {
+            "env": {},
+            "rdzv_port": null,
+            "rdzv_port_base": null,
+            "rdzv_port_span": null
+          }
+        },
+        "filesystems": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FilesystemProfile"
+          }
+        },
+        "generated_at_unix": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "gpu": {
+          "$ref": "#/$defs/GpuProfile",
+          "default": {
+            "cuda_driver": null,
+            "mig_profiles": [],
+            "model": null,
+            "rocm_driver": null,
+            "vendor": null
+          }
+        },
+        "gpu_models": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "mpi_installations": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MpiInstallationProfile"
+          }
+        },
+        "mpi_types": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkProfile",
+          "default": {
+            "dask_env": {},
+            "nccl_env": {},
+            "ofi_env": {},
+            "preferred_interfaces": [],
+            "ray_env": {},
+            "ucx_env": {}
+          }
+        },
+        "partitions": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PartitionProfile"
+          }
+        },
+        "qos": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "runtimes": {
+          "$ref": "#/$defs/RuntimeAvailability",
+          "default": {
+            "apptainer": false,
+            "enroot": false,
+            "host": false,
+            "pyxis": false,
+            "singularity": false
+          }
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "shared_cache_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "site": {
+          "$ref": "#/$defs/SiteProfile",
+          "default": {
+            "contact": null,
+            "description": null,
+            "name": null,
+            "support_url": null
+          }
+        },
+        "slurm": {
+          "$ref": "#/$defs/SlurmPolicyProfile",
+          "default": {
+            "defaults": {},
+            "required": {}
+          }
+        },
+        "slurm_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "software": {
+          "$ref": "#/$defs/SoftwareProfile",
+          "default": {
+            "modules": []
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContainerPolicyProfile": {
+      "description": "Container runtime and registry policy hints.",
+      "type": "object",
+      "properties": {
+        "approved_backends": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "registry_mirrors": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "required_bind_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "DistributedProfile": {
+      "description": "Distributed ML launch defaults and fabric environment captured for a cluster.",
+      "type": "object",
+      "properties": {
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "rdzv_port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "rdzv_port_base": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "rdzv_port_span": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "FilesystemProfile": {
+      "description": "Shared filesystem or scratch hint advertised by a site profile.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "path": {
+          "type": "string"
+        },
+        "quota_hint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "GpuProfile": {
+      "description": "GPU and accelerator facts that are stable enough to document for users.",
+      "type": "object",
+      "properties": {
+        "cuda_driver": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mig_profiles": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rocm_driver": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "vendor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "GroupedReport": {
+      "description": "Preflight report grouped into blockers, warnings, and passes.",
+      "type": "object",
+      "properties": {
+        "actionable_warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Item"
+          }
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Item"
+          }
+        },
+        "contextual_warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Item"
+          }
+        },
+        "passed_checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Item"
+          }
+        },
+        "summary": {
+          "$ref": "#/$defs/ReportSummary"
+        }
+      },
+      "required": [
+        "summary",
+        "blockers",
+        "actionable_warnings",
+        "contextual_warnings",
+        "passed_checks"
+      ]
+    },
+    "Item": {
+      "description": "One diagnostic finding.",
+      "type": "object",
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/Level"
+        },
+        "message": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "level",
+        "message"
+      ]
+    },
+    "Level": {
+      "description": "Severity level for one diagnostic finding.",
+      "oneOf": [
+        {
+          "description": "The check passed.",
+          "type": "string",
+          "const": "ok"
+        },
+        {
+          "description": "The check found a non-fatal issue worth surfacing.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "The check found a blocking issue.",
+          "type": "string",
+          "const": "error"
+        }
+      ]
+    },
+    "MpiImplementation": {
+      "description": "MPI implementation family used by a service image or host bind path.",
+      "oneOf": [
+        {
+          "description": "Open MPI.",
+          "type": "string",
+          "const": "openmpi"
+        },
+        {
+          "description": "MPICH.",
+          "type": "string",
+          "const": "mpich"
+        },
+        {
+          "description": "Intel MPI.",
+          "type": "string",
+          "const": "intel_mpi"
+        },
+        {
+          "description": "MVAPICH2.",
+          "type": "string",
+          "const": "mvapich2"
+        },
+        {
+          "description": "Cray MPI.",
+          "type": "string",
+          "const": "cray_mpi"
+        },
+        {
+          "description": "HPE MPI.",
+          "type": "string",
+          "const": "hpe_mpi"
+        },
+        {
+          "description": "Implementation is intentionally unspecified.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "MpiInstallationProfile": {
+      "description": "Best-effort MPI installation snapshot discovered from the login-node environment.",
+      "type": "object",
+      "properties": {
+        "bin_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "bind_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "implementation": {
+          "$ref": "#/$defs/MpiImplementation",
+          "default": "unknown"
+        },
+        "lib_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mpi_types": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string",
+          "default": ""
+        },
+        "pmi_library": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "NetworkProfile": {
+      "description": "Network fabric hints for distributed frameworks and collectives.",
+      "type": "object",
+      "properties": {
+        "dask_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "nccl_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "ofi_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "preferred_interfaces": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "ray_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "ucx_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "PartitionProfile": {
+      "description": "Per-partition capability snapshot.",
+      "type": "object",
+      "properties": {
+        "cpus_per_node": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "default_qos": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "default_time": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "features": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "gres": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "max_time": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "qos": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "ReportSummary": {
+      "description": "Count summary for a grouped preflight report.",
+      "type": "object",
+      "properties": {
+        "actionable_warnings": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "blockers": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "contextual_warnings": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "passed_checks": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "blockers",
+        "actionable_warnings",
+        "contextual_warnings",
+        "passed_checks"
+      ]
+    },
+    "RuntimeAvailability": {
+      "description": "Runtime backend availability snapshot.",
+      "type": "object",
+      "properties": {
+        "apptainer": {
+          "type": "boolean",
+          "default": false
+        },
+        "enroot": {
+          "type": "boolean",
+          "default": false
+        },
+        "host": {
+          "type": "boolean",
+          "default": true
+        },
+        "pyxis": {
+          "type": "boolean",
+          "default": false
+        },
+        "singularity": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "SiteProfile": {
+      "description": "Human-maintained site metadata for support-team distributed profiles.",
+      "type": "object",
+      "properties": {
+        "contact": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "support_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "SlurmPolicyProfile": {
+      "description": "Slurm defaults and requirements recommended by the site profile.",
+      "type": "object",
+      "properties": {
+        "defaults": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "required": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "SoftwareModuleProfile": {
+      "description": "One module or software stack advertised by a site profile.",
+      "type": "object",
+      "properties": {
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "implementation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "SoftwareProfile": {
+      "description": "Site software stacks that can be loaded through modules or path views.",
+      "type": "object",
+      "properties": {
+        "modules": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SoftwareModuleProfile"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

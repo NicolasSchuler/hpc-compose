@@ -1,0 +1,581 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ArtifactsOutput",
+  "description": "`artifacts` export report (`--format json`).",
+  "type": "object",
+  "properties": {
+    "bundles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BundleExportReport"
+      }
+    },
+    "export_dir": {
+      "type": "string"
+    },
+    "exported_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "manifest": {
+      "$ref": "#/$defs/ArtifactManifest"
+    },
+    "manifest_path": {
+      "type": "string"
+    },
+    "payload_dir": {
+      "type": "string"
+    },
+    "record": {
+      "$ref": "#/$defs/SubmissionRecord"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "selected_bundles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tarball_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "record",
+    "manifest_path",
+    "payload_dir",
+    "export_dir",
+    "manifest",
+    "selected_bundles",
+    "bundles",
+    "exported_paths",
+    "tarball_paths",
+    "warnings"
+  ],
+  "$defs": {
+    "ArtifactBundleManifest": {
+      "description": "Bundle-specific entries tracked in an artifact manifest.",
+      "type": "object",
+      "properties": {
+        "copied_relative_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "declared_source_patterns": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "matched_source_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ArtifactEntryMetadata": {
+      "description": "One exported artifact entry captured in provenance output.",
+      "type": "object",
+      "properties": {
+        "entry_type": {
+          "type": "string"
+        },
+        "link_target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relative_path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "relative_path",
+        "entry_type"
+      ]
+    },
+    "ArtifactManifest": {
+      "description": "Manifest produced when teardown exports tracked artifacts.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ArtifactBundleManifest"
+          },
+          "default": {}
+        },
+        "collect_policy": {
+          "type": "string"
+        },
+        "collected_at": {
+          "type": "string"
+        },
+        "copied_relative_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "declared_source_patterns": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "is_resume": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "job_outcome": {
+          "type": "string"
+        },
+        "matched_source_paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "resume_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "job_id",
+        "collect_policy",
+        "collected_at",
+        "job_outcome"
+      ]
+    },
+    "BundleExportReport": {
+      "description": "Export result for one artifact bundle.",
+      "type": "object",
+      "properties": {
+        "export_dir": {
+          "type": "string"
+        },
+        "exported_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactEntryMetadata"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "provenance_path": {
+          "type": "string"
+        },
+        "tarball_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "export_dir",
+        "provenance_path",
+        "exported_paths",
+        "files",
+        "warnings"
+      ]
+    },
+    "GitProvenance": {
+      "description": "Git state captured at submit time; only populated inside a working tree.",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "dirty"
+      ]
+    },
+    "JobProvenance": {
+      "description": "Provenance pinned into a tracked submission record. Descriptive only.",
+      "type": "object",
+      "properties": {
+        "git": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image_refs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "source_content_hash": {
+          "description": "Content hash of the working-tree source snapshot captured at submit (the\nCAS key from [`crate::cache::source::stage_source`]). Populated only on\nthe approval-gated submit path; `None` when source was not snapshotted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_version"
+      ]
+    },
+    "RequestedWalltime": {
+      "description": "Parsed requested allocation walltime persisted with a tracked record.",
+      "type": "object",
+      "properties": {
+        "original": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "original",
+        "seconds"
+      ]
+    },
+    "SubmissionBackend": {
+      "description": "Backend used to execute a tracked submission.",
+      "oneOf": [
+        {
+          "description": "The job was submitted to Slurm.",
+          "type": "string",
+          "const": "slurm"
+        },
+        {
+          "description": "The job was launched locally without Slurm.",
+          "type": "string",
+          "const": "local"
+        }
+      ]
+    },
+    "SubmissionKind": {
+      "description": "High-level submission flow used to create a tracked job.",
+      "oneOf": [
+        {
+          "description": "A normal compose application submission from `up`.",
+          "type": "string",
+          "const": "main"
+        },
+        {
+          "description": "A one-off `run` submission scoped to one service.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "A short right-sizing probe submitted by `germinate`.",
+          "type": "string",
+          "const": "canary"
+        },
+        {
+          "description": "One trial submitted by `sweep submit`.",
+          "type": "string",
+          "const": "sweep_trial"
+        },
+        {
+          "description": "A tracked interactive notebook server submitted by `notebook`.",
+          "type": "string",
+          "const": "notebook"
+        }
+      ]
+    },
+    "SubmissionRecord": {
+      "description": "Metadata persisted for a submitted job tracked under `.hpc-compose/`.",
+      "type": "object",
+      "properties": {
+        "artifact_export_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "backend": {
+          "$ref": "#/$defs/SubmissionBackend",
+          "default": "slurm"
+        },
+        "batch_log": {
+          "type": "string"
+        },
+        "batch_log_managed": {
+          "description": "True when `batch_log` is the hpc-compose-owned default path and can be\nremoved by tracked-job cleanup. False for user-pinned `x-slurm.output`.",
+          "type": "boolean"
+        },
+        "cache_dir": {
+          "type": "string"
+        },
+        "cached_artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "command_override": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "compose_file": {
+          "type": "string"
+        },
+        "config_snapshot_yaml": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubmissionKind",
+          "default": "main"
+        },
+        "provenance": {
+          "description": "Best-effort provenance pinned at submit time (tool version, git state,\nper-service image refs). Optional and additive; legacy records load with\n`None`. Descriptive only — capturing it contacts no scheduler.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested_walltime": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestedWalltime"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resume_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "runtime_root": {
+          "description": "Resolved `x-slurm.runtime_root` override (the parent of `<job_id>/`).\n`None` when the default `<submit_dir>/.hpc-compose` layout is used;\nreaders fall back to that default via `runtime_job_root_for_record`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "script_path": {
+          "type": "string"
+        },
+        "service_logs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "service_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "slurm_array": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "submit_dir": {
+          "type": "string"
+        },
+        "submitted_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sweep": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SweepTrialMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "job_id",
+        "submitted_at",
+        "compose_file",
+        "submit_dir",
+        "script_path",
+        "cache_dir",
+        "batch_log",
+        "service_logs"
+      ]
+    },
+    "SweepTrialMetadata": {
+      "description": "Sweep metadata attached to a trial submission record.",
+      "type": "object",
+      "properties": {
+        "sweep_id": {
+          "type": "string"
+        },
+        "trial_id": {
+          "type": "string"
+        },
+        "trial_index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "sweep_id",
+        "trial_id",
+        "trial_index",
+        "variables"
+      ]
+    }
+  }
+}

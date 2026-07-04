@@ -1,0 +1,413 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MetricsProbeReport",
+  "description": "Top-level report produced by `hpc-compose metrics-probe`.",
+  "type": "object",
+  "properties": {
+    "capabilities": {
+      "$ref": "#/$defs/MetricsProbeCapabilities"
+    },
+    "duration_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "generated_at_unix": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "measurements": {
+      "$ref": "#/$defs/MetricsProbeMeasurements"
+    },
+    "recommendation": {
+      "$ref": "#/$defs/MetricsProbeRecommendation"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "generated_at_unix",
+    "duration_seconds",
+    "capabilities",
+    "measurements",
+    "recommendation"
+  ],
+  "$defs": {
+    "MetricsProbeCapabilities": {
+      "type": "object",
+      "properties": {
+        "nvml": {
+          "$ref": "#/$defs/NvmlCapability"
+        },
+        "perf_event_open": {
+          "$ref": "#/$defs/PerfEventOpenCapability"
+        },
+        "tracepoints": {
+          "$ref": "#/$defs/TracepointCapability"
+        }
+      },
+      "required": [
+        "perf_event_open",
+        "nvml",
+        "tracepoints"
+      ]
+    },
+    "MetricsProbeMeasurements": {
+      "type": "object",
+      "properties": {
+        "nvidia_smi": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NvidiaSmiComparison"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nvml": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NvmlMeasurement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "perf": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PerfMeasurement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "MetricsProbeRecommendation": {
+      "type": "string",
+      "enum": [
+        "perf_only",
+        "perf_nvml_polling",
+        "admin_required_for_ebpf",
+        "not_viable"
+      ]
+    },
+    "NvidiaSmiComparison": {
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "elapsed_ns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      },
+      "required": [
+        "available"
+      ]
+    },
+    "NvmlCapability": {
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "device_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "library": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supported_event_mask": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "supported_event_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "available",
+        "library",
+        "supported_event_names"
+      ]
+    },
+    "NvmlDeviceMeasurement": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "memory_total_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "memory_used_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "power_draw_mw": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "process_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "utilization_gpu_percent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "utilization_memory_percent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "index"
+      ]
+    },
+    "NvmlMeasurement": {
+      "type": "object",
+      "properties": {
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NvmlDeviceMeasurement"
+          }
+        }
+      },
+      "required": [
+        "devices"
+      ]
+    },
+    "PerfEventOpenCapability": {
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "errno": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "errno_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "perf_event_paranoid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available"
+      ]
+    },
+    "PerfMeasurement": {
+      "type": "object",
+      "properties": {
+        "cycles": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "elapsed_ns": {
+          "type": "integer",
+          "format": "uint128",
+          "minimum": 0
+        },
+        "instructions": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ipc": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "time_enabled_ns": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "time_running_ns": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "workload_iterations": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cycles",
+        "instructions",
+        "elapsed_ns",
+        "time_enabled_ns",
+        "time_running_ns",
+        "workload_iterations"
+      ]
+    },
+    "TracepointCapability": {
+      "type": "object",
+      "properties": {
+        "available_events_readable": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected_tracepoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TracepointProbe"
+          }
+        },
+        "tracing_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unprivileged_bpf_disabled": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available_events_readable",
+        "selected_tracepoints"
+      ]
+    },
+    "TracepointProbe": {
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "available"
+      ]
+    }
+  }
+}

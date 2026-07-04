@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SweepStopOutput",
+  "type": "object",
+  "properties": {
+    "cancelled_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "cancelled_trials": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "skipped_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "skipped_trials": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "stop_reason": {
+      "type": "string"
+    },
+    "stopped_at": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "sweep_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "sweep_id",
+    "cancelled_count",
+    "skipped_count",
+    "cancelled_trials",
+    "skipped_trials",
+    "stopped_at",
+    "stop_reason"
+  ]
+}

@@ -26,7 +26,7 @@ pub use crate::diagnostics::{Item, Level, Report};
 
 /// Count summary for a grouped preflight report.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ReportSummary {
     pub blockers: usize,
     pub actionable_warnings: usize,
@@ -36,7 +36,7 @@ pub struct ReportSummary {
 
 /// Preflight report grouped into blockers, warnings, and passes.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct GroupedReport {
     pub summary: ReportSummary,
     pub blockers: Vec<Item>,

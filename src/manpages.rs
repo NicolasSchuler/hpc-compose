@@ -67,11 +67,23 @@ const EXIT_STATUS_SECTION: &[(&str, &str)] = &[
     ("0", "The command completed successfully."),
     (
         "1",
-        "The command failed because validation, local I/O, or an external tool reported an error.",
+        "A generic failure with no more specific category: an unexpected error, local I/O, or an external tool reporting an error.",
     ),
     (
-        "2-255",
-        "For direct-execution commands (run, alloc, shell, notebook, reach) the exit status of the executed child process is propagated verbatim, so scripts and CI can distinguish, for example, a test runner's exit code 2 from 5.",
+        "2",
+        "A usage error (an invalid flag or argument combination) or an invalid spec. clap also exits 2 for parse-level usage errors such as an unknown flag or a missing argument.",
+    ),
+    (
+        "3",
+        "A preflight or environment-readiness failure, including an unreachable cluster. Emitted by preflight, doctor, and the reachability checks in up --remote and the remote follow-up commands.",
+    ),
+    (
+        "4",
+        "Lint findings are present and failed the configured gate. Pass lint --allow-warnings to treat warning-level findings as advisory.",
+    ),
+    (
+        "child status",
+        "For direct-execution commands (run, alloc, shell, notebook, reach, exec) the executed child process's exit status is propagated verbatim, so scripts and CI can distinguish, for example, a test runner's exit code 2 from 5. A propagated status may coincide with a reserved code above.",
     ),
 ];
 

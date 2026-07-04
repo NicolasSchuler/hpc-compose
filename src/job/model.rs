@@ -7,7 +7,7 @@ use super::provenance::JobProvenance;
 
 /// Metadata persisted for a submitted job tracked under `.hpc-compose/`.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubmissionRecord {
     pub schema_version: u32,
     #[serde(default = "default_submission_backend")]
@@ -57,7 +57,9 @@ pub struct SubmissionRecord {
 }
 
 /// Backend used to execute a tracked submission.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmissionBackend {
     /// The job was submitted to Slurm.
@@ -68,7 +70,9 @@ pub enum SubmissionBackend {
 }
 
 /// High-level submission flow used to create a tracked job.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmissionKind {
     /// A normal compose application submission from `up`.
@@ -86,7 +90,7 @@ pub enum SubmissionKind {
 
 /// Sweep metadata attached to a trial submission record.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SweepTrialMetadata {
     pub sweep_id: String,
     pub trial_id: String,
@@ -96,7 +100,7 @@ pub struct SweepTrialMetadata {
 
 /// Parsed requested allocation walltime persisted with a tracked record.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RequestedWalltime {
     pub original: String,
     pub seconds: u64,
@@ -118,7 +122,7 @@ pub struct SubmissionRecordBuildOptions {
 }
 
 /// Source used to determine scheduler state.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulerSource {
     /// State came from `squeue`.

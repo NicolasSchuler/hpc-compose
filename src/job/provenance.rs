@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Git state captured at submit time; only populated inside a working tree.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct GitProvenance {
     pub sha: String,
     pub dirty: bool,
@@ -24,7 +24,7 @@ pub struct GitProvenance {
 
 /// Provenance pinned into a tracked submission record. Descriptive only.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JobProvenance {
     pub tool_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

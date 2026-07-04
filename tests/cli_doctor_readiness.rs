@@ -182,6 +182,13 @@ services:
         ],
     );
     assert_failure(&output);
+    // A failed readiness probe is an environment failure: code 3.
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a failed readiness probe should exit 3\nstderr:\n{}",
+        stderr_text(&output),
+    );
     handle.join().expect("join listener");
     let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("json");
     assert_eq!(payload["ran"], Value::from(true));

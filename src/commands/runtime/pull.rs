@@ -16,8 +16,9 @@ use hpc_compose::job::{
 use super::*;
 
 /// Machine-readable output for `pull --format json`.
-#[derive(Debug, Serialize)]
-struct PullOutput {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct PullOutput {
+    pub(crate) schema_version: u32,
     job_id: String,
     bundles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +115,7 @@ pub(crate) fn pull(
     match output::resolve_output_format(format) {
         OutputFormat::Json => {
             let out = PullOutput {
+                schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                 job_id: record.job_id.clone(),
                 bundles,
                 login_host,
