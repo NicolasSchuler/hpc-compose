@@ -1,0 +1,35 @@
+name: dev-cluster-sweep
+
+# Real hyperparameter-sweep smoke. Lives under _extra/ so the generic e2e loop
+# never globs it: `sweep` has its own submit/status/results verbs and a manifest
+# tying the trials together, which the generic up/watch loop cannot drive. Its
+# dedicated block runs `sweep submit` (two trials, one per `trial_val`), polls
+# `sweep status` until both are terminal, and asserts `sweep results` plus sacct
+# agree per trial. The unit suite only expands manifests against fake schedulers;
+# this fans two real independent sbatch allocations out of one compose file.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-sweep
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+# One parameter with two values -> two trials (matrix: full). `trial_val` is an
+# interpolation variable overridden per trial before planning/rendering.
+sweep:
+  parameters:
+    trial_val: ["alpha", "beta"]
+  matrix: full
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "sweep trial value=${trial_val:-none} sweep=$${HPC_COMPOSE_SWEEP_ID:-?} trial=$${HPC_COMPOSE_SWEEP_TRIAL:-?}"
+        sleep 2

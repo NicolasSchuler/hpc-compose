@@ -129,13 +129,17 @@ sacct_job_count() {
   inctr sacct -n -X -P --format=JobID 2>/dev/null | wc -l | tr -d ' '
 }
 
+# Accounting rows from just-finished jobs (e.g. the alloc/run block's sruns) can
+# commit to slurmdbd many seconds after the client returns, so require a longer
+# stable window: 3 consecutive identical readings over up to 30s. A short window
+# turns a late-landing stale row into a false "when submitted a job" failure.
 wait_for_sacct_count_stable() {
-  local attempts=10 previous="" current="" stable=0
+  local attempts=30 previous="" current="" stable=0
   for _ in $(seq 1 "$attempts"); do
     current="$(sacct_job_count)"
     if [[ "$current" == "$previous" ]]; then
       stable=$((stable + 1))
-      if (( stable >= 2 )); then
+      if (( stable >= 3 )); then
         printf '%s' "$current"
         return 0
       fi
@@ -297,6 +301,16 @@ for spec_path in "${spec_paths[@]}"; do
     fail "stats/sstat emitted the AllocTRES field error for job $jobid"
   fi
   pass "stats renders without the sstat AllocTRES error"
+
+  # Beyond the no-AllocTRES-error check: a completed run must render real content
+  # in `stats --format json` -- the tracked job id and the authoritative scheduler
+  # terminal state -- not just an empty snapshot shell.
+  stats_json="$(inctr hpc-compose stats -f "$rel" --job-id "$jobid" --format json 2>&1 || true)"
+  printf '%s' "$stats_json" | grep -q "\"job_id\": \"$jobid\"" \
+    || { printf '%s' "$stats_json" | sed 's/^/    | /' >&2; fail "stats --format json missing job_id $jobid"; }
+  printf '%s' "$stats_json" | grep -q "\"state\": \"$expect_state\"" \
+    || { printf '%s' "$stats_json" | sed 's/^/    | /' >&2; fail "stats --format json did not report scheduler state $expect_state for job $jobid"; }
+  pass "stats --format json reports real content (job_id + scheduler state $expect_state)"
 
   rm -f "$out"
 done
@@ -463,7 +477,7 @@ mkdir -p "$work_specs_dir/_extra"
 cp "${extra_specs[@]}" "$work_specs_dir/_extra"/
 # Every _extra spec must be handled by a block below; fail loudly on a new one so
 # it can never be silently skipped (mirrors the generic loop's spec registry).
-handled_extra=(array.yaml long-running.yaml dep-producer.yaml dep-consumer.yaml resume.yaml when.yaml watch-tui.yaml)
+handled_extra=(array.yaml long-running.yaml dep-producer.yaml dep-consumer.yaml resume.yaml when.yaml watch-tui.yaml sweep.yaml test-pass.yaml test-fail.yaml germinate.yaml down.yaml)
 for ex in "${extra_specs[@]}"; do
   exb="$(basename "$ex")"
   found=0
@@ -685,6 +699,153 @@ inctr grep -q '1049l' "$wt_cap" \
 inctr grep -q 'COMPLETED' "$wt_cap" || fail "watch TUI did not render the terminal job state"
 inctr rm -f "$wt_cap" >/dev/null 2>&1 || true
 pass "watch TUI entered + restored the alternate screen and tracked to COMPLETED"
+
+# 4h. Sweep: expand one embedded `sweep` block into N independent tracked Slurm
+# jobs. The generic loop cannot drive this -- `sweep` owns its submit/status/
+# results verbs and a manifest tying the trials together. Submit both trials,
+# register every trial job id for teardown, poll `sweep status` until both are
+# terminal, then assert `sweep results` lists both and sacct agrees per trial.
+note "Sweep block (embedded sweep -> N independent trials)"
+sweep_rel=".tmp/devcluster-e2e/specs/_extra/sweep.yaml"
+sweep_out="$(mktemp)"
+if ! inctr hpc-compose sweep submit -f "$sweep_rel" --skip-prepare --no-preflight >"$sweep_out" 2>&1; then
+  sed 's/^/    | /' "$sweep_out" >&2; rm -f "$sweep_out"; fail "sweep submit failed"
+fi
+# Register every trial's real sbatch job id for trap-cleanup ("submitted t000 job
+# <id> (...)" per trial). MUST land in the current shell, not a subshell, so the
+# cleanup array survives.
+sweep_jobids=()
+while read -r _sj; do
+  [[ -n "$_sj" ]] && { sweep_jobids+=("$_sj"); detached_jobids+=("$_sj"); }
+done < <(grep -oE 'submitted t[0-9r]+ job [0-9]+' "$sweep_out" | grep -oE '[0-9]+$')
+rm -f "$sweep_out"
+[[ ${#sweep_jobids[@]} -eq 2 ]] \
+  || fail "sweep did not submit 2 trials via real sbatch (parsed ${#sweep_jobids[@]})"
+pass "sweep submitted 2 trials via real sbatch (${sweep_jobids[*]})"
+sweep_ok=0
+sweep_status_json=""
+for _ in $(seq 1 60); do
+  sweep_status_json="$(inctr hpc-compose sweep status -f "$sweep_rel" --format json 2>/dev/null || true)"
+  # `|| true`: grep exits 1 while no trial is COMPLETED yet, and pipefail would
+  # otherwise fail the assignment and abort the whole harness via set -e.
+  term_n="$(printf '%s' "$sweep_status_json" | grep -c '"scheduler_state": "COMPLETED"' || true)"
+  if [[ "$term_n" -ge 2 ]]; then sweep_ok=1; break; fi
+  sleep 2
+done
+if [[ "$sweep_ok" != 1 ]]; then
+  printf '%s\n' "$sweep_status_json" | sed 's/^/    | /' >&2
+  fail "sweep: both trials did not reach COMPLETED via sweep status"
+fi
+pass "sweep status reports both trials COMPLETED"
+sweep_results_json="$(inctr hpc-compose sweep results -f "$sweep_rel" --format json 2>&1)" \
+  || { printf '%s\n' "$sweep_results_json" | sed 's/^/    | /' >&2; fail "sweep results failed"; }
+results_completed="$(printf '%s' "$sweep_results_json" | grep -c '"scheduler_state": "COMPLETED"' || true)"
+[[ "$results_completed" -ge 2 ]] \
+  || { printf '%s\n' "$sweep_results_json" | sed 's/^/    | /' >&2; fail "sweep results did not tabulate 2 COMPLETED trials"; }
+for _t in t000 t001; do
+  printf '%s' "$sweep_results_json" | grep -q "\"trial_id\": \"$_t\"" \
+    || { printf '%s\n' "$sweep_results_json" | sed 's/^/    | /' >&2; fail "sweep results missing trial $_t"; }
+done
+pass "sweep results tabulated both trials (t000,t001) as COMPLETED"
+# sacct is authoritative: every trial job id must be COMPLETED 0:0.
+for _j in "${sweep_jobids[@]}"; do
+  wait_for_sacct_state "$_j" COMPLETED 30 || fail "sweep: sacct did not report COMPLETED for trial job $_j"
+  _row="$(inctr sacct -j "$_j" -n -P --format=State,ExitCode 2>/dev/null | head -n1)"
+  printf '%s' "$_row" | grep -q '0:0' \
+    || fail "sweep: trial job $_j ExitCode not 0:0 (sacct row: $_row)"
+done
+pass "sweep: sacct confirms every trial job COMPLETED 0:0"
+
+# 4i. Test (smoke command): `test --submit` runs a short Slurm job and passes only
+# when every service launched and completed successfully. Prove both verdicts: a
+# healthy spec passes (exit 0, "smoke test passed"), a broken spec fails (nonzero
+# exit, "smoke test failed"). --local is unavailable here (it needs the Linux
+# Pyxis/Enroot supervisor; the dev cluster is host-backend only), so this uses the
+# real-sbatch --submit path.
+note "Test (smoke command) block"
+tp_rel=".tmp/devcluster-e2e/specs/_extra/test-pass.yaml"
+tf_rel=".tmp/devcluster-e2e/specs/_extra/test-fail.yaml"
+tp_out="$(mktemp)"
+if ! inctr hpc-compose test --submit -f "$tp_rel" --skip-prepare --no-preflight >"$tp_out" 2>&1; then
+  sed 's/^/    | /' "$tp_out" >&2; rm -f "$tp_out"; fail "test --submit (passing spec) exited nonzero"
+fi
+grep -q 'smoke test passed' "$tp_out" \
+  || { sed 's/^/    | /' "$tp_out" >&2; rm -f "$tp_out"; fail "test did not report a passing smoke test"; }
+# `test` consumes the sbatch stdout internally and reports the id in its own
+# verdict line ("smoke test passed: <id>"). `|| true` keeps a miss from tripping
+# set -e; the conditional sacct check below only runs when an id was parsed.
+tp_jobid="$(grep -oE 'smoke test passed: [0-9]+' "$tp_out" | head -n1 | grep -oE '[0-9]+' || true)"
+rm -f "$tp_out"
+pass "test --submit passed a healthy smoke spec (smoke test passed)"
+if [[ -n "$tp_jobid" ]]; then
+  wait_for_sacct_state "$tp_jobid" COMPLETED 30 \
+    || fail "test: sacct did not report COMPLETED for the passing smoke job $tp_jobid"
+  pass "test: sacct confirms the passing smoke job COMPLETED (job $tp_jobid)"
+fi
+tf_out="$(mktemp)"
+tf_status=0
+inctr hpc-compose test --submit -f "$tf_rel" --skip-prepare --no-preflight >"$tf_out" 2>&1 || tf_status=$?
+[[ "$tf_status" != 0 ]] \
+  || { sed 's/^/    | /' "$tf_out" >&2; rm -f "$tf_out"; fail "test --submit (failing spec) unexpectedly exited 0"; }
+grep -q 'smoke test failed' "$tf_out" \
+  || { sed 's/^/    | /' "$tf_out" >&2; rm -f "$tf_out"; fail "test did not report a failing smoke test"; }
+rm -f "$tf_out"
+pass "test --submit failed a broken smoke spec (nonzero exit + smoke test failed)"
+
+# 4j. Germinate: render a minimized canary of the plan, submit it as a real
+# sbatch, wait for terminal, and build a rightsize report + suggested YAML patch
+# from sacct accounting. germinate blocks until the canary is terminal, so it is
+# not detached (no teardown registration needed). The unit suite only drives the
+# canary planner against fakes; this runs the real submit -> terminal -> sacct
+# rightsize path.
+note "Germinate (canary rightsize) block"
+germ_rel=".tmp/devcluster-e2e/specs/_extra/germinate.yaml"
+germ_out="$(mktemp)"
+if ! inctr hpc-compose germinate -f "$germ_rel" --skip-prepare --no-preflight --canary-time 00:02:00 >"$germ_out" 2>&1; then
+  sed 's/^/    | /' "$germ_out" >&2; rm -f "$germ_out"; fail "germinate exited nonzero"
+fi
+# germinate does not echo the raw "Submitted batch job" line (it consumes the
+# sbatch stdout internally); its "canary job: <id>" line is the submission proof,
+# and the sacct check below confirms the id is a real accounting row.
+germ_jobid="$(grep -oE 'canary job: [0-9]+' "$germ_out" | head -n1 | grep -oE '[0-9]+' || true)"
+[[ -n "$germ_jobid" ]] \
+  || { sed 's/^/    | /' "$germ_out" >&2; rm -f "$germ_out"; fail "germinate did not report a canary job id"; }
+grep -q 'suggested YAML patch' "$germ_out" \
+  || { sed 's/^/    | /' "$germ_out" >&2; rm -f "$germ_out"; fail "germinate did not render a rightsize report/patch section"; }
+rm -f "$germ_out"
+pass "germinate submitted a real canary (job $germ_jobid) and rendered a rightsize report"
+wait_for_sacct_state "$germ_jobid" COMPLETED 30 \
+  || fail "germinate: sacct did not report COMPLETED for canary job $germ_jobid"
+pass "germinate: sacct confirms the canary COMPLETED (job $germ_jobid)"
+
+# 4k. Down: the tracked-teardown path. Up a long job, `down --job-id --yes`, and
+# assert the real scancel drove sacct to CANCELLED AND the tracked runtime state
+# was reaped (status by id no longer resolves) -- the lifecycle path `up`/`cancel`
+# alone never exercises via `down`.
+note "Down block (up a job, down it, assert reaped)"
+down_rel=".tmp/devcluster-e2e/specs/_extra/down.yaml"
+detach_submit "$down_rel"
+down_jobid="$DETACHED_JOBID"
+pass "down target submitted (job $down_jobid)"
+down_running=0
+for _ in $(seq 1 60); do
+  if [[ "$(inctr squeue -j "$down_jobid" -h -o '%T' 2>/dev/null | head -n1)" == "RUNNING" ]]; then
+    down_running=1; break
+  fi
+  sleep 1
+done
+[[ "$down_running" == 1 ]] || fail "down: job $down_jobid never reached RUNNING"
+pass "down: job $down_jobid is RUNNING"
+inctr hpc-compose down -f "$down_rel" --job-id "$down_jobid" --yes >/dev/null 2>&1 \
+  || fail "down: command failed for job $down_jobid"
+wait_for_sacct_state "$down_jobid" CANCELLED 30 \
+  || fail "down: sacct did not report CANCELLED for job $down_jobid"
+pass "down: real scancel drove the job to CANCELLED"
+# down also reaps tracked state: a follow-up status by that id must now fail.
+if inctr hpc-compose status -f "$down_rel" --job-id "$down_jobid" >/dev/null 2>&1; then
+  fail "down: tracked record for job $down_jobid still resolvable (state not reaped)"
+fi
+pass "down: tracked state reaped (status by id no longer resolves)"
 
 note "All dev-cluster end-to-end checks passed"
 # Artifact cleanup and any requested teardown run in the EXIT trap (`finish`).

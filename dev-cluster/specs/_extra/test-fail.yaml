@@ -1,0 +1,25 @@
+name: dev-cluster-test-fail
+
+# Failing half of the `test --submit` smoke-command block. The service exits
+# non-zero, so the smoke evaluation must fail: `test --submit` reports "smoke test
+# failed" and exits non-zero. Lives under _extra/ so the generic up/watch loop
+# never runs it (a deliberately failing spec would trip the generic success gate).
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-test-fail
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "test-fail: intentional smoke failure" >&2
+        exit 1
