@@ -714,6 +714,9 @@ services:
         ),
     );
     let sbatch = tmpdir.path().join("sbatch-slow");
+    // Genuine wall-clock wait: the first `up` must still hold the submission
+    // lock while the second `up` races for it, so sbatch stalls long enough for
+    // the concurrent attempt below to observe the lock as held.
     write_script(
         &sbatch,
         "#!/bin/bash\nset -euo pipefail\nsleep 2\necho 'Submitted batch job 12345'\n",
@@ -1841,6 +1844,9 @@ services:
         "api ok\napi error\n",
     )
     .expect("api log");
+    // Genuine wall-clock wait: `--since 1s` filters on file mtime (whole-second
+    // resolution), so the api log must be aged >1s before the worker log is
+    // written for the `--since` assertion below to distinguish them.
     thread::sleep(Duration::from_millis(2200));
     fs::write(
         log_dir.join(log_file_name_for_service("worker")),
@@ -7041,10 +7047,61 @@ fn submit_watch_queue_waits_for_running_before_watch() {
     let srun = write_fake_srun(tmpdir.path());
     let squeue_state = tmpdir.path().join("watch-queue-squeue.state");
     let sacct_state = tmpdir.path().join("watch-queue-sacct.state");
-    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    // The real fake squeue/sacct just render whatever these state files hold;
+    // the counter wrapper below owns all transitions so nothing depends on
+    // wall-clock timing.
+    let real_squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
     let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
     let log_dir = tmpdir.path().join(".hpc-compose/12345/logs");
     let service_log = log_dir.join(log_file_name_for_service("app"));
+
+    // Invocation-counted squeue: the PENDING -> RUNNING -> gone transition is
+    // driven by how many times squeue is polled, not by a background subshell
+    // racing the CLI's 1s poll cadence. This makes the ordering deterministic
+    // regardless of full-suite load, which is what made the old wall-clock
+    // fixture flaky (the 1s RUNNING window was not reliably observed).
+    //
+    // With PENDING for the first two polls the wait loop always prints at least
+    // one "queue state: PENDING" line before the RUNNING poll opens the watch
+    // view. The RUNNING poll (exactly once) publishes the service logs and arms
+    // the terminal state, then the latch makes squeue report the job as gone so
+    // sacct drives the watch to COMPLETED.
+    let counter_file = tmpdir.path().join("watch-queue-squeue.count");
+    let latch_file = tmpdir.path().join("watch-queue-squeue.latch");
+    let squeue = tmpdir.path().join("squeue-counter");
+    write_script(
+        &squeue,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+count="$(cat '{counter}' 2>/dev/null || echo 0)"
+count=$((count + 1))
+printf '%s\n' "$count" > '{counter}'
+if [[ -e '{latch}' ]]; then
+  printf 'NONE\n' > '{squeue_state}'
+elif (( count <= 2 )); then
+  printf 'PENDING\n' > '{squeue_state}'
+else
+  printf 'RUNNING\n' > '{squeue_state}'
+  mkdir -p '{log_dir}'
+  printf 'booting\nready\n' > '{service_log}'
+  printf 'COMPLETED\n' > '{sacct_state}'
+  : > '{latch}'
+fi
+exec '{real_squeue}' "$@"
+"#,
+            counter = counter_file.display(),
+            latch = latch_file.display(),
+            squeue_state = squeue_state.display(),
+            log_dir = log_dir.display(),
+            service_log = service_log.display(),
+            sacct_state = sacct_state.display(),
+            real_squeue = real_squeue.display(),
+        ),
+    );
+
+    // sbatch just seeds the initial PENDING state and clears any stale sacct
+    // record; every subsequent transition is owned by the counter squeue.
     let sbatch = tmpdir.path().join("sbatch-watch-queue");
     write_script(
         &sbatch,
@@ -7054,25 +7111,11 @@ set -euo pipefail
 mkdir -p '{}'
 printf 'PENDING\n' > '{}'
 rm -f '{}'
-(
-  sleep 10
-  printf 'RUNNING\n' > '{}'
-  printf 'booting\n' > '{}'
-  sleep 1
-  printf 'ready\n' >> '{}'
-  printf 'NONE\n' > '{}'
-  printf 'COMPLETED\n' > '{}'
-) >/dev/null 2>&1 &
 echo "Submitted batch job 12345"
 "#,
             log_dir.display(),
             squeue_state.display(),
             sacct_state.display(),
-            squeue_state.display(),
-            service_log.display(),
-            service_log.display(),
-            squeue_state.display(),
-            sacct_state.display()
         ),
     );
 
@@ -7102,16 +7145,19 @@ echo "Submitted batch job 12345"
     assert!(stdout.contains("waiting for job 12345 to start"));
     assert!(stdout.contains("queue state: PENDING (squeue)"));
     assert!(stdout.contains("watching job 12345"));
-    // The wait loop exits on RUNNING *or* a terminal state, so the watch view
-    // always opens, but the brief RUNNING poll line is not reliably observed
-    // under full-suite load. Assert the deterministic invariant instead: the
-    // watch opens only after a PENDING poll (it waited rather than watching
-    // the still-pending job immediately).
+    // Now deterministic: the wait loop observes PENDING, then RUNNING, then the
+    // watch view opens — strictly in that order. This is the strong assertion
+    // the old fixture wanted but could not reliably make under load.
+    let pending_at = stdout
+        .find("queue state: PENDING")
+        .expect("pending queue state");
+    let running_at = stdout
+        .find("queue state: RUNNING")
+        .expect("running queue state");
+    let watching_at = stdout.find("watching job 12345").expect("watch starts");
     assert!(
-        stdout
-            .find("queue state: PENDING")
-            .expect("pending queue state")
-            < stdout.find("watching job 12345").expect("watch starts")
+        pending_at < running_at && running_at < watching_at,
+        "expected PENDING < RUNNING < watching, got {pending_at} / {running_at} / {watching_at}\n{stdout}"
     );
     assert!(stdout.contains("[app] ready"));
 }
@@ -7583,10 +7629,54 @@ fn submit_watch_queue_warns_once_when_pending_past_threshold() {
     let srun = write_fake_srun(tmpdir.path());
     let squeue_state = tmpdir.path().join("watch-queue-pending-squeue.state");
     let sacct_state = tmpdir.path().join("watch-queue-pending-sacct.state");
-    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let real_squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
     let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
     let log_dir = tmpdir.path().join(".hpc-compose/12345/logs");
     let service_log = log_dir.join(log_file_name_for_service("app"));
+
+    // Invocation-counted squeue (see `submit_watch_queue_waits_for_running_...`
+    // for the pattern). Keeping the job PENDING for two polls guarantees the
+    // wait loop polls twice while pending; the second poll is one `POLL_INTERVAL`
+    // (1s) after the first, so the >=1s queue-warn threshold is crossed
+    // deterministically instead of relying on a wall-clock `sleep`.
+    let counter_file = tmpdir.path().join("watch-queue-pending-squeue.count");
+    let latch_file = tmpdir.path().join("watch-queue-pending-squeue.latch");
+    let squeue = tmpdir.path().join("squeue-counter-pending");
+    write_script(
+        &squeue,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+count="$(cat '{counter}' 2>/dev/null || echo 0)"
+count=$((count + 1))
+printf '%s\n' "$count" > '{counter}'
+if [[ -e '{latch}' ]]; then
+  printf 'NONE\n' > '{squeue_state}'
+elif (( count <= 2 )); then
+  cat > '{squeue_state}' <<'PENDING_STATE'
+STATE=PENDING
+REASON=Priority
+START=2026-04-07T12:34:56
+PENDING_STATE
+else
+  printf 'RUNNING\n' > '{squeue_state}'
+  mkdir -p '{log_dir}'
+  printf 'booting\nready\n' > '{service_log}'
+  printf 'COMPLETED\n' > '{sacct_state}'
+  : > '{latch}'
+fi
+exec '{real_squeue}' "$@"
+"#,
+            counter = counter_file.display(),
+            latch = latch_file.display(),
+            squeue_state = squeue_state.display(),
+            log_dir = log_dir.display(),
+            service_log = service_log.display(),
+            sacct_state = sacct_state.display(),
+            real_squeue = real_squeue.display(),
+        ),
+    );
+
     let sbatch = tmpdir.path().join("sbatch-watch-queue-pending");
     write_script(
         &sbatch,
@@ -7600,25 +7690,11 @@ REASON=Priority
 START=2026-04-07T12:34:56
 PENDING_STATE
 rm -f '{}'
-(
-  sleep 10
-  printf 'RUNNING\n' > '{}'
-  printf 'booting\n' > '{}'
-  sleep 1
-  printf 'ready\n' >> '{}'
-  printf 'NONE\n' > '{}'
-  printf 'COMPLETED\n' > '{}'
-) >/dev/null 2>&1 &
 echo "Submitted batch job 12345"
 "#,
             log_dir.display(),
             squeue_state.display(),
             sacct_state.display(),
-            squeue_state.display(),
-            service_log.display(),
-            service_log.display(),
-            squeue_state.display(),
-            sacct_state.display()
         ),
     );
 
