@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use toml::{Table, Value};
 
@@ -243,6 +244,166 @@ fn schema_allowed_keys_match_spec_validation_allowlists() {
         rust_string_array_const(&validation, "SERVICE_ALLOWED_KEYS"),
         "service schema properties should match SERVICE_ALLOWED_KEYS"
     );
+}
+
+/// Returns the serde field names of a `#[serde(deny_unknown_fields)]` struct,
+/// discovered at runtime rather than hand-listed.
+///
+/// The trick: feed the struct a map whose only key is a sentinel that can never
+/// be a real field. `deny_unknown_fields` rejects it on the first key visited,
+/// and serde's derived error enumerates every accepted field
+/// (`unknown field \`X\`, expected one of \`a\`, \`b\``). We parse that list.
+///
+/// This stays truthful with zero hand-syncing: `#[serde(rename = "type")]`
+/// surfaces as `type`, `#[serde(skip)]` fields (e.g. the injected
+/// `software_env` on `SlurmConfig`) are absent from the enum and so never leak
+/// into the comparison, and adding/removing a field on the struct moves this
+/// set automatically. The struct value is never fully deserialized, so field
+/// value types are irrelevant.
+///
+/// Panics if `T` is not `#[serde(deny_unknown_fields)]` (no rejection) or the
+/// error is not the expected "expected one of" shape.
+fn serde_deny_unknown_fields<T: DeserializeOwned>() -> BTreeSet<String> {
+    const SENTINEL: &str = "__hpc_compose_schema_gate_sentinel__";
+    let probe = serde_json::json!({ SENTINEL: JsonValue::Null });
+    let message = match serde_json::from_value::<T>(probe) {
+        Ok(_) => panic!(
+            "struct under test must be #[serde(deny_unknown_fields)] so an unknown \
+             field is rejected and the accepted-field list can be recovered"
+        ),
+        Err(error) => error.to_string(),
+    };
+    // Everything after "expected" holds the backtick-quoted field list; the
+    // sentinel appears before it (`unknown field \`SENTINEL\`, expected ...`)
+    // so slicing past "expected" drops it. The trailing " at line/column"
+    // suffix carries no backticks and is ignored by the step-by(2) walk.
+    let tail = message
+        .split_once("expected")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("serde error is not an 'expected one of' list: {message}"));
+    let fields: BTreeSet<String> = tail
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !fields.is_empty(),
+        "recovered an empty field set from serde error: {message}"
+    );
+    fields
+}
+
+/// Gate every significant nested schema *definition* against the serde field
+/// names of the Rust struct it mirrors, so a field added on one side without
+/// the other is caught. The existing
+/// `schema_allowed_keys_match_spec_validation_allowlists` only polices the root
+/// and `service` levels; this covers the hand-synced interior.
+///
+/// Rust field lists come from [`serde_deny_unknown_fields`] (runtime serde
+/// introspection) rather than a second hand-maintained list, so the only
+/// hand-synced artifact here is the explicit definition->struct mapping below.
+///
+/// Covered (schema definition -> struct): runtime/RuntimeConfig,
+/// slurm/SlurmConfig, serviceSlurm/ServiceSlurmConfig, sweep/SweepConfig,
+/// sweepObjective/SweepObjective, secretSource/SecretSpec, scratch/ScratchConfig,
+/// cleanup/CleanupConfig, stageIn/StageInConfig, hfStageSource/HfStageSource,
+/// stageOut/StageOutConfig, burstBuffer/BurstBufferConfig, metrics/MetricsConfig,
+/// artifacts/ArtifactsConfig, artifactBundle/ArtifactBundleSpec,
+/// resume/ResumeConfig, notify/NotifyConfig, emailNotify/EmailNotifyConfig,
+/// serviceScratch/ServiceScratchConfig, serviceEventHook/ServiceEventHookSpec,
+/// servicePlacement/ServicePlacementSpec, mpi/MpiConfig,
+/// parallelism/ParallelismConfig, hostMpi/HostMpiConfig,
+/// failurePolicy/ServiceFailurePolicySpec, serviceEnroot/ServiceEnrootConfig,
+/// serviceRuntime/ServiceRuntimeConfig, prepare/PrepareSpec,
+/// softwareEnv/SoftwareEnvConfig, serviceRendezvous/ServiceRendezvousConfig,
+/// serviceRendezvous.register (inline)/RendezvousRegisterConfig,
+/// serviceAssert/ServiceAssertSpec, healthcheck/HealthcheckSpec,
+/// dependencyCondition/DependsOnConditionSpec.
+///
+/// Skipped, with reason:
+/// - root `properties` and `service`: their structs (`ComposeSpec`,
+///   `ServiceSpec`) do not derive `deny_unknown_fields` (extra `extends`
+///   preprocessing) and are already gated by
+///   `schema_allowed_keys_match_spec_validation_allowlists`.
+/// - Scalar / array / enum / `oneOf` definitions with no single `properties`
+///   object: rootExtends, serviceExtends, stringList, nonNegativeInteger,
+///   positiveInteger, lineSafeString, arraySpec, jobDependency, command,
+///   environment, duration, secrets, sweepParameterValue, sweepMatrix,
+///   stageMode, rendezvousName, rendezvousClient, dependsOn, readiness,
+///   serviceHook. Their Rust mirrors are custom untagged/tagged enums or
+///   newtypes with no derived `deny_unknown_fields` field list to compare.
+#[test]
+fn schema_nested_definitions_match_spec_struct_fields() {
+    use hpc_compose::spec::{
+        ArtifactBundleSpec, ArtifactsConfig, BurstBufferConfig, CleanupConfig,
+        DependsOnConditionSpec, EmailNotifyConfig, HealthcheckSpec, HfStageSource, HostMpiConfig,
+        MetricsConfig, MpiConfig, NotifyConfig, ParallelismConfig, PrepareSpec,
+        RendezvousRegisterConfig, ResumeConfig, RuntimeConfig, ScratchConfig, SecretSpec,
+        ServiceAssertSpec, ServiceEnrootConfig, ServiceEventHookSpec, ServiceFailurePolicySpec,
+        ServicePlacementSpec, ServiceRendezvousConfig, ServiceRuntimeConfig, ServiceScratchConfig,
+        ServiceSlurmConfig, SlurmConfig, SoftwareEnvConfig, StageInConfig, StageOutConfig,
+        SweepConfig, SweepObjective,
+    };
+
+    let schema: JsonValue = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("schema/hpc-compose.schema.json"))
+            .expect("read schema"),
+    )
+    .expect("parse schema");
+
+    macro_rules! assert_definition_matches_struct {
+        ($definition_pointer:expr, $struct:ty) => {{
+            let schema_keys =
+                json_object_keys(&schema, concat!($definition_pointer, "/properties"));
+            let struct_keys = serde_deny_unknown_fields::<$struct>();
+            assert_eq!(
+                schema_keys,
+                struct_keys,
+                "schema {} properties should match {} serde fields",
+                $definition_pointer,
+                stringify!($struct),
+            );
+        }};
+    }
+
+    assert_definition_matches_struct!("/definitions/runtime", RuntimeConfig);
+    assert_definition_matches_struct!("/definitions/slurm", SlurmConfig);
+    assert_definition_matches_struct!("/definitions/serviceSlurm", ServiceSlurmConfig);
+    assert_definition_matches_struct!("/definitions/sweep", SweepConfig);
+    assert_definition_matches_struct!("/definitions/sweepObjective", SweepObjective);
+    assert_definition_matches_struct!("/definitions/secretSource", SecretSpec);
+    assert_definition_matches_struct!("/definitions/scratch", ScratchConfig);
+    assert_definition_matches_struct!("/definitions/cleanup", CleanupConfig);
+    assert_definition_matches_struct!("/definitions/stageIn", StageInConfig);
+    assert_definition_matches_struct!("/definitions/hfStageSource", HfStageSource);
+    assert_definition_matches_struct!("/definitions/stageOut", StageOutConfig);
+    assert_definition_matches_struct!("/definitions/burstBuffer", BurstBufferConfig);
+    assert_definition_matches_struct!("/definitions/metrics", MetricsConfig);
+    assert_definition_matches_struct!("/definitions/artifacts", ArtifactsConfig);
+    assert_definition_matches_struct!("/definitions/artifactBundle", ArtifactBundleSpec);
+    assert_definition_matches_struct!("/definitions/resume", ResumeConfig);
+    assert_definition_matches_struct!("/definitions/notify", NotifyConfig);
+    assert_definition_matches_struct!("/definitions/emailNotify", EmailNotifyConfig);
+    assert_definition_matches_struct!("/definitions/serviceScratch", ServiceScratchConfig);
+    assert_definition_matches_struct!("/definitions/serviceEventHook", ServiceEventHookSpec);
+    assert_definition_matches_struct!("/definitions/servicePlacement", ServicePlacementSpec);
+    assert_definition_matches_struct!("/definitions/mpi", MpiConfig);
+    assert_definition_matches_struct!("/definitions/parallelism", ParallelismConfig);
+    assert_definition_matches_struct!("/definitions/hostMpi", HostMpiConfig);
+    assert_definition_matches_struct!("/definitions/failurePolicy", ServiceFailurePolicySpec);
+    assert_definition_matches_struct!("/definitions/serviceEnroot", ServiceEnrootConfig);
+    assert_definition_matches_struct!("/definitions/serviceRuntime", ServiceRuntimeConfig);
+    assert_definition_matches_struct!("/definitions/prepare", PrepareSpec);
+    assert_definition_matches_struct!("/definitions/softwareEnv", SoftwareEnvConfig);
+    assert_definition_matches_struct!("/definitions/serviceRendezvous", ServiceRendezvousConfig);
+    assert_definition_matches_struct!(
+        "/definitions/serviceRendezvous/properties/register",
+        RendezvousRegisterConfig
+    );
+    assert_definition_matches_struct!("/definitions/serviceAssert", ServiceAssertSpec);
+    assert_definition_matches_struct!("/definitions/healthcheck", HealthcheckSpec);
+    assert_definition_matches_struct!("/definitions/dependencyCondition", DependsOnConditionSpec);
 }
 
 #[test]
