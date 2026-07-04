@@ -29,6 +29,12 @@ Refresh imported and prepared artifacts before submission.
 \fB--no\-preflight\fR
 Skip the preflight phase before submission.
 .TP
+\fB--resume\fR
+Re\-drive an existing sweep manifest, submitting only trials that never got a job (failed or unattempted); already\-submitted trials are left untouched.
+.TP
+\fB--sweep\-id\fR \fIID\fR
+Sweep id to resume; defaults to the latest sweep (requires \-\-resume).
+.TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.
 .TP
