@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
-use super::runtime_state::load_runtime_state;
+use super::runtime_state::{ServiceRuntimeStateFile, load_runtime_state};
 use super::scheduler::{
     SchedulerCommandError, SchedulerCommandUnavailable, build_local_scheduler_status,
     command_unavailable_detail, command_unavailable_error, reconcile_scheduler_status,
@@ -264,6 +264,157 @@ pub(super) struct GpuProcessSampleRow {
     pub(super) pid: Option<String>,
     pub(super) process_name: Option<String>,
     pub(super) used_memory_mib: Option<String>,
+    /// Raw `/proc/<pid>/cgroup` content captured live by the sampler with
+    /// newlines condensed to `;`. Parsed here (not in the job) so the cgroup
+    /// v1/v2 layouts stay unit-testable against fixtures.
+    #[serde(default)]
+    pub(super) cgroup: Option<String>,
+    /// `SLURM_PROCID` read live from `/proc/<pid>/environ`, if readable.
+    #[serde(default)]
+    pub(super) slurm_procid: Option<String>,
+    /// `SLURM_LOCALID` read live from `/proc/<pid>/environ`, if readable.
+    #[serde(default)]
+    pub(super) slurm_localid: Option<String>,
+}
+
+/// One `steps.jsonl` row: the live Slurm step-id -> step-name mapping the
+/// sampler captured through `squeue` while the job was running.
+#[derive(Debug, Deserialize)]
+struct StepMapRow {
+    #[serde(default)]
+    step_id: Option<String>,
+    #[serde(default)]
+    step_name: Option<String>,
+}
+
+/// Inputs required to attribute sampled GPU processes back to the hpc-compose
+/// service whose Slurm step owns them.
+///
+/// Built from the tracked job id plus the `state.json` step registry (each
+/// service's `step_name` is the `--job-name` its `srun` step was launched
+/// with). Attribution is strictly opt-out: any link that cannot be established
+/// leaves the fields null — it never guesses.
+#[derive(Debug, Clone)]
+pub(crate) struct GpuAttributionContext {
+    job_id: String,
+    /// step name (`hpc-compose:<token>`) -> (service name, is_distributed).
+    services_by_step_name: BTreeMap<String, (String, bool)>,
+}
+
+impl GpuAttributionContext {
+    pub(super) fn from_runtime_state(job_id: &str, state: &ServiceRuntimeStateFile) -> Self {
+        let mut services_by_step_name = BTreeMap::new();
+        for service in &state.services {
+            if let Some(step_name) = &service.step_name {
+                let distributed = service.placement_mode.as_deref() == Some("distributed");
+                services_by_step_name.insert(
+                    step_name.clone(),
+                    (service.service_name.clone(), distributed),
+                );
+            }
+        }
+        Self {
+            job_id: job_id.to_string(),
+            services_by_step_name,
+        }
+    }
+
+    #[cfg(test)]
+    fn new(job_id: &str, services: &[(&str, &str, bool)]) -> Self {
+        Self {
+            job_id: job_id.to_string(),
+            services_by_step_name: services
+                .iter()
+                .map(|(step_name, service, distributed)| {
+                    (step_name.to_string(), (service.to_string(), *distributed))
+                })
+                .collect(),
+        }
+    }
+
+    /// Resolves one sampled GPU-process row to `(service, is_distributed)`.
+    ///
+    /// Returns `None` (=> null fields) whenever the chain breaks: no cgroup
+    /// capture, an unrecognized cgroup layout, a foreign job's process visible
+    /// on a shared node, a step missing from the captured step map, or a step
+    /// whose name is not a registered hpc-compose service. That last case is
+    /// intended to cover the sampler's own `srun` fanout steps and any
+    /// user-spawned nested steps: their step names never match the
+    /// `hpc-compose:<token>` registry, so they fall through to null.
+    fn resolve_service(
+        &self,
+        step_names: &BTreeMap<String, String>,
+        cgroup: Option<&str>,
+    ) -> Option<(String, bool)> {
+        let (cgroup_job, cgroup_step) = parse_cgroup_step(cgroup?)?;
+        if cgroup_job != self.job_id {
+            return None;
+        }
+        let step_id = format!("{cgroup_job}.{cgroup_step}");
+        let step_name = step_names.get(&step_id)?;
+        self.services_by_step_name.get(step_name).cloned()
+    }
+}
+
+/// Parses a condensed `/proc/<pid>/cgroup` capture (lines joined with `;`)
+/// into the Slurm `(job id, step id)` the process belongs to.
+///
+/// Recognized layouts:
+/// - cgroup v2: `0::/system.slice/slurmstepd.scope/job_123/step_7/user/task_0`
+/// - cgroup v1: `10:devices:/slurm/uid_1000/job_123/step_7/task_0`
+///
+/// Any other layout (non-cgroup proctrack plugins, MIG-obscured PIDs, foreign
+/// container layouts) returns `None`, which downstream means "leave the
+/// service null" — the CUDA_VISIBLE_DEVICES fallback is deliberately not
+/// attempted.
+fn parse_cgroup_step(cgroup: &str) -> Option<(String, String)> {
+    for line in cgroup.split(';') {
+        // Each line is "<hierarchy-id>:<controllers>:<path>".
+        let Some(path) = line.trim().splitn(3, ':').nth(2) else {
+            continue;
+        };
+        let mut job: Option<&str> = None;
+        for component in path.split('/') {
+            if let Some(rest) = component.strip_prefix("job_")
+                && !rest.is_empty()
+                && rest.chars().all(|ch| ch.is_ascii_digit())
+            {
+                job = Some(rest);
+                continue;
+            }
+            if let (Some(job), Some(step)) = (job, component.strip_prefix("step_"))
+                && !step.is_empty()
+            {
+                return Some((job.to_string(), step.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Loads the sampler's captured step-id -> step-name map from `steps.jsonl`.
+///
+/// Lenient by design: a missing file, a torn tail line (the sampler appends
+/// while `stats` reads), or any malformed row degrades attribution to null
+/// instead of erroring, matching the never-guess rule. Later rows win so a
+/// re-used step id always maps to the newest observation.
+fn load_step_map(path: &Path) -> BTreeMap<String, String> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    let mut map = BTreeMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(row) = serde_json::from_str::<StepMapRow>(line)
+            && let (Some(step_id), Some(step_name)) = (row.step_id, row.step_name)
+        {
+            map.insert(step_id, step_name);
+        }
+    }
+    map
 }
 
 #[derive(Debug, Deserialize)]
@@ -371,9 +522,12 @@ fn build_stats_snapshot_core(
         raw_scheduler
     };
     let metrics_dir = record.as_ref().map(metrics_dir_for_record);
+    let attribution = runtime_state
+        .as_ref()
+        .map(|state| GpuAttributionContext::from_runtime_state(&job_id, state));
     let SamplerLoadOutcome { sampler, mut notes } = if let Some(metrics_dir) = metrics_dir.as_ref()
     {
-        load_sampler_snapshot(metrics_dir)
+        load_sampler_snapshot(metrics_dir, attribution.as_ref())
     } else {
         SamplerLoadOutcome::default()
     };
@@ -549,7 +703,10 @@ impl StepStats {
     }
 }
 
-pub(crate) fn load_sampler_snapshot(metrics_dir: &Path) -> SamplerLoadOutcome {
+pub(crate) fn load_sampler_snapshot(
+    metrics_dir: &Path,
+    attribution: Option<&GpuAttributionContext>,
+) -> SamplerLoadOutcome {
     if !metrics_dir.is_dir() {
         return SamplerLoadOutcome::default();
     }
@@ -581,7 +738,7 @@ pub(crate) fn load_sampler_snapshot(metrics_dir: &Path) -> SamplerLoadOutcome {
         .collect::<Vec<_>>();
 
     let gpu = if collector_enabled(&meta.collectors, "gpu") {
-        match load_gpu_snapshot(metrics_dir) {
+        match load_gpu_snapshot(metrics_dir, attribution) {
             Ok(snapshot) => snapshot,
             Err(err) => {
                 notes.push(format!(
@@ -864,13 +1021,22 @@ fn parse_sampled_at_probe(path: &Path, line_number: usize, line: &str) -> Result
     Ok(row.sampled_at)
 }
 
-fn load_gpu_snapshot(metrics_dir: &Path) -> Result<Option<GpuSnapshot>> {
+fn load_gpu_snapshot(
+    metrics_dir: &Path,
+    attribution: Option<&GpuAttributionContext>,
+) -> Result<Option<GpuSnapshot>> {
     let gpu_path = metrics_dir.join("gpu.jsonl");
-    let Some((sampled_at, devices)) = load_latest_gpu_devices(&gpu_path)? else {
+    let Some((sampled_at, mut devices)) = load_latest_gpu_devices(&gpu_path)? else {
         return Ok(None);
     };
-    let processes =
-        load_gpu_processes_for_timestamp(&metrics_dir.join("gpu_processes.jsonl"), &sampled_at)?;
+    let step_names = load_step_map(&metrics_dir.join("steps.jsonl"));
+    let processes = load_gpu_processes_for_timestamp(
+        &metrics_dir.join("gpu_processes.jsonl"),
+        &sampled_at,
+        attribution,
+        &step_names,
+    )?;
+    inherit_device_attribution(&mut devices, &processes);
     let nodes = summarize_gpu_nodes(&devices);
     Ok(Some(GpuSnapshot {
         sampled_at,
@@ -878,6 +1044,56 @@ fn load_gpu_snapshot(metrics_dir: &Path) -> Result<Option<GpuSnapshot>> {
         gpus: devices,
         processes,
     }))
+}
+
+/// Fills a device row's `service`/`rank`/`local_rank` from the process rows
+/// observed on the same GPU UUID in the same sample, but only when the value
+/// is unanimous across every process on that device.
+///
+/// The single-service-per-UUID rule keeps attribution honest: a GPU shared by
+/// two services, by another job's process (visible via nvidia-smi on
+/// non-exclusive nodes), by MPS, or by any unattributed process stays null —
+/// mixed or empty evidence never picks a winner.
+fn inherit_device_attribution(devices: &mut [GpuDeviceSample], processes: &[GpuProcessSample]) {
+    for device in devices {
+        let Some(uuid) = device
+            .uuid
+            .as_deref()
+            .map(str::trim)
+            .filter(|uuid| !uuid.is_empty())
+        else {
+            continue;
+        };
+        let device_processes: Vec<&GpuProcessSample> = processes
+            .iter()
+            .filter(|process| process.gpu_uuid.as_deref().map(str::trim) == Some(uuid))
+            .collect();
+        if device_processes.is_empty() {
+            continue;
+        }
+        let services: BTreeSet<Option<&str>> = device_processes
+            .iter()
+            .map(|process| process.service.as_deref())
+            .collect();
+        let Some(Some(service)) = services.iter().next().filter(|_| services.len() == 1) else {
+            continue;
+        };
+        device.service = Some(service.to_string());
+        let ranks: BTreeSet<Option<&str>> = device_processes
+            .iter()
+            .map(|process| process.rank.as_deref())
+            .collect();
+        if ranks.len() == 1 {
+            device.rank = device_processes[0].rank.clone();
+        }
+        let local_ranks: BTreeSet<Option<&str>> = device_processes
+            .iter()
+            .map(|process| process.local_rank.as_deref())
+            .collect();
+        if local_ranks.len() == 1 {
+            device.local_rank = device_processes[0].local_rank.clone();
+        }
+    }
 }
 
 fn load_latest_gpu_devices(path: &Path) -> Result<Option<(String, Vec<GpuDeviceSample>)>> {
@@ -1012,6 +1228,8 @@ fn sum_optional_f64_stats<'a>(values: impl Iterator<Item = Option<&'a str>>) -> 
 fn load_gpu_processes_for_timestamp(
     path: &Path,
     sampled_at: &str,
+    attribution: Option<&GpuAttributionContext>,
+    step_names: &BTreeMap<String, String>,
 ) -> Result<Vec<GpuProcessSample>> {
     let lines = ordered_jsonl_group_for_timestamp(path, sampled_at)?;
     let mut processes = Vec::with_capacity(lines.len());
@@ -1022,11 +1240,29 @@ fn load_gpu_processes_for_timestamp(
             path.display(),
             line.number
         ))?;
+        let resolved = attribution
+            .and_then(|context| context.resolve_service(step_names, row.cgroup.as_deref()));
+        let (service, distributed) = match &resolved {
+            Some((service, distributed)) => (Some(service.clone()), *distributed),
+            None => (row.service, false),
+        };
+        // rank/local_rank are surfaced only for distributed services, where a
+        // Slurm task rank is meaningful; single-task services stay null.
+        let rank = if distributed {
+            row.slurm_procid.filter(|value| !value.trim().is_empty())
+        } else {
+            row.rank
+        };
+        let local_rank = if distributed {
+            row.slurm_localid.filter(|value| !value.trim().is_empty())
+        } else {
+            row.local_rank
+        };
         processes.push(GpuProcessSample {
             node: row.node,
-            rank: row.rank,
-            local_rank: row.local_rank,
-            service: row.service,
+            rank,
+            local_rank,
+            service,
             collector: row.collector,
             gpu_uuid: row.gpu_uuid,
             pid: row.pid,
@@ -1244,7 +1480,7 @@ mod tests {
     #[test]
     fn sampler_helpers_cover_latest_rows_and_missing_files() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let missing = load_sampler_snapshot(&tmpdir.path().join("missing"));
+        let missing = load_sampler_snapshot(&tmpdir.path().join("missing"), None);
         assert!(missing.sampler.is_none());
         assert!(missing.notes.is_empty());
 
@@ -1291,7 +1527,7 @@ mod tests {
         )
         .expect("write slurm");
 
-        let loaded = load_sampler_snapshot(&metrics_dir);
+        let loaded = load_sampler_snapshot(&metrics_dir, None);
         let sampler = loaded.sampler.expect("sampler");
         assert_eq!(sampler.interval_seconds, 5);
         assert!(loaded.notes.iter().any(|note| note.contains("nvidia-smi")));
@@ -1307,6 +1543,259 @@ mod tests {
         let slurm = sampler.slurm.expect("slurm snapshot");
         assert_eq!(slurm.sampled_at, "2026-04-10T10:00:00Z");
         assert_eq!(slurm.steps.len(), 2);
+    }
+
+    #[test]
+    fn cgroup_step_parser_covers_v1_v2_and_unrecognized_layouts() {
+        // cgroup v2 (unified): slurmstepd scope layout.
+        assert_eq!(
+            parse_cgroup_step("0::/system.slice/slurmstepd.scope/job_123/step_7/user/task_0"),
+            Some(("123".to_string(), "7".to_string()))
+        );
+        // cgroup v1: multiple controller lines condensed with ';' by the
+        // sampler; only the slurm hierarchy carries the job/step path.
+        assert_eq!(
+            parse_cgroup_step(concat!(
+                "12:pids:/user.slice;",
+                "11:cpuset:/;",
+                "10:devices:/slurm/uid_1000/job_456/step_2/task_3;",
+                "1:name=systemd:/system.slice/slurmd.service"
+            )),
+            Some(("456".to_string(), "2".to_string()))
+        );
+        // Special step names (batch/extern) parse but never resolve to a
+        // service because squeue step ids for them are non-numeric too.
+        assert_eq!(
+            parse_cgroup_step("0::/system.slice/slurmstepd.scope/job_123/step_extern"),
+            Some(("123".to_string(), "extern".to_string()))
+        );
+        // Unrecognized layouts (non-cgroup proctrack, plain host cgroups,
+        // malformed captures) must return None -> fields stay null.
+        assert_eq!(parse_cgroup_step("0::/user.slice/user-1000.slice"), None);
+        assert_eq!(parse_cgroup_step("0::/system.slice/job_abc/step_1"), None);
+        assert_eq!(parse_cgroup_step("garbage-without-colons"), None);
+        assert_eq!(parse_cgroup_step(""), None);
+        // job_ with no following step_ component.
+        assert_eq!(
+            parse_cgroup_step("0::/system.slice/slurmstepd.scope/job_123"),
+            None
+        );
+    }
+
+    #[test]
+    fn gpu_attribution_resolver_maps_steps_to_services_and_nulls_the_rest() {
+        let context = GpuAttributionContext::new(
+            "123",
+            &[
+                ("hpc-compose:trainer", "trainer", true),
+                ("hpc-compose:sidecar", "sidecar", false),
+            ],
+        );
+        let mut step_names = BTreeMap::new();
+        step_names.insert("123.0".to_string(), "hpc-compose:trainer".to_string());
+        step_names.insert("123.1".to_string(), "hpc-compose:sidecar".to_string());
+        // The sampler's own srun fanout steps carry the launched command as
+        // their step name; falling through to null is intended.
+        step_names.insert("123.2".to_string(), "bash".to_string());
+        step_names.insert("123.batch".to_string(), "hpc-job".to_string());
+
+        let v2 = |step: &str| {
+            format!("0::/system.slice/slurmstepd.scope/job_123/step_{step}/user/task_0")
+        };
+        assert_eq!(
+            context.resolve_service(&step_names, Some(&v2("0"))),
+            Some(("trainer".to_string(), true))
+        );
+        assert_eq!(
+            context.resolve_service(&step_names, Some(&v2("1"))),
+            Some(("sidecar".to_string(), false))
+        );
+        // Sampler fanout / non-hpc-compose step -> null (intended).
+        assert_eq!(context.resolve_service(&step_names, Some(&v2("2"))), None);
+        // Step missing from the captured map -> null.
+        assert_eq!(context.resolve_service(&step_names, Some(&v2("9"))), None);
+        // Foreign job's process visible on a shared node -> null.
+        assert_eq!(
+            context.resolve_service(
+                &step_names,
+                Some("0::/system.slice/slurmstepd.scope/job_999/step_0")
+            ),
+            None
+        );
+        // No cgroup capture -> null.
+        assert_eq!(context.resolve_service(&step_names, None), None);
+    }
+
+    #[test]
+    fn step_map_loader_is_lenient_and_last_row_wins() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = tmpdir.path().join("steps.jsonl");
+        assert!(load_step_map(&path).is_empty());
+        fs::write(
+            &path,
+            concat!(
+                "{\"sampled_at\":\"t\",\"step_id\":\"123.0\",\"step_name\":\"hpc-compose:a\"}\n",
+                "not-json torn tail line\n",
+                "{\"sampled_at\":\"t\",\"step_id\":null,\"step_name\":\"orphan\"}\n",
+                "{\"sampled_at\":\"t\",\"step_id\":\"123.0\",\"step_name\":\"hpc-compose:b\"}\n"
+            ),
+        )
+        .expect("write steps");
+        let map = load_step_map(&path);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("123.0").map(String::as_str), Some("hpc-compose:b"));
+    }
+
+    #[test]
+    fn device_inheritance_requires_a_single_unanimous_service_per_uuid() {
+        fn device(uuid: &str) -> GpuDeviceSample {
+            GpuDeviceSample {
+                node: Some("node01".to_string()),
+                rank: None,
+                local_rank: None,
+                service: None,
+                collector: None,
+                index: Some("0".to_string()),
+                uuid: Some(uuid.to_string()),
+                name: None,
+                utilization_gpu: None,
+                utilization_memory: None,
+                memory_used_mib: None,
+                memory_total_mib: None,
+                temperature_c: None,
+                power_draw_w: None,
+                power_limit_w: None,
+            }
+        }
+        fn process(uuid: &str, service: Option<&str>, rank: Option<&str>) -> GpuProcessSample {
+            GpuProcessSample {
+                node: Some("node01".to_string()),
+                rank: rank.map(str::to_string),
+                local_rank: rank.map(str::to_string),
+                service: service.map(str::to_string),
+                collector: None,
+                gpu_uuid: Some(uuid.to_string()),
+                pid: Some("1".to_string()),
+                process_name: Some("python".to_string()),
+                used_memory_mib: None,
+            }
+        }
+
+        let mut devices = vec![
+            device("gpu-clean"),      // one attributed process -> inherits
+            device("gpu-shared"),     // two services -> stays null
+            device("gpu-mixed"),      // attributed + unattributed -> stays null
+            device("gpu-idle"),       // no processes -> stays null
+            device("gpu-multi-rank"), // one service, two ranks -> service only
+        ];
+        let processes = vec![
+            process("gpu-clean", Some("trainer"), Some("3")),
+            process("gpu-shared", Some("trainer"), None),
+            process("gpu-shared", Some("sidecar"), None),
+            process("gpu-mixed", Some("trainer"), None),
+            process("gpu-mixed", None, None),
+            process("gpu-multi-rank", Some("trainer"), Some("0")),
+            process("gpu-multi-rank", Some("trainer"), Some("1")),
+        ];
+        inherit_device_attribution(&mut devices, &processes);
+        assert_eq!(devices[0].service.as_deref(), Some("trainer"));
+        assert_eq!(devices[0].rank.as_deref(), Some("3"));
+        assert_eq!(devices[0].local_rank.as_deref(), Some("3"));
+        assert_eq!(devices[1].service, None);
+        assert_eq!(devices[2].service, None);
+        assert_eq!(devices[3].service, None);
+        assert_eq!(devices[4].service.as_deref(), Some("trainer"));
+        assert_eq!(devices[4].rank, None);
+        assert_eq!(devices[4].local_rank, None);
+    }
+
+    #[test]
+    fn sampler_snapshot_attributes_gpu_rows_through_step_ids() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let metrics_dir = tmpdir.path().join("metrics");
+        fs::create_dir_all(&metrics_dir).expect("metrics dir");
+        fs::write(
+            metrics_dir.join("meta.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "interval_seconds": 5,
+                "collectors": [
+                    {"name": "gpu", "enabled": true, "available": true, "note": null, "last_sampled_at": "2026-04-10T10:00:00Z"}
+                ]
+            }))
+            .expect("meta json"),
+        )
+        .expect("write meta");
+        fs::write(
+            metrics_dir.join("gpu.jsonl"),
+            concat!(
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"index\":\"0\",\"uuid\":\"gpu-a\",\"name\":\"A100\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"index\":\"1\",\"uuid\":\"gpu-b\",\"name\":\"A100\"}\n"
+            ),
+        )
+        .expect("write gpu");
+        // gpu-a is used by the distributed trainer step (cgroup v2); gpu-b is
+        // shared with a process whose cgroup capture failed -> stays null.
+        fs::write(
+            metrics_dir.join("gpu_processes.jsonl"),
+            concat!(
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"gpu_uuid\":\"gpu-a\",\"pid\":\"42\",\"process_name\":\"python\",\"used_memory_mib\":\"512\",\"cgroup\":\"0::/system.slice/slurmstepd.scope/job_123/step_0/user/task_1\",\"slurm_procid\":\"1\",\"slurm_localid\":\"1\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"gpu_uuid\":\"gpu-b\",\"pid\":\"43\",\"process_name\":\"python\",\"used_memory_mib\":\"256\",\"cgroup\":\"0::/system.slice/slurmstepd.scope/job_123/step_1/user/task_0\",\"slurm_procid\":\"0\",\"slurm_localid\":\"0\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"gpu_uuid\":\"gpu-b\",\"pid\":\"44\",\"process_name\":\"mystery\",\"used_memory_mib\":\"64\"}\n"
+            ),
+        )
+        .expect("write gpu processes");
+        fs::write(
+            metrics_dir.join("steps.jsonl"),
+            concat!(
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"step_id\":\"123.0\",\"step_name\":\"hpc-compose:trainer\"}\n",
+                "{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"step_id\":\"123.1\",\"step_name\":\"hpc-compose:sidecar\"}\n"
+            ),
+        )
+        .expect("write steps");
+
+        let context = GpuAttributionContext::new(
+            "123",
+            &[
+                ("hpc-compose:trainer", "trainer", true),
+                ("hpc-compose:sidecar", "sidecar", false),
+            ],
+        );
+        let loaded = load_sampler_snapshot(&metrics_dir, Some(&context));
+        let gpu = loaded.sampler.expect("sampler").gpu.expect("gpu snapshot");
+
+        let trainer_proc = &gpu.processes[0];
+        assert_eq!(trainer_proc.service.as_deref(), Some("trainer"));
+        // Distributed service -> rank/local_rank surfaced from the live
+        // SLURM_PROCID/SLURM_LOCALID environment capture.
+        assert_eq!(trainer_proc.rank.as_deref(), Some("1"));
+        assert_eq!(trainer_proc.local_rank.as_deref(), Some("1"));
+        let sidecar_proc = &gpu.processes[1];
+        assert_eq!(sidecar_proc.service.as_deref(), Some("sidecar"));
+        // Non-distributed service -> rank stays null even though captured.
+        assert_eq!(sidecar_proc.rank, None);
+        assert_eq!(sidecar_proc.local_rank, None);
+        // No cgroup capture -> null.
+        assert_eq!(gpu.processes[2].service, None);
+
+        // Device inheritance: gpu-a is unanimous, gpu-b has an unattributed
+        // co-tenant so it stays null (never guess).
+        assert_eq!(gpu.gpus[0].service.as_deref(), Some("trainer"));
+        assert_eq!(gpu.gpus[0].rank.as_deref(), Some("1"));
+        assert_eq!(gpu.gpus[1].service, None);
+
+        // Without attribution inputs everything stays null (legacy behavior).
+        let unattributed = load_sampler_snapshot(&metrics_dir, None);
+        let gpu = unattributed
+            .sampler
+            .expect("sampler")
+            .gpu
+            .expect("gpu snapshot");
+        assert!(
+            gpu.processes
+                .iter()
+                .all(|process| process.service.is_none())
+        );
+        assert!(gpu.gpus.iter().all(|device| device.service.is_none()));
     }
 
     #[test]
@@ -1412,6 +1901,8 @@ mod tests {
         let processes = load_gpu_processes_for_timestamp(
             &metrics_dir.join("gpu_processes.jsonl"),
             latest_sampled_at,
+            None,
+            &BTreeMap::new(),
         )
         .expect("processes");
         assert_eq!(processes.len(), 700);
