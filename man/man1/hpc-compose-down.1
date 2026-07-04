@@ -27,7 +27,7 @@ Also purge tracked cached image artifacts for this job.
 Skip auto\-exporting tracked artifacts to x\-slurm.artifacts.export_dir before reaping runtime state.
 .TP
 \fB--yes\fR
-Confirm this destructive action without prompting.
+Confirm this destructive action without prompting. Passing an explicit \-\-job\-id already skips the prompt (explicit intent), unless \-\-purge\-cache is also set; the prompt otherwise appears only when targeting the latest tracked job.
 .TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.

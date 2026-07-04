@@ -1344,13 +1344,7 @@ pub(crate) fn sweep_observe(
                     );
                 }
                 let reason = format!("stop-when condition '{expr}' satisfied");
-                let report = sweep_stop_inner(
-                    &context,
-                    sweep_id.as_deref(),
-                    true,
-                    Some(reason),
-                    output_format == OutputFormat::Text,
-                )?;
+                let report = sweep_stop_inner(&context, sweep_id.as_deref(), true, Some(reason))?;
                 if output_format == OutputFormat::Text {
                     print_sweep_stop_output(&report);
                 }
@@ -1501,13 +1495,7 @@ pub(crate) fn sweep_stop(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let output_format = output::resolve_output_format(format, false);
-    let report = sweep_stop_inner(
-        &context,
-        sweep_id.as_deref(),
-        yes,
-        reason,
-        output_format == OutputFormat::Text,
-    )?;
+    let report = sweep_stop_inner(&context, sweep_id.as_deref(), yes, reason)?;
     match output_format {
         OutputFormat::Text => print_sweep_stop_output(&report),
         OutputFormat::Json => {
@@ -1537,23 +1525,20 @@ fn sweep_stop_inner(
     sweep_id: Option<&str>,
     yes: bool,
     reason: Option<String>,
-    print_confirmation_hint: bool,
 ) -> Result<SweepStopOutput> {
     let scheduler_options = SchedulerOptions {
         squeue_bin: context.binaries.squeue.value.clone(),
         sacct_bin: context.binaries.sacct.value.clone(),
     };
     let mut manifest = load_sweep_manifest(&context.compose_file.value, sweep_id)?;
-    if !yes {
-        if print_confirmation_hint {
-            println!(
-                "About to cancel all non-terminal trials of sweep {} ({}). Re-run with --yes to proceed.",
-                manifest.sweep_id,
-                manifest.trials.len()
-            );
-        }
-        bail!("--yes not set; refusing to cancel sweep trials");
-    }
+    crate::commands::confirm::confirm_destructive_action(
+        &format!(
+            "cancel {} sweep trials for sweep {}",
+            manifest.trials.len(),
+            manifest.sweep_id
+        ),
+        yes,
+    )?;
     let mut cancelled = Vec::new();
     let mut skipped = Vec::new();
     for trial in &manifest.trials {

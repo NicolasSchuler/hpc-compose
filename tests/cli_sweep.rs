@@ -1393,7 +1393,18 @@ fn sweep_stop_requires_yes_flag() {
         ],
     );
     assert_failure(&stop);
-    assert!(stderr_text(&stop).contains("--yes not set"));
+    // Routed through the shared destructive-action confirmation: non-TTY stdin
+    // fails closed with the shared helper's phrasing rather than the old
+    // bespoke "--yes not set" bail.
+    let stderr = stderr_text(&stop);
+    assert!(
+        stderr.contains("requires --yes"),
+        "expected shared-confirm phrasing, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("sweep trials for sweep"),
+        "expected the sweep action string in the prompt, got: {stderr}"
+    );
 }
 
 #[test]

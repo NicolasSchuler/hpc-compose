@@ -2003,7 +2003,10 @@ pub enum Commands {
             help = "Skip auto-exporting tracked artifacts to x-slurm.artifacts.export_dir before reaping runtime state"
         )]
         no_export: bool,
-        #[arg(long, help = "Confirm this destructive action without prompting")]
+        #[arg(
+            long,
+            help = "Confirm this destructive action without prompting. Passing an explicit --job-id already skips the prompt (explicit intent), unless --purge-cache is also set; the prompt otherwise appears only when targeting the latest tracked job"
+        )]
         yes: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
@@ -2043,7 +2046,10 @@ pub enum Commands {
             help = "Skip auto-exporting tracked artifacts to x-slurm.artifacts.export_dir before reaping runtime state"
         )]
         no_export: bool,
-        #[arg(long, help = "Confirm this destructive action without prompting")]
+        #[arg(
+            long,
+            help = "Confirm this destructive action without prompting. Passing an explicit --job-id already skips the prompt (explicit intent), unless --purge-cache is also set; the prompt otherwise appears only when targeting the latest tracked job"
+        )]
         yes: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
