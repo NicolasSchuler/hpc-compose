@@ -17,6 +17,7 @@ fn service(image: &str) -> ServiceSpec {
         command: None,
         entrypoint: None,
         script: None,
+        env_file: None,
         environment: EnvironmentSpec::None,
         volumes: Vec::new(),
         working_dir: None,

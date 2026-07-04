@@ -743,6 +743,7 @@ Setting both a GPU-carrying `gres` (for example `gres: gpu:2`) and `gpus` at the
 | `command` | string or list of strings | omitted | Shell form or exec form. |
 | `entrypoint` | string or list of strings | omitted | Must use the same form as `command` when both are present. |
 | `script` | string | omitted | Multi-line shell script sugar for `command: ["/bin/sh", "-lc", script]`; mutually exclusive with `command` and `entrypoint`. |
+| `env_file` | string or list of strings | omitted | Dotenv-style files read on the submit host and folded into `environment`. See [`env_file`](#env_file). |
 | `environment` | mapping or list of `KEY=VALUE` strings | omitted | Both forms normalize to key/value pairs. |
 | `modules` | list of strings | omitted | List-only shorthand for service `x-env.modules.load`; cannot be combined with service `x-env.modules`. |
 | `volumes` | list of `host_path:container_path` strings | omitted | Runtime bind mounts. Host paths resolve against the compose file directory. |
@@ -830,6 +831,33 @@ With `DEPLOY_ENV` unset or empty, `hpc-compose validate` fails before submission
 ```text
 'DEPLOY_ENV' is required: set DEPLOY_ENV to staging or prod
 ```
+
+## `env_file`
+
+`env_file` pulls environment variables from one or more dotenv-style files (docker-compose compatibility), so you do not have to inline every value under `environment`.
+
+Accepted forms:
+
+```yaml
+env_file: config/train.env          # string form
+```
+
+```yaml
+env_file:                           # list form, later file wins
+  - config/base.env
+  - config/train.env
+```
+
+Rules:
+
+- Files are read on the **submit host** (the machine running `hpc-compose`), relative to the compose file's directory — the same base as the `.env` loader. They are baked into the rendered submission script; they are **not** re-read inside the job and **not** staged to the compute node.
+- Each line uses dotenv grammar: `KEY=VALUE`, optionally prefixed with `export `, with `#` comments and blank lines ignored and single/double quotes stripped. This is the same parser as `.env`.
+- Merge precedence, lowest to highest: `env_file` entries in list order, then inline `environment:`. A later file overrides an earlier one; inline `environment:` overrides anything from `env_file`.
+- File **contents are literal**: a value like `FOO=${BAR}` is kept verbatim with no `${...}` expansion (matching docker-compose and the `.env` loader). The env_file **paths are interpolated**, so `env_file: config/${STAGE}.env` resolves `${STAGE}` before the file is read.
+- The merged keys are name-validated exactly like inline `environment`, so an unsafe name (e.g. a leading digit) is rejected.
+- Failure modes are load-time errors with diagnostics: a missing file (`env_file ... does not exist`) or a malformed line (`env_file ... line N: must use KEY=VALUE syntax`).
+- Redaction is identical to inline `environment:`: entries become `environment` pairs, so a sensitive-looking key (`*_TOKEN`, `*_KEY`, ...) is masked by name in `config`/`context` output, and a value that matches a declared `secrets:` value is masked by value. `env_file` values are **not** treated as secrets in bulk; a benign entry like `LOG_LEVEL=info` is shown verbatim.
+- Unlike `.env`, `env_file` values are per-service and do **not** join the global interpolation map; you cannot reference them as `${VAR}` elsewhere in the spec.
 
 ## `volumes`
 

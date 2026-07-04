@@ -432,10 +432,7 @@ pub(crate) fn plan(
     // Only the rendered script (`--show-script`, `script` field) is exempt: it is
     // the submission artifact and is documented to carry secrets literally (see the
     // comment near the top of this module about the 0600 script write).
-    let secret_values = crate::redaction::secret_value_set(
-        &context.interpolation_vars,
-        &context.interpolation_var_sources,
-    );
+    let secret_values = context.secret_values();
     let redacted_runtime_plan =
         crate::redaction::redacted_runtime_plan(&runtime_plan, &secret_values, false);
 
@@ -790,10 +787,7 @@ pub(crate) fn inspect(
         }
         return Ok(());
     }
-    let secret_values = crate::redaction::secret_value_set(
-        &context.interpolation_vars,
-        &context.interpolation_var_sources,
-    );
+    let secret_values = context.secret_values();
     let redacted_runtime_plan =
         crate::redaction::redacted_runtime_plan(&runtime_plan, &secret_values, false);
 
@@ -850,10 +844,7 @@ pub(crate) fn config(
     // Redact sensitive service env values before any output. Secrets declared
     // via the top-level `secrets:` block (ValueSource::Secret) and any value
     // matching a resolved secret are hidden unless --show-values is passed.
-    let secret_values = crate::redaction::secret_value_set(
-        &context.interpolation_vars,
-        &context.interpolation_var_sources,
-    );
+    let secret_values = context.secret_values();
     for service in config.services.values_mut() {
         service.environment =
             crate::redaction::redact_env_map(&service.environment, &secret_values, show_values);

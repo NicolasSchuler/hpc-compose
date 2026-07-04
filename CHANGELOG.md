@@ -9,6 +9,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 
+- Added per-service `env_file:` (docker-compose compatibility). A string or list
+  of dotenv-style files is read on the submit host, relative to the compose
+  file's directory, and folded into the service `environment` at spec-load time.
+  Merge precedence is lowest-to-highest: `env_file` entries in list order, then
+  inline `environment:`. File contents are literal (no `${...}` expansion) while
+  the paths are interpolated. A missing file or malformed line surfaces as a
+  `SpecError::EnvFileNotFound` / `SpecError::EnvFileMalformedLine` miette
+  diagnostic. env_file entries redact the same as inline `environment:` (by
+  sensitive key name and declared `secrets:` values). Ships the `env-file`
+  example with `.env` fixtures.
 - Added `${VAR:?message}` / `${VAR?message}` required-variable interpolation.
   `${VAR:?message}` fails at spec-load time when `VAR` is unset or empty, and
   `${VAR?message}` fails only when `VAR` is unset; the message is interpolated

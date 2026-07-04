@@ -361,6 +361,15 @@ const EXAMPLES: &[ExampleInfo] = &[
         tags: &["gpu", "cuda", "probe", "nvidia-smi", "diagnostics"],
     },
     ExampleInfo {
+        name: "env-file",
+        path: "examples/env-file.yaml",
+        availability: ExampleAvailability::RepositoryFile,
+        category: "basics",
+        demonstrates: "Per-service env_file: (docker-compose compat) with list-order and inline precedence.",
+        start_when: "You are porting a docker-compose.yml whose services use env_file: instead of inlining environment.",
+        tags: &["env-file", "compose-compat", "env", "environment"],
+    },
+    ExampleInfo {
         name: "jupyter",
         path: "examples/jupyter.yaml",
         availability: ExampleAvailability::BuiltInTemplate,

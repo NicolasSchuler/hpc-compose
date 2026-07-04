@@ -1,6 +1,6 @@
 //! Repo-adjacent settings and execution-context resolution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -350,6 +350,19 @@ pub struct ResolvedContext {
     /// Watch/replay TUI display defaults from settings.
     #[serde(default)]
     pub watch: WatchSettings,
+}
+
+impl ResolvedContext {
+    /// Returns the value-equality redaction set: every value resolved through
+    /// the top-level `secrets:` block. Every output path redacts against this so
+    /// a benign-keyed value that equals a declared secret is still hidden.
+    #[must_use]
+    pub fn secret_values(&self) -> BTreeSet<String> {
+        crate::redaction::secret_value_set(
+            &self.interpolation_vars,
+            &self.interpolation_var_sources,
+        )
+    }
 }
 
 /// Inputs used when resolving a command context.

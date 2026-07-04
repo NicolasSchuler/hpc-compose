@@ -1,0 +1,56 @@
+name: env-file
+
+# Per-service `env_file:` (docker-compose compatibility).
+#
+# `env_file:` pulls environment variables from one or more dotenv-style files so
+# you do not have to inline every `KEY=VALUE` under `environment:`. It is a
+# straight port target for a `docker-compose.yml` that already lists
+# `env_file:` on its services.
+#
+# HOW IT RESOLVES
+#   * Files are read on the SUBMIT HOST (the machine running `hpc-compose`),
+#     relative to THIS compose file's directory — exactly like the `.env`
+#     interpolation loader. They are baked into the rendered submission script;
+#     they are NOT re-read inside the job and NOT staged to the compute node.
+#   * List order is lowest-to-highest precedence: later files win over earlier
+#     ones, and inline `environment:` wins over anything from `env_file:`.
+#     Below, `env-file-base.env` sets OVERRIDDEN=from-base, `env-file.env`
+#     overrides it to from-env-file, and inline `environment:` sets RUN_ID.
+#   * File CONTENTS are LITERAL: a value like `FOO=${BAR}` is kept verbatim, with
+#     no `${...}` expansion (matching docker-compose and the `.env` loader). The
+#     env_file PATHS, however, ARE interpolated — `env_file: config/${STAGE}.env`
+#     works — because they are ordinary spec strings.
+#   * A missing file or a malformed (`non-KEY=VALUE`) line is a load-time error
+#     with a diagnostic, so a typo fails fast instead of silently dropping vars.
+#
+# REDACTION: env_file entries become service `environment` pairs, so a
+# sensitive-looking key (e.g. `*_TOKEN`) is masked by name in `config`/`context`
+# output, and any value that equals an externalized env_file value is masked by
+# value too — without treating env_file as a structural `secrets:` source.
+
+x-slurm:
+  job_name: env-file
+  time: "00:05:00"
+  mem: 2G
+  cpus_per_task: 1
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+
+services:
+  app:
+    image: python:3.11-slim
+    # base.env first, then env-file.env (later wins), then inline environment.
+    env_file:
+      - env-file-base.env
+      - env-file.env
+    environment:
+      RUN_ID: "${RUN_ID:-local}"
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        # `$$` renders as a literal `$`, so the shell expands these from the
+        # service environment at run time (env_file merges into `environment`).
+        echo "BASE_ONLY=$$BASE_ONLY"       # from env-file-base.env
+        echo "OVERRIDDEN=$$OVERRIDDEN"     # from env-file.env (later file wins)
+        echo "FROM_ENV_FILE=$$FROM_ENV_FILE"
+        echo "RUN_ID=$$RUN_ID"             # inline environment wins

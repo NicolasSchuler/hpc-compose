@@ -20,6 +20,7 @@ const SERVICE_ALLOWED_KEYS: &[&str] = &[
     "command",
     "entrypoint",
     "script",
+    "env_file",
     "environment",
     "modules",
     "volumes",

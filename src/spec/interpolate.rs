@@ -289,14 +289,52 @@ fn collect_missing_from_braced_expr(
     Ok(())
 }
 
-fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
-    let dotenv_path = project_dir.join(".env");
-    if !dotenv_path.exists() {
-        return Ok(BTreeMap::new());
-    }
+/// The reason a single `.env`/`env_file` line failed the `KEY=VALUE` grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DotenvLineErrorKind {
+    /// The line had no `=` separator.
+    MissingEquals,
+    /// The key to the left of `=` was empty.
+    EmptyKey,
+}
 
-    let raw = fs::read_to_string(&dotenv_path)
-        .context(format!("failed to read {}", dotenv_path.display()))?;
+impl DotenvLineErrorKind {
+    /// Human-readable reason, reused verbatim by both the `.env` loader message
+    /// and [`SpecError::EnvFileMalformedLine`].
+    pub(super) fn reason(self) -> &'static str {
+        match self {
+            DotenvLineErrorKind::MissingEquals => "must use KEY=VALUE syntax",
+            DotenvLineErrorKind::EmptyKey => "has an empty variable name",
+        }
+    }
+}
+
+/// A path-free parse failure for one dotenv-style line. The caller attaches the
+/// file path (and any framing message) so the same grammar can back the
+/// `.env` loader and the per-service `env_file:` loader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DotenvLineError {
+    /// 1-based line number of the offending line.
+    pub(super) line: usize,
+    /// Why the line was rejected.
+    pub(super) kind: DotenvLineErrorKind,
+}
+
+/// Failure modes of [`parse_env_file`]: either the file could not be read, or a
+/// line violated the `KEY=VALUE` grammar. Keeping the two distinct lets the
+/// caller map an I/O failure and a malformed line to different diagnostics.
+pub(super) enum ParseEnvFileError {
+    /// The file could not be read (missing, permissions, etc.).
+    Io(std::io::Error),
+    /// A line violated the `KEY=VALUE` grammar.
+    Line(DotenvLineError),
+}
+
+/// Parses dotenv-style `KEY=VALUE` lines from an already-read buffer. Handles
+/// blank lines, `#` comments, an optional `export ` prefix, and single/double
+/// quoted values. This is the path-free core shared by the compose `.env`
+/// loader and the per-service `env_file:` loader.
+pub(super) fn parse_dotenv_lines(raw: &str) -> Result<InterpolationVars, DotenvLineError> {
     let mut vars = BTreeMap::new();
     for (line_no, line) in raw.lines().enumerate() {
         let trimmed = line.trim();
@@ -305,19 +343,17 @@ fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
         }
         let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
         let Some((key, value)) = trimmed.split_once('=') else {
-            bail!(
-                "failed to parse {}: line {} must use KEY=VALUE syntax",
-                dotenv_path.display(),
-                line_no + 1
-            );
+            return Err(DotenvLineError {
+                line: line_no + 1,
+                kind: DotenvLineErrorKind::MissingEquals,
+            });
         };
         let key = key.trim();
         if key.is_empty() {
-            bail!(
-                "failed to parse {}: line {} has an empty variable name",
-                dotenv_path.display(),
-                line_no + 1
-            );
+            return Err(DotenvLineError {
+                line: line_no + 1,
+                kind: DotenvLineErrorKind::EmptyKey,
+            });
         }
         let value = value.trim();
         let value = if quoted(value, '"') || quoted(value, '\'') {
@@ -328,6 +364,32 @@ fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
         vars.insert(key.to_string(), value);
     }
     Ok(vars)
+}
+
+/// Reads and parses a dotenv-style file at an explicit path. Existence is *not*
+/// checked here -- the caller decides how to surface a missing file (e.g. the
+/// `env_file:` loader raises [`SpecError::EnvFileNotFound`] first).
+pub(super) fn parse_env_file(path: &Path) -> Result<InterpolationVars, ParseEnvFileError> {
+    let raw = fs::read_to_string(path).map_err(ParseEnvFileError::Io)?;
+    parse_dotenv_lines(&raw).map_err(ParseEnvFileError::Line)
+}
+
+fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
+    let dotenv_path = project_dir.join(".env");
+    if !dotenv_path.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let raw = fs::read_to_string(&dotenv_path)
+        .context(format!("failed to read {}", dotenv_path.display()))?;
+    parse_dotenv_lines(&raw).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to parse {}: line {} {}",
+            dotenv_path.display(),
+            error.line,
+            error.kind.reason()
+        )
+    })
 }
 
 fn quoted(value: &str, quote: char) -> bool {
@@ -586,6 +648,41 @@ mod tests {
                 .to_string()
                 .contains("empty variable name")
         );
+    }
+
+    #[test]
+    fn parse_env_file_reuses_dotenv_line_grammar() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = tmpdir.path().join("service.env");
+
+        fs::write(&path, "# comment\nexport A=one\nB='two words'\n").expect("write env file");
+        let vars = match parse_env_file(&path) {
+            Ok(vars) => vars,
+            Err(_) => panic!("expected a parseable env file"),
+        };
+        assert_eq!(vars.get("A").map(String::as_str), Some("one"));
+        assert_eq!(vars.get("B").map(String::as_str), Some("two words"));
+
+        fs::write(&path, "GOOD=1\nBROKEN\n").expect("write malformed env file");
+        match parse_env_file(&path) {
+            Err(ParseEnvFileError::Line(error)) => {
+                assert_eq!(error.line, 2);
+                assert_eq!(error.kind, DotenvLineErrorKind::MissingEquals);
+            }
+            other => panic!("expected a malformed-line error, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[test]
+    fn parse_env_file_missing_file_is_a_plain_io_error() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let missing = tmpdir.path().join("does-not-exist.env");
+        match parse_env_file(&missing) {
+            Err(ParseEnvFileError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected an I/O error, got {:?}", other.is_ok()),
+        }
     }
 
     #[test]

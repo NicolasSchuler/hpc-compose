@@ -42,6 +42,14 @@ Source: `examples/dev-python-smoke.yaml`
 {{#include ../../examples/dev-python-smoke.yaml}}
 ```
 
+## Env File
+
+Source: `examples/env-file.yaml`
+
+```yaml
+{{#include ../../examples/env-file.yaml}}
+```
+
 ## Fairseq Preprocess
 
 Source: `examples/fairseq-preprocess.yaml`

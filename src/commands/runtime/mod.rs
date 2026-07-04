@@ -1233,13 +1233,8 @@ where
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml = output::effective_config_yaml(
-        &effective_config,
-        &crate::redaction::secret_value_set(
-            &context.interpolation_vars,
-            &context.interpolation_var_sources,
-        ),
-    )?;
+    let effective_config_yaml =
+        output::effective_config_yaml(&effective_config, &context.secret_values())?;
     let runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1675,13 +1670,8 @@ where
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml = output::effective_config_yaml(
-        &effective_config,
-        &crate::redaction::secret_value_set(
-            &context.interpolation_vars,
-            &context.interpolation_var_sources,
-        ),
-    )?;
+    let effective_config_yaml =
+        output::effective_config_yaml(&effective_config, &context.secret_values())?;
     let mut runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1972,13 +1962,8 @@ pub(crate) fn launch(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let effective_config_yaml = output::effective_config_yaml(
-        &effective_config,
-        &crate::redaction::secret_value_set(
-            &context.interpolation_vars,
-            &context.interpolation_var_sources,
-        ),
-    )?;
+    let effective_config_yaml =
+        output::effective_config_yaml(&effective_config, &context.secret_values())?;
     let mut runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,

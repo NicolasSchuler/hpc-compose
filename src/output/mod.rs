@@ -419,8 +419,9 @@ pub(crate) fn build_validate_output(plan: &Plan, cluster_warnings: Vec<String>) 
 /// must not carry cleartext secrets — `config`/`context`/`inspect` already
 /// redact the same struct on display, and this keeps the at-rest copy
 /// consistent. Pass the secret value set from
-/// [`crate::redaction::secret_value_set`] so values referenced under benign
-/// env names are caught in addition to name-based redaction.
+/// [`crate::context::ResolvedContext::secret_values`] (declared `secrets:`
+/// values) so values referenced under benign env names are caught in addition
+/// to name-based redaction.
 pub(crate) fn effective_config_yaml(
     config: &EffectiveComposeConfig,
     secret_values: &std::collections::BTreeSet<String>,
