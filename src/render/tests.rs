@@ -3350,11 +3350,13 @@ fn srun_cmd_line(script: &str) -> &str {
 #[test]
 fn global_and_per_service_x_slurm_precedence_is_pinned() {
     // --- Scope separation: header from global, srun line from per-service. ---
+    // NOTE: `gpus` is deliberately NOT set alongside `gres` here — since the
+    // gpus/gres cross-field guard landed, setting both in one scope is a hard
+    // validation error (the old silent "gres wins" precedence no longer exists).
     let global = SlurmConfig {
         cpus_per_task: Some(8),
         gres: Some("gpu:global:4".into()),
         distribution: Some("cyclic".into()),
-        gpus: Some(4),
         ..SlurmConfig::default()
     };
     let worker = plan_service_spec(
@@ -3363,7 +3365,6 @@ fn global_and_per_service_x_slurm_precedence_is_pinned() {
             cpus_per_task: Some(2),
             gres: Some("gpu:svc:1".into()),
             distribution: Some("block:block".into()),
-            gpus: Some(1),
             ..ServiceSlurmConfig::default()
         },
     );
@@ -3396,10 +3397,10 @@ fn global_and_per_service_x_slurm_precedence_is_pinned() {
         !header.contains("--distribution=block:block"),
         "header leaked svc dist: {header}"
     );
-    // `gres` wins over `gpus` on the header, so no plain `--gpus`.
+    // A gres request alone emits no plain `--gpus` flag on the header.
     assert!(
         !header.contains("#SBATCH --gpus="),
-        "header should prefer gres: {header}"
+        "header should carry gres only: {header}"
     );
 
     // The service srun line carries the PER-SERVICE values, and only those.
@@ -3423,8 +3424,11 @@ fn global_and_per_service_x_slurm_precedence_is_pinned() {
         !srun.contains("--distribution=cyclic"),
         "srun leaked global dist: {srun}"
     );
-    // `gres` wins over `gpus` on the srun line too.
-    assert!(!srun.contains("--gpus="), "srun should prefer gres: {srun}");
+    // A gres request alone emits no plain `--gpus` flag on the srun line either.
+    assert!(
+        !srun.contains("--gpus="),
+        "srun should carry gres only: {srun}"
+    );
 
     // --- ntasks_per_node: inherited from global when the service omits it. ---
     let global = SlurmConfig {

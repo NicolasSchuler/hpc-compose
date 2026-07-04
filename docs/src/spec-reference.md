@@ -239,7 +239,7 @@ These fields live under the top-level `x-slurm` block.
 | `cpus_per_task` | positive integer | omitted | Top-level Slurm CPU request. |
 | `mem` | string | omitted | Passed through to `#SBATCH --mem`. |
 | `gres` | string | omitted | Passed through to `#SBATCH --gres`. |
-| `gpus` | positive integer | omitted | Used only when `gres` is not set. |
+| `gpus` | positive integer | omitted | Cannot be combined with a `gpu:` `gres` request (validation error). |
 | `gpus_per_node` | positive integer | omitted | Passed through to `#SBATCH --gpus-per-node`. |
 | `gpus_per_task` | positive integer | omitted | Passed through to `#SBATCH --gpus-per-task`. |
 | `cpus_per_gpu` | positive integer | omitted | Passed through to `#SBATCH --cpus-per-gpu`. |
@@ -715,7 +715,7 @@ These are descriptive literal exports. They are emitted for every service that d
 
 ### `gres` and `gpus`
 
-When both `gres` and `gpus` are set at the same level, `gres` takes priority and `gpus` is ignored.
+Setting both a GPU-carrying `gres` (for example `gres: gpu:2`) and `gpus` at the same level is rejected at validation time: the two express the same request and can contradict each other. Use one or the other. A non-GPU `gres` (for example a license or bandwidth resource) can still be combined with `gpus`.
 
 ## Service fields
 
@@ -966,7 +966,7 @@ These fields live under `services.<name>.x-slurm`.
 | `ntasks` | positive integer | omitted | Adds `--ntasks` to that service's `srun`. |
 | `ntasks_per_node` | positive integer | omitted | Adds `--ntasks-per-node` to that service's `srun`. |
 | `cpus_per_task` | positive integer | omitted | Adds `--cpus-per-task` to that service's `srun`. |
-| `gpus` | positive integer | omitted | Adds `--gpus` when `gres` is not set. |
+| `gpus` | positive integer | omitted | Adds `--gpus`. Cannot be combined with a `gpu:` `gres` request (validation error). |
 | `gres` | string | omitted | Adds `--gres` to that service's `srun`. Takes priority over `gpus`. |
 | `gpus_per_node` | positive integer | omitted | Adds `--gpus-per-node` to that service's `srun`. |
 | `gpus_per_task` | positive integer | omitted | Adds `--gpus-per-task` to that service's `srun`. |
