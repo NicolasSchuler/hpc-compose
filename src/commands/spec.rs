@@ -429,6 +429,17 @@ pub(crate) fn plan(
     };
     let explanations = build_plan_hints(&runtime_plan, &cluster_warnings);
 
+    // Every output path must redact resolved secret values, mirroring `inspect`.
+    // Only the rendered script (`--show-script`, `script` field) is exempt: it is
+    // the submission artifact and is documented to carry secrets literally (see the
+    // comment near the top of this module about the 0600 script write).
+    let secret_values = crate::redaction::secret_value_set(
+        &context.interpolation_vars,
+        &context.interpolation_var_sources,
+    );
+    let redacted_runtime_plan =
+        crate::redaction::redacted_runtime_plan(&runtime_plan, &secret_values, false);
+
     match output_common::resolve_output_format(format, false) {
         OutputFormat::Text => {
             println!("{}", term::styled_success("spec is valid"));
@@ -436,17 +447,17 @@ pub(crate) fn plan(
                 eprintln!("{} {warning}", term::styled_warning("WARN"));
             }
             if tree {
-                output_spec::print_plan_inspect_tree(&plan, &runtime_plan)
+                output_spec::print_plan_inspect_tree(&plan, &redacted_runtime_plan)
                     .context("failed to write tree output")?;
             } else if verbose {
                 output_spec::print_plan_inspect_verbose_with_profile(
                     &plan,
-                    &runtime_plan,
+                    &redacted_runtime_plan,
                     cluster_profile.as_ref(),
                 )
                 .context("failed to write plan output")?;
             } else {
-                output_spec::print_plan_inspect(&runtime_plan)
+                output_spec::print_plan_inspect(&redacted_runtime_plan)
                     .context("failed to write plan output")?;
             }
             if let Some(script) = script.as_deref() {
@@ -464,7 +475,7 @@ pub(crate) fn plan(
                 serde_json::to_string_pretty(&PlanOutput {
                     valid: true,
                     compose_file: plan.spec_path,
-                    runtime_plan,
+                    runtime_plan: redacted_runtime_plan,
                     cluster_warnings,
                     explanations,
                     script,
