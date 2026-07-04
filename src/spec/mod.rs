@@ -4440,7 +4440,7 @@ impl HealthcheckDuration {
 }
 
 /// Parses a short duration string (`30s`, `2m`, `1h`, or a bare number of
-/// seconds) into seconds. Used by CLI flags like `--ready-timeout`.
+/// seconds) into seconds. Used by CLI flags like `notebook --timeout`.
 ///
 /// # Errors
 ///

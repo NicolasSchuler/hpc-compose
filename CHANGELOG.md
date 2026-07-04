@@ -58,6 +58,32 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   explicit `array_tasks` modifier, and using `array_tasks` without `x-slurm.array`
   is rejected.
 
+### Changed
+
+- **BREAKING:** every per-command "give up after this long" flag is now spelled
+  `--timeout` and takes a DURATION string (`30s`, `5m`, `1h`, or a bare number
+  of seconds). The old spellings are removed outright (no hidden aliases), and
+  each command's default is unchanged:
+
+  | Command | Before | After | Default |
+  | --- | --- | --- | --- |
+  | `test` | `--wait-timeout <DURATION>` (alias `--timeout`) | `--timeout <DURATION>` | `180s` |
+  | `notebook` | `--ready-timeout <DURATION>` | `--timeout <DURATION>` | `10m` |
+  | `germinate` | `--pending-timeout <DURATION>` | `--timeout <DURATION>` | `30m` |
+  | `when` | `--timeout <DURATION>` | unchanged | none |
+  | `sweep observe` | `--timeout <DURATION>` | unchanged | none |
+  | `doctor mpi-smoke` / `fabric-smoke` / `readiness` | `--timeout-seconds <SECONDS>` | `--timeout <DURATION>` | `5m` (was `300` seconds; same duration) |
+
+  `doctor --timeout` still accepts a bare number of seconds, so
+  `--timeout-seconds 300` migrates to `--timeout 300` (or `--timeout 5m`).
+
+### Removed
+
+- **BREAKING:** the hidden deprecated `prepare --force` alias for
+  `prepare --force-rebuild` is gone; `prepare --force` is now an unknown-flag
+  error. `--force` now means only "overwrite the output file" (`new`/`evolve`)
+  everywhere in the CLI. Use `prepare --force-rebuild`.
+
 ## [0.1.52] - 2026-06-30
 
 ### Fixed
