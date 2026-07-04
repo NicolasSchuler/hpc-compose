@@ -270,6 +270,31 @@ pub fn build_stats_snapshot(
     job_id: Option<&str>,
     options: &StatsOptions,
 ) -> Result<StatsSnapshot> {
+    build_stats_snapshot_core(spec_path, job_id, options, None)
+}
+
+/// Builds the tracked metrics snapshot reusing an already-probed raw scheduler
+/// status (from [`probe_scheduler_status_many`]) instead of re-probing.
+///
+/// The prefetched status is used only for Slurm-backed records; local records
+/// derive their status from runtime state. Callers batching probes over a whole
+/// sweep (`sweep stats`) thread the batched result through here so each snapshot
+/// avoids a per-job squeue/sacct spawn (sstat is still probed per job).
+pub fn build_stats_snapshot_with_status(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &StatsOptions,
+    prefetched: Option<SchedulerStatus>,
+) -> Result<StatsSnapshot> {
+    build_stats_snapshot_core(spec_path, job_id, options, prefetched)
+}
+
+fn build_stats_snapshot_core(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &StatsOptions,
+    prefetched: Option<SchedulerStatus>,
+) -> Result<StatsSnapshot> {
     let (job_id, record) = match job_id {
         Some(job_id) => (
             job_id.to_string(),
@@ -281,9 +306,10 @@ pub fn build_stats_snapshot(
         }
     };
     let runtime_state = record.as_ref().and_then(load_runtime_state);
-    let raw_scheduler = match record.as_ref().map(|record| record.backend) {
-        Some(SubmissionBackend::Local) => build_local_scheduler_status(runtime_state.as_ref()),
-        _ => probe_scheduler_status(&job_id, &options.scheduler),
+    let raw_scheduler = match (record.as_ref().map(|record| record.backend), prefetched) {
+        (Some(SubmissionBackend::Local), _) => build_local_scheduler_status(runtime_state.as_ref()),
+        (_, Some(status)) => status,
+        (_, None) => probe_scheduler_status(&job_id, &options.scheduler),
     };
     let scheduler = if let Some(record) = &record {
         match record.backend {

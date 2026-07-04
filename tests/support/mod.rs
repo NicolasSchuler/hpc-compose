@@ -774,10 +774,14 @@ pub(crate) fn write_fake_squeue(tmpdir: &Path, state_file: &Path) -> PathBuf {
 set -euo pipefail
 content="$(cat '{}' 2>/dev/null || true)"
 format_string=""
+job=""
 prev=""
 for arg in "$@"; do
   if [[ "$prev" == "-o" || "$prev" == "--format" ]]; then
     format_string="$arg"
+  fi
+  if [[ "$prev" == "-j" || "$prev" == "--jobs" ]]; then
+    job="$arg"
   fi
   case "$arg" in
     --format=*)
@@ -786,14 +790,14 @@ for arg in "$@"; do
   esac
   prev="$arg"
 done
+state=""
+reason="N/A"
+start="N/A"
 case "$content" in
   ""|NONE)
     exit 0
     ;;
   *"STATE="*)
-    state=""
-    reason=""
-    start=""
     while IFS= read -r line; do
       case "$line" in
         STATE=*)
@@ -807,25 +811,32 @@ case "$content" in
           ;;
       esac
     done <<< "$content"
-    if [[ -z "$state" || "$state" == "NONE" ]]; then
-      exit 0
-    fi
-    case "$format_string" in
-      *"%T|%r|%S"*)
-        printf '%s|%s|%s\n' "$state" "${{reason:-N/A}}" "${{start:-N/A}}"
-        ;;
-      *)
-        printf '%s\n' "$state"
-        ;;
-    esac
     ;;
   *)
     while IFS= read -r line; do
       if [[ -n "$line" && "$line" != "NONE" ]]; then
-        printf '%s\n' "$line"
+        state="$line"
         break
       fi
     done <<< "$content"
+    ;;
+esac
+if [[ -z "$state" || "$state" == "NONE" ]]; then
+  exit 0
+fi
+case "$format_string" in
+  *"%i|%T|%r|%S"*)
+    # Batched probe: one row per requested id, keyed by job id.
+    IFS=',' read -ra ids <<< "$job"
+    for id in "${{ids[@]}}"; do
+      printf '%s|%s|%s|%s\n' "$id" "$state" "${{reason:-N/A}}" "${{start:-N/A}}"
+    done
+    ;;
+  *"%T|%r|%S"*)
+    printf '%s|%s|%s\n' "$state" "${{reason:-N/A}}" "${{start:-N/A}}"
+    ;;
+  *)
+    printf '%s\n' "$state"
     ;;
 esac
 "#,
@@ -865,10 +876,14 @@ pub(crate) fn write_fake_sacct(tmpdir: &Path, state_file: &Path) -> PathBuf {
 set -euo pipefail
 content="$(cat '{}' 2>/dev/null || true)"
 format_string=""
+job=""
 prev=""
 for arg in "$@"; do
   if [[ "$prev" == "--format" ]]; then
     format_string="$arg"
+  fi
+  if [[ "$prev" == "-j" || "$prev" == "--jobs" ]]; then
+    job="$arg"
   fi
   case "$arg" in
     --format=*)
@@ -877,15 +892,15 @@ for arg in "$@"; do
   esac
   prev="$arg"
 done
+state=""
+reason="None"
+eligible="Unknown"
+start="Unknown"
 case "$content" in
   ""|NONE)
     exit 0
     ;;
   *"STATE="*)
-    state=""
-    reason=""
-    eligible=""
-    start=""
     while IFS= read -r line; do
       case "$line" in
         STATE=*)
@@ -902,29 +917,41 @@ case "$content" in
           ;;
       esac
     done <<< "$content"
-    if [[ -z "$state" || "$state" == "NONE" ]]; then
-      exit 0
-    fi
-    case "$format_string" in
-      *"State,Eligible,Start,Reason"*)
-        printf '%s|%s|%s|%s\n' \
-          "$state" \
-          "${{eligible:-Unknown}}" \
-          "${{start:-Unknown}}" \
-          "${{reason:-None}}"
-        ;;
-      *)
-        printf '%s\n' "$state"
-        ;;
-    esac
     ;;
   *)
     while IFS= read -r line; do
       if [[ -n "$line" && "$line" != "NONE" ]]; then
-        printf '%s\n' "$line"
+        state="$line"
         break
       fi
     done <<< "$content"
+    ;;
+esac
+if [[ -z "$state" || "$state" == "NONE" ]]; then
+  exit 0
+fi
+case "$format_string" in
+  *"JobID,State,Eligible,Start,Reason"*)
+    # Batched probe: one row per requested id, keyed by job id.
+    IFS=',' read -ra ids <<< "$job"
+    for id in "${{ids[@]}}"; do
+      printf '%s|%s|%s|%s|%s\n' \
+        "$id" \
+        "$state" \
+        "${{eligible:-Unknown}}" \
+        "${{start:-Unknown}}" \
+        "${{reason:-None}}"
+    done
+    ;;
+  *"State,Eligible,Start,Reason"*)
+    printf '%s|%s|%s|%s\n' \
+      "$state" \
+      "${{eligible:-Unknown}}" \
+      "${{start:-Unknown}}" \
+      "${{reason:-None}}"
+    ;;
+  *)
+    printf '%s\n' "$state"
     ;;
 esac
 "#,

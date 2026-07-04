@@ -533,12 +533,19 @@ pub(crate) fn sweep_status(
         squeue_bin: context.binaries.squeue.value,
         sacct_bin: context.binaries.sacct.value,
     };
+    // Batch the scheduler probe across every Slurm-backed trial (one squeue +
+    // one gated sacct) instead of a probe pair per trial.
+    let probes = batch_probe_sweep_trials(&manifest, &options);
     let mut summary = BTreeMap::new();
     let trials = manifest
         .trials
         .iter()
         .map(|trial| {
-            let output = status_for_sweep_trial(&manifest, trial, &options);
+            let prefetched = trial
+                .job_id
+                .as_deref()
+                .and_then(|job_id| probes.get(job_id).cloned());
+            let output = status_for_sweep_trial_with(&manifest, trial, &options, prefetched);
             *summary.entry(output.status.clone()).or_insert(0) += 1;
             output
         })
@@ -572,10 +579,39 @@ pub(crate) fn sweep_status(
     }
 }
 
+/// Collects the raw scheduler probe for every Slurm-backed trial with a job id
+/// in one squeue + one gated sacct. Local trials probe no scheduler and are
+/// excluded; missing/corrupt records are skipped (their per-trial snapshot
+/// re-derives the error).
+fn batch_probe_sweep_trials(
+    manifest: &SweepManifest,
+    options: &SchedulerOptions,
+) -> BTreeMap<String, (SchedulerStatus, Option<QueueDiagnostics>)> {
+    let job_ids = manifest
+        .trials
+        .iter()
+        .filter_map(|trial| trial.job_id.as_deref())
+        .filter(|job_id| {
+            load_submission_record_optional(&manifest.compose_file, Some(job_id))
+                .is_some_and(|record| record.backend == SubmissionBackend::Slurm)
+        })
+        .collect::<Vec<_>>();
+    probe_scheduler_status_many(&job_ids, options)
+}
+
 fn status_for_sweep_trial(
     manifest: &SweepManifest,
     trial: &SweepManifestTrial,
     options: &SchedulerOptions,
+) -> SweepStatusTrialOutput {
+    status_for_sweep_trial_with(manifest, trial, options, None)
+}
+
+fn status_for_sweep_trial_with(
+    manifest: &SweepManifest,
+    trial: &SweepManifestTrial,
+    options: &SchedulerOptions,
+    prefetched: Option<(SchedulerStatus, Option<QueueDiagnostics>)>,
 ) -> SweepStatusTrialOutput {
     if let Some(error) = &trial.submit_error {
         return SweepStatusTrialOutput {
@@ -603,7 +639,12 @@ fn status_for_sweep_trial(
             detail: Some("trial has no recorded job id".to_string()),
         };
     };
-    match build_status_snapshot(&manifest.compose_file, Some(job_id), options) {
+    match build_status_snapshot_with_status(
+        &manifest.compose_file,
+        Some(job_id),
+        options,
+        prefetched,
+    ) {
         Ok(snapshot) => SweepStatusTrialOutput {
             trial_id: trial.trial_id.clone(),
             index: trial.index,
@@ -2042,13 +2083,22 @@ pub(crate) fn stats_sweep(
         sstat_bin: context.binaries.sstat.value.clone(),
         accounting,
     };
+    // Batch the scheduler probe across every Slurm-backed trial (one squeue +
+    // one gated sacct); sstat is still probed per trial by build_stats_snapshot.
+    let probes = batch_probe_sweep_trials(&manifest, &options.scheduler);
     let trials = manifest
         .trials
         .iter()
         .map(|trial| {
             let (snapshot, error) = match trial.job_id.as_deref() {
                 Some(job_id) => {
-                    match build_stats_snapshot(&manifest.compose_file, Some(job_id), &options) {
+                    let prefetched = probes.get(job_id).map(|(status, _)| status.clone());
+                    match build_stats_snapshot_with_status(
+                        &manifest.compose_file,
+                        Some(job_id),
+                        &options,
+                        prefetched,
+                    ) {
                         Ok(snapshot) => (Some(snapshot), None),
                         Err(err) => (None, Some(format!("{err:#}"))),
                     }
