@@ -5388,6 +5388,156 @@ fn parallelism_cross_check_does_not_overflow_u32() {
     }));
 }
 
+#[test]
+fn slurm_signal_name_accepts_string_and_numeric_forms() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let by_name = ComposeSpec::load(&write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  signal:
+    name: USR1
+    at_seconds: 60
+services:
+  app:
+    image: redis:7
+"#,
+    ))
+    .expect("named signal");
+    let by_number = ComposeSpec::load(&write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  signal:
+    name: 10
+    at_seconds: 60
+services:
+  app:
+    image: redis:7
+"#,
+    ))
+    .expect("numeric signal");
+    let name_signal = by_name.slurm.signal.clone().expect("named present");
+    let number_signal = by_number.slurm.signal.clone().expect("numeric present");
+    assert_eq!(name_signal.name, SignalName::Usr1);
+    assert_eq!(name_signal.name, number_signal.name);
+    // Both spellings render the identical directive value, defaulting to step.
+    assert_eq!(name_signal.shell, SignalShellTarget::Step);
+    assert_eq!(
+        by_name.slurm.signal_directive_value().as_deref(),
+        Some("USR1@60")
+    );
+    assert_eq!(
+        by_number.slurm.signal_directive_value().as_deref(),
+        Some("USR1@60")
+    );
+}
+
+#[test]
+fn slurm_signal_name_rejects_unknown_value() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    for bad in ["BOGUS", "99"] {
+        let body = format!(
+            r#"
+x-slurm:
+  signal:
+    name: {bad}
+    at_seconds: 60
+services:
+  app:
+    image: redis:7
+"#
+        );
+        let err = ComposeSpec::load(&write_spec(tmpdir.path(), &body))
+            .expect_err("unknown signal name must be rejected");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("unsupported x-slurm.signal.name") && text.contains("USR1"),
+            "{bad} should surface the whitelist; got {text}"
+        );
+    }
+}
+
+#[test]
+fn signal_at_seconds_rejects_zero_and_ceiling() {
+    for value in [0_u64, 65_536] {
+        let config = SlurmConfig {
+            signal: Some(SignalConfig {
+                name: SignalName::Usr1,
+                at_seconds: value,
+                shell: SignalShellTarget::Step,
+            }),
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("at_seconds out of range");
+        assert!(err.to_string().contains("between 1 and 65535"), "{err:#}");
+        assert!(err.downcast_ref::<SpecError>().is_some_and(|se| {
+            se.code().is_some_and(|c| {
+                c.to_string()
+                    .contains("hpc_compose::spec::signal_delay_out_of_range")
+            })
+        }));
+    }
+}
+
+#[test]
+fn slurm_requeue_and_signal_reject_raw_submit_arg_conflicts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cases = [
+        (
+            "requeue plus raw --requeue",
+            r#"
+x-slurm:
+  requeue: true
+  submit_args:
+    - "--requeue"
+services:
+  app:
+    image: redis:7
+"#,
+            "x-slurm.requeue cannot be combined with raw --requeue",
+        ),
+        (
+            "requeue false plus raw --no-requeue",
+            r#"
+x-slurm:
+  requeue: false
+  submit_args:
+    - "--no-requeue"
+services:
+  app:
+    image: redis:7
+"#,
+            "x-slurm.requeue cannot be combined with raw --no-requeue",
+        ),
+        (
+            "signal plus raw --signal",
+            r#"
+x-slurm:
+  signal:
+    name: USR1
+    at_seconds: 60
+  submit_args:
+    - "--signal=USR1@60"
+services:
+  app:
+    image: redis:7
+"#,
+            "x-slurm.signal cannot be combined with raw --signal",
+        ),
+    ];
+
+    for (label, body, expected) in cases {
+        let path = write_spec(tmpdir.path(), body);
+        let err = ComposeSpec::load(&path).expect_err(label);
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(expected),
+            "{label} should mention {expected}; got {text}"
+        );
+    }
+}
+
 /// `ComposeSpec::validate` normalizes services (script/command promotion,
 /// healthcheck-into-readiness) as well as validating them. Because the planner
 /// now re-runs it as an enforcement chokepoint after `load` already ran it once

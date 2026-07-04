@@ -8,3 +8,7 @@ pub(super) fn push_directive(out: &mut String, name: &str, value: impl Display) 
 pub(super) fn push_raw_directive(out: &mut String, arg: &str) {
     writeln!(out, "#SBATCH {arg}").expect("writing to String cannot fail");
 }
+
+pub(super) fn push_bare_directive(out: &mut String, name: &str) {
+    writeln!(out, "#SBATCH --{name}").expect("writing to String cannot fail");
+}

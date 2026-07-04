@@ -1,0 +1,98 @@
+name: preemptible-checkpoint
+
+# Preemptible training that survives requeue.
+#
+# - x-slurm.requeue: true       -> #SBATCH --requeue, so Slurm puts the whole
+#   job back in the queue after node failure or preemption instead of killing it.
+# - x-slurm.signal              -> #SBATCH --signal=B:USR1@60, an early-warning
+#   SIGUSR1 delivered ~60s before the time limit so the trainer can checkpoint.
+#   shell: batch (B:) delivers to the batch shell; hpc-compose installs a
+#   non-exiting forwarding trap that relays USR1 to the running services. The
+#   default shell: step delivers straight to the job step and needs no trap.
+# - x-slurm.resume              -> HPC_COMPOSE_RESUME_DIR / _ATTEMPT / _IS_RESUME
+#   let the requeued attempt reload the latest checkpoint.
+#
+# SLURM_RESTART_COUNT unifies restart loops and real requeues, so the attempt
+# counter and checkpoints report work with requeue + resume with no extra config.
+x-slurm:
+  job_name: preemptible-checkpoint
+  time: "04:00:00"
+  mem: 32G
+  cpus_per_task: 8
+  gpus: 1
+  requeue: true
+  signal:
+    name: USR1
+    at_seconds: 60
+    shell: batch
+  cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
+  resume:
+    path: /shared/$USER/runs/preemptible-checkpoint
+  artifacts:
+    export_dir: ./results/${SLURM_JOB_ID}
+    paths:
+      - /hpc-compose/job/checkpoints/**
+
+services:
+  trainer:
+    image: pytorch/pytorch:2.12.1-cuda13.2-cudnn9-runtime
+    environment:
+      NUM_STEPS: "1000"
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        python - <<'PY'
+        import json
+        import os
+        import pathlib
+        import signal
+        import time
+
+        resume_dir = pathlib.Path(os.environ["HPC_COMPOSE_RESUME_DIR"])
+        attempt = int(os.environ["HPC_COMPOSE_ATTEMPT"])
+        is_resume = os.environ["HPC_COMPOSE_IS_RESUME"] == "1"
+        checkpoint_dir = pathlib.Path("/hpc-compose/job/checkpoints")
+        latest_state_path = resume_dir / "latest.json"
+
+        resume_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        stop_requested = False
+
+        def request_checkpoint(signum, _frame):
+            # SIGUSR1 arrives ~60s before the time limit (or on preemption).
+            # Flag a graceful stop; the loop checkpoints and exits so the
+            # requeued attempt resumes from the latest step.
+            global stop_requested
+            stop_requested = True
+            print(f"received signal {signum}; will checkpoint and stop", flush=True)
+
+        signal.signal(signal.SIGUSR1, request_checkpoint)
+
+        def write_checkpoint(step):
+            state = {"next_step": step, "attempt": attempt, "is_resume": is_resume}
+            latest_state_path.write_text(json.dumps(state, indent=2) + "\n")
+            (checkpoint_dir / f"checkpoint_step_{step}.json").write_text(
+                json.dumps(state, indent=2) + "\n"
+            )
+
+        start_step = 0
+        if latest_state_path.exists():
+            start_step = json.loads(latest_state_path.read_text())["next_step"]
+            print(f"resuming at step {start_step} (attempt {attempt})", flush=True)
+        else:
+            print(f"starting fresh (attempt {attempt})", flush=True)
+
+        for step in range(start_step, int(os.environ["NUM_STEPS"])):
+            if stop_requested:
+                write_checkpoint(step)
+                print(f"checkpointed at step {step}; exiting for requeue", flush=True)
+                break
+            if step % 100 == 0:
+                write_checkpoint(step)
+                print(f"step {step}: checkpointed", flush=True)
+            time.sleep(1)
+        else:
+            print("training complete", flush=True)
+        PY

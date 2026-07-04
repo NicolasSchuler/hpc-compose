@@ -313,7 +313,7 @@ fn serde_deny_unknown_fields<T: DeserializeOwned>() -> BTreeSet<String> {
 /// resume/ResumeConfig, notify/NotifyConfig, emailNotify/EmailNotifyConfig,
 /// serviceScratch/ServiceScratchConfig, serviceEventHook/ServiceEventHookSpec,
 /// servicePlacement/ServicePlacementSpec, mpi/MpiConfig,
-/// parallelism/ParallelismConfig, hostMpi/HostMpiConfig,
+/// parallelism/ParallelismConfig, signal/SignalConfig, hostMpi/HostMpiConfig,
 /// failurePolicy/ServiceFailurePolicySpec, serviceEnroot/ServiceEnrootConfig,
 /// serviceRuntime/ServiceRuntimeConfig, prepare/PrepareSpec,
 /// softwareEnv/SoftwareEnvConfig, serviceRendezvous/ServiceRendezvousConfig,
@@ -330,9 +330,10 @@ fn serde_deny_unknown_fields<T: DeserializeOwned>() -> BTreeSet<String> {
 ///   object: rootExtends, serviceExtends, stringList, nonNegativeInteger,
 ///   positiveInteger, lineSafeString, arraySpec, jobDependency, command,
 ///   envFile, environment, duration, secrets, sweepParameterValue, sweepMatrix,
-///   stageMode, rendezvousName, rendezvousClient, dependsOn, readiness,
-///   serviceHook. Their Rust mirrors are custom untagged/tagged enums or
-///   newtypes with no derived `deny_unknown_fields` field list to compare.
+///   stageMode, rendezvousName, rendezvousClient, signalName, dependsOn,
+///   readiness, serviceHook. Their Rust mirrors are custom untagged/tagged
+///   enums or newtypes with no derived `deny_unknown_fields` field list to
+///   compare.
 #[test]
 fn schema_nested_definitions_match_spec_struct_fields() {
     use hpc_compose::spec::{
@@ -342,8 +343,8 @@ fn schema_nested_definitions_match_spec_struct_fields() {
         RendezvousRegisterConfig, ResumeConfig, RuntimeConfig, ScratchConfig, SecretSpec,
         ServiceAssertSpec, ServiceEnrootConfig, ServiceEventHookSpec, ServiceFailurePolicySpec,
         ServicePlacementSpec, ServiceRendezvousConfig, ServiceRuntimeConfig, ServiceScratchConfig,
-        ServiceSlurmConfig, SlurmConfig, SoftwareEnvConfig, StageInConfig, StageOutConfig,
-        SweepConfig, SweepObjective,
+        ServiceSlurmConfig, SignalConfig, SlurmConfig, SoftwareEnvConfig, StageInConfig,
+        StageOutConfig, SweepConfig, SweepObjective,
     };
 
     let schema: JsonValue = serde_json::from_str(
@@ -390,6 +391,7 @@ fn schema_nested_definitions_match_spec_struct_fields() {
     assert_definition_matches_struct!("/definitions/servicePlacement", ServicePlacementSpec);
     assert_definition_matches_struct!("/definitions/mpi", MpiConfig);
     assert_definition_matches_struct!("/definitions/parallelism", ParallelismConfig);
+    assert_definition_matches_struct!("/definitions/signal", SignalConfig);
     assert_definition_matches_struct!("/definitions/hostMpi", HostMpiConfig);
     assert_definition_matches_struct!("/definitions/failurePolicy", ServiceFailurePolicySpec);
     assert_definition_matches_struct!("/definitions/serviceEnroot", ServiceEnrootConfig);

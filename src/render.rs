@@ -12,7 +12,7 @@ use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
     RendezvousRegisterConfig, RuntimeBackend, RuntimeCacheCleanupPolicy, RuntimeGpuPolicy,
     ScratchCleanupPolicy, ScratchScope, ServiceFailureMode, ServiceHookContext, ServiceHookEvent,
-    SlurmConfig, SoftwareEnvConfig,
+    SignalConfig, SlurmConfig, SoftwareEnvConfig,
 };
 use crate::tracked_paths;
 
@@ -335,6 +335,14 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
             .iter()
             .any(|service| !service.slurm.software_env.is_empty());
     let resume_host_path = plan.slurm.resume_dir().unwrap_or("");
+    // Only `Batch` (`B:`) signal delivery with a non-teardown signal needs a
+    // forwarding trap; `Step` delivery reaches the job step directly and INT/TERM
+    // are already handled by the existing teardown traps.
+    let signal_forward_target = plan
+        .slurm
+        .signal
+        .as_ref()
+        .and_then(SignalConfig::extra_trap_target);
     let artifact_bundles = plan
         .slurm
         .artifacts
@@ -465,6 +473,12 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     }
     if let Some(array) = &plan.slurm.array {
         sbatch::push_directive(&mut out, "array", array);
+    }
+    if let Some(requeue) = plan.slurm.requeue {
+        sbatch::push_bare_directive(&mut out, if requeue { "requeue" } else { "no-requeue" });
+    }
+    if let Some(signal_value) = plan.slurm.signal_directive_value() {
+        sbatch::push_directive(&mut out, "signal", signal_value);
     }
     for arg in &plan.slurm.submit_args {
         sbatch::push_raw_directive(&mut out, arg);
@@ -1384,6 +1398,22 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("  done\n");
     out.push_str("}\n\n");
 
+    if signal_forward_target.is_some() {
+        // Batch-shell (`B:`) delivery only reaches this supervisor, so relay the
+        // early-warning signal to each running service without exiting: the job
+        // keeps running so the application can checkpoint before the time limit.
+        out.push_str("forward_configured_signal() {\n");
+        out.push_str("  local sig=$1\n");
+        out.push_str(
+            "  echo \"received early-warning signal $sig; forwarding to running services\" >&2\n",
+        );
+        out.push_str("  for pid in \"${SERVICE_PIDS[@]:-}\"; do\n");
+        out.push_str("    [[ -z \"$pid\" ]] && continue\n");
+        out.push_str("    kill -s \"$sig\" \"$pid\" 2>/dev/null || true\n");
+        out.push_str("  done\n");
+        out.push_str("}\n\n");
+    }
+
     out.push_str("reap_services_after_cleanup() {\n");
     out.push_str("  local i\n");
     out.push_str("  for i in \"${!SERVICE_PIDS[@]}\"; do\n");
@@ -1556,7 +1586,13 @@ pub fn render_script_with_options(plan: &RuntimePlan, options: &RenderOptions) -
     out.push_str("}\n");
     out.push_str("trap cleanup EXIT\n");
     out.push_str("trap 'RECEIVED_SIGNAL=INT; exit 130' INT\n");
-    out.push_str("trap 'RECEIVED_SIGNAL=TERM; exit 143' TERM\n\n");
+    out.push_str("trap 'RECEIVED_SIGNAL=TERM; exit 143' TERM\n");
+    if let Some(target) = signal_forward_target {
+        out.push_str(&format!(
+            "trap 'forward_configured_signal {target}' {target}\n"
+        ));
+    }
+    out.push('\n');
 
     out.push_str("register_service() {\n");
     out.push_str("  local name=$1\n");

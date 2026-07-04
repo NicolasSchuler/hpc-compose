@@ -153,6 +153,7 @@ The matrix below covers the broader set of runnable examples beyond the four pro
 | [`secrets-hf-token.yaml`](example-source.md#secrets-hf-token) | Repository file | `secrets`, `redaction`, `huggingface`, `env`, `required-var` | File-sourced secret interpolated into env, redacted in config/context output, and guarded by a ${VAR:?message} required-variable check. | You need to feed a token into a service without leaking it into dumps, and fail fast if the token is missing or empty. |
 | [`deps-and-assert.yaml`](example-source.md#deps-and-assert) | Repository file | `dependency`, `after-job`, `assert`, `artifacts` | Cross-job after_job dependency plus in-job assert with artifacts_contain. | You need to gate on an earlier job and assert post-conditions on outputs. |
 | [`reservation-licenses.yaml`](example-source.md#reservation-licenses) | Repository file | `reservation`, `licenses`, `sbatch`, `scheduling` | First-class x-slurm.reservation and x-slurm.licenses rendered as #SBATCH directives. | Ops handed you a reservation or your job must hold software licenses. |
+| [`preemptible-checkpoint.yaml`](example-source.md#preemptible-checkpoint) | Repository file | `training`, `preemption`, `requeue`, `signal`, `resume`, `checkpoints` | Requeue-on-preemption plus an x-slurm.signal early-warning SIGUSR1 that drives checkpoint-and-resume. | Your training runs on a preemptible partition and must checkpoint before it is requeued. |
 
 ## Which Example Should I Start From?
 

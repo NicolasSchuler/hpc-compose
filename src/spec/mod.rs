@@ -575,6 +575,10 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub dependency: Option<JobDependencyMode>,
     #[serde(default)]
+    pub requeue: Option<bool>,
+    #[serde(default)]
+    pub signal: Option<SignalConfig>,
+    #[serde(default)]
     pub cache_dir: Option<String>,
     /// Optional override for enroot's prepare-time temporary extraction scratch
     /// directory (`ENROOT_TEMP_PATH`), separate from the persistent
@@ -1444,6 +1448,171 @@ pub struct ParallelismConfig {
     pub pipeline: u32,
 }
 
+/// POSIX signal that Slurm's `--signal` may deliver to a job before its time
+/// limit, restricted to the safe early-warning set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalName {
+    /// `SIGHUP` (1).
+    Hup,
+    /// `SIGINT` (2).
+    Int,
+    /// `SIGQUIT` (3).
+    Quit,
+    /// `SIGUSR1` (10) — the conventional checkpoint/preemption signal.
+    Usr1,
+    /// `SIGUSR2` (12).
+    Usr2,
+    /// `SIGTERM` (15).
+    Term,
+}
+
+/// Human-readable whitelist reused in the deserialization error.
+const SIGNAL_NAME_WHITELIST: &str =
+    "HUP, INT, QUIT, USR1, USR2, TERM (or the numeric aliases 1, 2, 3, 10, 12, 15)";
+
+impl SignalName {
+    /// Returns the canonical uppercase signal name (no `SIG` prefix).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hup => "HUP",
+            Self::Int => "INT",
+            Self::Quit => "QUIT",
+            Self::Usr1 => "USR1",
+            Self::Usr2 => "USR2",
+            Self::Term => "TERM",
+        }
+    }
+
+    /// Returns the token embedded into the `--signal` directive value.
+    #[must_use]
+    pub fn as_sbatch_token(self) -> &'static str {
+        self.as_str()
+    }
+
+    /// Whether the batch teardown already installs an INT/TERM trap that
+    /// performs graceful shutdown, so no extra forwarding trap is required.
+    fn is_teardown_signal(self) -> bool {
+        matches!(self, Self::Int | Self::Term)
+    }
+
+    fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "HUP" => Some(Self::Hup),
+            "INT" => Some(Self::Int),
+            "QUIT" => Some(Self::Quit),
+            "USR1" => Some(Self::Usr1),
+            "USR2" => Some(Self::Usr2),
+            "TERM" => Some(Self::Term),
+            _ => None,
+        }
+    }
+
+    fn from_number(value: u16) -> Option<Self> {
+        match value {
+            1 => Some(Self::Hup),
+            2 => Some(Self::Int),
+            3 => Some(Self::Quit),
+            10 => Some(Self::Usr1),
+            12 => Some(Self::Usr2),
+            15 => Some(Self::Term),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for SignalName {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// Accepts either the signal name (`USR1`) or its numeric alias (`10`) before
+/// the whitelist is enforced, mirroring [`MpiType`]'s manual parse.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawSignalName {
+    Text(String),
+    Num(u16),
+}
+
+impl<'de> Deserialize<'de> for SignalName {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawSignalName::deserialize(deserializer)?;
+        let (resolved, got) = match raw {
+            RawSignalName::Text(text) => {
+                let normalized = text.trim().to_ascii_uppercase();
+                let resolved = Self::from_name(&normalized)
+                    .or_else(|| normalized.parse::<u16>().ok().and_then(Self::from_number));
+                (resolved, text)
+            }
+            RawSignalName::Num(number) => (Self::from_number(number), number.to_string()),
+        };
+        resolved.ok_or_else(|| {
+            de::Error::custom(format!(
+                "unsupported x-slurm.signal.name '{got}'; use one of {SIGNAL_NAME_WHITELIST}"
+            ))
+        })
+    }
+}
+
+/// Which process the `--signal` reaches.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalShellTarget {
+    /// Deliver straight to each service's job step (no directive prefix). The
+    /// application handles the signal itself; no trap is rendered.
+    #[default]
+    Step,
+    /// Deliver only to the batch shell (`B:` prefix); a non-exiting forwarding
+    /// trap relays the signal to the running services.
+    Batch,
+}
+
+/// First-class Slurm `--signal` early-warning configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SignalConfig {
+    pub name: SignalName,
+    pub at_seconds: u64,
+    #[serde(default)]
+    pub shell: SignalShellTarget,
+}
+
+impl SignalConfig {
+    /// Validates the `at_seconds` bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `at_seconds` is outside Slurm's supported
+    /// `1..=65535` range (`0` is rejected because it defeats the early warning).
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=65_535).contains(&self.at_seconds) {
+            return Err(SpecError::SignalDelayOutOfRange {
+                value: self.at_seconds,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Returns the signal name a batch-shell forwarding trap must install, or
+    /// `None` when no extra trap is needed: step delivery reaches the job step
+    /// directly, and a batch INT/TERM is already handled by the teardown traps.
+    #[must_use]
+    pub fn extra_trap_target(&self) -> Option<&'static str> {
+        (self.shell == SignalShellTarget::Batch && !self.name.is_teardown_signal())
+            .then(|| self.name.as_sbatch_token())
+    }
+}
+
 /// MPI compatibility profile used for validation and diagnostics.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1731,6 +1900,10 @@ pub struct EffectiveSlurmConfig {
     pub after_job: Option<EffectiveJobDependency>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependency: Option<JobDependencyMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requeue: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<SignalConfig>,
     pub cache_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_root: Option<String>,
@@ -2462,6 +2635,8 @@ impl ComposeSpec {
                         condition: dependency.condition(),
                     }),
                 dependency: self.slurm.dependency,
+                requeue: self.slurm.requeue,
+                signal: self.slurm.signal.clone(),
                 cache_dir: cache_dir.display().to_string(),
                 runtime_root: self.slurm.runtime_root.clone(),
                 cleanup: self.slurm.cleanup.clone(),
@@ -2908,6 +3083,23 @@ impl SlurmConfig {
         self.after_job.is_some() || self.dependency.is_some()
     }
 
+    /// Returns the `--signal` directive value (`[B:]<name>@<sec>`) when a
+    /// first-class signal is configured.
+    #[must_use]
+    pub fn signal_directive_value(&self) -> Option<String> {
+        self.signal.as_ref().map(|signal| {
+            let prefix = match signal.shell {
+                SignalShellTarget::Step => "",
+                SignalShellTarget::Batch => "B:",
+            };
+            format!(
+                "{prefix}{}@{}",
+                signal.name.as_sbatch_token(),
+                signal.at_seconds
+            )
+        })
+    }
+
     /// Validates semantic rules that serde alone cannot express.
     ///
     /// # Errors
@@ -3041,6 +3233,9 @@ impl SlurmConfig {
             self.gpus_per_node,
             "x-slurm",
         )?;
+        if let Some(signal) = &self.signal {
+            signal.validate()?;
+        }
         Ok(())
     }
 
@@ -4480,6 +4675,9 @@ const FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS: &[(&str, &str)] = &[
     ("array", "-a"),
     ("after_job", "--dependency"),
     ("dependency", "--dependency"),
+    ("requeue", "--requeue"),
+    ("requeue", "--no-requeue"),
+    ("signal", "--signal"),
     ("gpus_per_node", "--gpus-per-node"),
     ("gpus_per_task", "--gpus-per-task"),
     ("cpus_per_gpu", "--cpus-per-gpu"),
@@ -4578,6 +4776,8 @@ fn top_level_slurm_field_is_set(slurm: &SlurmConfig, field: &str) -> bool {
         "array" => slurm.array.is_some(),
         "after_job" => slurm.after_job.is_some(),
         "dependency" => slurm.dependency.is_some(),
+        "requeue" => slurm.requeue.is_some(),
+        "signal" => slurm.signal.is_some(),
         _ => false,
     }
 }

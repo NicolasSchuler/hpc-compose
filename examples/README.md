@@ -73,6 +73,7 @@ Promoted starting points: [`minimal-batch.yaml`](minimal-batch.yaml), [`app-redi
 
 - [`training-checkpoints.yaml`](training-checkpoints.yaml)
 - [`training-resume.yaml`](training-resume.yaml)
+- [`preemptible-checkpoint.yaml`](preemptible-checkpoint.yaml)
 - [`training-sweep.yaml`](training-sweep.yaml)
 - [`array-sweep-lite.yaml`](array-sweep-lite.yaml)
 - [`training-tensorboard.yaml`](training-tensorboard.yaml)
