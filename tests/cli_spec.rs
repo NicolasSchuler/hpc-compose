@@ -2571,6 +2571,8 @@ fn settings_schema_definition_keys_match_exhaustive_catalog() {
                 "scancel",
                 "sshare",
                 "sprio",
+                "ssh",
+                "rsync",
             ],
         ),
         ("cacheSettings", &["dir", "enroot_temp_dir"]),

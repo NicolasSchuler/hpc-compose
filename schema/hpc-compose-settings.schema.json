@@ -153,6 +153,14 @@
         },
         "sprio": {
           "type": "string"
+        },
+        "ssh": {
+          "type": "string",
+          "description": "Path to the ssh client used by `up --remote` delegation and follow-ups."
+        },
+        "rsync": {
+          "type": "string",
+          "description": "Path to rsync used by `up --remote` to mirror the project to the login node."
         }
       }
     },

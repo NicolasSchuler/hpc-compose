@@ -28,6 +28,8 @@ const DEFAULT_SSTAT_BIN: &str = "sstat";
 const DEFAULT_SCANCEL_BIN: &str = "scancel";
 const DEFAULT_SSHARE_BIN: &str = "sshare";
 const DEFAULT_SPRIO_BIN: &str = "sprio";
+const DEFAULT_SSH_BIN: &str = "ssh";
+const DEFAULT_RSYNC_BIN: &str = "rsync";
 
 /// Source that provided a resolved value.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +94,15 @@ pub struct BinaryOverrides {
     pub sshare: Option<String>,
     #[serde(default)]
     pub sprio: Option<String>,
+    /// Path to the `ssh` client used by the `up --remote` / follow-up delegation
+    /// path (mkdir, probe, install, delegate) and the `reach --open` forward.
+    /// Defaults to `ssh` on `PATH`.
+    #[serde(default)]
+    pub ssh: Option<String>,
+    /// Path to `rsync`, used by `up --remote` to mirror the project to the login
+    /// node. Defaults to `rsync` on `PATH`.
+    #[serde(default)]
+    pub rsync: Option<String>,
 }
 
 /// Cache path defaults in settings.
@@ -293,6 +304,13 @@ pub struct ResolvedBinaries {
     pub scancel: ResolvedValue<String>,
     pub sshare: ResolvedValue<String>,
     pub sprio: ResolvedValue<String>,
+    /// `ssh` client for the remote delegation path (`up --remote`, follow-ups,
+    /// `reach --open`). Overridable via the settings `binaries` block; defaults
+    /// to bare `ssh` on `PATH`.
+    pub ssh: ResolvedValue<String>,
+    /// `rsync` used by `up --remote` to mirror the project to the login node.
+    /// Overridable via the settings `binaries` block; defaults to bare `rsync`.
+    pub rsync: ResolvedValue<String>,
 }
 
 /// Effective context used to execute commands.
@@ -783,6 +801,18 @@ fn resolve_binaries(
             profile.and_then(|p| p.sprio.clone()),
             defaults.and_then(|d| d.sprio.clone()),
             DEFAULT_SPRIO_BIN,
+        ),
+        ssh: resolve_binary(
+            cli.ssh.clone(),
+            profile.and_then(|p| p.ssh.clone()),
+            defaults.and_then(|d| d.ssh.clone()),
+            DEFAULT_SSH_BIN,
+        ),
+        rsync: resolve_binary(
+            cli.rsync.clone(),
+            profile.and_then(|p| p.rsync.clone()),
+            defaults.and_then(|d| d.rsync.clone()),
+            DEFAULT_RSYNC_BIN,
         ),
     }
 }

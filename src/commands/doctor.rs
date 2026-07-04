@@ -1933,6 +1933,8 @@ mod tests {
             scancel: resolved_string("/definitely/missing-scancel"),
             sshare: resolved_string("/definitely/missing-sshare"),
             sprio: resolved_string("/definitely/missing-sprio"),
+            ssh: resolved_string("/definitely/missing-ssh"),
+            rsync: resolved_string("/definitely/missing-rsync"),
         }
     }
 

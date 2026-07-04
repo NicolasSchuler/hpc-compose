@@ -286,9 +286,10 @@ pub(crate) fn build_remote_command(
 /// follow-up hints can carry the real id instead of a `<job-id>` placeholder.
 /// stderr stays inherited so remote progress still flows through unchanged.
 fn run_delegate_capturing_job_id(
+    ssh_bin: &str,
     ssh_args: &[String],
 ) -> Result<(std::process::ExitStatus, Option<String>)> {
-    let mut child = Command::new("ssh")
+    let mut child = Command::new(ssh_bin)
         .args(ssh_args)
         .stdout(Stdio::piped())
         .spawn()
@@ -417,8 +418,9 @@ pub(crate) fn remote_followup(context: &ResolvedContext, remote_flag: &str) -> R
     ensure_control_master_dir()?;
     let extra_opts = parse_extra_ssh_opts(env::var(REMOTE_SSH_OPTS_ENV).ok().as_deref());
     let base_ssh_args = build_base_ssh_args(&extra_opts);
+    let ssh_bin = context.binaries.ssh.value.as_str();
     let required = parse_version(env!("CARGO_PKG_VERSION")).unwrap_or((0, 0, 0));
-    let remote_bin = probe_remote_binary(&base_ssh_args, &host, required)?
+    let remote_bin = probe_remote_binary(ssh_bin, &base_ssh_args, &host, required)?
         .map(|binary| binary.path)
         .ok_or_else(|| {
             anyhow!(
@@ -450,7 +452,7 @@ pub(crate) fn remote_followup(context: &ResolvedContext, remote_flag: &str) -> R
     let mut args = base_ssh_args;
     args.push(host.clone());
     args.push(remote_cmd);
-    let status = Command::new("ssh")
+    let status = Command::new(ssh_bin)
         .args(&args)
         .status()
         .context("failed to run ssh for the remote follow-up command")?;
@@ -738,6 +740,7 @@ fn post_install_too_old(installed: Option<(u64, u64, u64)>, required: (u64, u64,
 /// Probes the login node for a usable `hpc-compose`, reusing the multiplexed
 /// SSH connection (so an OTP login node does not prompt again).
 fn probe_remote_binary_with_preference(
+    ssh_bin: &str,
     base_ssh_args: &[String],
     host: &str,
     preference: ProbePreference,
@@ -746,7 +749,7 @@ fn probe_remote_binary_with_preference(
     let mut args = base_ssh_args.to_vec();
     args.push(host.to_string());
     args.push(posix_sh(&build_probe_command(preference)));
-    let output = Command::new("ssh")
+    let output = Command::new(ssh_bin)
         .args(&args)
         .output()
         .context("failed to run ssh while probing the remote hpc-compose version")?;
@@ -766,16 +769,23 @@ fn probe_remote_binary_with_preference(
 }
 
 fn probe_remote_binary(
+    ssh_bin: &str,
     base_ssh_args: &[String],
     host: &str,
     required: (u64, u64, u64),
 ) -> Result<Option<RemoteBinary>> {
-    probe_remote_binary_with_preference(base_ssh_args, host, ProbePreference::PathFirst, required)
+    probe_remote_binary_with_preference(
+        ssh_bin,
+        base_ssh_args,
+        host,
+        ProbePreference::PathFirst,
+        required,
+    )
 }
 
 /// Installs the newest hpc-compose release on the login node, streaming the
 /// installer's output (stdio inherited) over the multiplexed connection.
-fn install_remote_binary(base_ssh_args: &[String], host: &str) -> Result<()> {
+fn install_remote_binary(ssh_bin: &str, base_ssh_args: &[String], host: &str) -> Result<()> {
     let url = env::var(REMOTE_INSTALL_URL_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -783,7 +793,7 @@ fn install_remote_binary(base_ssh_args: &[String], host: &str) -> Result<()> {
     let mut args = base_ssh_args.to_vec();
     args.push(host.to_string());
     args.push(posix_sh(&build_install_command(&url)));
-    let status = Command::new("ssh")
+    let status = Command::new(ssh_bin)
         .args(&args)
         .status()
         .context("failed to run ssh while installing hpc-compose on the login node")?;
@@ -802,12 +812,13 @@ fn install_remote_binary(base_ssh_args: &[String], host: &str) -> Result<()> {
 /// is missing or too old. Returns the absolute invocation path to delegate to
 /// (so a `~/.local/bin` install that is not on the non-interactive PATH works).
 fn ensure_remote_binary(
+    ssh_bin: &str,
     base_ssh_args: &[String],
     host: &str,
     mode: RemoteInstallMode,
 ) -> Result<String> {
     let required = parse_version(env!("CARGO_PKG_VERSION")).unwrap_or((0, 0, 0));
-    let probe = probe_remote_binary(base_ssh_args, host, required)?;
+    let probe = probe_remote_binary(ssh_bin, base_ssh_args, host, required)?;
     match remote_binary_action(mode, probe.as_ref(), required)? {
         RemoteAction::Use => {
             let binary = probe.expect("RemoteAction::Use implies a probed binary");
@@ -856,8 +867,9 @@ fn ensure_remote_binary(
                     "  remote hpc-compose: {reason}; installing newest release into ~/.local/bin"
                 ))
             );
-            install_remote_binary(base_ssh_args, host)?;
+            install_remote_binary(ssh_bin, base_ssh_args, host)?;
             let installed = probe_remote_binary_with_preference(
+                ssh_bin,
                 base_ssh_args,
                 host,
                 ProbePreference::InstallDirFirst,
@@ -1059,7 +1071,9 @@ pub(crate) fn remote_up(
     // RemoteCommand=none/RequestTTY=no so an interactive Host alias does not
     // hijack the non-interactive commands.
     let base_ssh_args = build_base_ssh_args(&extra_opts);
-    let ssh_command = format!("ssh {}", base_ssh_args.join(" "));
+    let ssh_bin = context.binaries.ssh.value.as_str();
+    let rsync_bin = context.binaries.rsync.value.as_str();
+    let ssh_command = format!("{} {}", ssh_bin, base_ssh_args.join(" "));
     let hpcignore_path = project_dir.join(".hpcignore");
     let hpcignore = hpcignore_path.exists().then_some(hpcignore_path.as_path());
     let rsync_args = build_rsync_args(&project_dir, &host, &stage, &ssh_command, hpcignore);
@@ -1077,7 +1091,7 @@ pub(crate) fn remote_up(
     let mut mkdir_args = base_ssh_args.clone();
     mkdir_args.push(host.clone());
     mkdir_args.push(format!("mkdir -p {}", shell_quote::quote(&stage)));
-    let mkdir_status = Command::new("ssh")
+    let mkdir_status = Command::new(ssh_bin)
         .args(&mkdir_args)
         .status()
         .context("failed to run ssh")?;
@@ -1089,9 +1103,9 @@ pub(crate) fn remote_up(
     // any OTP), probe the login node's hpc-compose and bootstrap/upgrade it
     // before the expensive rsync, so an old/missing binary fails fast and gets
     // fixed rather than surfacing a raw shell error after a multi-GB sync.
-    let remote_bin = ensure_remote_binary(&base_ssh_args, &host, install_mode)?;
+    let remote_bin = ensure_remote_binary(ssh_bin, &base_ssh_args, &host, install_mode)?;
 
-    let rsync_status = Command::new("rsync")
+    let rsync_status = Command::new(rsync_bin)
         .args(&rsync_args)
         .status()
         .context("failed to run rsync (is rsync installed on this host?)")?;
@@ -1106,7 +1120,7 @@ pub(crate) fn remote_up(
     let mut ssh_args = base_ssh_args.clone();
     ssh_args.push(host.clone());
     ssh_args.push(remote_command);
-    let (ssh_status, submitted_job_id) = run_delegate_capturing_job_id(&ssh_args)?;
+    let (ssh_status, submitted_job_id) = run_delegate_capturing_job_id(ssh_bin, &ssh_args)?;
     match child_status_result(
         ssh_status,
         "remote hpc-compose up was terminated by a signal",

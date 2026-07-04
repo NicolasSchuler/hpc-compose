@@ -444,8 +444,10 @@ fn parse_binary_entries(entries: &[String]) -> Result<BinaryOverrides> {
             "scancel" => overrides.scancel = Some(value.to_string()),
             "sshare" => overrides.sshare = Some(value.to_string()),
             "sprio" => overrides.sprio = Some(value.to_string()),
+            "ssh" => overrides.ssh = Some(value.to_string()),
+            "rsync" => overrides.rsync = Some(value.to_string()),
             _ => bail!(
-                "invalid binary name '{name}'; supported names: enroot, apptainer, singularity, salloc, sbatch, srun, scontrol, sinfo, squeue, sacct, sstat, scancel, sshare, sprio"
+                "invalid binary name '{name}'; supported names: enroot, apptainer, singularity, salloc, sbatch, srun, scontrol, sinfo, squeue, sacct, sstat, scancel, sshare, sprio, ssh, rsync"
             ),
         }
     }
@@ -495,6 +497,12 @@ fn format_binary_entries(overrides: &BinaryOverrides) -> String {
     }
     if let Some(value) = &overrides.sprio {
         entries.push(format!("sprio={value}"));
+    }
+    if let Some(value) = &overrides.ssh {
+        entries.push(format!("ssh={value}"));
+    }
+    if let Some(value) = &overrides.rsync {
+        entries.push(format!("rsync={value}"));
     }
     entries.join(",")
 }

@@ -1446,6 +1446,8 @@ mod tests {
             scancel: resolved_binary(tmpdir.join("scancel")),
             sshare: resolved_binary(tmpdir.join("sshare")),
             sprio: resolved_binary(tmpdir.join("sprio")),
+            ssh: resolved_binary(tmpdir.join("ssh")),
+            rsync: resolved_binary(tmpdir.join("rsync")),
         }
     }
 

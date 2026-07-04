@@ -1490,6 +1490,14 @@ services:
                 value: "sprio".to_string(),
                 source: ValueSource::Builtin,
             },
+            ssh: ResolvedValue {
+                value: "ssh".to_string(),
+                source: ValueSource::Builtin,
+            },
+            rsync: ResolvedValue {
+                value: "rsync".to_string(),
+                source: ValueSource::Builtin,
+            },
         }
     }
 

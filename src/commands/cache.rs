@@ -239,6 +239,8 @@ services:
                 scancel: binary("scancel"),
                 sshare: binary("sshare"),
                 sprio: binary("sprio"),
+                ssh: binary("ssh"),
+                rsync: binary("rsync"),
             },
             huggingface_cli_bin: "huggingface-cli".to_string(),
             interpolation_vars: BTreeMap::new(),
