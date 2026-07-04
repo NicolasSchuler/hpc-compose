@@ -5,10 +5,35 @@ All notable changes to `hpc-compose` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-04
 
 ### Added
 
+- Added a versioned JSON output-schema contract for `--format json`. Every JSON
+  command output is now backed by a `schemars`-pinned schema, and a new `schema`
+  subcommand emits the JSON Schemas (`schema --output <dir>`) so downstream
+  tooling can validate hpc-compose output against a stable, checked-in contract.
+- Added sampled CPU utilization to the metrics pipeline. `stats`, `watch`, and
+  the metrics JSONL now carry per-sample CPU usage alongside the existing GPU and
+  memory samples.
+- Added per-service GPU attribution to the metrics pipeline. The in-job sampler
+  records raw attribution facts (per-PID cgroup and Slurm rank environment, plus
+  a live step-id to step-name map in `steps.jsonl`), and `stats` resolves them
+  cgroup -> Slurm step -> service, attributing a GPU device to a service only
+  when every process on that GPU resolves unanimously to one service. `stats`
+  text output shows `service=` on GPU device and process lines; JSON output
+  fills the already-nullable `service`/`rank`/`local_rank` fields (strictly
+  additive, no `schema_version` bump). Shared GPUs, MIG, unrecognized cgroup
+  layouts, and dead PIDs stay `null` rather than guessing, and all sampler
+  probes are best-effort and can never affect the job.
+- Honor the CLICOLORS convention (`CLICOLOR` / `CLICOLOR_FORCE`) alongside the
+  existing `NO_COLOR` / `--color` / `TERM=dumb` logic under the `--color auto`
+  policy. Precedence, highest first: `NO_COLOR` > `CLICOLOR_FORCE` > `TERM=dumb`
+  > not-a-tty > `CLICOLOR=0`. Documented in the CLI reference.
+- Added an opt-in real-GPU end-to-end recipe (`just remote-gpu-e2e`, backed by
+  `scripts/remote_gpu_e2e.sh`) that exercises the remote-submit path against a
+  real GPU cluster from a laptop, documented in `dev-cluster/README.md`.
+- Added examples for arrays, mail notifications, healthcheck sugar, and secrets.
 - Reject per-service `x-slurm.partition`, `.qos`, and `.account` with a teaching
   error. A single hpc-compose allocation runs in one partition/account/qos, so
   these cannot be routed per service. Instead of serde's opaque "unknown field",
@@ -77,6 +102,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `doctor --timeout` still accepts a bare number of seconds, so
   `--timeout-seconds 300` migrates to `--timeout 300` (or `--timeout 5m`).
 
+- **Spec validation is now enforced at the planner chokepoint and covers more
+  cases.** The full validator runs before any plan/render/submit, and it now
+  guards Slurm time formats, `volumes:` short syntax (`host:container[:ro|rw]`),
+  conflicting `gpus:`/`x-slurm.gres` GPU requests, memory-unit strings, and
+  overlaps between first-class fields and raw `x-slurm.submit_args`. **Behavior
+  change:** specs that earlier slipped through (invalid durations, malformed
+  volume/memory strings, or a GPU count declared both ways) are now rejected with
+  a miette diagnostic instead of being accepted and rendered incorrectly. Review
+  specs
+  that previously validated only by luck.
+- `sweep stop` now routes through the shared destructive-action confirmation
+  prompt, matching `down`/`cancel`, so stopping a running sweep asks before
+  cancelling its trials (bypass with the standard non-interactive/force path).
+- Scheduler probes for `sweep` and `diff` are batched and redundant `sacct`
+  calls are gated, reducing the number and latency of scheduler queries on those
+  paths.
+- The `watch` TUI moves its scheduler probes onto a background worker thread, so
+  the UI keeps repainting and stays responsive while probes are in flight.
+- Documented and pinned the precedence of global versus per-service `x-slurm`
+  settings so the resolution order is unambiguous and regression-tested.
+
 ### Removed
 
 - **BREAKING:** the hidden deprecated `prepare --force` alias for
@@ -94,6 +140,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   of resolving the condition. Now `afterany`/`afternotok` are satisfied and
   `afterok` fails fast with a "can never satisfy" error, as they already did for
   every other failed terminal state.
+- Restore the terminal on `SIGTERM`/`SIGHUP` while the `watch` TUI is in the
+  alternate screen, so an interrupted watch no longer leaves the shell in a
+  broken state.
+- Warn instead of silently ignoring corrupt state files and truncated scheduler
+  output, so partial/damaged runtime state surfaces a diagnostic rather than
+  being dropped.
+- Flush a final metrics sample at job end and degrade GPU fanout gracefully when
+  a device query fails, so end-of-run metrics are complete and a single failing
+  GPU probe no longer aborts collection.
+- Populate `gpu_count` from device samples and aggregate the `watch` GPU line so
+  multi-GPU utilization is reported correctly.
+
+### Security
+
+- Redact secret values in `plan` output paths. Secret values (by sensitive key
+  name and declared `secrets:` values) are now masked in `plan` text and
+  `--format json` output the same way they are elsewhere, closing a path that
+  could echo secrets into logs or captured command output.
 
 ## [0.1.52] - 2026-06-30
 
