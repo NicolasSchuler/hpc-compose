@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::sync::{Mutex, OnceLock};
 
 use miette::Diagnostic;
 use proptest::prelude::*;
 use proptest::string::string_regex;
 
 use super::*;
+use crate::test_support::env_lock;
 
 fn write_spec(tmpdir: &Path, body: &str) -> std::path::PathBuf {
     let path = tmpdir.join("compose.yaml");
@@ -130,11 +130,6 @@ fn effective_config_maps_every_slurm_field_with_no_silent_drop() {
              EffectiveServiceSlurmConfig, or add it to service_exempt if intentional"
         );
     }
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn prop_config() -> ProptestConfig {

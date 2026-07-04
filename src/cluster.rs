@@ -1408,7 +1408,6 @@ fn contains_gpu(value: &str) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Mutex, OnceLock};
 
     use crate::context::{ResolvedValue, ValueSource};
     use crate::planner::{ExecutionSpec, ImageSource, ServicePlacement};
@@ -1417,11 +1416,7 @@ mod tests {
         MpiConfig, MpiType, RuntimeConfig, ScratchConfig, ServiceFailurePolicy, ServiceSlurmConfig,
         SlurmConfig,
     };
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_support::env_lock;
 
     fn resolved_binary(path: PathBuf) -> ResolvedValue<String> {
         ResolvedValue {
