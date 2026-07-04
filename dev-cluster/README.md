@@ -230,6 +230,11 @@ mock out. The `host`-backend scope above still applies — the e2e check does
 | `specs/_extra/resume.yaml` | Host-backend resume dir: `$HPC_COMPOSE_RESUME_DIR` is a real on-node path, not the container mount |
 | `specs/_extra/when.yaml` | Pins `x-slurm.partition` so the `when` block can evaluate `--free-nodes` against the live scheduler and decline to submit |
 | `specs/_extra/watch-tui.yaml` | A ~20s job that stays RUNNING long enough for the pty-driven `watch` TUI block to attach, render, and auto-exit on success |
+| `specs/_extra/sweep.yaml` | Embedded `sweep` block: `sweep submit` fans two trials into independent tracked sbatch jobs, then `sweep status`/`results` and sacct agree per trial |
+| `specs/_extra/test-pass.yaml` | Passing half of the `test --submit` smoke block (service completes → "smoke test passed", exit 0) |
+| `specs/_extra/test-fail.yaml` | Failing half of the `test --submit` smoke block (service exits nonzero → "smoke test failed", nonzero exit) |
+| `specs/_extra/germinate.yaml` | `germinate` renders + submits a minimized canary, waits for terminal, and rightsizes from sacct accounting |
+| `specs/_extra/down.yaml` | A long sleep used by the `down --job-id --yes` block: real scancel → CANCELLED plus tracked-state reaping |
 | `../scripts/devcluster.sh` | `up` / `run` / `exec` / `sinfo` / `logs` / `down` wrapper |
 | `../scripts/devcluster_e2e.sh` | UC1 end-to-end harness (generic loop + `_extra/` dedicated blocks; checks `sacct`/`status`/`ps`/`score`/`pull`) |
 | `../scripts/devcluster_remote_e2e.sh` | UC2 end-to-end harness: drives `up --remote` from the host against this node as an SSH login-node stand-in (`sshd` + `rsync` in the image; port `2222`); also asserts remote `--dry-run` stages-but-doesn't-submit |

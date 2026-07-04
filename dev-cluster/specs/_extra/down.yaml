@@ -1,0 +1,27 @@
+name: dev-cluster-down
+
+# Long-lived job used by the `down` teardown block. Lives under _extra/ so the
+# generic loop never runs it (it would never drain on its own). Its block submits
+# with `up --detach`, waits for RUNNING, then `down --job-id --yes` cancels it and
+# asserts the real scancel drove sacct to CANCELLED AND the tracked runtime state
+# was reaped (status by id no longer resolves) -- the lifecycle path `up`/`cancel`
+# alone never exercises via `down`.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-down
+  time: "00:10:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "down: sleeping until torn down"
+        sleep 300

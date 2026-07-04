@@ -1,0 +1,26 @@
+name: dev-cluster-test-pass
+
+# Passing half of the `test --submit` smoke-command block. `test` submits a short
+# Slurm job and passes only when every service appears in tracked state, launched,
+# passed readiness, and completed successfully. This service just completes, so
+# `test --submit` must report "smoke test passed" and exit 0. Lives under _extra/
+# so the generic up/watch loop never runs it (its block drives the `test` verb,
+# not `up`).
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: dev-cluster-test-pass
+  time: "00:05:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: ${CACHE_DIR:-/var/cache/hpc-compose}
+
+services:
+  app:
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        echo "test-pass: smoke ok"
