@@ -24,6 +24,18 @@ spec unchanged on the cluster.
 - The first `up` compiles `hpc-compose` for the container (a few minutes) and
   installs Slurm + MariaDB; later starts are fast.
 
+### Configuration knobs
+
+- `DEVCLUSTER_SSH_PORT` (default `2222`) sets the host port mapped to the
+  container's sshd (the login-node stand-in used by the remote/OTP harnesses).
+  Export it to avoid a clash with something already bound to `2222`, e.g.
+  `DEVCLUSTER_SSH_PORT=2223 scripts/devcluster.sh up`. Both e2e harnesses honour
+  the same variable, so set it once in your shell before running either.
+- `SLURM_VERSION` (build ARG, default pins the Slurm packages to a known-good
+  release) makes image builds reproducible. Bump it when the base image
+  supersedes that version — see the comment in `Dockerfile`; build with
+  `--build-arg SLURM_VERSION=` (empty) to unpin.
+
 ## Quickstart
 
 ```bash

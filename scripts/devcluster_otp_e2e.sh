@@ -27,10 +27,20 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 container="hpc-compose-devcluster"
 work_dir="$repo_root/.tmp/devcluster-otp-e2e"
 spec="$repo_root/dev-cluster/specs/hello.yaml"
-ssh_port=2222
-# The control socket the binary opens: CONTROL_MASTER_SSH_OPTS sets
-# ControlPath=~/.ssh/cm-%r@%h:%p, which for root@localhost -p 2222 is this path.
-control_socket="$HOME/.ssh/cm-root@localhost:$ssh_port"
+ssh_port="${DEVCLUSTER_SSH_PORT:-2222}"
+# Per-run dir for the SSH ControlMaster socket, so the whole session multiplexes
+# through our temp dir instead of the developer's real ~/.ssh (removed in the
+# EXIT trap). Based under /tmp (not $TMPDIR): macOS $TMPDIR lives under a long
+# /var/folders/... path that, plus the `cm-root@localhost:PORT` socket name and
+# the random suffix ssh appends while opening the master, overruns the ~104-char
+# sun_path limit. Below we inject `ControlPath=$ssh_ctl_dir/cm-%r@%h:%p` into
+# HPC_COMPOSE_REMOTE_SSH_OPTS so the binary AND the manual corroboration probes
+# share this exact one socket — the one-OTP-per-session assertion depends on
+# every ssh invocation using an identical ControlPath.
+ssh_ctl_dir="$(mktemp -d /tmp/hcdc-ssh.XXXXXX)"
+# The control socket the binary opens: the injected ControlPath expands
+# %r@%h:%p to root@localhost:$ssh_port under our per-run dir.
+control_socket="$ssh_ctl_dir/cm-root@localhost:$ssh_port"
 
 red='\033[31m'; green='\033[32m'; bold='\033[1m'; reset='\033[0m'
 note() { printf '%b==>%b %s\n' "$bold" "$reset" "$*"; }
@@ -74,7 +84,7 @@ finish() {
   if [[ -S "$control_socket" ]]; then
     ssh -o ControlPath="$control_socket" -O exit root@localhost >/dev/null 2>&1 || true
   fi
-  rm -f "$control_socket" 2>/dev/null || true
+  rm -rf "$ssh_ctl_dir" 2>/dev/null || true
   inctr scancel --user=root >/dev/null 2>&1 || true
   inctr otp-sim disable >/dev/null 2>&1 || true
   inctr rm -rf /root/.hpc-compose-remote >/dev/null 2>&1 || true
@@ -114,9 +124,13 @@ inctr otp-sim enable >/dev/null || fail "otp-sim enable failed"
 pass "sshd now requires publickey + an interactive (OTP) second factor"
 
 # Connection opts the binary appends to every ssh/rsync (host not in ~/.ssh/config).
-# Deliberately NO ControlPath here, so the binary uses its built-in
-# ~/.ssh/cm-%r@%h:%p and the manual probes below share that one master socket.
-export HPC_COMPOSE_REMOTE_SSH_OPTS="-p $ssh_port -i $key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+# The explicit ControlPath redirects the binary's ControlMaster socket into our
+# per-run temp dir (keeping it out of ~/.ssh). It comes FIRST in the binary's arg
+# vector, so it wins ssh's first-value-wins order over the built-in
+# ~/.ssh/cm-%r@%h:%p default. Crucially it is the SAME socket the manual probes
+# below reference, so all of them share ONE master — the one-OTP property still
+# holds. ControlMaster/ControlPersist are left to the binary's built-in defaults.
+export HPC_COMPOSE_REMOTE_SSH_OPTS="-p $ssh_port -i $key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ControlPath=$ssh_ctl_dir/cm-%r@%h:%p"
 # Same connection opts as a bash array, for manual corroboration probes.
 conn_opts=(-p "$ssh_port" -i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
