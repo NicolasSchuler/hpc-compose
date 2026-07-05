@@ -454,6 +454,18 @@ Read-only: status + score + artifacts + provenance in one object. The printed
 next_commands carry an ssh ControlMaster hint so an OTP/2FA login node prompts
 only once; nothing is written and no connection is opened.";
 
+pub(super) const EXPERIMENT_BUNDLE_HELP: &str = "\
+Examples:
+  hpc-compose experiment bundle
+  hpc-compose experiment bundle 12345 --output run.tar.gz
+  hpc-compose experiment bundle 12345 --dir
+  hpc-compose experiment bundle --strict --format json
+Emits a citeable tar.gz (or a directory with --dir) holding the compose spec,
+the resolved config snapshot, the rendered sbatch, provenance, sweep seeds,
+metrics, checkpoint history, and a generated methods appendix (README.md).
+Image entries are references as recorded at submit time, not content digests.
+Missing ingredients degrade with a MANIFEST `missing[]` ledger unless --strict.";
+
 pub(super) const NEW_HELP: &str = "\
 Examples:
   hpc-compose new --list-templates
