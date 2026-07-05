@@ -35,6 +35,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   repoints the tracked "latest" record. Both commands support `--format json`
   with published schemas (`experiment-tag`, `experiment-note`); the record
   fields are additive, so existing records and schemas stay compatible.
+- Added `experiment bundle [JOB_ID]`, which emits a citeable, paper-ready
+  reproducibility archive for one tracked run: the compose spec, the resolved
+  config snapshot (secret-redacted), the rendered `sbatch` (re-rendered from the
+  plan and marked "reconstructed" when the on-disk script is gone), the full
+  submission record, provenance (git SHA + dirty flag + per-service image
+  references), the sweep manifest with seeds (for sweep trials), metrics
+  (`stats.csv` plus the raw `*.jsonl` samples), the checkpoint attempt history,
+  and a generated methods appendix (`README.md`) alongside a `MANIFEST.json`
+  with per-file sha256 and a `missing[]` ledger. A `spec/spec-drift.diff` is
+  included only when the current spec differs from the snapshot. Image entries
+  are references as recorded at submit time, not content digests, and are never
+  resolved against a registry. Output defaults to `experiment-bundle-<job_id>.tar.gz`;
+  `--dir` writes an unpacked directory instead, `--strict` fails (after
+  reporting) when any ingredient is missing, and `--format json` is pinned by
+  the new `experiment-bundle` output schema. Defaults to the latest tracked run
+  and contacts the scheduler only as much as `stats` does.
 - Added `render --annotate` and `plan --show-script --annotate`: the rendered
   preview script interleaves provenance comments (`# <- x-slurm.mem` field
   markers and `# --- artifact helpers (x-slurm.artifacts) ---` section banners)

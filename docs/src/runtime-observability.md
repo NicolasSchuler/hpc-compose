@@ -251,6 +251,38 @@ hpc-compose jobs list --tag baseline                # filter tracked jobs by tag
 
 Tags are short labels (`[A-Za-z0-9._-]`, max 64 chars, 32 per record) with set semantics: they stay sorted and deduplicated, and adding an existing tag or removing an absent one is a no-op. Notes are append-only and timestamped. Both default to the latest tracked run when no `--job-id` is given, are shown by `experiment show` (and as `tags`/`note_count` in `jobs list`), and support `--format json`. Repeating `--tag` in `jobs list` requires every given tag (AND). These commands contact no scheduler and rewrite only the tracked record; tagging an old run never repoints what hpc-compose considers the "latest" job.
 
+### Bundle a run for reproducibility
+
+When you need to publish or archive a run — for a paper appendix, an artifact-evaluation submission, or a lab notebook — `hpc-compose experiment bundle` collects everything about one tracked run into a single citeable archive:
+
+```bash
+hpc-compose experiment bundle                       # latest run -> experiment-bundle-<job_id>.tar.gz
+hpc-compose experiment bundle 4815162 --output paper/run.tar.gz
+hpc-compose experiment bundle 4815162 --dir         # unpacked directory instead of a tarball
+hpc-compose experiment bundle --strict --format json
+```
+
+The archive lays out one directory per concern:
+
+| Path | Contents |
+| --- | --- |
+| `README.md` | Generated methods appendix: run identity, provenance, resources, sweep, attempt history, metrics summary, tags/notes, and a "Reproducing this run" section |
+| `MANIFEST.json` | `schema_version`, tool version, per-file sha256, and a `missing[]` ledger of degraded ingredients |
+| `spec/compose.yaml` | The tracked compose spec as submitted |
+| `spec/config.snapshot.yaml` | The resolved effective config (secret-redacted) — the reproducibility ground truth |
+| `spec/spec-drift.diff` | Present only when the current spec differs from the snapshot |
+| `scripts/job.sbatch` | The rendered batch script (re-rendered from the plan and marked "reconstructed" in the manifest and README when the on-disk script is gone) |
+| `provenance/record.json` | The full tracked submission record |
+| `provenance/artifacts-manifest.json` | The artifact manifest — names only, never payloads |
+| `sweep/manifest.json` | The sweep manifest with per-trial seeds (sweep trials only) |
+| `metrics/stats.csv` | The metrics summary as CSV |
+| `metrics/raw/*.jsonl` | The raw metric samples copied as-is |
+| `checkpoints/history.json` | The attempt/requeue history |
+
+Image entries in the appendix are **references as recorded at submit time, not content digests**: hpc-compose records what the compose file asked for and never resolves it against a registry, so a tag that has since moved is reported as the tag, not the bytes it once pointed at.
+
+By default a missing ingredient (no config snapshot on a `run`-style or legacy record, no metrics directory, no artifact manifest, an absent rendered script that could not be re-rendered, and so on) degrades: the command warns on stderr, records the reason in the `MANIFEST.json` `missing[]` ledger, and still succeeds. Pass `--strict` to fail (after reporting) when any ingredient is missing. Bundling defaults to the latest tracked run, contacts the scheduler only as much as `stats` does, and — apart from the archive it writes — changes nothing.
+
 For a short canary run before a full run, use `hpc-compose germinate`; see [Right-Size With Canary Runs](canary-runs.md).
 
 ## Sweep Manifests
