@@ -195,6 +195,8 @@ fn sample_snapshot() -> PsSnapshot {
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
             provenance: None,
+            tags: Vec::new(),
+            notes: Vec::new(),
         },
         scheduler: SchedulerStatus {
             state: "RUNNING".into(),

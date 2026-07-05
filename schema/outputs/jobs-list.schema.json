@@ -72,6 +72,12 @@
         "legacy_runtime_job_root_present": {
           "type": "boolean"
         },
+        "note_count": {
+          "description": "Number of notes attached to the record (see `experiment note`).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
         "record_path": {
           "type": "string"
         },
@@ -96,6 +102,13 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "tags": {
+          "description": "User-assigned tags copied from the record (see `experiment tag`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [

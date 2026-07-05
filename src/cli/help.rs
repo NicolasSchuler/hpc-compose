@@ -400,7 +400,25 @@ hpc-compose only prints the rsync command (it copies nothing). The ssh transport
 uses ControlMaster, so an OTP/2FA login node prompts only once.";
 
 pub(super) const EXPERIMENT_HELP: &str = "\
-Aggregate a single tracked run into one read-only object.";
+Track one run: `show` aggregates it into one read-only object; `tag` and
+`note` attach labels and timestamped observations to its tracked record.";
+
+pub(super) const EXPERIMENT_TAG_HELP: &str = "\
+Examples:
+  hpc-compose experiment tag baseline
+  hpc-compose experiment tag baseline lr-bug --job-id 12345
+  hpc-compose experiment tag --remove lr-bug --job-id 12345 --format json
+Tags are a sorted set on the tracked record: adding an existing tag or removing
+an absent one is a no-op. Filter with `hpc-compose jobs list --tag <TAG>`.
+Allowed characters: letters, digits, '.', '_', '-' (max 64 chars, 32 tags).";
+
+pub(super) const EXPERIMENT_NOTE_HELP: &str = "\
+Examples:
+  hpc-compose experiment note 'diverged after epoch 3'
+  hpc-compose experiment note 'baseline for v2 sweep' --job-id 12345
+  hpc-compose experiment note 'lr too high' --format json
+Notes are append-only and timestamped; `experiment show` prints them with the
+run. Nothing is sent to the scheduler.";
 
 pub(super) const EXPERIMENT_SHOW_HELP: &str = "\
 Examples:
@@ -464,6 +482,7 @@ pub(super) const JOBS_HELP: &str = "\
 Examples:
   hpc-compose jobs list
   hpc-compose jobs list --disk-usage
+  hpc-compose jobs list --tag baseline --tag lr-bug
   hpc-compose jobs list --format json";
 
 pub(super) const CLEAN_HELP: &str = "\

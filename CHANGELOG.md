@@ -26,6 +26,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `--no-preflight`, and `--format`. The `sweep-submit` JSON output gains
   additive `resumed`, `resubmitted`, and `skipped_already_submitted` fields (no
   `schema_version` bump).
+- Added run tagging and notes on tracked job records: `experiment tag` attaches
+  short set-semantic labels ("baseline", "lr-bug") and `experiment note` appends
+  timestamped observations, both defaulting to the latest tracked run and
+  targetable with `--job-id`. Tags and notes surface in `experiment show` and in
+  `jobs list` (`tags`/`note_count`), and a repeatable `jobs list --tag <TAG>`
+  filter keeps only jobs carrying every given tag. Tagging an older run never
+  repoints the tracked "latest" record. Both commands support `--format json`
+  with published schemas (`experiment-tag`, `experiment-note`); the record
+  fields are additive, so existing records and schemas stay compatible.
 
 ## [0.2.0] - 2026-07-04
 

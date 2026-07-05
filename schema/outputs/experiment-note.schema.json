@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExperimentNoteOutput",
+  "description": "`experiment note` result (`--format json`): the record's full note list\nafter the append.",
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobNote"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "notes"
+  ],
+  "$defs": {
+    "JobNote": {
+      "description": "One append-only observation attached to a tracked job record via\n`experiment note`.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "created_at"
+      ]
+    }
+  }
+}

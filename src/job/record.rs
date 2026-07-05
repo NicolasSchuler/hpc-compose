@@ -33,6 +33,16 @@ pub struct JobInventoryEntry {
     pub batch_log_managed: bool,
     #[serde(default)]
     pub disk_usage_bytes: Option<u64>,
+    /// User-assigned tags copied from the record (see `experiment tag`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Number of notes attached to the record (see `experiment note`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub note_count: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// Repo-tree scan result returned by `jobs list`.
@@ -259,6 +269,8 @@ pub fn build_submission_record_with_backend_and_options(
         config_snapshot_yaml: options.config_snapshot_yaml.clone(),
         cached_artifacts: options.cached_artifacts.clone(),
         provenance: options.provenance.clone(),
+        tags: Vec::new(),
+        notes: Vec::new(),
     })
 }
 
@@ -267,14 +279,141 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
     let jobs_dir = jobs_dir_for(&record.compose_file);
     fs::create_dir_all(&jobs_dir).context(format!("failed to create {}", jobs_dir.display()))?;
     write_json(&jobs_dir.join(format!("{}.json", record.job_id)), record)?;
-    let latest_path = match record.kind {
-        SubmissionKind::Main => latest_record_path_for(&record.compose_file),
-        SubmissionKind::Run => latest_run_record_path_for(&record.compose_file),
-        SubmissionKind::Canary => latest_canary_record_path_for(&record.compose_file),
-        SubmissionKind::Notebook => latest_notebook_record_path_for(&record.compose_file),
-        SubmissionKind::SweepTrial => return Ok(()),
+    let Some(latest_path) = latest_pointer_path_for_kind(&record.compose_file, record.kind) else {
+        return Ok(());
     };
     write_json(&latest_path, record)?;
+    Ok(())
+}
+
+/// Maximum number of tags one tracked record can carry.
+pub const MAX_TAGS_PER_RECORD: usize = 32;
+/// Maximum length of one tag, in characters.
+pub const MAX_TAG_LEN: usize = 64;
+/// Maximum length of one note text, in characters (after trimming).
+pub const MAX_NOTE_LEN: usize = 4096;
+
+/// Returns the per-kind latest pointer file for a compose file, or `None` for
+/// kinds without a pointer (sweep trials).
+fn latest_pointer_path_for_kind(compose_file: &Path, kind: SubmissionKind) -> Option<PathBuf> {
+    match kind {
+        SubmissionKind::Main => Some(latest_record_path_for(compose_file)),
+        SubmissionKind::Run => Some(latest_run_record_path_for(compose_file)),
+        SubmissionKind::Canary => Some(latest_canary_record_path_for(compose_file)),
+        SubmissionKind::Notebook => Some(latest_notebook_record_path_for(compose_file)),
+        SubmissionKind::SweepTrial => None,
+    }
+}
+
+/// Applies a post-submit mutation to one tracked submission record and
+/// persists it.
+///
+/// Unlike [`write_submission_record`], this never *repoints* the per-kind
+/// `latest*.json` pointer: the pointer file is a full duplicate of the record,
+/// so it is rewritten (synced) only when it already names `job_id`. Mutating a
+/// non-latest job leaves the pointer file untouched; sweep trials have no
+/// pointer and skip the sync entirely. The mutation closure may fail, in which
+/// case nothing is written.
+pub fn update_submission_record(
+    spec_path: &Path,
+    job_id: &str,
+    mutate: impl FnOnce(&mut SubmissionRecord) -> Result<()>,
+) -> Result<SubmissionRecord> {
+    let compose_file = absolute_path(spec_path)?;
+    let record_path = jobs_dir_for(&compose_file).join(format!("{job_id}.json"));
+    if !record_path.exists() {
+        bail!(
+            "no tracked submission metadata exists for job '{}' under {}",
+            job_id,
+            metadata_root_for(&compose_file).display()
+        );
+    }
+    let mut record = validate_submission_record(read_json(&record_path)?, &record_path)?;
+    mutate(&mut record)?;
+    write_json(&record_path, &record)?;
+    // Sync (never repoint) the per-kind latest pointer duplicate: rewrite it
+    // only when it currently names this job, so mutating an old job can never
+    // repoint "latest" at it, while readers of the pointer file (the no-id
+    // default paths) never observe a stale copy.
+    if let Some(latest_path) = latest_pointer_path_for_kind(&compose_file, record.kind)
+        && read_latest_pointer_job_id(&metadata_root_for(&compose_file), record.kind).as_deref()
+            == Some(job_id)
+    {
+        write_json(&latest_path, &record)?;
+    }
+    Ok(record)
+}
+
+/// Validates one tag label: non-empty, at most [`MAX_TAG_LEN`] characters, and
+/// only `[A-Za-z0-9._-]` characters.
+pub fn validate_tag(tag: &str) -> Result<()> {
+    if tag.is_empty() {
+        bail!("tag must not be empty");
+    }
+    if tag.chars().count() > MAX_TAG_LEN {
+        bail!("tag '{tag}' is longer than the maximum of {MAX_TAG_LEN} characters");
+    }
+    if !tag
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        bail!(
+            "tag '{tag}' contains unsupported characters; use only letters, digits, '.', '_', and '-'"
+        );
+    }
+    Ok(())
+}
+
+/// Applies sorted-set tag semantics to a record's tag list: `add` then `remove`,
+/// deduplicated and sorted. Adding a tag that is already present and removing a
+/// tag that is absent are idempotent no-ops. Fails without mutating semantics
+/// callers care about when a tag is invalid or the result would exceed
+/// [`MAX_TAGS_PER_RECORD`] tags.
+pub fn apply_tag_changes(
+    existing: &mut Vec<String>,
+    add: &[String],
+    remove: &[String],
+) -> Result<()> {
+    for tag in add.iter().chain(remove.iter()) {
+        validate_tag(tag)?;
+    }
+    let mut set: BTreeSet<String> = existing.iter().cloned().collect();
+    for tag in add {
+        set.insert(tag.clone());
+    }
+    for tag in remove {
+        set.remove(tag.as_str());
+    }
+    if set.len() > MAX_TAGS_PER_RECORD {
+        bail!(
+            "a tracked record can carry at most {MAX_TAGS_PER_RECORD} tags ({} after this change); remove tags with 'experiment tag --remove <TAG>' first",
+            set.len()
+        );
+    }
+    *existing = set.into_iter().collect();
+    Ok(())
+}
+
+/// Validates and normalizes one note text: trimmed, non-empty, at most
+/// [`MAX_NOTE_LEN`] characters. Returns the trimmed text.
+pub fn validate_note_text(text: &str) -> Result<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("note text must not be empty");
+    }
+    if trimmed.chars().count() > MAX_NOTE_LEN {
+        bail!("note text is longer than the maximum of {MAX_NOTE_LEN} characters");
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Appends one timestamped note to a record's append-only note list.
+pub fn append_job_note(record: &mut SubmissionRecord, text: &str) -> Result<()> {
+    let text = validate_note_text(text)?;
+    record.notes.push(JobNote {
+        text,
+        created_at: unix_timestamp_now(),
+    });
     Ok(())
 }
 
@@ -698,6 +837,8 @@ fn build_inventory_entries_for_metadata_root(
             batch_log,
             batch_log_managed: record.batch_log_managed,
             disk_usage_bytes,
+            tags: record.tags.clone(),
+            note_count: record.notes.len(),
         });
     }
 
@@ -905,12 +1046,8 @@ fn repair_latest_record_for_kind(
     records: &[SubmissionRecord],
     kind: SubmissionKind,
 ) -> Result<()> {
-    let latest_path = match kind {
-        SubmissionKind::Main => latest_record_path_for(compose_file),
-        SubmissionKind::Run => latest_run_record_path_for(compose_file),
-        SubmissionKind::Canary => latest_canary_record_path_for(compose_file),
-        SubmissionKind::Notebook => latest_notebook_record_path_for(compose_file),
-        SubmissionKind::SweepTrial => return Ok(()),
+    let Some(latest_path) = latest_pointer_path_for_kind(compose_file, kind) else {
+        return Ok(());
     };
     if let Some(latest) = records
         .iter()
@@ -1117,5 +1254,217 @@ mod tests {
         let ok = validate_submission_record(record, Path::new("/tmp/p/x.json"))
             .expect("valid record accepted");
         assert_eq!(ok.job_id, "12345");
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn validate_tag_accepts_allowed_charset_and_rejects_the_rest() {
+        validate_tag("baseline").expect("plain tag");
+        validate_tag("lr-bug_v1.2").expect("dots dashes underscores digits");
+        assert!(validate_tag("").unwrap_err().to_string().contains("empty"));
+        assert!(
+            validate_tag("has space")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported characters")
+        );
+        assert!(
+            validate_tag("emoji🙂")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported characters")
+        );
+        let long = "a".repeat(MAX_TAG_LEN + 1);
+        assert!(
+            validate_tag(&long)
+                .unwrap_err()
+                .to_string()
+                .contains("longer than")
+        );
+        validate_tag(&"a".repeat(MAX_TAG_LEN)).expect("max length is allowed");
+    }
+
+    #[test]
+    fn apply_tag_changes_is_a_sorted_idempotent_set() {
+        let mut tags = strings(&["zeta", "baseline"]);
+        apply_tag_changes(&mut tags, &strings(&["alpha", "baseline"]), &[]).expect("add");
+        assert_eq!(tags, strings(&["alpha", "baseline", "zeta"]));
+
+        // Re-adding an existing tag and removing an absent one are no-ops.
+        apply_tag_changes(&mut tags, &strings(&["alpha"]), &strings(&["missing"]))
+            .expect("idempotent");
+        assert_eq!(tags, strings(&["alpha", "baseline", "zeta"]));
+
+        apply_tag_changes(&mut tags, &[], &strings(&["zeta"])).expect("remove");
+        assert_eq!(tags, strings(&["alpha", "baseline"]));
+    }
+
+    #[test]
+    fn apply_tag_changes_rejects_invalid_tags_and_overflow() {
+        let mut tags = Vec::new();
+        let err = apply_tag_changes(&mut tags, &strings(&["bad tag!"]), &[]).unwrap_err();
+        assert!(err.to_string().contains("unsupported characters"));
+        assert!(tags.is_empty(), "failed change must not mutate");
+
+        let mut full = (0..MAX_TAGS_PER_RECORD)
+            .map(|index| format!("tag{index:03}"))
+            .collect::<Vec<_>>();
+        let err = apply_tag_changes(&mut full, &strings(&["one-more"]), &[]).unwrap_err();
+        assert!(err.to_string().contains("at most"), "got: {err}");
+        assert_eq!(full.len(), MAX_TAGS_PER_RECORD);
+    }
+
+    #[test]
+    fn validate_note_text_trims_and_bounds() {
+        assert_eq!(
+            validate_note_text("  diverged after epoch 3\n").expect("note"),
+            "diverged after epoch 3"
+        );
+        assert!(
+            validate_note_text("   \n\t")
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
+        let long = "n".repeat(MAX_NOTE_LEN + 1);
+        assert!(
+            validate_note_text(&long)
+                .unwrap_err()
+                .to_string()
+                .contains("longer than")
+        );
+    }
+
+    #[test]
+    fn append_job_note_appends_in_order_with_timestamps() {
+        let mut record: SubmissionRecord =
+            serde_json::from_value(record_json("12345", SUBMISSION_SCHEMA_VERSION))
+                .expect("record");
+        append_job_note(&mut record, "first").expect("first note");
+        append_job_note(&mut record, "second").expect("second note");
+        assert_eq!(record.notes.len(), 2);
+        assert_eq!(record.notes[0].text, "first");
+        assert_eq!(record.notes[1].text, "second");
+        assert!(record.notes[0].created_at > 0);
+        assert!(record.notes[1].created_at >= record.notes[0].created_at);
+    }
+
+    fn tracked_record(
+        compose: &Path,
+        job_id: &str,
+        submitted_at: u64,
+        kind: &str,
+    ) -> SubmissionRecord {
+        let submit_dir = compose.parent().expect("compose parent");
+        serde_json::from_value(serde_json::json!({
+            "schema_version": SUBMISSION_SCHEMA_VERSION,
+            "backend": "slurm",
+            "kind": kind,
+            "job_id": job_id,
+            "submitted_at": submitted_at,
+            "compose_file": compose,
+            "submit_dir": submit_dir,
+            "script_path": submit_dir.join("run.sbatch"),
+            "cache_dir": submit_dir.join("cache"),
+            "batch_log": submit_dir.join("logs/x.out"),
+            "service_logs": {}
+        }))
+        .expect("tracked record")
+    }
+
+    #[test]
+    fn update_submission_record_on_non_latest_leaves_pointer_byte_identical() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("older");
+        write_submission_record(&tracked_record(&compose, "22222", 20, "main")).expect("newer");
+
+        let latest_path = latest_record_path_for(&compose);
+        let pointer_before = fs::read(&latest_path).expect("latest before");
+
+        let updated = update_submission_record(&compose, "11111", |record| {
+            apply_tag_changes(&mut record.tags, &strings(&["baseline"]), &[])
+        })
+        .expect("update older");
+        assert_eq!(updated.tags, strings(&["baseline"]));
+
+        // The mutated per-job record carries the tag ...
+        let record: SubmissionRecord =
+            read_json(&jobs_dir_for(&compose).join("11111.json")).expect("older record");
+        assert_eq!(record.tags, strings(&["baseline"]));
+        // ... while the latest pointer still names the newer job, byte for byte.
+        let pointer_after = fs::read(&latest_path).expect("latest after");
+        assert_eq!(pointer_before, pointer_after);
+    }
+
+    #[test]
+    fn update_submission_record_on_latest_syncs_the_pointer_duplicate() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("older");
+        write_submission_record(&tracked_record(&compose, "22222", 20, "main")).expect("newer");
+
+        update_submission_record(&compose, "22222", |record| {
+            apply_tag_changes(&mut record.tags, &strings(&["baseline"]), &[])
+        })
+        .expect("update latest");
+
+        let record: SubmissionRecord =
+            read_json(&jobs_dir_for(&compose).join("22222.json")).expect("latest record");
+        assert_eq!(record.tags, strings(&["baseline"]));
+        let pointer: SubmissionRecord =
+            read_json(&latest_record_path_for(&compose)).expect("latest pointer");
+        assert_eq!(pointer.job_id, "22222");
+        assert_eq!(pointer.tags, strings(&["baseline"]));
+    }
+
+    #[test]
+    fn update_submission_record_tags_sweep_trials_without_touching_pointers() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        write_submission_record(&tracked_record(&compose, "33333", 30, "sweep_trial"))
+            .expect("sweep trial");
+
+        update_submission_record(&compose, "33333", |record| {
+            apply_tag_changes(&mut record.tags, &strings(&["sweep-best"]), &[])
+        })
+        .expect("update sweep trial");
+
+        let record: SubmissionRecord =
+            read_json(&jobs_dir_for(&compose).join("33333.json")).expect("trial record");
+        assert_eq!(record.tags, strings(&["sweep-best"]));
+        assert!(
+            !latest_record_path_for(&compose).exists(),
+            "sweep trials have no latest pointer to create"
+        );
+    }
+
+    #[test]
+    fn update_submission_record_missing_job_errors_and_failed_mutation_writes_nothing() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        let err = update_submission_record(&compose, "99999", |_| Ok(())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no tracked submission metadata exists"),
+            "got: {err}"
+        );
+
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("record");
+        let record_path = jobs_dir_for(&compose).join("11111.json");
+        let bytes_before = fs::read(&record_path).expect("record before");
+        let err = update_submission_record(&compose, "11111", |record| {
+            apply_tag_changes(&mut record.tags, &strings(&["bad tag!"]), &[])
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported characters"));
+        assert_eq!(
+            bytes_before,
+            fs::read(&record_path).expect("record after"),
+            "a failed mutation must not rewrite the record"
+        );
     }
 }

@@ -238,6 +238,19 @@ Use `hpc-compose score <job-id>` after a tracked Slurm run when you want a compa
 
 Use `hpc-compose experiment show <job-id>` when you want all of that in one read-only object. A single call aggregates scheduler status, the post-run efficiency score, the artifact manifest, and submit-time provenance, so a notebook or experiment tracker can capture one run with one command (`hpc-compose experiment show <job-id> --format json`). It is static-safe: it contacts the scheduler only as much as `status` and `score` already do, writes nothing, and opens no connection. For each service with TCP or HTTP readiness it emits a per-service `ssh -L` tunnel hint, and `next_commands` carries SSH `ControlMaster`/`ControlPath`/`ControlPersist` multiplexing guidance so an OTP/2FA login node prompts you only once. Legacy records without provenance, non-terminal jobs without a complete efficiency report, and runs without an artifact manifest still produce a valid object with those fields omitted.
 
+### Tag and annotate runs
+
+Instead of keeping a side text file that maps job ids to labels ("baseline", "lr-bug") and observations, attach them to the tracked record itself:
+
+```bash
+hpc-compose experiment tag baseline lr-bug          # tag the latest tracked run
+hpc-compose experiment tag --remove lr-bug --job-id 4815162
+hpc-compose experiment note 'diverged after epoch 3' --job-id 4815162
+hpc-compose jobs list --tag baseline                # filter tracked jobs by tag
+```
+
+Tags are short labels (`[A-Za-z0-9._-]`, max 64 chars, 32 per record) with set semantics: they stay sorted and deduplicated, and adding an existing tag or removing an absent one is a no-op. Notes are append-only and timestamped. Both default to the latest tracked run when no `--job-id` is given, are shown by `experiment show` (and as `tags`/`note_count` in `jobs list`), and support `--format json`. Repeating `--tag` in `jobs list` requires every given tag (AND). These commands contact no scheduler and rewrite only the tracked record; tagging an old run never repoints what hpc-compose considers the "latest" job.
+
 For a short canary run before a full run, use `hpc-compose germinate`; see [Right-Size With Canary Runs](canary-runs.md).
 
 ## Sweep Manifests

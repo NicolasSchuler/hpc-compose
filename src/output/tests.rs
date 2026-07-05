@@ -1309,6 +1309,8 @@ fn stdout_entrypoints_cover_public_output_wrappers() {
             .join(".hpc-compose/logs/hpc-compose-12345.out"),
         batch_log_managed: true,
         disk_usage_bytes: Some(2_048),
+        tags: Vec::new(),
+        note_count: 0,
     };
     let scan = JobInventoryScan {
         scan_root: tmpdir.path().to_path_buf(),

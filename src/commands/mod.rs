@@ -1540,7 +1540,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             }
         },
         Commands::Jobs { command } => match command {
-            JobsCommands::List { disk_usage, format } => runtime::jobs_list(disk_usage, format),
+            JobsCommands::List {
+                disk_usage,
+                tag,
+                format,
+            } => runtime::jobs_list(disk_usage, tag, format),
         },
         Commands::Clean {
             file,
@@ -1739,6 +1743,25 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     gpu_tdp_w,
                     cpu_watts_per_core,
                 )
+            }
+            ExperimentCommands::Tag {
+                tags,
+                remove,
+                job_id,
+                file,
+                format,
+            } => {
+                let context = resolve_ctx(options, file, &[])?;
+                runtime::experiment_tag(context, tags, remove, job_id, format)
+            }
+            ExperimentCommands::Note {
+                text,
+                job_id,
+                file,
+                format,
+            } => {
+                let context = resolve_ctx(options, file, &[])?;
+                runtime::experiment_note(context, text, job_id, format)
             }
         },
         Commands::Completions { shell } => init::completions(shell),
@@ -2309,6 +2332,7 @@ mod tests {
                 command: Commands::Jobs {
                     command: JobsCommands::List {
                         disk_usage: false,
+                        tag: Vec::new(),
                         format: Some(hpc_compose::cli::OutputFormat::Json),
                     },
                 },

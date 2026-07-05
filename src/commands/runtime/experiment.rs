@@ -1,16 +1,22 @@
 //! `hpc-compose experiment show` — read-only "one JSON object per run"
-//! aggregator over already-persisted tracked state.
+//! aggregator over already-persisted tracked state — plus `experiment tag` /
+//! `experiment note`, which annotate the tracked record.
 //!
-//! Static-safe: it contacts a scheduler only as much as `status` (squeue plus a
-//! terminal-only sacct probe via [`build_status_snapshot`]) and `score` (the
-//! same plus the terminal-only sstat efficiency probe via
+//! `show` is static-safe: it contacts a scheduler only as much as `status`
+//! (squeue plus a terminal-only sacct probe via [`build_status_snapshot`]) and
+//! `score` (the same plus the terminal-only sstat efficiency probe via
 //! [`build_efficiency_score_report`]) already do. It never submits, cancels,
 //! exports, writes a file, or opens a connection. SSH/ControlMaster guidance and
 //! per-service tunnel hints are PRINTED strings only.
+//!
+//! `tag` and `note` contact no scheduler either; they rewrite only the tracked
+//! record file (and its latest-pointer duplicate when that pointer already
+//! names the job) via [`update_submission_record`].
 
 use hpc_compose::job::{
-    ArtifactManifest, EfficiencyScoreReport, JobProvenance, StatusSnapshot,
-    artifact_manifest_path_for_record,
+    ArtifactManifest, EfficiencyScoreReport, JobNote, JobProvenance, StatusSnapshot,
+    append_job_note, apply_tag_changes, artifact_manifest_path_for_record,
+    update_submission_record,
 };
 
 use super::*;
@@ -29,7 +35,31 @@ pub(crate) struct ExperimentShowOutput {
     results: Option<ArtifactManifest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     efficiency: Option<EfficiencyScoreReport>,
+    /// User-assigned labels on the tracked record (see `experiment tag`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    /// Append-only timestamped observations (see `experiment note`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<JobNote>,
     next_commands: Vec<String>,
+}
+
+/// `experiment tag` result (`--format json`): the record's full tag set after
+/// the change.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ExperimentTagOutput {
+    pub(crate) schema_version: u32,
+    job_id: String,
+    tags: Vec<String>,
+}
+
+/// `experiment note` result (`--format json`): the record's full note list
+/// after the append.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ExperimentNoteOutput {
+    pub(crate) schema_version: u32,
+    job_id: String,
+    notes: Vec<JobNote>,
 }
 
 /// Per-service slice of the aggregate: tracked placement plus a printable tunnel
@@ -103,10 +133,9 @@ pub(crate) fn experiment_show(
 
     let login_host = context.login_host.clone();
     let output = build_experiment_show_output(
-        &record.job_id,
+        &record,
         &runtime_plan,
         &snapshot,
-        record.provenance.clone(),
         results,
         efficiency,
         login_host.as_deref(),
@@ -136,14 +165,14 @@ fn read_artifact_manifest(record: &SubmissionRecord) -> Option<ArtifactManifest>
 /// Pure assembly of the aggregate from already-fetched reports. Keeps the
 /// field-mapping and tunnel-hint logic unit-testable without a scheduler.
 fn build_experiment_show_output(
-    job_id: &str,
+    record: &SubmissionRecord,
     plan: &RuntimePlan,
     snapshot: &StatusSnapshot,
-    provenance: Option<JobProvenance>,
     results: Option<ArtifactManifest>,
     efficiency: Option<EfficiencyScoreReport>,
     login_host: Option<&str>,
 ) -> ExperimentShowOutput {
+    let job_id = record.job_id.as_str();
     // Readiness-derived endpoints (TCP/HTTP only), keyed by service name. The
     // port + placeholder handling mirrors `reach`/`build_submit_endpoints`.
     let endpoints = output::build_submit_endpoints(plan);
@@ -184,11 +213,94 @@ fn build_experiment_show_output(
         name: plan.name.clone(),
         state: snapshot.scheduler.state.clone(),
         services,
-        provenance,
+        provenance: record.provenance.clone(),
         results,
         efficiency,
+        tags: record.tags.clone(),
+        notes: record.notes.clone(),
         next_commands: experiment_next_commands(job_id, output::artifact_export_configured(plan)),
     }
+}
+
+/// `experiment tag`: add and/or remove labels on one tracked record. The
+/// record file (and, when it names this job, the latest-pointer duplicate) is
+/// the only thing rewritten; no scheduler is contacted.
+pub(crate) fn experiment_tag(
+    context: ResolvedContext,
+    tags: Vec<String>,
+    remove: Vec<String>,
+    job_id: Option<String>,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    if tags.is_empty() && remove.is_empty() {
+        bail!("pass at least one tag to add, or --remove <TAG> to remove one");
+    }
+    let record = resolve_tracked_record(&context, job_id.as_deref())?
+        .with_context(|| tracked_job_hint(job_id.as_deref()))?;
+    let updated = update_submission_record(&record.compose_file, &record.job_id, |record| {
+        apply_tag_changes(&mut record.tags, &tags, &remove)
+    })?;
+    let output = ExperimentTagOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
+        job_id: updated.job_id.clone(),
+        tags: updated.tags.clone(),
+    };
+    match output::resolve_output_format(format) {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output)
+                    .context("failed to serialize experiment tag output")?
+            );
+        }
+        OutputFormat::Text => {
+            let tags = if output.tags.is_empty() {
+                "(none)".to_string()
+            } else {
+                output.tags.join(", ")
+            };
+            println!("tags for job {}: {tags}", output.job_id);
+        }
+    }
+    Ok(())
+}
+
+/// `experiment note`: append one timestamped observation to one tracked
+/// record. Same write scope as `experiment tag`; no scheduler is contacted.
+pub(crate) fn experiment_note(
+    context: ResolvedContext,
+    text: String,
+    job_id: Option<String>,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let record = resolve_tracked_record(&context, job_id.as_deref())?
+        .with_context(|| tracked_job_hint(job_id.as_deref()))?;
+    let updated = update_submission_record(&record.compose_file, &record.job_id, |record| {
+        append_job_note(record, &text)
+    })?;
+    let output = ExperimentNoteOutput {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
+        job_id: updated.job_id.clone(),
+        notes: updated.notes.clone(),
+    };
+    match output::resolve_output_format(format) {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output)
+                    .context("failed to serialize experiment note output")?
+            );
+        }
+        OutputFormat::Text => {
+            println!(
+                "note added to job {} ({} note{})",
+                output.job_id,
+                output.notes.len(),
+                if output.notes.len() == 1 { "" } else { "s" }
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Suggested follow-up reads. References only shipped commands and carries the
@@ -221,6 +333,9 @@ fn print_experiment_show_output(output: &ExperimentShowOutput) {
     println!("{}", term::styled_section_header("Experiment"));
     println!("  run:   {} (job {})", output.name, output.job_id);
     println!("  state: {}", output.state);
+    if !output.tags.is_empty() {
+        println!("  tags:  {}", output.tags.join(", "));
+    }
     if !output.services.is_empty() {
         println!();
         println!("Services:");
@@ -259,6 +374,21 @@ fn print_experiment_show_output(output: &ExperimentShowOutput) {
         println!();
         println!("Artifacts: {files} collected file(s)");
     }
+    if !output.notes.is_empty() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        println!();
+        println!("Notes:");
+        for note in &output.notes {
+            println!(
+                "  [{}] {}",
+                output::format_age_seconds(now.saturating_sub(note.created_at)),
+                note.text
+            );
+        }
+    }
     println!();
     println!("Next:");
     for command in &output.next_commands {
@@ -286,6 +416,25 @@ mod tests {
         let spec = ComposeSpec::load(&compose).expect("spec");
         let plan = hpc_compose::planner::build_plan(&compose, spec).expect("plan");
         hpc_compose::prepare::build_runtime_plan(&plan)
+    }
+
+    fn record_for(job_id: &str) -> SubmissionRecord {
+        // Minimal tracked record via serde (all optional/additive fields take
+        // their defaults) so the test does not enumerate every record field.
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "backend": "slurm",
+            "kind": "main",
+            "job_id": job_id,
+            "submitted_at": 1,
+            "compose_file": "/tmp/compose.yaml",
+            "submit_dir": "/tmp",
+            "script_path": "/tmp/x.sbatch",
+            "cache_dir": "/tmp/cache",
+            "batch_log": "/tmp/batch.log",
+            "service_logs": {},
+        }))
+        .expect("submission record")
     }
 
     fn snapshot_for(plan: &RuntimePlan, state: &str) -> StatusSnapshot {
@@ -364,7 +513,8 @@ services:
         let snapshot = snapshot_for(&plan, "RUNNING");
         let mut image_refs = BTreeMap::new();
         image_refs.insert("api".to_string(), "docker://python:3.12".to_string());
-        let provenance = Some(JobProvenance {
+        let mut record = record_for("12345");
+        record.provenance = Some(JobProvenance {
             tool_version: "9.9.9".to_string(),
             git: Some(GitProvenance {
                 sha: "abc123".to_string(),
@@ -374,16 +524,14 @@ services:
             image_refs,
             source_content_hash: None,
         });
+        record.tags = vec!["baseline".to_string(), "lr-bug".to_string()];
+        record.notes = vec![hpc_compose::job::JobNote {
+            text: "diverged after epoch 3".to_string(),
+            created_at: 42,
+        }];
 
-        let output = build_experiment_show_output(
-            "12345",
-            &plan,
-            &snapshot,
-            provenance,
-            None,
-            None,
-            Some("login01"),
-        );
+        let output =
+            build_experiment_show_output(&record, &plan, &snapshot, None, None, Some("login01"));
 
         assert_eq!(output.job_id, "12345");
         assert_eq!(output.name, "exp-test");
@@ -401,6 +549,11 @@ services:
         assert!(hint.contains("-L 8000:gpu042:8000 login01"), "hint: {hint}");
         assert!(hint.contains("ControlMaster=auto"), "multiplex: {hint}");
         assert!(output.provenance.is_some());
+        // Tags and notes on the record surface in the aggregate.
+        assert_eq!(output.tags, vec!["baseline", "lr-bug"]);
+        assert_eq!(output.notes.len(), 1);
+        assert_eq!(output.notes[0].text, "diverged after epoch 3");
+        assert_eq!(output.notes[0].created_at, 42);
     }
 
     #[test]
@@ -409,7 +562,7 @@ services:
         let snapshot = snapshot_for(&plan, "RUNNING");
         // No login host and the worker has no readiness port.
         let output =
-            build_experiment_show_output("12345", &plan, &snapshot, None, None, None, None);
+            build_experiment_show_output(&record_for("12345"), &plan, &snapshot, None, None, None);
 
         let worker = output
             .services
@@ -436,7 +589,7 @@ services:
         let plan = plan_with_services(TCP_COMPOSE);
         let snapshot = snapshot_for(&plan, "PENDING");
         let output =
-            build_experiment_show_output("12345", &plan, &snapshot, None, None, None, None);
+            build_experiment_show_output(&record_for("12345"), &plan, &snapshot, None, None, None);
         assert!(
             output.provenance.is_none(),
             "legacy record -> no provenance"
@@ -460,10 +613,9 @@ services:
         }))
         .expect("manifest");
         let output = build_experiment_show_output(
-            "12345",
+            &record_for("12345"),
             &plan,
             &snapshot,
-            None,
             Some(manifest),
             None,
             None,

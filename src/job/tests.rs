@@ -285,6 +285,8 @@ fn defaults_and_path_helpers_cover_remaining_helpers() {
         config_snapshot_yaml: None,
         cached_artifacts: Vec::new(),
         provenance: None,
+        tags: Vec::new(),
+        notes: Vec::new(),
     };
     assert_eq!(
         log_dir_for_record(&fallback_record),
