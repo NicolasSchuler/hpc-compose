@@ -130,6 +130,7 @@ pub(crate) fn doctor_mpi_smoke(
             huggingface_cli_bin: context.huggingface_cli_bin.clone(),
             cluster_profile,
             runtime_root: None,
+            annotate: false,
         },
     )?;
 
@@ -353,6 +354,7 @@ pub(crate) fn doctor_fabric_smoke(
             huggingface_cli_bin: context.huggingface_cli_bin.clone(),
             cluster_profile,
             runtime_root: None,
+            annotate: false,
         },
     )?;
 

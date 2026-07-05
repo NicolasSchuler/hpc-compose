@@ -309,6 +309,7 @@ fn print_lint_findings(findings: &[LintFinding], passed: bool) {
 pub(crate) fn render(
     context: ResolvedContext,
     output_path: Option<PathBuf>,
+    annotate: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -327,6 +328,7 @@ pub(crate) fn render(
             huggingface_cli_bin: context.huggingface_cli_bin.clone(),
             cluster_profile,
             runtime_root: None,
+            annotate,
         },
     )?;
     if let Some(path) = output_path.as_ref() {
@@ -378,12 +380,14 @@ struct PlanHint {
     message: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan(
     context: ResolvedContext,
     strict_env: bool,
     verbose: bool,
     tree: bool,
     show_script: bool,
+    annotate: bool,
     explain: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
@@ -425,6 +429,7 @@ pub(crate) fn plan(
                 huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 cluster_profile: cluster_profile.clone(),
                 runtime_root: None,
+                annotate,
             },
         )?)
     } else {
@@ -1543,10 +1548,17 @@ services:
         let resolved_context = context_for(&compose, tmpdir.path());
 
         validate(resolved_context.clone(), false, Some(OutputFormat::Json)).expect("validate json");
-        render(resolved_context.clone(), None, Some(OutputFormat::Json)).expect("render json");
+        render(
+            resolved_context.clone(),
+            None,
+            false,
+            Some(OutputFormat::Json),
+        )
+        .expect("render json");
         render(
             resolved_context.clone(),
             Some(tmpdir.path().join("rendered.sbatch")),
+            false,
             Some(OutputFormat::Json),
         )
         .expect("render file json");
@@ -1599,6 +1611,7 @@ services:
         let render_err = render(
             resolved_context.clone(),
             Some(tmpdir.path().join("missing/output/rendered.sbatch")),
+            false,
             None,
         )
         .expect_err("render should report write failures");
@@ -1645,6 +1658,7 @@ services:
         render(
             resolved_context.clone(),
             Some(tmpdir.path().join("rendered-text.sbatch")),
+            false,
             None,
         )
         .expect("render text");

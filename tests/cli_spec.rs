@@ -160,6 +160,63 @@ fn validate_and_render_commands_work() {
 }
 
 #[test]
+fn render_and_plan_annotate_interleave_provenance_comments() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+
+    // Default renders stay comment-free.
+    let plain = run_cli(
+        tmpdir.path(),
+        &["render", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&plain);
+    let plain_stdout = stdout_text(&plain);
+    assert!(!plain_stdout.contains("# <- "));
+    assert!(!plain_stdout.contains("# --- "));
+
+    let annotated = run_cli(
+        tmpdir.path(),
+        &[
+            "render",
+            "--annotate",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&annotated);
+    let annotated_stdout = stdout_text(&annotated);
+    assert!(annotated_stdout.contains("# <- x-slurm.time\n#SBATCH --time=00:10:00"));
+    assert!(annotated_stdout.contains("# <- x-slurm.job_name\n#SBATCH --job-name=demo"));
+    assert!(annotated_stdout.contains("# --- service app (services.app) ---"));
+
+    let plan_annotated = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "--show-script",
+            "--annotate",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&plan_annotated);
+    let plan_stdout = stdout_text(&plan_annotated);
+    assert!(plan_stdout.contains("Rendered script:"));
+    assert!(plan_stdout.contains("# <- x-slurm.time\n#SBATCH --time=00:10:00"));
+
+    // --annotate only makes sense when a script is printed.
+    let missing_show_script = run_cli(
+        tmpdir.path(),
+        &["plan", "--annotate", "-f", compose.to_str().expect("path")],
+    );
+    assert!(!missing_show_script.status.success());
+    let stderr = stderr_text(&missing_show_script);
+    assert!(stderr.contains("--show-script"), "stderr: {stderr}");
+}
+
+#[test]
 fn inspect_dependencies_outputs_text_dot_and_json() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_dir = tmpdir.path().join("cache");

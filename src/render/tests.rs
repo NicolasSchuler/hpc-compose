@@ -716,6 +716,7 @@ fn render_apptainer_and_singularity_honor_binary_overrides() {
             huggingface_cli_bin: "huggingface-cli".into(),
             cluster_profile: None,
             runtime_root: None,
+            annotate: false,
         },
     )
     .expect("script");
@@ -737,6 +738,7 @@ fn render_apptainer_and_singularity_honor_binary_overrides() {
             huggingface_cli_bin: "huggingface-cli".into(),
             cluster_profile: None,
             runtime_root: None,
+            annotate: false,
         },
     )
     .expect("script");
@@ -3695,4 +3697,156 @@ fn global_and_per_service_x_slurm_precedence_is_pinned() {
         !srun.contains("--ntasks-per-node=3"),
         "srun should not inherit global when overridden: {srun}"
     );
+}
+
+fn annotate_fixture_plan() -> RuntimePlan {
+    let mut api = runtime_service();
+    api.name = "api".into();
+    api.readiness = Some(ReadinessSpec::Tcp {
+        host: Some("127.0.0.1".into()),
+        port: 8080,
+        timeout_seconds: Some(20),
+    });
+    let mut worker = runtime_service();
+    worker.name = "worker".into();
+    worker.readiness = None;
+    worker.depends_on = vec![ServiceDependency {
+        name: "api".into(),
+        condition: DependencyCondition::ServiceHealthy,
+        implicit: false,
+    }];
+    RuntimePlan {
+        name: "annotated".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            time: Some("00:10:00".into()),
+            mem: Some("4G".into()),
+            partition: Some("gpu".into()),
+            requeue: Some(true),
+            submit_args: vec!["--exclusive".into()],
+            setup: vec!["module load cuda".into()],
+            metrics: Some(crate::spec::MetricsConfig {
+                enabled: Some(true),
+                interval_seconds: Some(5),
+                collectors: vec![MetricsCollector::Slurm],
+            }),
+            artifacts: Some(crate::spec::ArtifactsConfig {
+                collect: ArtifactCollectPolicy::Always,
+                export_dir: Some("./results/${SLURM_JOB_ID}".into()),
+                paths: vec!["/hpc-compose/job/metrics/**".into()],
+                bundles: BTreeMap::new(),
+            }),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![api, worker],
+    }
+}
+
+fn render_annotated_script(plan: &RuntimePlan) -> String {
+    render_script_with_options(
+        plan,
+        &RenderOptions {
+            annotate: true,
+            ..RenderOptions::default()
+        },
+    )
+    .expect("annotated script")
+}
+
+#[test]
+fn annotate_places_field_comments_directly_above_their_directives() {
+    let plan = annotate_fixture_plan();
+    let script = render_annotated_script(&plan);
+    // Field comments sit on their own line immediately above the directive
+    // they explain (never trailing on the #SBATCH line itself).
+    assert!(script.contains("# <- x-slurm.time\n#SBATCH --time=00:10:00\n"));
+    assert!(script.contains("# <- x-slurm.mem\n#SBATCH --mem=4G\n"));
+    assert!(script.contains("# <- x-slurm.partition\n#SBATCH --partition=gpu\n"));
+    assert!(script.contains("# <- name\n#SBATCH --job-name=annotated\n"));
+    assert!(script.contains("# <- x-slurm.requeue\n#SBATCH --requeue\n"));
+    assert!(script.contains("# <- x-slurm.submit_args\n#SBATCH --exclusive\n"));
+    // Readiness gates and dependency waits map back to their service fields.
+    assert!(script.contains("# <- services.api.readiness.tcp\nwait_until_api_ready()"));
+    assert!(
+        script.contains(
+            "# <- services.worker.depends_on[api].condition\nwait_for_service_healthy 'api' 'worker' wait_until_api_ready\n"
+        )
+    );
+    // Feature-block banners name the section and the enabling field.
+    assert!(script.contains("# --- artifact helpers (x-slurm.artifacts) ---\n"));
+    assert!(script.contains("# --- metrics helpers (x-slurm.metrics) ---\n"));
+    assert!(script.contains("# --- setup commands (x-slurm.setup) ---\nmodule load cuda\n"));
+    assert!(script.contains("# --- service api (services.api) ---\n"));
+    assert!(script.contains("# --- service worker (services.worker) ---\n"));
+    // Annotated output must still be valid bash.
+    assert_bash_syntax(&script);
+}
+
+#[test]
+fn annotate_uses_job_name_source_when_set() {
+    let mut plan = annotate_fixture_plan();
+    plan.slurm.job_name = Some("annotated".into());
+    let script = render_annotated_script(&plan);
+    assert!(script.contains("# <- x-slurm.job_name\n#SBATCH --job-name=annotated\n"));
+}
+
+#[test]
+fn annotate_off_renders_byte_identically_and_without_markers() {
+    let plan = annotate_fixture_plan();
+    let plain = render_script(&plan).expect("plain script");
+    // The default render carries no annotation vocabulary at all.
+    assert!(!plain.contains("# <- "));
+    assert!(!plain.contains("# --- "));
+    // Rendering through the span-collecting entry point with annotate off is
+    // byte-identical to the plain render.
+    let (unannotated, spans) =
+        render_script_annotated(&plan, &RenderOptions::default()).expect("unannotated");
+    assert_eq!(plain, unannotated);
+    assert!(
+        !spans.is_empty(),
+        "spans are recorded even without comments"
+    );
+    // Stripping exactly the interleaved comment lines from an annotated render
+    // reproduces the plain render byte-for-byte, so annotation cannot change
+    // any generated line.
+    let annotated = render_annotated_script(&plan);
+    let stripped = annotated
+        .lines()
+        .filter(|line| !line.starts_with("# <- ") && !line.starts_with("# --- "))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    assert_eq!(plain, stripped);
+}
+
+#[test]
+fn annotate_banners_appear_only_when_their_feature_block_is_enabled() {
+    let bare = RuntimePlan {
+        name: "bare".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+    let script = render_annotated_script(&bare);
+    assert!(!script.contains("artifact helpers (x-slurm.artifacts)"));
+    assert!(!script.contains("metrics helpers (x-slurm.metrics)"));
+    assert!(!script.contains("setup commands (x-slurm.setup)"));
+    assert!(!script.contains("rendezvous helpers (x-slurm.rendezvous)"));
+    // Service banners always render: every service owns a launch function.
+    assert!(script.contains("# --- service worker (services.worker) ---\n"));
+}
+
+#[test]
+fn annotate_renders_cleanly_across_backends() {
+    for backend in [RuntimeBackend::Host, RuntimeBackend::Pyxis] {
+        let mut plan = annotate_fixture_plan();
+        plan.runtime = crate::spec::RuntimeConfig {
+            backend,
+            gpu: RuntimeGpuPolicy::default(),
+        };
+        let script = render_annotated_script(&plan);
+        assert!(script.contains("# <- x-slurm.time\n#SBATCH --time=00:10:00\n"));
+        assert_bash_syntax(&script);
+    }
 }

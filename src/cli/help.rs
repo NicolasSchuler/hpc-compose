@@ -130,6 +130,7 @@ Examples:
 pub(super) const RENDER_HELP: &str = "\
 Examples:
   hpc-compose render -f compose.yaml
+  hpc-compose render -f compose.yaml --annotate
   hpc-compose render -f compose.yaml --output job.sbatch
   hpc-compose render -f compose.yaml --format json";
 
@@ -174,6 +175,7 @@ Examples:
   hpc-compose plan --verbose -f compose.yaml
   hpc-compose plan --explain -f compose.yaml
   hpc-compose plan --show-script -f compose.yaml
+  hpc-compose plan --show-script --annotate -f compose.yaml
   hpc-compose plan -f compose.yaml --format json";
 
 pub(super) const UP_HELP: &str = "\

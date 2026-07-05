@@ -305,6 +305,7 @@ fn validate_sweep_trial_plan(
                 &context.cwd,
                 runtime_plan.slurm.runtime_root.as_deref(),
             )),
+            annotate: false,
         },
     )?;
     Ok(())
@@ -414,6 +415,7 @@ fn submit_sweep_trial(
                     &context.cwd,
                     runtime_plan.slurm.runtime_root.as_deref(),
                 )),
+                annotate: false,
             },
         )
     })?;

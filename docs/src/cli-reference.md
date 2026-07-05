@@ -124,7 +124,7 @@ Use these commands and global flags when you want the project-local settings fil
 
 | Command | Use it for | Notes |
 | --- | --- | --- |
-| `plan` | Validate and preview the static runtime plan | Recommended before every first run. `--show-script` prints the generated launcher to stdout without writing a file; `--explain` adds actionable cache, resume, preflight, and next-command hints. |
+| `plan` | Validate and preview the static runtime plan | Recommended before every first run. `--show-script` prints the generated launcher to stdout without writing a file (add `--annotate` to interleave provenance comments mapping script lines back to spec fields); `--explain` adds actionable cache, resume, preflight, and next-command hints. |
 | `validate` | Check YAML shape and field validation | Add `--strict-env` when interpolation fallbacks should fail. |
 | `lint` | Run stricter opinionated static checks | Flags risky-but-valid specs such as weak dependency readiness, unusual memory/CPU ratios, ignored services that can write shared paths, node-local cache or volume paths, and implicit `depends_on` conditions. Warnings fail by default; add `--allow-warnings` to make warning-only results successful. Pass `--fix` to apply auto-fixable findings in place (preview with `--fix --dry-run`). |
 | `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. `config --variables` reports only interpolation variables referenced by the compose file and redacts sensitive-looking names unless `--show-values` is passed. |
@@ -137,7 +137,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `doctor fabric-smoke` | Render or run MPI/NCCL/UCX/OFI smoke probes for one MPI service | Use `--checks auto` or a comma-separated list such as `mpi,nccl`; render-only by default, `--submit` consumes a Slurm allocation. |
 | `weather` | Show advisory live cluster conditions | One-shot dashboard from `sinfo`, `squeue`, optional `sshare`, and optional `sprio`; does not reserve resources or change submission behavior. |
 | `prepare` | Import images and build prepared runtime artifacts | Use `--force-rebuild` when the base image or prepare inputs changed. |
-| `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. |
+| `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. `--annotate` interleaves provenance comments (`# <- x-slurm.mem`) mapping script lines back to spec fields; annotations are preview-only and never appear in submitted scripts. |
 | `up` | Run the one-command launch/watch/logs workflow | Preferred normal run on a real cluster. Uses a spec-scoped `.hpc-compose/locks/*.up.lock` to prevent concurrent `up` races. |
 | `test` | Smoke-test a finite spec end to end | Requires explicit `--local` or `--submit`; every service must start, pass configured readiness, and complete successfully. |
 | `dev` | Run local hot-reload mode | Watches bind-mounted source directories and restarts affected services through the local supervisor. |
@@ -154,6 +154,7 @@ Use these commands and global flags when you want the project-local settings fil
 hpc-compose plan -f compose.yaml
 hpc-compose plan --explain -f compose.yaml
 hpc-compose plan --show-script -f compose.yaml
+hpc-compose plan --show-script --annotate -f compose.yaml
 hpc-compose validate -f compose.yaml
 hpc-compose lint -f compose.yaml
 hpc-compose lint -f compose.yaml --allow-warnings
@@ -179,6 +180,7 @@ hpc-compose weather
 hpc-compose weather --format json
 hpc-compose prepare -f compose.yaml
 hpc-compose render -f compose.yaml --output job.sbatch
+hpc-compose render -f compose.yaml --annotate
 hpc-compose up -f compose.yaml
 hpc-compose up --hold-on-exit always -f compose.yaml
 hpc-compose up --watch-queue --queue-warn-after 15m -f compose.yaml

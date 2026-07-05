@@ -1392,6 +1392,7 @@ fn run_command_covers_success_and_error_arms() {
     run_command(Commands::Render {
         file: Some(compose.clone()),
         output: None,
+        annotate: false,
         format: None,
     })
     .expect("render stdout");
@@ -1399,6 +1400,7 @@ fn run_command_covers_success_and_error_arms() {
     run_command(Commands::Render {
         file: Some(compose.clone()),
         output: Some(rendered.clone()),
+        annotate: false,
         format: None,
     })
     .expect("render file");
@@ -1406,6 +1408,7 @@ fn run_command_covers_success_and_error_arms() {
     let render_err = run_command(Commands::Render {
         file: Some(compose.clone()),
         output: Some(tmpdir.path().join("missing-parent/rendered.sbatch")),
+        annotate: false,
         format: None,
     })
     .expect_err("render write failure");

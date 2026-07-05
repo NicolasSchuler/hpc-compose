@@ -5,6 +5,17 @@ All notable changes to `hpc-compose` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added `render --annotate` and `plan --show-script --annotate`: the rendered
+  preview script interleaves provenance comments (`# <- x-slurm.mem` field
+  markers and `# --- artifact helpers (x-slurm.artifacts) ---` section banners)
+  mapping generated lines back to the compose spec fields that produced them.
+  Annotations are preview-only: submission paths never enable them, and without
+  the flag the rendered script is byte-identical to previous releases.
+
 ## [0.2.0] - 2026-07-04
 
 ### Added

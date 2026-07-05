@@ -223,7 +223,7 @@ pub enum Commands {
     #[command(
         display_order = 430,
         about = "Render the generated sbatch script",
-        long_about = "Render the sbatch script produced from the normalized plan. Use this to inspect generated SBATCH directives, srun invocations, mounts, and environment forwarding without submitting the job.",
+        long_about = "Render the sbatch script produced from the normalized plan. Use this to inspect generated SBATCH directives, srun invocations, mounts, and environment forwarding without submitting the job. With --annotate, provenance comments (`# <- x-slurm.mem` markers and `# --- section ---` banners) map script lines back to the spec fields that produced them; annotations are preview-only and never appear in submitted scripts.",
         after_help = RENDER_HELP
     )]
     Render {
@@ -241,6 +241,11 @@ pub enum Commands {
             help = "Write the rendered batch script to this path instead of stdout"
         )]
         output: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Interleave provenance comments mapping script lines back to spec fields (preview-only)"
+        )]
+        annotate: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
@@ -528,6 +533,12 @@ pub enum Commands {
             help = "Print the rendered launcher script to stdout after the plan"
         )]
         show_script: bool,
+        #[arg(
+            long,
+            requires = "show_script",
+            help = "With --show-script, interleave provenance comments mapping script lines back to spec fields"
+        )]
+        annotate: bool,
         #[arg(long, help = "Show cache, runtime, and next-step planning hints")]
         explain: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]

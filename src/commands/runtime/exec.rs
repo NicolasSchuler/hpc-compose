@@ -235,6 +235,7 @@ pub(crate) fn run_service(
                     &context.cwd,
                     runtime_plan.slurm.runtime_root.as_deref(),
                 )),
+                annotate: false,
             },
         )?;
         Ok::<_, anyhow::Error>(if active_allocation_job_id.is_some() {
@@ -519,6 +520,7 @@ pub(crate) fn run_ephemeral(
                         &context.cwd,
                         runtime_plan.slurm.runtime_root.as_deref(),
                     )),
+                    annotate: false,
                 },
             )
         }
@@ -923,6 +925,7 @@ pub(crate) fn notebook(
                         &context.cwd,
                         runtime_plan.slurm.runtime_root.as_deref(),
                     )),
+                    annotate: false,
                 },
             )
         }
