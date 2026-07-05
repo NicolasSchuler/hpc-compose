@@ -61,6 +61,13 @@ toml = "1.1.2"
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }
 tempfile = "3.23.0"
 
+[profile.dev]
+# Line tables only: backtraces and test failures keep file:line, but the
+# multi-GB full-debuginfo payload across dependency rlibs and the many
+# integration-test binaries is dropped. Full debugger sessions are rare enough
+# here that the disk and compile-time win dominates.
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = "s"
 strip = "symbols"
