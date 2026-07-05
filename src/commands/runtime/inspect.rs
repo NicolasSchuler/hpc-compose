@@ -264,7 +264,9 @@ pub(crate) fn diff(
 /// snapshot (interpolation, resource profiles, cache default, secret
 /// redaction), so both sides are effective configs — an env-var change shows up
 /// even when the file is untouched, and a changed secret is invisible because
-/// both sides read `<redacted>`.
+/// both sides read `<redacted>`. For a sweep-trial record the trial's variable
+/// overlay is re-applied to the current side, so swept values don't surface as
+/// spec drift.
 pub(crate) fn diff_against_spec(
     context: ResolvedContext,
     job_id: Option<String>,
@@ -279,10 +281,17 @@ pub(crate) fn diff_against_spec(
             record.job_id
         );
     };
+    // A sweep trial's snapshot was minted with the trial's variable overlay;
+    // re-apply what the record carries (swept axes + the persisted reserved
+    // HPC_COMPOSE_SWEEP_* names) so the sweep itself doesn't read as drift.
+    let mut interpolation_vars = context.interpolation_vars.clone();
+    if let Some(sweep) = &record.sweep {
+        interpolation_vars.extend(interpolation_vars_for_sweep_metadata(sweep));
+    }
     let effective_config =
         load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
-            &context.interpolation_vars,
+            &interpolation_vars,
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
@@ -299,6 +308,12 @@ pub(crate) fn diff_against_spec(
             "job {} was submitted from a different compose file: {}",
             record.job_id,
             record.compose_file.display()
+        ));
+    }
+    if let Some(sweep) = &record.sweep {
+        report.notes.push(format!(
+            "job {} is a sweep trial ({}/{}); its swept variables were re-applied, so the sweep overlay itself does not appear as drift",
+            record.job_id, sweep.sweep_id, sweep.trial_id
         ));
     }
     let changed = report.has_changes();

@@ -18,7 +18,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   secret does not appear as a change. `--fail-on-change` exits non-zero when
   any change is found, for scripted pre-submit gates
   (`hpc-compose diff --against-spec --fail-on-change && hpc-compose up`).
-  `--format json` output is pinned by the new `diff-spec` output schema.
+  Sweep-trial records have their swept variables re-applied to the current
+  side, so the sweep overlay itself does not read as drift. `--format json`
+  output is pinned by the new `diff-spec` output schema.
 
 ## [0.2.0] - 2026-07-04
 

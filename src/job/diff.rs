@@ -99,7 +99,9 @@ pub fn build_spec_diff_report(
     diff_json_values("", &snapshot, &current, &mut config_changes);
     let resource_changes = resource_changes(&snapshot, &current);
     let mut notes = Vec::new();
-    if snapshot_yaml.contains("<redacted>") || current_yaml.contains("<redacted>") {
+    if snapshot_yaml.contains(crate::redaction::REDACTED_PLACEHOLDER)
+        || current_yaml.contains(crate::redaction::REDACTED_PLACEHOLDER)
+    {
         notes.push(
             "secret values are redacted on both sides; a changed secret does not appear here"
                 .to_string(),

@@ -13,10 +13,10 @@ use std::time::Duration;
 use hpc_compose::job::{
     GitProvenance, JobProvenance, SWEEP_MANIFEST_SCHEMA_VERSION, SubmissionBackend, SubmissionKind,
     SubmissionRecord, SubmissionRecordBuildOptions, SweepManifest, SweepManifestTrial,
-    artifact_manifest_path_for_record, artifact_payload_dir_for_record, build_submission_record,
-    build_submission_record_with_backend_and_options, build_submission_record_with_options,
-    latest_record_path_for, load_submission_record, state_path_for_record, sweep_manifest_path_for,
-    write_submission_record, write_sweep_manifest,
+    SweepTrialMetadata, artifact_manifest_path_for_record, artifact_payload_dir_for_record,
+    build_submission_record, build_submission_record_with_backend_and_options,
+    build_submission_record_with_options, latest_record_path_for, load_submission_record,
+    state_path_for_record, sweep_manifest_path_for, write_submission_record, write_sweep_manifest,
 };
 use hpc_compose::render::log_file_name_for_service;
 use serde_json::Value;
@@ -8671,6 +8671,121 @@ fn diff_against_spec_fail_on_change_gates_exit_code() {
     assert_eq!(gated.status.code(), Some(1));
     assert!(stdout_text(&gated).contains("services.app.environment.LEARNING_RATE"));
     assert!(stderr_text(&gated).contains("config changed since job 31112"));
+
+    // JSON mode: the full diff-spec envelope is still flushed to stdout before
+    // the gate fails the command.
+    let gated_json = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--fail-on-change",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+        &[("SPEC_DIFF_LR", "0.002")],
+    );
+    assert_failure(&gated_json);
+    assert_eq!(gated_json.status.code(), Some(1));
+    let value: Value = serde_json::from_str(&stdout_text(&gated_json)).expect("diff-spec json");
+    assert_eq!(value["schema_version"], Value::from(1));
+    assert!(
+        value["config_changes"]
+            .as_array()
+            .expect("config changes")
+            .iter()
+            .any(|change| change["path"] == "services.app.environment.LEARNING_RATE")
+    );
+}
+
+#[test]
+fn diff_against_spec_reapplies_sweep_trial_variables() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+
+    // Mint the snapshot exactly as the trial ran: SPEC_DIFF_LR swept to 0.5,
+    // away from the compose default of 0.001.
+    let config = run_cli_with_env(
+        tmpdir.path(),
+        &["config", "-f", compose.to_str().expect("path")],
+        &[("SPEC_DIFF_LR", "0.5")],
+    );
+    assert_success(&config);
+    let options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::SweepTrial,
+        config_snapshot_yaml: Some(stdout_text(&config)),
+        sweep: Some(SweepTrialMetadata {
+            sweep_id: "lr-sweep".to_string(),
+            trial_id: "t0".to_string(),
+            trial_index: 0,
+            variables: std::collections::BTreeMap::from([(
+                "SPEC_DIFF_LR".to_string(),
+                "0.5".to_string(),
+            )]),
+        }),
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "31113",
+        SubmissionBackend::Local,
+        &options,
+    )
+    .expect("sweep trial record");
+    write_submission_record(&record).expect("write sweep trial record");
+
+    // No env set here: without the overlay the compose default (0.001) would
+    // read as drift against the trial's 0.5 even though the spec is untouched.
+    let clean = run_cli(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--job-id",
+            "31113",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&clean);
+    let text = stdout_text(&clean);
+    assert!(
+        text.contains("no changes since job 31113"),
+        "swept variables must not read as drift:\n{text}"
+    );
+    assert!(text.contains("sweep trial (lr-sweep/t0)"), "got:\n{text}");
+
+    // A real spec edit still surfaces through the overlay, while the swept
+    // variable stays quiet.
+    write_spec_diff_compose(&project, &cache_dir, "python:3.12-slim");
+    let drifted = run_cli(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--job-id",
+            "31113",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&drifted);
+    let text = stdout_text(&drifted);
+    assert!(text.contains("services.app.image"), "got:\n{text}");
+    assert!(!text.contains("LEARNING_RATE"), "got:\n{text}");
 }
 
 #[test]

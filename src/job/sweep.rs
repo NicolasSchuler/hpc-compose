@@ -332,6 +332,27 @@ pub fn interpolation_vars_for_sweep_trial(
     vars
 }
 
+/// Returns the interpolation overlay reconstructable from a tracked record's
+/// sweep metadata: the trial's swept variables plus the reserved
+/// `HPC_COMPOSE_SWEEP_*` names the record persists. `HPC_COMPOSE_SWEEP_REPLICATE`
+/// and `HPC_COMPOSE_SWEEP_SEED` are not stored on records and cannot be rebuilt.
+#[must_use]
+pub fn interpolation_vars_for_sweep_metadata(
+    sweep: &SweepTrialMetadata,
+) -> BTreeMap<String, String> {
+    let mut vars = sweep.variables.clone();
+    vars.insert("HPC_COMPOSE_SWEEP_ID".to_string(), sweep.sweep_id.clone());
+    vars.insert(
+        "HPC_COMPOSE_SWEEP_TRIAL".to_string(),
+        sweep.trial_id.clone(),
+    );
+    vars.insert(
+        "HPC_COMPOSE_SWEEP_TRIAL_INDEX".to_string(),
+        sweep.trial_index.to_string(),
+    );
+    vars
+}
+
 /// Returns the sweep manifest path for a compose file and sweep id.
 #[must_use]
 pub fn sweep_manifest_path_for(spec_path: &Path, sweep_id: &str) -> PathBuf {

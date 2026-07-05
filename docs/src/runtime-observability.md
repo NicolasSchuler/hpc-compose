@@ -265,6 +265,8 @@ hpc-compose diff --across sweep-1700000000-1234 --matrix-format csv
 
 Both sides are **effective** configs: the current side is recomputed through the same interpolation, resource-profile merging, and secret redaction that produced the snapshot at submit time. That cuts both ways deliberately — changing an interpolated environment variable shows up as a change even when the file on disk is untouched, and because secret values read `<redacted>` on both sides, a changed secret does not appear as a change. Records without a snapshot (`run`-style submissions and records written before config snapshots existed) fail with a clear message instead of a misleading empty diff.
 
+When the target run is a sweep trial, the trial's variable overlay (its swept values and `HPC_COMPOSE_SWEEP_*` names) is re-applied to the current side, so the sweep itself does not read as drift — only genuine spec edits do. A note in the report says when this happened.
+
 `--fail-on-change` turns the check into a scriptable gate: it exits non-zero when any change is found and `0` when the spec is unchanged, so a pre-submit guard is one line:
 
 ```bash
