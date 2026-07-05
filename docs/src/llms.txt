@@ -8,7 +8,7 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
 
 - Safe to run unprompted — never submits, cancels, allocates, or consumes quota:
   - Purely static (no scheduler contact at all): `new`, `validate`, `plan`,
-    `plan --show-script`, `inspect`, `render`, `config`.
+    `plan --show-script`, `inspect`, `render`, `explain`, `config`.
   - Read-only scheduler queries (run `squeue`/`sacct` lookups but change nothing):
     `status`, `ps`, `stats`, `diff`, `logs`. Do not poll these in tight loops on a
     rate-limited login node.

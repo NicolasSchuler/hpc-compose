@@ -94,6 +94,15 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::render(context, output, annotate, format)
         }
+        Commands::Explain {
+            file,
+            field,
+            line,
+            format,
+        } => {
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
+            spec::explain(context, field, line, format)
+        }
         Commands::Prepare {
             file,
             enroot_bin,

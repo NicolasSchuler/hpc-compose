@@ -138,6 +138,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `weather` | Show advisory live cluster conditions | One-shot dashboard from `sinfo`, `squeue`, optional `sshare`, and optional `sprio`; does not reserve resources or change submission behavior. |
 | `prepare` | Import images and build prepared runtime artifacts | Use `--force-rebuild` when the base image or prepare inputs changed. |
 | `render` | Write the generated launcher script without submitting | Good for reviewing the final batch script. `--annotate` interleaves provenance comments (`# <- x-slurm.mem`) mapping script lines back to spec fields; annotations are preview-only and never appear in submitted scripts. |
+| `explain` | Map spec fields to generated script lines and back | Static-safe. `--field x-slurm.time` lists the script lines a field produced (prefix matching allowed), `--line N` names the field behind a line, bare `explain` prints the full provenance map. Line numbers match the `render` / `plan --show-script` preview, not a submitted `.sbatch`; echoed lines are secret-redacted. |
 | `up` | Run the one-command launch/watch/logs workflow | Preferred normal run on a real cluster. Uses a spec-scoped `.hpc-compose/locks/*.up.lock` to prevent concurrent `up` races. |
 | `test` | Smoke-test a finite spec end to end | Requires explicit `--local` or `--submit`; every service must start, pass configured readiness, and complete successfully. |
 | `dev` | Run local hot-reload mode | Watches bind-mounted source directories and restarts affected services through the local supervisor. |
@@ -181,6 +182,10 @@ hpc-compose weather --format json
 hpc-compose prepare -f compose.yaml
 hpc-compose render -f compose.yaml --output job.sbatch
 hpc-compose render -f compose.yaml --annotate
+hpc-compose explain -f compose.yaml
+hpc-compose explain -f compose.yaml --field x-slurm.time
+hpc-compose explain -f compose.yaml --line 42
+hpc-compose explain -f compose.yaml --format json
 hpc-compose up -f compose.yaml
 hpc-compose up --hold-on-exit always -f compose.yaml
 hpc-compose up --watch-queue --queue-warn-after 15m -f compose.yaml

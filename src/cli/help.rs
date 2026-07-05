@@ -60,6 +60,7 @@ pub(super) const WORKFLOW_GROUPS: &[(&str, &str, &[&str])] = &[
             "inspect",
             "config",
             "render",
+            "explain",
             "prepare",
             "preflight",
             "schema",
@@ -133,6 +134,18 @@ Examples:
   hpc-compose render -f compose.yaml --annotate
   hpc-compose render -f compose.yaml --output job.sbatch
   hpc-compose render -f compose.yaml --format json";
+
+pub(super) const EXPLAIN_HELP: &str = "\
+Examples:
+  hpc-compose explain -f compose.yaml
+  hpc-compose explain -f compose.yaml --field x-slurm.time
+  hpc-compose explain -f compose.yaml --field services.app.readiness
+  hpc-compose explain -f compose.yaml --line 42
+  hpc-compose explain -f compose.yaml --format json
+
+Line numbers refer to the preview script exactly as printed by `render` and
+`plan --show-script` (JOB_ROOT keeps the portable ${SLURM_SUBMIT_DIR:-$PWD}
+form), not to a submitted .sbatch, which can bake absolute runtime paths.";
 
 pub(super) const PREPARE_HELP: &str = "\
 Examples:
@@ -890,7 +903,11 @@ mod tests {
     /// be a conscious edit in the same change that adds the command.
     #[test]
     fn top_level_command_count_stays_within_budget() {
-        const MAX_TOP_LEVEL_COMMANDS: usize = 48;
+        // Bumped 48 -> 49 for `explain` (spec-field <-> script-line provenance
+        // queries): it is a static-safe inspection query over the rendered
+        // preview, peer to `render`/`inspect`, and fits no existing command as
+        // a subcommand (`plan --explain` already means planning hints).
+        const MAX_TOP_LEVEL_COMMANDS: usize = 49;
         let count = real_top_level_commands().len();
         assert!(
             count <= MAX_TOP_LEVEL_COMMANDS,

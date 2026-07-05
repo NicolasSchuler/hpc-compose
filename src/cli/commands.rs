@@ -250,6 +250,36 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 435,
+        about = "Explain which spec fields produced which script lines",
+        long_about = "Map the rendered preview script back to the compose spec fields that produced it, in both directions: `--field` lists the script lines a spec field generated, `--line` names the field behind one script line, and the bare command prints the full provenance map. Static-safe: renders the same preview script as `render` and `plan --show-script` without contacting Slurm, so line numbers match those previews exactly (submitted scripts can differ once submission paths bake absolute runtime paths). Coverage is best-effort: SBATCH directives, feature-block sections, readiness gates, and dependency waits are mapped. Echoed script lines are secret-redacted like other diagnostics; the full map lists line ranges without echoing contents.",
+        after_help = EXPLAIN_HELP
+    )]
+    Explain {
+        #[arg(
+            short = 'f',
+            long,
+            value_name = "FILE",
+            help = FILE_ARG_HELP
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "SPEC_PATH",
+            help = "Show the script lines produced by this spec field (prefix match, e.g. x-slurm.mem or services.app.readiness)"
+        )]
+        field: Option<String>,
+        #[arg(
+            long,
+            value_name = "N",
+            conflicts_with = "field",
+            help = "Show the spec field(s) that produced script line N (1-based, matching render / plan --show-script line numbers)"
+        )]
+        line: Option<usize>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
         display_order = 440,
         about = "Prepare imported and customized runtime images",
         long_about = "Import base images and build prepared runtime artifacts on the submission host with the selected runtime backend. This is the login-node image preparation phase reused later by up and run.",

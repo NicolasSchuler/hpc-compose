@@ -3850,3 +3850,82 @@ fn annotate_renders_cleanly_across_backends() {
         assert_bash_syntax(&script);
     }
 }
+
+#[test]
+fn spans_map_line_ranges_back_to_fields_without_comments() {
+    let plan = annotate_fixture_plan();
+    let (script, spans) =
+        render_script_annotated(&plan, &RenderOptions::default()).expect("script with spans");
+    let lines: Vec<&str> = script.lines().collect();
+
+    let time = spans
+        .iter()
+        .find(|span| span.source == "x-slurm.time")
+        .expect("time span");
+    assert_eq!(time.start_line, time.end_line);
+    assert_eq!(lines[time.start_line - 1], "#SBATCH --time=00:10:00");
+    assert_eq!(time.section, None);
+
+    let readiness = spans
+        .iter()
+        .find(|span| span.source == "services.api.readiness.tcp")
+        .expect("readiness span");
+    let readiness_lines = &lines[readiness.start_line - 1..readiness.end_line];
+    assert_eq!(readiness_lines.first(), Some(&"wait_until_api_ready() {"));
+    assert!(
+        readiness_lines
+            .iter()
+            .any(|line| line.contains("wait_for_tcp"))
+    );
+
+    let dependency = spans
+        .iter()
+        .find(|span| span.source == "services.worker.depends_on[api].condition")
+        .expect("dependency span");
+    assert_eq!(
+        lines[dependency.start_line - 1],
+        "wait_for_service_healthy 'api' 'worker' wait_until_api_ready"
+    );
+
+    let metrics = spans
+        .iter()
+        .find(|span| span.source == "x-slurm.metrics")
+        .expect("metrics span");
+    assert_eq!(metrics.section.as_deref(), Some("metrics helpers"));
+    assert!(metrics.end_line > metrics.start_line);
+    let metrics_lines = &lines[metrics.start_line - 1..metrics.end_line];
+    assert!(
+        metrics_lines
+            .iter()
+            .any(|line| line.contains("start_metrics_sampler()"))
+    );
+
+    let service = spans
+        .iter()
+        .find(|span| span.source == "services.worker")
+        .expect("service span");
+    assert_eq!(service.section.as_deref(), Some("service worker"));
+    let service_lines = &lines[service.start_line - 1..service.end_line];
+    assert_eq!(service_lines.first(), Some(&"launch_worker() {"));
+}
+
+#[test]
+fn spans_include_the_comment_line_when_comments_are_enabled() {
+    let plan = annotate_fixture_plan();
+    let (script, spans) = render_script_annotated(
+        &plan,
+        &RenderOptions {
+            annotate: true,
+            ..RenderOptions::default()
+        },
+    )
+    .expect("annotated script with spans");
+    let lines: Vec<&str> = script.lines().collect();
+    let time = spans
+        .iter()
+        .find(|span| span.source == "x-slurm.time")
+        .expect("time span");
+    assert_eq!(time.end_line - time.start_line, 1);
+    assert_eq!(lines[time.start_line - 1], "# <- x-slurm.time");
+    assert_eq!(lines[time.end_line - 1], "#SBATCH --time=00:10:00");
+}
