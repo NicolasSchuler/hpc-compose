@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkspaceStatusOutput",
+  "description": "`workspace status` JSON output (`--format json`).",
+  "type": "object",
+  "properties": {
+    "exists": {
+      "description": "Whether `ws_find` located the workspace.",
+      "type": "boolean"
+    },
+    "expiry_display": {
+      "description": "Raw expiration-date string from `ws_list` (display fallback when the\nremaining time could not be parsed).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expiry_epoch": {
+      "description": "Absolute expiry time (unix seconds) computed from `ws_list`'s\nremaining time; `None` when unavailable.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "extensions_remaining": {
+      "description": "Extensions still available per `ws_list`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "name": {
+      "description": "Configured workspace name.",
+      "type": "string"
+    },
+    "path": {
+      "description": "Workspace path from `ws_find`; `None` when it does not exist.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profile": {
+      "description": "Selected settings profile; `None` when running without a profile.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remaining_display": {
+      "description": "Raw remaining-time string from `ws_list`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "state_path": {
+      "description": "Persisted workspace state file refreshed by this command.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "name",
+    "exists",
+    "state_path"
+  ]
+}

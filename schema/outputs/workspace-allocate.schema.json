@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkspaceAllocateOutput",
+  "description": "`workspace allocate` JSON output (`--format json`).",
+  "type": "object",
+  "properties": {
+    "already_allocated": {
+      "description": "True when the workspace already existed and `ws_allocate` was skipped.",
+      "type": "boolean"
+    },
+    "duration_days": {
+      "description": "Days passed to `ws_allocate`; `None` when it already existed.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "expiry_display": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expiry_epoch": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "extensions_remaining": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "name": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    },
+    "profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remaining_display": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "state_path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "name",
+    "already_allocated",
+    "path",
+    "state_path"
+  ]
+}

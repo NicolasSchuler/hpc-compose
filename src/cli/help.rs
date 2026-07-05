@@ -48,7 +48,15 @@ pub(super) const WORKFLOW_GROUPS: &[(&str, &str, &[&str])] = &[
     (
         "Maintain",
         "clean up tracked state and resources",
-        &["cache", "jobs", "clean", "down", "cancel", "rendezvous"],
+        &[
+            "cache",
+            "workspace",
+            "jobs",
+            "clean",
+            "down",
+            "cancel",
+            "rendezvous",
+        ],
     ),
     (
         "Advanced",
@@ -458,6 +466,43 @@ Examples:
   hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>' --yes
   hpc-compose cache prune --age 7 --yes --format json";
 
+pub(super) const WORKSPACE_HELP: &str = "\
+Examples:
+  hpc-compose workspace status
+  hpc-compose workspace allocate
+  hpc-compose workspace extend --days 30
+  hpc-compose workspace release --yes
+Configure the workspace name in settings, e.g.:
+  [profiles.dev.workspace]
+  name = \"hpc-compose-cache\"
+  duration_days = 30";
+
+pub(super) const WORKSPACE_STATUS_HELP: &str = "\
+Examples:
+  hpc-compose workspace status
+  hpc-compose workspace status --format json
+  hpc-compose --profile dev workspace status";
+
+pub(super) const WORKSPACE_ALLOCATE_HELP: &str = "\
+Examples:
+  hpc-compose workspace allocate
+  hpc-compose workspace allocate --duration-days 60
+  hpc-compose workspace allocate --format json
+Idempotent: an existing workspace is reported as already allocated.";
+
+pub(super) const WORKSPACE_EXTEND_HELP: &str = "\
+Examples:
+  hpc-compose workspace extend
+  hpc-compose workspace extend --days 30
+  hpc-compose workspace extend --format json";
+
+pub(super) const WORKSPACE_RELEASE_HELP: &str = "\
+Examples:
+  hpc-compose workspace release
+  hpc-compose workspace release --yes
+Refuses to release while tracked jobs keep cache or runtime state under the
+workspace; run `hpc-compose down --job-id <id>` or `hpc-compose clean` first.";
+
 pub(super) const JOBS_HELP: &str = "\
 Examples:
   hpc-compose jobs list
@@ -706,6 +751,13 @@ const CACHE_PRUNE_EXAMPLES: &[&str] = &[
     "hpc-compose cache prune --age 7 --yes --format json",
 ];
 
+const WORKSPACE_EXAMPLES: &[&str] = &[
+    "hpc-compose workspace status",
+    "hpc-compose workspace allocate",
+    "hpc-compose workspace extend --days 30",
+    "hpc-compose workspace release --yes",
+];
+
 const JOBS_EXAMPLES: &[&str] = &[
     "hpc-compose jobs list",
     "hpc-compose jobs list --disk-usage",
@@ -805,6 +857,11 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["cache", "list"] => CACHE_LIST_EXAMPLES,
         ["cache", "inspect"] => CACHE_INSPECT_EXAMPLES,
         ["cache", "prune"] => CACHE_PRUNE_EXAMPLES,
+        ["workspace"] => WORKSPACE_EXAMPLES,
+        ["workspace", "status"] => WORKSPACE_EXAMPLES,
+        ["workspace", "allocate"] => WORKSPACE_EXAMPLES,
+        ["workspace", "extend"] => WORKSPACE_EXAMPLES,
+        ["workspace", "release"] => WORKSPACE_EXAMPLES,
         ["jobs"] => JOBS_EXAMPLES,
         ["jobs", "list"] => JOBS_EXAMPLES,
         ["clean"] => CLEAN_EXAMPLES,
@@ -888,7 +945,9 @@ mod tests {
     /// be a conscious edit in the same change that adds the command.
     #[test]
     fn top_level_command_count_stays_within_budget() {
-        const MAX_TOP_LEVEL_COMMANDS: usize = 48;
+        // 48 -> 49: deliberate addition of the `workspace` lifecycle group
+        // (status/allocate/extend/release as subcommands, not new top-levels).
+        const MAX_TOP_LEVEL_COMMANDS: usize = 49;
         let count = real_top_level_commands().len();
         assert!(
             count <= MAX_TOP_LEVEL_COMMANDS,

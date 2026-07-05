@@ -85,6 +85,8 @@ ws_list
 ws_extend <workspace-name> <duration>
 ```
 
+Alternatively, configure the workspace name in settings and let `hpc-compose workspace status/allocate/extend/release` drive these tools for you — see [Manage Cluster Workspaces](workspaces.md).
+
 Use the path from `ws_find` for the cache:
 
 ```bash
@@ -102,7 +104,7 @@ x-slurm:
 
 The official HAICORE filesystem page documents workspace lifetime, extension limits, quotas, and backup policy. Treat workspace expiration as operational risk: long-running projects should have a habit of checking `ws_list` and copying durable results to the correct long-term location.
 
-`hpc-compose` (including `hpc-compose up --remote` from a laptop) stages your repo and reads these paths, but it does not run `ws_allocate` or create the cache and storage directories for you. Allocate the workspace and `mkdir -p` your `cache_dir`, dataset, and checkpoint paths first; a missing host bind-mount or storage directory blocks preflight. See [Repo staging vs cluster workspace provisioning](files-and-directories.md#repo-staging-vs-cluster-workspace-provisioning).
+`hpc-compose` (including `hpc-compose up --remote` from a laptop) stages your repo and reads these paths, but the `up` flow does not run `ws_allocate` (use the [`workspace` commands](workspaces.md) on the login node) or create the cache and storage directories for you. Allocate the workspace and `mkdir -p` your `cache_dir`, dataset, and checkpoint paths first; a missing host bind-mount or storage directory blocks preflight. See [Repo staging vs cluster workspace provisioning](files-and-directories.md#repo-staging-vs-cluster-workspace-provisioning).
 
 ## Containers On HAICORE
 

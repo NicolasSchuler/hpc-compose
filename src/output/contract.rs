@@ -253,6 +253,10 @@ output_schemas! {
     "lint" => crate::commands::spec::LintOutput,
     "plan" => crate::commands::spec::PlanOutput,
     "context" => crate::commands::spec::ContextOutput,
+    "workspace-status" => crate::commands::workspace::WorkspaceStatusOutput,
+    "workspace-allocate" => crate::commands::workspace::WorkspaceAllocateOutput,
+    "workspace-extend" => crate::commands::workspace::WorkspaceExtendOutput,
+    "workspace-release" => crate::commands::workspace::WorkspaceReleaseOutput,
     "lessons-list" => crate::commands::evolve::LessonListOutput,
     "lessons-describe" => crate::commands::evolve::LessonDescriptionOutput,
     "examples-list" => crate::commands::examples::ExamplesListOutput<'static>,
@@ -535,6 +539,10 @@ mod tests {
             "test",
             "vars",
             "when",
+            "workspace-allocate",
+            "workspace-extend",
+            "workspace-release",
+            "workspace-status",
         ];
         expected.sort_unstable();
         assert_eq!(commands, expected);

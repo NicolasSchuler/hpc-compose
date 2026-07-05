@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{
     CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, ExperimentCommands,
-    JobsCommands, OutputFormat, RendezvousCommands, SchemaKind, SweepCommands,
+    JobsCommands, OutputFormat, RendezvousCommands, SchemaKind, SweepCommands, WorkspaceCommands,
 };
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
@@ -28,6 +28,7 @@ pub(crate) mod load;
 pub(crate) mod runtime;
 pub(crate) mod spec;
 mod weather;
+pub(crate) mod workspace;
 
 #[derive(Debug, Clone, Default)]
 struct GlobalCommandOptions {
@@ -1533,6 +1534,36 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     confirm::confirm_destructive_action("prune cached artifacts by age", yes)?;
                     cache::prune_no_context(cache_dir, age, format)
                 }
+            }
+        },
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Status { tools, format } => {
+                let context =
+                    resolve_command_context(options, None, BinaryOverrides::default(), None)?;
+                workspace::status(context, &tools, format)
+            }
+            WorkspaceCommands::Allocate {
+                duration_days,
+                tools,
+                format,
+            } => {
+                let context =
+                    resolve_command_context(options, None, BinaryOverrides::default(), None)?;
+                workspace::allocate(context, duration_days, &tools, format)
+            }
+            WorkspaceCommands::Extend {
+                days,
+                tools,
+                format,
+            } => {
+                let context =
+                    resolve_command_context(options, None, BinaryOverrides::default(), None)?;
+                workspace::extend(context, days, &tools, format)
+            }
+            WorkspaceCommands::Release { yes, tools, format } => {
+                let context =
+                    resolve_command_context(options, None, BinaryOverrides::default(), None)?;
+                workspace::release(context, yes, &tools, format)
             }
         },
         Commands::Jobs { command } => match command {
