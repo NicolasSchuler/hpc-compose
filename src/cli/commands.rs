@@ -3315,6 +3315,38 @@ pub enum ExperimentCommands {
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
+    #[command(
+        about = "Emit a paper-ready reproducibility archive for a tracked run",
+        long_about = "Bundle one tracked run into a citeable tar.gz (or a directory with --dir): the compose spec, the resolved config snapshot, the rendered sbatch, provenance (git SHA + dirty flag + image references), the sweep manifest with seeds, metrics (CSV + raw JSONL), checkpoint attempt history, and a generated methods appendix (README.md) with a MANIFEST.json carrying per-file sha256. Image entries are references as recorded at submit time, not content digests, and are not resolved against any registry. Defaults to the latest tracked run. Missing ingredients degrade with a warning and a MANIFEST `missing[]` entry unless --strict is given, in which case the command fails after reporting them.",
+        after_help = EXPERIMENT_BUNDLE_HELP
+    )]
+    Bundle {
+        #[arg(
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to bundle; defaults to the latest tracked run"
+        )]
+        job_id: Option<String>,
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Output archive path (or directory with --dir); defaults to experiment-bundle-<job_id>.tar.gz in the current directory"
+        )]
+        output: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Write an unpacked bundle directory instead of a tar.gz archive"
+        )]
+        dir: bool,
+        #[arg(
+            long,
+            help = "Fail (non-zero) if any ingredient is missing, after reporting what is absent"
+        )]
+        strict: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

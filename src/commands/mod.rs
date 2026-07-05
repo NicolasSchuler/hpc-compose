@@ -1811,6 +1811,17 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 let context = resolve_ctx(options, file, &[])?;
                 runtime::experiment_note(context, text, job_id, format)
             }
+            ExperimentCommands::Bundle {
+                job_id,
+                file,
+                output,
+                dir,
+                strict,
+                format,
+            } => {
+                let context = resolve_ctx(options, file, &[])?;
+                runtime::experiment_bundle(context, job_id, output, dir, strict, format)
+            }
         },
         Commands::Completions { shell } => init::completions(shell),
     }

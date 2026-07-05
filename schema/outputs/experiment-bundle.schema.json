@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExperimentBundleOutput",
+  "description": "`experiment bundle` result (`--format json`): the emitted archive path, its\nlayout, the per-file sha256 ledger, and the `missing[]` ingredient ledger.",
+  "type": "object",
+  "properties": {
+    "drift_detected": {
+      "description": "`Some(true)` when the current spec drifted from the recorded snapshot,\n`Some(false)` when it matched, `None` when drift could not be checked.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "files": {
+      "description": "Every staged file with its sha256 (relative to the bundle root).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExperimentBundleFile"
+      }
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "layout": {
+      "description": "`\"tarball\"` or `\"directory\"`.",
+      "type": "string"
+    },
+    "missing": {
+      "description": "Ingredients that could not be included, each with a human reason.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExperimentBundleMissing"
+      }
+    },
+    "output": {
+      "description": "The archive path (tarball) or bundle directory that was written.",
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "strict": {
+      "description": "Whether `--strict` was requested (the command fails when any ingredient\nis missing under strict mode).",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "output",
+    "layout",
+    "files",
+    "missing",
+    "strict"
+  ],
+  "$defs": {
+    "ExperimentBundleFile": {
+      "description": "One staged bundle file with its content hash.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Path relative to the bundle root (e.g. `spec/compose.yaml`).",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "Lowercase hex SHA-256 of the file's bytes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ]
+    },
+    "ExperimentBundleMissing": {
+      "description": "One ingredient that was requested but could not be included in the bundle.",
+      "type": "object",
+      "properties": {
+        "item": {
+          "description": "The bundle-relative path or logical item that is absent.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "A human-readable explanation of why it is absent.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "reason"
+      ]
+    }
+  }
+}

@@ -16,7 +16,8 @@ use hpc_compose::job::{
     SweepTrialMetadata, artifact_manifest_path_for_record, artifact_payload_dir_for_record,
     build_submission_record, build_submission_record_with_backend_and_options,
     build_submission_record_with_options, latest_record_path_for, load_submission_record,
-    state_path_for_record, sweep_manifest_path_for, write_submission_record, write_sweep_manifest,
+    metrics_dir_for_record, state_path_for_record, sweep_manifest_path_for,
+    write_submission_record, write_sweep_manifest,
 };
 use hpc_compose::render::log_file_name_for_service;
 use serde_json::Value;
@@ -11933,4 +11934,562 @@ fn shell_mode_rejects_empty_image_before_srun() {
         "stderr:\n{}",
         stderr_text(&output)
     );
+}
+
+/// Extracts a `.tar.gz` bundle into `dest` and returns the top-level bundle
+/// directory (`<dest>/experiment-bundle-<job_id>`).
+fn untar_bundle(tarball: &std::path::Path, dest: &std::path::Path, job_id: &str) -> PathBuf {
+    fs::create_dir_all(dest).expect("extract dir");
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(tarball)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .expect("run tar");
+    assert!(status.success(), "tar extraction failed for {tarball:?}");
+    dest.join(format!("experiment-bundle-{job_id}"))
+}
+
+/// Builds a fully-populated tracked record (real config snapshot, fake metrics,
+/// an artifact manifest, a written script) so `experiment bundle` can exercise
+/// every ingredient. Returns the compose path and the record.
+fn write_full_bundle_fixture(
+    tmpdir: &std::path::Path,
+    cache_dir: &std::path::Path,
+    job_id: &str,
+) -> (PathBuf, SubmissionRecord) {
+    fs::create_dir_all(tmpdir.join(".git")).expect("git root");
+    let project = tmpdir.join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n#SBATCH --job-name=demo\n").expect("script");
+
+    // Mint the config snapshot through the real `config` pipeline (as `up` does),
+    // and pin provenance so the image-references block + caveat are exercised.
+    let config = run_cli_with_env(
+        tmpdir,
+        &["config", "-f", compose.to_str().expect("path")],
+        &[("SPEC_DIFF_LR", "0.001")],
+    );
+    assert_success(&config);
+    let options = SubmissionRecordBuildOptions {
+        config_snapshot_yaml: Some(stdout_text(&config)),
+        provenance: Some(JobProvenance {
+            tool_version: "9.9.9".to_string(),
+            git: Some(GitProvenance {
+                sha: "deadbeef".to_string(),
+                dirty: false,
+                branch: Some("main".to_string()),
+            }),
+            image_refs: std::collections::BTreeMap::from([(
+                "app".to_string(),
+                "docker://python:3.11-slim".to_string(),
+            )]),
+            source_content_hash: None,
+        }),
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        job_id,
+        SubmissionBackend::Local,
+        &options,
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    let metrics_dir = metrics_dir_for_record(&record);
+    fs::create_dir_all(&metrics_dir).expect("metrics dir");
+    fs::write(metrics_dir.join("gpu.jsonl"), "{\"sampled_at\":1}\n").expect("gpu jsonl");
+    fs::write(metrics_dir.join("steps.jsonl"), "{\"step_id\":\"0\"}\n").expect("steps jsonl");
+
+    let manifest_path = artifact_manifest_path_for_record(&record);
+    fs::create_dir_all(manifest_path.parent().expect("manifest parent")).expect("manifest dir");
+    fs::write(
+        &manifest_path,
+        format!(
+            r#"{{
+  "schema_version": 1,
+  "job_id": "{job_id}",
+  "collect_policy": "always",
+  "collected_at": "2026-01-01T00:00:00Z",
+  "job_outcome": "completed",
+  "copied_relative_paths": ["out/metrics.json"]
+}}"#
+        ),
+    )
+    .expect("manifest");
+
+    (compose, record)
+}
+
+#[test]
+fn experiment_bundle_full_record_produces_complete_archive() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let (compose, _record) = write_full_bundle_fixture(tmpdir.path(), &cache_dir, "51111");
+
+    let tarball = tmpdir.path().join("bundle.tar.gz");
+    let out = run_cli(
+        tmpdir.path(),
+        &[
+            "experiment",
+            "bundle",
+            "51111",
+            "-f",
+            compose.to_str().expect("path"),
+            "--output",
+            tarball.to_str().expect("path"),
+        ],
+    );
+    assert_success(&out);
+    assert!(tarball.exists(), "tarball written");
+
+    let bundle = untar_bundle(&tarball, &tmpdir.path().join("extract"), "51111");
+    for relative in [
+        "README.md",
+        "MANIFEST.json",
+        "spec/compose.yaml",
+        "spec/config.snapshot.yaml",
+        "scripts/job.sbatch",
+        "provenance/record.json",
+        "provenance/artifacts-manifest.json",
+        "metrics/stats.csv",
+        "metrics/raw/gpu.jsonl",
+        "checkpoints/history.json",
+    ] {
+        assert!(
+            bundle.join(relative).exists(),
+            "missing bundle file: {relative}"
+        );
+    }
+
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(bundle.join("MANIFEST.json")).expect("read"))
+            .expect("MANIFEST.json parses");
+    assert_eq!(manifest["job_id"], Value::from("51111"));
+    let files = manifest["files"].as_array().expect("files array");
+    let readme_entry = files
+        .iter()
+        .find(|file| file["path"] == "README.md")
+        .expect("README.md listed in MANIFEST");
+    assert_eq!(
+        readme_entry["sha256"].as_str().map(str::len),
+        Some(64),
+        "sha256 is a 64-char hex digest"
+    );
+    assert!(
+        manifest["missing"]
+            .as_array()
+            .expect("missing array")
+            .is_empty(),
+        "no missing ingredients: {:#}",
+        manifest["missing"]
+    );
+
+    let readme = fs::read_to_string(bundle.join("README.md")).expect("readme");
+    assert!(
+        readme.contains("Reproducibility bundle"),
+        "readme title: {readme}"
+    );
+    assert!(
+        readme.contains("references as recorded at submit time"),
+        "refs-not-digests caveat present"
+    );
+    assert!(readme.contains("Job id: 51111"), "run identity present");
+
+    let csv = fs::read_to_string(bundle.join("metrics/stats.csv")).expect("csv");
+    assert!(csv.contains("job_id"), "stats CSV header: {csv}");
+}
+
+#[test]
+fn experiment_bundle_degrades_without_snapshot_or_metrics() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    // No config snapshot, no metrics dir, no artifact manifest.
+    let options = SubmissionRecordBuildOptions {
+        config_snapshot_yaml: None,
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "52222",
+        SubmissionBackend::Local,
+        &options,
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    let bundle_dir = tmpdir.path().join("bundle-out");
+    let out = run_cli(
+        tmpdir.path(),
+        &[
+            "experiment",
+            "bundle",
+            "52222",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dir",
+            "--output",
+            bundle_dir.to_str().expect("path"),
+        ],
+    );
+    assert_success(&out); // degrade-and-warn, not fail.
+    assert!(
+        stderr_text(&out).contains("bundle ingredient missing"),
+        "warnings on stderr:\n{}",
+        stderr_text(&out)
+    );
+
+    assert!(
+        bundle_dir.join("README.md").exists(),
+        "README still generated"
+    );
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(bundle_dir.join("MANIFEST.json")).expect("read"))
+            .expect("MANIFEST parses");
+    let missing: Vec<String> = manifest["missing"]
+        .as_array()
+        .expect("missing array")
+        .iter()
+        .map(|entry| entry["item"].as_str().expect("item").to_string())
+        .collect();
+    assert!(
+        missing
+            .iter()
+            .any(|item| item == "spec/config.snapshot.yaml"),
+        "config snapshot recorded as missing: {missing:?}"
+    );
+    assert!(
+        missing.iter().any(|item| item == "metrics"),
+        "metrics recorded as missing: {missing:?}"
+    );
+}
+
+#[test]
+fn experiment_bundle_strict_fails_on_missing_ingredient() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    let options = SubmissionRecordBuildOptions {
+        config_snapshot_yaml: None,
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "53333",
+        SubmissionBackend::Local,
+        &options,
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    let out = run_cli(
+        tmpdir.path(),
+        &[
+            "experiment",
+            "bundle",
+            "53333",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dir",
+            "--output",
+            tmpdir.path().join("strict-out").to_str().expect("path"),
+            "--strict",
+        ],
+    );
+    assert_failure(&out);
+    assert!(
+        stderr_text(&out).contains("spec/config.snapshot.yaml"),
+        "strict error names the missing ingredient:\n{}",
+        stderr_text(&out)
+    );
+}
+
+#[test]
+fn experiment_bundle_sweep_trial_includes_manifest_and_seed() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+
+    let sweep_meta = SweepTrialMetadata {
+        sweep_id: "sweep-test-1".to_string(),
+        trial_id: "trial-000".to_string(),
+        trial_index: 0,
+        variables: std::collections::BTreeMap::from([("lr".to_string(), "0.5".to_string())]),
+    };
+    let options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::SweepTrial,
+        sweep: Some(sweep_meta),
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "54444",
+        SubmissionBackend::Local,
+        &options,
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    let manifest: SweepManifest = serde_json::from_value(serde_json::json!({
+        "schema_version": SWEEP_MANIFEST_SCHEMA_VERSION,
+        "sweep_id": "sweep-test-1",
+        "compose_file": record.compose_file,
+        "submitted_at": 1,
+        "matrix": "full",
+        "seed": "root-seed",
+        "total_combinations": 1,
+        "trials": [{
+            "trial_id": "trial-000",
+            "index": 0,
+            "variables": {"lr": "0.5"},
+            "seed": "trial-seed-7",
+            "script_path": record.script_path,
+        }],
+    }))
+    .expect("sweep manifest");
+    write_sweep_manifest(&manifest).expect("write sweep manifest");
+
+    let tarball = tmpdir.path().join("sweep-bundle.tar.gz");
+    let out = run_cli(
+        tmpdir.path(),
+        &[
+            "experiment",
+            "bundle",
+            "54444",
+            "-f",
+            compose.to_str().expect("path"),
+            "--output",
+            tarball.to_str().expect("path"),
+        ],
+    );
+    assert_success(&out);
+
+    let bundle = untar_bundle(&tarball, &tmpdir.path().join("extract"), "54444");
+    assert!(
+        bundle.join("sweep/manifest.json").exists(),
+        "sweep manifest bundled"
+    );
+    let readme = fs::read_to_string(bundle.join("README.md")).expect("readme");
+    assert!(
+        readme.contains("sweep-test-1"),
+        "sweep id in README: {readme}"
+    );
+    assert!(readme.contains("trial-000"), "trial id in README");
+    assert!(readme.contains("trial-seed-7"), "trial seed in README");
+}
+
+#[test]
+fn experiment_bundle_json_output_matches_disk() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let (compose, _record) = write_full_bundle_fixture(tmpdir.path(), &cache_dir, "55555");
+
+    let tarball = tmpdir.path().join("json-bundle.tar.gz");
+    let out = run_cli(
+        tmpdir.path(),
+        &[
+            "experiment",
+            "bundle",
+            "55555",
+            "-f",
+            compose.to_str().expect("path"),
+            "--output",
+            tarball.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("bundle json");
+    assert!(
+        value.get("schema_version").is_some(),
+        "schema_version present"
+    );
+    assert_eq!(value["job_id"], Value::from("55555"));
+    assert_eq!(value["layout"], Value::from("tarball"));
+
+    let bundle = untar_bundle(&tarball, &tmpdir.path().join("extract"), "55555");
+    let files = value["files"].as_array().expect("files array");
+    assert!(!files.is_empty(), "files listed");
+    for file in files {
+        let relative = file["path"].as_str().expect("path");
+        assert!(
+            bundle.join(relative).exists(),
+            "reported file exists on disk: {relative}"
+        );
+    }
+    // The reported ledger matches the extracted file count exactly.
+    let mut on_disk = 0;
+    for entry in walkdir_count(&bundle) {
+        on_disk += entry;
+    }
+    assert_eq!(files.len(), on_disk, "files array matches disk reality");
+    assert!(
+        value["missing"]
+            .as_array()
+            .expect("missing array")
+            .is_empty(),
+        "no missing ingredients"
+    );
+}
+
+/// Counts regular files under `root` (one element per file), for the JSON
+/// files-array-vs-disk cross-check.
+fn walkdir_count(root: &std::path::Path) -> Vec<usize> {
+    let mut counts = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect("read dir") {
+            let entry = entry.expect("entry");
+            let file_type = entry.file_type().expect("file type");
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                counts.push(1);
+            }
+        }
+    }
+    counts
+}
+
+#[test]
+fn experiment_bundle_dir_layout_writes_no_tarball() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let (compose, _record) = write_full_bundle_fixture(tmpdir.path(), &cache_dir, "56666");
+
+    let bundle_dir = tmpdir.path().join("dir-bundle");
+    let out = run_cli(
+        tmpdir.path(),
+        &[
+            "experiment",
+            "bundle",
+            "56666",
+            "-f",
+            compose.to_str().expect("path"),
+            "--dir",
+            "--output",
+            bundle_dir.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("bundle json");
+    assert_eq!(value["layout"], Value::from("directory"));
+
+    assert!(
+        bundle_dir.join("README.md").exists(),
+        "directory layout produced"
+    );
+    assert!(bundle_dir.join("MANIFEST.json").exists());
+    // No tarball anywhere.
+    assert!(
+        !tmpdir.path().join("dir-bundle.tar.gz").exists(),
+        "no tarball beside the directory"
+    );
+    assert!(
+        !tmpdir
+            .path()
+            .join("experiment-bundle-56666.tar.gz")
+            .exists(),
+        "no default tarball written"
+    );
+}
+
+#[test]
+fn experiment_bundle_flags_spec_drift() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    write_spec_diff_record(
+        tmpdir.path(),
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "57777",
+        "0.001",
+    );
+
+    // Edit the compose (image tag) after minting the snapshot so drift appears.
+    write_spec_diff_compose(&project, &cache_dir, "python:3.12-slim");
+
+    let tarball = tmpdir.path().join("drift-bundle.tar.gz");
+    let out = run_cli(
+        tmpdir.path(),
+        &[
+            "experiment",
+            "bundle",
+            "57777",
+            "-f",
+            compose.to_str().expect("path"),
+            "--output",
+            tarball.to_str().expect("path"),
+        ],
+    );
+    assert_success(&out);
+
+    let bundle = untar_bundle(&tarball, &tmpdir.path().join("extract"), "57777");
+    assert!(
+        bundle.join("spec/spec-drift.diff").exists(),
+        "drift diff written"
+    );
+    let diff = fs::read_to_string(bundle.join("spec/spec-drift.diff")).expect("diff");
+    assert!(
+        diff.contains("services.app.image"),
+        "drift diff names the change: {diff}"
+    );
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(bundle.join("MANIFEST.json")).expect("read"))
+            .expect("MANIFEST parses");
+    assert_eq!(manifest["drift_detected"], Value::from(true));
+    let readme = fs::read_to_string(bundle.join("README.md")).expect("readme");
+    assert!(readme.contains("differs"), "README flags drift: {readme}");
 }
