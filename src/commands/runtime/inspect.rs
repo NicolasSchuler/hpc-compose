@@ -256,6 +256,73 @@ pub(crate) fn diff(
     Ok(())
 }
 
+/// Compares the current compose file's effective config against the config
+/// snapshot recorded on a tracked run (`diff --against-spec`): a pre-submit
+/// "what changed since job X" check.
+///
+/// The current side is recomputed through the same pipeline that minted the
+/// snapshot (interpolation, resource profiles, cache default, secret
+/// redaction), so both sides are effective configs — an env-var change shows up
+/// even when the file is untouched, and a changed secret is invisible because
+/// both sides read `<redacted>`.
+pub(crate) fn diff_against_spec(
+    context: ResolvedContext,
+    job_id: Option<String>,
+    fail_on_change: bool,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let record = resolve_tracked_record(&context, job_id.as_deref())?
+        .with_context(|| tracked_job_hint(job_id.as_deref()))?;
+    let Some(snapshot_yaml) = record.config_snapshot_yaml.as_deref() else {
+        bail!(
+            "tracked job {} has no config snapshot to compare against; `run`-style submissions and records written before config snapshots existed do not carry one",
+            record.job_id
+        );
+    };
+    let effective_config =
+        load::load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    let current_yaml = output::effective_config_yaml(&effective_config, &context.secret_values())?;
+    let mut report = build_spec_diff_report(
+        &record.job_id,
+        record.submitted_at,
+        &context.compose_file.value,
+        snapshot_yaml,
+        &current_yaml,
+    )?;
+    if record.compose_file != context.compose_file.value {
+        report.notes.push(format!(
+            "job {} was submitted from a different compose file: {}",
+            record.job_id,
+            record.compose_file.display()
+        ));
+    }
+    let changed = report.has_changes();
+    match output::resolve_output_format(format) {
+        OutputFormat::Text => {
+            output::print_spec_diff_report(&report).context("failed to write diff output")?;
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output::contract::DiffSpecOutput::new(report))
+                    .context("failed to serialize diff output")?
+            );
+        }
+    }
+    if fail_on_change && changed {
+        bail!(
+            "config changed since job {}; review the diff above before resubmitting",
+            record.job_id
+        );
+    }
+    Ok(())
+}
+
 /// Builds an N-way comparison matrix over either every submitted trial of a
 /// sweep (`--across`) or an explicit list of tracked job ids (`--jobs`).
 pub(crate) fn diff_matrix(

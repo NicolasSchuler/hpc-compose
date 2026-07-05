@@ -5,6 +5,21 @@ All notable changes to `hpc-compose` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added `diff --against-spec`: a pre-submit "what changed since job X" check
+  that compares the current compose file's effective config against the config
+  snapshot recorded on a tracked run (`--job-id <ID>`, default: the latest
+  tracked run). Both sides are effective configs — interpolated and
+  profile-merged — so an environment-variable change shows up even when the
+  file is untouched; secret values are redacted on both sides, so a changed
+  secret does not appear as a change. `--fail-on-change` exits non-zero when
+  any change is found, for scripted pre-submit gates
+  (`hpc-compose diff --against-spec --fail-on-change && hpc-compose up`).
+  `--format json` output is pinned by the new `diff-spec` output schema.
+
 ## [0.2.0] - 2026-07-04
 
 ### Added

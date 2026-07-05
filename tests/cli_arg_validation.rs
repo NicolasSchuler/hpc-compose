@@ -66,6 +66,42 @@ fn inspect_rejects_job_id_without_rightsize() {
     );
 }
 
+#[test]
+fn diff_rejects_against_spec_with_positional_job_ids() {
+    let stderr = arg_error(&["diff", "11111", "22222", "--against-spec"]);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "expected a clap conflict error, got: {stderr}"
+    );
+}
+
+#[test]
+fn diff_rejects_against_spec_with_jobs_matrix() {
+    let stderr = arg_error(&["diff", "--against-spec", "--jobs", "1,2,3"]);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "expected a clap conflict error, got: {stderr}"
+    );
+}
+
+#[test]
+fn diff_rejects_job_id_without_against_spec() {
+    let stderr = arg_error(&["diff", "--job-id", "12345"]);
+    assert!(
+        stderr.to_lowercase().contains("required"),
+        "expected a clap requires error, got: {stderr}"
+    );
+}
+
+#[test]
+fn diff_rejects_fail_on_change_without_against_spec() {
+    let stderr = arg_error(&["diff", "--fail-on-change"]);
+    assert!(
+        stderr.to_lowercase().contains("required"),
+        "expected a clap requires error, got: {stderr}"
+    );
+}
+
 // The following pin runtime (dispatch-time) `bail!` cross-flag guards in
 // `src/commands/mod.rs`, which are not clap-native but still fire before any
 // file access, so they need no fixture either.

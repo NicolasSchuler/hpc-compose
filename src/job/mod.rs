@@ -60,7 +60,8 @@ pub use checkpoints::{
 };
 pub use diff::{
     JobDiffChange, JobDiffReport, JobDiffServiceStatus, JobDiffSide, JobMatrixReport, JobMatrixRow,
-    JobMatrixRun, build_job_diff_report, build_job_matrix_report,
+    JobMatrixRun, SpecDiffReport, build_job_diff_report, build_job_matrix_report,
+    build_spec_diff_report,
 };
 pub use logs::{
     LogPrintOptions, WatchOutcome, parse_log_since_duration, parse_queue_warn_after_duration,

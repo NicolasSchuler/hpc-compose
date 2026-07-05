@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiffSpecOutput",
+  "description": "`diff --against-spec` current-spec-vs-snapshot comparison (`--format json`).",
+  "type": "object",
+  "properties": {
+    "compose_file": {
+      "description": "The compose file whose effective config forms the right (current) side.",
+      "type": "string"
+    },
+    "config_changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobDiffChange"
+      }
+    },
+    "job_id": {
+      "description": "The tracked run whose recorded snapshot forms the left side.",
+      "type": "string"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "resource_changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobDiffChange"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "submitted_at": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "submitted_at",
+    "compose_file",
+    "config_changes",
+    "resource_changes",
+    "notes"
+  ],
+  "$defs": {
+    "JobDiffChange": {
+      "description": "One value-level difference.",
+      "type": "object",
+      "properties": {
+        "left": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "right": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  }
+}

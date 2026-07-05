@@ -994,6 +994,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             job_id_2,
             across,
             jobs,
+            against_spec,
+            job_id,
+            fail_on_change,
             file,
             format,
             matrix_format,
@@ -1005,7 +1008,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 file,
                 &[("--squeue-bin", &squeue_bin), ("--sacct-bin", &sacct_bin)],
             )?;
-            if across.is_some() || !jobs.is_empty() {
+            if against_spec {
+                runtime::diff_against_spec(context, job_id, fail_on_change, format)
+            } else if across.is_some() || !jobs.is_empty() {
                 runtime::diff_matrix(context, across, jobs, matrix_format)
             } else {
                 runtime::diff(context, job_id_1, job_id_2, format)

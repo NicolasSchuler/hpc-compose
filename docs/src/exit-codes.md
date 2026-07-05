@@ -17,6 +17,13 @@ Codes `1`–`4` are what `hpc-compose` emits for its *own* failures. Direct-exec
 
 ## Which command produces which code
 
+### Code 1 — deliberate gates
+
+Most `1` exits are unexpected failures, but a few commands use it as a deliberate, scriptable "check failed" signal:
+
+- `diff --against-spec --fail-on-change` exits `1` when the current compose file's effective config differs from the tracked run's recorded snapshot, and `0` when there is no drift — so `hpc-compose diff --against-spec --fail-on-change && hpc-compose up` submits only an unchanged spec.
+- `up` exits `1` when resume config drift is detected without `--allow-resume-changes`.
+
 ### Code 2 — usage and validation
 
 - Parse-level usage errors — an unknown flag, a missing argument — are reported by the argument parser, which exits `2` before any command runs.

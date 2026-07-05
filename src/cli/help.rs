@@ -294,7 +294,9 @@ Examples:
   hpc-compose diff 12345 12346 -f compose.yaml
   hpc-compose diff 12345 12346 --format json
   hpc-compose diff --jobs 12345,12346,12347 --matrix-format json
-  hpc-compose diff --across sweep-1700000000-1234 --matrix-format csv";
+  hpc-compose diff --across sweep-1700000000-1234 --matrix-format csv
+  hpc-compose diff --against-spec --job-id 12345 -f compose.yaml
+  hpc-compose diff --against-spec --fail-on-change && hpc-compose up";
 
 pub(super) const ARTIFACTS_HELP: &str = "\
 Examples:

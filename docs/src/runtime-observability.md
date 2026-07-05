@@ -259,6 +259,19 @@ hpc-compose diff --jobs 12345,12346,12347 --matrix-format json
 hpc-compose diff --across sweep-1700000000-1234 --matrix-format csv
 ```
 
+### Pre-Submit: What Changed Since a Run
+
+`hpc-compose diff --against-spec` compares the current compose file's effective config against the config snapshot recorded on a tracked run — "you changed the learning rate and the image tag since job 12345" — catching accidental variable changes *before* they cost GPU-hours. Pass `--job-id <ID>` to pick the run; without it the latest tracked run is used.
+
+Both sides are **effective** configs: the current side is recomputed through the same interpolation, resource-profile merging, and secret redaction that produced the snapshot at submit time. That cuts both ways deliberately — changing an interpolated environment variable shows up as a change even when the file on disk is untouched, and because secret values read `<redacted>` on both sides, a changed secret does not appear as a change. Records without a snapshot (`run`-style submissions and records written before config snapshots existed) fail with a clear message instead of a misleading empty diff.
+
+`--fail-on-change` turns the check into a scriptable gate: it exits non-zero when any change is found and `0` when the spec is unchanged, so a pre-submit guard is one line:
+
+```bash
+hpc-compose diff --against-spec --job-id 12345 -f compose.yaml
+hpc-compose diff --against-spec --fail-on-change && hpc-compose up
+```
+
 ## Related Docs
 
 - [Operate a Real Cluster Run](runbook.md)
