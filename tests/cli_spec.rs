@@ -160,6 +160,185 @@ fn validate_and_render_commands_work() {
 }
 
 #[test]
+fn render_and_plan_annotate_interleave_provenance_comments() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+
+    // Default renders stay comment-free.
+    let plain = run_cli(
+        tmpdir.path(),
+        &["render", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&plain);
+    let plain_stdout = stdout_text(&plain);
+    assert!(!plain_stdout.contains("# <- "));
+    assert!(!plain_stdout.contains("# --- "));
+
+    let annotated = run_cli(
+        tmpdir.path(),
+        &[
+            "render",
+            "--annotate",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&annotated);
+    let annotated_stdout = stdout_text(&annotated);
+    assert!(annotated_stdout.contains("# <- x-slurm.time\n#SBATCH --time=00:10:00"));
+    assert!(annotated_stdout.contains("# <- x-slurm.job_name\n#SBATCH --job-name=demo"));
+    assert!(annotated_stdout.contains("# --- service app (services.app) ---"));
+
+    let plan_annotated = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "--show-script",
+            "--annotate",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&plan_annotated);
+    let plan_stdout = stdout_text(&plan_annotated);
+    assert!(plan_stdout.contains("Rendered script:"));
+    assert!(plan_stdout.contains("# <- x-slurm.time\n#SBATCH --time=00:10:00"));
+
+    // --annotate only makes sense when a script is printed.
+    let missing_show_script = run_cli(
+        tmpdir.path(),
+        &["plan", "--annotate", "-f", compose.to_str().expect("path")],
+    );
+    assert!(!missing_show_script.status.success());
+    let stderr = stderr_text(&missing_show_script);
+    assert!(stderr.contains("--show-script"), "stderr: {stderr}");
+}
+
+#[test]
+fn explain_maps_fields_and_lines_in_both_directions() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+    let compose_arg = compose.to_str().expect("path");
+
+    // Field -> script lines.
+    let by_field = run_cli(
+        tmpdir.path(),
+        &["explain", "-f", compose_arg, "--field", "x-slurm.time"],
+    );
+    assert_success(&by_field);
+    let by_field_stdout = stdout_text(&by_field);
+    assert!(by_field_stdout.contains("#SBATCH --time=00:10:00"));
+    assert!(by_field_stdout.contains("x-slurm.time"));
+
+    // Line -> field, with N taken from the plain `render` output so the two
+    // previews are guaranteed to agree on numbering.
+    let render = run_cli(tmpdir.path(), &["render", "-f", compose_arg]);
+    assert_success(&render);
+    let time_line = stdout_text(&render)
+        .lines()
+        .position(|line| line.starts_with("#SBATCH --time="))
+        .expect("time directive in render output")
+        + 1;
+    let by_line = run_cli(
+        tmpdir.path(),
+        &[
+            "explain",
+            "-f",
+            compose_arg,
+            "--line",
+            &time_line.to_string(),
+        ],
+    );
+    assert_success(&by_line);
+    assert!(stdout_text(&by_line).contains("x-slurm.time"));
+
+    // Bare explain prints the full map; JSON mode reports spans without
+    // echoing line contents.
+    let map = run_cli(tmpdir.path(), &["explain", "-f", compose_arg]);
+    assert_success(&map);
+    let map_stdout = stdout_text(&map);
+    assert!(map_stdout.contains("SOURCE"));
+    assert!(map_stdout.contains("x-slurm.time"));
+    assert!(map_stdout.contains("services.app"));
+
+    let json = run_cli(
+        tmpdir.path(),
+        &["explain", "-f", compose_arg, "--format", "json"],
+    );
+    assert_success(&json);
+    let value: Value = serde_json::from_str(&stdout_text(&json)).expect("explain json");
+    assert_eq!(value["schema_version"], Value::from(1));
+    let entries = value["entries"].as_array().expect("entries");
+    assert!(!entries.is_empty());
+    let time_entry = entries
+        .iter()
+        .find(|entry| entry["source"] == "x-slurm.time")
+        .expect("time entry");
+    assert_eq!(time_entry["start_line"].as_u64(), Some(time_line as u64));
+    assert_eq!(
+        time_entry["lines"].as_array().map(Vec::len),
+        Some(0),
+        "full-map mode must not echo line contents"
+    );
+
+    // Field queries echo lines in JSON mode.
+    let json_field = run_cli(
+        tmpdir.path(),
+        &[
+            "explain",
+            "-f",
+            compose_arg,
+            "--field",
+            "x-slurm.time",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&json_field);
+    let field_value: Value =
+        serde_json::from_str(&stdout_text(&json_field)).expect("explain field json");
+    assert_eq!(
+        field_value["entries"][0]["lines"][0],
+        Value::from("#SBATCH --time=00:10:00")
+    );
+
+    // Unknown fields fail cleanly and list what is available.
+    let unknown = run_cli(
+        tmpdir.path(),
+        &["explain", "-f", compose_arg, "--field", "x-slurm.bogus"],
+    );
+    assert!(!unknown.status.success());
+    let unknown_stderr = stderr_text(&unknown);
+    assert!(
+        unknown_stderr.contains("available sources"),
+        "stderr: {unknown_stderr}"
+    );
+    assert!(
+        unknown_stderr.contains("x-slurm.time"),
+        "stderr: {unknown_stderr}"
+    );
+
+    // --field and --line are mutually exclusive.
+    let conflict = run_cli(
+        tmpdir.path(),
+        &[
+            "explain",
+            "-f",
+            compose_arg,
+            "--field",
+            "x-slurm.time",
+            "--line",
+            "1",
+        ],
+    );
+    assert!(!conflict.status.success());
+}
+
+#[test]
 fn inspect_dependencies_outputs_text_dot_and_json() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_dir = tmpdir.path().join("cache");

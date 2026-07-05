@@ -1777,6 +1777,7 @@ where
                     &context.cwd,
                     runtime_plan.slurm.runtime_root.as_deref(),
                 )),
+                annotate: false,
             },
         )
     })?;
@@ -2110,6 +2111,7 @@ pub(crate) fn launch(
                         &context.cwd,
                         runtime_plan.slurm.runtime_root.as_deref(),
                     )),
+                    annotate: false,
                 },
             )
         }

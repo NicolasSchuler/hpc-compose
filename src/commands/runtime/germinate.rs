@@ -150,6 +150,7 @@ pub(crate) fn germinate(
                     &context.cwd,
                     canary_plan.slurm.runtime_root.as_deref(),
                 )),
+                annotate: false,
             },
         )
     })?;

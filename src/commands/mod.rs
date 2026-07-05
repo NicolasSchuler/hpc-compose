@@ -88,10 +88,20 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Render {
             file,
             output,
+            annotate,
             format,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            spec::render(context, output, format)
+            spec::render(context, output, annotate, format)
+        }
+        Commands::Explain {
+            file,
+            field,
+            line,
+            format,
+        } => {
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
+            spec::explain(context, field, line, format)
         }
         Commands::Prepare {
             file,
@@ -196,6 +206,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             verbose,
             tree,
             show_script,
+            annotate,
             explain,
             format,
         } => {
@@ -206,6 +217,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 verbose,
                 tree,
                 show_script,
+                annotate,
                 explain,
                 format,
             )

@@ -16,7 +16,9 @@ use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{
     PrepareOptions, RuntimePlan, build_runtime_plan, prepare_runtime_plan_with_reporter,
 };
-use hpc_compose::render::{RenderOptions, render_script_with_options};
+use hpc_compose::render::{
+    ProvenanceSpan, RenderOptions, render_script_annotated, render_script_with_options,
+};
 use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
 use serde::Serialize;
@@ -309,6 +311,7 @@ fn print_lint_findings(findings: &[LintFinding], passed: bool) {
 pub(crate) fn render(
     context: ResolvedContext,
     output_path: Option<PathBuf>,
+    annotate: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -327,6 +330,7 @@ pub(crate) fn render(
             huggingface_cli_bin: context.huggingface_cli_bin.clone(),
             cluster_profile,
             runtime_root: None,
+            annotate,
         },
     )?;
     if let Some(path) = output_path.as_ref() {
@@ -378,12 +382,14 @@ struct PlanHint {
     message: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan(
     context: ResolvedContext,
     strict_env: bool,
     verbose: bool,
     tree: bool,
     show_script: bool,
+    annotate: bool,
     explain: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
@@ -425,6 +431,7 @@ pub(crate) fn plan(
                 huggingface_cli_bin: context.huggingface_cli_bin.clone(),
                 cluster_profile: cluster_profile.clone(),
                 runtime_root: None,
+                annotate,
             },
         )?)
     } else {
@@ -586,6 +593,220 @@ fn print_plan_hints(hints: &[PlanHint]) {
             _ => term::styled_dim(hint.level),
         };
         println!("- {label}: {}", hint.message);
+    }
+}
+
+/// `explain --format json` output: the provenance entries selected by the
+/// query (or the full map when no query is given).
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ExplainOutput {
+    pub(crate) schema_version: u32,
+    compose_file: PathBuf,
+    entries: Vec<ExplainEntry>,
+}
+
+/// One provenance span: a spec field and the preview-script line range it
+/// produced.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ExplainEntry {
+    /// Spec path that produced the lines, e.g. `x-slurm.mem` or
+    /// `services.app.readiness.tcp`.
+    source: String,
+    /// Feature-block section name for banner-level entries, e.g.
+    /// `artifact helpers`.
+    section: Option<String>,
+    /// First script line of the span (1-based, inclusive).
+    start_line: usize,
+    /// Last script line of the span (1-based, inclusive).
+    end_line: usize,
+    /// The matching script lines, secret-redacted. Empty in full-map mode,
+    /// which reports line ranges without echoing contents.
+    lines: Vec<String>,
+}
+
+pub(crate) fn explain(
+    context: ResolvedContext,
+    field: Option<String>,
+    line: Option<usize>,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+        &context.compose_file.value,
+        &context.interpolation_vars,
+        Some(&context.cache_dir.value),
+        &context.resource_profiles,
+    )?;
+    let runtime_plan = build_runtime_plan(&plan);
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+    // Render exactly the preview script that `render` and `plan --show-script`
+    // print (`runtime_root: None`, no annotation comments), so span line
+    // numbers match those outputs one-to-one. A submitted .sbatch can differ:
+    // submission paths bake absolute runtime paths into the script.
+    let (script, spans) = render_script_annotated(
+        &runtime_plan,
+        &RenderOptions {
+            apptainer_bin: context.binaries.apptainer.value.clone(),
+            singularity_bin: context.binaries.singularity.value.clone(),
+            huggingface_cli_bin: context.huggingface_cli_bin.clone(),
+            cluster_profile,
+            runtime_root: None,
+            annotate: false,
+        },
+    )?;
+    let script_lines: Vec<&str> = script.lines().collect();
+
+    let (selected, echo_lines): (Vec<&ProvenanceSpan>, bool) = if let Some(field) = field.as_deref()
+    {
+        (select_spans_for_field(&spans, field)?, true)
+    } else if let Some(line) = line {
+        if line == 0 || line > script_lines.len() {
+            bail!(
+                "line {line} is out of range; the rendered preview script has {} lines",
+                script_lines.len()
+            );
+        }
+        let matches: Vec<_> = spans
+            .iter()
+            .filter(|span| span.start_line <= line && line <= span.end_line)
+            .collect();
+        if matches.is_empty() {
+            bail!(
+                "script line {line} is not mapped to a spec field; provenance covers SBATCH \
+                 directives, feature-block sections, service launch functions, readiness gates, \
+                 and dependency waits (run `explain` without --line for the full map)"
+            );
+        }
+        (matches, true)
+    } else {
+        (spans.iter().collect(), false)
+    };
+
+    // `plan` leaves only the rendered script itself unredacted (it is the
+    // submission artifact); `explain` output is a diagnostic surface, so every
+    // echoed fragment is scrubbed like `runtime_plan` diagnostics are.
+    let secret_values = context.secret_values();
+    let entries: Vec<ExplainEntry> = selected
+        .into_iter()
+        .map(|span| ExplainEntry {
+            source: span.source.clone(),
+            section: span.section.clone(),
+            start_line: span.start_line,
+            end_line: span.end_line,
+            lines: if echo_lines {
+                script_lines[span.start_line - 1..span.end_line]
+                    .iter()
+                    .map(|text| {
+                        crate::redaction::redact_freeform_string(text, &secret_values, false)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        })
+        .collect();
+
+    match output_common::resolve_output_format(format) {
+        OutputFormat::Text => print_explain_entries(&entries, echo_lines),
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ExplainOutput {
+                    schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
+                    compose_file: plan.spec_path,
+                    entries,
+                })
+                .context("failed to serialize explain output")?
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Selects the spans matching a `--field` query: exact source matches win;
+/// otherwise prefix matches are returned. Fails with the list of available
+/// sources when nothing matches.
+fn select_spans_for_field<'a>(
+    spans: &'a [ProvenanceSpan],
+    field: &str,
+) -> Result<Vec<&'a ProvenanceSpan>> {
+    let exact: Vec<_> = spans.iter().filter(|span| span.source == field).collect();
+    if !exact.is_empty() {
+        return Ok(exact);
+    }
+    let prefixed: Vec<_> = spans
+        .iter()
+        .filter(|span| span.source.starts_with(field))
+        .collect();
+    if !prefixed.is_empty() {
+        return Ok(prefixed);
+    }
+    let mut sources: Vec<_> = spans.iter().map(|span| span.source.as_str()).collect();
+    sources.sort_unstable();
+    sources.dedup();
+    bail!(
+        "no rendered lines map to spec field '{field}'; available sources:\n  {}",
+        sources.join("\n  ")
+    );
+}
+
+fn print_explain_entries(entries: &[ExplainEntry], echo_lines: bool) {
+    if echo_lines {
+        for (index, entry) in entries.iter().enumerate() {
+            if index > 0 {
+                println!();
+            }
+            let section = entry
+                .section
+                .as_deref()
+                .map(|section| format!(" [{section}]"))
+                .unwrap_or_default();
+            let noun = if entry.start_line == entry.end_line {
+                "line"
+            } else {
+                "lines"
+            };
+            println!(
+                "{} ({noun} {}){section}",
+                entry.source,
+                format_line_range(entry.start_line, entry.end_line)
+            );
+            for (offset, text) in entry.lines.iter().enumerate() {
+                println!("  {:>5}  {text}", entry.start_line + offset);
+            }
+        }
+        return;
+    }
+    let lines_width = entries
+        .iter()
+        .map(|entry| format_line_range(entry.start_line, entry.end_line).len())
+        .chain(std::iter::once("LINES".len()))
+        .max()
+        .unwrap_or(0);
+    let source_width = entries
+        .iter()
+        .map(|entry| entry.source.len())
+        .chain(std::iter::once("SOURCE".len()))
+        .max()
+        .unwrap_or(0);
+    println!(
+        "{:<lines_width$}  {:<source_width$}  SECTION",
+        "LINES", "SOURCE"
+    );
+    for entry in entries {
+        println!(
+            "{:<lines_width$}  {:<source_width$}  {}",
+            format_line_range(entry.start_line, entry.end_line),
+            entry.source,
+            entry.section.as_deref().unwrap_or("-")
+        );
+    }
+}
+
+fn format_line_range(start_line: usize, end_line: usize) -> String {
+    if start_line == end_line {
+        start_line.to_string()
+    } else {
+        format!("{start_line}-{end_line}")
     }
 }
 
@@ -1543,10 +1764,17 @@ services:
         let resolved_context = context_for(&compose, tmpdir.path());
 
         validate(resolved_context.clone(), false, Some(OutputFormat::Json)).expect("validate json");
-        render(resolved_context.clone(), None, Some(OutputFormat::Json)).expect("render json");
+        render(
+            resolved_context.clone(),
+            None,
+            false,
+            Some(OutputFormat::Json),
+        )
+        .expect("render json");
         render(
             resolved_context.clone(),
             Some(tmpdir.path().join("rendered.sbatch")),
+            false,
             Some(OutputFormat::Json),
         )
         .expect("render file json");
@@ -1599,6 +1827,7 @@ services:
         let render_err = render(
             resolved_context.clone(),
             Some(tmpdir.path().join("missing/output/rendered.sbatch")),
+            false,
             None,
         )
         .expect_err("render should report write failures");
@@ -1645,6 +1874,7 @@ services:
         render(
             resolved_context.clone(),
             Some(tmpdir.path().join("rendered-text.sbatch")),
+            false,
             None,
         )
         .expect("render text");

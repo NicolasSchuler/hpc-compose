@@ -95,6 +95,40 @@ Recommended default:
   <p>If a mounted file is a symlink, the symlink target must also be visible from inside the mounted directory. Otherwise the path can exist on the host but fail inside the container.</p>
 </div>
 
+## Explain the generated script
+
+The whole point of the model above is that everything lands in one inspectable
+sbatch script. Two static-safe tools map that script back to the spec that
+produced it:
+
+- `render --annotate` (and `plan --show-script --annotate`) interleaves
+  provenance comments into the preview: `# <- x-slurm.mem` markers above
+  SBATCH directives, readiness gates, and dependency waits, and
+  `# --- artifact helpers (x-slurm.artifacts) ---` banners above feature
+  blocks. Annotations are preview-only; submitted scripts never contain them.
+- `explain` queries the same mapping in both directions without needing the
+  comments: `--field x-slurm.time` lists the script lines a spec field
+  generated (prefix matching is allowed, e.g. `services.app.readiness`),
+  `--line N` names the field behind one script line, and the bare command
+  prints the full line-range map.
+
+```bash
+hpc-compose render --annotate -f compose.yaml
+hpc-compose explain -f compose.yaml                        # full map
+hpc-compose explain -f compose.yaml --field x-slurm.time   # field -> lines
+hpc-compose explain -f compose.yaml --line 42              # line -> field
+```
+
+Two caveats. First, coverage is deliberately best-effort: SBATCH directives,
+feature-block sections, service launch functions, readiness gates, and
+dependency waits are mapped; glue lines between them are not. Second,
+`explain` line numbers refer to the preview script exactly as `render` and
+`plan --show-script` print it (`JOB_ROOT` keeps the portable
+`${SLURM_SUBMIT_DIR:-$PWD}` form), not to a submitted `.sbatch`, which bakes
+absolute runtime paths at submission time. Script fragments echoed by
+`explain` are secret-redacted like other diagnostics; only `render` and
+`plan --show-script` print the unredacted submission artifact.
+
 ## Command vocabulary
 
 - The **normal run** is <code>hpc-compose up -f compose.yaml</code>. See [Quickstart](quickstart.md) for the full end-to-end description.

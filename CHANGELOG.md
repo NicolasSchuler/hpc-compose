@@ -35,6 +35,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   repoints the tracked "latest" record. Both commands support `--format json`
   with published schemas (`experiment-tag`, `experiment-note`); the record
   fields are additive, so existing records and schemas stay compatible.
+- Added `render --annotate` and `plan --show-script --annotate`: the rendered
+  preview script interleaves provenance comments (`# <- x-slurm.mem` field
+  markers and `# --- artifact helpers (x-slurm.artifacts) ---` section banners)
+  mapping generated lines back to the compose spec fields that produced them.
+  Annotations are preview-only: submission paths never enable them, and without
+  the flag the rendered script is byte-identical to previous releases.
+- Added the static-safe `explain` command mapping spec fields to generated
+  script lines and back: `explain --field x-slurm.time` lists the script lines
+  a field produced (prefix matching allowed), `explain --line N` names the
+  field behind one script line, and bare `explain` prints the full provenance
+  map. `--format json` is a registered output schema (`schema --output
+  explain`). Line numbers match the `render` / `plan --show-script` preview;
+  echoed script fragments are secret-redacted.
 
 ## [0.2.0] - 2026-07-04
 

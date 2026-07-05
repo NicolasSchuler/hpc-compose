@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExplainOutput",
+  "description": "`explain --format json` output: the provenance entries selected by the\nquery (or the full map when no query is given).",
+  "type": "object",
+  "properties": {
+    "compose_file": {
+      "type": "string"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExplainEntry"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "compose_file",
+    "entries"
+  ],
+  "$defs": {
+    "ExplainEntry": {
+      "description": "One provenance span: a spec field and the preview-script line range it\nproduced.",
+      "type": "object",
+      "properties": {
+        "end_line": {
+          "description": "Last script line of the span (1-based, inclusive).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "lines": {
+          "description": "The matching script lines, secret-redacted. Empty in full-map mode,\nwhich reports line ranges without echoing contents.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "section": {
+          "description": "Feature-block section name for banner-level entries, e.g.\n`artifact helpers`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Spec path that produced the lines, e.g. `x-slurm.mem` or\n`services.app.readiness.tcp`.",
+          "type": "string"
+        },
+        "start_line": {
+          "description": "First script line of the span (1-based, inclusive).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "source",
+        "start_line",
+        "end_line",
+        "lines"
+      ]
+    }
+  }
+}
