@@ -1961,6 +1961,80 @@ fn sweep_resume_refuses_when_sweep_block_drifted() {
 }
 
 #[test]
+fn sweep_resume_warns_when_service_definition_changed() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01", "0.1"]);
+    submit_partial_sweep(tmpdir.path(), &compose);
+
+    // Edit only the SERVICE command; the sweep block (parameters/matrix) is left
+    // byte-identical, so the hard drift guard passes but the file hash changes.
+    let original = fs::read_to_string(&compose).expect("read compose");
+    let edited = original.replace("train.py", "train_v2.py");
+    assert_ne!(original, edited, "expected the service command to change");
+    fs::write(&compose, &edited).expect("write edited compose");
+
+    // A fresh, working sbatch so resume actually resubmits the pending trials.
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 22222);
+    let resume = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    // Warn, do not fail: a benign/service edit must not block recovery.
+    assert_success(&resume);
+    let stderr = stderr_text(&resume);
+    assert!(
+        stderr.contains("changed since sweep"),
+        "expected a spec-drift warning, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("the drift guard only covers the sweep block"),
+        "expected the drift-guard caveat, got: {stderr}"
+    );
+}
+
+#[test]
+fn sweep_resume_does_not_warn_when_compose_file_unchanged() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.001", "0.01", "0.1"]);
+    submit_partial_sweep(tmpdir.path(), &compose);
+
+    // No edits: resume the same file it was submitted from.
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 22222);
+    let resume = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--resume",
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&resume);
+    let stderr = stderr_text(&resume);
+    assert!(
+        !stderr.contains("changed since sweep"),
+        "unexpected spec-drift warning on an unchanged file: {stderr}"
+    );
+}
+
+#[test]
 fn sweep_resume_refuses_stopped_sweep() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache = safe_cache_dir();

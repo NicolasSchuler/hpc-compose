@@ -51,6 +51,13 @@ pub struct SweepManifest {
     pub compose_file: PathBuf,
     pub submitted_at: u64,
     pub matrix: String,
+    /// SHA-256 (lowercase hex) of the compose file's bytes at original submit
+    /// time. `--resume` compares the current file's hash against this to warn
+    /// about service-level spec drift (an edited `command:`, `image:`, etc.)
+    /// that the sweep-block drift guard cannot see. Absent on manifests written
+    /// before this field existed (loads as `None`; the resume check is skipped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_file_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<String>,
     pub total_combinations: usize,
@@ -105,6 +112,23 @@ pub struct SweepManifestTrial {
 #[must_use]
 pub fn generate_sweep_id() -> String {
     format!("sweep-{}-{}", unix_timestamp_millis(), std::process::id())
+}
+
+/// Computes the lowercase hex SHA-256 digest of a compose file's bytes.
+///
+/// Recorded on the manifest at original submit time so `--resume` can detect
+/// service-level spec drift (an edited `command:`, `image:`, etc.) that the
+/// sweep-block drift guard does not cover.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read.
+pub fn compose_file_sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read {} for content hashing", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Expands an embedded sweep config into deterministic trial variables.
@@ -737,6 +761,7 @@ mod tests {
             compose_file: PathBuf::from("/tmp/compose.yaml"),
             submitted_at: 0,
             matrix: expansion.matrix.clone(),
+            compose_file_sha256: None,
             seed: expansion.seed.clone(),
             total_combinations: expansion.total_combinations,
             objective: None,
@@ -860,6 +885,25 @@ mod tests {
         let reexpanded = expand_sweep(&sweep_config(), &manifest.sweep_id).expect("re-expand");
         let reason = detect_sweep_drift(&reexpanded, &manifest).expect("seed drift");
         assert!(reason.contains("seed"), "unexpected: {reason}");
+    }
+
+    #[test]
+    fn compose_file_sha256_matches_known_vector() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("compose.yaml");
+        // Canonical SHA-256 test vector: sha256("abc").
+        fs::write(&path, b"abc").expect("write");
+        assert_eq!(
+            compose_file_sha256(&path).expect("hash"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn compose_file_sha256_errors_on_missing_file() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let missing = dir.path().join("does-not-exist.yaml");
+        assert!(compose_file_sha256(&missing).is_err());
     }
 
     #[test]

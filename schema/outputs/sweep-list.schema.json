@@ -53,6 +53,13 @@
         "compose_file": {
           "type": "string"
         },
+        "compose_file_sha256": {
+          "description": "SHA-256 (lowercase hex) of the compose file's bytes at original submit\ntime. `--resume` compares the current file's hash against this to warn\nabout service-level spec drift (an edited `command:`, `image:`, etc.)\nthat the sweep-block drift guard cannot see. Absent on manifests written\nbefore this field existed (loads as `None`; the resume check is skipped).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "matrix": {
           "type": "string"
         },

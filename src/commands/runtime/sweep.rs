@@ -210,12 +210,17 @@ pub(crate) fn sweep_submit(
         .context("sweep manifest path has no parent")?
         .to_path_buf();
     let submitted_at = unix_timestamp_now();
+    // Record the compose file's content hash so `--resume` can warn if a service
+    // definition changed between submit and resume. Computed before the dry-run
+    // branch so dry-run previews carry it too.
+    let compose_file_sha256 = compose_file_sha256(&file)?;
     let mut manifest = SweepManifest {
         schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
         sweep_id: sweep_id.clone(),
         compose_file: file.clone(),
         submitted_at,
         matrix: expansion.matrix.clone(),
+        compose_file_sha256: Some(compose_file_sha256),
         seed: expansion.seed.clone(),
         total_combinations: expansion.total_combinations,
         objective: sweep.objective.clone(),
@@ -386,6 +391,28 @@ fn sweep_submit_resume(
             )?,
         }
         return Ok(());
+    }
+
+    // Service-level spec drift: the hard drift guard above only covers the sweep
+    // block, so an edited service (`command:`, `image:`, ...) slips past it. If
+    // the compose file's content hash changed since the original submit, the
+    // trials we are about to resume will render from the CURRENT file and may
+    // diverge from already-submitted siblings. Warn rather than fail so benign
+    // edits (comments, unrelated services) do not block recovery. The warning
+    // goes to stderr (never touching the JSON stdout contract) in both text and
+    // JSON modes, and in both dry-run and real runs. Manifests written before the
+    // hash was recorded have `None` here and skip the check. The stored hash is
+    // never updated on resume, so it keeps pointing at the original submit-time
+    // content and repeated resumes keep warning.
+    if let Some(original_hash) = manifest.compose_file_sha256.as_deref() {
+        let current_hash = compose_file_sha256(&file)?;
+        if current_hash != original_hash {
+            eprintln!(
+                "warning: {} changed since sweep {} was submitted; resumed trials will render from the current file and may diverge from already-submitted trials (the drift guard only covers the sweep block)",
+                file.display(),
+                manifest.sweep_id
+            );
+        }
     }
 
     // Dry run: preview the resume set (validating each trial's plan) without
@@ -2607,6 +2634,7 @@ mod tests {
             compose_file: PathBuf::from("/tmp/c.yaml"),
             submitted_at: 0,
             matrix: "full".into(),
+            compose_file_sha256: None,
             seed: None,
             total_combinations: 1,
             objective: None,
@@ -2625,6 +2653,7 @@ mod tests {
             compose_file: PathBuf::from("/tmp/c.yaml"),
             submitted_at: 0,
             matrix: "full".into(),
+            compose_file_sha256: None,
             seed: None,
             total_combinations: 1,
             objective: None,
