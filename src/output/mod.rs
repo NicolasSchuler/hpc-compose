@@ -636,6 +636,14 @@ fn write_job_inventory_scan(
                 job.legacy_runtime_job_root_present,
             )
         )?;
+        if !job.tags.is_empty() {
+            write!(
+                writer,
+                " {}={}",
+                term::styled_bold("tags"),
+                job.tags.join(",")
+            )?;
+        }
         if disk_usage {
             write!(
                 writer,
@@ -3577,7 +3585,7 @@ fn format_dependencies(dependencies: &[ServiceDependency]) -> String {
     formatted.join(",")
 }
 
-fn format_age_seconds(seconds: u64) -> String {
+pub(crate) fn format_age_seconds(seconds: u64) -> String {
     match seconds {
         0..=59 => format!("{seconds}s ago"),
         60..=3599 => format!("{}m ago", seconds / 60),

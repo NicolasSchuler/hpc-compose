@@ -71,13 +71,14 @@ pub use metrics_probe::{
     serialize_metrics_probe_report, validate_metrics_probe_options,
 };
 pub use model::{
-    RequestedWalltime, SchedulerSource, SubmissionBackend, SubmissionKind, SubmissionRecord,
-    SubmissionRecordBuildOptions, SweepTrialMetadata,
+    JobNote, RequestedWalltime, SchedulerSource, SubmissionBackend, SubmissionKind,
+    SubmissionRecord, SubmissionRecordBuildOptions, SweepTrialMetadata,
 };
 pub use provenance::{GitProvenance, JobProvenance, collect_provenance, read_git_provenance};
 pub use ps::{PsSnapshot, build_ps_snapshot};
 pub use record::{
     CleanupJobReport, CleanupMode, CleanupReport, JobInventoryEntry, JobInventoryScan,
+    MAX_NOTE_LEN, MAX_TAG_LEN, MAX_TAGS_PER_RECORD, append_job_note, apply_tag_changes,
     build_cleanup_report, build_submission_record, build_submission_record_with_backend,
     build_submission_record_with_backend_and_options, build_submission_record_with_options,
     clean_all_except_latest, clean_by_age, find_submission_record_in_repo, jobs_dir_for,
@@ -85,7 +86,8 @@ pub use record::{
     latest_run_record_path_for, load_submission_record, load_submission_record_optional,
     log_dir_for_record, metadata_root_for, persist_submission_record, remove_submission_record,
     run_cleanup_report, runtime_job_root_for_record, scan_job_inventory, scan_job_records,
-    state_path_for_record, write_submission_record,
+    state_path_for_record, update_submission_record, validate_note_text, validate_tag,
+    write_submission_record,
 };
 pub use replay::{
     ReplayArtifactPaths, ReplayEvent, ReplayEventKind, ReplayFrame, ReplayReport,

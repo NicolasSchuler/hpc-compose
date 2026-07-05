@@ -3,9 +3,9 @@ mod support;
 use std::fs;
 
 use hpc_compose::job::{
-    SubmissionKind, SubmissionRecordBuildOptions, build_submission_record,
+    SubmissionKind, SubmissionRecordBuildOptions, apply_tag_changes, build_submission_record,
     build_submission_record_with_options, jobs_dir_for, latest_record_path_for,
-    load_submission_record, write_submission_record,
+    load_submission_record, update_submission_record, write_submission_record,
 };
 use serde_json::Value;
 use support::*;
@@ -402,4 +402,75 @@ fn jobs_list_ignores_latest_pointer_to_missing_record() {
         .expect("newer job");
     assert_eq!(older_job["is_latest"], Value::from(false));
     assert_eq!(newer_job["is_latest"], Value::from(true));
+}
+
+#[test]
+fn jobs_list_filters_by_tag_with_and_semantics() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, &cache_dir);
+    let submit_dir = tmpdir.path().join("submit");
+
+    write_record(&compose, &submit_dir, "11111", 10);
+    write_record(&compose, &submit_dir, "22222", 20);
+    write_record(&compose, &submit_dir, "33333", 30);
+    let tag = |job_id: &str, tags: &[&str]| {
+        update_submission_record(&compose, job_id, |record| {
+            apply_tag_changes(
+                &mut record.tags,
+                &tags
+                    .iter()
+                    .map(|tag| (*tag).to_string())
+                    .collect::<Vec<_>>(),
+                &[],
+            )
+        })
+        .expect("tag record");
+    };
+    tag("11111", &["baseline"]);
+    tag("22222", &["baseline", "gpu"]);
+
+    let list_ids = |args: &[&str]| -> Vec<String> {
+        let json = run_cli(tmpdir.path(), args);
+        assert_success(&json);
+        let payload: Value = serde_json::from_str(&stdout_text(&json)).expect("jobs json");
+        payload["jobs"]
+            .as_array()
+            .expect("jobs array")
+            .iter()
+            .map(|job| job["job_id"].as_str().expect("job id").to_string())
+            .collect()
+    };
+
+    // One tag matches every job carrying it.
+    let mut baseline = list_ids(&["jobs", "list", "--tag", "baseline", "--format", "json"]);
+    baseline.sort();
+    assert_eq!(baseline, vec!["11111".to_string(), "22222".to_string()]);
+
+    // Two tags combine with AND semantics: every given tag must be present.
+    assert_eq!(
+        list_ids(&[
+            "jobs", "list", "--tag", "baseline", "--tag", "gpu", "--format", "json",
+        ]),
+        vec!["22222".to_string()]
+    );
+
+    // A tag no job carries filters everything out.
+    assert_eq!(
+        list_ids(&["jobs", "list", "--tag", "missing", "--format", "json"]),
+        Vec::<String>::new()
+    );
+
+    // The text view reports the empty filtered scan, and untagged jobs stay
+    // visible without a --tag filter.
+    let text = run_cli(tmpdir.path(), &["jobs", "list", "--tag", "missing"]);
+    assert_success(&text);
+    assert!(stdout_text(&text).contains("no tracked jobs found"));
+    let all = list_ids(&["jobs", "list", "--format", "json"]);
+    assert_eq!(all.len(), 3);
 }

@@ -244,6 +244,8 @@ fn smoke_evaluation_rejects_missing_readiness_and_completion() {
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
             provenance: None,
+            tags: Vec::new(),
+            notes: Vec::new(),
         },
         scheduler: hpc_compose::job::SchedulerStatus {
             state: "COMPLETED".into(),
@@ -398,7 +400,7 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
             .contains("no tracked submission metadata exists")
     );
 
-    jobs_list(false, Some(OutputFormat::Json)).expect("jobs list");
+    jobs_list(false, Vec::new(), Some(OutputFormat::Json)).expect("jobs list");
     clean(
         context,
         Some(7),
@@ -1048,7 +1050,7 @@ fn runtime_wrappers_cover_success_paths_with_local_tracking() {
         Some(OutputFormat::Json),
     )
     .expect("cancel");
-    jobs_list(true, Some(OutputFormat::Json)).expect("jobs list");
+    jobs_list(true, Vec::new(), Some(OutputFormat::Json)).expect("jobs list");
     clean(
         context,
         Some(0),

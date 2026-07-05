@@ -188,9 +188,19 @@ pub(crate) fn cancel(
     }
 }
 
-pub(crate) fn jobs_list(disk_usage: bool, format: Option<OutputFormat>) -> Result<()> {
+pub(crate) fn jobs_list(
+    disk_usage: bool,
+    tags: Vec<String>,
+    format: Option<OutputFormat>,
+) -> Result<()> {
     let cwd = env::current_dir().context("failed to determine current working directory")?;
-    let report = scan_job_inventory(&cwd, disk_usage)?;
+    let mut report = scan_job_inventory(&cwd, disk_usage)?;
+    // --tag is an AND filter: keep only jobs carrying every requested tag.
+    if !tags.is_empty() {
+        report
+            .jobs
+            .retain(|job| tags.iter().all(|tag| job.tags.iter().any(|t| t == tag)));
+    }
     match output::resolve_output_format(format) {
         OutputFormat::Text => {
             output::print_job_inventory_scan(&report, disk_usage)

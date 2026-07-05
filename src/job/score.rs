@@ -1375,6 +1375,8 @@ mod tests {
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
             provenance: None,
+            tags: Vec::new(),
+            notes: Vec::new(),
         };
         let cases = [
             (
@@ -1449,6 +1451,8 @@ mod tests {
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
             provenance: None,
+            tags: Vec::new(),
+            notes: Vec::new(),
         };
         let err = build_efficiency_score_report(
             &minimal_plan(),

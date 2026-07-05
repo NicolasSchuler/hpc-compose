@@ -929,6 +929,8 @@ mod tests {
             config_snapshot_yaml: Some(config_snapshot_yaml.to_string()),
             cached_artifacts: Vec::new(),
             provenance: None,
+            tags: Vec::new(),
+            notes: Vec::new(),
         }
     }
 

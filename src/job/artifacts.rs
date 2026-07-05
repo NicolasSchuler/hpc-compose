@@ -773,6 +773,8 @@ mod tests {
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
             provenance: None,
+            tags: Vec::new(),
+            notes: Vec::new(),
         };
         write_submission_record(&record).expect("write record");
         record

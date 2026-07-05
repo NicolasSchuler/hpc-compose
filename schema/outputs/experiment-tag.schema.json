@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExperimentTagOutput",
+  "description": "`experiment tag` result (`--format json`): the record's full tag set after\nthe change.",
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "tags"
+  ]
+}

@@ -54,6 +54,25 @@ pub struct SubmissionRecord {
     /// `None`. Descriptive only — capturing it contacts no scheduler.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<JobProvenance>,
+    /// Short user-assigned labels attached after submission via
+    /// `experiment tag` (e.g. "baseline", "lr-bug"). Set semantics: kept
+    /// sorted and deduplicated. Additive; legacy records load with an empty
+    /// list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Append-only timestamped observations attached after submission via
+    /// `experiment note`. Additive; legacy records load with an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<JobNote>,
+}
+
+/// One append-only observation attached to a tracked job record via
+/// `experiment note`.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct JobNote {
+    pub text: String,
+    pub created_at: u64,
 }
 
 /// Backend used to execute a tracked submission.

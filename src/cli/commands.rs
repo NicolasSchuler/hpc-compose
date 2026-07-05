@@ -2655,8 +2655,8 @@ pub enum Commands {
     },
     #[command(
         display_order = 256,
-        about = "Aggregate one tracked run into a single read-only object",
-        long_about = "Read-only aggregation over a single tracked run: combines scheduler status, the post-run efficiency score, the artifact manifest, and submit-time provenance into one object. Static-safe — it contacts the scheduler only as much as `status`/`score` already do (squeue, terminal-only sacct/sstat), never submits, cancels, exports, writes a file, or opens a connection.",
+        about = "Aggregate, tag, and annotate one tracked run",
+        long_about = "Work with a single tracked run's record. `show` is a read-only aggregation: scheduler status, the post-run efficiency score, the artifact manifest, and submit-time provenance in one object, contacting the scheduler only as much as `status`/`score` already do (squeue, terminal-only sacct/sstat). `tag` and `note` attach labels and timestamped observations to the tracked record; they contact no scheduler and rewrite only that record. Nothing here submits, cancels, exports, or opens a connection.",
         after_help = EXPERIMENT_HELP
     )]
     Experiment {
@@ -3015,12 +3015,19 @@ pub enum JobsCommands {
             help = "Include recursive disk-usage totals for tracked job paths"
         )]
         disk_usage: bool,
+        #[arg(
+            long,
+            value_name = "TAG",
+            help = "Only list jobs carrying this tag; repeat to require every given tag"
+        )]
+        tag: Vec<String>,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },
 }
 
-/// Subcommands for the read-only `experiment` aggregator.
+/// Subcommands for the `experiment` run-tracking family: the read-only `show`
+/// aggregator plus tracked-record annotation (`tag`, `note`).
 #[derive(Debug, Subcommand)]
 pub enum ExperimentCommands {
     #[command(
@@ -3083,6 +3090,53 @@ pub enum ExperimentCommands {
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
+    },
+    #[command(
+        about = "Add or remove short labels on a tracked run",
+        long_about = "Attach short labels (\"baseline\", \"lr-bug\") to a tracked job record. Tags are a sorted set: adding an existing tag or removing an absent one is a no-op. Defaults to the latest tracked run when no --job-id is given. Contacts no scheduler; only the tracked record (and its latest-pointer duplicate, when it names this job) is rewritten.",
+        after_help = EXPERIMENT_TAG_HELP
+    )]
+    Tag {
+        #[arg(
+            value_name = "TAG",
+            help = "Tags to add; may be omitted when only removing"
+        )]
+        tags: Vec<String>,
+        #[arg(
+            long,
+            value_name = "TAG",
+            help = "Tag to remove; repeat for multiple tags"
+        )]
+        remove: Vec<String>,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to tag; defaults to the latest tracked run"
+        )]
+        job_id: Option<String>,
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Append a timestamped note to a tracked run",
+        long_about = "Append one timestamped observation to a tracked job record. Notes are append-only and shown by `experiment show`. Defaults to the latest tracked run when no --job-id is given. Contacts no scheduler; only the tracked record (and its latest-pointer duplicate, when it names this job) is rewritten.",
+        after_help = EXPERIMENT_NOTE_HELP
+    )]
+    Note {
+        #[arg(value_name = "TEXT", help = "Note text to append")]
+        text: String,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to annotate; defaults to the latest tracked run"
+        )]
+        job_id: Option<String>,
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
     },
 }
 

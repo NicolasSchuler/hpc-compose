@@ -304,6 +304,24 @@
         "dirty"
       ]
     },
+    "JobNote": {
+      "description": "One append-only observation attached to a tracked job record via\n`experiment note`.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "created_at"
+      ]
+    },
     "JobProvenance": {
       "description": "Provenance pinned into a tracked submission record. Descriptive only.",
       "type": "object",
@@ -952,6 +970,13 @@
           "$ref": "#/$defs/SubmissionKind",
           "default": "main"
         },
+        "notes": {
+          "description": "Append-only timestamped observations attached after submission via\n`experiment note`. Additive; legacy records load with an empty list.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JobNote"
+          }
+        },
         "provenance": {
           "description": "Best-effort provenance pinned at submit time (tool version, git state,\nper-service image refs). Optional and additive; legacy records load with\n`None`. Descriptive only — capturing it contacts no scheduler.",
           "anyOf": [
@@ -1033,6 +1058,13 @@
               "type": "null"
             }
           ]
+        },
+        "tags": {
+          "description": "Short user-assigned labels attached after submission via\n`experiment tag` (e.g. \"baseline\", \"lr-bug\"). Set semantics: kept\nsorted and deduplicated. Additive; legacy records load with an empty\nlist.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [

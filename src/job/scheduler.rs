@@ -1774,6 +1774,8 @@ mod tests {
             config_snapshot_yaml: None,
             cached_artifacts: Vec::new(),
             provenance: None,
+            tags: Vec::new(),
+            notes: Vec::new(),
         }
     }
 

@@ -7509,6 +7509,399 @@ services:
     assert!(!project.join("results").exists());
 }
 
+/// Writes one tracked main-kind record for `job_id` under the compose file's
+/// metadata root, pinning `submitted_at` so "latest" ordering is deterministic.
+fn write_tag_note_record(
+    compose: &std::path::Path,
+    project: &std::path::Path,
+    job_id: &str,
+    submitted_at: u64,
+) {
+    let plan = runtime_plan(compose);
+    let script = project.join(format!("{job_id}.sbatch"));
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    let mut record =
+        build_submission_record(compose, project, &script, &plan, job_id).expect("record");
+    record.submitted_at = submitted_at;
+    write_submission_record(&record).expect("write record");
+}
+
+#[test]
+fn experiment_tag_round_trips_through_show_and_jobs_list() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, cache_root.path());
+    write_tag_note_record(&compose, &project, "55555", 10);
+    let compose_arg = compose.to_str().expect("path");
+
+    // Add two tags; the JSON output is the sorted full tag set.
+    let out = run_cli(
+        &project,
+        &[
+            "experiment",
+            "tag",
+            "lr-bug",
+            "baseline",
+            "--job-id",
+            "55555",
+            "-f",
+            compose_arg,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("tag json");
+    assert_eq!(value["job_id"], Value::from("55555"));
+    assert_eq!(value["tags"], serde_json::json!(["baseline", "lr-bug"]));
+
+    // Re-adding an existing tag is an idempotent no-op, not an error.
+    let out = run_cli(
+        &project,
+        &[
+            "experiment",
+            "tag",
+            "baseline",
+            "--job-id",
+            "55555",
+            "-f",
+            compose_arg,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("tag json");
+    assert_eq!(value["tags"], serde_json::json!(["baseline", "lr-bug"]));
+
+    // Tags surface in `experiment show` (json + text).
+    let show = run_cli(
+        &project,
+        &[
+            "experiment",
+            "show",
+            "55555",
+            "-f",
+            compose_arg,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&show);
+    let value: Value = serde_json::from_str(&stdout_text(&show)).expect("show json");
+    assert_eq!(value["tags"], serde_json::json!(["baseline", "lr-bug"]));
+    let show_text = run_cli(
+        &project,
+        &["experiment", "show", "55555", "-f", compose_arg],
+    );
+    assert_success(&show_text);
+    assert!(stdout_text(&show_text).contains("tags:  baseline, lr-bug"));
+
+    // Tags surface in `jobs list` (json + text rows).
+    let jobs = run_cli(tmpdir.path(), &["jobs", "list", "--format", "json"]);
+    assert_success(&jobs);
+    let payload: Value = serde_json::from_str(&stdout_text(&jobs)).expect("jobs json");
+    let job = payload["jobs"]
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .find(|job| job["job_id"] == "55555")
+        .expect("job 55555")
+        .clone();
+    assert_eq!(job["tags"], serde_json::json!(["baseline", "lr-bug"]));
+    let jobs_text = run_cli(tmpdir.path(), &["jobs", "list"]);
+    assert_success(&jobs_text);
+    assert!(stdout_text(&jobs_text).contains("tags=baseline,lr-bug"));
+
+    // Removing works and removing an absent tag is a no-op.
+    let out = run_cli(
+        &project,
+        &[
+            "experiment",
+            "tag",
+            "--remove",
+            "lr-bug",
+            "--remove",
+            "never-there",
+            "--job-id",
+            "55555",
+            "-f",
+            compose_arg,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("tag json");
+    assert_eq!(value["tags"], serde_json::json!(["baseline"]));
+
+    // Text confirmation names the job and the remaining tag set.
+    let text = run_cli(
+        &project,
+        &[
+            "experiment",
+            "tag",
+            "--remove",
+            "baseline",
+            "--job-id",
+            "55555",
+            "-f",
+            compose_arg,
+        ],
+    );
+    assert_success(&text);
+    assert!(stdout_text(&text).contains("tags for job 55555: (none)"));
+}
+
+#[test]
+fn experiment_note_appends_in_order_with_timestamps() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, cache_root.path());
+    write_tag_note_record(&compose, &project, "66666", 10);
+    let compose_arg = compose.to_str().expect("path");
+
+    let first = run_cli(
+        &project,
+        &[
+            "experiment",
+            "note",
+            "diverged after epoch 3",
+            "--job-id",
+            "66666",
+            "-f",
+            compose_arg,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&first);
+    let second = run_cli(
+        &project,
+        &[
+            "experiment",
+            "note",
+            "  restarting with lower lr  ",
+            "--job-id",
+            "66666",
+            "-f",
+            compose_arg,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&second);
+    let value: Value = serde_json::from_str(&stdout_text(&second)).expect("note json");
+    assert_eq!(value["job_id"], Value::from("66666"));
+    let notes = value["notes"].as_array().expect("notes array");
+    assert_eq!(notes.len(), 2);
+    // Append-only order with trimming and real timestamps.
+    assert_eq!(notes[0]["text"], Value::from("diverged after epoch 3"));
+    assert_eq!(notes[1]["text"], Value::from("restarting with lower lr"));
+    let first_at = notes[0]["created_at"].as_u64().expect("created_at");
+    let second_at = notes[1]["created_at"].as_u64().expect("created_at");
+    assert!(first_at > 0);
+    assert!(second_at >= first_at);
+
+    // Notes surface in `experiment show` (json + text) and count in jobs list.
+    let show = run_cli(
+        &project,
+        &[
+            "experiment",
+            "show",
+            "66666",
+            "-f",
+            compose_arg,
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&show);
+    let value: Value = serde_json::from_str(&stdout_text(&show)).expect("show json");
+    let notes = value["notes"].as_array().expect("show notes");
+    assert_eq!(notes.len(), 2);
+    let show_text = run_cli(
+        &project,
+        &["experiment", "show", "66666", "-f", compose_arg],
+    );
+    assert_success(&show_text);
+    let text = stdout_text(&show_text);
+    assert!(text.contains("Notes:"), "notes section: {text}");
+    assert!(text.contains("diverged after epoch 3"), "note text: {text}");
+
+    let jobs = run_cli(tmpdir.path(), &["jobs", "list", "--format", "json"]);
+    assert_success(&jobs);
+    let payload: Value = serde_json::from_str(&stdout_text(&jobs)).expect("jobs json");
+    let job = payload["jobs"]
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .find(|job| job["job_id"] == "66666")
+        .expect("job 66666")
+        .clone();
+    assert_eq!(job["note_count"], Value::from(2));
+}
+
+#[test]
+fn experiment_tag_never_repoints_or_stales_the_latest_pointer() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_prepare_compose(&project, cache_root.path());
+    write_tag_note_record(&compose, &project, "11111", 10);
+    write_tag_note_record(&compose, &project, "22222", 20);
+    let compose_arg = compose.to_str().expect("path");
+
+    // Tagging the OLDER job must not repoint (or even rewrite) latest.json.
+    let latest_path = latest_record_path_for(&compose);
+    let pointer_before = fs::read(&latest_path).expect("latest before");
+    let out = run_cli(
+        &project,
+        &[
+            "experiment",
+            "tag",
+            "old-run",
+            "--job-id",
+            "11111",
+            "-f",
+            compose_arg,
+        ],
+    );
+    assert_success(&out);
+    let pointer_after = fs::read(&latest_path).expect("latest after");
+    assert_eq!(
+        pointer_before, pointer_after,
+        "tagging a non-latest job must leave the latest pointer byte-identical"
+    );
+
+    // Tagging the LATEST job updates both the record and the pointer duplicate.
+    let out = run_cli(
+        &project,
+        &[
+            "experiment",
+            "tag",
+            "fresh",
+            "--job-id",
+            "22222",
+            "-f",
+            compose_arg,
+        ],
+    );
+    assert_success(&out);
+    let record = load_submission_record(&compose, Some("22222")).expect("record");
+    assert_eq!(record.tags, vec!["fresh".to_string()]);
+    let pointer: SubmissionRecord =
+        serde_json::from_str(&fs::read_to_string(&latest_path).expect("latest"))
+            .expect("latest record");
+    assert_eq!(
+        pointer.job_id, "22222",
+        "pointer still names the latest job"
+    );
+    assert_eq!(pointer.tags, vec!["fresh".to_string()], "duplicate synced");
+
+    // The no-id default path still resolves the newest job (with its tag).
+    let show = run_cli(
+        &project,
+        &["experiment", "show", "-f", compose_arg, "--format", "json"],
+    );
+    assert_success(&show);
+    let value: Value = serde_json::from_str(&stdout_text(&show)).expect("show json");
+    assert_eq!(value["job_id"], Value::from("22222"));
+    assert_eq!(value["tags"], serde_json::json!(["fresh"]));
+}
+
+#[test]
+fn experiment_tag_and_note_reject_invalid_input() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let project = tmpdir.path().to_path_buf();
+    let compose = write_prepare_compose(&project, cache_root.path());
+    write_tag_note_record(&compose, &project, "77777", 10);
+    let compose_arg = compose.to_str().expect("path");
+
+    // Invalid charset fails cleanly and mutates nothing.
+    let bad = run_cli(
+        &project,
+        &[
+            "experiment",
+            "tag",
+            "bad tag!",
+            "--job-id",
+            "77777",
+            "-f",
+            compose_arg,
+        ],
+    );
+    assert!(!bad.status.success());
+    assert!(
+        stderr_text(&bad).contains("unsupported characters"),
+        "got: {}",
+        stderr_text(&bad)
+    );
+    let record = load_submission_record(&compose, Some("77777")).expect("record");
+    assert!(record.tags.is_empty(), "failed tag must not be persisted");
+
+    // Neither tags nor --remove is a usage error.
+    let empty = run_cli(
+        &project,
+        &["experiment", "tag", "--job-id", "77777", "-f", compose_arg],
+    );
+    assert!(!empty.status.success());
+    assert!(
+        stderr_text(&empty).contains("at least one tag"),
+        "got: {}",
+        stderr_text(&empty)
+    );
+
+    // A whitespace-only note is rejected.
+    let blank = run_cli(
+        &project,
+        &[
+            "experiment",
+            "note",
+            "   ",
+            "--job-id",
+            "77777",
+            "-f",
+            compose_arg,
+        ],
+    );
+    assert!(!blank.status.success());
+    assert!(
+        stderr_text(&blank).contains("must not be empty"),
+        "got: {}",
+        stderr_text(&blank)
+    );
+
+    // An unknown job id yields the shared tracked-job hint.
+    let missing = run_cli(
+        &project,
+        &[
+            "experiment",
+            "tag",
+            "baseline",
+            "--job-id",
+            "00000",
+            "-f",
+            compose_arg,
+        ],
+    );
+    assert!(!missing.status.success());
+    assert!(
+        stderr_text(&missing).contains("was not found"),
+        "got: {}",
+        stderr_text(&missing)
+    );
+}
+
 fn results_trial(trial_id: &str, index: usize, vars: &[(&str, &str)]) -> SweepManifestTrial {
     SweepManifestTrial {
         trial_id: trial_id.to_string(),
