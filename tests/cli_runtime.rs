@@ -13,10 +13,10 @@ use std::time::Duration;
 use hpc_compose::job::{
     GitProvenance, JobProvenance, SWEEP_MANIFEST_SCHEMA_VERSION, SubmissionBackend, SubmissionKind,
     SubmissionRecord, SubmissionRecordBuildOptions, SweepManifest, SweepManifestTrial,
-    artifact_manifest_path_for_record, artifact_payload_dir_for_record, build_submission_record,
-    build_submission_record_with_backend_and_options, build_submission_record_with_options,
-    latest_record_path_for, load_submission_record, state_path_for_record, sweep_manifest_path_for,
-    write_submission_record, write_sweep_manifest,
+    SweepTrialMetadata, artifact_manifest_path_for_record, artifact_payload_dir_for_record,
+    build_submission_record, build_submission_record_with_backend_and_options,
+    build_submission_record_with_options, latest_record_path_for, load_submission_record,
+    state_path_for_record, sweep_manifest_path_for, write_submission_record, write_sweep_manifest,
 };
 use hpc_compose::render::log_file_name_for_service;
 use serde_json::Value;
@@ -8828,6 +8828,404 @@ fn diff_single_job_bails_without_second_id() {
     let output = run_cli(tmpdir.path(), &["diff", "90001"]);
     assert!(!output.status.success());
     assert!(stderr_text(&output).contains("pairwise diff requires two tracked job ids"));
+}
+
+/// Writes the `diff --against-spec` compose fixture: a swappable image tag and
+/// an env value interpolated from `$SPEC_DIFF_LR` (default 0.001), so both a
+/// file edit and an env-only change can be exercised.
+fn write_spec_diff_compose(
+    project: &std::path::Path,
+    cache_dir: &std::path::Path,
+    image: &str,
+) -> PathBuf {
+    write_compose(
+        project,
+        "compose.yaml",
+        &format!(
+            r#"
+name: demo
+x-slurm:
+  job_name: demo
+  time: "00:10:00"
+  cache_dir: {cache}
+services:
+  app:
+    image: {image}
+    command:
+      - python
+      - train.py
+    environment:
+      LEARNING_RATE: "${{SPEC_DIFF_LR:-0.001}}"
+"#,
+            cache = cache_dir.display(),
+        ),
+    )
+}
+
+/// Mints an effective-config snapshot through the same pipeline `up` uses (the
+/// `config` command serializes the identical redacted effective config) and
+/// persists it on a tracked record, so `diff --against-spec` compares
+/// effective-vs-effective exactly like a real submission.
+fn write_spec_diff_record(
+    cwd: &std::path::Path,
+    compose: &std::path::Path,
+    project: &std::path::Path,
+    script: &std::path::Path,
+    plan: &hpc_compose::prepare::RuntimePlan,
+    job_id: &str,
+    lr: &str,
+) -> SubmissionRecord {
+    let config = run_cli_with_env(
+        cwd,
+        &["config", "-f", compose.to_str().expect("path")],
+        &[("SPEC_DIFF_LR", lr)],
+    );
+    assert_success(&config);
+    let snapshot_yaml = stdout_text(&config);
+    assert!(
+        snapshot_yaml.contains("LEARNING_RATE"),
+        "snapshot must carry the interpolated env value:\n{snapshot_yaml}"
+    );
+    let options = SubmissionRecordBuildOptions {
+        config_snapshot_yaml: Some(snapshot_yaml),
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let record = build_submission_record_with_backend_and_options(
+        compose,
+        project,
+        script,
+        plan,
+        job_id,
+        SubmissionBackend::Local,
+        &options,
+    )
+    .expect("spec diff record");
+    write_submission_record(&record).expect("write spec diff record");
+    record
+}
+
+#[test]
+fn diff_against_spec_reports_file_and_env_changes_since_snapshot() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    write_spec_diff_record(
+        tmpdir.path(),
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "31111",
+        "0.001",
+    );
+
+    // Untouched file + same env -> explicitly no changes (latest record is
+    // resolved without --job-id).
+    let clean = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+        &[("SPEC_DIFF_LR", "0.001")],
+    );
+    assert_success(&clean);
+    assert!(
+        stdout_text(&clean).contains("no changes since job 31111"),
+        "expected the clean banner, got:\n{}",
+        stdout_text(&clean)
+    );
+
+    // Edit the compose file (image tag) AND change the env var: both surface,
+    // the env change at its resolved path even though the file text for it is
+    // untouched.
+    write_spec_diff_compose(&project, &cache_dir, "python:3.12-slim");
+    let drifted = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--job-id",
+            "31111",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+        &[("SPEC_DIFF_LR", "0.002")],
+    );
+    assert_success(&drifted);
+    let text = stdout_text(&drifted);
+    assert!(text.contains("changes since job 31111"), "got:\n{text}");
+    assert!(text.contains("services.app.image"), "got:\n{text}");
+    assert!(
+        text.contains("python:3.11-slim -> python:3.12-slim"),
+        "got:\n{text}"
+    );
+    assert!(
+        text.contains("services.app.environment.LEARNING_RATE"),
+        "got:\n{text}"
+    );
+
+    // JSON carries the same rows under the versioned diff-spec envelope; left
+    // is the past run's snapshot, right is the current spec.
+    let json = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+        &[("SPEC_DIFF_LR", "0.002")],
+    );
+    assert_success(&json);
+    let value: Value = serde_json::from_str(&stdout_text(&json)).expect("diff-spec json");
+    assert_eq!(value["schema_version"], Value::from(1));
+    assert_eq!(value["job_id"], Value::from("31111"));
+    assert!(
+        value["resource_changes"]
+            .as_array()
+            .expect("resource changes")
+            .iter()
+            .any(|change| change["path"] == "services.app.image")
+    );
+    assert!(
+        value["config_changes"]
+            .as_array()
+            .expect("config changes")
+            .iter()
+            .any(
+                |change| change["path"] == "services.app.environment.LEARNING_RATE"
+                    && change["left"] == "0.001"
+                    && change["right"] == "0.002"
+            )
+    );
+}
+
+#[test]
+fn diff_against_spec_fail_on_change_gates_exit_code() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    write_spec_diff_record(
+        tmpdir.path(),
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "31112",
+        "0.001",
+    );
+
+    // No drift -> exit 0 with or without the gate.
+    let clean = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--fail-on-change",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+        &[("SPEC_DIFF_LR", "0.001")],
+    );
+    assert_success(&clean);
+    assert!(stdout_text(&clean).contains("no changes since job 31112"));
+
+    // Drift (env-only change) -> the report still prints on stdout, and the
+    // gate fails the command with the generic first-party code 1.
+    let gated = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--fail-on-change",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+        &[("SPEC_DIFF_LR", "0.002")],
+    );
+    assert_failure(&gated);
+    assert_eq!(gated.status.code(), Some(1));
+    assert!(stdout_text(&gated).contains("services.app.environment.LEARNING_RATE"));
+    assert!(stderr_text(&gated).contains("config changed since job 31112"));
+
+    // JSON mode: the full diff-spec envelope is still flushed to stdout before
+    // the gate fails the command.
+    let gated_json = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--fail-on-change",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+        &[("SPEC_DIFF_LR", "0.002")],
+    );
+    assert_failure(&gated_json);
+    assert_eq!(gated_json.status.code(), Some(1));
+    let value: Value = serde_json::from_str(&stdout_text(&gated_json)).expect("diff-spec json");
+    assert_eq!(value["schema_version"], Value::from(1));
+    assert!(
+        value["config_changes"]
+            .as_array()
+            .expect("config changes")
+            .iter()
+            .any(|change| change["path"] == "services.app.environment.LEARNING_RATE")
+    );
+}
+
+#[test]
+fn diff_against_spec_reapplies_sweep_trial_variables() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+
+    // Mint the snapshot exactly as the trial ran: SPEC_DIFF_LR swept to 0.5,
+    // away from the compose default of 0.001.
+    let config = run_cli_with_env(
+        tmpdir.path(),
+        &["config", "-f", compose.to_str().expect("path")],
+        &[("SPEC_DIFF_LR", "0.5")],
+    );
+    assert_success(&config);
+    let options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::SweepTrial,
+        config_snapshot_yaml: Some(stdout_text(&config)),
+        sweep: Some(SweepTrialMetadata {
+            sweep_id: "lr-sweep".to_string(),
+            trial_id: "t0".to_string(),
+            trial_index: 0,
+            variables: std::collections::BTreeMap::from([(
+                "SPEC_DIFF_LR".to_string(),
+                "0.5".to_string(),
+            )]),
+        }),
+        ..SubmissionRecordBuildOptions::default()
+    };
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "31113",
+        SubmissionBackend::Local,
+        &options,
+    )
+    .expect("sweep trial record");
+    write_submission_record(&record).expect("write sweep trial record");
+
+    // No env set here: without the overlay the compose default (0.001) would
+    // read as drift against the trial's 0.5 even though the spec is untouched.
+    let clean = run_cli(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--job-id",
+            "31113",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&clean);
+    let text = stdout_text(&clean);
+    assert!(
+        text.contains("no changes since job 31113"),
+        "swept variables must not read as drift:\n{text}"
+    );
+    assert!(text.contains("sweep trial (lr-sweep/t0)"), "got:\n{text}");
+
+    // A real spec edit still surfaces through the overlay, while the swept
+    // variable stays quiet.
+    write_spec_diff_compose(&project, &cache_dir, "python:3.12-slim");
+    let drifted = run_cli(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--job-id",
+            "31113",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&drifted);
+    let text = stdout_text(&drifted);
+    assert!(text.contains("services.app.image"), "got:\n{text}");
+    assert!(!text.contains("LEARNING_RATE"), "got:\n{text}");
+}
+
+#[test]
+fn diff_against_spec_without_snapshot_bails_cleanly() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::create_dir_all(tmpdir.path().join(".git")).expect("git root");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let project = tmpdir.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_spec_diff_compose(&project, &cache_dir, "python:3.11-slim");
+    let plan = runtime_plan(&compose);
+    let script = project.join("job.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    // A record built without a config snapshot (like `run`-style submissions
+    // and pre-snapshot records).
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "32222",
+        SubmissionBackend::Local,
+        &SubmissionRecordBuildOptions::default(),
+    )
+    .expect("record without snapshot");
+    write_submission_record(&record).expect("write record");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "diff",
+            "--against-spec",
+            "--job-id",
+            "32222",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(
+        stderr_text(&output).contains("has no config snapshot to compare against"),
+        "expected the clean no-snapshot bail, got:\n{}",
+        stderr_text(&output)
+    );
 }
 
 #[test]

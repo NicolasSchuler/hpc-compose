@@ -30,7 +30,7 @@ use hpc_compose::evolve::EvolveRunReport;
 use hpc_compose::job::{
     ArtifactExportReport, CheckpointHistory, CleanupReport, EfficiencyScoreReport, JobDiffReport,
     JobInventoryScan, JobMatrixReport, MetricsProbeReport, PsSnapshot, ReplayReport,
-    RightsizeReport, StatsSnapshot, StatusSnapshot,
+    RightsizeReport, SpecDiffReport, StatsSnapshot, StatusSnapshot,
 };
 use hpc_compose::preflight::GroupedReport;
 use hpc_compose::prepare::{PrepareSummary, RuntimePlan};
@@ -113,6 +113,11 @@ flatten_envelope!(
     /// `diff --matrix` N-way comparison (`--matrix-format json`).
     DiffMatrixOutput,
     JobMatrixReport
+);
+flatten_envelope!(
+    /// `diff --against-spec` current-spec-vs-snapshot comparison (`--format json`).
+    DiffSpecOutput,
+    SpecDiffReport
 );
 flatten_envelope!(
     /// `replay` reconstructed run timeline (`--format json`).
@@ -198,6 +203,7 @@ output_schemas! {
     "artifacts" => ArtifactsOutput,
     "diff" => DiffOutput,
     "diff-matrix" => DiffMatrixOutput,
+    "diff-spec" => DiffSpecOutput,
     "replay" => ReplayOutput,
     "clean" => CleanOutput,
     "checkpoints" => CheckpointsOutput,
@@ -483,6 +489,7 @@ mod tests {
             "dependencies",
             "diff",
             "diff-matrix",
+            "diff-spec",
             "doctor",
             "evolve",
             "init-describe",

@@ -53,6 +53,70 @@ pub struct JobDiffChange {
     pub right: Option<String>,
 }
 
+/// Comparison of the current compose file's effective config against the
+/// config snapshot recorded on one tracked run (`diff --against-spec`).
+///
+/// Both sides are resolved effective configs (interpolated, profile-merged,
+/// secrets redacted): left is the tracked run's snapshot and right is the
+/// current spec. Because secret values are redacted on both sides, a changed
+/// secret does not appear as a change.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SpecDiffReport {
+    /// The tracked run whose recorded snapshot forms the left side.
+    pub job_id: String,
+    pub submitted_at: u64,
+    /// The compose file whose effective config forms the right (current) side.
+    pub compose_file: PathBuf,
+    pub config_changes: Vec<JobDiffChange>,
+    pub resource_changes: Vec<JobDiffChange>,
+    pub notes: Vec<String>,
+}
+
+impl SpecDiffReport {
+    /// Returns `true` when any config or resource change was found.
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        !self.config_changes.is_empty() || !self.resource_changes.is_empty()
+    }
+}
+
+/// Builds a semantic diff of the current effective config (`current_yaml`)
+/// against the config snapshot recorded on a tracked run (`snapshot_yaml`).
+/// Left = the past run's snapshot, right = the current spec.
+pub fn build_spec_diff_report(
+    job_id: &str,
+    submitted_at: u64,
+    compose_file: &Path,
+    snapshot_yaml: &str,
+    current_yaml: &str,
+) -> Result<SpecDiffReport> {
+    let snapshot: Value = serde_norway::from_str(snapshot_yaml)
+        .with_context(|| format!("config snapshot for job {job_id} could not be parsed as yaml"))?;
+    let current: Value = serde_norway::from_str(current_yaml)
+        .context("current effective config could not be parsed as yaml")?;
+    let mut config_changes = Vec::new();
+    diff_json_values("", &snapshot, &current, &mut config_changes);
+    let resource_changes = resource_changes(&snapshot, &current);
+    let mut notes = Vec::new();
+    if snapshot_yaml.contains(crate::redaction::REDACTED_PLACEHOLDER)
+        || current_yaml.contains(crate::redaction::REDACTED_PLACEHOLDER)
+    {
+        notes.push(
+            "secret values are redacted on both sides; a changed secret does not appear here"
+                .to_string(),
+        );
+    }
+    Ok(SpecDiffReport {
+        job_id: job_id.to_string(),
+        submitted_at,
+        compose_file: compose_file.to_path_buf(),
+        config_changes,
+        resource_changes,
+        notes,
+    })
+}
+
 /// N-way comparison matrix across several tracked job submissions.
 ///
 /// One column per run (positionally aligned to [`Self::runs`]) and one row per
@@ -1353,6 +1417,90 @@ mod tests {
                 .notes
                 .iter()
                 .any(|note| note == "jobs were built from different commits")
+        );
+    }
+
+    #[test]
+    fn spec_diff_reports_nested_config_and_resource_changes() {
+        let snapshot = "x-slurm:\n  time: \"00:10:00\"\nservices:\n  app:\n    image: app:1\n    environment:\n      LEARNING_RATE: \"0.001\"\n";
+        let current = "x-slurm:\n  time: \"00:10:00\"\nservices:\n  app:\n    image: app:2\n    environment:\n      LEARNING_RATE: \"0.002\"\n";
+        let report =
+            build_spec_diff_report("12345", 100, Path::new("compose.yaml"), snapshot, current)
+                .expect("report");
+        assert_eq!(report.job_id, "12345");
+        assert_eq!(report.submitted_at, 100);
+        assert!(report.has_changes());
+        // A nested value change is keyed by its dotted path; left is the past
+        // run's snapshot, right is the current spec.
+        assert!(report.config_changes.iter().any(|change| {
+            change.path == "services.app.environment.LEARNING_RATE"
+                && change.left.as_deref() == Some("0.001")
+                && change.right.as_deref() == Some("0.002")
+        }));
+        // The image change is surfaced both in the resource projection and in
+        // the full config diff; the unchanged time field is not.
+        assert!(
+            report
+                .resource_changes
+                .iter()
+                .any(|change| change.path == "services.app.image")
+        );
+        assert!(
+            report
+                .config_changes
+                .iter()
+                .any(|change| change.path == "services.app.image")
+        );
+        assert!(
+            !report
+                .resource_changes
+                .iter()
+                .any(|change| change.path == "x-slurm.time")
+        );
+    }
+
+    #[test]
+    fn spec_diff_identical_inputs_yield_empty_report() {
+        let yaml = "x-slurm:\n  time: \"00:10:00\"\nservices:\n  app:\n    image: app:1\n";
+        let report =
+            build_spec_diff_report("1", 1, Path::new("compose.yaml"), yaml, yaml).expect("report");
+        assert!(report.config_changes.is_empty());
+        assert!(report.resource_changes.is_empty());
+        assert!(!report.has_changes());
+        assert!(report.notes.is_empty());
+    }
+
+    #[test]
+    fn spec_diff_malformed_snapshot_yaml_is_an_error() {
+        let err = build_spec_diff_report(
+            "9",
+            1,
+            Path::new("compose.yaml"),
+            "x-slurm: [not valid",
+            "services: {}",
+        )
+        .expect_err("malformed snapshot must fail");
+        assert!(
+            err.to_string()
+                .contains("config snapshot for job 9 could not be parsed"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn spec_diff_notes_redacted_values_on_either_side() {
+        let snapshot = "services:\n  app:\n    environment:\n      API_TOKEN: \"<redacted>\"\n";
+        let current = "services:\n  app:\n    environment:\n      API_TOKEN: \"<redacted>\"\n";
+        let report = build_spec_diff_report("7", 1, Path::new("compose.yaml"), snapshot, current)
+            .expect("report");
+        // Both sides read `<redacted>`, so a changed secret is invisible; the
+        // report says so explicitly.
+        assert!(!report.has_changes());
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("secret values are redacted on both sides"))
         );
     }
 }

@@ -15,8 +15,8 @@ use hpc_compose::init::{
 use hpc_compose::job::{
     ArtifactExportReport, CleanupReport, EfficiencyScoreReport, JobDiffChange, JobDiffReport,
     JobInventoryScan, JobMatrixReport, JobMatrixRow, PsSnapshot, RightsizeConfidence,
-    RightsizeReport, StatsSnapshot, StatusSnapshot, SubmissionBackend, WatchOutcome,
-    scheduler_source_label,
+    RightsizeReport, SpecDiffReport, StatsSnapshot, StatusSnapshot, SubmissionBackend,
+    WatchOutcome, scheduler_source_label,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, registry_host_for_remote,
@@ -588,6 +588,10 @@ pub(crate) fn print_job_diff_report(report: &JobDiffReport) -> io::Result<()> {
     write_job_diff_report(&mut io::stdout(), report)
 }
 
+pub(crate) fn print_spec_diff_report(report: &SpecDiffReport) -> io::Result<()> {
+    write_spec_diff_report(&mut io::stdout(), report)
+}
+
 pub(crate) fn print_job_matrix_report(report: &JobMatrixReport) -> io::Result<()> {
     write_job_matrix_report(&mut io::stdout(), report)
 }
@@ -769,6 +773,56 @@ fn write_job_diff_report(writer: &mut impl Write, report: &JobDiffReport) -> io:
                 "  ... {} more config changes; use --format json for full detail",
                 report.config_changes.len() - 25
             )?;
+        }
+    }
+    for note in &report.notes {
+        writeln!(writer, "note: {note}")?;
+    }
+    Ok(())
+}
+
+/// Renders a `diff --against-spec` report: what the current compose file's
+/// effective config changed relative to one tracked run's snapshot. Mirrors
+/// [`write_job_diff_report`]'s section style but carries only the two sections
+/// that exist for a spec comparison (`Resources` / `Config`).
+fn write_spec_diff_report(writer: &mut impl Write, report: &SpecDiffReport) -> io::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let submitted = format_age_seconds(now.saturating_sub(report.submitted_at));
+    if !report.has_changes() {
+        writeln!(
+            writer,
+            "no changes since job {} (submitted {})",
+            term::styled_bold(&report.job_id),
+            submitted
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "changes since job {} (submitted {})",
+            term::styled_bold(&report.job_id),
+            submitted
+        )?;
+        writeln!(writer, "{}", term::styled_section_header("Resources:"))?;
+        if report.resource_changes.is_empty() {
+            writeln!(writer, "  no resource changes")?;
+        } else {
+            write_diff_changes(writer, &report.resource_changes, usize::MAX)?;
+        }
+        writeln!(writer, "{}", term::styled_section_header("Config:"))?;
+        if report.config_changes.is_empty() {
+            writeln!(writer, "  no config changes")?;
+        } else {
+            write_diff_changes(writer, &report.config_changes, 25)?;
+            if report.config_changes.len() > 25 {
+                writeln!(
+                    writer,
+                    "  ... {} more config changes; use --format json for full detail",
+                    report.config_changes.len() - 25
+                )?;
+            }
         }
     }
     for note in &report.notes {

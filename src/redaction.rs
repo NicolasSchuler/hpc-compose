@@ -30,6 +30,11 @@ const SENSITIVE_NAME_NEEDLES: &[&str] = &[
     "BEARER",
 ];
 
+/// Placeholder substituted for every redacted secret value. Shared so code
+/// that *detects* redacted output (e.g. the spec-diff redaction note) cannot
+/// drift from the substitution itself.
+pub const REDACTED_PLACEHOLDER: &str = "<redacted>";
+
 /// Returns `true` when *name* matches the sensitive-name heuristic.
 #[must_use]
 pub fn is_sensitive_name(name: &str) -> bool {
@@ -62,7 +67,7 @@ pub fn redact_value(
         return value.to_string();
     }
     if is_sensitive(name, source) || secret_values.contains(value) {
-        "<redacted>".to_string()
+        REDACTED_PLACEHOLDER.to_string()
     } else {
         value.to_string()
     }
@@ -355,7 +360,7 @@ fn redact_string_for_key(
     secret_values: &BTreeSet<String>,
 ) -> String {
     if key.is_some_and(is_sensitive_name) {
-        "<redacted>".to_string()
+        REDACTED_PLACEHOLDER.to_string()
     } else {
         redact_secret_value(value, secret_values)
     }
@@ -363,7 +368,7 @@ fn redact_string_for_key(
 
 fn redact_secret_value(value: &str, secret_values: &BTreeSet<String>) -> String {
     if secret_values.contains(value) {
-        "<redacted>".to_string()
+        REDACTED_PLACEHOLDER.to_string()
     } else {
         redact_secret_substrings(value, secret_values)
     }
@@ -384,7 +389,7 @@ fn redact_secret_substrings(value: &str, secret_values: &BTreeSet<String>) -> St
         .collect::<Vec<_>>();
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     for secret in secrets {
-        redacted = redacted.replace(secret.as_str(), "<redacted>");
+        redacted = redacted.replace(secret.as_str(), REDACTED_PLACEHOLDER);
     }
     redacted
 }

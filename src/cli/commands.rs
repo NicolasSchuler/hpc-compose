@@ -1537,7 +1537,7 @@ pub enum Commands {
     #[command(
         display_order = 255,
         about = "Compare two tracked job submissions",
-        long_about = "Compare tracked submission metadata, effective config snapshots, selected resource settings, and observed outcomes between two jobs. With --across <SWEEP_ID> or --jobs <a,b,c> the comparison becomes an N-way matrix (one column per run, one row per field that differs in at least one run).",
+        long_about = "Compare tracked submission metadata, effective config snapshots, selected resource settings, and observed outcomes between two jobs. With --across <SWEEP_ID> or --jobs <a,b,c> the comparison becomes an N-way matrix (one column per run, one row per field that differs in at least one run). With --against-spec the current compose file's effective config (interpolated and profile-merged, so an environment-variable change shows up even when the file is untouched) is compared against the config snapshot recorded on a tracked run — a pre-submit \"what changed since job X\" check. Secret values are redacted on both sides of that comparison, so a changed secret does not appear as a change.",
         after_help = DIFF_HELP
     )]
     Diff {
@@ -1560,6 +1560,25 @@ pub enum Commands {
             help = "Compare these tracked job ids as an N-way matrix (comma-separated)"
         )]
         jobs: Vec<String>,
+        #[arg(
+            long,
+            conflicts_with_all = ["job_id_1", "job_id_2", "across", "jobs"],
+            help = "Compare the current compose file's effective config against a tracked run's recorded snapshot"
+        )]
+        against_spec: bool,
+        #[arg(
+            long,
+            value_name = "JOB_ID",
+            requires = "against_spec",
+            help = "Tracked run whose snapshot --against-spec compares against (default: the latest tracked run)"
+        )]
+        job_id: Option<String>,
+        #[arg(
+            long,
+            requires = "against_spec",
+            help = "Exit non-zero when --against-spec finds any change (scripted pre-submit gate)"
+        )]
+        fail_on_change: bool,
         #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
         file: Option<PathBuf>,
         #[arg(
