@@ -5,6 +5,28 @@ All notable changes to `hpc-compose` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added `sweep submit --resume [--sweep-id <ID>]` to re-drive a partial sweep
+  manifest after a failed submission. Resume submits only the trials that never
+  got a job (those with a `submit_error` or a missing `job_id`) and leaves
+  already-submitted trials untouched, keeping the sweep's id and `submitted_at`.
+  Before resubmitting, it re-expands the current compose file with the stored
+  sweep id (so `matrix: random` samples and per-replicate seeds reproduce) and
+  refuses to continue if the sweep block drifted since the original submission.
+  Spec edits outside the sweep block (a changed service `command:` or `image:`)
+  are not covered by that hard guard, so resume also records the compose file's
+  content hash at submit time and warns on stderr when the file changed since,
+  since the resumed trials render from the current file and may diverge from
+  already-submitted siblings.
+  `--resume` composes with `--dry-run` (preview the resume set without
+  submitting), `--max-trials`, `--skip-prepare`, `--force-rebuild`,
+  `--no-preflight`, and `--format`. The `sweep-submit` JSON output gains
+  additive `resumed`, `resubmitted`, and `skipped_already_submitted` fields (no
+  `schema_version` bump).
+
 ## [0.2.0] - 2026-07-04
 
 ### Added

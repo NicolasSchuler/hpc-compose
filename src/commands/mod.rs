@@ -579,6 +579,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 skip_prepare,
                 force_rebuild,
                 no_preflight,
+                resume,
+                sweep_id,
                 format,
                 sbatch_bin,
                 srun_bin,
@@ -609,6 +611,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     force_rebuild,
                     no_preflight,
                     format,
+                    resume,
+                    sweep_id,
                     options.quiet,
                 )
             }

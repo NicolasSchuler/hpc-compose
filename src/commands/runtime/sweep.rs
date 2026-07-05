@@ -116,6 +116,16 @@ fn best_group_mean(
 pub(crate) struct SweepSubmitOutput<'a> {
     pub(crate) schema_version: u32,
     dry_run: bool,
+    /// True when this run resumed an existing sweep (`--resume`) rather than
+    /// submitting a fresh one.
+    resumed: bool,
+    /// Number of trials (re)submitted by a resume run. Omitted for a fresh submit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resubmitted: Option<usize>,
+    /// Number of trials a resume run left untouched because they already had a
+    /// job. Omitted for a fresh submit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_already_submitted: Option<usize>,
     manifest_path: Option<PathBuf>,
     manifest: &'a SweepManifest,
 }
@@ -163,8 +173,25 @@ pub(crate) fn sweep_submit(
     force_rebuild: bool,
     no_preflight: bool,
     format: Option<OutputFormat>,
+    resume: bool,
+    sweep_id: Option<String>,
     quiet: bool,
 ) -> Result<()> {
+    let output_format = output::resolve_output_format(format);
+    if resume {
+        return sweep_submit_resume(
+            context,
+            dry_run,
+            max_trials,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            output_format,
+            sweep_id,
+            quiet,
+        );
+    }
+
     let file = context.compose_file.value.clone();
     let sweep = ComposeSpec::load_sweep(&file)?.with_context(|| {
         format!(
@@ -176,7 +203,6 @@ pub(crate) fn sweep_submit(
     let max_trials = max_trials.unwrap_or(DEFAULT_SWEEP_MAX_TRIALS);
     let expansion = expand_sweep_with_limit(&sweep, &sweep_id, Some(max_trials))?;
 
-    let output_format = output::resolve_output_format(format);
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
     let manifest_path = sweep_manifest_path_for(&file, &sweep_id);
     let sweep_root = manifest_path
@@ -184,12 +210,17 @@ pub(crate) fn sweep_submit(
         .context("sweep manifest path has no parent")?
         .to_path_buf();
     let submitted_at = unix_timestamp_now();
+    // Record the compose file's content hash so `--resume` can warn if a service
+    // definition changed between submit and resume. Computed before the dry-run
+    // branch so dry-run previews carry it too.
+    let compose_file_sha256 = compose_file_sha256(&file)?;
     let mut manifest = SweepManifest {
         schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
         sweep_id: sweep_id.clone(),
         compose_file: file.clone(),
         submitted_at,
         matrix: expansion.matrix.clone(),
+        compose_file_sha256: Some(compose_file_sha256),
         seed: expansion.seed.clone(),
         total_combinations: expansion.total_combinations,
         objective: sweep.objective.clone(),
@@ -223,7 +254,7 @@ pub(crate) fn sweep_submit(
         for trial in &expansion.trials {
             validate_sweep_trial_plan(&context, trial, &sweep_id, cluster_profile.clone())?;
         }
-        print_sweep_submit_output(output_format, true, None, &manifest)?;
+        print_sweep_submit_output(output_format, true, false, None, None, None, &manifest)?;
         return Ok(());
     }
 
@@ -272,7 +303,204 @@ pub(crate) fn sweep_submit(
         }
     }
 
-    print_sweep_submit_output(output_format, false, Some(manifest_path), &manifest)
+    print_sweep_submit_output(
+        output_format,
+        false,
+        false,
+        None,
+        None,
+        Some(manifest_path),
+        &manifest,
+    )
+}
+
+/// Re-drives an existing sweep manifest, submitting only the trials that never
+/// got a job (those with a `submit_error` or a missing `job_id`). No new sweep
+/// id is minted; the manifest keeps its identity and `submitted_at`.
+#[allow(clippy::too_many_arguments)]
+fn sweep_submit_resume(
+    context: ResolvedContext,
+    dry_run: bool,
+    max_trials: Option<usize>,
+    skip_prepare: bool,
+    force_rebuild: bool,
+    no_preflight: bool,
+    output_format: OutputFormat,
+    sweep_id: Option<String>,
+    quiet: bool,
+) -> Result<()> {
+    let file = context.compose_file.value.clone();
+    let mut manifest = load_sweep_manifest(&file, sweep_id.as_deref())?;
+
+    // A sweep that was explicitly stopped is a terminal decision; resuming it
+    // would resurrect trials the operator cancelled. Refuse and point at a fresh
+    // submission instead.
+    if manifest.stopped_at.is_some() {
+        bail!(
+            "sweep {} was explicitly stopped ({}); resume is not allowed. Submit a new sweep instead.",
+            manifest.sweep_id,
+            manifest
+                .stop_reason
+                .as_deref()
+                .unwrap_or("manual sweep stop")
+        );
+    }
+
+    // Re-expand the CURRENT compose file's sweep block using the manifest's
+    // stored sweep id so `matrix: random` samples and per-replicate seeds
+    // reproduce, and enforce the same fanout guard as the original submit.
+    let sweep = ComposeSpec::load_sweep(&file)?.with_context(|| {
+        format!(
+            "{} does not contain a top-level sweep block",
+            file.display()
+        )
+    })?;
+    let max_trials = max_trials.unwrap_or(DEFAULT_SWEEP_MAX_TRIALS);
+    let expansion = expand_sweep_with_limit(&sweep, &manifest.sweep_id, Some(max_trials))?;
+
+    // Drift guard: refuse to resume a sweep whose definition changed, which would
+    // otherwise submit trials that no longer match the recorded plan.
+    if let Some(reason) = detect_sweep_drift(&expansion, &manifest) {
+        bail!(
+            "the sweep block in {} changed since sweep {} was submitted ({reason}); resume cannot safely continue. Submit a new sweep instead.",
+            file.display(),
+            manifest.sweep_id
+        );
+    }
+
+    let resume_positions = resume_trial_positions(&manifest);
+    let total = manifest.trials.len();
+    let already_submitted = total - resume_positions.len();
+
+    // Nothing to resume: every trial already has a job. Exit 0 with a friendly
+    // message (text) or a well-formed object (json) without touching anything.
+    if resume_positions.is_empty() {
+        match output_format {
+            OutputFormat::Text => println!(
+                "nothing to resume: all {total} trials of sweep {} already submitted",
+                manifest.sweep_id
+            ),
+            OutputFormat::Json => print_sweep_submit_output(
+                output_format,
+                false,
+                true,
+                Some(0),
+                Some(already_submitted),
+                None,
+                &manifest,
+            )?,
+        }
+        return Ok(());
+    }
+
+    // Service-level spec drift: the hard drift guard above only covers the sweep
+    // block, so an edited service (`command:`, `image:`, ...) slips past it. If
+    // the compose file's content hash changed since the original submit, the
+    // trials we are about to resume will render from the CURRENT file and may
+    // diverge from already-submitted siblings. Warn rather than fail so benign
+    // edits (comments, unrelated services) do not block recovery. The warning
+    // goes to stderr (never touching the JSON stdout contract) in both text and
+    // JSON modes, and in both dry-run and real runs. Manifests written before the
+    // hash was recorded have `None` here and skip the check. The stored hash is
+    // never updated on resume, so it keeps pointing at the original submit-time
+    // content and repeated resumes keep warning.
+    if let Some(original_hash) = manifest.compose_file_sha256.as_deref() {
+        let current_hash = compose_file_sha256(&file)?;
+        if current_hash != original_hash {
+            eprintln!(
+                "warning: {} changed since sweep {} was submitted; resumed trials will render from the current file and may diverge from already-submitted trials (the drift guard only covers the sweep block)",
+                file.display(),
+                manifest.sweep_id
+            );
+        }
+    }
+
+    // Dry run: preview the resume set (validating each trial's plan) without
+    // writing scripts, submitting jobs, or touching the manifest.
+    if dry_run {
+        let cluster_profile = load_discovered_cluster_profile(&context)?;
+        for &position in &resume_positions {
+            validate_sweep_trial_plan(
+                &context,
+                &expansion.trials[position],
+                &manifest.sweep_id,
+                cluster_profile.clone(),
+            )?;
+        }
+        print_sweep_submit_output(
+            output_format,
+            true,
+            true,
+            Some(resume_positions.len()),
+            Some(already_submitted),
+            None,
+            &manifest,
+        )?;
+        return Ok(());
+    }
+
+    let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
+    let manifest_path = sweep_manifest_path_for(&file, &manifest.sweep_id);
+    let cluster_profile = load_discovered_cluster_profile(&context)?;
+    let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
+    let mut resubmitted = 0_usize;
+
+    for &position in &resume_positions {
+        // Clear any stale error so a successful resubmission leaves a clean trial
+        // and a fresh failure records a current error.
+        manifest.trials[position].submit_error = None;
+        let script_path = manifest.trials[position].script_path.clone();
+        let trial = &expansion.trials[position];
+        let result = submit_sweep_trial(
+            &context,
+            trial,
+            &manifest.sweep_id,
+            &submit_dir,
+            &script_path,
+            skip_prepare,
+            force_rebuild,
+            no_preflight,
+            cluster_profile.clone(),
+            &progress,
+            output_format,
+            quiet,
+        );
+        match result {
+            Ok(record) => {
+                let record_path = latest_record_path(&record);
+                manifest.trials[position].job_id = Some(record.job_id.clone());
+                manifest.trials[position].record_path = Some(record_path);
+                manifest.trials[position].submitted_at = Some(record.submitted_at);
+                write_sweep_manifest(&manifest)
+                    .context("failed to persist sweep manifest after trial submission")?;
+                resubmitted += 1;
+                if output_format == OutputFormat::Text {
+                    println!(
+                        "submitted {} job {} ({})",
+                        trial.trial_id,
+                        record.job_id,
+                        format_sweep_variables(&trial.variables)
+                    );
+                }
+            }
+            Err(err) => {
+                manifest.trials[position].submit_error = Some(err.to_string());
+                write_sweep_manifest(&manifest)
+                    .context("failed to persist sweep manifest after trial failure")?;
+                return Err(err.context(format!("sweep trial {} failed", trial.trial_id)));
+            }
+        }
+    }
+
+    print_sweep_submit_output(
+        output_format,
+        false,
+        true,
+        Some(resubmitted),
+        Some(already_submitted),
+        Some(manifest_path),
+        &manifest,
+    )
 }
 
 fn validate_sweep_trial_plan(
@@ -474,15 +702,26 @@ fn sweep_interpolation_vars(
     vars
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_sweep_submit_output(
     output_format: OutputFormat,
     dry_run: bool,
+    resumed: bool,
+    resubmitted: Option<usize>,
+    skipped_already_submitted: Option<usize>,
     manifest_path: Option<PathBuf>,
     manifest: &SweepManifest,
 ) -> Result<()> {
     match output_format {
         OutputFormat::Text => {
             println!("sweep: {}", manifest.sweep_id);
+            if resumed {
+                println!(
+                    "resumed: {} resubmitted, {} already submitted",
+                    resubmitted.unwrap_or(0),
+                    skipped_already_submitted.unwrap_or(0)
+                );
+            }
             println!("trials: {}", manifest.trials.len());
             if let Some(seed) = &manifest.seed {
                 println!("seed: {seed}");
@@ -512,6 +751,9 @@ fn print_sweep_submit_output(
                 serde_json::to_string_pretty(&SweepSubmitOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     dry_run,
+                    resumed,
+                    resubmitted,
+                    skipped_already_submitted,
                     manifest_path,
                     manifest,
                 })
@@ -2392,6 +2634,7 @@ mod tests {
             compose_file: PathBuf::from("/tmp/c.yaml"),
             submitted_at: 0,
             matrix: "full".into(),
+            compose_file_sha256: None,
             seed: None,
             total_combinations: 1,
             objective: None,
@@ -2410,6 +2653,7 @@ mod tests {
             compose_file: PathBuf::from("/tmp/c.yaml"),
             submitted_at: 0,
             matrix: "full".into(),
+            compose_file_sha256: None,
             seed: None,
             total_combinations: 1,
             objective: None,

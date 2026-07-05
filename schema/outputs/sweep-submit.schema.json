@@ -15,15 +15,38 @@
         "null"
       ]
     },
+    "resubmitted": {
+      "description": "Number of trials (re)submitted by a resume run. Omitted for a fresh submit.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "resumed": {
+      "description": "True when this run resumed an existing sweep (`--resume`) rather than\nsubmitting a fresh one.",
+      "type": "boolean"
+    },
     "schema_version": {
       "type": "integer",
       "format": "uint32",
+      "minimum": 0
+    },
+    "skipped_already_submitted": {
+      "description": "Number of trials a resume run left untouched because they already had a\njob. Omitted for a fresh submit.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
       "minimum": 0
     }
   },
   "required": [
     "schema_version",
     "dry_run",
+    "resumed",
     "manifest"
   ],
   "$defs": {
@@ -55,6 +78,13 @@
         },
         "compose_file": {
           "type": "string"
+        },
+        "compose_file_sha256": {
+          "description": "SHA-256 (lowercase hex) of the compose file's bytes at original submit\ntime. `--resume` compares the current file's hash against this to warn\nabout service-level spec drift (an edited `command:`, `image:`, etc.)\nthat the sweep-block drift guard cannot see. Absent on manifests written\nbefore this field existed (loads as `None`; the resume check is skipped).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "matrix": {
           "type": "string"

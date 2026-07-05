@@ -227,7 +227,9 @@ pub(super) const SWEEP_SUBMIT_HELP: &str = "\
 Examples:
   hpc-compose sweep submit -f train.yaml --dry-run
   hpc-compose sweep submit -f train.yaml --max-trials 200
-  hpc-compose sweep submit -f train.yaml --format json";
+  hpc-compose sweep submit -f train.yaml --format json
+  hpc-compose sweep submit -f train.yaml --resume            # resubmit only trials that never got a job
+  hpc-compose sweep submit -f train.yaml --resume --sweep-id sweep-123 --dry-run";
 
 pub(super) const SWEEP_STATUS_HELP: &str = "\
 Examples:

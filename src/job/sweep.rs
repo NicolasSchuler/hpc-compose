@@ -51,6 +51,13 @@ pub struct SweepManifest {
     pub compose_file: PathBuf,
     pub submitted_at: u64,
     pub matrix: String,
+    /// SHA-256 (lowercase hex) of the compose file's bytes at original submit
+    /// time. `--resume` compares the current file's hash against this to warn
+    /// about service-level spec drift (an edited `command:`, `image:`, etc.)
+    /// that the sweep-block drift guard cannot see. Absent on manifests written
+    /// before this field existed (loads as `None`; the resume check is skipped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_file_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<String>,
     pub total_combinations: usize,
@@ -105,6 +112,23 @@ pub struct SweepManifestTrial {
 #[must_use]
 pub fn generate_sweep_id() -> String {
     format!("sweep-{}-{}", unix_timestamp_millis(), std::process::id())
+}
+
+/// Computes the lowercase hex SHA-256 digest of a compose file's bytes.
+///
+/// Recorded on the manifest at original submit time so `--resume` can detect
+/// service-level spec drift (an edited `command:`, `image:`, etc.) that the
+/// sweep-block drift guard does not cover.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read.
+pub fn compose_file_sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read {} for content hashing", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Expands an embedded sweep config into deterministic trial variables.
@@ -419,6 +443,87 @@ pub fn scan_sweep_manifests(spec_path: &Path) -> Result<Vec<SweepManifest>> {
     Ok(manifests)
 }
 
+/// Detects whether a sweep's compose block changed since it was first submitted.
+///
+/// `sweep submit --resume` re-expands the current compose file using the
+/// manifest's stored sweep id (so `matrix: random` samples and per-replicate
+/// seeds reproduce) and calls this before resubmitting anything. It returns
+/// `None` when the re-expansion is identical to the persisted manifest along
+/// every identifying axis (matrix mode, parameter combination count, trial
+/// count, and each trial's id, variables, config key, replicate index, and
+/// seed), or `Some(reason)` naming the first mismatch. On drift, resume refuses
+/// to continue rather than submit trials that no longer match the recorded plan.
+#[must_use]
+pub fn detect_sweep_drift(expansion: &SweepExpansion, manifest: &SweepManifest) -> Option<String> {
+    if expansion.matrix != manifest.matrix {
+        return Some(format!(
+            "matrix mode changed from '{}' to '{}'",
+            manifest.matrix, expansion.matrix
+        ));
+    }
+    if expansion.total_combinations != manifest.total_combinations {
+        return Some(format!(
+            "parameter combination count changed from {} to {}",
+            manifest.total_combinations, expansion.total_combinations
+        ));
+    }
+    if expansion.trials.len() != manifest.trials.len() {
+        return Some(format!(
+            "trial count changed from {} to {}",
+            manifest.trials.len(),
+            expansion.trials.len()
+        ));
+    }
+    for (fresh, persisted) in expansion.trials.iter().zip(&manifest.trials) {
+        if fresh.trial_id != persisted.trial_id {
+            return Some(format!(
+                "trial id at index {} changed from '{}' to '{}'",
+                persisted.index, persisted.trial_id, fresh.trial_id
+            ));
+        }
+        if fresh.variables != persisted.variables {
+            return Some(format!(
+                "variables for trial '{}' changed",
+                persisted.trial_id
+            ));
+        }
+        if fresh.config_key != persisted.config_key {
+            return Some(format!(
+                "config key for trial '{}' changed",
+                persisted.trial_id
+            ));
+        }
+        if fresh.replicate != persisted.replicate {
+            return Some(format!(
+                "replicate index for trial '{}' changed",
+                persisted.trial_id
+            ));
+        }
+        if fresh.seed != persisted.seed {
+            return Some(format!("seed for trial '{}' changed", persisted.trial_id));
+        }
+    }
+    None
+}
+
+/// Selects the manifest trial positions that still need submission on resume.
+///
+/// Resume targets exactly the trials that never received a job: any trial with a
+/// recorded `submit_error` or a missing `job_id`. Already-submitted trials
+/// (those with a `job_id` and no error) are never returned. Positions are the
+/// indexes into `manifest.trials`, in natural order, so resubmission preserves
+/// the original submit order.
+#[must_use]
+pub fn resume_trial_positions(manifest: &SweepManifest) -> Vec<usize> {
+    manifest
+        .trials
+        .iter()
+        .enumerate()
+        .filter(|(_, trial)| trial.submit_error.is_some() || trial.job_id.is_none())
+        .map(|(position, _)| position)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,5 +750,181 @@ mod tests {
         assert_eq!(trial.config_key, "");
         assert_eq!(trial.replicate, 0);
         assert_eq!(trial.seed, None);
+    }
+
+    /// Builds a fresh-off-submit manifest from an expansion: every trial is
+    /// present with no job id, mirroring `sweep_submit`'s initial persist.
+    fn manifest_from_expansion(expansion: &SweepExpansion) -> SweepManifest {
+        SweepManifest {
+            schema_version: SWEEP_MANIFEST_SCHEMA_VERSION,
+            sweep_id: expansion.sweep_id.clone(),
+            compose_file: PathBuf::from("/tmp/compose.yaml"),
+            submitted_at: 0,
+            matrix: expansion.matrix.clone(),
+            compose_file_sha256: None,
+            seed: expansion.seed.clone(),
+            total_combinations: expansion.total_combinations,
+            objective: None,
+            best_trial: None,
+            stopped_at: None,
+            stop_reason: None,
+            trials: expansion
+                .trials
+                .iter()
+                .map(|trial| SweepManifestTrial {
+                    trial_id: trial.trial_id.clone(),
+                    index: trial.index,
+                    variables: trial.variables.clone(),
+                    config_key: trial.config_key.clone(),
+                    replicate: trial.replicate,
+                    seed: trial.seed.clone(),
+                    script_path: PathBuf::from(format!("{}.sbatch", trial.trial_id)),
+                    job_id: None,
+                    record_path: None,
+                    submitted_at: None,
+                    submit_error: None,
+                    objective: None,
+                    objective_error: None,
+                    observed_at: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn lr_config(values: &[&str]) -> SweepConfig {
+        let mut config = sweep_config();
+        config.parameters.insert(
+            "lr".to_string(),
+            values
+                .iter()
+                .map(|value| SweepParameterValue::from((*value).to_string()))
+                .collect(),
+        );
+        config
+    }
+
+    #[test]
+    fn detect_sweep_drift_accepts_identical_reexpansion() {
+        let config = sweep_config();
+        let expansion = expand_sweep(&config, "sweep-x").expect("expand");
+        let manifest = manifest_from_expansion(&expansion);
+        // Re-expanding the same config with the stored sweep id reproduces it.
+        let reexpanded = expand_sweep(&config, &manifest.sweep_id).expect("re-expand");
+        assert!(detect_sweep_drift(&reexpanded, &manifest).is_none());
+    }
+
+    #[test]
+    fn detect_sweep_drift_accepts_identical_random_reexpansion() {
+        let mut config = sweep_config();
+        config.matrix = SweepMatrix::Random {
+            random: 2,
+            seed: None,
+        };
+        // With no explicit seed the sweep id is the seed, so re-expansion with the
+        // stored id must reproduce the same sampled trials.
+        let expansion = expand_sweep(&config, "sweep-rand").expect("expand");
+        let manifest = manifest_from_expansion(&expansion);
+        let reexpanded = expand_sweep(&config, &manifest.sweep_id).expect("re-expand");
+        assert!(detect_sweep_drift(&reexpanded, &manifest).is_none());
+    }
+
+    #[test]
+    fn detect_sweep_drift_flags_changed_variable_values() {
+        let expansion = expand_sweep(&lr_config(&["0.001", "0.01"]), "sweep-x").expect("expand");
+        let manifest = manifest_from_expansion(&expansion);
+        // Same trial count and combination count, but one lr value changed.
+        let reexpanded =
+            expand_sweep(&lr_config(&["0.001", "0.5"]), &manifest.sweep_id).expect("re-expand");
+        let reason = detect_sweep_drift(&reexpanded, &manifest).expect("variable drift");
+        assert!(reason.contains("variables"), "unexpected: {reason}");
+    }
+
+    #[test]
+    fn detect_sweep_drift_flags_changed_combination_count() {
+        let expansion = expand_sweep(&lr_config(&["0.001", "0.01"]), "sweep-x").expect("expand");
+        let manifest = manifest_from_expansion(&expansion);
+        let reexpanded = expand_sweep(&lr_config(&["0.001", "0.01", "0.1"]), &manifest.sweep_id)
+            .expect("re-expand");
+        let reason = detect_sweep_drift(&reexpanded, &manifest).expect("count drift");
+        assert!(reason.contains("combination count"), "unexpected: {reason}");
+    }
+
+    #[test]
+    fn detect_sweep_drift_flags_changed_trial_count_via_replicates() {
+        // Replicates leave the combination count unchanged but multiply the trial
+        // count, exercising the trial-count branch specifically.
+        let expansion = expand_sweep(&sweep_config(), "sweep-x").expect("expand");
+        let manifest = manifest_from_expansion(&expansion);
+        let mut replicated = sweep_config();
+        replicated.replicates = 2;
+        let reexpanded = expand_sweep(&replicated, &manifest.sweep_id).expect("re-expand");
+        let reason = detect_sweep_drift(&reexpanded, &manifest).expect("trial count drift");
+        assert!(reason.contains("trial count"), "unexpected: {reason}");
+    }
+
+    #[test]
+    fn detect_sweep_drift_flags_changed_matrix_mode() {
+        let expansion = expand_sweep(&sweep_config(), "sweep-x").expect("expand");
+        let manifest = manifest_from_expansion(&expansion);
+        let mut random = sweep_config();
+        random.matrix = SweepMatrix::Random {
+            random: 2,
+            seed: Some("s".into()),
+        };
+        let reexpanded = expand_sweep(&random, &manifest.sweep_id).expect("re-expand");
+        let reason = detect_sweep_drift(&reexpanded, &manifest).expect("matrix drift");
+        assert!(reason.contains("matrix mode"), "unexpected: {reason}");
+    }
+
+    #[test]
+    fn detect_sweep_drift_flags_changed_seed() {
+        let expansion = expand_sweep(&sweep_config(), "sweep-x").expect("expand");
+        let mut manifest = manifest_from_expansion(&expansion);
+        // A stale persisted per-replicate seed no longer matches the re-expansion.
+        manifest.trials[0].seed = Some("stale-seed".to_string());
+        let reexpanded = expand_sweep(&sweep_config(), &manifest.sweep_id).expect("re-expand");
+        let reason = detect_sweep_drift(&reexpanded, &manifest).expect("seed drift");
+        assert!(reason.contains("seed"), "unexpected: {reason}");
+    }
+
+    #[test]
+    fn compose_file_sha256_matches_known_vector() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("compose.yaml");
+        // Canonical SHA-256 test vector: sha256("abc").
+        fs::write(&path, b"abc").expect("write");
+        assert_eq!(
+            compose_file_sha256(&path).expect("hash"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn compose_file_sha256_errors_on_missing_file() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let missing = dir.path().join("does-not-exist.yaml");
+        assert!(compose_file_sha256(&missing).is_err());
+    }
+
+    #[test]
+    fn resume_trial_positions_selects_failed_and_unattempted() {
+        let expansion = expand_sweep(&sweep_config(), "sweep-x").expect("expand");
+        let mut manifest = manifest_from_expansion(&expansion);
+        // t000 submitted, t001 submit_failed, t002 unattempted, t003 submitted.
+        manifest.trials[0].job_id = Some("100".into());
+        manifest.trials[1].submit_error = Some("boom".into());
+        // t002 left untouched (no job id, no error).
+        manifest.trials[3].job_id = Some("103".into());
+        assert_eq!(resume_trial_positions(&manifest), vec![1, 2]);
+    }
+
+    #[test]
+    fn resume_trial_positions_empty_when_all_submitted() {
+        let expansion = expand_sweep(&sweep_config(), "sweep-x").expect("expand");
+        let mut manifest = manifest_from_expansion(&expansion);
+        for (position, trial) in manifest.trials.iter_mut().enumerate() {
+            trial.job_id = Some(format!("10{position}"));
+        }
+        assert!(resume_trial_positions(&manifest).is_empty());
     }
 }
