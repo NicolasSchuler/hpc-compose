@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkspaceReleaseOutput",
+  "description": "`workspace release` JSON output (`--format json`).",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "path": {
+      "description": "Path the workspace had before release; `None` when it did not exist.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "released": {
+      "description": "True when `ws_release` ran; false when there was nothing to release.",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "state_path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "name",
+    "released",
+    "state_path"
+  ]
+}

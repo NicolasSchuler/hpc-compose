@@ -27,6 +27,7 @@
 - [Operate a Real Cluster Run](runbook.md)
 - [Monitor a Run](runtime-observability.md)
 - [Manage the Cache and Clean Up](cache-management.md)
+- [Manage Cluster Workspaces](workspaces.md)
 - [Troubleshoot a Failed Run](troubleshooting.md)
 - [Develop and Smoke-Test Locally](development-workflow.md)
 - [Local Slurm Dev Cluster](local-slurm-dev-cluster.md)

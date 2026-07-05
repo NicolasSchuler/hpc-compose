@@ -2513,6 +2513,16 @@ pub enum Commands {
         command: CacheCommands,
     },
     #[command(
+        display_order = 302,
+        about = "Manage the expiring scratch workspace (hpc-workspace ws_* tools)",
+        long_about = "Allocate, inspect, extend, or release the hpc-workspace-managed scratch workspace configured in settings, using the site's ws_find/ws_allocate/ws_extend/ws_release/ws_list tools. Runs the tools locally (on the login node or a dev machine); resolved facts are persisted per profile in .hpc-compose/workspace-state.toml.",
+        after_help = WORKSPACE_HELP
+    )]
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
+    },
+    #[command(
         display_order = 305,
         about = "Inspect and manage shared-cache rendezvous records",
         long_about = "Register, resolve, list, or prune cross-job service discovery records under the active cache directory."
@@ -2977,6 +2987,113 @@ pub enum CacheCommands {
         all_unused: bool,
         #[arg(long, help = "Confirm this destructive action without prompting")]
         yes: bool,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+}
+
+/// hpc-workspace tool-path overrides shared by every `workspace` subcommand.
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceToolArgs {
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "ws_find",
+        help_heading = "Tool overrides",
+        help = "Path to the ws_find executable"
+    )]
+    pub ws_find_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "ws_allocate",
+        help_heading = "Tool overrides",
+        help = "Path to the ws_allocate executable"
+    )]
+    pub ws_allocate_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "ws_extend",
+        help_heading = "Tool overrides",
+        help = "Path to the ws_extend executable"
+    )]
+    pub ws_extend_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "ws_release",
+        help_heading = "Tool overrides",
+        help = "Path to the ws_release executable"
+    )]
+    pub ws_release_bin: String,
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "ws_list",
+        help_heading = "Tool overrides",
+        help = "Path to the ws_list executable"
+    )]
+    pub ws_list_bin: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommands {
+    #[command(
+        about = "Show the configured workspace's path and expiry",
+        long_about = "Look up the configured workspace with ws_find and ws_list, refresh the persisted workspace state, and print its path, remaining lifetime, and available extensions. Read-only against the workspace tools.",
+        after_help = WORKSPACE_STATUS_HELP
+    )]
+    Status {
+        #[command(flatten)]
+        tools: WorkspaceToolArgs,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Allocate the configured workspace if it does not exist",
+        long_about = "Idempotently allocate the configured workspace: when ws_find already locates it, report it as already allocated; otherwise run ws_allocate, confirm with ws_find, and record the resolved facts in the workspace state file.",
+        after_help = WORKSPACE_ALLOCATE_HELP
+    )]
+    Allocate {
+        #[arg(
+            long,
+            value_name = "DAYS",
+            help = "Workspace duration in days passed to ws_allocate; defaults to the settings duration_days or 30"
+        )]
+        duration_days: Option<u32>,
+        #[command(flatten)]
+        tools: WorkspaceToolArgs,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Extend the configured workspace's lifetime",
+        long_about = "Run ws_extend for the configured workspace and refresh the persisted expiry and remaining-extension facts from ws_list.",
+        after_help = WORKSPACE_EXTEND_HELP
+    )]
+    Extend {
+        #[arg(
+            long,
+            value_name = "DAYS",
+            help = "Days passed to ws_extend; defaults to the settings duration_days or 30"
+        )]
+        days: Option<u32>,
+        #[command(flatten)]
+        tools: WorkspaceToolArgs,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        about = "Release the configured workspace (destructive)",
+        long_about = "Run ws_release for the configured workspace after a confirmation prompt. Refuses to release while tracked job records keep cache or runtime state under the workspace path; run `down` or `clean` for those jobs first.",
+        after_help = WORKSPACE_RELEASE_HELP
+    )]
+    Release {
+        #[arg(long, help = "Confirm this destructive action without prompting")]
+        yes: bool,
+        #[command(flatten)]
+        tools: WorkspaceToolArgs,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
     },

@@ -122,6 +122,43 @@ pub struct CacheSettings {
     pub enroot_temp_dir: Option<String>,
 }
 
+/// Workspace lifecycle defaults in settings, consumed by the `workspace`
+/// command group's hpc-workspace (`ws_find`/`ws_allocate`/`ws_extend`/
+/// `ws_release`/`ws_list`) integration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSettings {
+    /// Workspace name passed to the `ws_*` tools (for example
+    /// `hpc-compose-cache`).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Allocation/renewal duration in days for `ws_allocate` and the
+    /// `ws_extend` default. Defaults to 30 at use sites when unset.
+    #[serde(default)]
+    pub duration_days: Option<u32>,
+    /// Allocate a missing workspace automatically at submit time. Defined now
+    /// so the settings surface is stable; used from Phase 2 (up/preflight
+    /// integration).
+    #[serde(default)]
+    pub auto_allocate: Option<bool>,
+    /// Extend the workspace automatically at submit time when it would expire
+    /// too soon. Defined now so the settings surface is stable; used from
+    /// Phase 2 (auto-extend at submit).
+    #[serde(default)]
+    pub auto_extend: Option<bool>,
+    /// Warn when fewer than this many days of workspace lifetime remain
+    /// (default 7 at use sites). Defined now so the settings surface is
+    /// stable; used from Phase 2.
+    #[serde(default)]
+    pub warn_days_left: Option<u32>,
+    /// Extra buffer in days added on top of a job's expected queue+run time
+    /// when Phase 2 decides whether the workspace outlives the job (default 2
+    /// at use sites). Defined now so the settings surface is stable; used
+    /// from Phase 2.
+    #[serde(default)]
+    pub queue_buffer_days: Option<u32>,
+}
+
 /// Reusable Slurm resource defaults in settings.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,6 +223,10 @@ pub struct SettingsDefaults {
     pub binaries: BinaryOverrides,
     #[serde(default)]
     pub cache: CacheSettings,
+    /// Shared hpc-workspace (`ws_*`) lifecycle defaults for the `workspace`
+    /// command group. A profile's `workspace` block overrides these per field.
+    #[serde(default)]
+    pub workspace: Option<WorkspaceSettings>,
     /// SSH login host used as the `up --remote` delegation destination and shown
     /// in connection hints. May be a bare host, a `~/.ssh/config` alias, or
     /// `user@host`. Used to open the connection.
@@ -213,6 +254,10 @@ pub struct SettingsProfile {
     pub binaries: BinaryOverrides,
     #[serde(default)]
     pub cache: CacheSettings,
+    /// hpc-workspace (`ws_*`) lifecycle settings for the `workspace` command
+    /// group. Overrides the shared `defaults.workspace` block per field.
+    #[serde(default)]
+    pub workspace: Option<WorkspaceSettings>,
     /// SSH login host used as the `up --remote` delegation destination and shown
     /// in connection hints. May be a bare host, a `~/.ssh/config` alias, or
     /// `user@host`. Overrides the shared default. Used to open the connection.
@@ -313,6 +358,31 @@ pub struct ResolvedBinaries {
     pub rsync: ResolvedValue<String>,
 }
 
+/// Workspace lifecycle settings after resolution: each field takes the
+/// profile's `workspace` value when set, falling back to the shared
+/// `defaults.workspace` value (mirroring the `login_host` precedence).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedWorkspaceSettings {
+    /// Workspace name passed to the `ws_*` tools.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Allocation/renewal duration in days (default 30 at use sites).
+    #[serde(default)]
+    pub duration_days: Option<u32>,
+    /// Auto-allocate at submit time (used from Phase 2).
+    #[serde(default)]
+    pub auto_allocate: Option<bool>,
+    /// Auto-extend at submit time (used from Phase 2).
+    #[serde(default)]
+    pub auto_extend: Option<bool>,
+    /// Remaining-lifetime warning threshold in days (used from Phase 2).
+    #[serde(default)]
+    pub warn_days_left: Option<u32>,
+    /// Queue-time buffer in days for expiry checks (used from Phase 2).
+    #[serde(default)]
+    pub queue_buffer_days: Option<u32>,
+}
+
 /// Effective context used to execute commands.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +407,11 @@ pub struct ResolvedContext {
     /// on the shared cache.
     #[serde(default)]
     pub enroot_temp_dir: Option<String>,
+    /// hpc-workspace (`ws_*`) lifecycle settings for the `workspace` command
+    /// group. Field-wise profile-over-defaults merge; `None` when neither the
+    /// profile nor the shared defaults define a `workspace` block.
+    #[serde(default)]
+    pub workspace: Option<ResolvedWorkspaceSettings>,
     pub resource_profiles: BTreeMap<String, ResourceProfile>,
     pub binaries: ResolvedBinaries,
     /// `huggingface-cli` path used by `hf://` stage-in, executed cluster-side
@@ -563,6 +638,10 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         .and_then(|profile| profile.cache.enroot_temp_dir.as_deref())
         .or_else(|| defaults_cfg.and_then(|defaults| defaults.cache.enroot_temp_dir.as_deref()))
         .map(str::to_string);
+    let workspace = resolve_workspace_settings(
+        profile_cfg.and_then(|profile| profile.workspace.as_ref()),
+        defaults_cfg.and_then(|defaults| defaults.workspace.as_ref()),
+    );
 
     let mut interpolation_vars = BTreeMap::new();
     let mut interpolation_var_sources = BTreeMap::new();
@@ -623,6 +702,7 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         login_host,
         login_user,
         enroot_temp_dir,
+        workspace,
         resource_profiles: settings
             .as_ref()
             .map(|settings| settings.resource_profiles.clone())
@@ -895,6 +975,35 @@ fn resolve_login_user(profile_value: Option<&str>, defaults_value: Option<&str>)
     profile_value.or(defaults_value).map(str::to_string)
 }
 
+/// Resolves workspace lifecycle settings field-wise: each field takes the
+/// profile value when set, else the shared default. Returns `None` only when
+/// neither layer defines a `workspace` block at all.
+fn resolve_workspace_settings(
+    profile_value: Option<&WorkspaceSettings>,
+    defaults_value: Option<&WorkspaceSettings>,
+) -> Option<ResolvedWorkspaceSettings> {
+    if profile_value.is_none() && defaults_value.is_none() {
+        return None;
+    }
+    fn pick<T: Clone>(
+        profile: Option<&WorkspaceSettings>,
+        defaults: Option<&WorkspaceSettings>,
+        field: impl Fn(&WorkspaceSettings) -> Option<T>,
+    ) -> Option<T> {
+        profile
+            .and_then(&field)
+            .or_else(|| defaults.and_then(&field))
+    }
+    Some(ResolvedWorkspaceSettings {
+        name: pick(profile_value, defaults_value, |w| w.name.clone()),
+        duration_days: pick(profile_value, defaults_value, |w| w.duration_days),
+        auto_allocate: pick(profile_value, defaults_value, |w| w.auto_allocate),
+        auto_extend: pick(profile_value, defaults_value, |w| w.auto_extend),
+        warn_days_left: pick(profile_value, defaults_value, |w| w.warn_days_left),
+        queue_buffer_days: pick(profile_value, defaults_value, |w| w.queue_buffer_days),
+    })
+}
+
 fn load_compose_dotenv(
     compose_file: &Path,
     vars: &mut BTreeMap<String, String>,
@@ -1070,6 +1179,12 @@ mod tests {
         settings.defaults.binaries.srun = Some("/defaults/srun".into());
         settings.defaults.cache.dir = Some("defaults-cache".into());
         settings.defaults.login_host = Some("login-defaults.example".into());
+        settings.defaults.workspace = Some(WorkspaceSettings {
+            name: Some("defaults-workspace".into()),
+            duration_days: Some(10),
+            warn_days_left: Some(4),
+            ..WorkspaceSettings::default()
+        });
 
         let mut profile = SettingsProfile {
             compose_file: Some("compose-profile.yaml".into()),
@@ -1080,8 +1195,40 @@ mod tests {
         profile.binaries.srun = Some("/profile/srun".into());
         profile.cache.dir = Some("profile-cache".into());
         profile.login_host = Some("login-profile.example".into());
+        profile.workspace = Some(WorkspaceSettings {
+            name: Some("profile-workspace".into()),
+            ..WorkspaceSettings::default()
+        });
         settings.profiles.insert("dev".into(), profile);
         settings
+    }
+
+    #[test]
+    fn resolve_workspace_settings_merges_profile_over_defaults_per_field() {
+        let defaults = WorkspaceSettings {
+            name: Some("d".into()),
+            duration_days: Some(10),
+            auto_allocate: Some(false),
+            ..WorkspaceSettings::default()
+        };
+        let profile = WorkspaceSettings {
+            name: Some("p".into()),
+            queue_buffer_days: Some(3),
+            ..WorkspaceSettings::default()
+        };
+
+        let merged = resolve_workspace_settings(Some(&profile), Some(&defaults))
+            .expect("both layers present");
+        assert_eq!(merged.name.as_deref(), Some("p"));
+        assert_eq!(merged.duration_days, Some(10));
+        assert_eq!(merged.auto_allocate, Some(false));
+        assert_eq!(merged.queue_buffer_days, Some(3));
+        assert_eq!(merged.warn_days_left, None);
+
+        let defaults_only =
+            resolve_workspace_settings(None, Some(&defaults)).expect("defaults present");
+        assert_eq!(defaults_only.name.as_deref(), Some("d"));
+        assert!(resolve_workspace_settings(None, None).is_none());
     }
 
     #[test]
@@ -1153,6 +1300,13 @@ mod tests {
             resolved.login_host.as_deref(),
             Some("login-profile.example")
         );
+        // Workspace settings merge field-wise: the profile's name wins while
+        // unset profile fields fall back to the shared defaults.
+        let workspace = resolved.workspace.as_ref().expect("workspace resolved");
+        assert_eq!(workspace.name.as_deref(), Some("profile-workspace"));
+        assert_eq!(workspace.duration_days, Some(10));
+        assert_eq!(workspace.warn_days_left, Some(4));
+        assert_eq!(workspace.auto_allocate, None);
         assert_eq!(
             resolved.interpolation_vars.get("A").map(String::as_str),
             Some("profile-map")

@@ -14,6 +14,7 @@ Jump to the section that documents each command group:
 | `lint` finding codes (`HPC001`-`HPC900`) | [Lint rules](#lint-rules) |
 | `debug`, `status`, `ps`, `watch`, `replay`, `checkpoints`, `logs`, `inspect --rightsize`, `stats`, `score`, `diff`, `artifacts`, `reach`, `pull`, `experiment`, `cancel`, `down`, `jobs`, `clean`, `rendezvous` | [Tracked Runtime](#tracked-runtime) |
 | `cache list`, `cache inspect`, `cache prune` | [Cache Maintenance](#cache-maintenance) |
+| `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` | [Workspace Lifecycle](#workspace-lifecycle) |
 | `--<tool>-bin` overrides | [Tool overrides](#tool-overrides) |
 
 ## Manual Pages
@@ -299,6 +300,11 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | `--singularity-bin` | `singularity` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
 | `--huggingface-cli-bin` | `huggingface-cli` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare` |
 | `--tmux-bin` | `tmux` | `tmux` |
+| `--ws-find-bin` | `ws_find` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
+| `--ws-allocate-bin` | `ws_allocate` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
+| `--ws-extend-bin` | `ws_extend` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
+| `--ws-release-bin` | `ws_release` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
+| `--ws-list-bin` | `ws_list` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
 
 > **Note:** `doctor` accepts the `--*-bin` overrides only through its deprecated top-level flag form, not the recommended `doctor <subcommand>` forms (`doctor cluster-report`, `doctor readiness`, `doctor mpi-smoke`, `doctor fabric-smoke`), which reject them with an "unexpected argument" error.
 
@@ -653,6 +659,26 @@ hpc-compose cache list
 hpc-compose cache inspect -f compose.yaml --service app
 hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>' --yes
 hpc-compose cache prune --all-unused -f compose.yaml --yes
+```
+
+## Workspace Lifecycle
+
+Drive the site's hpc-workspace (`ws_*`) tools for the workspace configured in settings; see [Manage Cluster Workspaces](workspaces.md) for the settings block and state file.
+
+| Command | Use it for | Notes |
+| --- | --- | --- |
+| `workspace status` | Show the configured workspace's path, remaining lifetime, and available extensions | Read-only; refreshes `.hpc-compose/workspace-state.toml`. |
+| `workspace allocate` | Create the workspace when it does not exist yet | Idempotent: an existing workspace is reported as already allocated. `--duration-days <N>` overrides the settings `duration_days` (default 30). |
+| `workspace extend` | Renew the workspace's lifetime | `--days <N>` overrides the settings `duration_days` (default 30). |
+| `workspace release` | Free the workspace and everything inside it | Destructive: prompts unless `--yes`; refuses while tracked jobs keep cache or runtime state under the workspace. |
+
+The `ws_*` executables resolve from `PATH` and can be overridden per invocation with `--ws-find-bin`, `--ws-allocate-bin`, `--ws-extend-bin`, `--ws-release-bin`, and `--ws-list-bin`.
+
+```bash
+hpc-compose workspace status --format json
+hpc-compose workspace allocate --duration-days 60
+hpc-compose workspace extend --days 30
+hpc-compose workspace release --yes
 ```
 
 ## Related Docs

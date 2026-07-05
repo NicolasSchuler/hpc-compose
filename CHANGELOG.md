@@ -60,6 +60,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   Sweep-trial records have their swept variables re-applied to the current
   side, so the sweep overlay itself does not read as drift. `--format json`
   output is pinned by the new `diff-spec` output schema.
+- Added a `workspace` command group (`status`, `allocate`, `extend`,
+  `release`) that drives the site's hpc-workspace tools (`ws_find`,
+  `ws_allocate`, `ws_extend`, `ws_release`, `ws_list`) for the workspace named
+  in the new settings `workspace` block (`[defaults.workspace]` /
+  `[profiles.<name>.workspace]`). Allocation is idempotent and guarded by
+  `ws_find`; `status` computes expiry from `ws_list`'s remaining time with a
+  version-tolerant parser; `release` prompts for confirmation and refuses
+  while tracked jobs keep cache or runtime state under the workspace. Resolved
+  facts persist per profile in `.hpc-compose/workspace-state.toml`, and all
+  four commands support `--format json` with pinned output schemas. Phase 1
+  runs the tools locally (on the login node); submit-time integration
+  (auto-allocate/auto-extend, expiry warnings) is planned, and its settings
+  (`auto_allocate`, `auto_extend`, `warn_days_left`, `queue_buffer_days`) are
+  already part of the settings surface.
 
 ## [0.2.0] - 2026-07-04
 

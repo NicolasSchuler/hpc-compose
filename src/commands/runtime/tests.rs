@@ -77,6 +77,7 @@ fn context_for(compose: &Path, cwd: &Path) -> ResolvedContext {
         login_host: None,
         login_user: None,
         enroot_temp_dir: None,
+        workspace: None,
         resource_profiles: BTreeMap::new(),
         binaries: ResolvedBinaries {
             enroot: resolved_string("/definitely/missing-enroot"),
