@@ -121,10 +121,32 @@ fn configured_workspace(context: &ResolvedContext) -> Result<(String, Option<u32
              — see the 'Manage Cluster Workspaces' docs page (docs/src/workspaces.md)"
         );
     };
+    // The name is passed to the ws_* tools as a positional argument; a
+    // leading '-' would be parsed as a flag by those tools instead.
+    if name.starts_with('-') {
+        bail!(
+            "the configured workspace name '{name}' must not start with '-': it is passed to \
+             the ws_* tools as a command-line argument and would be treated as a flag; fix the \
+             `name` in the settings workspace block (.hpc-compose/settings.toml)"
+        );
+    }
     Ok((
         name.to_string(),
         settings.and_then(|workspace| workspace.duration_days),
     ))
+}
+
+/// Validates a resolved allocation/renewal duration: the hpc-workspace tools
+/// need at least one day (the settings schema pins `duration_days` to a
+/// minimum of 1; this enforces the same bound for CLI flags at runtime).
+fn validated_days(days: u32, flag: &str) -> Result<u32> {
+    if days == 0 {
+        bail!(
+            "workspace duration must be at least 1 day; got 0 — pass a positive {flag} or set \
+             a positive `duration_days` in the settings workspace block"
+        );
+    }
+    Ok(days)
 }
 
 fn state_profile_key(context: &ResolvedContext) -> String {
@@ -135,7 +157,10 @@ fn state_profile_key(context: &ResolvedContext) -> String {
 }
 
 /// Refreshes the state file: records the observation under the profile key,
-/// or removes the entry when the workspace no longer exists.
+/// or removes the entry when the workspace no longer exists. Always rewrites
+/// the file so stale content (corrupt or unknown-version files, which
+/// [`load_workspace_state`] tolerates as empty) is replaced with a canonical
+/// current-version snapshot.
 fn refresh_state(
     state_path: &std::path::Path,
     profile_key: &str,
@@ -143,17 +168,13 @@ fn refresh_state(
     now: u64,
 ) -> Result<()> {
     let mut state = load_workspace_state(state_path)?;
-    let changed = match observation {
-        Some(observation) => {
-            record_observation(&mut state, profile_key, observation, now);
-            true
+    match observation {
+        Some(observation) => record_observation(&mut state, profile_key, observation, now),
+        None => {
+            state.profiles.remove(profile_key);
         }
-        None => state.profiles.remove(profile_key).is_some(),
-    };
-    if changed {
-        save_workspace_state(state_path, &state)?;
     }
-    Ok(())
+    save_workspace_state(state_path, &state)
 }
 
 fn print_expiry_lines(
@@ -255,9 +276,12 @@ pub(crate) fn allocate(
     let (already_allocated, requested_days) = if find_workspace(&tools, &name)?.is_some() {
         (true, None)
     } else {
-        let days = duration_days
-            .or(settings_duration)
-            .unwrap_or(DEFAULT_WORKSPACE_DURATION_DAYS);
+        let days = validated_days(
+            duration_days
+                .or(settings_duration)
+                .unwrap_or(DEFAULT_WORKSPACE_DURATION_DAYS),
+            "--duration-days",
+        )?;
         allocate_workspace(&tools, &name, days)?;
         (false, Some(days))
     };
@@ -323,9 +347,11 @@ pub(crate) fn extend(
     if find_workspace(&tools, &name)?.is_none() {
         bail!("workspace '{name}' does not exist; run `hpc-compose workspace allocate` first");
     }
-    let days = days
-        .or(settings_duration)
-        .unwrap_or(DEFAULT_WORKSPACE_DURATION_DAYS);
+    let days = validated_days(
+        days.or(settings_duration)
+            .unwrap_or(DEFAULT_WORKSPACE_DURATION_DAYS),
+        "--days",
+    )?;
     extend_workspace(&tools, &name, days)?;
 
     let observation = observe_workspace(&tools, &name, now)?.with_context(|| {
@@ -425,7 +451,14 @@ pub(crate) fn release(
         yes,
     )?;
     release_workspace(&tools, &name)?;
-    refresh_state(&state_path, &profile_key, None, now)?;
+    // The workspace is gone: the command must report success no matter what
+    // happens to the (regenerable) state file, so state cleanup only warns.
+    if let Err(err) = refresh_state(&state_path, &profile_key, None, now) {
+        eprintln!(
+            "warning: workspace '{name}' was released, but updating the workspace state file \
+             failed: {err:#}"
+        );
+    }
 
     let output = WorkspaceReleaseOutput {
         schema_version: OUTPUT_SCHEMA_VERSION,

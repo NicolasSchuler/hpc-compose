@@ -105,7 +105,7 @@ submit-time integration phase reads it to warn before a workspace expires
 under a queued job. It is safe to delete — the next `workspace status`
 rebuilds it.
 
-## Related pages
+## Related Docs
 
 * [HAICORE@KIT Guide](haicore-guide.md) — the site this workflow was built
   around, including which paths belong in a workspace.

@@ -178,10 +178,14 @@ done
 }
 
 fn write_workspace_settings(root: &Path) {
+    write_workspace_settings_named(root, WS_NAME);
+}
+
+fn write_workspace_settings_named(root: &Path, name: &str) {
     fs::create_dir_all(root.join(".hpc-compose")).expect("settings dir");
     fs::write(
         root.join(".hpc-compose/settings.toml"),
-        format!("version = 1\n\n[defaults.workspace]\nname = \"{WS_NAME}\"\nduration_days = 5\n"),
+        format!("version = 1\n\n[defaults.workspace]\nname = \"{name}\"\nduration_days = 5\n"),
     )
     .expect("settings");
 }
@@ -433,4 +437,127 @@ fn workspace_release_with_yes_releases_and_clears_state() {
         stdout_text(&again)
     );
     assert_eq!(fixture.release_invocations(), 1);
+}
+
+#[test]
+fn workspace_status_survives_non_ascii_ws_list_output() {
+    // Regression: a ws_list line with a multi-byte character crossing byte
+    // offset 3 used to panic the parser (exit 101) instead of being skipped.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_workspace_settings(tmpdir.path());
+    let fixture = write_ws_tools(tmpdir.path());
+    fs::create_dir_all(fixture.workspace_dir(WS_NAME)).expect("workspace");
+    write_script(
+        &fixture.list,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+echo "a€rie: non-ascii noise"
+echo "id: {WS_NAME}"
+echo "     remaining time       : 3 days"
+"#
+        ),
+    );
+
+    let status = run_workspace(tmpdir.path(), &fixture, &["status"]);
+    assert_success(&status);
+    let stdout = stdout_text(&status);
+    assert!(stdout.contains("3 days"), "got: {stdout}");
+}
+
+#[test]
+fn workspace_status_recovers_from_corrupt_or_future_version_state() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_workspace_settings(tmpdir.path());
+    let fixture = write_ws_tools(tmpdir.path());
+    fs::create_dir_all(fixture.workspace_dir(WS_NAME)).expect("workspace");
+    let state_path = tmpdir.path().join(".hpc-compose/workspace-state.toml");
+
+    // Corrupt state: status must not fail — it warns and rebuilds the file.
+    fs::write(&state_path, "not [valid toml").expect("corrupt state");
+    let status = run_workspace(tmpdir.path(), &fixture, &["status"]);
+    assert_success(&status);
+    assert!(
+        stderr_text(&status).contains("regenerable cache"),
+        "got: {}",
+        stderr_text(&status)
+    );
+    let state = state_file_text(tmpdir.path());
+    assert!(state.contains("version = 1"), "got: {state}");
+    assert!(state.contains(WS_NAME), "got: {state}");
+
+    // Unknown (future) schema version: same fallback + canonical rewrite.
+    fs::write(&state_path, "version = 2\n").expect("future version state");
+    let status = run_workspace(tmpdir.path(), &fixture, &["status"]);
+    assert_success(&status);
+    let state = state_file_text(tmpdir.path());
+    assert!(state.contains("version = 1"), "got: {state}");
+    assert!(state.contains(WS_NAME), "got: {state}");
+}
+
+#[test]
+fn workspace_release_with_yes_succeeds_despite_future_version_state() {
+    // Regression: a stale state file must never fail `release` after
+    // ws_release already removed the workspace.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_workspace_settings(tmpdir.path());
+    let fixture = write_ws_tools(tmpdir.path());
+    fs::create_dir_all(fixture.workspace_dir(WS_NAME)).expect("workspace");
+    let state_path = tmpdir.path().join(".hpc-compose/workspace-state.toml");
+    fs::write(
+        &state_path,
+        format!(
+            "version = 2\n\n[profiles.default]\nname = \"{WS_NAME}\"\npath = \"/stale\"\nlast_checked = 0\n"
+        ),
+    )
+    .expect("future version state");
+
+    let release = run_workspace(tmpdir.path(), &fixture, &["release", "--yes"]);
+    assert_success(&release);
+    assert_eq!(fixture.release_invocations(), 1);
+    assert!(!fixture.workspace_dir(WS_NAME).exists());
+    let state = state_file_text(tmpdir.path());
+    assert!(state.contains("version = 1"), "got: {state}");
+    assert!(
+        !state.contains(WS_NAME),
+        "stale entry must be cleared: {state}"
+    );
+}
+
+#[test]
+fn workspace_rejects_leading_dash_name() {
+    // A leading-dash name would be passed to the ws_* tools as a flag.
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_workspace_settings_named(tmpdir.path(), "--delete-everything");
+    let fixture = write_ws_tools(tmpdir.path());
+
+    let status = run_workspace(tmpdir.path(), &fixture, &["status"]);
+    assert_failure(&status);
+    let stderr = stderr_text(&status);
+    assert!(stderr.contains("must not start with"), "got: {stderr}");
+    assert!(stderr.contains("settings"), "got: {stderr}");
+}
+
+#[test]
+fn workspace_allocate_rejects_zero_duration() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    write_workspace_settings(tmpdir.path());
+    let fixture = write_ws_tools(tmpdir.path());
+
+    let allocate = run_workspace(
+        tmpdir.path(),
+        &fixture,
+        &["allocate", "--duration-days", "0"],
+    );
+    assert_failure(&allocate);
+    assert!(
+        stderr_text(&allocate).contains("at least 1 day"),
+        "got: {}",
+        stderr_text(&allocate)
+    );
+    assert_eq!(
+        fixture.allocate_invocations(),
+        0,
+        "ws_allocate must not run with a zero duration"
+    );
 }

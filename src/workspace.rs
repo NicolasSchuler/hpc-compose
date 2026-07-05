@@ -107,26 +107,49 @@ pub fn workspace_state_path(settings_path: Option<&Path>, cwd: &Path) -> PathBuf
 /// Loads the workspace state file, returning an empty default when the file
 /// does not exist yet.
 ///
+/// The state file is a regenerable cache of `ws_*` facts, so an unparsable
+/// file or an unknown schema version must never brick the very commands
+/// whose refresh would repair it (and `release` must never fail *after*
+/// `ws_release` ran because of it): both cases warn on stderr and fall back
+/// to the empty default, which the caller's refresh rewrites in canonical
+/// form.
+///
 /// # Errors
 ///
-/// Returns an error when an existing file cannot be read or parsed, or uses
-/// an unsupported schema version.
+/// Returns an error only when an existing file cannot be read at all (for
+/// example, permission denied) — a genuine I/O failure, not stale content.
 pub fn load_workspace_state(path: &Path) -> Result<WorkspaceState> {
-    if !path.exists() {
-        return Ok(WorkspaceState::default());
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(WorkspaceState::default());
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read workspace state {}", path.display()));
+        }
+    };
+    match toml::from_str::<WorkspaceState>(&raw) {
+        Ok(state) if state.version == WORKSPACE_STATE_SCHEMA_VERSION => Ok(state),
+        Ok(state) => {
+            eprintln!(
+                "warning: workspace state {} has unsupported schema version {} (expected {}); \
+                 treating it as empty — it is a regenerable cache and will be rebuilt",
+                path.display(),
+                state.version,
+                WORKSPACE_STATE_SCHEMA_VERSION
+            );
+            Ok(WorkspaceState::default())
+        }
+        Err(err) => {
+            eprintln!(
+                "warning: workspace state {} is unreadable ({err}); treating it as empty — \
+                 it is a regenerable cache and will be rebuilt",
+                path.display()
+            );
+            Ok(WorkspaceState::default())
+        }
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read workspace state {}", path.display()))?;
-    let state: WorkspaceState = toml::from_str(&raw)
-        .with_context(|| format!("failed to parse workspace state {}", path.display()))?;
-    if state.version != WORKSPACE_STATE_SCHEMA_VERSION {
-        bail!(
-            "unsupported workspace state schema version {}; expected {}",
-            state.version,
-            WORKSPACE_STATE_SCHEMA_VERSION
-        );
-    }
-    Ok(state)
 }
 
 /// Atomically writes the workspace state file, creating parent directories.
@@ -305,9 +328,13 @@ pub struct WsListEntry {
     pub available_extensions: Option<u32>,
 }
 
-/// Parses `ws_list` output: blocks start at `id:` lines; within a block,
-/// known fields are matched on their lowercase prefix before the first `:`.
-/// Unknown lines are skipped and missing fields stay `None`.
+/// Parses `ws_list` output: blocks start at `id:` lines (the key before the
+/// first `:` is trimmed and compared case-insensitively, so `Id : name`
+/// variants are recognized too); within a block, known fields are matched on
+/// their lowercase key prefix. Unknown lines — including arbitrary non-ASCII
+/// or lossy-decoded noise — are skipped and missing fields stay `None`; the
+/// parser never slices at fixed byte offsets, so it cannot panic on
+/// multi-byte UTF-8 input.
 #[must_use]
 pub fn parse_ws_list(raw: &str) -> Vec<WsListEntry> {
     let mut entries = Vec::new();
@@ -317,12 +344,17 @@ pub fn parse_ws_list(raw: &str) -> Vec<WsListEntry> {
         if trimmed.is_empty() {
             continue;
         }
-        if trimmed.len() >= 3 && trimmed[..3].eq_ignore_ascii_case("id:") {
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.eq_ignore_ascii_case("id") {
             if let Some(entry) = current.take() {
                 entries.push(entry);
             }
             current = Some(WsListEntry {
-                id: trimmed[3..].trim().to_string(),
+                id: value.to_string(),
                 ..WsListEntry::default()
             });
             continue;
@@ -330,14 +362,10 @@ pub fn parse_ws_list(raw: &str) -> Vec<WsListEntry> {
         let Some(entry) = current.as_mut() else {
             continue;
         };
-        let Some((key, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let key = key.trim().to_ascii_lowercase();
-        let value = value.trim();
         if value.is_empty() {
             continue;
         }
+        let key = key.to_ascii_lowercase();
         if key.starts_with("workspace directory") {
             entry.directory = Some(PathBuf::from(value));
         } else if key.starts_with("remaining time") {
@@ -560,6 +588,57 @@ Id: ws-a
     }
 
     #[test]
+    fn parse_ws_list_never_panics_on_multibyte_utf8_lines() {
+        // Regression: the old parser sliced `trimmed[..3]`, which panics when
+        // byte 3 falls inside a multi-byte character ('€' spans bytes 1-3
+        // here). Such lines must be skipped as unknown noise, not panic.
+        let raw = "\
+a€rie: not a block
+id: ok
+     workspace directory  : /scratch/ok
+€€: more noise
+";
+        let entries = parse_ws_list(raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "ok");
+        assert_eq!(
+            entries[0].directory.as_deref(),
+            Some(Path::new("/scratch/ok"))
+        );
+    }
+
+    #[test]
+    fn parse_ws_list_tolerates_lossy_decoded_noise() {
+        // from_utf8_lossy replaces invalid bytes with U+FFFD; interleaved
+        // replacement-character noise must not derail block parsing.
+        let raw = format!(
+            "{r}{r}garbage {r}\nid: survivor\n     remaining time       : 2 days\n{r}: {r}\n",
+            r = char::REPLACEMENT_CHARACTER
+        );
+        let entries = parse_ws_list(&raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "survivor");
+        assert_eq!(entries[0].remaining_seconds, Some(2 * SECONDS_PER_DAY));
+    }
+
+    #[test]
+    fn parse_ws_list_accepts_space_before_the_id_colon() {
+        // Block detection is as tolerant as field matching: the key before
+        // the first ':' is trimmed and compared case-insensitively.
+        let raw = "\
+Id : foo
+     workspace directory  : /scratch/foo
+";
+        let entries = parse_ws_list(raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "foo");
+        assert_eq!(
+            entries[0].directory.as_deref(),
+            Some(Path::new("/scratch/foo"))
+        );
+    }
+
+    #[test]
     fn parse_remaining_time_covers_variants() {
         assert_eq!(
             parse_remaining_time_seconds("29 days 23 hours"),
@@ -585,7 +664,7 @@ Id: ws-a
     }
 
     #[test]
-    fn workspace_state_round_trips_and_rejects_future_versions() {
+    fn workspace_state_round_trips_and_falls_back_on_stale_content() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("workspace-state.toml");
 
@@ -607,9 +686,19 @@ Id: ws-a
         let reloaded = load_workspace_state(&path).expect("reload");
         assert_eq!(reloaded, state);
 
+        // Stale content must never brick a command: an unknown schema version
+        // or an unparsable file is a regenerable cache and falls back to the
+        // empty default (with a stderr warning) instead of erroring.
         fs::write(&path, "version = 999\n").expect("future version");
-        let err = load_workspace_state(&path).expect_err("future version rejected");
-        assert!(err.to_string().contains("unsupported workspace state"));
+        assert_eq!(
+            load_workspace_state(&path).expect("future version tolerated"),
+            WorkspaceState::default()
+        );
+        fs::write(&path, "not [valid toml").expect("corrupt state");
+        assert_eq!(
+            load_workspace_state(&path).expect("corrupt state tolerated"),
+            WorkspaceState::default()
+        );
     }
 
     #[test]

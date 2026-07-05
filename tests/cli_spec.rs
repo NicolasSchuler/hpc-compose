@@ -2742,6 +2742,7 @@ fn settings_schema_definition_keys_match_exhaustive_catalog() {
                 "env",
                 "binaries",
                 "cache",
+                "workspace",
                 "login_host",
                 "login_user",
             ],
@@ -2768,6 +2769,17 @@ fn settings_schema_definition_keys_match_exhaustive_catalog() {
             ],
         ),
         ("cacheSettings", &["dir", "enroot_temp_dir"]),
+        (
+            "workspaceSettings",
+            &[
+                "name",
+                "duration_days",
+                "auto_allocate",
+                "auto_extend",
+                "warn_days_left",
+                "queue_buffer_days",
+            ],
+        ),
         (
             "resourceProfile",
             &[

@@ -291,6 +291,11 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | `--singularity-bin` | `singularity` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare`, `preflight`, `debug`, `doctor` |
 | `--huggingface-cli-bin` | `huggingface-cli` | `up`, `when`, `alloc`, `germinate`, `test`, `dev`, `tmux`, `run`, `notebook`, `sweep submit`, `prepare` |
 | `--tmux-bin` | `tmux` | `tmux` |
+| `--ws-find-bin` | `ws_find` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
+| `--ws-allocate-bin` | `ws_allocate` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
+| `--ws-extend-bin` | `ws_extend` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
+| `--ws-release-bin` | `ws_release` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
+| `--ws-list-bin` | `ws_list` | `workspace status`, `workspace allocate`, `workspace extend`, `workspace release` |
 
 > **Note:** `doctor` accepts the `--*-bin` overrides only through its deprecated top-level flag form, not the recommended `doctor <subcommand>` forms (`doctor cluster-report`, `doctor readiness`, `doctor mpi-smoke`, `doctor fabric-smoke`), which reject them with an "unexpected argument" error.
 
