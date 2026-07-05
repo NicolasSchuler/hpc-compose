@@ -55,6 +55,9 @@ pub use artifacts::{
     ArtifactExportReport, ArtifactManifest, BundleExportReport, artifact_manifest_path_for_record,
     artifact_payload_dir_for_record, artifacts_dir_for_record, export_artifacts,
 };
+// Crate-internal tar/hash helpers shared with `experiment bundle` (kept
+// `pub(crate)` because they are not part of the published `job` API).
+pub(crate) use artifacts::{hash_file, write_tree_tarball};
 pub use checkpoints::{
     CheckpointAttempt, CheckpointAttemptService, CheckpointHistory, collect_checkpoint_history,
 };

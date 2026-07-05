@@ -482,7 +482,10 @@ fn collect_path_metadata(
     Ok(())
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+/// Streams `path`'s contents through a SHA-256 hasher and returns the lowercase
+/// hex digest. Shared by the artifact-export manifest and the reproducibility
+/// bundle so per-file hashing stays byte-identical across both.
+pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).context(format!("failed to open {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 8192];
@@ -498,25 +501,21 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn write_bundle_tarball(
-    tarball_path: &Path,
-    bundle_root: &Path,
-    copied_relative_paths: &[PathBuf],
-) -> Result<()> {
+/// Opens a gzip-compressed tar builder at `tarball_path`, creating the parent
+/// directory first. Shared by [`write_bundle_tarball`] and [`write_tree_tarball`].
+fn create_tar_builder(tarball_path: &Path) -> Result<Builder<GzEncoder<File>>> {
     if let Some(parent) = tarball_path.parent() {
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
     }
     let file = File::create(tarball_path)
         .context(format!("failed to create {}", tarball_path.display()))?;
     let encoder = GzEncoder::new(file, Compression::default());
-    let mut builder = Builder::new(encoder);
-    for relative in copied_relative_paths {
-        let source = bundle_root.join(relative);
-        if !source.exists() && fs::symlink_metadata(&source).is_err() {
-            continue;
-        }
-        append_path_to_tar(&mut builder, &source, relative)?;
-    }
+    Ok(Builder::new(encoder))
+}
+
+/// Finalizes a tar builder created by [`create_tar_builder`], flushing the tar
+/// trailer and the gzip stream to disk.
+fn finish_tar_builder(mut builder: Builder<GzEncoder<File>>, tarball_path: &Path) -> Result<()> {
     builder
         .finish()
         .context(format!("failed to finalize {}", tarball_path.display()))?;
@@ -529,7 +528,37 @@ fn write_bundle_tarball(
     Ok(())
 }
 
-fn append_path_to_tar<W: Write>(
+fn write_bundle_tarball(
+    tarball_path: &Path,
+    bundle_root: &Path,
+    copied_relative_paths: &[PathBuf],
+) -> Result<()> {
+    let mut builder = create_tar_builder(tarball_path)?;
+    for relative in copied_relative_paths {
+        let source = bundle_root.join(relative);
+        if !source.exists() && fs::symlink_metadata(&source).is_err() {
+            continue;
+        }
+        append_path_to_tar(&mut builder, &source, relative)?;
+    }
+    finish_tar_builder(builder, tarball_path)
+}
+
+/// Writes a deterministic gzip tarball of the entire directory tree rooted at
+/// `source_dir`, placing every entry under `top_level_name`. Entries are emitted
+/// in sorted order (via [`append_path_to_tar`]), so the archive layout is
+/// reproducible. Used by `experiment bundle`.
+pub(crate) fn write_tree_tarball(
+    tarball_path: &Path,
+    source_dir: &Path,
+    top_level_name: &Path,
+) -> Result<()> {
+    let mut builder = create_tar_builder(tarball_path)?;
+    append_path_to_tar(&mut builder, source_dir, top_level_name)?;
+    finish_tar_builder(builder, tarball_path)
+}
+
+pub(crate) fn append_path_to_tar<W: Write>(
     builder: &mut Builder<W>,
     source: &Path,
     relative: &Path,
