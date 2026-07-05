@@ -81,8 +81,6 @@
     "name",
     "state",
     "services",
-    "tags",
-    "notes",
     "next_commands"
   ],
   "$defs": {

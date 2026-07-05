@@ -36,10 +36,10 @@ pub(crate) struct ExperimentShowOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     efficiency: Option<EfficiencyScoreReport>,
     /// User-assigned labels on the tracked record (see `experiment tag`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tags: Vec<String>,
     /// Append-only timestamped observations (see `experiment note`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     notes: Vec<JobNote>,
     next_commands: Vec<String>,
 }
