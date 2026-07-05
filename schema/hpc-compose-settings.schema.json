@@ -95,6 +95,9 @@
         "cache": {
           "$ref": "#/definitions/cacheSettings"
         },
+        "workspace": {
+          "$ref": "#/definitions/workspaceSettings"
+        },
         "login_host": {
           "type": "string",
           "description": "SSH login host used as the `up --remote` delegation destination and shown in connection hints. May be a bare host, a ~/.ssh/config alias, or user@host."
@@ -175,6 +178,39 @@
         "enroot_temp_dir": {
           "type": "string",
           "description": "Directory enroot uses for its temporary extraction scratch (ENROOT_TEMP_PATH) during prepare-time image import. Defaults to <cache_dir>/enroot/tmp; point it at fast node-local storage (e.g. /tmp/$USER-hpc-compose-enroot) when the shared cache filesystem causes `Stale file handle` errors. Overridden by the compose x-slurm.enroot_temp_dir and HPC_COMPOSE_ENROOT_TEMP_DIR."
+        }
+      }
+    },
+    "workspaceSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "hpc-workspace (ws_*) lifecycle settings for the `workspace` command group. A profile's workspace block overrides defaults.workspace per field.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Workspace name passed to the ws_* tools (for example hpc-compose-cache)."
+        },
+        "duration_days": {
+          "$ref": "#/definitions/positiveInteger",
+          "description": "Allocation/renewal duration in days for ws_allocate and the ws_extend default (default 30)."
+        },
+        "auto_allocate": {
+          "type": "boolean",
+          "description": "Allocate a missing workspace automatically at submit time. Reserved: used from Phase 2 (up/preflight integration)."
+        },
+        "auto_extend": {
+          "type": "boolean",
+          "description": "Extend the workspace automatically at submit time when it would expire too soon. Reserved: used from Phase 2."
+        },
+        "warn_days_left": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Warn when fewer than this many days of workspace lifetime remain (default 7; 0 disables the warning). Reserved: used from Phase 2."
+        },
+        "queue_buffer_days": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Extra buffer in days on top of a job's expected queue+run time for expiry checks (default 2; 0 disables the buffer). Reserved: used from Phase 2."
         }
       }
     },

@@ -79,6 +79,7 @@ pub(crate) mod tracked_paths;
 pub(crate) mod watch_ui;
 pub(crate) mod weather;
 pub(crate) mod when;
+pub mod workspace;
 
 /// Converts a CLI failure into a rendered diagnostic report while preserving
 /// structured spec diagnostics when they are present inside an `anyhow::Error`.
