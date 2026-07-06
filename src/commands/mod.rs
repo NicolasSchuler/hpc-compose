@@ -4,9 +4,11 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use hpc_compose::cli::{
-    CacheCommands, Cli, Commands, DoctorCommands, ExamplesCommands, ExperimentCommands,
-    JobsCommands, OutputFormat, RendezvousCommands, SchemaKind, SweepCommands, WorkspaceCommands,
+    CacheCommands, Cli, Commands, CompletionValueKind, DoctorCommands, ExamplesCommands,
+    ExperimentCommands, JobsCommands, OutputFormat, RendezvousCommands, SchemaKind, SweepCommands,
+    WorkspaceCommands,
 };
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
@@ -19,6 +21,7 @@ use hpc_compose::when::{
 };
 
 mod cache;
+mod completion_values;
 mod confirm;
 pub(crate) mod doctor;
 pub(crate) mod evolve;
@@ -52,6 +55,128 @@ pub fn run_cli(cli: Cli, raw_args: &[OsString]) -> Result<()> {
             assume_explicit_values: false,
         },
     )
+}
+
+/// Handles the internal live-completion value endpoint before Clap parses the
+/// public command tree. Keeping this endpoint out of [`Cli`] prevents generated
+/// shell completions from advertising it as a normal subcommand.
+pub fn run_completion_values_from_raw_args(raw_args: &[OsString]) -> Result<bool> {
+    let Some(command_index) = completion_values_command_index(raw_args) else {
+        return Ok(false);
+    };
+    let mut options = GlobalCommandOptions {
+        raw_args: raw_args.to_vec(),
+        ..GlobalCommandOptions::default()
+    };
+    let mut kind = None;
+    let mut file = None;
+    let mut job_id = None;
+    let mut prefix = String::new();
+    let mut index = 1;
+    while index < raw_args.len() {
+        if index == command_index {
+            index += 1;
+            continue;
+        }
+        let arg = raw_args[index].to_string_lossy();
+        match arg.as_ref() {
+            "--profile" => {
+                if let Some(value) = raw_args.get(index + 1) {
+                    options.profile = Some(value.to_string_lossy().to_string());
+                    index += 2;
+                    continue;
+                }
+            }
+            "--settings-file" => {
+                if let Some(value) = raw_args.get(index + 1) {
+                    options.settings_file = Some(PathBuf::from(value.as_os_str()));
+                    index += 2;
+                    continue;
+                }
+            }
+            "--kind" => {
+                if let Some(value) = raw_args.get(index + 1) {
+                    kind = Some(parse_completion_value_kind(&value.to_string_lossy())?);
+                    index += 2;
+                    continue;
+                }
+            }
+            "--file" | "-f" => {
+                if let Some(value) = raw_args.get(index + 1) {
+                    file = Some(PathBuf::from(value.as_os_str()));
+                    index += 2;
+                    continue;
+                }
+            }
+            "--job-id" => {
+                if let Some(value) = raw_args.get(index + 1) {
+                    job_id = Some(value.to_string_lossy().to_string());
+                    index += 2;
+                    continue;
+                }
+            }
+            "--prefix" => {
+                if let Some(value) = raw_args.get(index + 1) {
+                    prefix = value.to_string_lossy().to_string();
+                    index += 2;
+                    continue;
+                }
+            }
+            "--quiet" => {
+                options.quiet = true;
+            }
+            _ => {
+                if let Some(value) = arg.strip_prefix("--profile=") {
+                    options.profile = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--settings-file=") {
+                    options.settings_file = Some(PathBuf::from(value));
+                } else if let Some(value) = arg.strip_prefix("--kind=") {
+                    kind = Some(parse_completion_value_kind(value)?);
+                } else if let Some(value) = arg.strip_prefix("--file=") {
+                    file = Some(PathBuf::from(value));
+                } else if let Some(value) = arg.strip_prefix("-f") {
+                    if !value.is_empty() {
+                        file = Some(PathBuf::from(value));
+                    }
+                } else if let Some(value) = arg.strip_prefix("--job-id=") {
+                    job_id = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--prefix=") {
+                    prefix = value.to_string();
+                }
+            }
+        }
+        index += 1;
+    }
+    let kind = kind.context("__complete-values requires --kind <kind>")?;
+    completion_values::complete_values(&options, kind, file, job_id, prefix)?;
+    Ok(true)
+}
+
+fn completion_values_command_index(raw_args: &[OsString]) -> Option<usize> {
+    let mut index = 1;
+    while index < raw_args.len() {
+        let arg = raw_args[index].to_string_lossy();
+        match arg.as_ref() {
+            "__complete-values" => return Some(index),
+            "--" => return None,
+            "--quiet" => index += 1,
+            "--color" | "--profile" | "--settings-file" => index += 2,
+            value
+                if value.starts_with("--color=")
+                    || value.starts_with("--profile=")
+                    || value.starts_with("--settings-file=") =>
+            {
+                index += 1;
+            }
+            value if value.starts_with('-') => return None,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn parse_completion_value_kind(raw: &str) -> Result<CompletionValueKind> {
+    CompletionValueKind::from_str(raw, true).map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 #[cfg(test)]
@@ -2297,6 +2422,28 @@ fn print_schema(kind: Option<SchemaKind>, output: Option<String>) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_completion_endpoint_is_only_top_level_command() {
+        let top_level = vec![
+            OsString::from("hpc-compose"),
+            OsString::from("--profile"),
+            OsString::from("dev"),
+            OsString::from("__complete-values"),
+            OsString::from("--kind"),
+            OsString::from("service"),
+        ];
+        assert_eq!(completion_values_command_index(&top_level), Some(3));
+
+        let user_argument = vec![
+            OsString::from("hpc-compose"),
+            OsString::from("run"),
+            OsString::from("app"),
+            OsString::from("--"),
+            OsString::from("__complete-values"),
+        ];
+        assert_eq!(completion_values_command_index(&user_argument), None);
+    }
 
     #[test]
     fn flag_helpers_and_strategy_validation_cover_remaining_paths() {

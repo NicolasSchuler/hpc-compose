@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 use super::help::*;
@@ -2757,6 +2757,18 @@ pub enum Commands {
         )]
         shell: Shell,
     },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum CompletionValueKind {
+    Partition,
+    Qos,
+    Resources,
+    Service,
+    JobId,
+    Tag,
+    SweepId,
+    Bundle,
 }
 
 #[derive(Debug, Subcommand)]

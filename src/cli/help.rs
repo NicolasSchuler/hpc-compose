@@ -585,6 +585,9 @@ Examples:
   hpc-compose setup --env 'CACHE_DIR=<shared-cache-dir>' --binary srun=/opt/slurm/bin/srun --non-interactive";
 
 pub(super) const COMPLETIONS_HELP: &str = "\
+Notes:
+  Bash, Zsh, and Fish completions include live values for local project state, such as compose services, resource profiles, cluster partitions/QOS, tracked job ids, sweep ids, tags, and artifact bundles. PowerShell and Elvish use static command/flag completions.
+
 Examples:
   hpc-compose completions bash
   hpc-compose completions zsh > ~/.zfunc/_hpc-compose

@@ -71,7 +71,7 @@ and common practice.
 | `evolve` | Learn spec features through a progressive valid-spec tutorial | Use `--list-lessons`, `--describe-lesson <id>`, and `--until <step>` to inspect or stop at a lesson step. `--format json` requires `--yes`. |
 | `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, binary overrides, and an optional profile cache default. |
 | `context` | Print the resolved execution context | Shows the selected profile, binaries, interpolation vars, runtime paths, and value sources. |
-| `completions` | Generate shell completion scripts | Supports Bash, Zsh, Fish, PowerShell, and Elvish through Clap's completion generator. |
+| `completions` | Generate shell completion scripts | Bash, Zsh, and Fish include live local values for service names, resource profiles, partitions/QOS, tracked job ids, sweep ids, tags, and artifact bundles. PowerShell and Elvish use static command/flag completions from Clap. |
 
 ```bash
 hpc-compose new --list-templates

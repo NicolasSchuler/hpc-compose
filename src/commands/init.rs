@@ -354,11 +354,416 @@ fn completions_to_writer(shell: Shell, writer: &mut impl Write) -> Result<()> {
         .context("failed to spawn completion generator")?
         .join()
         .map_err(|_| anyhow::anyhow!("completion generator panicked"))?;
+    let output = add_dynamic_completion_hooks(shell, output)?;
     writer
         .write_all(&output)
         .context("failed to write shell completions")?;
     Ok(())
 }
+
+fn add_dynamic_completion_hooks(shell: Shell, output: Vec<u8>) -> Result<Vec<u8>> {
+    match shell {
+        Shell::Bash => {
+            let script =
+                String::from_utf8(output).context("bash completions were not valid UTF-8")?;
+            Ok(inject_bash_dynamic_completion(script).into_bytes())
+        }
+        Shell::Zsh => {
+            let script =
+                String::from_utf8(output).context("zsh completions were not valid UTF-8")?;
+            Ok(inject_zsh_dynamic_completion(script).into_bytes())
+        }
+        Shell::Fish => {
+            let mut script =
+                String::from_utf8(output).context("fish completions were not valid UTF-8")?;
+            script.push_str(FISH_DYNAMIC_COMPLETIONS);
+            Ok(script.into_bytes())
+        }
+        _ => Ok(output),
+    }
+}
+
+fn inject_bash_dynamic_completion(script: String) -> String {
+    let mut script = script.replacen("_hpc-compose() {", "_hpc-compose_static() {", 1);
+    script.push_str(BASH_DYNAMIC_COMPLETIONS);
+    script
+}
+
+fn inject_zsh_dynamic_completion(script: String) -> String {
+    let mut script = script.replacen("_hpc-compose() {", "_hpc-compose_static() {", 1);
+    script.push_str(ZSH_DYNAMIC_COMPLETIONS);
+    script
+}
+
+const BASH_DYNAMIC_COMPLETIONS: &str = r#"
+
+__hpc_compose_dynamic_command() {
+    local -a commands
+    local word skip_next=""
+    for word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
+        if [[ -n "$skip_next" ]]; then
+            skip_next=""
+            continue
+        fi
+        case "$word" in
+            --) break ;;
+            -f|--file|--profile|--settings-file|--color|--format|--output|--into|--timeout|--log-file|--queue-warn-after|--poll-interval|--wait-until|--at|--env|--set|--remove)
+                skip_next=1
+                continue
+                ;;
+        esac
+        [[ "$word" == -* ]] && continue
+        commands+=("$word")
+    done
+    printf '%s\n' "${commands[*]}"
+}
+
+__hpc_compose_dynamic_kind() {
+    local command_path="$1"
+    local flag="$2"
+    case "$flag" in
+        --partition) printf '%s\n' partition ;;
+        --qos) printf '%s\n' qos ;;
+        --resources) printf '%s\n' resources ;;
+        --service) printf '%s\n' service ;;
+        --job-id|--after-job) printf '%s\n' job-id ;;
+        --tag|--remove)
+            case "$command_path" in
+                experiment|experiment\ *) printf '%s\n' tag ;;
+            esac
+            ;;
+        --sweep-id|--sweep|--across) printf '%s\n' sweep-id ;;
+        --bundle)
+            case "$command_path" in
+                experiment\ bundle*) printf '%s\n' bundle ;;
+            esac
+            ;;
+    esac
+}
+
+__hpc_compose_dynamic_arg() {
+    local flag="$1"
+    local i
+    for ((i = 1; i < COMP_CWORD; i++)); do
+        case "${COMP_WORDS[i]}" in
+            "$flag")
+                if ((i + 1 < COMP_CWORD)); then
+                    printf '%s\n' "${COMP_WORDS[$((i + 1))]}"
+                    return
+                fi
+                ;;
+            "$flag"=*)
+                printf '%s\n' "${COMP_WORDS[i]#*=}"
+                return
+                ;;
+            -f*)
+                if [[ "$flag" == "-f" && "${COMP_WORDS[i]}" != "-f" ]]; then
+                    printf '%s\n' "${COMP_WORDS[i]#-f}"
+                    return
+                fi
+                ;;
+        esac
+    done
+}
+
+__hpc_compose_experiment_bundle_job_id() {
+    local command_path="$1"
+    [[ "$command_path" == "experiment bundle"* ]] || return
+    local word previous=""
+    for word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
+        if [[ -n "$previous" ]]; then
+            previous=""
+            continue
+        fi
+        case "$word" in
+            experiment|bundle) continue ;;
+            --) break ;;
+            -f|--file|--profile|--settings-file|--color|--format|--output|--into)
+                previous=skip
+                continue
+                ;;
+            --*) continue ;;
+            -*) continue ;;
+        esac
+        printf '%s\n' "$word"
+        return
+    done
+}
+
+__hpc_compose_dynamic_values() {
+    local kind="$1"
+    local cur="$2"
+    local file profile settings job_id
+    local -a globals args
+    file="$(__hpc_compose_dynamic_arg --file)"
+    if [[ -z "$file" ]]; then
+        file="$(__hpc_compose_dynamic_arg -f)"
+    fi
+    profile="$(__hpc_compose_dynamic_arg --profile)"
+    settings="$(__hpc_compose_dynamic_arg --settings-file)"
+    job_id="$(__hpc_compose_dynamic_arg --job-id)"
+    if [[ -z "$job_id" ]]; then
+        job_id="$(__hpc_compose_experiment_bundle_job_id "$(__hpc_compose_dynamic_command)")"
+    fi
+    [[ -n "$profile" ]] && globals+=(--profile "$profile")
+    [[ -n "$settings" ]] && globals+=(--settings-file "$settings")
+    args=(__complete-values --kind "$kind" --prefix "$cur")
+    [[ -n "$file" ]] && args+=(--file "$file")
+    [[ -n "$job_id" ]] && args+=(--job-id "$job_id")
+    command hpc-compose "${globals[@]}" "${args[@]}" 2>/dev/null
+}
+
+_hpc-compose() {
+    local cur prev command_path kind
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[$((COMP_CWORD - 1))]}"
+    command_path="$(__hpc_compose_dynamic_command)"
+    kind="$(__hpc_compose_dynamic_kind "$command_path" "$prev")"
+    if [[ -n "$kind" ]]; then
+        COMPREPLY=()
+        while IFS= read -r value; do
+            COMPREPLY+=("$value")
+        done < <(__hpc_compose_dynamic_values "$kind" "$cur")
+        if ((${#COMPREPLY[@]} > 0)); then
+            return 0
+        fi
+    fi
+    _hpc-compose_static "$@"
+}
+"#;
+
+const ZSH_DYNAMIC_COMPLETIONS: &str = r#"
+
+__hpc_compose_dynamic_command() {
+    local -a commands
+    local word skip_next
+    for word in "${words[@]:1:CURRENT-2}"; do
+        if [[ -n "$skip_next" ]]; then
+            skip_next=
+            continue
+        fi
+        case "$word" in
+            --) break ;;
+            -f|--file|--profile|--settings-file|--color|--format|--output|--into|--timeout|--log-file|--queue-warn-after|--poll-interval|--wait-until|--at|--env|--set|--remove)
+                skip_next=1
+                continue
+                ;;
+        esac
+        [[ "$word" == -* ]] && continue
+        commands+=("$word")
+    done
+    print -r -- "${commands[*]}"
+}
+
+__hpc_compose_dynamic_kind() {
+    local command_path="$1"
+    local flag="$2"
+    case "$flag" in
+        --partition) print -r -- partition ;;
+        --qos) print -r -- qos ;;
+        --resources) print -r -- resources ;;
+        --service) print -r -- service ;;
+        --job-id|--after-job) print -r -- job-id ;;
+        --tag|--remove)
+            case "$command_path" in
+                experiment|experiment\ *) print -r -- tag ;;
+            esac
+            ;;
+        --sweep-id|--sweep|--across) print -r -- sweep-id ;;
+        --bundle)
+            case "$command_path" in
+                experiment\ bundle*) print -r -- bundle ;;
+            esac
+            ;;
+    esac
+}
+
+__hpc_compose_zsh_arg() {
+    local flag="$1"
+    local i=1
+    while ((i < CURRENT)); do
+        case "${words[i]}" in
+            "$flag")
+                if ((i + 1 < CURRENT)); then
+                    print -r -- "${words[$((i + 1))]}"
+                    return
+                fi
+                ;;
+            "$flag"=*)
+                print -r -- "${words[i]#*=}"
+                return
+                ;;
+            -f*)
+                if [[ "$flag" == "-f" && "${words[i]}" != "-f" ]]; then
+                    print -r -- "${words[i]#-f}"
+                    return
+                fi
+                ;;
+        esac
+        ((i++))
+    done
+}
+
+__hpc_compose_experiment_bundle_job_id() {
+    local command_path="$1"
+    [[ "$command_path" == "experiment bundle"* ]] || return
+    local word skip_next
+    for word in "${words[@]:1:CURRENT-2}"; do
+        if [[ -n "$skip_next" ]]; then
+            skip_next=
+            continue
+        fi
+        case "$word" in
+            experiment|bundle) continue ;;
+            --) break ;;
+            -f|--file|--profile|--settings-file|--color|--format|--output|--into)
+                skip_next=1
+                continue
+                ;;
+            --*|-*) continue ;;
+        esac
+        print -r -- "$word"
+        return
+    done
+}
+
+__hpc_compose_zsh_values() {
+    local kind="$1"
+    local file profile settings job_id
+    local -a globals args
+    file="$(__hpc_compose_zsh_arg --file)"
+    if [[ -z "$file" ]]; then
+        file="$(__hpc_compose_zsh_arg -f)"
+    fi
+    profile="$(__hpc_compose_zsh_arg --profile)"
+    settings="$(__hpc_compose_zsh_arg --settings-file)"
+    job_id="$(__hpc_compose_zsh_arg --job-id)"
+    if [[ -z "$job_id" ]]; then
+        job_id="$(__hpc_compose_experiment_bundle_job_id "$(__hpc_compose_dynamic_command)")"
+    fi
+    [[ -n "$profile" ]] && globals+=(--profile "$profile")
+    [[ -n "$settings" ]] && globals+=(--settings-file "$settings")
+    args=(__complete-values --kind "$kind" --prefix "$PREFIX")
+    [[ -n "$file" ]] && args+=(--file "$file")
+    [[ -n "$job_id" ]] && args+=(--job-id "$job_id")
+    command hpc-compose "${globals[@]}" "${args[@]}" 2>/dev/null
+}
+
+_hpc-compose() {
+    local prev command_path kind
+    prev="${words[$((CURRENT - 1))]}"
+    command_path="$(__hpc_compose_dynamic_command)"
+    kind="$(__hpc_compose_dynamic_kind "$command_path" "$prev")"
+    if [[ -n "$kind" ]]; then
+        local -a values
+        values=("${(@f)$(__hpc_compose_zsh_values "$kind")}")
+        if ((${#values} > 0)); then
+            compadd -- "${values[@]}"
+            return
+        fi
+    fi
+    _hpc-compose_static "$@"
+}
+compdef _hpc-compose hpc-compose
+"#;
+
+const FISH_DYNAMIC_COMPLETIONS: &str = r#"
+
+function __hpc_compose_dynamic_arg
+    set -l flag $argv[1]
+    set -l words (commandline -opc)
+    set -l count_words (count $words)
+    for i in (seq 1 $count_words)
+        switch $words[$i]
+            case $flag
+                set -l next (math $i + 1)
+                if test $next -le $count_words
+                    printf '%s\n' $words[$next]
+                    return
+                end
+            case "$flag=*"
+                string replace -r "^$flag=" "" -- $words[$i]
+                return
+            case "-f*"
+                if test "$flag" = "-f"; and test "$words[$i]" != "-f"
+                    string replace -r "^-f" "" -- $words[$i]
+                    return
+                end
+        end
+    end
+end
+
+function __hpc_compose_dynamic_contains_command --argument-names wanted
+    set -l words (commandline -opc)
+    string match -q -- "* $wanted *" " $words "
+end
+
+function __hpc_compose_experiment_bundle_job_id
+    __hpc_compose_dynamic_contains_command "experiment bundle"; or return
+    set -l words (commandline -opc)
+    set -l skip_next 0
+    for word in $words[2..-1]
+        if test "$skip_next" = 1
+            set skip_next 0
+            continue
+        end
+        switch $word
+            case experiment bundle
+                continue
+            case --file -f --profile --settings-file --color --format --output --into
+                set skip_next 1
+                continue
+            case "--*" "-*"
+                continue
+        end
+        printf '%s\n' $word
+        return
+    end
+end
+
+function __hpc_compose_complete_values
+    set -l kind $argv[1]
+    set -l token (commandline -ct)
+    set -l file (__hpc_compose_dynamic_arg --file)
+    if test -z "$file"
+        set file (__hpc_compose_dynamic_arg -f)
+    end
+    set -l profile (__hpc_compose_dynamic_arg --profile)
+    set -l settings (__hpc_compose_dynamic_arg --settings-file)
+    set -l job_id (__hpc_compose_dynamic_arg --job-id)
+    if test -z "$job_id"
+        set job_id (__hpc_compose_experiment_bundle_job_id)
+    end
+    set -l globals
+    set -l args __complete-values --kind $kind --prefix "$token"
+    if test -n "$profile"
+        set globals $globals --profile "$profile"
+    end
+    if test -n "$settings"
+        set globals $globals --settings-file "$settings"
+    end
+    if test -n "$file"
+        set args $args --file "$file"
+    end
+    if test -n "$job_id"
+        set args $args --job-id "$job_id"
+    end
+    command hpc-compose $globals $args 2>/dev/null
+end
+
+complete -c hpc-compose -l partition -f -n "__hpc_compose_dynamic_contains_command up" -a "(__hpc_compose_complete_values partition)"
+complete -c hpc-compose -l qos -f -n "__hpc_compose_dynamic_contains_command up" -a "(__hpc_compose_complete_values qos)"
+complete -c hpc-compose -l resources -f -n "__hpc_compose_dynamic_contains_command up" -a "(__hpc_compose_complete_values resources)"
+complete -c hpc-compose -l service -f -n "__hpc_compose_dynamic_contains_command experiment" -a "(__hpc_compose_complete_values service)"
+complete -c hpc-compose -l job-id -f -n "__hpc_compose_dynamic_contains_command experiment" -a "(__hpc_compose_complete_values job-id)"
+complete -c hpc-compose -l after-job -f -n "__hpc_compose_dynamic_contains_command up" -a "(__hpc_compose_complete_values job-id)"
+complete -c hpc-compose -l tag -f -n "__hpc_compose_dynamic_contains_command experiment" -a "(__hpc_compose_complete_values tag)"
+complete -c hpc-compose -l remove -f -n "__hpc_compose_dynamic_contains_command experiment" -a "(__hpc_compose_complete_values tag)"
+complete -c hpc-compose -l sweep-id -f -n "__hpc_compose_dynamic_contains_command sweep" -a "(__hpc_compose_complete_values sweep-id)"
+complete -c hpc-compose -l sweep -f -n "__hpc_compose_dynamic_contains_command experiment" -a "(__hpc_compose_complete_values sweep-id)"
+complete -c hpc-compose -l across -f -n "__hpc_compose_dynamic_contains_command sweep" -a "(__hpc_compose_complete_values sweep-id)"
+complete -c hpc-compose -l bundle -f -n "__hpc_compose_dynamic_contains_command experiment bundle" -a "(__hpc_compose_complete_values bundle)"
+"#;
 
 fn prompt(
     input: &mut impl BufRead,
@@ -686,11 +1091,35 @@ mod tests {
     fn completions_emits_supported_shell_output() {
         let mut bash = Vec::new();
         completions_to_writer(Shell::Bash, &mut bash).expect("bash completions");
-        assert!(String::from_utf8_lossy(&bash).contains("hpc-compose"));
+        let bash = String::from_utf8_lossy(&bash);
+        assert!(bash.contains("hpc-compose"));
+        assert!(bash.contains("_hpc-compose_static"));
+        assert!(bash.contains("__complete-values --kind"));
+        assert!(bash.contains("COMPREPLY=()"));
+        assert!(!bash.contains("mapfile"));
+        assert!(bash.contains(r#"experiment\ bundle*)"#));
+        assert!(!bash.contains(" __complete-values completions"));
 
         let mut zsh = Vec::new();
         completions_to_writer(Shell::Zsh, &mut zsh).expect("zsh completions");
-        assert!(String::from_utf8_lossy(&zsh).contains("#compdef hpc-compose"));
+        let zsh = String::from_utf8_lossy(&zsh);
+        assert!(zsh.contains("#compdef hpc-compose"));
+        assert!(zsh.contains("_hpc-compose_static"));
+        assert!(zsh.contains("__complete-values --kind"));
+        assert!(!zsh.contains("'__complete-values:'"));
+
+        let mut fish = Vec::new();
+        completions_to_writer(Shell::Fish, &mut fish).expect("fish completions");
+        let fish = String::from_utf8_lossy(&fish);
+        assert!(fish.contains("__hpc_compose_complete_values"));
+        assert!(fish.contains("__complete-values --kind"));
+        assert!(
+            fish.contains(r#"-l tag -f -n "__hpc_compose_dynamic_contains_command experiment""#)
+        );
+        assert!(fish.contains(
+            r#"-l bundle -f -n "__hpc_compose_dynamic_contains_command experiment bundle""#
+        ));
+        assert!(!fish.contains(r#"-f -a "__complete-values""#));
     }
 
     #[test]
