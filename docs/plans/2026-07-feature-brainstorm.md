@@ -622,7 +622,7 @@ is quantile regression over your own sacct history (2.1) with per-geometry
 what-if deltas — call it estimation, not simulation, and it's actually
 buildable.
 
-## Agreed roadmap (updated 2026-07-05)
+## Agreed roadmap (updated 2026-07-06)
 
 Sequence agreed with Nicolas. Each item gets an architecture sketch (grounded
 in subsystem recon) before implementation; implementation runs via isolated
@@ -631,23 +631,23 @@ worktree agents with adversarial review before PR.
 **Done / in flight:**
 
 - 1.1 `sweep submit --resume` — PR #68 open
+- 4.10 `diff --against-spec` — implemented locally
+- 1.3 `experiment bundle` — implemented locally
+- 3.6 State reconciliation (`status --verify`) — implemented locally
+- 3.9 Unified residue reaper — implemented locally
+- 4.2 Live-value shell completions — implemented locally
+- 4.6 Strict `--dry-run`/`--offline` contract — implemented locally
 - 1.4 `experiment tag/note` — in implementation
 - 4.1 `render --annotate` + `explain` — in implementation
 
 **Queued, in this order:**
 
-1. 4.10 `diff --against-spec` (pre-submit what-changed)
-2. 1.3 `experiment bundle` (paper-ready reproducibility archive)
-3. 3.6 State reconciliation (`status --verify`)
-4. 3.9 Unified residue reaper
-5. 4.2 Live-value shell completions
-6. 4.6 Strict `--dry-run`/`--offline` contract
-7. 4.9 Offline doc search (`hpc-compose docs <query>`)
-8. 1.7 `notebook promote`
-9. 2.7 Idle-GPU watchdog
-10. 3.1 Preemption-contract verification (`test --preemption`)
-11. 3.4 Failure classifier (`debug --classify`)
-12. 3.8 Shared-FS behavior probes in preflight
+1. 4.9 Offline doc search (`hpc-compose docs <query>`)
+2. 1.7 `notebook promote`
+3. 2.7 Idle-GPU watchdog
+4. 3.1 Preemption-contract verification (`test --preemption`)
+5. 3.4 Failure classifier (`debug --classify`)
+6. 3.8 Shared-FS behavior probes in preflight
 
 **Second wave (after the 12 above):**
 
