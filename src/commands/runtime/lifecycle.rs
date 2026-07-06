@@ -221,6 +221,7 @@ pub(crate) fn clean(
     age: Option<u64>,
     all: bool,
     dry_run: bool,
+    deep: bool,
     disk_usage: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
@@ -230,9 +231,24 @@ pub(crate) fn clean(
         debug_assert!(all);
         CleanupMode::AllExceptLatest
     };
-    let report = build_cleanup_report(&context.compose_file.value, mode, disk_usage, dry_run)?;
+    let report = if deep {
+        let cache_dir = active_cleanup_cache_dir(&context)?;
+        build_deep_cleanup_report(
+            &context.compose_file.value,
+            &cache_dir,
+            mode,
+            disk_usage,
+            dry_run,
+        )?
+    } else {
+        build_cleanup_report(&context.compose_file.value, mode, disk_usage, dry_run)?
+    };
     if !dry_run {
-        run_cleanup_report(&report)?;
+        if deep {
+            run_deep_cleanup_report(&report)?;
+        } else {
+            run_cleanup_report(&report)?;
+        }
     }
     match output::resolve_output_format(format) {
         OutputFormat::Text => {
@@ -248,4 +264,18 @@ pub(crate) fn clean(
         }
     }
     Ok(())
+}
+
+fn active_cleanup_cache_dir(context: &ResolvedContext) -> Result<PathBuf> {
+    if context.compose_file.source == ValueSource::Builtin && !context.compose_file.value.exists() {
+        return Ok(context.cache_dir.value.clone());
+    }
+    let runtime_plan =
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    Ok(runtime_plan.cache_dir)
 }

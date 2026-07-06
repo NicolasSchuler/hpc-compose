@@ -76,6 +76,20 @@ hpc-compose clean -f compose.yaml --age 7 --dry-run
 hpc-compose clean -f compose.yaml --age 7
 ```
 
+For long-lived project directories, use deep cleanup to audit the residue that is
+not covered by ordinary tracked-job selection alone:
+
+```bash
+hpc-compose clean -f compose.yaml --age 7 --deep --dry-run --disk-usage
+hpc-compose clean -f compose.yaml --age 7 --deep --yes
+```
+
+`--deep` keeps the same tracked-job selection (`--age DAYS` or `--all`), and
+adds expired rendezvous records plus unreferenced per-job enroot runtime dirs
+under `cache_dir/runtime/<job-id>`. It does not prune content-addressed cache
+artifacts; use `cache prune` for `base/`, `prepared/`, dataset, and model cache
+entries.
+
 ## After Upgrading
 
 Cache keys include the tool version, so upgrading `hpc-compose` invalidates existing cached artifacts. Expect a full rebuild on the next `prepare` or `up`, then optionally prune old entries:

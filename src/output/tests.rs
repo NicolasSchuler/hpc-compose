@@ -1361,6 +1361,7 @@ fn stdout_entrypoints_cover_public_output_wrappers() {
             bytes_reclaimed: Some(2_048),
             removable_paths: vec![tmpdir.path().join(".hpc-compose/jobs/12345.json")],
         }],
+        deep: None,
     };
 
     assert_eq!(

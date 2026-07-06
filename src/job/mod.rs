@@ -25,6 +25,7 @@ mod accounting;
 mod artifacts;
 mod bundle;
 mod checkpoints;
+mod deep_clean;
 mod diff;
 mod logs;
 mod metrics_probe;
@@ -63,6 +64,9 @@ pub use bundle::{
 };
 pub use checkpoints::{
     CheckpointAttempt, CheckpointAttemptService, CheckpointHistory, collect_checkpoint_history,
+};
+pub use deep_clean::{
+    DeepCleanupDetails, OrphanRuntimeDirReport, build_deep_cleanup_report, run_deep_cleanup_report,
 };
 pub use diff::{
     JobDiffChange, JobDiffReport, JobDiffServiceStatus, JobDiffSide, JobMatrixReport, JobMatrixRow,

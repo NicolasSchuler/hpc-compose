@@ -409,6 +409,7 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
         Some(7),
         false,
         true,
+        false,
         true,
         Some(OutputFormat::Json),
     )
@@ -1060,6 +1061,7 @@ fn runtime_wrappers_cover_success_paths_with_local_tracking() {
         Some(0),
         false,
         true,
+        false,
         true,
         Some(OutputFormat::Json),
     )

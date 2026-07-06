@@ -7,6 +7,16 @@
     "compose_file": {
       "type": "string"
     },
+    "deep": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DeepCleanupDetails"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "dry_run": {
       "type": "boolean"
     },
@@ -185,6 +195,88 @@
         "legacy_runtime_job_root",
         "legacy_runtime_job_root_present",
         "selected"
+      ]
+    },
+    "DeepCleanupDetails": {
+      "description": "Extra cleanup details included by `clean --deep`.",
+      "type": "object",
+      "properties": {
+        "cache_dir": {
+          "type": "string"
+        },
+        "orphan_runtime_dirs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrphanRuntimeDirReport"
+          }
+        },
+        "rendezvous": {
+          "$ref": "#/$defs/RendezvousPruneReport"
+        }
+      },
+      "required": [
+        "cache_dir",
+        "rendezvous",
+        "orphan_runtime_dirs"
+      ]
+    },
+    "OrphanRuntimeDirReport": {
+      "description": "One per-job enroot runtime directory found under `cache_dir/runtime/`.",
+      "type": "object",
+      "properties": {
+        "bytes_reclaimed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "modified_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "selected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "job_id",
+        "path",
+        "selected",
+        "reason"
+      ]
+    },
+    "RendezvousPruneReport": {
+      "description": "Summary returned by pruning expired records.",
+      "type": "object",
+      "properties": {
+        "cache_dir": {
+          "type": "string"
+        },
+        "removed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "cache_dir",
+        "removed"
       ]
     },
     "SubmissionKind": {

@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -19,6 +20,7 @@ use hpc_compose::job::{
     state_path_for_record, sweep_manifest_path_for, write_submission_record, write_sweep_manifest,
 };
 use hpc_compose::render::log_file_name_for_service;
+use hpc_compose::rendezvous::{RendezvousRegisterRequest, build_record, register};
 use serde_json::Value;
 use support::*;
 
@@ -11653,6 +11655,105 @@ fn clean_dry_run_does_not_remove_state_and_reports_json_contract() {
     assert!(record_path.exists());
     assert!(runtime_dir.exists());
     assert!(latest_path.exists());
+}
+
+#[test]
+fn clean_deep_reports_and_reaps_orphan_runtime_and_expired_rendezvous() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+
+    let orphan_runtime = cache_dir.join("runtime/99999");
+    fs::create_dir_all(orphan_runtime.join("cache")).expect("orphan runtime");
+    fs::write(orphan_runtime.join("cache/blob"), "payload").expect("orphan payload");
+
+    let record = build_record(
+        &cache_dir,
+        RendezvousRegisterRequest {
+            name: "model-server".to_string(),
+            job_id: "99999".to_string(),
+            service: Some("api".to_string()),
+            host: "node01".to_string(),
+            port: 8000,
+            protocol: "http".to_string(),
+            path: Some("/".to_string()),
+            ttl_seconds: 1,
+            metadata: BTreeMap::new(),
+        },
+        1,
+    )
+    .expect("rendezvous record");
+    let historical_path = register(&cache_dir, &record).expect("register rendezvous");
+    let latest_path = cache_dir.join("rendezvous/model-server/latest.json");
+
+    let dry_run = run_cli(
+        tmpdir.path(),
+        &[
+            "clean",
+            "--all",
+            "--deep",
+            "--dry-run",
+            "--disk-usage",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&dry_run);
+    let payload: Value = serde_json::from_str(&stdout_text(&dry_run)).expect("clean deep json");
+    assert_eq!(payload["dry_run"], Value::from(true));
+    assert_eq!(payload["removed_job_ids"], serde_json::json!([]));
+    assert_eq!(
+        payload["deep"]["cache_dir"],
+        Value::from(cache_dir.display().to_string())
+    );
+    assert_eq!(
+        payload["deep"]["orphan_runtime_dirs"][0]["job_id"],
+        Value::from("99999")
+    );
+    assert_eq!(
+        payload["deep"]["orphan_runtime_dirs"][0]["selected"],
+        Value::from(true)
+    );
+    assert!(
+        payload["deep"]["orphan_runtime_dirs"][0]["bytes_reclaimed"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    let removed_rendezvous = payload["deep"]["rendezvous"]["removed"]
+        .as_array()
+        .expect("removed rendezvous");
+    assert_eq!(removed_rendezvous.len(), 2);
+    assert!(orphan_runtime.exists());
+    assert!(historical_path.exists());
+    assert!(latest_path.exists());
+
+    let clean = run_cli(
+        tmpdir.path(),
+        &[
+            "clean",
+            "--all",
+            "--deep",
+            "--yes",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&clean);
+    let payload: Value = serde_json::from_str(&stdout_text(&clean)).expect("clean deep json");
+    assert_eq!(payload["dry_run"], Value::from(false));
+    assert_eq!(
+        payload["deep"]["orphan_runtime_dirs"][0]["job_id"],
+        Value::from("99999")
+    );
+    assert!(!orphan_runtime.exists());
+    assert!(!historical_path.exists());
+    assert!(!latest_path.exists());
 }
 
 #[test]

@@ -705,31 +705,91 @@ fn write_cleanup_report(
     }
     if report.removed_job_ids.is_empty() {
         writeln!(writer, "no tracked jobs matched cleanup criteria")?;
-        return Ok(());
+    } else {
+        let action = if report.dry_run {
+            "would remove"
+        } else {
+            "removed"
+        };
+        for job in report.jobs.iter().filter(|job| job.selected) {
+            write!(
+                writer,
+                "{} {} submit_dir={} runtime={}",
+                action,
+                job.inventory.job_id,
+                job.inventory.submit_dir.display(),
+                runtime_presence_label(
+                    job.inventory.runtime_job_root_present,
+                    job.inventory.legacy_runtime_job_root_present,
+                )
+            )?;
+            if disk_usage {
+                write!(
+                    writer,
+                    " size={}",
+                    format_bytes(job.bytes_reclaimed.unwrap_or(0))
+                )?;
+            }
+            writeln!(writer)?;
+        }
     }
+    if let Some(deep) = &report.deep {
+        write_deep_cleanup_details(writer, report, deep, disk_usage)?;
+    }
+    Ok(())
+}
 
+fn write_deep_cleanup_details(
+    writer: &mut impl Write,
+    report: &CleanupReport,
+    deep: &hpc_compose::job::DeepCleanupDetails,
+    disk_usage: bool,
+) -> io::Result<()> {
+    writeln!(writer, "{}", term::styled_section_header("Deep cleanup:"))?;
+    writeln!(
+        writer,
+        "{}",
+        term::styled_label("cache dir", &deep.cache_dir.display().to_string())
+    )?;
     let action = if report.dry_run {
         "would remove"
     } else {
         "removed"
     };
-    for job in report.jobs.iter().filter(|job| job.selected) {
+    writeln!(
+        writer,
+        "{} expired rendezvous records: {}",
+        action,
+        deep.rendezvous.removed.len()
+    )?;
+    for path in &deep.rendezvous.removed {
+        writeln!(writer, "  {}", path.display())?;
+    }
+
+    let selected_orphans = deep
+        .orphan_runtime_dirs
+        .iter()
+        .filter(|entry| entry.selected)
+        .collect::<Vec<_>>();
+    writeln!(
+        writer,
+        "{} orphan runtime dirs: {}",
+        action,
+        selected_orphans.len()
+    )?;
+    for entry in selected_orphans {
         write!(
             writer,
-            "{} {} submit_dir={} runtime={}",
-            action,
-            job.inventory.job_id,
-            job.inventory.submit_dir.display(),
-            runtime_presence_label(
-                job.inventory.runtime_job_root_present,
-                job.inventory.legacy_runtime_job_root_present,
-            )
+            "  {} job_id={} reason={}",
+            entry.path.display(),
+            entry.job_id,
+            entry.reason
         )?;
         if disk_usage {
             write!(
                 writer,
                 " size={}",
-                format_bytes(job.bytes_reclaimed.unwrap_or(0))
+                format_bytes(entry.bytes_reclaimed.unwrap_or(0))
             )?;
         }
         writeln!(writer)?;

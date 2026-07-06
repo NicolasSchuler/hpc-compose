@@ -567,6 +567,8 @@ pub(super) const CLEAN_HELP: &str = "\
 Examples:
   hpc-compose clean --age 7 --yes
   hpc-compose clean --all --dry-run
+  hpc-compose clean --age 7 --deep --dry-run --disk-usage
+  hpc-compose clean --age 7 --deep --yes
   hpc-compose clean --all --yes --format json";
 
 pub(super) const CONTEXT_HELP: &str = "\

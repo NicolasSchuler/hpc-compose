@@ -67,6 +67,8 @@ pub struct CleanupReport {
     pub latest_job_id_after: Option<String>,
     pub total_bytes_reclaimed: Option<u64>,
     pub jobs: Vec<CleanupJobReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep: Option<DeepCleanupDetails>,
 }
 
 /// Cleanup planning details for one tracked job.
@@ -466,6 +468,13 @@ pub fn clean_all_except_latest(spec_path: &Path) -> Result<CleanupReport> {
 /// Scans the repo tree for tracked job records.
 pub fn scan_job_inventory(scan_start: &Path, include_disk_usage: bool) -> Result<JobInventoryScan> {
     let scan_root = repo_root_or_cwd(scan_start);
+    scan_job_inventory_from_root(&scan_root, include_disk_usage)
+}
+
+pub(crate) fn scan_job_inventory_from_root(
+    scan_root: &Path,
+    include_disk_usage: bool,
+) -> Result<JobInventoryScan> {
     let now = unix_timestamp_now();
     let mut jobs = Vec::new();
     scan_inventory_recursive(&scan_root, include_disk_usage, now, &mut jobs)?;
@@ -476,7 +485,10 @@ pub fn scan_job_inventory(scan_start: &Path, include_disk_usage: bool) -> Result
             .then_with(|| left.compose_file.cmp(&right.compose_file))
             .then_with(|| left.job_id.cmp(&right.job_id))
     });
-    Ok(JobInventoryScan { scan_root, jobs })
+    Ok(JobInventoryScan {
+        scan_root: scan_root.to_path_buf(),
+        jobs,
+    })
 }
 
 /// Resolves one tracked record by job id by scanning from the nearest repo
@@ -584,6 +596,7 @@ pub fn build_cleanup_report(
         latest_job_id_after,
         total_bytes_reclaimed,
         jobs,
+        deep: None,
     })
 }
 

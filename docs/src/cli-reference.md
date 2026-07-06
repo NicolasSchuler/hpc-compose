@@ -602,7 +602,7 @@ hpc-compose status -f compose.yaml --format json
 | `cancel` | Cancel the latest tracked job or an explicit job id | Uses tracked metadata instead of making you retype paths. |
 | `down` | Cancel a tracked job and clean tracked state | Supports `--purge-cache` when the tracked snapshot names concrete cache artifacts. |
 | `jobs list` | Scan the current repo tree for tracked runs | Start here when you need to rediscover an older run. Repeatable `--tag <TAG>` keeps only jobs carrying every given tag (see `experiment tag`); rows show `tags=` and JSON entries carry `tags`/`note_count` when set. |
-| `clean` | Remove old tracked job directories for one compose context | Use `--dry-run` first when you are unsure. |
+| `clean` | Remove old tracked job directories for one compose context | Use `--dry-run` first when you are unsure. Add `--deep` to also report/reap expired rendezvous records and orphaned per-job enroot runtime dirs under the active cache. |
 | `rendezvous list` | List live shared-cache service records | Defaults to the resolved cache dir; `--cache-dir` inspects a specific cache. |
 | `rendezvous resolve NAME` | Resolve one provider record | Prints endpoint fields or JSON for automation. |
 | `rendezvous register NAME` | Manually register a provider record | Intended for debugging and custom workflows; declarative specs usually register providers. |
@@ -641,6 +641,8 @@ hpc-compose artifacts -f compose.yaml --bundle checkpoints --tarball
 hpc-compose down -f compose.yaml --yes
 hpc-compose cancel -f compose.yaml --yes
 hpc-compose clean -f compose.yaml --age 7 --dry-run
+hpc-compose clean -f compose.yaml --age 7 --deep --dry-run --disk-usage
+hpc-compose clean -f compose.yaml --age 7 --deep --yes
 hpc-compose rendezvous list
 hpc-compose rendezvous resolve model-server
 hpc-compose rendezvous register model-server --host node01 --port 8000 --job-id 12345

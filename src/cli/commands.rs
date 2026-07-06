@@ -2578,6 +2578,11 @@ pub enum Commands {
             help = "Preview the tracked job cleanup plan without deleting files"
         )]
         dry_run: bool,
+        #[arg(
+            long,
+            help = "Also prune expired rendezvous records and orphaned per-job enroot runtime dirs"
+        )]
+        deep: bool,
         #[arg(long, help = "Confirm this destructive action without prompting")]
         yes: bool,
         #[arg(

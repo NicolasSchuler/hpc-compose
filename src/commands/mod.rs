@@ -1600,6 +1600,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             age,
             all,
             dry_run,
+            deep,
             yes,
             disk_usage,
             format,
@@ -1608,7 +1609,13 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 bail!("clean requires either --age DAYS or --all");
             }
             if !dry_run {
-                let action = if all {
+                let action = if deep {
+                    if all {
+                        "remove tracked job residue except the latest run, expired rendezvous records, and orphaned per-job runtime cache dirs"
+                    } else {
+                        "remove tracked job residue by age, expired rendezvous records, and orphaned per-job runtime cache dirs"
+                    }
+                } else if all {
                     "remove tracked job directories except the latest one"
                 } else {
                     "remove tracked job directories by age"
@@ -1616,7 +1623,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 confirm::confirm_destructive_action(action, yes)?;
             }
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            runtime::clean(context, age, all, dry_run, disk_usage, format)
+            runtime::clean(context, age, all, dry_run, deep, disk_usage, format)
         }
         Commands::Context {
             format,
@@ -2378,6 +2385,7 @@ mod tests {
             age: None,
             all: false,
             dry_run: false,
+            deep: false,
             yes: false,
             disk_usage: false,
             format: None,
