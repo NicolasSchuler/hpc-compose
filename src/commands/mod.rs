@@ -1792,6 +1792,26 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     cpu_watts_per_core,
                 )
             }
+            ExperimentCommands::Bundle {
+                job_id,
+                file,
+                into,
+                tarball,
+                include_artifacts,
+                bundles,
+                format,
+            } => {
+                let context = resolve_ctx(options, file, &[])?;
+                runtime::experiment_bundle(
+                    context,
+                    job_id,
+                    into,
+                    tarball,
+                    include_artifacts,
+                    bundles,
+                    format,
+                )
+            }
             ExperimentCommands::Tag {
                 tags,
                 remove,
@@ -2444,5 +2464,58 @@ mod tests {
             err.to_string().contains("was not found"),
             "expected tracked-job hint, got: {err}"
         );
+    }
+
+    #[test]
+    fn run_cli_dispatches_experiment_bundle() {
+        // Mirrors the show dispatch guard: with no tracked run available, the
+        // bundle path should reach tracked-record resolution before it could
+        // write any bundle files.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let compose = dir.path().join("compose.yaml");
+        let out = dir.path().join("bundles");
+        std::fs::write(
+            &compose,
+            "name: dispatch-test\nx-slurm:\n  time: \"00:10:00\"\nservices:\n  app:\n    image: docker://python:3.12\n    command: [\"true\"]\n",
+        )
+        .expect("write compose");
+        let err = run_cli(
+            Cli {
+                color: hpc_compose::cli::ColorPolicy::Auto,
+                quiet: false,
+                profile: None,
+                settings_file: None,
+                command: Commands::Experiment {
+                    command: ExperimentCommands::Bundle {
+                        job_id: Some("99999".to_string()),
+                        file: Some(compose.clone()),
+                        into: out.clone(),
+                        tarball: true,
+                        include_artifacts: false,
+                        bundles: Vec::new(),
+                        format: Some(hpc_compose::cli::OutputFormat::Json),
+                    },
+                },
+            },
+            &[
+                OsString::from("hpc-compose"),
+                OsString::from("experiment"),
+                OsString::from("bundle"),
+                OsString::from("99999"),
+                OsString::from("-f"),
+                OsString::from(compose.as_os_str()),
+                OsString::from("--into"),
+                OsString::from(out.as_os_str()),
+                OsString::from("--tarball"),
+                OsString::from("--format"),
+                OsString::from("json"),
+            ],
+        )
+        .expect_err("unknown tracked job should error");
+        assert!(
+            err.to_string().contains("was not found"),
+            "expected tracked-job hint, got: {err}"
+        );
+        assert!(!out.exists(), "bundle output should not be created");
     }
 }

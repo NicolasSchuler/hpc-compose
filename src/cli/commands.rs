@@ -3269,6 +3269,42 @@ pub enum ExperimentCommands {
         sacct_bin: String,
     },
     #[command(
+        about = "Write a reproducibility bundle for one tracked run",
+        long_about = "Write a local directory containing one tracked run's aggregate status, submission record, submit-time config snapshot, submitted script, checkpoint history, provenance, artifact manifest, and optionally artifact payload. Defaults to the latest tracked run when no job id is given. It does not submit, cancel, export from the cluster, or mutate tracked job records.",
+        after_help = EXPERIMENT_BUNDLE_HELP
+    )]
+    Bundle {
+        #[arg(
+            value_name = "JOB_ID",
+            help = "Tracked Slurm job id to bundle; defaults to the latest tracked run"
+        )]
+        job_id: Option<String>,
+        #[arg(short = 'f', long, value_name = "FILE", help = FILE_ARG_HELP)]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "DIR",
+            default_value = ".",
+            help = "Directory in which to create hpc-compose-bundle-<JOB_ID>"
+        )]
+        into: PathBuf,
+        #[arg(long, help = "Also create hpc-compose-bundle-<JOB_ID>.tar.gz")]
+        tarball: bool,
+        #[arg(
+            long,
+            help = "Copy artifact payload into artifacts/payload/ in addition to metadata"
+        )]
+        include_artifacts: bool,
+        #[arg(
+            long = "bundle",
+            value_name = "NAME",
+            help = "Artifact payload bundle to copy when --include-artifacts is set; may be repeated"
+        )]
+        bundles: Vec<String>,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
         about = "Add or remove short labels on a tracked run",
         long_about = "Attach short labels (\"baseline\", \"lr-bug\") to a tracked job record. Tags are a sorted set: adding an existing tag or removing an absent one is a no-op. Defaults to the latest tracked run when no --job-id is given. Contacts no scheduler; only the tracked record (and its latest-pointer duplicate, when it names this job) is rewritten.",
         after_help = EXPERIMENT_TAG_HELP

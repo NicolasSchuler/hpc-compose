@@ -23,6 +23,7 @@ use crate::tracked_paths;
 
 mod accounting;
 mod artifacts;
+mod bundle;
 mod checkpoints;
 mod diff;
 mod logs;
@@ -54,6 +55,10 @@ pub use artifacts::{
     ArtifactBundleManifest, ArtifactBundleProvenance, ArtifactEntryMetadata, ArtifactExportOptions,
     ArtifactExportReport, ArtifactManifest, BundleExportReport, artifact_manifest_path_for_record,
     artifact_payload_dir_for_record, artifacts_dir_for_record, export_artifacts,
+};
+pub use bundle::{
+    ExperimentBundleFileEntry, ExperimentBundleManifest, ExperimentBundleOptions,
+    write_experiment_bundle,
 };
 pub use checkpoints::{
     CheckpointAttempt, CheckpointAttemptService, CheckpointHistory, collect_checkpoint_history,

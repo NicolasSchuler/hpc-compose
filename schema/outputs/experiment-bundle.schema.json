@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExperimentBundleManifest",
+  "description": "Authoritative manifest written at the root of an experiment bundle.",
+  "type": "object",
+  "properties": {
+    "artifact_payload_included": {
+      "type": "boolean"
+    },
+    "bundle_root": {
+      "type": "string"
+    },
+    "created_at_unix": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExperimentBundleFileEntry"
+      }
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "selected_bundles": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "tarball_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "job_id",
+    "created_at_unix",
+    "bundle_root",
+    "artifact_payload_included",
+    "files"
+  ],
+  "$defs": {
+    "ExperimentBundleFileEntry": {
+      "description": "One file materialized inside an experiment bundle.",
+      "type": "object",
+      "properties": {
+        "relative_path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "relative_path"
+      ]
+    }
+  }
+}

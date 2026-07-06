@@ -1,6 +1,8 @@
 //! `hpc-compose experiment show` — read-only "one JSON object per run"
 //! aggregator over already-persisted tracked state — plus `experiment tag` /
-//! `experiment note`, which annotate the tracked record.
+//! `experiment note`, which annotate the tracked record. The sibling
+//! `experiment bundle` command reuses the same aggregate builder and writes its
+//! bundle-specific files in `experiment_bundle`.
 //!
 //! `show` is static-safe: it contacts a scheduler only as much as `status`
 //! (squeue plus a terminal-only sacct probe via [`build_status_snapshot`]) and
@@ -85,7 +87,29 @@ pub(crate) fn experiment_show(
 ) -> Result<()> {
     let record = resolve_tracked_record(&context, job_id.as_deref())?
         .with_context(|| tracked_job_hint(job_id.as_deref()))?;
+    let output =
+        collect_experiment_show_output(&context, &record, pue, gpu_tdp_w, cpu_watts_per_core)?;
 
+    match output::resolve_output_format(format) {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output)
+                    .context("failed to serialize experiment show output")?
+            );
+        }
+        OutputFormat::Text => print_experiment_show_output(&output),
+    }
+    Ok(())
+}
+
+pub(crate) fn collect_experiment_show_output(
+    context: &ResolvedContext,
+    record: &SubmissionRecord,
+    pue: f64,
+    gpu_tdp_w: f64,
+    cpu_watts_per_core: f64,
+) -> Result<ExperimentShowOutput> {
     let runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &record.compose_file,
@@ -117,7 +141,7 @@ pub(crate) fn experiment_show(
     // (or a local run) degrades to `None` rather than failing the aggregate.
     let efficiency = build_efficiency_score_report(
         &runtime_plan,
-        &record,
+        record,
         &EfficiencyScoreOptions {
             scheduler: scheduler_options,
             sstat_bin: context.binaries.sstat.value.clone(),
@@ -129,29 +153,16 @@ pub(crate) fn experiment_show(
     .ok();
 
     // Pure, side-effect-free manifest read (never export_artifacts).
-    let results = read_artifact_manifest(&record);
+    let results = read_artifact_manifest(record);
 
-    let login_host = context.login_host.clone();
-    let output = build_experiment_show_output(
-        &record,
+    Ok(build_experiment_show_output(
+        record,
         &runtime_plan,
         &snapshot,
         results,
         efficiency,
-        login_host.as_deref(),
-    );
-
-    match output::resolve_output_format(format) {
-        OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&output)
-                    .context("failed to serialize experiment show output")?
-            );
-        }
-        OutputFormat::Text => print_experiment_show_output(&output),
-    }
-    Ok(())
+        context.login_host.as_deref(),
+    ))
 }
 
 /// Pure read of the persisted artifact manifest for a record. Returns `None`

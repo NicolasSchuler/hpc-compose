@@ -153,6 +153,41 @@ For each attempt, the command reports the earliest service start, the latest ser
 
 `--format json` emits one object: `{job_id, compose_file, submitted_at, resume_configured, attempts, requeues, current_attempt, is_resume, resume_dir, entries[], degraded[]}`. This is distinct from the `artifacts --bundle checkpoints` export, which copies model checkpoint files rather than describing attempt history. See [Artifacts and Resume](artifacts-and-resume.md) for the attempt directory layout.
 
+## Experiment Bundles
+
+`hpc-compose experiment bundle` writes a local evidence bundle for one tracked run. It is intended for papers, lab notebooks, handoffs, and artifact review packets where the important thing is to preserve what hpc-compose actually tracked, not to reinterpret the current checkout as if it were the submit-time source.
+
+```bash
+hpc-compose experiment bundle -f compose.yaml
+hpc-compose experiment bundle 12345 --into ./bundles
+hpc-compose experiment bundle 12345 --tarball
+hpc-compose experiment bundle 12345 --include-artifacts --bundle metrics --format json
+```
+
+The directory layout is deterministic:
+
+```text
+hpc-compose-bundle-<job-id>/
+|-- manifest.json
+|-- README.md
+|-- methods.md
+|-- run/
+|   |-- experiment-show.json
+|   |-- submission-record.json
+|   |-- effective-config.yaml      # when the tracked record has a snapshot
+|   |-- submitted.sbatch           # when the persisted script is readable
+|   `-- checkpoint-history.json
+|-- provenance/
+|   `-- provenance.json            # when submit-time provenance was recorded
+`-- artifacts/
+    |-- manifest.json              # when artifact collection wrote one
+    `-- payload/                   # only with --include-artifacts
+```
+
+`manifest.json` is the authoritative index: it records the schema version, job id, creation time, bundle root, optional tarball path, whether artifact payload was included, selected artifact bundles, every materialized file with size and SHA-256 where applicable, and any warnings. Warnings are expected for legacy records that predate config snapshots or provenance, unreadable submitted scripts, missing artifact manifests, missing payload files, or degraded checkpoint history.
+
+The current compose file is used only to resolve the tracked run context and to produce the same bundle-time aggregate that `experiment show` would print. It is not copied as submit-time evidence. Prefer `run/effective-config.yaml`, `run/submitted.sbatch`, `provenance/provenance.json`, and any provenance `source_content_hash` when they are present.
+
 ## Logs
 
 Runtime logs live under:

@@ -425,8 +425,9 @@ hpc-compose only prints the rsync command (it copies nothing). The ssh transport
 uses ControlMaster, so an OTP/2FA login node prompts only once.";
 
 pub(super) const EXPERIMENT_HELP: &str = "\
-Track one run: `show` aggregates it into one read-only object; `tag` and
-`note` attach labels and timestamped observations to its tracked record.";
+Track one run: `show` aggregates it into one read-only object, `bundle` writes
+a local reproducibility bundle, and `tag`/`note` attach labels and timestamped
+observations to its tracked record.";
 
 pub(super) const EXPERIMENT_TAG_HELP: &str = "\
 Examples:
@@ -453,6 +454,17 @@ Examples:
 Read-only: status + score + artifacts + provenance in one object. The printed
 next_commands carry an ssh ControlMaster hint so an OTP/2FA login node prompts
 only once; nothing is written and no connection is opened.";
+
+pub(super) const EXPERIMENT_BUNDLE_HELP: &str = "\
+Examples:
+  hpc-compose experiment bundle 12345 --into ./bundles
+  hpc-compose experiment bundle --tarball
+  hpc-compose experiment bundle 12345 --include-artifacts --bundle metrics --format json
+Writes hpc-compose-bundle-<job-id>/ with manifest.json, README.md, methods.md,
+run metadata, checkpoint history, provenance when recorded, and artifact
+metadata when present. Artifact payload is copied only with --include-artifacts.
+The current compose file is not copied as submit-time source; use the recorded
+effective config, submitted script, and provenance/source hash when present.";
 
 pub(super) const NEW_HELP: &str = "\
 Examples:

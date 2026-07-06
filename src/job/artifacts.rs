@@ -315,7 +315,7 @@ pub fn export_artifacts(
     })
 }
 
-fn resolve_selected_bundles(
+pub(super) fn resolve_selected_bundles(
     bundles: &BTreeMap<String, ArtifactBundleManifest>,
     requested: &[String],
 ) -> Result<Vec<String>> {
@@ -343,7 +343,7 @@ fn bundle_export_dir(export_dir: &Path, bundle_name: &str) -> PathBuf {
     }
 }
 
-fn validate_manifest_relative_path(relative_path: &str) -> Result<PathBuf> {
+pub(super) fn validate_manifest_relative_path(relative_path: &str) -> Result<PathBuf> {
     if relative_path.trim().is_empty() {
         bail!("artifact manifest copied_relative_paths entries must not be empty");
     }
@@ -372,7 +372,7 @@ fn validate_manifest_relative_path(relative_path: &str) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-fn validate_payload_source(payload_dir: &Path, source: &Path) -> Result<()> {
+pub(super) fn validate_payload_source(payload_dir: &Path, source: &Path) -> Result<()> {
     let payload_root = payload_dir
         .canonicalize()
         .context(format!("failed to canonicalize {}", payload_dir.display()))?;
@@ -588,7 +588,7 @@ pub(crate) fn copy_path_recursive(source: &Path, destination: &Path) -> Result<(
     Ok(())
 }
 
-fn copy_path_recursive_within(
+pub(super) fn copy_path_recursive_within(
     source: &Path,
     destination: &Path,
     destination_root: &Path,
