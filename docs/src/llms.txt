@@ -9,11 +9,20 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
 - Safe to run unprompted — never submits, cancels, allocates, or consumes quota:
   - Purely static (no scheduler contact at all): `new`, `validate`, `plan`,
     `plan --show-script`, `inspect`, `render`, `explain`, `config`.
+  - Static previews: `up --dry-run`, `up --remote --dry-run`, `notebook --dry-run`,
+    `germinate --dry-run`, and `sweep submit --dry-run` render/validate locally
+    without SSH, rsync, preflight, prepare, scheduler submission, job tracking, or
+    cancellation. They may still write documented preview outputs such as rendered
+    scripts.
   - Read-only scheduler queries (run `squeue`/`sacct` lookups but change nothing):
     `status`, `ps`, `stats`, `diff`, `logs`. Do not poll these in tight loops on a
     rate-limited login node.
   - `artifacts` makes no scheduler contact but writes exported files to the local
     `export_dir`.
+- Add global `--offline` when you must guarantee no SSH, remote delegation, Slurm
+  scheduler contact, submission, allocation, or cancellation. Static authoring
+  commands and explicit dry-run previews still work; external/scheduler paths fail
+  before tool invocation.
 - Requires EXPLICIT user approval — submits or cancels Slurm jobs, opens an allocation, or consumes quota:
   `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel`.
 - Never submit, allocate, or cancel a Slurm job unprompted. Author the spec, then verify with the safe

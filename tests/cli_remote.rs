@@ -122,6 +122,46 @@ fn up_remote_stages_project_over_ssh_and_rsync() {
 }
 
 #[test]
+fn up_remote_dry_run_is_static_and_does_not_ssh_or_rsync() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let root = &fs::canonicalize(tmpdir.path()).expect("canonicalize tmpdir");
+    let root = root.as_path();
+    let compose = write_remote_compose(root);
+
+    let ssh_log = root.join("ssh.log");
+    let rsync_log = root.join("rsync.log");
+    let rules = root.join("ssh-rules");
+    let ssh = write_fake_ssh(root, &ssh_log, &rules);
+    let rsync = write_fake_rsync(root, &rsync_log);
+    write_remote_settings(root, &ssh, &rsync);
+
+    let output = run_cli_with_env(
+        root,
+        &[
+            "--offline",
+            "up",
+            "--remote=fakehost",
+            "--dry-run",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+        &[("HOME", root.to_str().expect("home"))],
+    );
+    assert_success(&output);
+    assert!(stdout_text(&output).contains("dry run: skipping sbatch submission"));
+    assert!(
+        !ssh_log.exists(),
+        "remote dry-run must not open ssh; log:\n{}",
+        fs::read_to_string(&ssh_log).unwrap_or_default()
+    );
+    assert!(
+        !rsync_log.exists(),
+        "remote dry-run must not run rsync; log:\n{}",
+        fs::read_to_string(&rsync_log).unwrap_or_default()
+    );
+}
+
+#[test]
 fn remote_followup_forwards_status_command() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let root = &fs::canonicalize(tmpdir.path()).expect("canonicalize tmpdir");

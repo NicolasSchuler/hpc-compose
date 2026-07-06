@@ -85,7 +85,7 @@ pub(crate) fn germinate(
     let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
     let cluster_profile = load_discovered_cluster_profile(&context)?;
 
-    if !no_preflight {
+    if !dry_run && !no_preflight {
         let report = progress.run_checked_result(
             "Running canary preflight checks",
             || {
@@ -114,7 +114,7 @@ pub(crate) fn germinate(
         }
     }
 
-    if !skip_prepare {
+    if !dry_run && !skip_prepare {
         let prepare_progress =
             PrepareProgress::new(&canary_plan, !quiet && output_format == OutputFormat::Text);
         let summary = prepare_progress.run("Preparing canary runtime artifacts", || {

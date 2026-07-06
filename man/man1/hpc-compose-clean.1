@@ -23,6 +23,9 @@ Remove all tracked job directories except the latest one.
 \fB--dry\-run\fR
 Preview the tracked job cleanup plan without deleting files.
 .TP
+\fB--deep\fR
+Also prune expired rendezvous records and orphaned per\-job enroot runtime dirs.
+.TP
 \fB--yes\fR
 Confirm this destructive action without prompting.
 .TP
@@ -43,6 +46,9 @@ Profile name to load from .hpc\-compose/settings.toml.
 .TP
 \fB--settings\-file\fR \fIPATH\fR
 Explicit settings file path; defaults to upward search for .hpc\-compose/settings.toml.
+.TP
+\fB--offline\fR
+Forbid SSH, remote delegation, Slurm scheduler contact, submissions, allocations, and cancels.
 .TP
 \fB-h\fR, \fB--help\fR
 Print help (see a summary with '\-h').

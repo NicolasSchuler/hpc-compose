@@ -2036,7 +2036,7 @@ pub(crate) fn launch(
         load_discovered_cluster_profile(&context)?
     };
 
-    if !no_preflight {
+    if !dry_run && !no_preflight {
         let report = progress.run_checked_result(
             "Running preflight checks",
             || {
@@ -2065,7 +2065,7 @@ pub(crate) fn launch(
         }
     }
 
-    if !skip_prepare {
+    if !dry_run && !skip_prepare {
         let prepare_progress =
             PrepareProgress::new(&runtime_plan, !quiet && output_format == OutputFormat::Text);
         let summary = prepare_progress.run("Preparing runtime artifacts", || {
@@ -2324,7 +2324,11 @@ pub(crate) fn up(
         print_endpoints,
         quiet,
     } = options;
-    let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
+    let _up_lock = if dry_run {
+        None
+    } else {
+        Some(acquire_up_invocation_lock(&context.compose_file.value)?)
+    };
     launch(
         context,
         script_out,

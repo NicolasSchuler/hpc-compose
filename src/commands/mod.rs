@@ -36,6 +36,7 @@ pub(crate) mod workspace;
 #[derive(Debug, Clone, Default)]
 struct GlobalCommandOptions {
     quiet: bool,
+    offline: bool,
     profile: Option<String>,
     settings_file: Option<PathBuf>,
     raw_args: Vec<OsString>,
@@ -49,6 +50,7 @@ pub fn run_cli(cli: Cli, raw_args: &[OsString]) -> Result<()> {
         cli.command,
         &GlobalCommandOptions {
             quiet: cli.quiet,
+            offline: cli.offline,
             profile: cli.profile,
             settings_file: cli.settings_file,
             raw_args: raw_args.to_vec(),
@@ -125,6 +127,9 @@ pub fn run_completion_values_from_raw_args(raw_args: &[OsString]) -> Result<bool
             "--quiet" => {
                 options.quiet = true;
             }
+            "--offline" => {
+                options.offline = true;
+            }
             _ => {
                 if let Some(value) = arg.strip_prefix("--profile=") {
                     options.profile = Some(value.to_string());
@@ -159,7 +164,7 @@ fn completion_values_command_index(raw_args: &[OsString]) -> Option<usize> {
         match arg.as_ref() {
             "__complete-values" => return Some(index),
             "--" => return None,
-            "--quiet" => index += 1,
+            "--quiet" | "--offline" => index += 1,
             "--color" | "--profile" | "--settings-file" => index += 2,
             value
                 if value.starts_with("--color=")
@@ -179,6 +184,78 @@ fn parse_completion_value_kind(raw: &str) -> Result<CompletionValueKind> {
     CompletionValueKind::from_str(raw, true).map_err(|err| anyhow::anyhow!("{err}"))
 }
 
+fn ensure_offline_allowed(command: &Commands, options: &GlobalCommandOptions) -> Result<()> {
+    if !options.offline {
+        return Ok(());
+    }
+    let Some(reason) = offline_rejection_reason(command) else {
+        return Ok(());
+    };
+    bail!(
+        "--offline forbids {reason}; use static authoring commands such as validate, plan, render, inspect, or an explicit dry-run preview"
+    )
+}
+
+fn offline_rejection_reason(command: &Commands) -> Option<&'static str> {
+    match command {
+        Commands::Prepare { .. } => Some("image preparation and runtime artifact writes"),
+        Commands::Preflight { .. } => Some("preflight runtime and scheduler probing"),
+        Commands::Doctor { .. } => Some("doctor runtime and cluster probes"),
+        Commands::Weather { .. } => Some("Slurm scheduler weather queries"),
+        Commands::Inspect {
+            rightsize, job_id, ..
+        } => (*rightsize || job_id.is_some())
+            .then_some("right-size inspection scheduler and metrics probes"),
+        Commands::Up { dry_run, .. } => (!*dry_run).then_some("real up submission or local launch"),
+        Commands::Test { .. } => Some("test launches and submissions"),
+        Commands::Dev { .. } => Some("development launches"),
+        Commands::Tmux { .. } => Some("tmux launches"),
+        Commands::Sweep { command } => match command {
+            SweepCommands::Submit { dry_run, .. } => (!*dry_run).then_some("real sweep submission"),
+            SweepCommands::Status { .. } => Some("sweep scheduler status queries"),
+            SweepCommands::List { .. } => None,
+            SweepCommands::Observe { .. } => {
+                Some("sweep scheduler observation and optional cancellation")
+            }
+            SweepCommands::Stop { .. } => Some("sweep cancellation"),
+            SweepCommands::Results { .. } => Some("sweep scheduler/accounting result queries"),
+        },
+        Commands::Germinate { dry_run, .. } => (!*dry_run).then_some("canary submission"),
+        Commands::When { .. } => Some("conditional scheduler polling and submission"),
+        Commands::Alloc { .. } => Some("Slurm allocation"),
+        Commands::Status { .. } => Some("Slurm scheduler status queries"),
+        Commands::Stats { .. } => Some("Slurm scheduler/accounting statistics queries"),
+        Commands::Score { .. } => Some("Slurm scheduler/accounting efficiency queries"),
+        Commands::Diff { against_spec, .. } => {
+            (!*against_spec).then_some("tracked-job scheduler comparison queries")
+        }
+        Commands::Pull { remote, .. } => remote
+            .remote
+            .is_some()
+            .then_some("remote follow-up over SSH"),
+        Commands::Logs { remote, .. } => remote
+            .remote
+            .is_some()
+            .then_some("remote follow-up over SSH"),
+        Commands::Ps { .. } => Some("Slurm scheduler process-state queries"),
+        Commands::Watch { .. } => Some("live scheduler watching"),
+        Commands::Debug { .. } => Some("debug scheduler/preflight probes"),
+        Commands::Cancel { .. } | Commands::Down { .. } => Some("Slurm cancellation"),
+        Commands::Run { .. } => Some("one-off launches or submissions"),
+        Commands::Shell { .. } => Some("interactive Slurm shell allocation"),
+        Commands::Workspace { .. } => Some("workspace tool calls"),
+        Commands::Notebook { dry_run, .. } => (!*dry_run).then_some("notebook submission"),
+        Commands::Reach { .. } => Some("scheduler-backed reachability lookup"),
+        Commands::Experiment { command } => match command {
+            ExperimentCommands::Show { .. } => Some("experiment scheduler/accounting aggregation"),
+            ExperimentCommands::Bundle { .. }
+            | ExperimentCommands::Tag { .. }
+            | ExperimentCommands::Note { .. } => None,
+        },
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn run_command(command: Commands) -> Result<()> {
     run_command_with_options(
@@ -191,6 +268,7 @@ pub(crate) fn run_command(command: Commands) -> Result<()> {
 }
 
 fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -> Result<()> {
+    ensure_offline_allowed(&command, options)?;
     match command {
         Commands::Validate {
             file,
@@ -535,12 +613,45 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             // Slurm path entirely (so it works from macOS, which is otherwise
             // authoring-only).
             if let Some(remote_target) = remote {
+                if local {
+                    bail!(
+                        "up --remote cannot be combined with --local: --local launches on this host, \
+                         --remote delegates submission to the login node"
+                    );
+                }
                 if watch_queue {
                     bail!("up --remote cannot be combined with --watch-queue");
                 }
-                if script_out.is_some() {
+                if script_out.is_some() && !dry_run {
                     bail!(
                         "up --remote cannot be combined with --script-out: the rendered script is produced in the remote staged project"
+                    );
+                }
+                if dry_run {
+                    return runtime::up(
+                        context,
+                        script_out,
+                        runtime::PrepareFlags {
+                            keep_failed_prep: launch.keep_failed_prep,
+                            skip_prepare: launch.skip_prepare,
+                            force_rebuild: launch.force_rebuild,
+                            no_preflight: launch.no_preflight,
+                        },
+                        runtime::UpOptions {
+                            local: false,
+                            allow_resume_changes,
+                            resume_diff_only,
+                            dry_run,
+                            detach,
+                            watch_queue,
+                            print_endpoints,
+                            quiet: options.quiet,
+                        },
+                        queue_warn_after_seconds,
+                        watch_mode,
+                        hold_on_exit,
+                        format,
+                        metrics_overrides,
                     );
                 }
                 return runtime::remote_up(
@@ -2551,6 +2662,7 @@ mod tests {
             Cli {
                 color: hpc_compose::cli::ColorPolicy::Auto,
                 quiet: false,
+                offline: false,
                 profile: None,
                 settings_file: None,
                 command: Commands::Jobs {
@@ -2588,6 +2700,7 @@ mod tests {
             Cli {
                 color: hpc_compose::cli::ColorPolicy::Auto,
                 quiet: false,
+                offline: false,
                 profile: None,
                 settings_file: None,
                 command: Commands::Experiment {
@@ -2639,6 +2752,7 @@ mod tests {
             Cli {
                 color: hpc_compose::cli::ColorPolicy::Auto,
                 quiet: false,
+                offline: false,
                 profile: None,
                 settings_file: None,
                 command: Commands::Experiment {

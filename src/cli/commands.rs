@@ -47,6 +47,12 @@ pub struct Cli {
         help = "Explicit settings file path; defaults to upward search for .hpc-compose/settings.toml"
     )]
     pub settings_file: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        help = "Forbid SSH, remote delegation, Slurm scheduler contact, submissions, allocations, and cancels"
+    )]
+    pub offline: bool,
     #[command(subcommand)]
     pub command: Commands,
 }

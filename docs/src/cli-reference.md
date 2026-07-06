@@ -39,6 +39,7 @@ Release archives install them under `share/man/man1/`. From a source checkout, r
 | `-f`, `--file <FILE>` | Select the compose file on compose-aware commands | When omitted, `hpc-compose` uses the active context compose file or falls back to `compose.yaml`. |
 | `--color auto|always|never` | Control ANSI color output | Use `--color never` for logs, CI captures, or assistive tooling that should receive plain text. |
 | `--quiet` | Suppress non-essential progress labels | Useful when a wrapper only needs command output and errors. |
+| `--offline` | Forbid SSH, remote delegation, Slurm scheduler contact, submissions, allocations, and cancels | Static authoring commands still work. External/scheduler paths fail before tool invocation; explicit dry-run previews such as `up --dry-run`, `up --remote --dry-run`, `notebook --dry-run`, `germinate --dry-run`, and `sweep submit --dry-run` remain local previews. |
 | `--format json` | Machine-readable output | Preferred on non-streaming commands. |
 
 ### Color environment variables
@@ -433,6 +434,13 @@ There is no `x-when` YAML field. Conditional submission is intentionally a CLI w
 ```bash
 hpc-compose up --local --dry-run -f compose.yaml
 ```
+
+`up --dry-run` is a static preview path: it renders the submission script and
+skips preflight, runtime preparation, Slurm submission, job tracking, and local
+launch. `up --remote --dry-run` follows the same local static preview path; it
+does not SSH, rsync, probe/install a remote binary, or delegate to the login
+node. Passing `--script-out` still writes the rendered preview to that explicit
+path.
 
 Current constraints:
 

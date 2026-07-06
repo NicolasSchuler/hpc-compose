@@ -4,9 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-#[cfg(target_os = "linux")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -23,6 +21,21 @@ use hpc_compose::render::log_file_name_for_service;
 use hpc_compose::rendezvous::{RendezvousRegisterRequest, build_record, register};
 use serde_json::Value;
 use support::*;
+
+fn write_failing_tool(tmpdir: &Path, name: &str, log_path: &Path) -> PathBuf {
+    let path = tmpdir.join(name);
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+printf '%s\n' "$0 $*" >> '{}'
+exit 42
+"#,
+            log_path.display()
+        ),
+    );
+    path
+}
 
 #[cfg(target_os = "linux")]
 fn wait_for_service_assertion_status(
@@ -9330,6 +9343,106 @@ fn submit_dry_run_skips_sbatch() {
     assert!(out.contains("dry run: skipping sbatch submission"));
     assert!(!out.contains("Submitted batch job"));
     assert!(script_out.exists());
+}
+
+#[test]
+fn up_dry_run_skips_preflight_prepare_scheduler_tools_and_locks() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_prepare_compose(tmpdir.path(), cache_root.path());
+    let tool_log = tmpdir.path().join("tool-invocations.log");
+    let enroot = write_failing_tool(tmpdir.path(), "enroot-fail", &tool_log);
+    let srun = write_failing_tool(tmpdir.path(), "srun-fail", &tool_log);
+    let sbatch = write_failing_tool(tmpdir.path(), "sbatch-fail", &tool_log);
+    let apptainer = write_failing_tool(tmpdir.path(), "apptainer-fail", &tool_log);
+    let singularity = write_failing_tool(tmpdir.path(), "singularity-fail", &tool_log);
+    let script_out = tmpdir.path().join("static-preview.sbatch");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--dry-run",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+            "--apptainer-bin",
+            apptainer.to_str().expect("path"),
+            "--singularity-bin",
+            singularity.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    assert!(stdout_text(&output).contains("dry run: skipping sbatch submission"));
+    assert!(
+        script_out.exists(),
+        "explicit --script-out is still honored"
+    );
+    assert!(
+        !tool_log.exists(),
+        "dry-run must not invoke preflight, prepare, or scheduler tools:\n{}",
+        fs::read_to_string(&tool_log).unwrap_or_default()
+    );
+    assert!(
+        !tmpdir.path().join(".hpc-compose/locks").exists(),
+        "dry-run should not create an up invocation lock directory"
+    );
+    let plan = runtime_plan(&compose);
+    assert!(
+        !plan.ordered_services[0].runtime_image.exists(),
+        "dry-run must not prepare runtime artifacts"
+    );
+}
+
+#[test]
+fn offline_rejects_real_up_remote_before_side_effects() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_prepare_compose(tmpdir.path(), cache_root.path());
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "up",
+            "--remote=fakehost",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("--offline forbids real up submission"));
+}
+
+#[test]
+fn offline_rejects_weather_but_allows_static_validate() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let weather = run_cli(tmpdir.path(), &["--offline", "weather"]);
+    assert_failure(&weather);
+    assert!(stderr_text(&weather).contains("--offline forbids Slurm scheduler weather queries"));
+
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        "services:\n  app:\n    image: python:3.12\n    command: /bin/true\n",
+    );
+    let validate = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "validate",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&validate);
 }
 
 #[test]

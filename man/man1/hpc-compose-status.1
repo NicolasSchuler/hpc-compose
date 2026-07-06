@@ -26,6 +26,9 @@ Output format. Possible values: text, json.
 \fB--array\fR
 Include Slurm array task rows from squeue \-\-array and sacct \-\-array.
 .TP
+\fB--verify\fR
+Cross\-check scheduler, tracked runtime files, logs, checkpoints, and artifacts for drift.
+.TP
 \fB--squeue\-bin\fR \fIPATH\fR
 Path to the squeue executable. Default: squeue.
 .TP
@@ -43,6 +46,9 @@ Profile name to load from .hpc\-compose/settings.toml.
 .TP
 \fB--settings\-file\fR \fIPATH\fR
 Explicit settings file path; defaults to upward search for .hpc\-compose/settings.toml.
+.TP
+\fB--offline\fR
+Forbid SSH, remote delegation, Slurm scheduler contact, submissions, allocations, and cancels.
 .TP
 \fB-h\fR, \fB--help\fR
 Print help (see a summary with '\-h').
