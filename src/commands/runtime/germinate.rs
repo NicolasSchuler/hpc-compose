@@ -100,6 +100,7 @@ pub(crate) fn germinate(
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: true,
                         skip_prepare,
+                        fs_probes: false,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))

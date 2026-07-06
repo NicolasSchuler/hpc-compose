@@ -309,6 +309,7 @@ fn serde_deny_unknown_fields<T: DeserializeOwned>() -> BTreeSet<String> {
 /// sweepObjective/SweepObjective, secretSource/SecretSpec, scratch/ScratchConfig,
 /// cleanup/CleanupConfig, stageIn/StageInConfig, hfStageSource/HfStageSource,
 /// stageOut/StageOutConfig, burstBuffer/BurstBufferConfig, metrics/MetricsConfig,
+/// watchdog/WatchdogConfig, watchdogResource/WatchdogResourceConfig,
 /// artifacts/ArtifactsConfig, artifactBundle/ArtifactBundleSpec,
 /// resume/ResumeConfig, notify/NotifyConfig, emailNotify/EmailNotifyConfig,
 /// serviceScratch/ServiceScratchConfig, serviceEventHook/ServiceEventHookSpec,
@@ -344,7 +345,7 @@ fn schema_nested_definitions_match_spec_struct_fields() {
         ServiceAssertSpec, ServiceEnrootConfig, ServiceEventHookSpec, ServiceFailurePolicySpec,
         ServicePlacementSpec, ServiceRendezvousConfig, ServiceRuntimeConfig, ServiceScratchConfig,
         ServiceSlurmConfig, SignalConfig, SlurmConfig, SoftwareEnvConfig, StageInConfig,
-        StageOutConfig, SweepConfig, SweepObjective,
+        StageOutConfig, SweepConfig, SweepObjective, WatchdogConfig, WatchdogResourceConfig,
     };
 
     let schema: JsonValue = serde_json::from_str(
@@ -381,6 +382,8 @@ fn schema_nested_definitions_match_spec_struct_fields() {
     assert_definition_matches_struct!("/definitions/stageOut", StageOutConfig);
     assert_definition_matches_struct!("/definitions/burstBuffer", BurstBufferConfig);
     assert_definition_matches_struct!("/definitions/metrics", MetricsConfig);
+    assert_definition_matches_struct!("/definitions/watchdog", WatchdogConfig);
+    assert_definition_matches_struct!("/definitions/watchdogResource", WatchdogResourceConfig);
     assert_definition_matches_struct!("/definitions/artifacts", ArtifactsConfig);
     assert_definition_matches_struct!("/definitions/artifactBundle", ArtifactBundleSpec);
     assert_definition_matches_struct!("/definitions/resume", ResumeConfig);

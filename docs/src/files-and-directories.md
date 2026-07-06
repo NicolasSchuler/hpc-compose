@@ -162,6 +162,8 @@ Staging copies your **repo**. It does **not** allocate cluster workspaces (for e
 
 Preflight remediation reflects this boundary. For a relative or in-repo missing path it tells you to create the directory; for an absolute missing path it notes that the path may be a cluster workspace or site storage location and should be provisioned with your site's allocation command (for example `ws_allocate`) or an `x-slurm.setup` step, because `hpc-compose` stages your repo but does not allocate workspaces or create site storage directories.
 
+For storage that must be visible from both the login node and compute nodes, `hpc-compose preflight -f compose.yaml --fs-probes` submits a tiny Slurm job with `sbatch --wait`. The probe checks the cache directory, explicit runtime root, resume directory, and shared scratch path for login-to-compute visibility, compute-to-login visibility, atomic rename behavior, and compute-node filesystem headroom. The default `preflight` command stays a cheap login-node check; use `--fs-probes` only when you are on a Slurm login node and want active evidence about a shared filesystem.
+
 ### Bootstrapping required directories
 
 `x-slurm.setup` is the declarative bootstrap phase: its commands run on the allocated node before any service starts, so it is the right place to create the cache/data/results sub-directories your bind mounts expect. Allocate (or look up) the workspace first, then create the layout declaratively:

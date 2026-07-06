@@ -20,6 +20,9 @@ Treat warnings as failures.
 \fB--verbose\fR
 Show detailed preflight findings.
 .TP
+\fB--fs\-probes\fR
+Submit a tiny Slurm job to actively probe shared filesystem visibility, rename atomicity, and compute\-node headroom.
+.TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.
 .TP
@@ -62,6 +65,7 @@ Print help (see a summary with '\-h').
 .nf
 hpc\-compose preflight \-f compose.yaml
 hpc\-compose preflight \-f compose.yaml \-\-strict
+hpc\-compose preflight \-f compose.yaml \-\-fs\-probes
 hpc\-compose preflight \-f compose.yaml \-\-format json
 .fi
 .SH SEE ALSO

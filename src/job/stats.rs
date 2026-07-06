@@ -26,6 +26,8 @@ pub struct StatsSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting: Option<AccountingSnapshot>,
     pub first_failure: Option<FirstFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<WatchdogSnapshot>,
     pub attempt: Option<u32>,
     pub is_resume: Option<bool>,
     pub resume_dir: Option<PathBuf>,
@@ -531,6 +533,18 @@ fn build_stats_snapshot_core(
     } else {
         SamplerLoadOutcome::default()
     };
+    let watchdog = record.as_ref().map(|record| {
+        super::watchdog::build_watchdog_snapshot(
+            spec_path,
+            record,
+            &scheduler,
+            None,
+            unix_timestamp_now(),
+        )
+    });
+    if let Some(outcome) = &watchdog {
+        notes.extend(outcome.notes.clone());
+    }
 
     let mut steps = sampler
         .as_ref()
@@ -652,6 +666,7 @@ fn build_stats_snapshot_core(
         first_failure: runtime_state
             .as_ref()
             .and_then(first_failure_from_runtime_state),
+        watchdog: watchdog.and_then(|outcome| outcome.snapshot),
         attempt: runtime_state.as_ref().and_then(|state| state.attempt),
         is_resume: runtime_state.as_ref().and_then(|state| state.is_resume),
         resume_dir: runtime_state

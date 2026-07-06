@@ -612,6 +612,8 @@ pub struct SlurmConfig {
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
     #[serde(default)]
+    pub watchdog: Option<WatchdogConfig>,
+    #[serde(default)]
     pub artifacts: Option<ArtifactsConfig>,
     #[serde(default)]
     pub resume: Option<ResumeConfig>,
@@ -1132,6 +1134,46 @@ pub struct MetricsConfig {
     pub interval_seconds: Option<u64>,
     #[serde(default)]
     pub collectors: Vec<MetricsCollector>,
+}
+
+/// Advisory idle-resource watchdog action.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchdogAction {
+    /// Surface an advisory in status/watch/stats output.
+    Warn,
+    /// Reserved for a future runtime-enforced self-cancel policy.
+    Cancel,
+}
+
+/// Top-level `x-slurm.watchdog` configuration.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WatchdogConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub action: Option<WatchdogAction>,
+    #[serde(default)]
+    pub grace_period_seconds: Option<u64>,
+    #[serde(default)]
+    pub gpu: Option<WatchdogResourceConfig>,
+    #[serde(default)]
+    pub cpu: Option<WatchdogResourceConfig>,
+}
+
+/// Per-resource thresholds for the idle-resource watchdog.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WatchdogResourceConfig {
+    #[serde(default)]
+    pub window_seconds: Option<u64>,
+    #[serde(default)]
+    pub compute_below_pct: Option<u32>,
+    #[serde(default)]
+    pub memory_resident_above_pct: Option<u32>,
 }
 
 /// Structured host-side software environment setup for modules, Spack views,
@@ -1954,6 +1996,8 @@ pub struct EffectiveSlurmConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<EffectiveMetricsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<EffectiveWatchdogConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<EffectiveArtifactsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeConfig>,
@@ -1984,6 +2028,40 @@ pub struct EffectiveMetricsConfig {
     pub enabled: bool,
     pub interval_seconds: u64,
     pub collectors: Vec<MetricsCollector>,
+}
+
+/// Stable effective watchdog config with defaults applied.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct EffectiveWatchdogConfig {
+    pub enabled: bool,
+    pub action: WatchdogAction,
+    pub grace_period_seconds: u64,
+    pub gpu: EffectiveWatchdogResourceConfig,
+    pub cpu: EffectiveWatchdogResourceConfig,
+}
+
+/// Stable effective per-resource watchdog thresholds with defaults applied.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct EffectiveWatchdogResourceConfig {
+    pub window_seconds: u64,
+    pub compute_below_pct: u32,
+    pub memory_resident_above_pct: u32,
+}
+
+impl EffectiveWatchdogResourceConfig {
+    /// Returns the compute threshold as a percentage.
+    #[must_use]
+    pub fn compute_below_pct_f64(&self) -> f64 {
+        f64::from(self.compute_below_pct)
+    }
+
+    /// Returns the residency threshold as a percentage.
+    #[must_use]
+    pub fn memory_resident_above_pct_f64(&self) -> f64 {
+        f64::from(self.memory_resident_above_pct)
+    }
 }
 
 /// Stable effective artifacts config with defaults applied.
@@ -2683,6 +2761,11 @@ impl ComposeSpec {
                     interval_seconds: self.slurm.metrics_interval_seconds(),
                     collectors: self.slurm.metrics_collectors(),
                 }),
+                watchdog: self
+                    .slurm
+                    .watchdog
+                    .as_ref()
+                    .map(WatchdogConfig::effective_config),
                 artifacts: self.slurm.artifacts.as_ref().map(|artifacts| {
                     EffectiveArtifactsConfig {
                         collect: self.slurm.artifacts_collect_policy(),
@@ -2987,6 +3070,134 @@ fn default_true() -> bool {
     true
 }
 
+const DEFAULT_WATCHDOG_GRACE_PERIOD_SECONDS: u64 = 600;
+const DEFAULT_GPU_WATCHDOG_WINDOW_SECONDS: u64 = 1_800;
+const DEFAULT_CPU_WATCHDOG_WINDOW_SECONDS: u64 = 1_800;
+const DEFAULT_GPU_WATCHDOG_COMPUTE_BELOW_PCT: u32 = 2;
+const DEFAULT_CPU_WATCHDOG_COMPUTE_BELOW_PCT: u32 = 5;
+const DEFAULT_WATCHDOG_MEMORY_RESIDENT_ABOVE_PCT: u32 = 20;
+
+impl WatchdogConfig {
+    /// Returns the effective watchdog action.
+    #[must_use]
+    pub fn action(&self) -> WatchdogAction {
+        self.action.unwrap_or(WatchdogAction::Warn)
+    }
+
+    /// Returns the effective grace period in seconds.
+    #[must_use]
+    pub fn grace_period_seconds(&self) -> u64 {
+        self.grace_period_seconds
+            .unwrap_or(DEFAULT_WATCHDOG_GRACE_PERIOD_SECONDS)
+    }
+
+    /// Returns this config with all watchdog defaults materialized.
+    #[must_use]
+    pub fn effective_config(&self) -> EffectiveWatchdogConfig {
+        EffectiveWatchdogConfig {
+            enabled: self.enabled.unwrap_or(true),
+            action: self.action(),
+            grace_period_seconds: self.grace_period_seconds(),
+            gpu: self.gpu.as_ref().map_or_else(
+                EffectiveWatchdogResourceConfig::default_gpu,
+                WatchdogResourceConfig::effective_gpu,
+            ),
+            cpu: self.cpu.as_ref().map_or_else(
+                EffectiveWatchdogResourceConfig::default_cpu,
+                WatchdogResourceConfig::effective_cpu,
+            ),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.action == Some(WatchdogAction::Cancel) {
+            bail!(
+                "x-slurm.watchdog.action=cancel is reserved for a future runtime-enforced watchdog; the current implementation supports only action: warn"
+            );
+        }
+        if matches!(self.grace_period_seconds, Some(0)) {
+            bail!("x-slurm.watchdog.grace_period_seconds must be at least 1");
+        }
+        if let Some(gpu) = &self.gpu {
+            gpu.validate("x-slurm.watchdog.gpu")?;
+        }
+        if let Some(cpu) = &self.cpu {
+            cpu.validate("x-slurm.watchdog.cpu")?;
+        }
+        Ok(())
+    }
+}
+
+impl WatchdogResourceConfig {
+    fn effective_gpu(&self) -> EffectiveWatchdogResourceConfig {
+        EffectiveWatchdogResourceConfig {
+            window_seconds: self
+                .window_seconds
+                .unwrap_or(DEFAULT_GPU_WATCHDOG_WINDOW_SECONDS),
+            compute_below_pct: self
+                .compute_below_pct
+                .unwrap_or(DEFAULT_GPU_WATCHDOG_COMPUTE_BELOW_PCT),
+            memory_resident_above_pct: self
+                .memory_resident_above_pct
+                .unwrap_or(DEFAULT_WATCHDOG_MEMORY_RESIDENT_ABOVE_PCT),
+        }
+    }
+
+    fn effective_cpu(&self) -> EffectiveWatchdogResourceConfig {
+        EffectiveWatchdogResourceConfig {
+            window_seconds: self
+                .window_seconds
+                .unwrap_or(DEFAULT_CPU_WATCHDOG_WINDOW_SECONDS),
+            compute_below_pct: self
+                .compute_below_pct
+                .unwrap_or(DEFAULT_CPU_WATCHDOG_COMPUTE_BELOW_PCT),
+            memory_resident_above_pct: self
+                .memory_resident_above_pct
+                .unwrap_or(DEFAULT_WATCHDOG_MEMORY_RESIDENT_ABOVE_PCT),
+        }
+    }
+
+    fn validate(&self, field: &str) -> Result<()> {
+        if matches!(self.window_seconds, Some(0)) {
+            bail!("{field}.window_seconds must be at least 1");
+        }
+        validate_watchdog_percent(
+            self.compute_below_pct,
+            &format!("{field}.compute_below_pct"),
+        )?;
+        validate_watchdog_percent(
+            self.memory_resident_above_pct,
+            &format!("{field}.memory_resident_above_pct"),
+        )?;
+        Ok(())
+    }
+}
+
+impl EffectiveWatchdogResourceConfig {
+    fn default_gpu() -> Self {
+        Self {
+            window_seconds: DEFAULT_GPU_WATCHDOG_WINDOW_SECONDS,
+            compute_below_pct: DEFAULT_GPU_WATCHDOG_COMPUTE_BELOW_PCT,
+            memory_resident_above_pct: DEFAULT_WATCHDOG_MEMORY_RESIDENT_ABOVE_PCT,
+        }
+    }
+
+    fn default_cpu() -> Self {
+        Self {
+            window_seconds: DEFAULT_CPU_WATCHDOG_WINDOW_SECONDS,
+            compute_below_pct: DEFAULT_CPU_WATCHDOG_COMPUTE_BELOW_PCT,
+            memory_resident_above_pct: DEFAULT_WATCHDOG_MEMORY_RESIDENT_ABOVE_PCT,
+        }
+    }
+}
+
+fn validate_watchdog_percent(value: Option<u32>, field: &str) -> Result<()> {
+    if value.is_some_and(|value| value > 100) {
+        bail!("{field} must be between 0 and 100");
+    }
+    Ok(())
+}
+
 impl SlurmConfig {
     /// Returns the effective Slurm allocation node count.
     #[must_use]
@@ -3032,6 +3243,20 @@ impl SlurmConfig {
         } else {
             metrics.collectors.clone()
         }
+    }
+
+    /// Returns whether the advisory idle-resource watchdog is enabled.
+    #[must_use]
+    pub fn watchdog_enabled(&self) -> bool {
+        self.watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.enabled.unwrap_or(true))
+    }
+
+    /// Returns the effective watchdog config when the block is present.
+    #[must_use]
+    pub fn effective_watchdog_config(&self) -> Option<EffectiveWatchdogConfig> {
+        self.watchdog.as_ref().map(WatchdogConfig::effective_config)
     }
 
     /// Returns whether teardown artifact collection is enabled.
@@ -3208,6 +3433,9 @@ impl SlurmConfig {
             && matches!(metrics.interval_seconds, Some(0))
         {
             return Err(SpecError::MetricsIntervalTooLow.into());
+        }
+        if let Some(watchdog) = &self.watchdog {
+            watchdog.validate()?;
         }
         if let Some(artifacts) = &self.artifacts {
             let Some(export_dir) = artifacts.export_dir.as_deref() else {

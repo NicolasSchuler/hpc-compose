@@ -57,7 +57,7 @@ pub(super) use hpc_compose::render::{
 pub(super) use hpc_compose::rendezvous::{self, RendezvousRegisterRequest};
 pub(super) use hpc_compose::spec::{
     ComposeSpec, MetricsCollector, MetricsConfig, RuntimeConfig, ServiceFailureMode,
-    parse_slurm_time_limit,
+    SignalShellTarget, parse_slurm_time_limit,
 };
 pub(super) use hpc_compose::when::{
     MonitorOptions, RealMonitorRuntime, WhenConditionSummary, WhenConditions, monitor_until_ready,
@@ -1279,6 +1279,7 @@ where
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: false,
                         skip_prepare,
+                        fs_probes: false,
                         cluster_profile: None,
                     },
                 ))
@@ -1732,6 +1733,7 @@ where
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: true,
                         skip_prepare,
+                        fs_probes: false,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))
@@ -2052,6 +2054,7 @@ pub(crate) fn launch(
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: !local,
                         skip_prepare,
+                        fs_probes: false,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))
@@ -2358,6 +2361,13 @@ struct SmokePhase {
     status: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SmokeTestMode {
+    Smoke,
+    Preemption,
+}
+
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 struct SmokeServiceResult {
     service_name: String,
@@ -2371,15 +2381,27 @@ struct SmokeServiceResult {
     failures: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+struct PreemptionTestSummary {
+    signal: String,
+    signal_target: &'static str,
+    grace_seconds: u64,
+    observed_attempt: Option<u32>,
+    observed_is_resume: Option<bool>,
+}
+
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct SmokeTestOutput {
     pub(crate) schema_version: u32,
+    mode: SmokeTestMode,
     ok: bool,
     backend: SubmissionBackend,
     compose_file: PathBuf,
     job_id: String,
     script_path: PathBuf,
     timeout_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preemption: Option<PreemptionTestSummary>,
     phases: Vec<SmokePhase>,
     services: Vec<SmokeServiceResult>,
     failure_reason: Option<String>,
@@ -2457,12 +2479,175 @@ fn evaluate_smoke_snapshot(snapshot: &hpc_compose::job::StatusSnapshot) -> Smoke
     }
 }
 
+fn validate_preemption_contract(plan: &RuntimePlan) -> Result<()> {
+    let mut missing = Vec::new();
+    if plan.slurm.resume_dir().is_none() {
+        missing.push("x-slurm.resume");
+    }
+    if plan.slurm.requeue != Some(true) {
+        missing.push("x-slurm.requeue: true");
+    }
+    if plan.slurm.signal.is_none() {
+        missing.push("x-slurm.signal");
+    }
+    if !plan.ordered_services.iter().any(|service| {
+        service
+            .assertions
+            .as_ref()
+            .is_some_and(|assertions| !assertions.is_empty())
+    }) {
+        missing.push("at least one services.<name>.assert");
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "test --preemption requires a verifiable preemption contract: {}",
+            missing.join(", ")
+        )
+    }
+}
+
+fn preemption_signal_target(shell: SignalShellTarget) -> &'static str {
+    match shell {
+        SignalShellTarget::Step => "step",
+        SignalShellTarget::Batch => "batch",
+    }
+}
+
+fn preemption_ready_failures(snapshot: &hpc_compose::job::StatusSnapshot) -> Vec<String> {
+    let mut failures = Vec::new();
+    if !snapshot.scheduler.state.eq_ignore_ascii_case("RUNNING") {
+        failures.push(format!("scheduler state is {}", snapshot.scheduler.state));
+    }
+    if snapshot.services.is_empty() {
+        failures.push("runtime state did not include any services".to_string());
+    }
+    for service in &snapshot.services {
+        let launched = service.started_at.is_some()
+            || service.launcher_pid.is_some()
+            || service.last_exit_code.is_some();
+        if !launched {
+            failures.push(format!("{}: service did not launch", service.service_name));
+        }
+        let readiness_configured = service.readiness_configured.unwrap_or(false);
+        if readiness_configured && !service.healthy.unwrap_or(false) {
+            failures.push(format!(
+                "{}: configured readiness did not pass",
+                service.service_name
+            ));
+        }
+    }
+    failures
+}
+
+fn evaluate_preemption_snapshot(snapshot: &hpc_compose::job::StatusSnapshot) -> SmokeEvaluation {
+    let base = evaluate_smoke_snapshot(snapshot);
+    let mut failures = Vec::new();
+    if snapshot.attempt.unwrap_or(0) < 1 {
+        failures.push("attempt counter did not advance to a resumed attempt".to_string());
+    }
+    if snapshot.is_resume != Some(true) {
+        failures.push("latest runtime state did not report is_resume=true".to_string());
+    }
+    if snapshot.resume_dir.is_none() {
+        failures.push("latest runtime state did not report a resume directory".to_string());
+    }
+    if let Some(reason) = base.failure_reason.clone() {
+        failures.push(reason);
+    }
+    let ok = failures.is_empty();
+    SmokeEvaluation {
+        ok,
+        services: base.services,
+        failure_reason: (!ok).then(|| failures.join("; ")),
+    }
+}
+
+fn command_failure_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn send_preemption_signal(
+    context: &ResolvedContext,
+    record: &SubmissionRecord,
+    signal: &hpc_compose::spec::SignalConfig,
+) -> Result<()> {
+    let mut command = Command::new(&context.binaries.scancel.value);
+    command.arg(format!("--signal={}", signal.name.as_str()));
+    if signal.shell == SignalShellTarget::Batch {
+        command.arg("--batch");
+    }
+    let output = command.arg(&record.job_id).output().with_context(|| {
+        format!(
+            "failed to execute '{}' for synthetic preemption signal",
+            context.binaries.scancel.value
+        )
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = command_failure_detail(&output);
+    if detail.is_empty() {
+        bail!(
+            "failed to send synthetic preemption signal to job {}",
+            record.job_id
+        );
+    }
+    bail!(
+        "failed to send synthetic preemption signal to job {}: {detail}",
+        record.job_id
+    )
+}
+
+fn requeue_preemption_job(context: &ResolvedContext, record: &SubmissionRecord) -> Result<()> {
+    let output = Command::new(&context.binaries.scontrol.value)
+        .arg("requeue")
+        .arg(&record.job_id)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to execute '{}' for synthetic preemption requeue",
+                context.binaries.scontrol.value
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = command_failure_detail(&output);
+    if detail.is_empty() {
+        bail!(
+            "failed to requeue job {} for preemption test",
+            record.job_id
+        );
+    }
+    bail!(
+        "failed to requeue job {} for preemption test: {detail}",
+        record.job_id
+    )
+}
+
 fn wait_for_smoke_terminal(
     record: &SubmissionRecord,
     options: &SchedulerOptions,
     timeout_seconds: u64,
 ) -> Result<(hpc_compose::job::StatusSnapshot, bool)> {
-    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    wait_for_smoke_terminal_until(
+        record,
+        options,
+        Instant::now() + Duration::from_secs(timeout_seconds),
+    )
+}
+
+fn wait_for_smoke_terminal_until(
+    record: &SubmissionRecord,
+    options: &SchedulerOptions,
+    deadline: Instant,
+) -> Result<(hpc_compose::job::StatusSnapshot, bool)> {
     loop {
         let snapshot = build_status_snapshot(&record.compose_file, Some(&record.job_id), options)?;
         if snapshot.scheduler.terminal {
@@ -2470,6 +2655,46 @@ fn wait_for_smoke_terminal(
         }
         if Instant::now() >= deadline {
             return Ok((snapshot, true));
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn wait_for_preemption_ready_until(
+    record: &SubmissionRecord,
+    options: &SchedulerOptions,
+    deadline: Instant,
+) -> Result<(hpc_compose::job::StatusSnapshot, bool, bool)> {
+    loop {
+        let snapshot = build_status_snapshot(&record.compose_file, Some(&record.job_id), options)?;
+        if preemption_ready_failures(&snapshot).is_empty() {
+            return Ok((snapshot, true, false));
+        }
+        if snapshot.scheduler.terminal {
+            return Ok((snapshot, false, false));
+        }
+        if Instant::now() >= deadline {
+            return Ok((snapshot, false, true));
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn wait_for_preemption_attempt_until(
+    record: &SubmissionRecord,
+    options: &SchedulerOptions,
+    deadline: Instant,
+) -> Result<(hpc_compose::job::StatusSnapshot, bool, bool)> {
+    loop {
+        let snapshot = build_status_snapshot(&record.compose_file, Some(&record.job_id), options)?;
+        if snapshot.attempt.unwrap_or(0) >= 1 && snapshot.is_resume == Some(true) {
+            return Ok((snapshot, true, false));
+        }
+        if snapshot.scheduler.terminal {
+            return Ok((snapshot, false, false));
+        }
+        if Instant::now() >= deadline {
+            return Ok((snapshot, false, true));
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -2505,15 +2730,33 @@ fn cancel_smoke_timeout(context: &ResolvedContext, record: &SubmissionRecord) {
 fn print_smoke_output(output_format: OutputFormat, report: &SmokeTestOutput) -> Result<()> {
     match output_format {
         OutputFormat::Text => {
+            let label = match report.mode {
+                SmokeTestMode::Smoke => "smoke test",
+                SmokeTestMode::Preemption => "preemption test",
+            };
             if report.ok {
-                println!("smoke test passed: {}", report.job_id);
+                println!("{label} passed: {}", report.job_id);
             } else {
-                println!("smoke test failed: {}", report.job_id);
+                println!("{label} failed: {}", report.job_id);
                 if let Some(reason) = &report.failure_reason {
                     println!("reason: {reason}");
                 }
             }
             println!("script: {}", report.script_path.display());
+            if let Some(preemption) = &report.preemption {
+                println!(
+                    "preemption: signal={} target={} grace={}s observed_attempt={} is_resume={}",
+                    preemption.signal,
+                    preemption.signal_target,
+                    preemption.grace_seconds,
+                    preemption
+                        .observed_attempt
+                        .map_or_else(|| "unknown".to_string(), |attempt| attempt.to_string()),
+                    preemption
+                        .observed_is_resume
+                        .map_or_else(|| "unknown".to_string(), |is_resume| is_resume.to_string())
+                );
+            }
             for service in &report.services {
                 let state = if service.failures.is_empty() {
                     "ok".to_string()
@@ -2539,21 +2782,39 @@ pub(crate) fn smoke_test(
     context: ResolvedContext,
     local: bool,
     submit: bool,
+    preemption: bool,
     time: String,
     timeout: String,
+    preemption_grace: Option<String>,
     script_out: Option<PathBuf>,
     flags: PrepareFlags,
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
-    if local == submit {
-        bail!("test requires exactly one execution mode; choose --local or --submit");
+    let mode_count = [local, submit, preemption]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count();
+    if mode_count != 1 {
+        bail!(
+            "test requires exactly one execution mode; choose --local, --submit, or --preemption"
+        );
     }
-    if submit {
+    if preemption_grace.is_some() && !preemption {
+        bail!("--preemption-grace is only valid with test --preemption");
+    }
+    if submit || preemption {
         parse_slurm_time_limit(&time).context("test --time is invalid")?;
     }
     let timeout_seconds =
         parse_log_since_duration(&timeout).context("test --timeout is invalid")?;
+    let preemption_grace_seconds = match preemption_grace {
+        Some(value) => {
+            Some(parse_log_since_duration(&value).context("test --preemption-grace is invalid")?)
+        }
+        None if preemption => Some(10),
+        None => None,
+    };
     let output_format = output::resolve_output_format(format);
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     let scheduler_options = SchedulerOptions {
@@ -2561,7 +2822,7 @@ pub(crate) fn smoke_test(
         sacct_bin: context.binaries.sacct.value.clone(),
     };
 
-    let (backend, record, script_path) = if local {
+    let (backend, record, script_path, preemption_signal) = if local {
         let prepared = prepare_local_launch(
             &context,
             script_out,
@@ -2576,8 +2837,10 @@ pub(crate) fn smoke_test(
             SubmissionBackend::Local,
             outcome.record,
             prepared.script_path.clone(),
+            None,
         )
     } else {
+        let preemption_enabled = preemption;
         let prepared = prepare_slurm_submission(
             &context,
             script_out,
@@ -2587,7 +2850,12 @@ pub(crate) fn smoke_test(
             false,
             output_format,
             quiet,
-            |_| Ok(()),
+            |plan| {
+                if preemption_enabled {
+                    validate_preemption_contract(plan)?;
+                }
+                Ok(())
+            },
         )?;
         let progress = ProgressReporter::new(!quiet && output_format == OutputFormat::Text);
         let outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
@@ -2602,45 +2870,136 @@ pub(crate) fn smoke_test(
             SubmissionBackend::Slurm,
             record,
             prepared.script_path.clone(),
+            prepared.runtime_plan.slurm.signal.clone(),
         )
     };
 
-    let (snapshot, timed_out) =
-        wait_for_smoke_terminal(&record, &scheduler_options, timeout_seconds)?;
+    let mode = if preemption {
+        SmokeTestMode::Preemption
+    } else {
+        SmokeTestMode::Smoke
+    };
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut phases = vec![SmokePhase {
+        name: "launch",
+        status: "ok",
+    }];
+    let mut preemption_summary = None;
+    let (snapshot, timed_out) = if preemption {
+        let (ready_snapshot, ready, ready_timed_out) =
+            wait_for_preemption_ready_until(&record, &scheduler_options, deadline)?;
+        phases.push(SmokePhase {
+            name: "running",
+            status: if ready_timed_out {
+                "timeout"
+            } else if ready {
+                "ok"
+            } else {
+                "failed"
+            },
+        });
+        if !ready {
+            (ready_snapshot, ready_timed_out)
+        } else {
+            let signal = preemption_signal
+                .as_ref()
+                .context("test --preemption requires x-slurm.signal")?;
+            send_preemption_signal(&context, &record, signal)?;
+            phases.push(SmokePhase {
+                name: "signal",
+                status: "ok",
+            });
+            let grace_seconds = preemption_grace_seconds.unwrap_or(10);
+            let remaining_before_grace = deadline.saturating_duration_since(Instant::now());
+            preemption_summary = Some(PreemptionTestSummary {
+                signal: signal.name.as_str().to_string(),
+                signal_target: preemption_signal_target(signal.shell),
+                grace_seconds,
+                observed_attempt: None,
+                observed_is_resume: None,
+            });
+            if remaining_before_grace < Duration::from_secs(grace_seconds) {
+                thread::sleep(remaining_before_grace);
+                (
+                    build_status_snapshot(
+                        &record.compose_file,
+                        Some(&record.job_id),
+                        &scheduler_options,
+                    )?,
+                    true,
+                )
+            } else {
+                thread::sleep(Duration::from_secs(grace_seconds));
+                requeue_preemption_job(&context, &record)?;
+                phases.push(SmokePhase {
+                    name: "requeue",
+                    status: "ok",
+                });
+                let (attempt_snapshot, attempt_seen, attempt_timed_out) =
+                    wait_for_preemption_attempt_until(&record, &scheduler_options, deadline)?;
+                phases.push(SmokePhase {
+                    name: "attempt_2",
+                    status: if attempt_timed_out {
+                        "timeout"
+                    } else if attempt_seen {
+                        "ok"
+                    } else {
+                        "failed"
+                    },
+                });
+                if let Some(summary) = &mut preemption_summary {
+                    summary.observed_attempt = attempt_snapshot.attempt;
+                    summary.observed_is_resume = attempt_snapshot.is_resume;
+                }
+                if !attempt_seen {
+                    (attempt_snapshot, attempt_timed_out)
+                } else {
+                    wait_for_smoke_terminal_until(&record, &scheduler_options, deadline)?
+                }
+            }
+        }
+    } else {
+        wait_for_smoke_terminal(&record, &scheduler_options, timeout_seconds)?
+    };
     if timed_out {
         cancel_smoke_timeout(&context, &record);
     }
-    let mut evaluation = evaluate_smoke_snapshot(&snapshot);
+    let mut evaluation = if preemption {
+        evaluate_preemption_snapshot(&snapshot)
+    } else {
+        evaluate_smoke_snapshot(&snapshot)
+    };
     if timed_out {
-        let timeout_reason = format!("smoke test timed out after {timeout_seconds}s");
+        let label = match mode {
+            SmokeTestMode::Smoke => "smoke test",
+            SmokeTestMode::Preemption => "preemption test",
+        };
+        let timeout_reason = format!("{label} timed out after {timeout_seconds}s");
         evaluation.ok = false;
         evaluation.failure_reason = Some(match evaluation.failure_reason {
             Some(reason) => format!("{timeout_reason}; {reason}"),
             None => timeout_reason,
         });
     }
+    phases.push(SmokePhase {
+        name: "terminal",
+        status: if timed_out { "timeout" } else { "ok" },
+    });
+    phases.push(SmokePhase {
+        name: "evaluate",
+        status: if evaluation.ok { "ok" } else { "failed" },
+    });
     let report = SmokeTestOutput {
         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
+        mode,
         ok: evaluation.ok,
         backend,
         compose_file: record.compose_file.clone(),
         job_id: record.job_id.clone(),
         script_path,
         timeout_seconds,
-        phases: vec![
-            SmokePhase {
-                name: "launch",
-                status: "ok",
-            },
-            SmokePhase {
-                name: "terminal",
-                status: if timed_out { "timeout" } else { "ok" },
-            },
-            SmokePhase {
-                name: "evaluate",
-                status: if evaluation.ok { "ok" } else { "failed" },
-            },
-        ],
+        preemption: preemption_summary,
+        phases,
         services: evaluation.services,
         failure_reason: evaluation.failure_reason.clone(),
     };

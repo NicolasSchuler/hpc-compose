@@ -866,6 +866,7 @@ pub(crate) fn preflight(
     context: ResolvedContext,
     strict: bool,
     verbose: bool,
+    fs_probes: bool,
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
@@ -893,6 +894,7 @@ pub(crate) fn preflight(
                     scontrol_bin: context.binaries.scontrol.value.clone(),
                     require_submit_tools: true,
                     skip_prepare: false,
+                    fs_probes,
                     cluster_profile,
                 },
             ))
@@ -1791,6 +1793,7 @@ services:
             resolved_context.clone(),
             false,
             true,
+            false,
             Some(OutputFormat::Json),
             false,
         )
@@ -1840,8 +1843,8 @@ services:
 
         let remote_compose = write_remote_compose(tmpdir.path());
         let strict_warning_context = context_for(&remote_compose, tmpdir.path());
-        let strict_warning =
-            preflight(strict_warning_context, true, false, None, false).expect_err("warnings");
+        let strict_warning = preflight(strict_warning_context, true, false, false, None, false)
+            .expect_err("warnings");
         assert!(
             strict_warning
                 .to_string()
@@ -1850,8 +1853,8 @@ services:
 
         let missing_compose = write_missing_image_compose(tmpdir.path());
         let missing_context = context_for(&missing_compose, tmpdir.path());
-        let preflight_err =
-            preflight(missing_context, false, false, None, false).expect_err("missing image");
+        let preflight_err = preflight(missing_context, false, false, false, None, false)
+            .expect_err("missing image");
         assert!(preflight_err.to_string().contains("preflight failed"));
 
         let context_compose = write_context_compose(tmpdir.path());

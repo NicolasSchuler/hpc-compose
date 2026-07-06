@@ -594,6 +594,7 @@ mod tests {
                     nodelist: None,
                 })
                 .collect(),
+            watchdog: None,
             attempt: None,
             is_resume: None,
             resume_dir: None,

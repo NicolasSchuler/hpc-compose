@@ -2402,6 +2402,17 @@
             "null"
           ],
           "default": null
+        },
+        "watchdog": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WatchdogConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -2498,6 +2509,111 @@
           "const": "on_failure"
         }
       ]
+    },
+    "WatchdogAction": {
+      "description": "Advisory idle-resource watchdog action.",
+      "oneOf": [
+        {
+          "description": "Surface an advisory in status/watch/stats output.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "Reserved for a future runtime-enforced self-cancel policy.",
+          "type": "string",
+          "const": "cancel"
+        }
+      ]
+    },
+    "WatchdogConfig": {
+      "description": "Top-level `x-slurm.watchdog` configuration.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WatchdogAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WatchdogResourceConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "gpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WatchdogResourceConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "grace_period_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "WatchdogResourceConfig": {
+      "description": "Per-resource thresholds for the idle-resource watchdog.",
+      "type": "object",
+      "properties": {
+        "compute_below_pct": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "memory_resident_above_pct": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "window_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

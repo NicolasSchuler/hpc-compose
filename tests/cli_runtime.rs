@@ -705,6 +705,168 @@ services:
 }
 
 #[test]
+fn status_and_stats_surface_idle_resource_watchdog_warning() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_dir = tmpdir.path().join("cache");
+    fs::create_dir_all(&cache_dir).expect("cache");
+    let local_image = tmpdir.path().join("image.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: watchdog-demo
+x-slurm:
+  cache_dir: {}
+  metrics:
+    interval_seconds: 60
+  watchdog:
+    grace_period_seconds: 1
+    gpu:
+      window_seconds: 120
+      compute_below_pct: 2
+      memory_resident_above_pct: 20
+    cpu:
+      window_seconds: 120
+      compute_below_pct: 5
+      memory_resident_above_pct: 20
+services:
+  app:
+    image: {}
+    command: ["python", "train.py"]
+"#,
+            cache_dir.display(),
+            local_image.display()
+        ),
+    );
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = write_fake_sbatch(tmpdir.path());
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "-f",
+            compose.to_str().expect("path"),
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+
+    let mut record = load_submission_record(&compose, Some("12345")).expect("record");
+    record.submitted_at = 1;
+    write_submission_record(&record).expect("rewrite old record");
+
+    let metrics_dir = tmpdir.path().join(".hpc-compose/12345/metrics");
+    fs::create_dir_all(&metrics_dir).expect("metrics dir");
+    fs::write(
+        metrics_dir.join("meta.json"),
+        r#"{
+  "interval_seconds": 60,
+  "collectors": [
+    {"name":"gpu","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-10T10:01:00Z"},
+    {"name":"cpu","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-10T10:01:00Z"},
+    {"name":"slurm","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-10T10:01:00Z"}
+  ]
+}"#,
+    )
+    .expect("meta");
+    fs::write(
+        metrics_dir.join("gpu.jsonl"),
+        "\
+{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"index\":\"0\",\"uuid\":\"GPU-0\",\"utilization_gpu\":\"0\",\"utilization_memory\":\"99\",\"memory_used_mib\":\"30000\",\"memory_total_mib\":\"40000\"}\n\
+{\"sampled_at\":\"2026-04-10T10:01:00Z\",\"index\":\"0\",\"uuid\":\"GPU-0\",\"utilization_gpu\":\"0\",\"utilization_memory\":\"99\",\"memory_used_mib\":\"30000\",\"memory_total_mib\":\"40000\"}\n",
+    )
+    .expect("gpu metrics");
+    fs::write(
+        metrics_dir.join("cpu.jsonl"),
+        "\
+{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"node\":\"node01\",\"cpu_util_pct\":50.0,\"core_count\":8,\"loadavg_1m\":4.0}\n\
+{\"sampled_at\":\"2026-04-10T10:01:00Z\",\"node\":\"node01\",\"cpu_util_pct\":50.0,\"core_count\":8,\"loadavg_1m\":4.0}\n",
+    )
+    .expect("cpu metrics");
+    fs::write(
+        metrics_dir.join("slurm.jsonl"),
+        "\
+{\"sampled_at\":\"2026-04-10T10:00:00Z\",\"step_id\":\"12345.0\",\"ntasks\":\"1\",\"ave_cpu\":\"00:00:30\",\"ave_rss\":\"4000M\",\"max_rss\":\"4000M\",\"alloc_tres\":\"cpu=8,mem=64G,gres/gpu=1\",\"tres_usage_in_ave\":\"cpu=00:00:30\"}\n\
+{\"sampled_at\":\"2026-04-10T10:01:00Z\",\"step_id\":\"12345.0\",\"ntasks\":\"1\",\"ave_cpu\":\"00:00:30\",\"ave_rss\":\"4000M\",\"max_rss\":\"4000M\",\"alloc_tres\":\"cpu=8,mem=64G,gres/gpu=1\",\"tres_usage_in_ave\":\"cpu=00:00:30\"}\n",
+    )
+    .expect("slurm metrics");
+
+    let squeue_state = tmpdir.path().join("watchdog-squeue.state");
+    fs::write(
+        &squeue_state,
+        "STATE=RUNNING\nREASON=None\nSTART=2026-04-10T09:59:00\n",
+    )
+    .expect("squeue state");
+    let squeue = write_fake_squeue(tmpdir.path(), &squeue_state);
+    let sacct_state = tmpdir.path().join("watchdog-sacct.state");
+    fs::write(&sacct_state, "NONE\n").expect("sacct state");
+    let sacct = write_fake_sacct(tmpdir.path(), &sacct_state);
+    let sstat_output = tmpdir.path().join("watchdog-sstat.output");
+    fs::write(&sstat_output, "").expect("sstat output");
+    let sstat = write_fake_sstat(tmpdir.path(), &sstat_output);
+
+    let status = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status);
+    let status_json: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    assert_eq!(status_json["watchdog"]["status"], Value::from("warning"));
+    assert!(
+        status_json["watchdog"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("resident VRAM"))
+    );
+    let gpu = status_json["watchdog"]["observations"]
+        .as_array()
+        .expect("observations")
+        .iter()
+        .find(|item| item["resource"] == "gpu")
+        .expect("gpu observation");
+    assert_eq!(gpu["classification"], Value::from("resident_idle"));
+    assert_eq!(gpu["memory_signal"], Value::from("gpu_memory_used_total"));
+
+    let stats = run_cli(
+        tmpdir.path(),
+        &[
+            "stats",
+            "-f",
+            compose.to_str().expect("path"),
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--sstat-bin",
+            sstat.to_str().expect("path"),
+        ],
+    );
+    assert_success(&stats);
+    let stats_stdout = stdout_text(&stats);
+    assert!(stats_stdout.contains("Watchdog:"));
+    assert!(stats_stdout.contains("gpu: resident_idle"));
+    assert!(stats_stdout.contains("resident VRAM"));
+}
+
+#[test]
 fn concurrent_up_invocations_for_same_spec_fail_fast_on_lock() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_dir = tmpdir.path().join("cache");
@@ -3394,14 +3556,26 @@ JobID|NTasks|AveCPU|AveRSS|MaxRSS|TRESUsageInAve
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("jsonl record"))
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), 3);
-    assert_eq!(records[0]["record_type"], Value::from("summary"));
-    assert_eq!(records[0]["job_id"], Value::from("12345"));
-    assert_eq!(records[0]["stats_source"], Value::from("sstat"));
-    assert_eq!(records[1]["record_type"], Value::from("step"));
-    assert_eq!(records[1]["step"]["step_id"], Value::from("12345.0"));
-    assert_eq!(records[2]["record_type"], Value::from("step"));
-    assert_eq!(records[2]["step"]["step_id"], Value::from("12345.1"));
+    let summary = records
+        .iter()
+        .find(|record| record["record_type"] == "summary")
+        .expect("summary record");
+    assert_eq!(summary["job_id"], Value::from("12345"));
+    assert_eq!(summary["stats_source"], Value::from("sstat"));
+    let steps = records
+        .iter()
+        .filter(|record| record["record_type"] == "step")
+        .collect::<Vec<_>>();
+    assert_eq!(steps.len(), 2, "{stdout}");
+    assert_eq!(steps[0]["step"]["step_id"], Value::from("12345.0"));
+    assert_eq!(steps[1]["step"]["step_id"], Value::from("12345.1"));
+    assert!(
+        records.iter().all(|record| matches!(
+            record["record_type"].as_str(),
+            Some("summary" | "note" | "step")
+        )),
+        "{stdout}"
+    );
 }
 
 #[test]

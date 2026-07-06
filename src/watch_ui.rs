@@ -2682,6 +2682,13 @@ fn format_watch_metrics_line(snapshot: &StatsSnapshot) -> Option<String> {
             failure.service, failure.exit_code
         ));
     }
+    if let Some(message) = snapshot
+        .watchdog
+        .as_ref()
+        .and_then(hpc_compose::job::WatchdogSnapshot::warning_message)
+    {
+        parts.push(format!("watchdog: {message}"));
+    }
     if let Some(gpu) = snapshot
         .sampler
         .as_ref()

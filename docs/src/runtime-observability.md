@@ -247,6 +247,30 @@ On a multi-node allocation the collector fans out through `srun` (the same mecha
 
 **First-sample caveat:** the very first sample for a given node has no previous counters to diff against, so its `cpu_util_pct` is `null`. Utilization appears from the second sample onward. `hpc-compose stats` surfaces the latest per-node `util`/`cores`/`load1` (plus a cross-node mean/max summary on multi-node jobs); the `--format json` snapshot exposes `sampler.cpu.nodes` and `sampler.cpu.summary`; the watch metrics line appends a compact `cpu: <mean>%` segment once utilization is available.
 
+### Idle resource watchdog
+
+`x-slurm.watchdog` turns sampler history into advisory idle-resource warnings. It is opt-in and currently warn-only:
+
+- `status` and `stats` print a `Watchdog:` block and expose a structured `watchdog` object in JSON.
+- `watch` adds a compact `watchdog: ...` segment to the metrics line only when a warning is active.
+- The watchdog never cancels a job in the current implementation. `action: cancel` is reserved and rejected by validation.
+
+The classifier reads a sustained history window, not just the latest sample. It waits until the scheduler reports `RUNNING`, the grace period has elapsed, and enough sampler timestamps cover the configured `window_seconds`.
+
+GPU classifications use:
+
+- compute: `gpu.jsonl` `utilization_gpu`
+- memory residency: `memory_used_mib / memory_total_mib`
+
+`utilization_memory` is GPU memory bandwidth and is intentionally not used as residency. Low GPU compute with low VRAM is reported as `idle`; low GPU compute with high resident VRAM is `resident_idle`.
+
+CPU classifications use:
+
+- compute: `cpu.jsonl` `cpu_util_pct`
+- memory residency: step RSS from `slurm.jsonl` against memory in `AllocTRES`, when Slurm reports both
+
+Low CPU compute with low memory is reported as `wrapper_stuck`; low CPU compute with high RSS is an `io_wait_like` warning. When RSS or allocation memory is unavailable, CPU warnings remain compute-only and say that memory residency is unavailable.
+
 ### Per-service GPU attribution
 
 Because every service runs as its own Slurm step, sampled GPU processes can usually be attributed back to the service that owns them. Attribution is two-stage:

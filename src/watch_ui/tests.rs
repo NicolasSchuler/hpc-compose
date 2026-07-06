@@ -4,9 +4,11 @@ use hpc_compose::job::{
     ReplayArtifactPaths, ReplayEvent, ReplayEventKind, ReplayFrame, ReplayReport,
     ReplayServiceFrame, RequestedWalltime, SamplerSnapshot, SchedulerOptions, SchedulerSource,
     SchedulerStatus, StatsSnapshot, SubmissionBackend, SubmissionKind, SubmissionRecord,
-    WalltimeProgress, WatchOutcome, build_submission_record_with_backend, state_path_for_record,
+    WalltimeProgress, WatchOutcome, WatchdogClassification, WatchdogObservation, WatchdogResource,
+    WatchdogSnapshot, WatchdogStatus, build_submission_record_with_backend, state_path_for_record,
     write_submission_record,
 };
+use hpc_compose::spec::WatchdogAction;
 
 fn stats_snapshot_with_cpu(cpu: Option<CpuSnapshot>, available: bool) -> StatsSnapshot {
     StatsSnapshot {
@@ -34,6 +36,7 @@ fn stats_snapshot_with_cpu(cpu: Option<CpuSnapshot>, available: bool) -> StatsSn
         steps: vec![],
         accounting: None,
         first_failure: None,
+        watchdog: None,
         attempt: None,
         is_resume: None,
         resume_dir: None,
@@ -99,6 +102,36 @@ fn format_watch_metrics_line_omits_cpu_segment_when_absent_or_util_less() {
     assert_eq!(
         format_watch_metrics_line(&stats_snapshot_with_cpu(Some(util_less), false)),
         None
+    );
+}
+
+#[test]
+fn format_watch_metrics_line_includes_watchdog_warning() {
+    let mut snapshot = stats_snapshot_with_cpu(None, false);
+    snapshot.watchdog = Some(WatchdogSnapshot {
+        enabled: true,
+        action: WatchdogAction::Warn,
+        status: WatchdogStatus::Warning,
+        message: "low GPU compute with resident VRAM".into(),
+        grace_period_seconds: 1,
+        observations: vec![WatchdogObservation {
+            resource: WatchdogResource::Gpu,
+            status: WatchdogStatus::Warning,
+            classification: WatchdogClassification::ResidentIdle,
+            window_seconds: 120,
+            observed_seconds: 120,
+            sample_count: 2,
+            mean_compute_pct: Some(0.0),
+            max_compute_pct: Some(0.0),
+            memory_resident_pct: Some(75.0),
+            memory_signal: Some("gpu_memory_used_total".into()),
+            message: "low GPU compute with resident VRAM".into(),
+        }],
+    });
+
+    assert_eq!(
+        format_watch_metrics_line(&snapshot).as_deref(),
+        Some("watchdog: low GPU compute with resident VRAM")
     );
 }
 

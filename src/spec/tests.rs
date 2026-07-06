@@ -3043,6 +3043,122 @@ services:
 }
 
 #[test]
+fn watchdog_block_defaults_to_warn_and_resource_thresholds() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  watchdog: {}
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("load");
+    assert!(spec.slurm.watchdog_enabled());
+    let watchdog = spec
+        .slurm
+        .effective_watchdog_config()
+        .expect("watchdog config");
+    assert!(watchdog.enabled);
+    assert_eq!(watchdog.action, WatchdogAction::Warn);
+    assert_eq!(watchdog.grace_period_seconds, 600);
+    assert_eq!(watchdog.gpu.window_seconds, 1_800);
+    assert_eq!(watchdog.gpu.compute_below_pct, 2);
+    assert_eq!(watchdog.gpu.memory_resident_above_pct, 20);
+    assert_eq!(watchdog.cpu.window_seconds, 1_800);
+    assert_eq!(watchdog.cpu.compute_below_pct, 5);
+    assert_eq!(watchdog.cpu.memory_resident_above_pct, 20);
+}
+
+#[test]
+fn watchdog_block_parses_explicit_cpu_and_gpu_thresholds() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  watchdog:
+    enabled: true
+    action: warn
+    grace_period_seconds: 42
+    gpu:
+      window_seconds: 120
+      compute_below_pct: 3
+      memory_resident_above_pct: 25
+    cpu:
+      window_seconds: 240
+      compute_below_pct: 7
+      memory_resident_above_pct: 35
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let spec = ComposeSpec::load(&path).expect("load");
+    let watchdog = spec
+        .slurm
+        .effective_watchdog_config()
+        .expect("watchdog config");
+    assert_eq!(watchdog.grace_period_seconds, 42);
+    assert_eq!(watchdog.gpu.window_seconds, 120);
+    assert_eq!(watchdog.gpu.compute_below_pct, 3);
+    assert_eq!(watchdog.gpu.memory_resident_above_pct, 25);
+    assert_eq!(watchdog.cpu.window_seconds, 240);
+    assert_eq!(watchdog.cpu.compute_below_pct, 7);
+    assert_eq!(watchdog.cpu.memory_resident_above_pct, 35);
+}
+
+#[test]
+fn watchdog_block_rejects_cancel_and_invalid_bounds() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cancel = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  watchdog:
+    action: cancel
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let err = ComposeSpec::load(&cancel).expect_err("cancel is reserved");
+    assert!(err.to_string().contains("action=cancel"), "{err:#}");
+
+    let zero_window = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  watchdog:
+    gpu:
+      window_seconds: 0
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let err = ComposeSpec::load(&zero_window).expect_err("zero window");
+    assert!(err.to_string().contains("window_seconds"), "{err:#}");
+
+    let bad_percent = write_spec(
+        tmpdir.path(),
+        r#"
+x-slurm:
+  watchdog:
+    cpu:
+      compute_below_pct: 101
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let err = ComposeSpec::load(&bad_percent).expect_err("bad percent");
+    assert!(err.to_string().contains("compute_below_pct"), "{err:#}");
+}
+
+#[test]
 fn artifacts_block_defaults_to_always_and_accepts_job_mount_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let path = write_spec(

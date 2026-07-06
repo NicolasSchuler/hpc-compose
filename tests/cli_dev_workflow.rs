@@ -30,7 +30,52 @@ fn test_command_requires_explicit_execution_mode() {
         &["test", "-f", compose.to_str().expect("path")],
     );
     assert_failure(&output);
-    assert!(stderr_text(&output).contains("choose --local or --submit"));
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("--local"));
+    assert!(stderr.contains("--submit"));
+    assert!(stderr.contains("--preemption"));
+}
+
+#[test]
+fn test_preemption_rejects_missing_contract_before_submission() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sqsh");
+    fs::write(&local_image, "sqsh").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            "x-slurm:\n  cache_dir: {}\nservices:\n  app:\n    image: {}\n    command: /bin/true\n",
+            tmpdir.path().join("cache").display(),
+            local_image.display()
+        ),
+    );
+    let script_out = tmpdir.path().join("preemption.sbatch");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "test",
+            "--preemption",
+            "--skip-prepare",
+            "--no-preflight",
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+
+    assert_failure(&output);
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("test --preemption requires"));
+    assert!(stderr.contains("resume"));
+    assert!(stderr.contains("requeue"));
+    assert!(stderr.contains("signal"));
+    assert!(
+        !script_out.exists(),
+        "contract failure should happen before render"
+    );
 }
 
 #[test]
@@ -98,6 +143,7 @@ services:
     assert_success(&output);
     let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("json");
     assert_eq!(payload["ok"], Value::from(true));
+    assert_eq!(payload["mode"], Value::from("smoke"));
     assert_eq!(payload["backend"], Value::from("slurm"));
     assert_eq!(payload["job_id"], Value::from("12345"));
     assert_eq!(payload["services"].as_array().map(Vec::len), Some(2));
@@ -234,6 +280,7 @@ fn test_local_success_outputs_json_and_tracks_local_backend() {
     assert_success(&output);
     let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("json");
     assert_eq!(payload["ok"], Value::from(true));
+    assert_eq!(payload["mode"], Value::from("smoke"));
     assert_eq!(payload["backend"], Value::from("local"));
     assert_eq!(payload["services"].as_array().map(Vec::len), Some(1));
     assert_eq!(

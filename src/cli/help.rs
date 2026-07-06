@@ -165,6 +165,7 @@ pub(super) const PREFLIGHT_HELP: &str = "\
 Examples:
   hpc-compose preflight -f compose.yaml
   hpc-compose preflight -f compose.yaml --strict
+  hpc-compose preflight -f compose.yaml --fs-probes
   hpc-compose preflight -f compose.yaml --format json";
 
 pub(super) const WEATHER_HELP: &str = "\
@@ -219,9 +220,11 @@ pub(super) const TEST_HELP: &str = "\
 Examples:
   hpc-compose test --local -f compose.yaml
   hpc-compose test --submit --time 00:01:00 -f compose.yaml
+  hpc-compose test --preemption --preemption-grace 10s -f compose.yaml
   hpc-compose test --submit --timeout 180s --format json -f compose.yaml
 
-Smoke tests are finite: every service must start, pass configured readiness, and complete successfully.";
+Smoke tests are finite: every service must start, pass configured readiness, and complete successfully.
+Preemption tests submit to Slurm, send the configured x-slurm.signal, requeue the job, and require a resumed attempt with passing service assertions.";
 
 pub(super) const DEV_HELP: &str = "\
 Examples:
@@ -632,6 +635,7 @@ const PREPARE_EXAMPLES: &[&str] = &[
 const PREFLIGHT_EXAMPLES: &[&str] = &[
     "hpc-compose preflight -f compose.yaml",
     "hpc-compose preflight -f compose.yaml --strict",
+    "hpc-compose preflight -f compose.yaml --fs-probes",
     "hpc-compose preflight -f compose.yaml --format json",
 ];
 

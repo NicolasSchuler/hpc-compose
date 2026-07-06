@@ -1017,10 +1017,76 @@
             "string",
             "null"
           ]
+        },
+        "watchdog": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveWatchdogConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "cache_dir"
+      ]
+    },
+    "EffectiveWatchdogConfig": {
+      "description": "Stable effective watchdog config with defaults applied.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/WatchdogAction"
+        },
+        "cpu": {
+          "$ref": "#/$defs/EffectiveWatchdogResourceConfig"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "gpu": {
+          "$ref": "#/$defs/EffectiveWatchdogResourceConfig"
+        },
+        "grace_period_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "enabled",
+        "action",
+        "grace_period_seconds",
+        "gpu",
+        "cpu"
+      ]
+    },
+    "EffectiveWatchdogResourceConfig": {
+      "description": "Stable effective per-resource watchdog thresholds with defaults applied.",
+      "type": "object",
+      "properties": {
+        "compute_below_pct": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "memory_resident_above_pct": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "window_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "window_seconds",
+        "compute_below_pct",
+        "memory_resident_above_pct"
       ]
     },
     "EnvironmentSpec": {
@@ -2314,6 +2380,21 @@
     "SweepParameterValue": {
       "description": "One scalar sweep parameter value, stored as the string passed to interpolation.",
       "type": "string"
+    },
+    "WatchdogAction": {
+      "description": "Advisory idle-resource watchdog action.",
+      "oneOf": [
+        {
+          "description": "Surface an advisory in status/watch/stats output.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "Reserved for a future runtime-enforced self-cancel policy.",
+          "type": "string",
+          "const": "cancel"
+        }
+      ]
     }
   }
 }

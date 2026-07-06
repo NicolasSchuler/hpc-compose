@@ -44,11 +44,17 @@ Run the smoke test through the local Pyxis/Enroot supervisor.
 \fB--submit\fR
 Submit the smoke test to Slurm.
 .TP
+\fB--preemption\fR
+Submit a synthetic preemption drill: signal, requeue, observe attempt 2, and evaluate resume assertions.
+.TP
 \fB--time\fR \fITIME\fR
-Walltime override for \-\-submit smoke tests. Default: 00:01:00.
+Walltime override for \-\-submit and \-\-preemption smoke tests. Default: 00:01:00.
 .TP
 \fB--timeout\fR \fIDURATION\fR
 Maximum time to wait for the smoke test to reach a terminal result. Default: 180s.
+.TP
+\fB--preemption\-grace\fR \fIDURATION\fR
+Checkpoint grace period between the synthetic preemption signal and requeue (default: 10s; only valid with \-\-preemption).
 .TP
 \fB--script\-out\fR \fIOUTPUT\fR
 Write the rendered launcher script to this path.
@@ -64,6 +70,9 @@ Path to the squeue executable. Default: squeue.
 .TP
 \fB--sacct\-bin\fR \fIPATH\fR
 Path to the sacct executable. Default: sacct.
+.TP
+\fB--scontrol\-bin\fR \fIPATH\fR
+Path to the scontrol executable. Default: scontrol.
 .TP
 \fB--scancel\-bin\fR \fIPATH\fR
 Path to the scancel executable. Default: scancel.
@@ -92,6 +101,7 @@ Print help (see a summary with '\-h').
 .nf
 hpc\-compose test \-\-local \-f compose.yaml
 hpc\-compose test \-\-submit \-\-time 00:01:00 \-f compose.yaml
+hpc\-compose test \-\-preemption \-\-preemption\-grace 10s \-f compose.yaml
 hpc\-compose test \-\-submit \-\-timeout 180s \-\-format json \-f compose.yaml
 .fi
 .SH SEE ALSO

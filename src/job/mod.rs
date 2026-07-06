@@ -42,6 +42,7 @@ mod stats;
 mod stats_rollup;
 mod sweep;
 mod verify;
+mod watchdog;
 
 #[cfg(test)]
 use artifacts::{copy_path_recursive, remove_existing_destination, resolve_export_dir};
@@ -139,6 +140,9 @@ pub use sweep::{
 };
 pub use verify::{
     StatusVerificationCheck, StatusVerificationReport, build_status_verification_report,
+};
+pub use watchdog::{
+    WatchdogClassification, WatchdogObservation, WatchdogResource, WatchdogSnapshot, WatchdogStatus,
 };
 
 const SUBMISSION_SCHEMA_VERSION: u32 = 3;

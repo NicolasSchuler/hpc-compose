@@ -433,6 +433,7 @@
         },
         "burst_buffer": { "$ref": "#/definitions/burstBuffer" },
         "metrics": { "$ref": "#/definitions/metrics" },
+        "watchdog": { "$ref": "#/definitions/watchdog" },
         "artifacts": { "$ref": "#/definitions/artifacts" },
         "resume": { "$ref": "#/definitions/resume" },
         "notify": { "$ref": "#/definitions/notify" },
@@ -546,6 +547,39 @@
             "type": "string",
             "enum": ["gpu", "slurm", "cpu"]
           }
+        }
+      }
+    },
+    "watchdog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "action": {
+          "type": "string",
+          "enum": ["warn", "cancel"],
+          "default": "warn",
+          "description": "The current implementation accepts only warn; cancel is reserved for a future runtime-enforced watchdog and is rejected by hpc-compose validation."
+        },
+        "grace_period_seconds": { "$ref": "#/definitions/positiveInteger" },
+        "gpu": { "$ref": "#/definitions/watchdogResource" },
+        "cpu": { "$ref": "#/definitions/watchdogResource" }
+      }
+    },
+    "watchdogResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "window_seconds": { "$ref": "#/definitions/positiveInteger" },
+        "compute_below_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "memory_resident_above_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
         }
       }
     },

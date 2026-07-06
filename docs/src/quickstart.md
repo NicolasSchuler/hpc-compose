@@ -126,7 +126,7 @@ Success looks like:
 | Missing `sbatch`, `srun`, `enroot`, `apptainer`, or `singularity` | `hpc-compose debug -f compose.yaml --preflight` | Reruns prerequisite checks and keeps the latest tracked context in one report. |
 | `srun` does not advertise `--container-image` | `hpc-compose doctor cluster-report` | Pyxis support is unavailable or not loaded on that node. |
 | Job submitted but no service log appeared | `hpc-compose debug -f compose.yaml` | Shows scheduler state, batch log tail, service log hints, and the next command. |
-| Cache path warning or error | `hpc-compose debug -f compose.yaml --preflight` | Confirms whether `x-slurm.cache_dir` is shared and writable. |
+| Cache path warning or error | `hpc-compose debug -f compose.yaml --preflight` | Confirms whether `x-slurm.cache_dir` looks shared and is writable from the login node. On a login node, run `hpc-compose preflight -f compose.yaml --fs-probes` to submit a tiny compute-node visibility and rename probe. |
 | Services start in the wrong order | `hpc-compose plan --explain --verbose -f compose.yaml` | Shows normalized dependencies, readiness gates, and planner hints before running. |
 
 The longer symptom guide is [Troubleshooting](troubleshooting.md).

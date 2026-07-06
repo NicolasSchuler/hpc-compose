@@ -55,6 +55,7 @@ pub(crate) fn alloc(
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: true,
                         skip_prepare,
+                        fs_probes: false,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))
@@ -186,6 +187,7 @@ pub(crate) fn run_service(
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: true,
                         skip_prepare,
+                        fs_probes: false,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))
@@ -456,6 +458,7 @@ pub(crate) fn run_ephemeral(
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: !local,
                         skip_prepare,
+                        fs_probes: false,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))
@@ -861,6 +864,7 @@ pub(crate) fn notebook(
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: !local,
                         skip_prepare,
+                        fs_probes: false,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))

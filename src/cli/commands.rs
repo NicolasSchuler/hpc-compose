@@ -420,6 +420,11 @@ pub enum Commands {
         strict: bool,
         #[arg(long, help = "Show detailed preflight findings")]
         verbose: bool,
+        #[arg(
+            long,
+            help = "Submit a tiny Slurm job to actively probe shared filesystem visibility, rename atomicity, and compute-node headroom"
+        )]
+        fs_probes: bool,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
@@ -1078,9 +1083,14 @@ pub enum Commands {
         submit: bool,
         #[arg(
             long,
+            help = "Submit a synthetic preemption drill: signal, requeue, observe attempt 2, and evaluate resume assertions"
+        )]
+        preemption: bool,
+        #[arg(
+            long,
             value_name = "TIME",
             default_value = "00:01:00",
-            help = "Walltime override for --submit smoke tests"
+            help = "Walltime override for --submit and --preemption smoke tests"
         )]
         time: String,
         #[arg(
@@ -1090,6 +1100,12 @@ pub enum Commands {
             help = "Maximum time to wait for the smoke test to reach a terminal result"
         )]
         timeout: String,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            help = "Checkpoint grace period between the synthetic preemption signal and requeue (default: 10s; only valid with --preemption)"
+        )]
+        preemption_grace: Option<String>,
         #[arg(
             long,
             value_name = "OUTPUT",
@@ -1128,6 +1144,14 @@ pub enum Commands {
             help = "Path to the sacct executable"
         )]
         sacct_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "scontrol",
+            help_heading = "Tool overrides",
+            help = "Path to the scontrol executable"
+        )]
+        scontrol_bin: String,
         #[arg(
             long,
             value_name = "PATH",

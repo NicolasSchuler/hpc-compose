@@ -224,17 +224,26 @@ A lint rule that checks the spec against past runs of the same spec name:
 - **Builds on:** `inspect --rightsize`, tracked history, lint's patch
   machinery.
 
-### 2.7 Idle-GPU watchdog
+### 2.7 Idle resource watchdog
 
-An in-job policy: if attributed GPU utilization stays ~0% for N minutes across
-all services, fire a hook / warn in `watch` / optionally self-cancel — the
-"allocation left running overnight" tax, now detectable per service thanks to
-the just-landed cgroup attribution.
+Implemented as an opt-in, read-side advisory watchdog (`x-slurm.watchdog`):
+`status`, `stats`, and `watch` warn when sustained sampler history shows low
+compute after a grace period. The scope is broader than the original GPU-only
+sketch: GPU compute (`utilization_gpu`) is separated from GPU memory residency
+(`memory_used_mib / memory_total_mib`), and CPU jobs are covered through
+`cpu.jsonl` utilization with RSS-vs-`AllocTRES` memory residency when Slurm
+reports enough data.
+
+This first pass intentionally does not fire hooks or cancel jobs.
+`action: cancel` is reserved and rejected by validation until there is a
+runtime-side enforcement path with focused tests.
 
 - **Who:** users and the admins who email them.
 - **Effort:** M
 - **Builds on:** metrics sampler + per-service GPU attribution, failure-policy
   hooks.
+- **Follow-ups:** runtime hook/cancel enforcement, per-service warning grouping,
+  richer CPU memory signals on clusters that do not expose memory TRES.
 
 ### 2.8 Lab citizenship report (`score --account --period`)
 
@@ -279,6 +288,12 @@ kill/requeue, restart as attempt 2, and assert the workload actually resumed
 (attempt counter advanced, user-provided resume assertion passed) — today the
 whole requeue+signal+resume contract is unverifiable until real preemption at
 hour 40.
+
+Status: implemented locally as `hpc-compose test --preemption`. The first pass
+submits a finite Slurm smoke run, waits for launched/ready services, sends the
+configured `x-slurm.signal` via `scancel --signal`, waits
+`--preemption-grace` (default `10s`), runs `scontrol requeue`, observes a
+resumed attempt, and requires normal service assertions to pass.
 
 - **Who:** everyone using `x-slurm.resume`; CI via the local Slurm dev
   cluster.
@@ -638,16 +653,16 @@ worktree agents with adversarial review before PR.
 - 4.2 Live-value shell completions — implemented locally
 - 4.6 Strict `--dry-run`/`--offline` contract — implemented locally
 - 1.7 `notebook promote` — implemented locally
+- 2.7 Idle resource watchdog — implemented locally
 - 1.4 `experiment tag/note` — in implementation
 - 4.1 `render --annotate` + `explain` — in implementation
+- 3.1 Preemption-contract verification (`test --preemption`) — implemented locally
+- 3.8 Shared-FS behavior probes in preflight — implemented locally
 
 **Queued, in this order:**
 
 1. 4.9 Offline doc search (`hpc-compose docs <query>`)
-2. 2.7 Idle-GPU watchdog
-3. 3.1 Preemption-contract verification (`test --preemption`)
-4. 3.4 Failure classifier (`debug --classify`)
-5. 3.8 Shared-FS behavior probes in preflight
+2. 3.4 Failure classifier (`debug --classify`)
 
 **Second wave (after the 12 above):**
 

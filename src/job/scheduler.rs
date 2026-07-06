@@ -287,6 +287,8 @@ pub struct StatusSnapshot {
     pub log_dir: PathBuf,
     pub batch_log: BatchLogStatus,
     pub services: Vec<PsServiceRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<WatchdogSnapshot>,
     pub attempt: Option<u32>,
     pub is_resume: Option<bool>,
     pub resume_dir: Option<PathBuf>,
@@ -566,6 +568,18 @@ fn build_status_snapshot_core(
     } else {
         None
     };
+    let watchdog_started_at = queue_diagnostics
+        .as_ref()
+        .and_then(|queue| queue.start_time.as_deref())
+        .and_then(parse_scheduler_timestamp);
+    let watchdog = super::watchdog::build_watchdog_snapshot(
+        spec_path,
+        &record,
+        &scheduler,
+        watchdog_started_at,
+        now,
+    )
+    .snapshot;
 
     Ok(StatusSnapshot {
         log_dir: log_dir_for_record(&record),
@@ -576,6 +590,7 @@ fn build_status_snapshot_core(
         array,
         verification: None,
         services,
+        watchdog,
         attempt: runtime_state.as_ref().and_then(|state| state.attempt),
         is_resume: runtime_state.as_ref().and_then(|state| state.is_resume),
         resume_dir: runtime_state

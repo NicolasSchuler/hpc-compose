@@ -92,6 +92,7 @@ pub(crate) fn debug(
                 scontrol_bin: preflight_context.binaries.scontrol.value.clone(),
                 require_submit_tools: true,
                 skip_prepare: false,
+                fs_probes: false,
                 cluster_profile,
             },
         );

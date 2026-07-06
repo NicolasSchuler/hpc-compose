@@ -16,7 +16,7 @@ use hpc_compose::job::{
     ArtifactExportReport, CleanupReport, EfficiencyScoreReport, JobDiffChange, JobDiffReport,
     JobInventoryScan, JobMatrixReport, JobMatrixRow, PsSnapshot, RightsizeConfidence,
     RightsizeReport, SpecDiffReport, StatsSnapshot, StatusSnapshot, StatusVerificationReport,
-    SubmissionBackend, WatchOutcome, scheduler_source_label,
+    SubmissionBackend, WatchOutcome, WatchdogSnapshot, scheduler_source_label,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, registry_host_for_remote,
@@ -1034,6 +1034,9 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
     if let Some(verification) = &snapshot.verification {
         write_status_verification(writer, verification)?;
     }
+    if let Some(watchdog) = &snapshot.watchdog {
+        write_watchdog_snapshot(writer, watchdog)?;
+    }
     writeln!(writer, "{}", term::styled_section_header("Runtime:"))?;
     writeln!(
         writer,
@@ -1252,6 +1255,56 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
     }
     if let Some(array) = &snapshot.array {
         write_array_status(writer, array)?;
+    }
+    Ok(())
+}
+
+fn write_watchdog_snapshot(writer: &mut impl Write, watchdog: &WatchdogSnapshot) -> io::Result<()> {
+    writeln!(writer, "{}", term::styled_section_header("Watchdog:"))?;
+    let status = match watchdog.status.as_str() {
+        "warning" => term::styled_warning("warning"),
+        "ok" => term::styled_success("ok"),
+        other => other.to_string(),
+    };
+    let action = match watchdog.action {
+        hpc_compose::spec::WatchdogAction::Warn => "warn",
+        hpc_compose::spec::WatchdogAction::Cancel => "cancel",
+    };
+    writeln!(
+        writer,
+        "  status: {status} action={action} grace={}s",
+        watchdog.grace_period_seconds
+    )?;
+    writeln!(writer, "  message: {}", watchdog.message)?;
+    for observation in &watchdog.observations {
+        let compute = observation
+            .mean_compute_pct
+            .map(|value| format!("{value:.1}%"))
+            .unwrap_or_else(|| "-".to_string());
+        let max_compute = observation
+            .max_compute_pct
+            .map(|value| format!("{value:.1}%"))
+            .unwrap_or_else(|| "-".to_string());
+        let memory = observation
+            .memory_resident_pct
+            .map(|value| format!("{value:.1}%"))
+            .unwrap_or_else(|| "-".to_string());
+        let signal = observation.memory_signal.as_deref().unwrap_or("-");
+        writeln!(
+            writer,
+            "  {}: {} status={} observed={}/{}s samples={} mean_compute={} max_compute={} memory={} signal={}",
+            format!("{:?}", observation.resource).to_ascii_lowercase(),
+            observation.classification.as_str(),
+            observation.status.as_str(),
+            observation.observed_seconds,
+            observation.window_seconds,
+            observation.sample_count,
+            compute,
+            max_compute,
+            memory,
+            signal
+        )?;
+        writeln!(writer, "    {}", observation.message)?;
     }
     Ok(())
 }
@@ -1507,6 +1560,9 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
     }
     for note in &snapshot.notes {
         writeln!(writer, "note: {note}")?;
+    }
+    if let Some(watchdog) = &snapshot.watchdog {
+        write_watchdog_snapshot(writer, watchdog)?;
     }
     if let Some(accounting) = &snapshot.accounting {
         writeln!(writer)?;
@@ -2031,6 +2087,26 @@ pub(crate) fn write_stats_snapshot_jsonl(
                 "message": note,
             }),
         )?;
+    }
+    if let Some(watchdog) = &snapshot.watchdog {
+        write_jsonl_record(
+            writer,
+            &serde_json::json!({
+                "record_type": "watchdog",
+                "job_id": snapshot.job_id,
+                "watchdog": watchdog,
+            }),
+        )?;
+        for observation in &watchdog.observations {
+            write_jsonl_record(
+                writer,
+                &serde_json::json!({
+                    "record_type": "watchdog_observation",
+                    "job_id": snapshot.job_id,
+                    "observation": observation,
+                }),
+            )?;
+        }
     }
     if let Some(sampler) = &snapshot.sampler {
         for collector in &sampler.collectors {

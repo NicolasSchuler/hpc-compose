@@ -343,6 +343,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             file,
             strict,
             verbose,
+            fs_probes,
             format,
             enroot_bin,
             sbatch_bin,
@@ -363,7 +364,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--singularity-bin", &singularity_bin),
                 ],
             )?;
-            spec::preflight(context, strict, verbose, format, options.quiet)
+            spec::preflight(context, strict, verbose, fs_probes, format, options.quiet)
         }
         Commands::Inspect {
             file,
@@ -712,13 +713,16 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             launch,
             local,
             submit,
+            preemption,
             time,
             timeout,
+            preemption_grace,
             script_out,
             sbatch_bin,
             srun_bin,
             squeue_bin,
             sacct_bin,
+            scontrol_bin,
             scancel_bin,
             format,
         } => {
@@ -731,6 +735,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--srun-bin", &srun_bin),
                     ("--squeue-bin", &squeue_bin),
                     ("--sacct-bin", &sacct_bin),
+                    ("--scontrol-bin", &scontrol_bin),
                     ("--scancel-bin", &scancel_bin),
                     ("--apptainer-bin", &launch.apptainer_bin),
                     ("--singularity-bin", &launch.singularity_bin),
@@ -741,8 +746,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 context,
                 local,
                 submit,
+                preemption,
                 time,
                 timeout,
+                preemption_grace,
                 script_out,
                 runtime::PrepareFlags {
                     keep_failed_prep: launch.keep_failed_prep,

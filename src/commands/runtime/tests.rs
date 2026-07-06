@@ -296,6 +296,7 @@ fn smoke_evaluation_rejects_missing_readiness_and_completion() {
             ntasks_per_node: None,
             nodelist: None,
         }],
+        watchdog: None,
         attempt: None,
         is_resume: None,
         resume_dir: None,
@@ -306,6 +307,179 @@ fn smoke_evaluation_rejects_missing_readiness_and_completion() {
     assert!(reason.contains("api"));
     assert!(reason.contains("readiness"));
     assert!(reason.contains("complete successfully"));
+}
+
+#[test]
+fn preemption_contract_requires_resume_requeue_signal_and_assertion() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let incomplete = write_compose(tmpdir.path());
+    let incomplete_plan = load::load_runtime_plan(&incomplete).expect("incomplete plan");
+    let err = validate_preemption_contract(&incomplete_plan).expect_err("missing contract");
+    let message = err.to_string();
+    assert!(message.contains("x-slurm.resume"));
+    assert!(message.contains("x-slurm.requeue: true"));
+    assert!(message.contains("x-slurm.signal"));
+    assert!(message.contains("assert"));
+
+    let complete = tmpdir.path().join("preemption.yaml");
+    fs::write(
+        &complete,
+        r#"
+name: preemption-test
+x-slurm:
+  requeue: true
+  signal:
+    name: USR1
+    at_seconds: 5
+  resume:
+    path: /shared/preemption-test
+services:
+  app:
+    image: docker://python:3.12
+    command: /bin/true
+    assert:
+      exit_code: 0
+"#,
+    )
+    .expect("write preemption compose");
+    let complete_plan = load::load_runtime_plan(&complete).expect("complete plan");
+    validate_preemption_contract(&complete_plan).expect("complete contract");
+}
+
+fn completed_preemption_snapshot(
+    attempt: Option<u32>,
+    is_resume: Option<bool>,
+    resume_dir: Option<PathBuf>,
+    assertion_failures: Vec<String>,
+) -> hpc_compose::job::StatusSnapshot {
+    hpc_compose::job::StatusSnapshot {
+        record: SubmissionRecord {
+            schema_version: 2,
+            backend: SubmissionBackend::Slurm,
+            kind: SubmissionKind::Main,
+            job_id: "123".into(),
+            submitted_at: 1,
+            compose_file: PathBuf::from("compose.yaml"),
+            submit_dir: PathBuf::from("/tmp"),
+            script_path: PathBuf::from("job.sbatch"),
+            cache_dir: PathBuf::from("/tmp/cache"),
+            runtime_root: None,
+            batch_log: PathBuf::from("slurm-123.out"),
+            batch_log_managed: false,
+            service_logs: BTreeMap::new(),
+            artifact_export_dir: None,
+            resume_dir: resume_dir.clone(),
+            service_name: None,
+            command_override: None,
+            requested_walltime: None,
+            slurm_array: None,
+            sweep: None,
+            config_snapshot_yaml: None,
+            cached_artifacts: Vec::new(),
+            provenance: None,
+            tags: Vec::new(),
+            notes: Vec::new(),
+        },
+        scheduler: hpc_compose::job::SchedulerStatus {
+            state: "COMPLETED".into(),
+            source: hpc_compose::job::SchedulerSource::Sacct,
+            terminal: true,
+            failed: false,
+            detail: None,
+        },
+        queue_diagnostics: None,
+        array: None,
+        verification: None,
+        log_dir: PathBuf::from("/tmp/logs"),
+        batch_log: hpc_compose::job::BatchLogStatus {
+            path: PathBuf::from("slurm-123.out"),
+            present: true,
+            updated_at: None,
+            updated_age_seconds: None,
+        },
+        services: vec![hpc_compose::job::PsServiceRow {
+            service_name: "api".into(),
+            path: PathBuf::from("api.log"),
+            present: true,
+            updated_at: None,
+            updated_age_seconds: None,
+            log_path: None,
+            step_name: None,
+            launch_index: Some(0),
+            launcher_pid: None,
+            healthy: Some(true),
+            completed_successfully: Some(true),
+            readiness_configured: Some(true),
+            status: Some("completed".into()),
+            failure_policy_mode: Some("fail".into()),
+            restart_count: Some(0),
+            max_restarts: None,
+            window_seconds: None,
+            max_restarts_in_window: None,
+            restart_failures_in_window: None,
+            last_exit_code: Some(0),
+            started_at: Some(10),
+            finished_at: Some(20),
+            duration_seconds: Some(10),
+            assertions: Some(hpc_compose::job::ServiceAssertionStatus {
+                configured: true,
+                status: Some(if assertion_failures.is_empty() {
+                    "passed".into()
+                } else {
+                    "failed".into()
+                }),
+                expected_exit_code: Some(0),
+                artifacts_contain: None,
+                max_duration_seconds: None,
+                duration_seconds: Some(10),
+                failures: assertion_failures,
+            }),
+            placement_mode: None,
+            nodes: None,
+            ntasks: None,
+            ntasks_per_node: None,
+            nodelist: None,
+        }],
+        watchdog: None,
+        attempt,
+        is_resume,
+        resume_dir,
+    }
+}
+
+#[test]
+fn preemption_evaluation_requires_resumed_attempt_and_assertions() {
+    let not_resumed = completed_preemption_snapshot(None, Some(false), None, Vec::new());
+    let evaluation = evaluate_preemption_snapshot(&not_resumed);
+    assert!(!evaluation.ok);
+    let reason = evaluation.failure_reason.expect("failure reason");
+    assert!(reason.contains("attempt counter"));
+    assert!(reason.contains("is_resume=true"));
+    assert!(reason.contains("resume directory"));
+
+    let assertion_failed = completed_preemption_snapshot(
+        Some(1),
+        Some(true),
+        Some(PathBuf::from("/shared/preemption-test")),
+        vec!["expected marker".into()],
+    );
+    let evaluation = evaluate_preemption_snapshot(&assertion_failed);
+    assert!(!evaluation.ok);
+    assert!(
+        evaluation
+            .failure_reason
+            .expect("assert failure reason")
+            .contains("assertion failed: expected marker")
+    );
+
+    let resumed = completed_preemption_snapshot(
+        Some(1),
+        Some(true),
+        Some(PathBuf::from("/shared/preemption-test")),
+        Vec::new(),
+    );
+    let evaluation = evaluate_preemption_snapshot(&resumed);
+    assert!(evaluation.ok);
 }
 
 #[test]

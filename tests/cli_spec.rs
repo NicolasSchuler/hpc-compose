@@ -1270,6 +1270,7 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
     let enroot = write_fake_enroot(tmpdir.path());
     let srun = write_fake_srun(tmpdir.path());
     let sbatch = write_fake_sbatch(tmpdir.path());
+    let sbatch_wait = write_fake_sbatch_wait_runs_script(tmpdir.path());
 
     let inspect = run_cli(
         tmpdir.path(),
@@ -1301,6 +1302,28 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
     assert!(preflight_stderr.contains("Passed checks:"));
     assert!(preflight_stderr.contains("srun reports Pyxis container support"));
     assert!(preflight_stderr.contains("cache directory is writable"));
+
+    let active_preflight = run_cli(
+        tmpdir.path(),
+        &[
+            "preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--verbose",
+            "--fs-probes",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch_wait.to_str().expect("path"),
+        ],
+    );
+    assert_success(&active_preflight);
+    assert!(
+        stderr_text(&active_preflight)
+            .contains("shared filesystem probe passed for cache directory")
+    );
 
     let inspect_json = run_cli(
         tmpdir.path(),
@@ -1344,6 +1367,36 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
             .as_u64()
             .unwrap_or(0)
             > 0
+    );
+
+    let active_preflight_json = run_cli(
+        tmpdir.path(),
+        &[
+            "preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--fs-probes",
+            "--format",
+            "json",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch_wait.to_str().expect("path"),
+        ],
+    );
+    assert_success(&active_preflight_json);
+    let active_preflight_value: Value =
+        serde_json::from_str(&stdout_text(&active_preflight_json)).expect("active preflight json");
+    assert!(
+        active_preflight_value["passed_checks"]
+            .as_array()
+            .expect("passed checks")
+            .iter()
+            .any(|item| item["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("shared filesystem probe passed")))
     );
 
     let strict = run_cli(
@@ -1495,6 +1548,13 @@ x-slurm:
   distribution: block:block
   hint: nomultithread
   metrics: {{}}
+  watchdog:
+    enabled: true
+    grace_period_seconds: 90
+    gpu:
+      window_seconds: 300
+      compute_below_pct: 4
+      memory_resident_above_pct: 30
   notify:
     email:
       to: ops@example.com
@@ -1579,6 +1639,24 @@ services:
             "enabled": true,
             "interval_seconds": 5,
             "collectors": ["gpu", "slurm", "cpu"]
+        })
+    );
+    assert_eq!(
+        slurm["watchdog"],
+        serde_json::json!({
+            "enabled": true,
+            "action": "warn",
+            "grace_period_seconds": 90,
+            "gpu": {
+                "window_seconds": 300,
+                "compute_below_pct": 4,
+                "memory_resident_above_pct": 30
+            },
+            "cpu": {
+                "window_seconds": 1800,
+                "compute_below_pct": 5,
+                "memory_resident_above_pct": 20
+            }
         })
     );
     assert_eq!(
@@ -2501,6 +2579,7 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
                 "stage_out",
                 "burst_buffer",
                 "metrics",
+                "watchdog",
                 "artifacts",
                 "resume",
                 "notify",
@@ -2548,6 +2627,18 @@ fn schema_definition_property_keys_match_exhaustive_catalog() {
         ("stageOut", &["from", "to", "when", "mode"]),
         ("burstBuffer", &["directives"]),
         ("metrics", &["enabled", "interval_seconds", "collectors"]),
+        (
+            "watchdog",
+            &["enabled", "action", "grace_period_seconds", "gpu", "cpu"],
+        ),
+        (
+            "watchdogResource",
+            &[
+                "window_seconds",
+                "compute_below_pct",
+                "memory_resident_above_pct",
+            ],
+        ),
         ("artifacts", &["collect", "export_dir", "paths", "bundles"]),
         ("artifactBundle", &["paths"]),
         ("resume", &["path"]),

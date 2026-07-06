@@ -269,6 +269,7 @@ These fields live under the top-level `x-slurm` block.
 | `stage_out` | list of mappings | omitted | Copy or rsync paths during teardown, optionally by outcome. |
 | `burst_buffer` | mapping | omitted | Raw `#BB` / `#DW` directives for site-specific burst-buffer systems. |
 | `metrics` | mapping | omitted | Enables runtime metrics sampling. |
+| `watchdog` | mapping | omitted | Enables advisory idle-resource warnings in `status`, `stats`, and `watch`. |
 | `artifacts` | mapping | omitted | Enables tracked artifact collection and export metadata. |
 | `resume` | mapping | omitted | Enables checkpoint-aware resume semantics with a shared host path mounted into every service. |
 | `notify` | mapping | omitted | First-class Slurm email notification settings. |
@@ -629,6 +630,40 @@ x-slurm:
   - In multi-node jobs, `gpu` and `cpu` sampling each launch one best-effort sampler task per allocated node and write node metadata into their rows; legacy GPU rows without `node` remain readable as primary-node samples.
   - Sampler files are written under the active job workspace's `metrics/` directory and are also visible inside containers at `/hpc-compose/job/metrics`. For ordinary runs that is `<runtime-root>/<job-id>/metrics`; for resume-aware attempts it is `<runtime-root>/<job-id>/attempts/<attempt>/metrics`.
   - Diagnostics are written under `metrics/diagnostics/` when available, including `nvidia-smi topo -m`, `nvidia-smi -q`, selected fabric/GPU environment variables, and best-effort `ibstat`, `ibv_devinfo`, `ucx_info -v`, and `fi_info` output.
+
+### `x-slurm.watchdog`
+
+```yaml
+x-slurm:
+  metrics:
+    interval_seconds: 60
+  watchdog:
+    enabled: true
+    action: warn
+    grace_period_seconds: 600
+    gpu:
+      window_seconds: 1800
+      compute_below_pct: 2
+      memory_resident_above_pct: 20
+    cpu:
+      window_seconds: 1800
+      compute_below_pct: 5
+      memory_resident_above_pct: 20
+```
+
+- Shape: mapping
+- Default: omitted
+- Notes:
+  - Omitting the block disables the watchdog. If the block is present and `enabled` is omitted, the watchdog is enabled.
+  - The current implementation is advisory and read-side only. It warns in `status`, `stats`, and the `watch` metrics line; it does not fire hooks or cancel jobs.
+  - `action` defaults to `warn`. `cancel` is reserved for a future runtime-enforced implementation and is rejected by validation.
+  - `grace_period_seconds` defaults to `600` and must be at least `1`.
+  - `gpu.window_seconds` and `cpu.window_seconds` default to `1800` and must be at least `1`.
+  - `gpu.compute_below_pct` defaults to `2`; `cpu.compute_below_pct` defaults to `5`; both must be integers from `0` to `100`.
+  - `memory_resident_above_pct` defaults to `20` for both resources and must be an integer from `0` to `100`.
+  - GPU compute uses `utilization_gpu`. GPU memory bandwidth (`utilization_memory`) is not treated as memory residency. GPU memory residency is computed as `memory_used_mib / memory_total_mib` when both are available.
+  - CPU compute uses the `cpu` sampler's host utilization rows. CPU memory residency uses `slurm.jsonl` step RSS against memory in `AllocTRES` when Slurm reports both; otherwise CPU warnings are compute-only and say that memory residency is unavailable.
+  - The warning is conservative: the scheduler must report `RUNNING`, the grace period must have elapsed, and the configured history window must be covered by sampler timestamps before an idle classification is emitted.
 
 ### `x-slurm.rendezvous`
 

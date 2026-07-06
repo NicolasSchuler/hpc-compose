@@ -1,9 +1,11 @@
 //! Login-node environment checks run before submission.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -16,7 +18,7 @@ use crate::planner::{
 };
 use crate::prepare::RuntimePlan;
 use crate::readiness_util::readiness_uses_implicit_localhost;
-use crate::spec::{MetricsCollector, MpiProfile, ReadinessSpec, RuntimeBackend};
+use crate::spec::{MetricsCollector, MpiProfile, ReadinessSpec, RuntimeBackend, ScratchScope};
 use crate::term;
 
 /// Shared findings model, re-exported so existing `preflight::{Item, Level,
@@ -57,6 +59,7 @@ pub struct Options {
     pub scontrol_bin: String,
     pub require_submit_tools: bool,
     pub skip_prepare: bool,
+    pub fs_probes: bool,
     pub cluster_profile: Option<ClusterProfile>,
 }
 
@@ -71,10 +74,13 @@ impl Default for Options {
             scontrol_bin: "scontrol".to_string(),
             require_submit_tools: true,
             skip_prepare: false,
+            fs_probes: false,
             cluster_profile: None,
         }
     }
 }
+
+const LOW_SPACE_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 
 impl Report {
     /// Returns `true` when the report contains at least one blocking error.
@@ -277,6 +283,9 @@ pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
     check_runtime_root_policy(&mut report, plan);
     check_cache_dir_access(&mut report, &plan.cache_dir);
     check_disk_space(&mut report, &plan.cache_dir);
+    if options.fs_probes {
+        check_shared_fs_probes(&mut report, plan, options);
+    }
     check_local_and_mount_paths(&mut report, plan);
     check_resume_path(&mut report, plan);
     check_registry_credentials(&mut report, plan);
@@ -962,11 +971,10 @@ fn available_bytes(_path: &Path) -> Option<u64> {
 /// a common HPC failure mode that otherwise surfaces only as a confusing tar or
 /// enroot error mid-run. Stays silent when space is ample so it adds no noise.
 fn check_disk_space(report: &mut Report, cache_dir: &Path) {
-    const LOW_SPACE_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
     let Some(avail) = available_bytes(cache_dir) else {
         return;
     };
-    if avail < LOW_SPACE_THRESHOLD {
+    if avail < LOW_SPACE_THRESHOLD_BYTES {
         let gib = avail as f64 / (1024.0 * 1024.0 * 1024.0);
         report.items.push(Item {
             level: Level::Warn,
@@ -979,6 +987,320 @@ fn check_disk_space(report: &mut Report, cache_dir: &Path) {
                     .to_string(),
             ),
         });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SharedFsProbeTarget {
+    label: &'static str,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SharedFsProbeOutcome {
+    available_bytes: Option<u64>,
+}
+
+fn check_shared_fs_probes(report: &mut Report, plan: &RuntimePlan, options: &Options) {
+    let targets = shared_fs_probe_targets(plan);
+    if targets.is_empty() {
+        report.items.push(Item {
+            level: Level::Warn,
+            message: "shared filesystem probes were requested, but no shared filesystem paths were found".to_string(),
+            remediation: Some(
+                "Set x-slurm.cache_dir, x-slurm.runtime_root, resume, or shared scratch paths before running active filesystem probes."
+                    .to_string(),
+            ),
+        });
+        return;
+    }
+
+    for target in targets {
+        match run_shared_fs_probe(&target, &options.sbatch_bin) {
+            Ok(outcome) => {
+                report.items.push(Item {
+                    level: Level::Ok,
+                    message: format!(
+                        "shared filesystem probe passed for {}: {} (compute saw login write, login saw compute write, rename atomicity ok{})",
+                        target.label,
+                        target.path.display(),
+                        format_probe_headroom(outcome.available_bytes).as_deref().unwrap_or(""),
+                    ),
+                    remediation: None,
+                });
+                if let Some(avail) = outcome.available_bytes
+                    && avail < LOW_SPACE_THRESHOLD_BYTES
+                {
+                    let gib = avail as f64 / (1024.0 * 1024.0 * 1024.0);
+                    report.items.push(Item {
+                        level: Level::Warn,
+                        message: format!(
+                            "shared filesystem probe for {} saw only {gib:.1} GiB available on compute: {}",
+                            target.label,
+                            target.path.display()
+                        ),
+                        remediation: Some(
+                            "Free space, raise your quota, or choose a shared filesystem with more headroom before submitting image-heavy or artifact-heavy jobs."
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
+            Err(err) => report.items.push(Item {
+                level: Level::Error,
+                message: format!(
+                    "shared filesystem probe failed for {} '{}': {err}",
+                    target.label,
+                    target.path.display()
+                ),
+                remediation: Some(
+                    "Choose a path that is visible and coherent from both login and compute nodes, then rerun `hpc-compose preflight --fs-probes`."
+                        .to_string(),
+                ),
+            }),
+        }
+    }
+}
+
+fn shared_fs_probe_targets(plan: &RuntimePlan) -> Vec<SharedFsProbeTarget> {
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut seen = BTreeSet::new();
+    let mut targets = Vec::new();
+
+    push_shared_fs_probe_target(
+        &mut targets,
+        &mut seen,
+        "cache directory",
+        plan.cache_dir.clone(),
+    );
+
+    if let Some(raw) = plan.slurm.runtime_root.as_deref() {
+        push_shared_fs_probe_target(
+            &mut targets,
+            &mut seen,
+            "runtime root",
+            crate::path_util::absolute_path(Path::new(raw), &cwd),
+        );
+    }
+
+    if let Some(raw) = plan.slurm.resume_dir() {
+        push_shared_fs_probe_target(
+            &mut targets,
+            &mut seen,
+            "resume directory",
+            crate::path_util::absolute_path(Path::new(raw), &cwd),
+        );
+    }
+
+    if let Some(scratch) = &plan.slurm.scratch
+        && scratch.scope == ScratchScope::Shared
+    {
+        push_shared_fs_probe_target(
+            &mut targets,
+            &mut seen,
+            "shared scratch",
+            crate::path_util::absolute_path(Path::new(&scratch.base), &cwd),
+        );
+    }
+
+    targets
+}
+
+fn push_shared_fs_probe_target(
+    targets: &mut Vec<SharedFsProbeTarget>,
+    seen: &mut BTreeSet<PathBuf>,
+    label: &'static str,
+    path: PathBuf,
+) {
+    if seen.insert(path.clone()) {
+        targets.push(SharedFsProbeTarget { label, path });
+    }
+}
+
+fn format_probe_headroom(available_bytes: Option<u64>) -> Option<String> {
+    available_bytes.map(|bytes| {
+        let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        format!(", compute headroom {gib:.1} GiB")
+    })
+}
+
+fn run_shared_fs_probe(
+    target: &SharedFsProbeTarget,
+    sbatch_bin: &str,
+) -> std::result::Result<SharedFsProbeOutcome, String> {
+    fs::create_dir_all(&target.path).map_err(|err| {
+        format!(
+            "failed to create probe parent directory {}: {err}",
+            target.path.display()
+        )
+    })?;
+
+    let probe_id = shared_fs_probe_id();
+    let probe_root = target
+        .path
+        .join(format!(".hpc-compose-fs-probe-{probe_id}"));
+    fs::create_dir_all(&probe_root).map_err(|err| {
+        format!(
+            "failed to create probe directory {}: {err}",
+            probe_root.display()
+        )
+    })?;
+
+    let login_token = format!("login:{probe_id}");
+    fs::write(
+        probe_root.join("login-sentinel"),
+        format!("{login_token}\n"),
+    )
+    .map_err(|err| {
+        format!(
+            "failed to write login sentinel in {}: {err}",
+            probe_root.display()
+        )
+    })?;
+
+    let script_path = probe_root.join("probe.sbatch");
+    let script = render_shared_fs_probe_script(&probe_root, &login_token);
+    crate::secure_io::write(&script_path, script, true).map_err(|err| {
+        format!(
+            "failed to write probe script {}: {err}",
+            script_path.display()
+        )
+    })?;
+
+    let output = Command::new(sbatch_bin)
+        .arg("--wait")
+        .arg(&script_path)
+        .output()
+        .map_err(|err| format!("failed to execute sbatch probe command '{sbatch_bin}': {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        let mut message = format!("sbatch --wait exited with {}", output.status);
+        if !detail.is_empty() {
+            message.push_str(&format!(": {detail}"));
+        }
+        if let Some(probe_message) = read_failed_probe_message(&probe_root) {
+            message.push_str(&format!("; probe reported: {probe_message}"));
+        }
+        message.push_str(&format!("; probe files left at {}", probe_root.display()));
+        return Err(message);
+    }
+
+    let result_path = probe_root.join("result.env");
+    let raw = fs::read_to_string(&result_path)
+        .map_err(|err| format!("probe did not publish {}: {err}", result_path.display()))?;
+    let outcome = parse_shared_fs_probe_result(&raw)?;
+
+    let compute_sentinel = probe_root.join("compute-sentinel");
+    let compute_payload = fs::read_to_string(&compute_sentinel).map_err(|err| {
+        format!(
+            "login node could not read compute sentinel {}: {err}",
+            compute_sentinel.display()
+        )
+    })?;
+    if !compute_payload.starts_with("compute:") {
+        return Err(format!(
+            "compute sentinel had unexpected contents in {}",
+            compute_sentinel.display()
+        ));
+    }
+
+    let _ = fs::remove_dir_all(&probe_root);
+    Ok(outcome)
+}
+
+fn read_failed_probe_message(probe_root: &Path) -> Option<String> {
+    let raw = fs::read_to_string(probe_root.join("result.env")).ok()?;
+    raw.lines()
+        .find_map(|line| line.strip_prefix("message="))
+        .map(str::to_string)
+}
+
+fn shared_fs_probe_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    format!("{}-{millis}", std::process::id())
+}
+
+fn render_shared_fs_probe_script(probe_root: &Path, login_token: &str) -> String {
+    let probe_root = crate::shell_quote::quote(&probe_root.display().to_string());
+    let login_token = crate::shell_quote::quote(login_token);
+    format!(
+        r#"#!/bin/bash
+#SBATCH --job-name=hpc-compose-fs-probe
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --time=00:01:00
+
+set -euo pipefail
+
+PROBE_ROOT={probe_root}
+LOGIN_TOKEN={login_token}
+RESULT="$PROBE_ROOT/result.env"
+
+fail() {{
+  printf 'status=error\nmessage=%s\n' "$1" > "$RESULT"
+  exit 1
+}}
+
+login_sentinel="$PROBE_ROOT/login-sentinel"
+[[ -f "$login_sentinel" ]] || fail "login sentinel is not visible on the compute node"
+observed="$(cat "$login_sentinel")"
+[[ "$observed" == "$LOGIN_TOKEN" ]] || fail "login sentinel contents changed before compute read"
+
+compute_tmp="$PROBE_ROOT/compute-sentinel.tmp"
+compute_final="$PROBE_ROOT/compute-sentinel"
+printf 'compute:%s\n' "${{SLURM_JOB_ID:-unknown}}" > "$compute_tmp"
+mv "$compute_tmp" "$compute_final"
+[[ -f "$compute_final" ]] || fail "compute-to-login rename target was not created"
+
+rename_tmp="$PROBE_ROOT/rename.tmp"
+rename_final="$PROBE_ROOT/rename.final"
+printf 'rename-ok\n' > "$rename_tmp"
+mv "$rename_tmp" "$rename_final"
+[[ "$(cat "$rename_final")" == "rename-ok" ]] || fail "rename atomicity check read unexpected contents"
+
+available_kb=""
+if command -v df >/dev/null 2>&1; then
+  available_kb="$(df -Pk "$PROBE_ROOT" 2>/dev/null | awk 'NR==2 {{print $4}}')" || available_kb=""
+fi
+
+tmp_result="$RESULT.tmp"
+printf 'status=ok\navailable_kb=%s\n' "$available_kb" > "$tmp_result"
+mv "$tmp_result" "$RESULT"
+"#
+    )
+}
+
+fn parse_shared_fs_probe_result(raw: &str) -> std::result::Result<SharedFsProbeOutcome, String> {
+    let mut status = None;
+    let mut message = None;
+    let mut available_kb = None;
+
+    for line in raw.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "status" => status = Some(value.to_string()),
+            "message" => message = Some(value.to_string()),
+            "available_kb" if !value.trim().is_empty() => {
+                available_kb = value.trim().parse::<u64>().ok();
+            }
+            _ => {}
+        }
+    }
+
+    match status.as_deref() {
+        Some("ok") => Ok(SharedFsProbeOutcome {
+            available_bytes: available_kb.and_then(|kb| kb.checked_mul(1024)),
+        }),
+        Some("error") => Err(message.unwrap_or_else(|| "probe reported an unknown error".into())),
+        Some(other) => Err(format!("probe reported unexpected status '{other}'")),
+        None => Err("probe result did not include a status".to_string()),
     }
 }
 
@@ -1582,7 +1904,7 @@ mod tests {
     use crate::prepare::RuntimeService;
     use crate::spec::{
         MetricsCollector, MetricsConfig, MpiConfig, MpiProfile, MpiType, ReadinessSpec,
-        ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
+        ResumeConfig, ScratchConfig, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
     };
 
     fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
@@ -1621,6 +1943,139 @@ mod tests {
         let mut perms = fs::metadata(path).expect("meta").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    fn write_fake_sbatch_wait(path: &Path) {
+        write_fake_binary(
+            path,
+            r#"#!/bin/bash
+set -euo pipefail
+script_path=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --wait)
+      shift
+      ;;
+    --*)
+      shift
+      ;;
+    *)
+      script_path="$1"
+      shift
+      ;;
+  esac
+done
+if [[ -z "$script_path" ]]; then
+  echo "missing script path" >&2
+  exit 2
+fi
+export SLURM_JOB_ID=999
+bash "$script_path" >/dev/null 2>&1
+echo "Submitted batch job 999"
+"#,
+        );
+    }
+
+    #[test]
+    fn shared_fs_probe_targets_cover_shared_paths_and_deduplicate() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut plan = runtime_plan(tmpdir.path());
+        let cache = plan.cache_dir.clone();
+        let scratch = tmpdir.path().join("scratch");
+        plan.slurm.runtime_root = Some(cache.display().to_string());
+        plan.slurm.resume = Some(ResumeConfig {
+            path: cache.display().to_string(),
+        });
+        plan.slurm.scratch = Some(ScratchConfig {
+            scope: ScratchScope::Shared,
+            base: scratch.display().to_string(),
+            mount: "/scratch".to_string(),
+            cleanup: Default::default(),
+        });
+
+        let targets = shared_fs_probe_targets(&plan);
+
+        assert_eq!(targets.len(), 2, "deduplicated targets: {targets:#?}");
+        assert_eq!(targets[0].label, "cache directory");
+        assert_eq!(targets[0].path, cache);
+        assert_eq!(targets[1].label, "shared scratch");
+        assert_eq!(targets[1].path, scratch);
+    }
+
+    #[test]
+    fn shared_fs_probe_runner_submits_waiting_probe_and_cleans_success() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let target = SharedFsProbeTarget {
+            label: "cache directory",
+            path: tmpdir.path().join("cache"),
+        };
+        let sbatch = tmpdir.path().join("sbatch");
+        write_fake_sbatch_wait(&sbatch);
+
+        let outcome = run_shared_fs_probe(&target, sbatch.to_str().expect("path"))
+            .expect("probe should pass");
+
+        assert!(
+            outcome.available_bytes.is_some_and(|bytes| bytes > 0),
+            "compute-side df should report available bytes, got {outcome:#?}"
+        );
+        let leftovers = fs::read_dir(&target.path)
+            .expect("read target")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers
+                .iter()
+                .all(|name| !name.starts_with(".hpc-compose-fs-probe-")),
+            "successful probe should clean its probe directory, left: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn shared_fs_probe_failure_becomes_preflight_error() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let target = SharedFsProbeTarget {
+            label: "cache directory",
+            path: tmpdir.path().join("cache"),
+        };
+        let sbatch = tmpdir.path().join("sbatch-fail");
+        write_fake_binary(
+            &sbatch,
+            "#!/bin/bash\necho scheduler rejected probe >&2\nexit 7\n",
+        );
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.cache_dir = target.path.clone();
+
+        let mut report = Report { items: Vec::new() };
+        check_shared_fs_probes(
+            &mut report,
+            &plan,
+            &Options {
+                sbatch_bin: sbatch.display().to_string(),
+                fs_probes: true,
+                ..Options::default()
+            },
+        );
+
+        assert!(report.items.iter().any(|item| {
+            item.level == Level::Error
+                && item
+                    .message
+                    .contains("shared filesystem probe failed for cache directory")
+                && item.message.contains("scheduler rejected probe")
+        }));
+    }
+
+    #[test]
+    fn parse_shared_fs_probe_result_reports_status_and_headroom() {
+        let outcome =
+            parse_shared_fs_probe_result("status=ok\navailable_kb=2048\n").expect("ok result");
+        assert_eq!(outcome.available_bytes, Some(2 * 1024 * 1024));
+
+        let err = parse_shared_fs_probe_result("status=error\nmessage=not visible\n")
+            .expect_err("error result");
+        assert_eq!(err, "not visible");
     }
 
     #[test]

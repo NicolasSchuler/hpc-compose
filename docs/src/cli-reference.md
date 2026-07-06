@@ -132,7 +132,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. `config --variables` reports only interpolation variables referenced by the compose file and redacts sensitive-looking names unless `--show-values` is passed. |
 | `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` for the `settings.toml` authoring schema. The compose schema is also published with the docs site for YAML Language Server and SchemaStore consumption. Rust validation remains the semantic source of truth. |
 | `inspect` | View the normalized runtime plan | `--verbose` shows resolved argv and final mount mappings with secret values redacted. Add `--dependencies` for a service DAG in text, DOT, or JSON form. |
-| `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. |
+| `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. Add `--fs-probes` on a Slurm login node to submit a tiny active shared-filesystem probe. |
 | `doctor cluster-report` | Generate a best-effort cluster capability profile | Writes `.hpc-compose/cluster.toml` by default; use `--out -` to print the TOML profile. |
 | `doctor readiness` | Explain or run one service readiness probe from the current host | Does not start services or submit jobs. Use `--run` only against an already reachable endpoint, tracked log, tunnel, or login-node-visible service. |
 | `doctor mpi-smoke` | Render or run a small MPI probe for one service | Reports requested/advertised MPI types, MPI profile metadata, discovered MPI installs, host MPI binds/env, and rendered `srun`; add `--submit` to consume a Slurm allocation. |
@@ -171,6 +171,7 @@ hpc-compose inspect --verbose -f compose.yaml
 hpc-compose inspect --dependencies -f compose.yaml
 hpc-compose inspect --dependencies --dependencies-format dot -f compose.yaml
 hpc-compose preflight -f compose.yaml
+hpc-compose preflight -f compose.yaml --fs-probes
 hpc-compose doctor cluster-report
 hpc-compose doctor readiness -f compose.yaml --service api
 hpc-compose doctor readiness -f compose.yaml --service api --run
@@ -290,7 +291,7 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | `--squeue-bin` | `squeue` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `reach`, `experiment show`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug`, `weather` |
 | `--sacct-bin` | `sacct` | `up`, `when`, `germinate`, `test`, `run`, `notebook`, `watch`, `status`, `stats`, `ps`, `inspect`, `score`, `diff`, `reach`, `experiment show`, `sweep status`, `sweep observe`, `sweep stop`, `sweep results`, `debug` |
 | `--salloc-bin` | `salloc` | `alloc` |
-| `--scontrol-bin` | `scontrol` | `alloc`, `sweep submit`, `preflight`, `debug`, `doctor` |
+| `--scontrol-bin` | `scontrol` | `alloc`, `test`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--sinfo-bin` | `sinfo` | `when`, `weather` |
 | `--scancel-bin` | `scancel` | `test`, `cancel`, `down`, `sweep observe`, `sweep stop` |
 | `--sstat-bin` | `sstat` | `germinate`, `stats`, `inspect`, `score`, `experiment show`, `sweep results` |
@@ -468,10 +469,13 @@ In local mode the batch script also exports `HPC_COMPOSE_BACKEND_OVERRIDE=local`
 ```bash
 hpc-compose test --local -f compose.yaml
 hpc-compose test --submit --time 00:01:00 --timeout 180s -f compose.yaml
+hpc-compose test --preemption --preemption-grace 10s -f compose.yaml
 hpc-compose test --submit --format json -f compose.yaml
 ```
 
 Success means all tracked services appear in runtime state, launched at least once, passed readiness when `readiness` is configured, and completed successfully. Long-running application specs should use a smoke-test variant of the command or service entrypoint that exits after proving the workflow.
+
+`test --preemption` is a scheduler-backed resume drill. It requires `x-slurm.resume`, `x-slurm.requeue: true`, `x-slurm.signal`, and at least one service `assert`. The command submits the finite smoke spec to Slurm, waits until services have launched and readiness has passed, sends the configured signal with `scancel --signal` (using `--batch` when `x-slurm.signal.shell: batch` is configured), waits the preemption grace period, runs `scontrol requeue <job-id>`, observes the resumed attempt, and then evaluates the normal service assertions. It passes only when the latest runtime state reports attempt 2 or later, `is_resume=true`, a resume directory, successful service completion, and passing assertions.
 
 Useful `test` options:
 
@@ -479,8 +483,10 @@ Useful `test` options:
 | --- | --- |
 | `--local` | Run the finite smoke spec through the local supervisor. |
 | `--submit` | Submit the finite smoke spec to Slurm; required before any scheduler submission happens. |
-| `--time <TIME>` | Override Slurm wall time for `--submit`; defaults to `00:01:00`. |
+| `--preemption` | Run the synthetic preemption drill through Slurm; it submits, signals, requeues, and verifies resume behavior. |
+| `--time <TIME>` | Override Slurm wall time for `--submit` and `--preemption`; defaults to `00:01:00`. |
 | `--timeout <DURATION>` | Stop waiting and best-effort cancel/cleanup after the timeout; defaults to `180s`. |
+| `--preemption-grace <DURATION>` | Time to wait between the synthetic signal and `scontrol requeue`; defaults to `10s`. |
 | `--format json` | Emit phase status, job id, script path, per-service results, and failure reason for automation. |
 
 `dev` is local-only and watches host directories from service `volumes`:

@@ -703,6 +703,47 @@ echo "Submitted batch job 12345"
     path
 }
 
+pub(crate) fn write_fake_sbatch_wait_runs_script(tmpdir: &Path) -> PathBuf {
+    let path = tmpdir.join("sbatch-wait-run-script");
+    let bash = shell_quote(&test_bash_path().display().to_string());
+    write_script(
+        &path,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+script_path=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --wait)
+      shift
+      ;;
+    --*)
+      shift
+      ;;
+    *)
+      script_path="$1"
+      shift
+      ;;
+  esac
+done
+if [[ -z "$script_path" ]]; then
+  echo "missing script path" >&2
+  exit 2
+fi
+PATH="{}:$PATH"
+export SLURM_JOB_ID=12345
+export SLURM_JOB_NODELIST=node01
+export SLURM_SUBMIT_DIR="$PWD"
+{} "$script_path" >/dev/null 2>&1
+echo "Submitted batch job 12345"
+"#,
+            tmpdir.display(),
+            bash
+        ),
+    );
+    path
+}
+
 pub(crate) fn write_fake_sbatch_runs_script_with_job_output(tmpdir: &Path) -> PathBuf {
     let path = tmpdir.join("sbatch-run-script-with-output");
     let bash = shell_quote(&test_bash_path().display().to_string());
