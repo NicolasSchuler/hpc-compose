@@ -40,6 +40,7 @@ mod score;
 mod stats;
 mod stats_rollup;
 mod sweep;
+mod verify;
 
 #[cfg(test)]
 use artifacts::{copy_path_recursive, remove_existing_destination, resolve_export_dir};
@@ -131,6 +132,9 @@ pub use sweep::{
     expand_sweep_with_limit, generate_sweep_id, interpolation_vars_for_sweep_metadata,
     interpolation_vars_for_sweep_trial, latest_sweep_manifest_path_for, load_sweep_manifest,
     resume_trial_positions, scan_sweep_manifests, sweep_manifest_path_for, write_sweep_manifest,
+};
+pub use verify::{
+    StatusVerificationCheck, StatusVerificationReport, build_status_verification_report,
 };
 
 const SUBMISSION_SCHEMA_VERSION: u32 = 3;

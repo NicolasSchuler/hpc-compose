@@ -15,8 +15,8 @@ use hpc_compose::init::{
 use hpc_compose::job::{
     ArtifactExportReport, CleanupReport, EfficiencyScoreReport, JobDiffChange, JobDiffReport,
     JobInventoryScan, JobMatrixReport, JobMatrixRow, PsSnapshot, RightsizeConfidence,
-    RightsizeReport, SpecDiffReport, StatsSnapshot, StatusSnapshot, SubmissionBackend,
-    WatchOutcome, scheduler_source_label,
+    RightsizeReport, SpecDiffReport, StatsSnapshot, StatusSnapshot, StatusVerificationReport,
+    SubmissionBackend, WatchOutcome, scheduler_source_label,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, registry_host_for_remote,
@@ -971,6 +971,9 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
             )?;
         }
     }
+    if let Some(verification) = &snapshot.verification {
+        write_status_verification(writer, verification)?;
+    }
     writeln!(writer, "{}", term::styled_section_header("Runtime:"))?;
     writeln!(
         writer,
@@ -1189,6 +1192,45 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
     }
     if let Some(array) = &snapshot.array {
         write_array_status(writer, array)?;
+    }
+    Ok(())
+}
+
+fn write_status_verification(
+    writer: &mut impl Write,
+    report: &StatusVerificationReport,
+) -> io::Result<()> {
+    writeln!(writer, "{}", term::styled_section_header("Verification:"))?;
+    writeln!(
+        writer,
+        "  {}: {} (errors: {}, warnings: {})",
+        term::styled_bold("state"),
+        if report.errors > 0 {
+            "drift detected"
+        } else if report.warnings > 0 {
+            "warnings"
+        } else {
+            "ok"
+        },
+        report.errors,
+        report.warnings
+    )?;
+    if report.checks.is_empty() {
+        writeln!(writer, "  checks: none")?;
+        return Ok(());
+    }
+    for check in &report.checks {
+        writeln!(
+            writer,
+            "  [{}:{}] {}",
+            check.severity, check.status, check.summary
+        )?;
+        if let Some(detail) = &check.detail {
+            writeln!(writer, "    detail: {detail}")?;
+        }
+        if let Some(suggestion) = &check.suggestion {
+            writeln!(writer, "    next: {suggestion}")?;
+        }
     }
     Ok(())
 }

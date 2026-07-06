@@ -926,6 +926,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             remote,
             format,
             array,
+            verify,
             squeue_bin,
             sacct_bin,
         } => {
@@ -938,7 +939,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             {
                 result
             } else {
-                runtime::status(context, job_id, format, array)
+                runtime::status(context, job_id, format, array, verify)
             }
         }
         Commands::Stats {

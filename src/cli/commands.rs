@@ -1362,6 +1362,11 @@ pub enum Commands {
         array: bool,
         #[arg(
             long,
+            help = "Cross-check scheduler, tracked runtime files, logs, checkpoints, and artifacts for drift"
+        )]
+        verify: bool,
+        #[arg(
+            long,
             value_name = "PATH",
             default_value = "squeue",
             help_heading = "Tool overrides",

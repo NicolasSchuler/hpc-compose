@@ -14,7 +14,8 @@ use hpc_compose::job::{
     CollectorStatus, CpuNodeSample, CpuSnapshot, CpuSummary, GpuDeviceSample, GpuProcessSample,
     GpuSnapshot, JobInventoryEntry, JobInventoryScan, QueueDiagnostics, SamplerSnapshot,
     SchedulerSource, SchedulerStatus, ServiceAssertionStatus, ServiceLogStatus, StatsSnapshot,
-    StatusSnapshot, StepStats, SubmissionKind, SubmissionRecord,
+    StatusSnapshot, StatusVerificationCheck, StatusVerificationReport, StepStats, SubmissionKind,
+    SubmissionRecord,
 };
 use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
 use hpc_compose::spec::{
@@ -685,7 +686,7 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
         ordered_services: vec![service.clone()],
     };
     let record = submission_record(tmpdir.path(), &plan, "12345");
-    let status = StatusSnapshot {
+    let mut status = StatusSnapshot {
         record: record.clone(),
         scheduler: SchedulerStatus {
             state: "COMPLETED".into(),
@@ -700,6 +701,7 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
             start_time: Some("2026-04-06T10:05:00".into()),
         }),
         array: None,
+        verification: None,
         log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
         batch_log: BatchLogStatus {
             path: tmpdir.path().join("slurm-12345.out"),
@@ -771,6 +773,31 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
             "  placement service 'svc/name': mode=distributed nodes=2 ntasks=4 ntasks_per_node=2 nodelist=node01 node02"
         ));
 
+    status.verification = Some(StatusVerificationReport {
+        schema_version: 1,
+        ok: false,
+        errors: 1,
+        warnings: 0,
+        checks: vec![StatusVerificationCheck {
+            id: "scheduler-vs-runtime".to_string(),
+            severity: "error".to_string(),
+            status: "failed".to_string(),
+            summary: "scheduler is terminal but runtime still appears active".to_string(),
+            detail: Some("service 'svc/name' status is running".to_string()),
+            suggestion: Some("Inspect the latest state.json and service logs".to_string()),
+        }],
+    });
+    let mut verify_out = Vec::new();
+    write_status_snapshot(&mut verify_out, &status).expect("status with verification");
+    let verify_plain = strip_ansi(&String::from_utf8(verify_out).expect("utf8"));
+    assert!(verify_plain.contains("Verification:"));
+    assert!(verify_plain.contains("state: drift detected (errors: 1, warnings: 0)"));
+    assert!(
+        verify_plain
+            .contains("[error:failed] scheduler is terminal but runtime still appears active")
+    );
+    assert!(verify_plain.contains("next: Inspect the latest state.json and service logs"));
+
     let waiting = StatusSnapshot {
         record: record.clone(),
         scheduler: SchedulerStatus {
@@ -784,6 +811,7 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
         },
         queue_diagnostics: None,
         array: None,
+        verification: None,
         log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
         batch_log: BatchLogStatus {
             path: tmpdir.path().join("slurm-12345.out"),
@@ -1224,6 +1252,7 @@ fn stdout_entrypoints_cover_public_output_wrappers() {
             start_time: Some("2026-04-06T10:05:00".into()),
         }),
         array: None,
+        verification: None,
         log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
         batch_log: BatchLogStatus {
             path: tmpdir.path().join("slurm-12345.out"),
@@ -1722,6 +1751,7 @@ fn write_status_snapshot_omits_window_for_non_restart_or_legacy_state() {
         },
         queue_diagnostics: None,
         array: None,
+        verification: None,
         log_dir: tmpdir.path().join(".hpc-compose/12345/logs"),
         batch_log: BatchLogStatus {
             path: tmpdir.path().join("slurm-12345.out"),

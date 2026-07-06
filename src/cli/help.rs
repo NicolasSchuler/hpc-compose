@@ -299,7 +299,11 @@ pub(super) const STATUS_HELP: &str = "\
 Examples:
   hpc-compose status -f compose.yaml
   hpc-compose status -f compose.yaml --array
-  hpc-compose status -f compose.yaml --format json";
+  hpc-compose status -f compose.yaml --verify
+  hpc-compose status -f compose.yaml --verify --format json
+Use --verify to report contradictions between scheduler state, tracked runtime
+files, logs, checkpoints, and artifacts. It is read-only and suggests explicit
+next commands instead of repairing state automatically.";
 
 pub(super) const STATS_HELP: &str = "\
 Examples:

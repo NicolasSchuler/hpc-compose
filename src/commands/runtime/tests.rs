@@ -257,6 +257,7 @@ fn smoke_evaluation_rejects_missing_readiness_and_completion() {
         },
         queue_diagnostics: None,
         array: None,
+        verification: None,
         log_dir: PathBuf::from("/tmp/logs"),
         batch_log: hpc_compose::job::BatchLogStatus {
             path: PathBuf::from("slurm-123.out"),
@@ -366,6 +367,7 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
         Some("12345".into()),
         Some(OutputFormat::Json),
         false,
+        true,
     )
     .expect_err("status should require tracked metadata");
     assert!(status_err.to_string().contains("tracked job '12345'"));
@@ -1007,6 +1009,7 @@ fn runtime_wrappers_cover_success_paths_with_local_tracking() {
         context.clone(),
         Some(record.job_id.clone()),
         Some(OutputFormat::Json),
+        false,
         false,
     )
     .expect("status");

@@ -282,6 +282,8 @@ pub struct StatusSnapshot {
     pub queue_diagnostics: Option<QueueDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub array: Option<ArrayStatusSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<StatusVerificationReport>,
     pub log_dir: PathBuf,
     pub batch_log: BatchLogStatus,
     pub services: Vec<PsServiceRow>,
@@ -572,6 +574,7 @@ fn build_status_snapshot_core(
         scheduler,
         queue_diagnostics,
         array,
+        verification: None,
         services,
         attempt: runtime_state.as_ref().and_then(|state| state.attempt),
         is_resume: runtime_state.as_ref().and_then(|state| state.is_resume),

@@ -5,6 +5,7 @@ pub(crate) fn status(
     job_id: Option<String>,
     format: Option<OutputFormat>,
     array: bool,
+    verify: bool,
 ) -> Result<()> {
     let lookup_job_id = if array {
         job_id
@@ -41,6 +42,12 @@ pub(crate) fn status(
             job_id.as_deref(),
             &scheduler_options,
         )?);
+    }
+    if verify {
+        snapshot.verification = Some(hpc_compose::job::build_status_verification_report(
+            &snapshot.record,
+            &snapshot,
+        ));
     }
     match output::resolve_output_format(format) {
         OutputFormat::Text => {

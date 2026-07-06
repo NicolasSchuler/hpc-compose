@@ -1725,6 +1725,10 @@ fn status_and_logs_commands_use_submission_metadata() {
         .join(".hpc-compose/logs/hpc-compose-12345.out");
     fs::create_dir_all(batch_log.parent().expect("batch log dir")).expect("batch log dir");
     fs::write(&batch_log, "batch-line\n").expect("batch log");
+    let record = load_submission_record(&compose, Some("12345")).expect("record");
+    let state_path = state_path_for_record(&record);
+    fs::create_dir_all(state_path.parent().expect("state parent")).expect("state dir");
+    fs::write(&state_path, r#"{"job_status":"COMPLETED","services":[]}"#).expect("state json");
 
     let status = run_cli(
         tmpdir.path(),
@@ -1771,10 +1775,42 @@ fn status_and_logs_commands_use_submission_metadata() {
     let value: Value = serde_json::from_str(&stdout_text(&status_json)).expect("status json");
     assert_eq!(value["record"]["job_id"], Value::from("12345"));
     assert_eq!(value["scheduler"]["state"], Value::from("COMPLETED"));
+    assert!(value.get("verification").is_none());
     assert!(value.get("queue_diagnostics").is_none());
     let batch_log_value = value["record"]["batch_log"].as_str().unwrap_or_default();
     assert!(batch_log_value.contains("/.hpc-compose/logs/"));
     assert!(batch_log_value.ends_with("hpc-compose-12345.out"));
+
+    let status_verify_json = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "12345",
+            "--verify",
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status_verify_json);
+    let value: Value =
+        serde_json::from_str(&stdout_text(&status_verify_json)).expect("status verify json");
+    assert_eq!(value["verification"]["ok"], Value::from(true));
+    assert_eq!(value["verification"]["errors"], Value::from(0));
+    assert_eq!(value["verification"]["warnings"], Value::from(0));
+    assert!(
+        value["verification"]["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .any(|check| check["id"] == "state-json-health" && check["status"] == "passed")
+    );
 
     let logs = run_cli(
         tmpdir.path(),
@@ -2043,6 +2079,36 @@ fn status_reports_pending_queue_diagnostics_in_text_and_json() {
         Value::from("2026-04-07T12:34:56")
     );
     assert_eq!(value["record"]["job_id"], "12345");
+
+    let status_verify_json = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("path"),
+            "--verify",
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+    );
+    assert_success(&status_verify_json);
+    let value: Value =
+        serde_json::from_str(&stdout_text(&status_verify_json)).expect("status verify json");
+    assert_eq!(value["verification"]["ok"], Value::from(true));
+    assert_eq!(value["verification"]["warnings"], Value::from(0));
+    let checks = value["verification"]["checks"].as_array().expect("checks");
+    for check_id in ["state-json-health", "checkpoint-history", "log-presence"] {
+        assert!(
+            checks
+                .iter()
+                .any(|check| check["id"] == check_id && check["status"] == "skipped"),
+            "expected {check_id} to be skipped: {checks:#?}"
+        );
+    }
 }
 
 #[test]

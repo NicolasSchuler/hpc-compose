@@ -14,6 +14,7 @@ After a real submission, `hpc-compose` writes per-job runtime artifacts under:
 
 ```bash
 hpc-compose status -f compose.yaml
+hpc-compose status -f compose.yaml --verify
 hpc-compose ps -f compose.yaml
 hpc-compose watch -f compose.yaml
 hpc-compose watch -f compose.yaml --hold-on-exit always
@@ -33,7 +34,7 @@ hpc-compose diff 12345 12346 -f compose.yaml
 
 | Command | Use it for |
 | --- | --- |
-| `status` | Scheduler state, batch log path, runtime paths, and failure-policy state. |
+| `status` | Scheduler state, batch log path, runtime paths, and failure-policy state. Add `--verify` when reconnecting after a laptop, SSH, or watch session was interrupted. |
 | `ps` | Stable per-service snapshot with readiness, status, restart counters, and log path. |
 | `watch` | Live terminal UI; falls back to line-oriented output on non-interactive terminals. |
 | `replay` | Best-effort DVR for a tracked run, reconstructed from existing runtime artifacts. |
@@ -46,6 +47,12 @@ hpc-compose diff 12345 12346 -f compose.yaml
 | `diff` | Compact comparison between two tracked submissions. |
 
 Use `--format json` on non-streaming commands when automation needs stable fields. `stats` also supports `--format csv` and `--format jsonl`.
+
+## Status Verification
+
+`hpc-compose status --verify` keeps the normal status view and adds a read-only reconciliation pass. It cross-checks the tracked submission record, scheduler status, latest runtime `state.json`, checkpoint history, batch and service logs, and artifact manifest location. The goal is to flag contradictions such as "accounting says the job failed, but local runtime state still looks running" or "artifact export was configured, but no teardown manifest exists for a terminal job".
+
+Verification findings are diagnostic only. The command does not remove tracked records, rewrite latest pointers, cancel jobs, export artifacts, or clean runtime directories. Suggested fixes are printed as explicit follow-up commands so the user can decide whether to run `debug`, `logs`, `artifacts`, `down`, `clean`, or `clean --deep`.
 
 ## Watch UI
 

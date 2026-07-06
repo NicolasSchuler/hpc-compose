@@ -581,7 +581,7 @@ hpc-compose status -f compose.yaml --format json
 | Command | Use it for | Notes |
 | --- | --- | --- |
 | `debug` | Diagnose the latest tracked run | Shows scheduler state, per-service state, batch and service log tails, missing-log hints, and a recommended next command. Add `--preflight` to rerun prerequisite checks. |
-| `status` | Summarize scheduler state, the top-level batch log, per-service outcomes, and failure-policy state | Prefer `--format json` for automation. Add `--array` to include merged `squeue --array` and `sacct --array` task rows. |
+| `status` | Summarize scheduler state, the top-level batch log, per-service outcomes, and failure-policy state | Prefer `--format json` for automation. Add `--array` to include merged `squeue --array` and `sacct --array` task rows. Add `--verify` to cross-check scheduler state, tracked runtime files, logs, checkpoint history, and artifact metadata for contradictions; it reports findings and suggested next commands but does not repair state. |
 | `ps` | Show a stable per-service runtime snapshot | Useful when you want a point-in-time view instead of the live TUI. |
 | `watch` | Reconnect to the live watch UI | Falls back to line-oriented output on non-interactive terminals. |
 | `reach` | Print the SSH tunnel to reach a tracked service from a laptop | Resolves the compute node from tracked status and the port from the service's TCP/HTTP readiness, then prints an `ssh -L` command (with `ControlMaster` multiplexing so an OTP login node prompts once) or runs it in the foreground with `--open`. Pass `--port` for services without TCP/HTTP readiness; `--format json` emits `{service, job_id, compute_node, login_host, local_port, remote_port, url, ssh_command}`. |

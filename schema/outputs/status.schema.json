@@ -66,6 +66,16 @@
       "items": {
         "$ref": "#/$defs/PsServiceRow"
       }
+    },
+    "verification": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StatusVerificationReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -663,6 +673,79 @@
       "required": [
         "configured",
         "failures"
+      ]
+    },
+    "StatusVerificationCheck": {
+      "description": "One verification check result.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "suggestion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "severity",
+        "status",
+        "summary"
+      ]
+    },
+    "StatusVerificationReport": {
+      "description": "Local consistency report for a tracked job status snapshot.",
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StatusVerificationCheck"
+          }
+        },
+        "errors": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "errors",
+        "warnings",
+        "checks"
       ]
     },
     "SubmissionBackend": {
