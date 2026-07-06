@@ -170,6 +170,64 @@ pub struct RemoteArgs {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum NotebookCommands {
+    #[command(
+        about = "Promote a tracked notebook session into a batch compose spec",
+        long_about = "Read a tracked notebook session record and write a static compose YAML spec that runs the notebook through Papermill. This is an authoring-only command: it does not contact Slurm, run preflight or prepare, or execute Papermill."
+    )]
+    Promote {
+        #[arg(value_name = "NOTEBOOK.ipynb", help = "Notebook to execute in batch")]
+        notebook: PathBuf,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Tracked notebook record to read; defaults to .hpc-compose/latest-notebook.json"
+        )]
+        record: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Compose YAML output path; defaults to <notebook-stem>.promoted.yaml"
+        )]
+        output: Option<PathBuf>,
+        #[arg(long, help = "Overwrite the output file if it already exists")]
+        force: bool,
+        #[arg(
+            long,
+            value_name = "IMAGE",
+            help = "Container image to use when the tracked record has no recoverable image"
+        )]
+        image: Option<String>,
+        #[arg(
+            long = "volume",
+            value_name = "HOST:CONTAINER",
+            help = "Additional runtime mount to include in the promoted service"
+        )]
+        volumes: Vec<String>,
+        #[arg(long, value_name = "PATH", help = "Container working directory")]
+        working_dir: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "requirements.txt to mount and install during x-runtime.prepare"
+        )]
+        requirements: Option<PathBuf>,
+        #[arg(
+            long = "prepare-command",
+            value_name = "CMD",
+            help = "Additional x-runtime.prepare command; may be passed multiple times"
+        )]
+        prepare_commands: Vec<String>,
+        #[arg(
+            long = "param",
+            value_name = "NAME=DEFAULT",
+            help = "Papermill parameter exposed via ${NAME:-DEFAULT}; may be passed multiple times"
+        )]
+        params: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum Commands {
     #[command(
         display_order = 400,
@@ -2270,6 +2328,8 @@ pub enum Commands {
         after_help = NOTEBOOK_HELP
     )]
     Notebook {
+        #[command(subcommand)]
+        command: Option<NotebookCommands>,
         #[arg(
             long,
             value_enum,

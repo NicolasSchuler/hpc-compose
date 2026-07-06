@@ -9,8 +9,9 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
 - Safe to run unprompted — never submits, cancels, allocates, or consumes quota:
   - Purely static (no scheduler contact at all): `new`, `validate`, `plan`,
     `plan --show-script`, `inspect`, `render`, `explain`, `config`.
-  - Static previews: `up --dry-run`, `up --remote --dry-run`, `notebook --dry-run`,
-    `germinate --dry-run`, and `sweep submit --dry-run` render/validate locally
+  - Static previews and authoring helpers: `up --dry-run`, `up --remote --dry-run`,
+    `notebook --dry-run`, `notebook promote`, `germinate --dry-run`, and
+    `sweep submit --dry-run` render/validate locally
     without SSH, rsync, preflight, prepare, scheduler submission, job tracking, or
     cancellation. They may still write documented preview outputs such as rendered
     scripts.

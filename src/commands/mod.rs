@@ -7,8 +7,8 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use hpc_compose::cli::{
     CacheCommands, Cli, Commands, CompletionValueKind, DoctorCommands, ExamplesCommands,
-    ExperimentCommands, JobsCommands, OutputFormat, RendezvousCommands, SchemaKind, SweepCommands,
-    WorkspaceCommands,
+    ExperimentCommands, JobsCommands, NotebookCommands, OutputFormat, RendezvousCommands,
+    SchemaKind, SweepCommands, WorkspaceCommands,
 };
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
@@ -244,6 +244,10 @@ fn offline_rejection_reason(command: &Commands) -> Option<&'static str> {
         Commands::Run { .. } => Some("one-off launches or submissions"),
         Commands::Shell { .. } => Some("interactive Slurm shell allocation"),
         Commands::Workspace { .. } => Some("workspace tool calls"),
+        Commands::Notebook {
+            command: Some(NotebookCommands::Promote { .. }),
+            ..
+        } => None,
         Commands::Notebook { dry_run, .. } => (!*dry_run).then_some("notebook submission"),
         Commands::Reach { .. } => Some("scheduler-backed reachability lookup"),
         Commands::Experiment { command } => match command {
@@ -1896,6 +1900,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
         ),
         Commands::Notebook {
+            command,
             kind,
             image,
             port,
@@ -1923,6 +1928,35 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             sacct_bin,
             format,
         } => {
+            if let Some(NotebookCommands::Promote {
+                notebook,
+                record,
+                output,
+                force,
+                image,
+                volumes,
+                working_dir,
+                requirements,
+                prepare_commands,
+                params,
+            }) = command
+            {
+                return runtime::notebook_promote::promote(
+                    runtime::notebook_promote::PromoteArgs {
+                        notebook,
+                        record,
+                        output,
+                        force,
+                        image,
+                        volumes,
+                        working_dir,
+                        requirements,
+                        prepare_commands,
+                        params,
+                    },
+                    options.quiet,
+                );
+            }
             use hpc_compose::cli::NotebookKindArg;
             use hpc_compose::spec::parse_short_duration;
             use runtime::NotebookKind;

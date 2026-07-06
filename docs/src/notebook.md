@@ -88,6 +88,38 @@ hpc-compose cancel -f <compose>          # stop and release the allocation
 
 By default `notebook` detaches after printing the URL (the job keeps running). Pass `--follow` to stream logs in the foreground instead.
 
+## Promote a Notebook to Batch
+
+After prototyping interactively, convert a tracked notebook session plus an
+`.ipynb` into a normal batch compose spec:
+
+```bash
+hpc-compose notebook promote notebooks/train.ipynb \
+  --requirements requirements.txt \
+  --param SEED=1 \
+  --output train-batch.yaml
+```
+
+`notebook promote` is a static authoring command. It reads the latest tracked
+notebook session from `.hpc-compose/latest-notebook.json` by default, writes a
+compose file, and does not submit, contact Slurm, SSH, run preflight/prepare, or
+execute Papermill. The promoted service runs `python -m papermill` against the
+notebook, and `--param NAME=DEFAULT` exposes Papermill parameters through
+compose interpolation such as `${NAME:-DEFAULT}`.
+
+Dependencies should be declared explicitly. Pass `--requirements
+requirements.txt` or repeated `--prepare-command` flags to render package setup
+under `x-runtime.prepare.commands`; this keeps slower-changing dependencies in
+the prepared runtime image instead of hiding them in interactive notebook cells.
+Promotion scans the notebook for obvious `%pip install`, `!pip install`,
+`conda install`, or `mamba install` cells and warns when it finds them.
+
+Existing notebook records may not contain a full submit-time config snapshot.
+When that metadata is missing, promotion reconstructs the spec from persisted
+record fields plus explicit overrides such as `--image`, `--volume`, and
+`--working-dir`, then prints a warning so you can inspect the generated YAML
+before launching it.
+
 ## Security
 
 For Jupyter, `hpc-compose` generates a random auth token and embeds it in the printed URL, so the link is unguessable but self-contained. Override it with `--token` if you prefer. Do not share the printed URL: it grants access to the notebook session.

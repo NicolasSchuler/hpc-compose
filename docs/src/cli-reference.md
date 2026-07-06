@@ -569,6 +569,25 @@ hpc-compose notebook [--kind jupyter|vscode] [--image IMAGE] [--port N] [--token
 
 It synthesizes a one-service compose job from the preset, runs the normal preflight/prepare/render path, submits (or launches locally with `--local`), waits for a log readiness signal, then prints the connection URL — a localhost Jupyter URL plus an SSH tunnel hint for Jupyter on Slurm, or the scraped `vscode.dev` link for VS Code. The session is a tracked job of kind `notebook` (see [Notebook Sessions](notebook.md)); stop it with `hpc-compose cancel`. `--kind vscode` requires `--image` because no universal default `code` image is shipped.
 
+`notebook promote` converts a tracked notebook session plus an `.ipynb` into a
+batch compose spec that executes the notebook with Papermill:
+
+```bash
+hpc-compose notebook promote notebooks/train.ipynb \
+  --requirements requirements.txt \
+  --param SEED=1 \
+  --output train-batch.yaml
+```
+
+Promotion is static authoring: it reads `.hpc-compose/latest-notebook.json` (or
+`--record PATH`), writes a compose file, and does not contact Slurm, SSH, run
+preflight/prepare, or execute the notebook. Use `--requirements` or repeated
+`--prepare-command` flags to declare packages needed by the batch run; they are
+rendered under `x-runtime.prepare.commands`. Existing notebook records without a
+submit-time config snapshot are promoted from persisted record fields plus
+explicit overrides such as `--image`, `--volume`, and `--working-dir`, and the
+command prints a warning so the generated spec can be reviewed before launch.
+
 ## Accessible and Automation-Friendly Output
 
 Use plain or structured output when terminal styling, progress labels, or alternate-screen interfaces make automation or assistive tooling harder:

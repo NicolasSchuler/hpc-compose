@@ -4,11 +4,15 @@
 hpc\-compose\-notebook \- Launch a tracked JupyterLab or VS Code notebook server
 .SH SYNOPSIS
 .nf
-hpc\-compose notebook [OPTIONS] [ARGS]...
+hpc\-compose notebook [OPTIONS] [ARGS]... [COMMAND]
 .fi
 .SH DESCRIPTION
 .PP
 Submit a long\-running, tracked interactive server (JupyterLab or VS Code `code tunnel`) as a single\-service Slurm job, wait for it to become ready, and print the connection URL. Use \-\-local to run on the current host through the local supervisor. Manage the session with `hpc\-compose status` and stop it with `hpc\-compose cancel`.
+.SH SUBCOMMANDS
+.TP
+\fBpromote\fR
+Promote a tracked notebook session into a batch compose spec. See hpc\-compose\-notebook\-promote(1).
 .SH OPTIONS
 .TP
 \fB--kind\fR \fIKIND\fR
@@ -140,4 +144,4 @@ hpc\-compose notebook \-\-follow \-\-kind jupyter
 hpc\-compose notebook \-\-kind jupyter \-\-format json
 .fi
 .SH SEE ALSO
-hpc\-compose(1), hpc\-compose\-alloc(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-checkpoints(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-debug(1), hpc\-compose\-dev(1), hpc\-compose\-diff(1), hpc\-compose\-doctor(1), hpc\-compose\-down(1), hpc\-compose\-evolve(1), hpc\-compose\-examples(1), hpc\-compose\-experiment(1), hpc\-compose\-explain(1), hpc\-compose\-germinate(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-lint(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-plan(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-pull(1), hpc\-compose\-reach(1), hpc\-compose\-render(1), hpc\-compose\-rendezvous(1), hpc\-compose\-replay(1), hpc\-compose\-run(1), hpc\-compose\-schema(1), hpc\-compose\-score(1), hpc\-compose\-setup(1), hpc\-compose\-shell(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-sweep(1), hpc\-compose\-test(1), hpc\-compose\-tmux(1), hpc\-compose\-up(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1), hpc\-compose\-weather(1), hpc\-compose\-when(1), hpc\-compose\-workspace(1)
+hpc\-compose(1), hpc\-compose\-alloc(1), hpc\-compose\-artifacts(1), hpc\-compose\-cache(1), hpc\-compose\-cancel(1), hpc\-compose\-checkpoints(1), hpc\-compose\-clean(1), hpc\-compose\-completions(1), hpc\-compose\-config(1), hpc\-compose\-context(1), hpc\-compose\-debug(1), hpc\-compose\-dev(1), hpc\-compose\-diff(1), hpc\-compose\-doctor(1), hpc\-compose\-down(1), hpc\-compose\-evolve(1), hpc\-compose\-examples(1), hpc\-compose\-experiment(1), hpc\-compose\-explain(1), hpc\-compose\-germinate(1), hpc\-compose\-inspect(1), hpc\-compose\-jobs(1), hpc\-compose\-lint(1), hpc\-compose\-logs(1), hpc\-compose\-new(1), hpc\-compose\-notebook\-promote(1), hpc\-compose\-plan(1), hpc\-compose\-preflight(1), hpc\-compose\-prepare(1), hpc\-compose\-ps(1), hpc\-compose\-pull(1), hpc\-compose\-reach(1), hpc\-compose\-render(1), hpc\-compose\-rendezvous(1), hpc\-compose\-replay(1), hpc\-compose\-run(1), hpc\-compose\-schema(1), hpc\-compose\-score(1), hpc\-compose\-setup(1), hpc\-compose\-shell(1), hpc\-compose\-stats(1), hpc\-compose\-status(1), hpc\-compose\-sweep(1), hpc\-compose\-test(1), hpc\-compose\-tmux(1), hpc\-compose\-up(1), hpc\-compose\-validate(1), hpc\-compose\-watch(1), hpc\-compose\-weather(1), hpc\-compose\-when(1), hpc\-compose\-workspace(1)

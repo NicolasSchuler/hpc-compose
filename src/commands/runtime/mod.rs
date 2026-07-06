@@ -72,6 +72,7 @@ pub(super) use crate::term;
 pub(super) use crate::watch_ui;
 
 pub(crate) mod notebook;
+pub(crate) mod notebook_promote;
 mod resources;
 pub(crate) use notebook::NotebookKind;
 pub(crate) use resources::ResourceCliOptions;

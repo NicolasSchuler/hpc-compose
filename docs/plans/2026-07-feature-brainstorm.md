@@ -637,17 +637,17 @@ worktree agents with adversarial review before PR.
 - 3.9 Unified residue reaper — implemented locally
 - 4.2 Live-value shell completions — implemented locally
 - 4.6 Strict `--dry-run`/`--offline` contract — implemented locally
+- 1.7 `notebook promote` — implemented locally
 - 1.4 `experiment tag/note` — in implementation
 - 4.1 `render --annotate` + `explain` — in implementation
 
 **Queued, in this order:**
 
 1. 4.9 Offline doc search (`hpc-compose docs <query>`)
-2. 1.7 `notebook promote`
-3. 2.7 Idle-GPU watchdog
-4. 3.1 Preemption-contract verification (`test --preemption`)
-5. 3.4 Failure classifier (`debug --classify`)
-6. 3.8 Shared-FS behavior probes in preflight
+2. 2.7 Idle-GPU watchdog
+3. 3.1 Preemption-contract verification (`test --preemption`)
+4. 3.4 Failure classifier (`debug --classify`)
+5. 3.8 Shared-FS behavior probes in preflight
 
 **Second wave (after the 12 above):**
 

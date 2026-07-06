@@ -6111,6 +6111,43 @@ fn shell_rejects_invalid_env_before_srun() {
     assert!(!srun_log.exists());
 }
 
+fn write_latest_notebook_record(root: &Path, config_snapshot_yaml: Option<&str>) {
+    let metadata = root.join(".hpc-compose");
+    fs::create_dir_all(&metadata).expect("metadata dir");
+    let mut record = serde_json::json!({
+        "schema_version": 1,
+        "backend": "slurm",
+        "kind": "notebook",
+        "job_id": "12345",
+        "submitted_at": 42,
+        "compose_file": root.join("hpc-compose-notebook-jupyter.yaml"),
+        "submit_dir": root,
+        "script_path": root.join("hpc-compose-notebook.sbatch"),
+        "cache_dir": root.join("cache"),
+        "batch_log": root.join("hpc-compose-12345.out"),
+        "service_logs": {},
+        "service_name": "notebook",
+        "requested_walltime": {
+            "original": "01:00:00",
+            "seconds": 3600
+        },
+        "provenance": {
+            "tool_version": "test",
+            "image_refs": {
+                "notebook": "jupyter/scipy-notebook:latest"
+            }
+        }
+    });
+    if let Some(snapshot) = config_snapshot_yaml {
+        record["config_snapshot_yaml"] = Value::from(snapshot);
+    }
+    fs::write(
+        metadata.join("latest-notebook.json"),
+        serde_json::to_string_pretty(&record).expect("record json"),
+    )
+    .expect("latest notebook record");
+}
+
 #[test]
 fn notebook_dry_run_renders_jupyter_launcher_without_submitting() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
@@ -6220,6 +6257,149 @@ fn notebook_dry_run_renders_vscode_command_when_image_supplied() {
     assert!(
         script.contains("my-tunnel"),
         "vscode script should embed the tunnel name:\n{script}"
+    );
+}
+
+#[test]
+fn notebook_promote_writes_batch_spec_from_latest_record() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let notebook = tmpdir.path().join("analysis.ipynb");
+    fs::write(
+        &notebook,
+        r#"{"cells":[{"cell_type":"code","source":["%pip install numpy\n"]}]}"#,
+    )
+    .expect("notebook");
+    let requirements = tmpdir.path().join("requirements.txt");
+    fs::write(&requirements, "numpy\n").expect("requirements");
+    write_latest_notebook_record(tmpdir.path(), None);
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "notebook",
+            "promote",
+            notebook.to_str().expect("path"),
+            "--requirements",
+            requirements.to_str().expect("path"),
+            "--prepare-command",
+            "pip install --no-cache-dir pandas",
+            "--param",
+            "SEED=1",
+        ],
+    );
+    assert_success(&output);
+    let promoted = tmpdir.path().join("analysis.promoted.yaml");
+    assert!(promoted.exists(), "promote should write default output");
+    let yaml = fs::read_to_string(&promoted).expect("promoted yaml");
+    assert!(yaml.contains("python"));
+    assert!(yaml.contains("papermill"));
+    assert!(yaml.contains("/hpc-compose/notebook-promote/analysis.ipynb"));
+    assert!(yaml.contains("/hpc-compose/notebook-promote/analysis.promoted.ipynb"));
+    assert!(yaml.contains("${SEED:-1}"));
+    assert!(yaml.contains("x-runtime"));
+    assert!(yaml.contains("pip install --no-cache-dir -r /hpc-compose/prepare/requirements.txt"));
+    assert!(yaml.contains("pip install --no-cache-dir pandas"));
+    assert!(yaml.contains("pip install --no-cache-dir papermill"));
+    assert!(yaml.contains("jupyter/scipy-notebook:latest"));
+    let validate = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "validate",
+            "-f",
+            promoted.to_str().expect("path"),
+        ],
+    );
+    assert_success(&validate);
+    let stderr = stderr_text(&output);
+    assert!(
+        stderr.contains("ad-hoc install") && stderr.contains("config_snapshot_yaml"),
+        "promote should warn about install cells and legacy records:\n{stderr}"
+    );
+    assert!(stdout_text(&output).contains("hpc-compose plan -f"));
+}
+
+#[test]
+fn notebook_promote_uses_record_snapshot_when_present() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let notebook = tmpdir.path().join("analysis.ipynb");
+    fs::write(&notebook, r#"{"cells":[]}"#).expect("notebook");
+    let output_path = tmpdir.path().join("batch.yaml");
+    fs::write(&output_path, "old: true\n").expect("old output");
+    let snapshot = r#"name: interactive
+services:
+  notebook:
+    image: custom/notebook:1
+    working_dir: /workspace
+    volumes:
+      - ./project:/workspace
+    command:
+      - jupyter
+      - lab
+    readiness:
+      type: log
+      pattern: ready
+"#;
+    write_latest_notebook_record(tmpdir.path(), Some(snapshot));
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "promote",
+            notebook.to_str().expect("path"),
+            "--output",
+            output_path.to_str().expect("path"),
+            "--force",
+        ],
+    );
+    assert_success(&output);
+    let yaml = fs::read_to_string(&output_path).expect("promoted yaml");
+    assert!(yaml.contains("custom/notebook:1"));
+    assert!(yaml.contains("./project:/workspace"));
+    assert!(yaml.contains("python"));
+    assert!(yaml.contains("papermill"));
+    assert!(!yaml.contains("readiness"));
+    let validate = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "validate",
+            "-f",
+            output_path.to_str().expect("path"),
+        ],
+    );
+    assert_success(&validate);
+    assert!(
+        !stderr_text(&output).contains("config_snapshot_yaml"),
+        "snapshot-backed promote should not emit the legacy-record warning"
+    );
+}
+
+#[test]
+fn notebook_trailing_server_args_still_parse_after_promote_subcommand_added() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let script_out = tmpdir.path().join("notebook.sbatch");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "notebook",
+            "--kind",
+            "jupyter",
+            "--dry-run",
+            "--no-preflight",
+            "--script-out",
+            script_out.to_str().expect("path"),
+            "--",
+            "--NotebookApp.foo=bar",
+        ],
+    );
+    assert_success(&output);
+    let script = fs::read_to_string(&script_out).expect("script");
+    assert!(
+        script.contains("--NotebookApp.foo=bar"),
+        "trailing server arg should still be forwarded:\n{script}"
     );
 }
 
