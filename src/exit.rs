@@ -28,6 +28,7 @@
 //!
 //! - an [`ExitCodeError`] carries a child's status (pass-through);
 //! - a [`crate::spec_error::SpecError`] means the spec is invalid → code 2;
+//! - a [`UsageError`] means a command-level flag or argument combination is invalid → code 2;
 //! - a [`LintFindingsError`] means lint findings failed the gate → code 4;
 //! - an [`EnvironmentError`] means a preflight/reachability check failed → code 3;
 //! - anything else is an uncategorized failure → code 1.
@@ -102,6 +103,21 @@ impl EnvironmentError {
     }
 }
 
+/// A semantic command-line usage error discovered after Clap parsing. Classified
+/// as [`ExitCode::Usage`] (code 2), matching parser-level unknown flag / missing
+/// argument failures. Use this for value-dependent or context-dependent
+/// argument combinations that cannot be expressed cleanly in Clap metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{0}")]
+pub struct UsageError(pub String);
+
+impl UsageError {
+    /// Builds a command usage error from a message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
 /// Signals that `lint` found findings that fail the configured gate (errors, or
 /// warnings without `--allow-warnings`). Classified as [`ExitCode::Lint`]
 /// (code 4). The message matches the historical `lint` failure text so CI logs
@@ -141,6 +157,9 @@ pub fn classify(error: &anyhow::Error) -> ExitCode {
         .downcast_ref::<crate::spec_error::SpecError>()
         .is_some()
     {
+        return ExitCode::Usage;
+    }
+    if error.downcast_ref::<UsageError>().is_some() {
         return ExitCode::Usage;
     }
     if error.downcast_ref::<LintFindingsError>().is_some() {

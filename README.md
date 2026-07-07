@@ -92,6 +92,7 @@ Installer availability is not the same as full runtime support. Check the [Suppo
 - [Support Matrix](docs/src/support-matrix.md)
 - [Installation](docs/src/installation.md)
 - [Quickstart](docs/src/quickstart.md)
+- [FAQ](docs/src/faq.md)
 - [Examples](docs/src/examples.md)
 - [Task Guide](docs/src/task-guide.md)
 - [Development Workflow](docs/src/development-workflow.md)
@@ -113,11 +114,11 @@ Agents author and statically verify a spec (`validate`, `plan --show-script`, `i
 
 ## Feedback
 
-If you try `hpc-compose`, open an [adoption feedback issue](https://github.com/NicolasSchuler/hpc-compose/issues/new?template=adoption-feedback.yml) with:
+If you try `hpc-compose`, start with the [FAQ](docs/src/faq.md) when you are not sure whether a behavior is expected. Otherwise, choose the issue form that matches what you learned:
 
-- cluster type
-- workload type
-- the main failure or friction point
+- [Bug report](https://github.com/NicolasSchuler/hpc-compose/issues/new?template=bug_report.yml) for a reproducible CLI, docs, packaging, or runtime defect.
+- [Feature request](https://github.com/NicolasSchuler/hpc-compose/issues/new?template=feature_request.yml) for a proposed workflow, Compose subset, backend, docs, or ergonomics change.
+- [Adoption feedback](https://github.com/NicolasSchuler/hpc-compose/issues/new?template=adoption-feedback.yml) for cluster fit, workload fit, and the main failure or friction point.
 
 ## Project Policies
 

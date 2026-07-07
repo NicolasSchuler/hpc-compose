@@ -63,6 +63,8 @@ pub(super) const WORKFLOW_GROUPS: &[(&str, &str, &[&str])] = &[
         "low-level spec authoring and tooling",
         &[
             "examples",
+            "docs",
+            "feedback",
             "validate",
             "lint",
             "inspect",
@@ -104,12 +106,24 @@ const TOP_LEVEL_HELP_FOOTER: &str = "Use `hpc-compose help <command>` for comman
 fn workflow_groups_block() -> String {
     let mut block = String::from("Workflow groups:");
     for (label, description, names) in WORKFLOW_GROUPS {
+        let display_names = names
+            .iter()
+            .map(|name| workflow_group_command_label(name))
+            .collect::<Vec<_>>()
+            .join(", ");
         block.push_str(&format!(
             "\n  {label}: {description}\n    {}",
-            names.join(", ")
+            display_names
         ));
     }
     block
+}
+
+fn workflow_group_command_label(name: &str) -> &str {
+    match name {
+        "new" => "new/init",
+        _ => name,
+    }
 }
 
 /// Builds the top-level `--help` epilogue (`after_help`). Generated rather than
@@ -475,10 +489,14 @@ effective config, submitted script, and provenance/source hash when present.";
 
 pub(super) const NEW_HELP: &str = "\
 Examples:
+  hpc-compose init --template minimal-batch --name my-app --output compose.yaml
   hpc-compose new --list-templates
   hpc-compose new --describe-template minimal-batch
   hpc-compose new --template minimal-batch --name my-app --output compose.yaml
-  hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml";
+  hpc-compose new --template minimal-batch --name my-app --cache-dir '<shared-cache-dir>' --output compose.yaml
+
+`init` is a visible alias for `new`; `new` remains the canonical spelling in
+docs and generated scripts.";
 
 pub(super) const EXAMPLES_HELP: &str = "\
 Examples:
@@ -488,6 +506,25 @@ Examples:
   hpc-compose examples recommend 'multi-node training' --tag gpu
   hpc-compose examples recommend --format json
   hpc-compose examples coverage --format markdown";
+
+pub(super) const DOCS_HELP: &str = "\
+Examples:
+  hpc-compose docs cache dir
+  hpc-compose docs 'readiness never passes'
+  hpc-compose docs x-slurm.cache_dir --format json
+
+This command searches the bundled documentation only. It is static-safe and
+works with --offline; it does not resolve settings, contact SSH, call Slurm, or
+open a browser.";
+
+pub(super) const FEEDBACK_HELP: &str = "\
+Examples:
+  hpc-compose feedback
+  hpc-compose feedback --kind bug
+  hpc-compose feedback --kind feature --format json
+
+This command prints a local report and GitHub issue link only. It never sends
+telemetry, opens a browser, contacts GitHub, or performs a version ping.";
 
 pub(super) const EVOLVE_HELP: &str = "\
 Examples:
@@ -870,6 +907,12 @@ const EXAMPLES_EXAMPLES: &[&str] = &[
     "hpc-compose examples coverage --format markdown",
 ];
 
+const FEEDBACK_EXAMPLES: &[&str] = &[
+    "hpc-compose feedback",
+    "hpc-compose feedback --kind bug",
+    "hpc-compose feedback --kind feature --format json",
+];
+
 #[must_use]
 pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
     match path {
@@ -892,6 +935,7 @@ pub fn examples_for_path(path: &[&str]) -> &'static [&'static str] {
         ["examples", "search"] => EXAMPLES_EXAMPLES,
         ["examples", "recommend"] => EXAMPLES_EXAMPLES,
         ["examples", "coverage"] => EXAMPLES_EXAMPLES,
+        ["feedback"] => FEEDBACK_EXAMPLES,
         ["plan"] => PLAN_EXAMPLES,
         ["up"] => UP_EXAMPLES,
         ["when"] => WHEN_EXAMPLES,
@@ -1014,7 +1058,12 @@ mod tests {
         // subcommand (`plan --explain` already means planning hints).
         // Bumped 49 -> 50 for the `workspace` lifecycle group
         // (status/allocate/extend/release as subcommands, not new top-levels).
-        const MAX_TOP_LEVEL_COMMANDS: usize = 50;
+        // Bumped 50 -> 51 for `docs`, the roadmap's offline manual search
+        // command. It is intentionally top-level because it is a global
+        // discovery entrypoint, not tied to examples, specs, or tracked runs.
+        // Bumped 51 -> 52 for `feedback`, an explicit no-telemetry community
+        // signal surface with issue-template links.
+        const MAX_TOP_LEVEL_COMMANDS: usize = 52;
         let count = real_top_level_commands().len();
         assert!(
             count <= MAX_TOP_LEVEL_COMMANDS,

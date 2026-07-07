@@ -5,7 +5,7 @@
 ## The catalog
 
 | Code | Meaning | Emitted when |
-|------|---------|--------------|
+| --- | --- | --- |
 | `0` | Success | The command completed successfully. |
 | `1` | Generic failure | An unexpected error, local I/O failure, or an external tool reporting an error, with no more specific category. |
 | `2` | Usage or validation error | An invalid flag or argument combination, or an invalid spec. |
@@ -27,9 +27,8 @@ Most `1` exits are unexpected failures, but a few commands use it as a deliberat
 ### Code 2 — usage and validation
 
 - Parse-level usage errors — an unknown flag, a missing argument — are reported by the argument parser, which exits `2` before any command runs.
+- Command-level usage errors — semantic flag or argument combinations that must be checked after parsing — also exit `2`.
 - `validate`, and any command that loads a malformed `compose.yaml`, exits `2`.
-
-Semantic argument-combination checks (for example, two mutually exclusive flags) currently exit `1`. Only spec-invalid and parser-level usage errors map to `2` today. This may broaden in a future release, but the meaning of a code never changes: `2` will always mean "usage or validation".
 
 ### Code 3 — preflight and environment
 

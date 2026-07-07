@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/NicolasSchuler/hpc-compose/security/policy
+    about: Please report suspected vulnerabilities privately instead of filing a public issue.
+  - name: FAQ and troubleshooting docs
+    url: https://nicolasschuler.github.io/hpc-compose/faq.html
+    about: Check common setup, support-scope, and troubleshooting answers before filing.

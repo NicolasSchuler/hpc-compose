@@ -71,22 +71,58 @@ fn unknown_flag_is_a_usage_error_exit_2() {
     );
 }
 
-/// Semantic argument-combination errors are not (yet) categorized: they stay on
-/// the generic code 1. This pins the current contract documented in
-/// `docs/src/exit-codes.md`; only spec-invalid and parser-level usage map to 2.
+/// Semantic argument-combination errors now use the same stable usage exit code
+/// as parser-level clap errors.
 #[test]
-fn semantic_argument_combination_exits_1() {
+fn semantic_argument_combination_exits_2() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
 
-    // `up --format` requires `--detach` or `--dry-run`; this guard fires before
+    let output = run_cli(tmpdir.path(), &["cache", "prune"]);
+
+    assert_failure(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a semantic argument-combination error should exit 2\nstdout:\n{}\nstderr:\n{}",
+        stdout_text(&output),
+        stderr_text(&output),
+    );
+}
+
+#[test]
+fn semantic_value_usage_error_exits_2() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &["when", "--free-nodes", "0", "--partition", "gpu"],
+    );
+
+    assert_failure(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a semantic argument value error should exit 2\nstdout:\n{}\nstderr:\n{}",
+        stdout_text(&output),
+        stderr_text(&output),
+    );
+    assert!(stderr_text(&output).contains("--free-nodes must be greater than zero"));
+}
+
+/// Clap-level argument relationships also exit 2.
+#[test]
+fn clap_argument_relationship_exits_2() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    // `up --format` requires `--detach` or `--dry-run`; clap catches this before
     // any spec or cluster resolution, so no compose file is needed.
     let output = run_cli(tmpdir.path(), &["up", "--format", "json"]);
 
     assert_failure(&output);
     assert_eq!(
         output.status.code(),
-        Some(1),
-        "a semantic argument-combination error should exit 1\nstdout:\n{}\nstderr:\n{}",
+        Some(2),
+        "a clap argument relationship error should exit 2\nstdout:\n{}\nstderr:\n{}",
         stdout_text(&output),
         stderr_text(&output),
     );

@@ -546,11 +546,9 @@ pub(crate) fn replay(
                     ) {
                         Ok(()) => Ok(()),
                         Err(err) => {
-                            let _ = writeln!(
-                                io::stderr(),
-                                "warning: replay UI unavailable ({err}); printing static replay summary"
-                            );
-                            let _ = io::stderr().flush();
+                            hpc_compose::diagnostics::warn(format!(
+                                "replay UI unavailable ({err}); printing static replay summary"
+                            ));
                             print_replay_summary(&report)
                         }
                     }

@@ -1472,7 +1472,6 @@ fn run_command_covers_success_and_error_arms() {
     let err = run_command(Commands::Preflight {
         file: Some(compose.clone()),
         strict: true,
-        verbose: false,
         fs_probes: false,
         format: None,
         enroot_bin: enroot.display().to_string(),
@@ -1487,7 +1486,6 @@ fn run_command_covers_success_and_error_arms() {
     run_command(Commands::Preflight {
         file: Some(compose.clone()),
         strict: false,
-        verbose: false,
         fs_probes: false,
         format: None,
         enroot_bin: enroot.display().to_string(),
@@ -1501,7 +1499,6 @@ fn run_command_covers_success_and_error_arms() {
 
     run_command(Commands::Inspect {
         file: Some(compose.clone()),
-        verbose: false,
         tree: false,
         rightsize: false,
         dependencies: false,

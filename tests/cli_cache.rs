@@ -553,6 +553,33 @@ fn cache_prune_all_unused_keeps_current_plan_artifacts() {
 }
 
 #[test]
+fn cache_prune_all_unused_non_tty_prompt_shows_plan_preview() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let cache_dir = cache_root.path().to_path_buf();
+    let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
+
+    let prune = run_cli(
+        tmpdir.path(),
+        &[
+            "cache",
+            "prune",
+            "--all-unused",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+
+    assert_failure(&prune);
+    let stderr = stderr_text(&prune);
+    assert!(stderr.contains("destructive action preview"));
+    assert!(stderr.contains(&format!("cache dir: {}", cache_dir.display())));
+    assert!(stderr.contains("selected artifacts/manifests: 0"));
+    assert!(stderr.contains("estimated bytes: 0"));
+    assert!(stderr.contains("requires --yes"));
+}
+
+#[test]
 fn cache_prune_all_unused_defaults_to_plan_cache_dir() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();

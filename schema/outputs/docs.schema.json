@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DocsSearchOutput",
+  "description": "Search response consumed by text and JSON CLI renderers.",
+  "type": "object",
+  "properties": {
+    "matches": {
+      "description": "Ranked matches from the embedded documentation.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DocsSearchHit"
+      }
+    },
+    "query": {
+      "description": "Query string after CLI-level argument joining.",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "Additive schema version for machine-readable output.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema_version",
+    "query",
+    "matches"
+  ],
+  "$defs": {
+    "DocsSearchHit": {
+      "description": "One ranked documentation match.",
+      "type": "object",
+      "properties": {
+        "heading": {
+          "description": "Best matching section heading, when it is more specific than the page title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "Stable docs location, relative to the mdBook root.",
+          "type": "string"
+        },
+        "snippet": {
+          "description": "Compact query-centered excerpt.",
+          "type": "string"
+        },
+        "title": {
+          "description": "Page title.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "location",
+        "title",
+        "snippet"
+      ]
+    }
+  }
+}

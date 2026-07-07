@@ -52,7 +52,7 @@ pub(crate) fn promote(args: PromoteArgs, quiet: bool) -> Result<()> {
 
     if !quiet {
         for warning in notebook_scan.iter().chain(build.warnings.iter()) {
-            eprintln!("warning: {warning}");
+            hpc_compose::diagnostics::warn(warning);
         }
         println!("promoted notebook batch spec: {}", written.display());
         println!("record: {}", record_path.display());
@@ -91,7 +91,7 @@ fn build_promoted_yaml(
 
     if let Some(image) = nonempty_opt(args.image.as_deref()) {
         service.insert(key("image"), Value::String(image.to_string()));
-    } else if !service.contains_key(&key("image")) {
+    } else if !service.contains_key(key("image")) {
         if let Some(image) = inferred_image(record, &service_name) {
             service.insert(key("image"), Value::String(image));
         } else {
@@ -104,15 +104,15 @@ fn build_promoted_yaml(
 
     let command = papermill_command(notebook, params)?;
     service.insert(key("command"), string_sequence(command));
-    service.remove(&key("readiness"));
-    service.remove(&key("healthcheck"));
+    service.remove(key("readiness"));
+    service.remove(key("healthcheck"));
 
     let notebook_mount = notebook_mount(notebook)?;
     append_string_sequence(service, "volumes", [notebook_mount]);
     append_string_sequence(service, "volumes", args.volumes.iter().cloned());
     if let Some(working_dir) = nonempty_opt(args.working_dir.as_deref()) {
         service.insert(key("working_dir"), Value::String(working_dir.to_string()));
-    } else if !service.contains_key(&key("working_dir")) {
+    } else if !service.contains_key(key("working_dir")) {
         service.insert(
             key("working_dir"),
             Value::String(NOTEBOOK_CONTAINER_DIR.to_string()),
@@ -194,12 +194,12 @@ fn select_or_create_service(root: &mut Mapping, record: &SubmissionRecord) -> Re
         .service_name
         .as_deref()
         .filter(|name| !name.trim().is_empty());
-    if let Some(name) = recorded {
-        if services.contains_key(&key(name)) {
-            return Ok(name.to_string());
-        }
+    if let Some(name) = recorded
+        && services.contains_key(key(name))
+    {
+        return Ok(name.to_string());
     }
-    if services.contains_key(&key("notebook")) {
+    if services.contains_key(key("notebook")) {
         return Ok("notebook".to_string());
     }
     if let Some(name) = services.keys().find_map(Value::as_str) {
@@ -212,7 +212,7 @@ fn select_or_create_service(root: &mut Mapping, record: &SubmissionRecord) -> Re
 
 fn service_mapping_mut<'a>(root: &'a mut Mapping, service_name: &str) -> Result<&'a mut Mapping> {
     let services = root
-        .get_mut(&key("services"))
+        .get_mut(key("services"))
         .and_then(Value::as_mapping_mut)
         .context("promoted compose services must be a mapping")?;
     let service = services
@@ -343,11 +343,11 @@ fn append_prepare(service: &mut Mapping, commands: Vec<String>, mounts: Vec<Stri
 
 fn existing_prepare_commands(service: &Mapping) -> Vec<String> {
     service
-        .get(&key("x-runtime"))
+        .get(key("x-runtime"))
         .and_then(Value::as_mapping)
-        .and_then(|runtime| runtime.get(&key("prepare")))
+        .and_then(|runtime| runtime.get(key("prepare")))
         .and_then(Value::as_mapping)
-        .and_then(|prepare| prepare.get(&key("commands")))
+        .and_then(|prepare| prepare.get(key("commands")))
         .and_then(Value::as_sequence)
         .map(|commands| {
             commands

@@ -21,7 +21,7 @@ pub(super) use hpc_compose::context::{
 #[cfg(test)]
 pub(super) use hpc_compose::job::build_submission_record_with_backend;
 pub(super) use hpc_compose::job::{
-    ArtifactExportOptions, CleanupMode, EfficiencyScoreOptions, MetricsProbeOptions,
+    ArtifactExportOptions, CleanupMode, CleanupReport, EfficiencyScoreOptions, MetricsProbeOptions,
     QueueDiagnostics, RequestedWalltime, SWEEP_MANIFEST_SCHEMA_VERSION, SchedulerOptions,
     SchedulerStatus, StatsOptions, SubmissionBackend, SubmissionKind, SubmissionRecord,
     SubmissionRecordBuildOptions, SweepExpansionTrial, SweepManifest, SweepManifestTrial,
@@ -232,11 +232,9 @@ fn watch_with_fallback(
         match watch_ui::run_watch_ui(record, options, service, lines, hold_on_exit, prefs) {
             Ok(outcome) => return Ok(outcome),
             Err(err) => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "warning: live watch UI unavailable ({err}); falling back to line mode"
-                );
-                let _ = io::stderr().flush();
+                hpc_compose::diagnostics::warn(format!(
+                    "live watch UI unavailable ({err}); falling back to line mode"
+                ));
             }
         }
     }
@@ -329,7 +327,9 @@ pub(crate) fn attach_submit_source_snapshot(
     }
     match hpc_compose::cache::source::stage_source(repo_root, cache_dir) {
         Ok(snapshot) => provenance.source_content_hash = Some(snapshot.content_hash),
-        Err(err) => eprintln!("warning: failed to snapshot source for provenance: {err:#}"),
+        Err(err) => hpc_compose::diagnostics::warn(format!(
+            "failed to snapshot source for provenance: {err:#}"
+        )),
     }
     provenance
 }
@@ -503,12 +503,10 @@ fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
     let canonical = fs::canonicalize(compose_file).unwrap_or_else(|_| compose_file.to_path_buf());
     let lock_dir = metadata_root_for(compose_file).join("locks");
     if let Err(err) = fs::create_dir_all(&lock_dir) {
-        let _ = writeln!(
-            io::stderr(),
-            "warning: concurrent up protection unavailable because {} could not be created: {err}",
+        hpc_compose::diagnostics::warn(format!(
+            "concurrent up protection unavailable because {} could not be created: {err}",
             lock_dir.display()
-        );
-        let _ = io::stderr().flush();
+        ));
         return Ok(UpInvocationLock { path: None });
     }
     let path = up_invocation_lock_path(compose_file);
@@ -560,12 +558,10 @@ fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
                 );
             }
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "warning: concurrent up protection unavailable because {} could not be created: {err}",
+                hpc_compose::diagnostics::warn(format!(
+                    "concurrent up protection unavailable because {} could not be created: {err}",
                     path.display()
-                );
-                let _ = io::stderr().flush();
+                ));
                 return Ok(UpInvocationLock { path: None });
             }
             Err(err) => {
@@ -776,8 +772,7 @@ fn maybe_check_resume_diff(
             println!("{note}");
             return Ok(true);
         }
-        let _ = writeln!(io::stderr(), "warning: {note}");
-        let _ = io::stderr().flush();
+        hpc_compose::diagnostics::warn(note);
         return Ok(false);
     };
     let Some(diff) = diff_lines(previous_yaml, effective_config_yaml) else {
@@ -953,24 +948,19 @@ fn warn_local_ignored_scheduler_settings(plan: &RuntimePlan) {
         .iter()
         .any(|arg| arg.contains("reservation"))
     {
-        let _ = writeln!(
-            io::stderr(),
-            "warning: --local ignores reservation-related x-slurm.submit_args"
-        );
+        hpc_compose::diagnostics::warn("--local ignores reservation-related x-slurm.submit_args");
     }
     if plan.slurm.reservation.is_some() {
-        let _ = writeln!(io::stderr(), "warning: --local ignores x-slurm.reservation");
+        hpc_compose::diagnostics::warn("--local ignores x-slurm.reservation");
     }
     if plan.slurm.licenses.is_some() {
-        let _ = writeln!(io::stderr(), "warning: --local ignores x-slurm.licenses");
+        hpc_compose::diagnostics::warn("--local ignores x-slurm.licenses");
     }
     if plan.slurm.error.is_some() {
-        let _ = writeln!(
-            io::stderr(),
-            "warning: --local ignores x-slurm.error and writes batch stderr into the local batch log"
+        hpc_compose::diagnostics::warn(
+            "--local ignores x-slurm.error and writes batch stderr into the local batch log",
         );
     }
-    let _ = io::stderr().flush();
 }
 
 fn local_failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
@@ -1127,20 +1117,16 @@ fn rollback_local_tracking(record: &SubmissionRecord, supervisor_pid: Option<u32
     if let Some(pid) = supervisor_pid
         && let Err(err) = kill_pid(pid)
     {
-        let _ = writeln!(
-            io::stderr(),
-            "warning: failed to stop local supervisor {} during rollback: {err}",
-            pid
-        );
+        hpc_compose::diagnostics::warn(format!(
+            "failed to stop local supervisor {pid} during rollback: {err}"
+        ));
     }
     if let Err(err) = remove_submission_record(record) {
-        let _ = writeln!(
-            io::stderr(),
-            "warning: failed to roll back tracked metadata for local job {}: {err}",
+        hpc_compose::diagnostics::warn(format!(
+            "failed to roll back tracked metadata for local job {}: {err}",
             record.job_id
-        );
+        ));
     }
-    let _ = io::stderr().flush();
 }
 
 fn spawn_local_supervisor(submit_dir: &Path, script_path: &Path, batch_log: &Path) -> Result<u32> {
@@ -1525,11 +1511,9 @@ fn submit_prepared_slurm_submission(
         let persisted = match write_submission_record(&record) {
             Ok(()) => true,
             Err(err) => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "warning: job submitted, but failed to write tracking metadata: {err}"
-                );
-                let _ = io::stderr().flush();
+                hpc_compose::diagnostics::warn(format!(
+                    "job submitted, but failed to write tracking metadata: {err}"
+                ));
                 false
             }
         };
@@ -2705,9 +2689,9 @@ fn cancel_smoke_timeout(context: &ResolvedContext, record: &SubmissionRecord) {
         if let Ok(Some(pid)) = read_local_supervisor_pid(record)
             && let Err(err) = kill_pid(pid)
         {
-            eprintln!(
-                "warning: smoke test timed out but failed to stop local supervisor pid {pid}: {err}"
-            );
+            hpc_compose::diagnostics::warn(format!(
+                "smoke test timed out but failed to stop local supervisor pid {pid}: {err}"
+            ));
         }
         return;
     }
@@ -2716,14 +2700,14 @@ fn cancel_smoke_timeout(context: &ResolvedContext, record: &SubmissionRecord) {
         .status()
     {
         Ok(status) if status.success() => {}
-        Ok(status) => eprintln!(
-            "warning: smoke test timed out but scancel exited with {status} for job {}",
+        Ok(status) => hpc_compose::diagnostics::warn(format!(
+            "smoke test timed out but scancel exited with {status} for job {}",
             record.job_id
-        ),
-        Err(err) => eprintln!(
-            "warning: smoke test timed out but failed to run scancel for job {}: {err}",
+        )),
+        Err(err) => hpc_compose::diagnostics::warn(format!(
+            "smoke test timed out but failed to run scancel for job {}: {err}",
             record.job_id
-        ),
+        )),
     }
 }
 

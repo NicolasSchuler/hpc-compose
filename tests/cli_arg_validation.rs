@@ -22,15 +22,6 @@ fn arg_error(args: &[&str]) -> String {
 }
 
 #[test]
-fn inspect_rejects_verbose_with_rightsize() {
-    let stderr = arg_error(&["inspect", "--verbose", "--rightsize"]);
-    assert!(
-        stderr.contains("cannot be used with"),
-        "expected a clap conflict error, got: {stderr}"
-    );
-}
-
-#[test]
 fn inspect_rejects_tree_with_dependencies() {
     let stderr = arg_error(&["inspect", "--tree", "--dependencies"]);
     assert!(
@@ -96,6 +87,39 @@ fn diff_rejects_job_id_without_against_spec() {
 #[test]
 fn diff_rejects_fail_on_change_without_against_spec() {
     let stderr = arg_error(&["diff", "--fail-on-change"]);
+    assert!(
+        stderr.to_lowercase().contains("required"),
+        "expected a clap requires error, got: {stderr}"
+    );
+}
+
+#[test]
+fn up_format_requires_detach_or_dry_run() {
+    let stderr = arg_error(&["up", "--format", "json"]);
+    assert!(
+        stderr.to_lowercase().contains("required"),
+        "expected a clap requires error, got: {stderr}"
+    );
+}
+
+#[test]
+fn up_watch_queue_conflicts_with_detach_dry_run_and_local() {
+    for args in [
+        ["up", "--watch-queue", "--detach"].as_slice(),
+        ["up", "--watch-queue", "--dry-run"].as_slice(),
+        ["up", "--watch-queue", "--local"].as_slice(),
+    ] {
+        let stderr = arg_error(args);
+        assert!(
+            stderr.contains("cannot be used with"),
+            "expected a clap conflict error for {args:?}, got: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn up_queue_warn_after_requires_watch_queue() {
+    let stderr = arg_error(&["up", "--queue-warn-after", "5m"]);
     assert!(
         stderr.to_lowercase().contains("required"),
         "expected a clap requires error, got: {stderr}"

@@ -26,6 +26,8 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use hpc_compose::cache::CacheEntryManifest;
+use hpc_compose::diagnostics::Notice;
+use hpc_compose::docs_search::DocsSearchOutput;
 use hpc_compose::evolve::EvolveRunReport;
 use hpc_compose::job::{
     ArtifactExportReport, CheckpointHistory, CleanupReport, EfficiencyScoreReport, JobDiffReport,
@@ -246,6 +248,9 @@ output_schemas! {
     "doctor-fabric-smoke" => crate::commands::doctor::FabricSmokeJsonOutput,
     "doctor-readiness" => crate::commands::doctor::ReadinessDoctorOutput,
     "doctor-cluster-report" => crate::commands::doctor::ClusterReportJsonOutput<'static>,
+    "docs" => DocsSearchOutput,
+    "feedback" => crate::commands::feedback::FeedbackOutput,
+    "diagnostic-notice" => Notice,
     "experiment" => crate::commands::runtime::experiment::ExperimentShowOutput,
     "experiment-bundle" => hpc_compose::job::ExperimentBundleManifest,
     "experiment-tag" => crate::commands::runtime::experiment::ExperimentTagOutput,
@@ -492,6 +497,7 @@ mod tests {
             "checkpoints",
             "clean",
             "dependencies",
+            "diagnostic-notice",
             "diff",
             "diff-matrix",
             "diff-spec",
@@ -525,6 +531,7 @@ mod tests {
             "doctor-fabric-smoke",
             "doctor-mpi-smoke",
             "doctor-readiness",
+            "docs",
             "examples-list",
             "examples-recommend",
             "experiment",
@@ -532,6 +539,7 @@ mod tests {
             "experiment-note",
             "experiment-tag",
             "explain",
+            "feedback",
             "germinate",
             "init-list",
             "lessons-describe",

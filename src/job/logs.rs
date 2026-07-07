@@ -268,7 +268,7 @@ fn warn_pending_queue_wait(
         return;
     }
     let mut detail = format!(
-        "warning: job {} still PENDING after {}",
+        "job {} still PENDING after {}",
         record.job_id,
         format_walltime_duration(seconds)
     );
@@ -288,8 +288,7 @@ fn warn_pending_queue_wait(
             detail.push_str(&parts.join("; "));
         }
     }
-    let _ = writeln!(io::stderr(), "{detail}");
-    let _ = io::stderr().flush();
+    crate::diagnostics::warn(detail);
 }
 
 fn watch_local_submission(

@@ -190,10 +190,9 @@ fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
                 .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
                 .any(|io_err| io_err.kind() == std::io::ErrorKind::NotFound);
             if !is_not_found {
-                eprintln!(
-                    "{} {}: {err:#}",
-                    crate::term::styled_warning("WARN"),
-                    path.display()
+                crate::diagnostics::warn_with_code(
+                    "corrupt_job_record",
+                    format!("{}: {err:#}", path.display()),
                 );
             }
             None

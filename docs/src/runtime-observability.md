@@ -92,6 +92,7 @@ The watch and replay views repaint only the rows that change between refreshes, 
 | `HPC_COMPOSE_WATCH_REFRESH_MS` | Scheduler/log refresh cadence in milliseconds (default 1000, clamped to 100–60000). |
 | `HPC_COMPOSE_WATCH_METRICS_REFRESH_MS` | Metrics refresh cadence in milliseconds (default 5000, clamped to 500–600000). |
 | `HPC_COMPOSE_WATCH_MOUSE` | Set to a non-zero value to enable mouse capture; the scroll wheel then drives the log pane. Off by default so native terminal text selection keeps working. |
+| `HPC_COMPOSE_FORCE_WATCH_UI` | Force the alternate-screen watch UI even when terminal detection would normally fall back to line mode. Intended for debugging terminal detection. |
 
 These display preferences can also be set per-project in `.hpc-compose/settings.toml` under a `[watch]` section; environment variables take precedence over the file:
 

@@ -8,6 +8,44 @@ use serde_json::Value;
 use support::*;
 
 #[test]
+fn docs_command_searches_bundled_manual_offline() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    let text = run_cli(
+        tmpdir.path(),
+        &["--offline", "docs", "x-slurm.cache_dir", "--limit", "3"],
+    );
+    assert_success(&text);
+    let stdout = stdout_text(&text);
+    assert!(stdout.contains("Docs matches"));
+    assert!(stdout.contains("x-slurm.cache_dir"));
+
+    let json = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "docs",
+            "readiness",
+            "never",
+            "passes",
+            "--limit",
+            "2",
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&json);
+    let payload: Value = serde_json::from_str(&stdout_text(&json)).expect("docs json");
+    assert_eq!(payload["schema_version"], Value::from(1));
+    assert_eq!(payload["query"], Value::from("readiness never passes"));
+    assert!(
+        payload["matches"]
+            .as_array()
+            .is_some_and(|matches| !matches.is_empty())
+    );
+}
+
+#[test]
 fn validate_and_render_commands_work() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();

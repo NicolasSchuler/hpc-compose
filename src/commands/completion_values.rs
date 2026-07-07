@@ -141,11 +141,11 @@ fn sweep_id_candidates(
     file: Option<&PathBuf>,
 ) -> BTreeSet<String> {
     let mut candidates = BTreeSet::new();
-    if let Some(compose_file) = compose_path_for_completion(context, file) {
-        if let Ok(manifests) = scan_sweep_manifests(&compose_file) {
-            for manifest in manifests {
-                insert_candidate(&mut candidates, manifest.sweep_id);
-            }
+    if let Some(compose_file) = compose_path_for_completion(context, file)
+        && let Ok(manifests) = scan_sweep_manifests(&compose_file)
+    {
+        for manifest in manifests {
+            insert_candidate(&mut candidates, manifest.sweep_id);
         }
     }
     for record in filtered_submission_records(context, file) {
@@ -279,10 +279,10 @@ fn resolve_record_quiet(
     file: Option<&PathBuf>,
     job_id: Option<&str>,
 ) -> Option<SubmissionRecord> {
-    if let Some(compose_file) = compose_path_for_completion(context, file) {
-        if let Some(record) = load_submission_record_optional(&compose_file, job_id) {
-            return Some(record);
-        }
+    if let Some(compose_file) = compose_path_for_completion(context, file)
+        && let Some(record) = load_submission_record_optional(&compose_file, job_id)
+    {
+        return Some(record);
     }
     let scan_start = context
         .map(|context| context.cwd.clone())

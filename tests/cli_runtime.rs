@@ -2346,7 +2346,7 @@ fn submit_cancel_and_watch_conflict_support_json_output() {
         ],
     );
     assert_failure(&conflict);
-    assert!(stderr_text(&conflict).contains("up --format requires --detach or --dry-run"));
+    assert!(stderr_text(&conflict).contains("<--detach|--dry-run>"));
 
     let cancel = run_cli(
         tmpdir.path(),
@@ -8565,20 +8565,17 @@ fn submit_watch_queue_rejects_incompatible_flags() {
     let cases = [
         (
             vec!["up", "--watch-queue", "--detach"],
-            "up --watch-queue cannot be combined with --detach",
+            "the argument '--watch-queue' cannot be used with '--detach'",
         ),
         (
             vec!["up", "--watch-queue", "--dry-run"],
-            "up --watch-queue cannot be combined with --dry-run",
+            "the argument '--watch-queue' cannot be used with '--dry-run'",
         ),
         (
             vec!["up", "--watch-queue", "--local"],
-            "up --watch-queue cannot be combined with --local",
+            "the argument '--watch-queue' cannot be used with '--local'",
         ),
-        (
-            vec!["up", "--queue-warn-after", "1s"],
-            "up --queue-warn-after requires --watch-queue",
-        ),
+        (vec!["up", "--queue-warn-after", "1s"], "--watch-queue"),
     ];
     for (args, expected) in cases {
         let output = run_cli(tmpdir.path(), &args);

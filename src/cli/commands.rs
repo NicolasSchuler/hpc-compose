@@ -5,8 +5,8 @@ use clap_complete::Shell;
 
 use super::help::*;
 use super::{
-    ColorPolicy, CsvOutputFormat, DependencyOutputFormat, ExamplesOutputFormat, HoldOnExit,
-    OutputFormat, RemoteInstallMode, SchemaKind, StatsOutputFormat, WatchMode,
+    ColorPolicy, CsvOutputFormat, DependencyOutputFormat, ExamplesOutputFormat, FeedbackKind,
+    HoldOnExit, OutputFormat, RemoteInstallMode, SchemaKind, StatsOutputFormat, WatchMode,
 };
 
 #[derive(Debug, Parser)]
@@ -33,6 +33,20 @@ pub struct Cli {
         help = "Suppress progress indicators and non-essential labels"
     )]
     pub quiet: bool,
+    #[arg(
+        short = 'v',
+        long,
+        global = true,
+        action = clap::ArgAction::Count,
+        help = "Increase diagnostic verbosity; repeat for debug-level logs"
+    )]
+    pub verbose: u8,
+    #[arg(
+        long,
+        global = true,
+        help = "Enable debug-level diagnostics (equivalent to -vv unless RUST_LOG is set)"
+    )]
+    pub debug: bool,
     #[arg(
         long,
         global = true,
@@ -227,6 +241,7 @@ pub enum NotebookCommands {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     #[command(
@@ -418,8 +433,6 @@ pub enum Commands {
         file: Option<PathBuf>,
         #[arg(long, help = "Treat warnings as failures")]
         strict: bool,
-        #[arg(long, help = "Show detailed preflight findings")]
-        verbose: bool,
         #[arg(
             long,
             help = "Submit a tiny Slurm job to actively probe shared filesystem visibility, rename atomicity, and compute-node headroom"
@@ -493,12 +506,6 @@ pub enum Commands {
         #[arg(
             long,
             conflicts_with_all = ["rightsize", "dependencies"],
-            help = "Include resolved environment values and final mount mappings"
-        )]
-        verbose: bool,
-        #[arg(
-            long,
-            conflicts_with_all = ["rightsize", "dependencies"],
             help = "Show services as a dependency tree"
         )]
         tree: bool,
@@ -510,7 +517,7 @@ pub enum Commands {
         rightsize: bool,
         #[arg(
             long,
-            conflicts_with_all = ["verbose", "tree", "rightsize"],
+            conflicts_with_all = ["tree", "rightsize"],
             help = "Show the normalized service dependency graph"
         )]
         dependencies: bool,
@@ -620,11 +627,6 @@ pub enum Commands {
             help = "Fail when ${VAR:-default} or ${VAR-default} fallbacks are used because VAR is missing"
         )]
         strict_env: bool,
-        #[arg(
-            long,
-            help = "Include resolved environment values and final mount mappings"
-        )]
-        verbose: bool,
         #[arg(long, help = "Show services as a dependency tree")]
         tree: bool,
         #[arg(
@@ -664,33 +666,38 @@ pub enum Commands {
         #[arg(
             long,
             help = "Generate a best-effort cluster capability profile",
-            hide = true
+            hide = true,
+            conflicts_with_all = ["mpi_smoke", "fabric_smoke"]
         )]
         cluster_report: bool,
         #[arg(
             long = "cluster-report-out",
             value_name = "PATH",
             help = "Write the cluster profile to this path; use '-' to print TOML",
-            hide = true
+            hide = true,
+            requires = "cluster_report"
         )]
         cluster_report_out: Option<PathBuf>,
         #[arg(
             long,
             help = "Render or run an MPI smoke probe for a compose service with x-slurm.mpi",
-            hide = true
+            hide = true,
+            conflicts_with_all = ["cluster_report", "fabric_smoke"]
         )]
         mpi_smoke: bool,
         #[arg(
             long,
             help = "Render or run MPI and fabric smoke probes for a compose service with x-slurm.mpi",
-            hide = true
+            hide = true,
+            conflicts_with_all = ["cluster_report", "mpi_smoke"]
         )]
         fabric_smoke: bool,
         #[arg(
             long,
             value_name = "CHECKS",
             help = "Fabric smoke checks: auto, mpi, nccl, ucx, ofi, or a comma-separated list",
-            hide = true
+            hide = true,
+            requires = "fabric_smoke"
         )]
         checks: Option<String>,
         #[arg(
@@ -818,6 +825,7 @@ pub enum Commands {
         long_about = "Run the normal end-to-end workflow: optional preflight, image preparation, script rendering, sbatch submission or local launch, and immediate live watching with log streaming and exit-code propagation.",
         after_help = UP_HELP
     )]
+    #[group(id = "up_output_mode", args = ["detach", "dry_run"], multiple = true)]
     Up {
         #[command(flatten)]
         launch: RuntimeLaunchArgs,
@@ -889,12 +897,14 @@ pub enum Commands {
         detach: bool,
         #[arg(
             long,
+            conflicts_with_all = ["detach", "dry_run", "local"],
             help = "After Slurm submission, poll queue state until the job reaches RUNNING before opening the watch view"
         )]
         watch_queue: bool,
         #[arg(
             long,
             value_name = "DURATION",
+            requires = "watch_queue",
             help = "Warn when --watch-queue stays PENDING longer than this duration; default is 10m, and 0 disables the warning"
         )]
         queue_warn_after: Option<String>,
@@ -918,6 +928,7 @@ pub enum Commands {
             long,
             value_enum,
             value_name = "FORMAT",
+            requires = "up_output_mode",
             help = "Output format for --detach or --dry-run"
         )]
         format: Option<OutputFormat>,
@@ -941,6 +952,7 @@ pub enum Commands {
             num_args = 0..=1,
             require_equals = true,
             default_missing_value = "",
+            conflicts_with_all = ["local", "watch_queue"],
             help = "Delegate this submission to a login node over SSH: rsync the project there and run `hpc-compose up` remotely, streaming output back. With no value, uses the configured login_host. Accepts user@host; otherwise the user comes from HPC_COMPOSE_REMOTE_USER / login_user / your ~/.ssh/config. Port and identity come from ~/.ssh/config (or set HPC_COMPOSE_REMOTE_SSH_OPTS for ad-hoc ssh flags)"
         )]
         remote: Option<String>,
@@ -2490,7 +2502,7 @@ pub enum Commands {
         long_about = "Write a starter compose specification from a built-in template, or list and describe the available templates without writing a file. Use --cache-dir when the generated spec should pin an explicit shared cache directory.",
         after_help = NEW_HELP,
         name = "new",
-        alias = "init"
+        visible_alias = "init"
     )]
     New {
         #[arg(
@@ -2774,6 +2786,49 @@ pub enum Commands {
         command: ExamplesCommands,
     },
     #[command(
+        display_order = 467,
+        about = "Search the bundled documentation offline",
+        long_about = "Search the bundled mdBook documentation from the CLI without opening a browser, contacting the network, resolving settings, or touching Slurm. Useful on SSH login nodes and in agent workflows that need a static-safe documentation lookup.",
+        after_help = DOCS_HELP
+    )]
+    Docs {
+        #[arg(
+            value_name = "QUERY",
+            required = true,
+            num_args = 1..,
+            help = "Documentation query, such as `cache dir`, `readiness never passes`, or `x-slurm.cache_dir`"
+        )]
+        query: Vec<String>,
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 5,
+            value_parser = parse_docs_limit,
+            help = "Maximum matches to print (1-20)"
+        )]
+        limit: usize,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
+        display_order = 468,
+        about = "Prepare a local feedback report",
+        long_about = "Prepare a local pasteable feedback report and the matching GitHub issue link. This never sends telemetry, opens a browser, contacts GitHub, or performs a version ping.",
+        after_help = FEEDBACK_HELP
+    )]
+    Feedback {
+        #[arg(
+            long,
+            value_enum,
+            value_name = "KIND",
+            default_value = "adoption",
+            help = "Feedback kind to route: bug, feature, adoption, or question"
+        )]
+        kind: FeedbackKind,
+        #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
+        format: Option<OutputFormat>,
+    },
+    #[command(
         display_order = 225,
         about = "Print the SSH tunnel to reach a tracked service from a laptop",
         long_about = "Resolve the SSH port-forward needed to reach a tracked service's TCP/HTTP readiness port from a laptop: the compute node comes from tracked status and the port from the service readiness. Prints the `ssh -L` command (with connection multiplexing so an OTP login node prompts only once), or runs it in the foreground with --open. Read-only; never daemonizes a tunnel.",
@@ -3022,6 +3077,17 @@ pub enum ExamplesCommands {
 }
 
 fn parse_recommend_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|error| format!("expected a positive integer: {error}"))?;
+    if (1..=20).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 20".to_string())
+    }
+}
+
+fn parse_docs_limit(value: &str) -> Result<usize, String> {
     let limit = value
         .parse::<usize>()
         .map_err(|error| format!("expected a positive integer: {error}"))?;

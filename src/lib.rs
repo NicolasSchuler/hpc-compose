@@ -44,6 +44,7 @@ pub(crate) mod cluster;
 pub mod commands;
 pub mod context;
 pub(crate) mod diagnostics;
+pub mod docs_search;
 pub(crate) mod domain;
 pub mod evolve;
 pub mod examples;

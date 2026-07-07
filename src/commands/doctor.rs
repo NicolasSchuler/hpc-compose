@@ -35,6 +35,7 @@ use crate::time_util::unix_timestamp_millis;
 pub(crate) fn doctor(
     format: Option<OutputFormat>,
     binaries: &ResolvedBinaries,
+    active_cache_dir: Option<&Path>,
     cluster_report: bool,
     cluster_report_out: Option<PathBuf>,
 ) -> Result<()> {
@@ -42,7 +43,7 @@ pub(crate) fn doctor(
     if cluster_report {
         return doctor_cluster_report(output_format, binaries, cluster_report_out);
     }
-    let report = run_doctor(binaries);
+    let report = run_doctor(binaries, active_cache_dir);
     match output_format {
         OutputFormat::Text => print_doctor_report(&report),
         OutputFormat::Json => {
@@ -211,7 +212,7 @@ pub(crate) fn doctor_mpi_smoke(
                     }
                 }
                 for warning in &profile_warnings {
-                    println!("warning: {warning}");
+                    hpc_compose::diagnostics::warn(warning);
                 }
                 println!("expected ranks: {expected_ranks}");
                 println!("host MPI bind paths: {}", host_mpi_bind_paths.len());
@@ -437,7 +438,7 @@ pub(crate) fn doctor_fabric_smoke(
                     println!("advertised MPI types: {}", advertised_mpi_types.join(", "));
                 }
                 for warning in &profile_warnings {
-                    println!("warning: {warning}");
+                    hpc_compose::diagnostics::warn(warning);
                 }
                 println!("expected ranks: {expected_ranks}");
                 println!("host MPI bind paths: {}", host_mpi_bind_paths.len());
@@ -1052,7 +1053,7 @@ impl ResolvedFabricChecks {
     }
 }
 
-fn run_doctor(binaries: &ResolvedBinaries) -> Report {
+fn run_doctor(binaries: &ResolvedBinaries, active_cache_dir: Option<&Path>) -> Report {
     let mut items = Vec::new();
 
     check_slurm(&mut items, binaries);
@@ -1065,7 +1066,7 @@ fn run_doctor(binaries: &ResolvedBinaries) -> Report {
     );
     check_pyxis(&mut items, binaries.srun.value.as_str());
     check_gpu(&mut items);
-    check_cache_dir(&mut items);
+    check_cache_dir(&mut items, active_cache_dir);
     check_completions(&mut items);
 
     Report { items }
@@ -1799,17 +1800,19 @@ fn check_gpu(items: &mut Vec<Item>) {
     }
 }
 
-fn check_cache_dir(items: &mut Vec<Item>) {
-    let cache_dir = env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .ok()
-        .or_else(|| {
-            env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".cache"))
-        })
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("hpc-compose");
+fn check_cache_dir(items: &mut Vec<Item>, active_cache_dir: Option<&Path>) {
+    let cache_dir = active_cache_dir.map(Path::to_path_buf).unwrap_or_else(|| {
+        env::var("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| {
+                env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".cache"))
+            })
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("hpc-compose")
+    });
 
     if let Err(e) = std::fs::create_dir_all(&cache_dir) {
         items.push(Item {

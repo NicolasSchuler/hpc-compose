@@ -59,10 +59,10 @@ pub(crate) fn cancel(
     // x-slurm.artifacts.export_dir configured silently loses its results if the
     // user forgets to run `hpc-compose artifacts` first. --no-export opts out.
     if let Some(export_dir) = maybe_auto_export_artifacts(record.as_ref(), no_export)? {
-        eprintln!(
+        hpc_compose::diagnostics::notice(format!(
             "exported tracked artifacts to {} before teardown (pass --no-export to skip)",
             export_dir.display()
-        );
+        ));
     }
 
     if record
@@ -188,6 +188,64 @@ pub(crate) fn cancel(
     }
 }
 
+pub(crate) fn cancel_confirmation_details(
+    context: &ResolvedContext,
+    job_id: Option<&str>,
+    purge_cache: bool,
+    no_export: bool,
+) -> Result<Vec<String>> {
+    let record = resolve_tracked_record(context, job_id)?;
+    let resolved_job_id = record
+        .as_ref()
+        .map(|record| record.job_id.clone())
+        .or_else(|| job_id.map(ToOwned::to_owned))
+        .context("missing job id for cancel")?;
+    let scheduler_action = match record.as_ref().map(|record| record.backend) {
+        Some(SubmissionBackend::Local) => "local supervisor cancellation".to_string(),
+        _ => format!("scancel {}", resolved_job_id),
+    };
+    let mut details = vec![
+        format!("job id: {resolved_job_id}"),
+        format!("scheduler action: {scheduler_action}"),
+    ];
+    if let Some(record) = record.as_ref() {
+        details.push(format!(
+            "tracked metadata: {}",
+            latest_record_path(record).display()
+        ));
+        details.push(format!("compose file: {}", record.compose_file.display()));
+        details.push(format!("submit dir: {}", record.submit_dir.display()));
+        details.push(format!(
+            "runtime root: {}",
+            runtime_job_root_for_record(record).display()
+        ));
+        if no_export {
+            details.push("artifact export: skipped by --no-export".to_string());
+        } else if record.artifact_export_dir.is_some() {
+            details.push("artifact export: auto-export if collected artifacts exist".to_string());
+        } else {
+            details.push("artifact export: not configured".to_string());
+        }
+    } else {
+        details.push("tracked metadata: not found".to_string());
+        details.push("artifact export: unavailable without tracked metadata".to_string());
+    }
+    if purge_cache {
+        let cache_paths = cached_artifacts_for_teardown(record.as_ref())?;
+        details.push(format!("purge cache paths: {}", cache_paths.len()));
+        details.push(format!(
+            "estimated purge bytes: {}",
+            crate::commands::confirm::estimate_paths_bytes(&cache_paths)
+        ));
+        for path in cache_paths {
+            details.push(format!("purge path: {}", path.display()));
+        }
+    } else {
+        details.push("purge cache: no".to_string());
+    }
+    Ok(details)
+}
+
 pub(crate) fn jobs_list(
     disk_usage: bool,
     tags: Vec<String>,
@@ -216,6 +274,7 @@ pub(crate) fn jobs_list(
     }
     Ok(())
 }
+#[cfg(test)]
 pub(crate) fn clean(
     context: ResolvedContext,
     age: Option<u64>,
@@ -225,6 +284,18 @@ pub(crate) fn clean(
     disk_usage: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
+    let report = build_clean_report(&context, age, all, deep, disk_usage, dry_run)?;
+    finish_clean(report, dry_run, deep, disk_usage, format)
+}
+
+pub(crate) fn build_clean_report(
+    context: &ResolvedContext,
+    age: Option<u64>,
+    all: bool,
+    deep: bool,
+    disk_usage: bool,
+    dry_run: bool,
+) -> Result<CleanupReport> {
     let mode = if let Some(days) = age {
         CleanupMode::Age { age_days: days }
     } else {
@@ -232,7 +303,7 @@ pub(crate) fn clean(
         CleanupMode::AllExceptLatest
     };
     let report = if deep {
-        let cache_dir = active_cleanup_cache_dir(&context)?;
+        let cache_dir = active_cleanup_cache_dir(context)?;
         build_deep_cleanup_report(
             &context.compose_file.value,
             &cache_dir,
@@ -243,6 +314,72 @@ pub(crate) fn clean(
     } else {
         build_cleanup_report(&context.compose_file.value, mode, disk_usage, dry_run)?
     };
+    Ok(report)
+}
+
+pub(crate) fn clean_confirmation_details(
+    report: &CleanupReport,
+    deep: bool,
+    disk_usage: bool,
+) -> Vec<String> {
+    let mut details = vec![
+        format!("compose file: {}", report.compose_file.display()),
+        format!("mode: {}", report.mode),
+        format!("selected jobs: {}", report.removed_job_ids.len()),
+        format!(
+            "kept latest job: {}",
+            report
+                .latest_job_id_after
+                .as_deref()
+                .or(report.latest_job_id_before.as_deref())
+                .unwrap_or("<none>")
+        ),
+    ];
+    if !report.removed_job_ids.is_empty() {
+        details.push(format!(
+            "selected job ids: {}",
+            report.removed_job_ids.join(",")
+        ));
+    }
+    if !report.kept_job_ids.is_empty() {
+        details.push(format!("kept job ids: {}", report.kept_job_ids.join(",")));
+    }
+    if disk_usage {
+        details.push(format!(
+            "estimated bytes: {}",
+            report.total_bytes_reclaimed.unwrap_or(0)
+        ));
+    }
+    let selected_path_count = report
+        .jobs
+        .iter()
+        .filter(|job| job.selected)
+        .map(|job| job.removable_paths.len())
+        .sum::<usize>();
+    details.push(format!("selected tracked paths: {selected_path_count}"));
+    if deep && let Some(deep) = &report.deep {
+        details.push(format!(
+            "expired rendezvous records: {}",
+            deep.rendezvous.removed.len()
+        ));
+        details.push(format!(
+            "orphan runtime dirs: {}",
+            deep.orphan_runtime_dirs
+                .iter()
+                .filter(|entry| entry.selected)
+                .count()
+        ));
+    }
+    details
+}
+
+pub(crate) fn finish_clean(
+    report: CleanupReport,
+    dry_run: bool,
+    deep: bool,
+    disk_usage: bool,
+    format: Option<OutputFormat>,
+) -> Result<()> {
     if !dry_run {
         if deep {
             run_deep_cleanup_report(&report)?;

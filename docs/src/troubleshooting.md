@@ -16,6 +16,8 @@ hpc-compose debug -f compose.yaml --preflight
 
 `plan --verbose` can print resolved environment values and final mount mappings. Treat its output as sensitive when the spec contains secrets. `validate` and `lint` emit "Did you mean ..." suggestions for misspelled service keys and dependency conditions. `lint --fix --dry-run` previews auto-fixes (for example, making an implicit `depends_on` condition explicit) without writing. `debug` is read-only unless `--preflight` is passed; with `--preflight`, it reruns prerequisite checks and includes those findings in the triage report.
 
+For opaque CLI failures, add global `-v` or `--debug`; set `RUST_LOG` when you need an explicit tracing filter such as `RUST_LOG=hpc_compose=debug`. JSON-output commands keep stdout machine-readable and emit warning notices as one JSON object per line on stderr.
+
 ## Common Symptoms
 
 | Symptom | Likely cause | Next step |

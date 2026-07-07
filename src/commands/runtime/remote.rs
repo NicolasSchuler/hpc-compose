@@ -854,17 +854,10 @@ fn ensure_remote_binary(
             // see that, so warn (auto-install cannot fix it — the installer would
             // fetch the same published release).
             if local_build_is_unreleased() && binary.version == Some(required) {
-                eprintln!(
-                    "{}",
-                    term::styled_dim(&format!(
-                        "  warning: your local hpc-compose is an unreleased build (uncommitted \
-                         changes) but the login node runs the published {ver}; commands that use \
-                         unreleased spec fields or flags may fail on the remote with an \"unknown \
-                         field\" / \"unexpected argument\" error. To use them, build hpc-compose for \
-                         the login node's OS/arch and copy it over the remote ~/.local/bin/hpc-compose.",
-                        ver = fmt_ver(required)
-                    ))
-                );
+                hpc_compose::diagnostics::warn(format!(
+                    "your local hpc-compose is an unreleased build (uncommitted changes) but the login node runs the published {ver}; commands that use unreleased spec fields or flags may fail on the remote with an \"unknown field\" / \"unexpected argument\" error. To use them, build hpc-compose for the login node's OS/arch and copy it over the remote ~/.local/bin/hpc-compose.",
+                    ver = fmt_ver(required)
+                ));
             }
             Ok(binary.path)
         }
@@ -1009,16 +1002,11 @@ fn warn_volumes_outside_stage(compose_file: &Path, project_dir: &Path) {
         }
     }
     if !offenders.is_empty() {
-        eprintln!(
-            "{}",
-            term::styled_dim(&format!(
-                "  warning: relative bind-mount source(s) escape the staged project '{}' and will \
-                 be missing on the login node: {}. Move them under the project root, stage from the \
-                 repo root, or mount an absolute cluster path instead.",
-                project_dir.display(),
-                offenders.join(", ")
-            ))
-        );
+        hpc_compose::diagnostics::warn(format!(
+            "relative bind-mount source(s) escape the staged project '{}' and will be missing on the login node: {}. Move them under the project root, stage from the repo root, or mount an absolute cluster path instead.",
+            project_dir.display(),
+            offenders.join(", ")
+        ));
     }
 }
 

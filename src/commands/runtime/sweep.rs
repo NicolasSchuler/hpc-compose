@@ -407,11 +407,11 @@ fn sweep_submit_resume(
     if let Some(original_hash) = manifest.compose_file_sha256.as_deref() {
         let current_hash = compose_file_sha256(&file)?;
         if current_hash != original_hash {
-            eprintln!(
-                "warning: {} changed since sweep {} was submitted; resumed trials will render from the current file and may diverge from already-submitted trials (the drift guard only covers the sweep block)",
+            hpc_compose::diagnostics::warn(format!(
+                "{} changed since sweep {} was submitted; resumed trials will render from the current file and may diverge from already-submitted trials (the drift guard only covers the sweep block)",
                 file.display(),
                 manifest.sweep_id
-            );
+            ));
         }
     }
 
@@ -1808,12 +1808,10 @@ fn sweep_stop_inner(
             Ok(()) => cancelled.push(trial.trial_id.clone()),
             Err(err) => {
                 skipped.push(trial.trial_id.clone());
-                let _ = writeln!(
-                    io::stderr(),
-                    "warning: failed to cancel trial {} (job {}): {err}",
-                    trial.trial_id,
-                    job_id
-                );
+                hpc_compose::diagnostics::warn(format!(
+                    "failed to cancel trial {} (job {}): {err}",
+                    trial.trial_id, job_id
+                ));
             }
         }
     }

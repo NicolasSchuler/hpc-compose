@@ -62,7 +62,7 @@ pub(crate) fn validate(
         OutputFormat::Text => {
             println!("{}", term::styled_success("spec is valid"));
             for warning in &cluster_warnings {
-                eprintln!("{} {warning}", term::styled_warning("WARN"));
+                hpc_compose::diagnostics::warn(warning);
             }
             output::print_next_steps(&output::validate_next_commands(Some(
                 &context.compose_file.value,
@@ -451,7 +451,7 @@ pub(crate) fn plan(
         OutputFormat::Text => {
             println!("{}", term::styled_success("spec is valid"));
             for warning in &cluster_warnings {
-                eprintln!("{} {warning}", term::styled_warning("WARN"));
+                hpc_compose::diagnostics::warn(warning);
             }
             if tree {
                 output_spec::print_plan_inspect_tree(&plan, &redacted_runtime_plan)

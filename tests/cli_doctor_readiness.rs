@@ -15,6 +15,80 @@ fn write_compose(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn doctor_uses_resolved_plan_cache_dir_when_file_is_provided() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_dir = tmpdir.path().join("project-cache");
+    let compose = write_compose(
+        tmpdir.path(),
+        &format!(
+            r#"
+x-slurm:
+  cache_dir: {}
+services:
+  app:
+    image: python:3.12-slim
+    command: python -V
+"#,
+            cache_dir.display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "doctor",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("doctor json");
+    let messages = payload["passed_checks"]
+        .as_array()
+        .expect("passed checks")
+        .iter()
+        .filter_map(|item| item["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains(&cache_dir.display().to_string())),
+        "expected doctor cache check to use resolved plan cache dir {}\nstdout:\n{}",
+        cache_dir.display(),
+        stdout_text(&output)
+    );
+}
+
+#[test]
+fn deprecated_doctor_cluster_report_ignores_file_argument() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let missing = tmpdir.path().join("missing-compose.yaml");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "doctor",
+            "-f",
+            missing.to_str().expect("path"),
+            "--cluster-report",
+            "--cluster-report-out",
+            "-",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("doctor json");
+    assert_eq!(payload["schema_version"], Value::from(1));
+    assert_eq!(payload["wrote"], Value::from(false));
+    assert_eq!(payload["path"], Value::Null);
+}
+
+#[test]
 fn doctor_readiness_explains_probe_variants_and_infers_single_service() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_compose(

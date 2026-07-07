@@ -8,7 +8,7 @@ Jump to the section that documents each command group:
 
 | Commands | Section |
 | --- | --- |
-| `new` / `init`, `examples`, `evolve`, `setup`, `context`, `completions` | [Authoring and Setup](#authoring-and-setup) |
+| `new` / `init`, `examples`, `docs`, `evolve`, `setup`, `context`, `completions` | [Authoring and Setup](#authoring-and-setup) |
 | `--profile`, `--settings-file`, `setup`, `context`, `validate --strict-env`, `lint`, `schema` | [Settings-aware commands](#settings-aware-commands) |
 | `plan`, `validate`, `lint`, `config`, `schema`, `inspect`, `preflight`, `doctor`, `weather`, `prepare`, `render`, `up`, `test`, `dev`, `tmux`, `germinate`, `sweep`, `when`, `alloc`, `run`, `shell`, `notebook` | [Plan and Run](#plan-and-run) |
 | `lint` finding codes (`HPC001`-`HPC900`) | [Lint rules](#lint-rules) |
@@ -37,16 +37,18 @@ Release archives install them under `share/man/man1/`. From a source checkout, r
 | `--profile <NAME>` | Select a profile from the project-local settings file | Applies to every command. |
 | `--settings-file <PATH>` | Use an explicit settings file | Bypasses upward discovery of `.hpc-compose/settings.toml`. |
 | `-f`, `--file <FILE>` | Select the compose file on compose-aware commands | When omitted, `hpc-compose` uses the active context compose file or falls back to `compose.yaml`. |
-| `--color auto|always|never` | Control ANSI color output | Use `--color never` for logs, CI captures, or assistive tooling that should receive plain text. |
+| `--color auto\|always\|never` | Control ANSI color output | Use `--color never` for logs, CI captures, or assistive tooling that should receive plain text. |
 | `--quiet` | Suppress non-essential progress labels | Useful when a wrapper only needs command output and errors. |
 | `--offline` | Forbid SSH, remote delegation, Slurm scheduler contact, submissions, allocations, and cancels | Static authoring commands still work. External/scheduler paths fail before tool invocation; explicit dry-run previews such as `up --dry-run`, `up --remote --dry-run`, `notebook --dry-run`, `germinate --dry-run`, and `sweep submit --dry-run` remain local previews. |
 | `--format json` | Machine-readable output | Preferred on non-streaming commands. |
 
+Use `--color auto|always|never` to select color behavior explicitly.
+
 ### Color environment variables
 
 When `--color auto` (the default) is in effect, `hpc-compose` honors the
-[`NO_COLOR`](https://no-color.org/) and [CLICOLORS](https://bixense.com/clicolors/)
-conventions. `--color always` or `--color never` always wins over every
+`NO_COLOR` and [CLICOLORS](https://bixense.com/clicolors/) conventions.
+`--color always` or `--color never` always wins over every
 environment variable below. The `auto` policy resolves in this precedence order
 (highest first):
 
@@ -69,6 +71,7 @@ and common practice.
 | --- | --- | --- |
 | `new` (alias: `init`) | Generate a starter compose file from a built-in template | Use `--list-templates` and `--describe-template <name>` to inspect templates before writing a file. `--cache-dir` is optional and writes an explicit `x-slurm.cache_dir`. |
 | `examples` | Search and recommend shipped examples and starter templates | Use `examples recommend` for a no-Slurm starting-point chooser, `examples list` or `examples search` to browse, and `examples coverage` to generate the docs coverage table. |
+| `docs` | Search the bundled manual offline | Static-safe lookup for SSH login nodes and agent workflows. Searches the shipped mdBook pages without resolving settings, opening a browser, contacting the network, or touching Slurm. Use `--format json` for machine-readable ranked matches. |
 | `evolve` | Learn spec features through a progressive valid-spec tutorial | Use `--list-lessons`, `--describe-lesson <id>`, and `--until <step>` to inspect or stop at a lesson step. `--format json` requires `--yes`. |
 | `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, binary overrides, and an optional profile cache default. |
 | `context` | Print the resolved execution context | Shows the selected profile, binaries, interpolation vars, runtime paths, and value sources. |
@@ -85,6 +88,9 @@ hpc-compose examples search 'vllm worker'
 hpc-compose examples recommend 'multi-node training' --tag gpu
 hpc-compose examples recommend --format json
 hpc-compose examples coverage --format markdown
+hpc-compose docs cache dir
+hpc-compose docs 'readiness never passes'
+hpc-compose docs x-slurm.cache_dir --format json
 hpc-compose evolve --list-lessons
 hpc-compose evolve --describe-lesson progressive-complexity
 hpc-compose evolve --output compose.yaml --name my-app
@@ -114,13 +120,18 @@ Use these commands and global flags when you want the project-local settings fil
 
 | Command or flag | Purpose | Notes |
 | --- | --- | --- |
+| `-v`, `--verbose` | Increase diagnostic verbosity | Global flag; repeat as `-vv` for debug-level logs unless `RUST_LOG` is set. Existing `plan --verbose` and `inspect --verbose` usage continues to work through this global flag. |
+| `--debug` | Enable debug diagnostics | Global flag; shorthand for debug-level logging. `RUST_LOG` wins when present. |
 | `--profile <NAME>` | Select the profile from settings | Global flag; applies to every subcommand. |
 | `--settings-file <PATH>` | Use an explicit settings file | Global flag; bypasses upward auto-discovery of `.hpc-compose/settings.toml`. |
 | `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, `--cache-dir`, and `--default-profile`. `--login-host <host>` and `--login-user <user>` persist the `up --remote` SSH destination onto the selected profile (`[profiles.<name>]`). |
 | `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, referenced interpolation vars, runtime paths, and value sources; supports `--format json`. Sensitive-looking interpolation values are redacted unless `--show-values` is passed. |
+| `hpc-compose feedback` | Prepare a local feedback report | Prints version, OS/arch, build metadata, selected feedback kind, and a GitHub issue URL. It does not send telemetry, open a browser, contact GitHub, or perform a version ping. |
 | `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
 | `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. Auto-fixable findings can be applied with `--fix` (preview with `--fix --dry-run`). See [Lint rules](#lint-rules). |
 | `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` to print the `settings.toml` authoring schema. Rust validation remains the semantic source of truth. |
+
+`RUST_LOG` is honored by the internal tracing subscriber and takes precedence over the default filters selected by `-v`/`--debug`. User-facing warnings are still written through hpc-compose's diagnostic notice channel; when a command writes machine-readable JSON to stdout, warnings on stderr are emitted as one JSON object per line using the checked-in `diagnostic-notice` output schema.
 
 ## Plan and Run
 
@@ -358,7 +369,7 @@ hpc-compose sweep list -f train.yaml --format json
 | `--skip-prepare` | Reuse existing prepared artifacts and skip image preparation. |
 | `--force-rebuild` | Refresh imported/prepared artifacts for each submitted trial. |
 | `--no-preflight` | Skip preflight checks before trial submission. |
-| `--format text|json` | Print human-readable or machine-readable trial output. |
+| `--format text\|json` | Print human-readable or machine-readable trial output. |
 
 `sweep status` options:
 
@@ -366,14 +377,14 @@ hpc-compose sweep list -f train.yaml --format json
 | --- | --- |
 | `-f`, `--file <FILE>` | Select the compose file whose sweep manifests should be read. |
 | `--sweep-id <ID>` | Inspect a specific sweep instead of `.hpc-compose/sweeps/latest.json`. |
-| `--format text|json` | Print aggregate counts and per-trial state for automation. |
+| `--format text\|json` | Print aggregate counts and per-trial state for automation. |
 
 `sweep list` options:
 
 | Option | Use it for |
 | --- | --- |
 | `-f`, `--file <FILE>` | Select the compose file whose sweep directory should be scanned. |
-| `--format text|json` | Print persisted sweep manifests without querying Slurm. |
+| `--format text\|json` | Print persisted sweep manifests without querying Slurm. |
 
 `sweep observe` options:
 
@@ -384,7 +395,7 @@ hpc-compose sweep list -f train.yaml --format json
 | `--watch`, `--stop-when <EXPR>` | Poll until a terminal trial satisfies the objective threshold, then stop the sweep. |
 | `--poll-interval <DURATION>`, `--timeout <DURATION>` | Tune the `--watch` polling cadence and deadline. |
 | `--scaling` | Print a read-only post-hoc scaling report (objective vs `objective.scaling_axis`: log-log slope plus speedup/efficiency over terminal trials). |
-| `--format text|json` | Print the ranked table or a machine-readable payload (the `scaling` block appears only with `--scaling`). |
+| `--format text\|json` | Print the ranked table or a machine-readable payload (the `scaling` block appears only with `--scaling`). |
 
 `sweep stop` options:
 
@@ -394,7 +405,7 @@ hpc-compose sweep list -f train.yaml --format json
 | `--sweep-id <ID>` | Stop a specific sweep instead of the latest. |
 | `--reason <REASON>` | Record a free-form stop reason on the manifest. |
 | `--yes` | Skip the interactive confirmation prompt. |
-| `--format text|json` | Print human-readable or machine-readable stop output. |
+| `--format text\|json` | Print human-readable or machine-readable stop output. |
 
 `sweep stop` cancels every still-running or pending trial of a sweep with `scancel` and records the stop on the manifest. Use it after `sweep observe` to realize early termination once an objective threshold is met.
 

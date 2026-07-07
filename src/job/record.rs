@@ -477,7 +477,7 @@ pub(crate) fn scan_job_inventory_from_root(
 ) -> Result<JobInventoryScan> {
     let now = unix_timestamp_now();
     let mut jobs = Vec::new();
-    scan_inventory_recursive(&scan_root, include_disk_usage, now, &mut jobs)?;
+    scan_inventory_recursive(scan_root, include_disk_usage, now, &mut jobs)?;
     jobs.sort_by(|left, right| {
         right
             .submitted_at
@@ -657,10 +657,9 @@ pub fn load_submission_record_optional(
     match validate_submission_record(record, &path) {
         Ok(record) => Some(record),
         Err(err) => {
-            eprintln!(
-                "{} {}: {err:#}",
-                crate::term::styled_warning("WARN"),
-                path.display()
+            crate::diagnostics::warn_with_code(
+                "corrupt_submission_record",
+                format!("{}: {err:#}", path.display()),
             );
             None
         }
@@ -873,8 +872,12 @@ fn scan_job_records_with_paths(metadata_root: &Path) -> Result<Vec<(PathBuf, Sub
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(record) = read_json::<SubmissionRecord>(&path) {
-            records.push((path, record));
+        match read_json::<SubmissionRecord>(&path) {
+            Ok(record) => records.push((path, record)),
+            Err(err) => crate::diagnostics::warn_with_code(
+                "corrupt_job_record",
+                format!("ignoring corrupt job record {} ({err})", path.display()),
+            ),
         }
     }
     Ok(records)

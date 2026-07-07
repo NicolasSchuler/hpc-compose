@@ -21,6 +21,14 @@ pub enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum FeedbackKind {
+    Bug,
+    Feature,
+    Adoption,
+    Question,
+}
+
 /// Interactive server preset for the `notebook` command.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum NotebookKindArg {

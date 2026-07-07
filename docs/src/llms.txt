@@ -48,6 +48,7 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
 
 - [Overview](https://nicolasschuler.github.io/hpc-compose/index.html): what it is and the safe first path
 - [Why hpc-compose](why-hpc-compose.html): positioning and when not to use it
+- [FAQ](https://nicolasschuler.github.io/hpc-compose/faq.html): common scope, support, cache, and issue-routing answers
 - [Execution Model](https://nicolasschuler.github.io/hpc-compose/execution-model.html): the spec→sbatch→srun pipeline, the one-allocation model, networking, and the shared-cache rule
 - [Slurm Capability Scope](slurm-capability-scope.html): what is and is not supported
 - [Runtime Backends](https://nicolasschuler.github.io/hpc-compose/runtime-backends.html): Pyxis/Enroot, Apptainer, Singularity, host

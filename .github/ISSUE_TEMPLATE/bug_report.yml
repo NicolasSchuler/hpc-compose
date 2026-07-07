@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a reproducible CLI, docs, packaging, or runtime bug.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping make hpc-compose more reliable. Please remove secrets, tokens, project paths, and private registry names from logs or specs before posting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: hpc-compose accepted an invalid spec, rendered the wrong script, failed during preflight, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Paste the exact command you ran.
+      render: shell
+      placeholder: hpc-compose plan -f compose.yaml
+    validations:
+      required: true
+  - type: textarea
+    id: compose_shape
+    attributes:
+      label: Compose/spec shape
+      description: Share the smallest relevant spec snippet or describe the affected fields.
+      render: yaml
+      placeholder: |
+        services:
+          app:
+            image: ...
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect hpc-compose to do?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Paste the error, output, or observed behavior.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the OS, Slurm/runtime backend, cluster constraints, and install method when relevant.
+      placeholder: Ubuntu 24.04 login node, Slurm 24.x, Pyxis/Enroot, shared Lustre cache, release tarball
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: hpc-compose version
+      description: Paste `hpc-compose --version` when available.
+      placeholder: hpc-compose 0.2.0
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Additional logs or context
+      description: Add preflight output, rendered-script excerpts, or links to public reproductions.
+      render: text
+    validations:
+      required: false

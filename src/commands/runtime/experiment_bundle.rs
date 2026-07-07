@@ -82,6 +82,6 @@ fn print_experiment_bundle_output(manifest: &hpc_compose::job::ExperimentBundleM
         println!("  tarball: {}", tarball.display());
     }
     for warning in &manifest.warnings {
-        println!("warning: {warning}");
+        hpc_compose::diagnostics::warn(warning);
     }
 }

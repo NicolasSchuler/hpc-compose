@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use hpc_compose::cache::{CacheEntryKind, prune_all_unused, prune_by_age, scan_cache};
+use hpc_compose::cache::{
+    CacheEntryKind, plan_prune_all_unused, prune_all_unused, prune_by_age, scan_cache,
+};
 use hpc_compose::cli::OutputFormat;
 use hpc_compose::context::{ResolvedContext, ValueSource};
 
@@ -124,6 +126,48 @@ pub(crate) fn prune(
         }
     }
     Ok(())
+}
+
+pub(crate) fn plan_all_unused(
+    context: &ResolvedContext,
+    cache_dir: Option<PathBuf>,
+) -> Result<output_cache::CachePruneReport> {
+    let runtime_plan =
+        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+            &context.compose_file.value,
+            &context.interpolation_vars,
+            Some(&context.cache_dir.value),
+            &context.resource_profiles,
+        )?;
+    let target = cache_dir.unwrap_or_else(|| runtime_plan.cache_dir.clone());
+    let result = plan_prune_all_unused(&target, &runtime_plan)?;
+    Ok(output_cache::CachePruneReport {
+        schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
+        cache_dir: target,
+        mode: "all_unused".to_string(),
+        removed_count: result.removed.len(),
+        removed_paths: result.removed,
+    })
+}
+
+pub(crate) fn prune_confirmation_details(report: &output_cache::CachePruneReport) -> Vec<String> {
+    let mut details = vec![
+        format!("cache dir: {}", report.cache_dir.display()),
+        format!("mode: {}", report.mode),
+        format!("selected artifacts/manifests: {}", report.removed_count),
+        format!(
+            "estimated bytes: {}",
+            crate::commands::confirm::estimate_paths_bytes(&report.removed_paths)
+        ),
+    ];
+    if report.removed_paths.is_empty() {
+        details.push("selected paths: <none>".to_string());
+    } else {
+        for path in &report.removed_paths {
+            details.push(format!("selected path: {}", path.display()));
+        }
+    }
+    details
 }
 
 fn active_cache_dir(context: &ResolvedContext) -> Result<PathBuf> {

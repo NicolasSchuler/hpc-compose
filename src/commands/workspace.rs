@@ -454,10 +454,9 @@ pub(crate) fn release(
     // The workspace is gone: the command must report success no matter what
     // happens to the (regenerable) state file, so state cleanup only warns.
     if let Err(err) = refresh_state(&state_path, &profile_key, None, now) {
-        eprintln!(
-            "warning: workspace '{name}' was released, but updating the workspace state file \
-             failed: {err:#}"
-        );
+        hpc_compose::diagnostics::warn(format!(
+            "workspace '{name}' was released, but updating the workspace state file failed: {err:#}"
+        ));
     }
 
     let output = WorkspaceReleaseOutput {

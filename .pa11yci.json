@@ -26,11 +26,14 @@
     "http://127.0.0.1:3000/example-source.html",
     "http://127.0.0.1:3000/examples.html",
     "http://127.0.0.1:3000/execution-model.html",
+    "http://127.0.0.1:3000/exit-codes.html",
+    "http://127.0.0.1:3000/faq.html",
     "http://127.0.0.1:3000/files-and-directories.html",
     "http://127.0.0.1:3000/glossary.html",
     "http://127.0.0.1:3000/haicore-guide.html",
     "http://127.0.0.1:3000/index.html",
     "http://127.0.0.1:3000/installation.html",
+    "http://127.0.0.1:3000/json-output-stability.html",
     "http://127.0.0.1:3000/local-slurm-dev-cluster.html",
     "http://127.0.0.1:3000/notebook.html",
     "http://127.0.0.1:3000/quickstart.html",
@@ -46,6 +49,7 @@
     "http://127.0.0.1:3000/sweeps.html",
     "http://127.0.0.1:3000/task-guide.html",
     "http://127.0.0.1:3000/troubleshooting.html",
-    "http://127.0.0.1:3000/why-hpc-compose.html"
+    "http://127.0.0.1:3000/why-hpc-compose.html",
+    "http://127.0.0.1:3000/workspaces.html"
   ]
 }

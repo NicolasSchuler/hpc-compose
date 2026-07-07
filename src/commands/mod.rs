@@ -13,6 +13,7 @@ use hpc_compose::cli::{
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
 };
+use hpc_compose::diagnostics::{self, NoticeFormat};
 use hpc_compose::job::parse_queue_warn_after_duration;
 use hpc_compose::term;
 use hpc_compose::when::{
@@ -23,9 +24,11 @@ use hpc_compose::when::{
 mod cache;
 mod completion_values;
 mod confirm;
+pub(crate) mod docs;
 pub(crate) mod doctor;
 pub(crate) mod evolve;
 pub(crate) mod examples;
+pub(crate) mod feedback;
 pub(crate) mod init;
 pub(crate) mod load;
 pub(crate) mod runtime;
@@ -36,6 +39,8 @@ pub(crate) mod workspace;
 #[derive(Debug, Clone, Default)]
 struct GlobalCommandOptions {
     quiet: bool,
+    verbose: u8,
+    debug: bool,
     offline: bool,
     profile: Option<String>,
     settings_file: Option<PathBuf>,
@@ -46,10 +51,18 @@ struct GlobalCommandOptions {
 /// Dispatches a parsed CLI invocation using the provided raw argument vector.
 pub fn run_cli(cli: Cli, raw_args: &[OsString]) -> Result<()> {
     term::init_color(cli.color);
+    diagnostics::init_logging(cli.verbose, cli.debug);
+    diagnostics::set_notice_format(if raw_args_request_json_output(raw_args) {
+        NoticeFormat::Json
+    } else {
+        NoticeFormat::Text
+    });
     run_command_with_options(
         cli.command,
         &GlobalCommandOptions {
             quiet: cli.quiet,
+            verbose: cli.verbose,
+            debug: cli.debug,
             offline: cli.offline,
             profile: cli.profile,
             settings_file: cli.settings_file,
@@ -57,6 +70,39 @@ pub fn run_cli(cli: Cli, raw_args: &[OsString]) -> Result<()> {
             assume_explicit_values: false,
         },
     )
+}
+
+fn raw_args_request_json_output(raw_args: &[OsString]) -> bool {
+    let mut expect_format_value = false;
+    for arg in raw_args.iter().skip(1).map(|arg| arg.to_string_lossy()) {
+        if arg == "--" {
+            return false;
+        }
+        if expect_format_value {
+            if arg == "json" {
+                return true;
+            }
+            expect_format_value = false;
+        }
+        match arg.as_ref() {
+            "--format" | "--matrix-format" | "--dependencies-format" => {
+                expect_format_value = true;
+            }
+            value
+                if value == "--format=json"
+                    || value == "--matrix-format=json"
+                    || value == "--dependencies-format=json" =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn usage_error<T>(message: impl Into<String>) -> Result<T> {
+    Err(hpc_compose::exit::UsageError::new(message).into())
 }
 
 /// Handles the internal live-completion value endpoint before Clap parses the
@@ -256,7 +302,29 @@ fn offline_rejection_reason(command: &Commands) -> Option<&'static str> {
             | ExperimentCommands::Tag { .. }
             | ExperimentCommands::Note { .. } => None,
         },
-        _ => None,
+        Commands::Validate { .. }
+        | Commands::Lint { .. }
+        | Commands::Render { .. }
+        | Commands::Explain { .. }
+        | Commands::Config { .. }
+        | Commands::Schema { .. }
+        | Commands::Plan { .. }
+        | Commands::MetricsProbe { .. }
+        | Commands::Artifacts { .. }
+        | Commands::Replay { .. }
+        | Commands::Checkpoints { .. }
+        | Commands::New { .. }
+        | Commands::Evolve { .. }
+        | Commands::Cache { .. }
+        | Commands::Rendezvous { .. }
+        | Commands::Jobs { .. }
+        | Commands::Clean { .. }
+        | Commands::Context { .. }
+        | Commands::Setup { .. }
+        | Commands::Examples { .. }
+        | Commands::Docs { .. }
+        | Commands::Feedback { .. }
+        | Commands::Completions { .. } => None,
     }
 }
 
@@ -342,7 +410,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Preflight {
             file,
             strict,
-            verbose,
             fs_probes,
             format,
             enroot_bin,
@@ -364,11 +431,17 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     ("--singularity-bin", &singularity_bin),
                 ],
             )?;
-            spec::preflight(context, strict, verbose, fs_probes, format, options.quiet)
+            spec::preflight(
+                context,
+                strict,
+                options.verbose > 0 || options.debug,
+                fs_probes,
+                format,
+                options.quiet,
+            )
         }
         Commands::Inspect {
             file,
-            verbose,
             tree,
             rightsize,
             dependencies,
@@ -390,7 +463,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             )?;
             spec::inspect(
                 context,
-                verbose,
+                options.verbose > 0 || options.debug,
                 tree,
                 rightsize,
                 dependencies,
@@ -412,7 +485,6 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
         Commands::Plan {
             file,
             strict_env,
-            verbose,
             tree,
             show_script,
             annotate,
@@ -423,7 +495,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             spec::plan(
                 context,
                 strict_env,
-                verbose,
+                options.verbose > 0 || options.debug,
                 tree,
                 show_script,
                 annotate,
@@ -466,21 +538,22 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 return run_doctor_subcommand(command, options, binary_overrides, format);
             }
             if cluster_report || mpi_smoke || fabric_smoke {
-                let _ = writeln!(
-                    io::stderr(),
-                    "warning: doctor flag-based interface is deprecated; use 'doctor cluster-report', 'doctor mpi-smoke', 'doctor fabric-smoke', or 'doctor readiness' subcommands instead"
+                hpc_compose::diagnostics::warn(
+                    "doctor flag-based interface is deprecated and will not be removed before v0.3.0; use 'doctor cluster-report', 'doctor mpi-smoke', 'doctor fabric-smoke', or 'doctor readiness' subcommands instead",
                 );
             }
             if mpi_smoke && fabric_smoke {
-                bail!("doctor --mpi-smoke cannot be combined with --fabric-smoke");
+                return usage_error("doctor --mpi-smoke cannot be combined with --fabric-smoke");
             }
             let timeout_seconds = parse_doctor_timeout(&timeout)?;
             if mpi_smoke {
                 if cluster_report {
-                    bail!("doctor --mpi-smoke cannot be combined with --cluster-report");
+                    return usage_error(
+                        "doctor --mpi-smoke cannot be combined with --cluster-report",
+                    );
                 }
                 if checks.is_some() {
-                    bail!("doctor --checks requires --fabric-smoke");
+                    return usage_error("doctor --checks requires --fabric-smoke");
                 }
                 let context = resolve_command_context(options, file, binary_overrides, None)?;
                 doctor::doctor_mpi_smoke(
@@ -494,7 +567,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 )
             } else if fabric_smoke {
                 if cluster_report {
-                    bail!("doctor --fabric-smoke cannot be combined with --cluster-report");
+                    return usage_error(
+                        "doctor --fabric-smoke cannot be combined with --cluster-report",
+                    );
                 }
                 let context = resolve_command_context(options, file, binary_overrides, None)?;
                 doctor::doctor_fabric_smoke(
@@ -511,15 +586,43 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 )
             } else {
                 if submit || service.is_some() || script_out.is_some() || checks.is_some() {
-                    bail!(
-                        "doctor --submit, --service, --script-out, and --checks require --mpi-smoke or --fabric-smoke"
+                    return usage_error(
+                        "doctor --submit, --service, --script-out, and --checks require --mpi-smoke or --fabric-smoke",
                     );
                 }
-                let binaries = resolve_command_binaries(options, binary_overrides)?;
-                doctor::doctor(format, &binaries, cluster_report, cluster_report_out)
+                if cluster_report {
+                    let binaries = resolve_command_binaries(options, binary_overrides)?;
+                    doctor::doctor(format, &binaries, None, cluster_report, cluster_report_out)
+                } else if let Some(file) = file {
+                    let context =
+                        resolve_command_context(options, Some(file), binary_overrides, None)?;
+                    let runtime_plan =
+                        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+                            &context.compose_file.value,
+                            &context.interpolation_vars,
+                            Some(&context.cache_dir.value),
+                            &context.resource_profiles,
+                        )?;
+                    doctor::doctor(
+                        format,
+                        &context.binaries,
+                        Some(&runtime_plan.cache_dir),
+                        cluster_report,
+                        cluster_report_out,
+                    )
+                } else {
+                    let binaries = resolve_command_binaries(options, binary_overrides)?;
+                    doctor::doctor(format, &binaries, None, cluster_report, cluster_report_out)
+                }
             }
         }
         Commands::Examples { command } => run_examples_subcommand(command),
+        Commands::Docs {
+            query,
+            limit,
+            format,
+        } => docs::search(query, limit, format),
+        Commands::Feedback { kind, format } => feedback::feedback(kind, format),
         Commands::Weather {
             format,
             sinfo_bin,
@@ -563,19 +666,19 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             remote_install,
         } => {
             if format.is_some() && !detach && !dry_run {
-                bail!("up --format requires --detach or --dry-run");
+                return usage_error("up --format requires --detach or --dry-run");
             }
             if watch_queue && detach {
-                bail!("up --watch-queue cannot be combined with --detach");
+                return usage_error("up --watch-queue cannot be combined with --detach");
             }
             if watch_queue && dry_run {
-                bail!("up --watch-queue cannot be combined with --dry-run");
+                return usage_error("up --watch-queue cannot be combined with --dry-run");
             }
             if watch_queue && local {
-                bail!("up --watch-queue cannot be combined with --local");
+                return usage_error("up --watch-queue cannot be combined with --local");
             }
             if queue_warn_after.is_some() && !watch_queue {
-                bail!("up --queue-warn-after requires --watch-queue");
+                return usage_error("up --queue-warn-after requires --watch-queue");
             }
             // `--prepare-verbose` is sugar for HPC_COMPOSE_PREPARE_VERBOSE; honor a
             // locally-set env too so either form works. Enable it for a local
@@ -625,7 +728,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     );
                 }
                 if watch_queue {
-                    bail!("up --remote cannot be combined with --watch-queue");
+                    return usage_error("up --remote cannot be combined with --watch-queue");
                 }
                 if script_out.is_some() && !dry_run {
                     bail!(
@@ -1056,14 +1159,14 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
         } => {
             if format.is_some() && !detach {
-                bail!("when --format requires --detach");
+                return usage_error("when --format requires --detach");
             }
             let free_nodes = match free_nodes {
-                Some(0) => bail!("when --free-nodes must be greater than zero"),
+                Some(0) => return usage_error("when --free-nodes must be greater than zero"),
                 Some(minimum_idle_nodes) => {
-                    let partition = partition
-                        .clone()
-                        .context("when --free-nodes requires --partition")?;
+                    let partition = partition.clone().ok_or_else(|| {
+                        hpc_compose::exit::UsageError::new("when --free-nodes requires --partition")
+                    })?;
                     Some(FreeNodesCondition {
                         partition,
                         minimum_idle_nodes,
@@ -1072,7 +1175,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 None => None,
             };
             if after_job.is_none() && after_job_condition != "afterany" {
-                bail!("when --after-job-condition requires --after-job");
+                return usage_error("when --after-job-condition requires --after-job");
             }
             let after_job = match after_job {
                 Some(job_id) => {
@@ -1091,7 +1194,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 time_window,
             };
             if conditions.is_empty() {
-                bail!("when requires at least one of --free-nodes, --after-job, or --between");
+                return usage_error(
+                    "when requires at least one of --free-nodes, --after-job, or --between",
+                );
             }
             let poll_interval = parse_poll_interval(Some(&poll_interval))?;
             let timeout = timeout.as_deref().map(parse_when_duration).transpose()?;
@@ -1430,15 +1535,22 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             yes,
             format,
         } => {
-            if cancel_requires_confirmation(job_id.as_deref(), purge_cache) {
-                confirm::confirm_destructive_action(
-                    &cancel_confirmation_action("cancel", job_id.as_deref(), purge_cache),
-                    yes,
-                )?;
-            }
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
             let context = resolve_command_context(options, file, binary_overrides, None)?;
+            if cancel_requires_confirmation(job_id.as_deref(), purge_cache) {
+                let details = runtime::cancel_confirmation_details(
+                    &context,
+                    job_id.as_deref(),
+                    purge_cache,
+                    no_export,
+                )?;
+                confirm::confirm_destructive_action_with_details(
+                    &cancel_confirmation_action("cancel", job_id.as_deref(), purge_cache),
+                    &details,
+                    yes,
+                )?;
+            }
             runtime::cancel(context, job_id, purge_cache, no_export, format)
         }
         Commands::Down {
@@ -1450,15 +1562,22 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             yes,
             format,
         } => {
-            if cancel_requires_confirmation(job_id.as_deref(), purge_cache) {
-                confirm::confirm_destructive_action(
-                    &cancel_confirmation_action("down", job_id.as_deref(), purge_cache),
-                    yes,
-                )?;
-            }
             let binary_overrides =
                 resolve_binary_overrides(options, &[("--scancel-bin", &scancel_bin)]);
             let context = resolve_command_context(options, file, binary_overrides, None)?;
+            if cancel_requires_confirmation(job_id.as_deref(), purge_cache) {
+                let details = runtime::cancel_confirmation_details(
+                    &context,
+                    job_id.as_deref(),
+                    purge_cache,
+                    no_export,
+                )?;
+                confirm::confirm_destructive_action_with_details(
+                    &cancel_confirmation_action("down", job_id.as_deref(), purge_cache),
+                    &details,
+                    yes,
+                )?;
+            }
             runtime::cancel(context, job_id, purge_cache, no_export, format)
         }
         Commands::Run {
@@ -1499,7 +1618,9 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             );
             if let Some(image) = image {
                 if launch.file.is_some() {
-                    bail!("run --image cannot be combined with -f/--file or service mode");
+                    return usage_error(
+                        "run --image cannot be combined with -f/--file or service mode",
+                    );
                 }
                 ensure_run_image_mode_uses_separator(options)?;
                 let context = resolve_command_context(
@@ -1550,15 +1671,17 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                     );
                 }
                 let mut args = args.into_iter();
-                let service = args
-                    .next()
-                    .context("run service mode requires SERVICE -- CMD")?;
+                let service = args.next().ok_or_else(|| {
+                    hpc_compose::exit::UsageError::new("run service mode requires SERVICE -- CMD")
+                })?;
                 let mut cmd = args.collect::<Vec<_>>();
                 if cmd.first().is_some_and(|arg| arg == "--") {
                     cmd.remove(0);
                 }
                 if cmd.is_empty() {
-                    bail!("run service mode requires a command after the service name");
+                    return usage_error(
+                        "run service mode requires a command after the service name",
+                    );
                 }
                 let context = resolve_command_context(
                     options,
@@ -1676,7 +1799,11 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 };
                 let job_id = job_id
                     .or_else(|| env::var("SLURM_JOB_ID").ok())
-                    .context("rendezvous register requires --job-id outside a Slurm job")?;
+                    .ok_or_else(|| {
+                        hpc_compose::exit::UsageError::new(
+                            "rendezvous register requires --job-id outside a Slurm job",
+                        )
+                    })?;
                 runtime::rendezvous_register(
                     cache_dir,
                     name,
@@ -1774,24 +1901,29 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 format,
             } => {
                 if age.is_none() && !all_unused {
-                    bail!("cache prune requires either --age DAYS or --all-unused");
+                    return usage_error("cache prune requires either --age DAYS or --all-unused");
                 }
                 if age.is_some() && all_unused {
-                    bail!("cache prune accepts only one strategy at a time");
+                    return usage_error("cache prune accepts only one strategy at a time");
                 }
                 if all_unused {
-                    let file = file.context(
-                        "--all-unused requires -f/--file so the current plan can define which artifacts are still referenced",
-                    )?;
-                    confirm::confirm_destructive_action(
-                        "prune cached artifacts that the current compose plan no longer references",
-                        yes,
-                    )?;
+                    let file = file.ok_or_else(|| {
+                        hpc_compose::exit::UsageError::new(
+                            "--all-unused requires -f/--file so the current plan can define which artifacts are still referenced",
+                        )
+                    })?;
                     let context = resolve_command_context(
                         options,
                         Some(file),
                         BinaryOverrides::default(),
                         None,
+                    )?;
+                    let plan = cache::plan_all_unused(&context, cache_dir.clone())?;
+                    let details = cache::prune_confirmation_details(&plan);
+                    confirm::confirm_destructive_action_with_details(
+                        "prune cached artifacts that the current compose plan no longer references",
+                        &details,
+                        yes,
                     )?;
                     cache::prune(context, cache_dir, age, all_unused, format)
                 } else if cache_dir.is_none() {
@@ -1853,8 +1985,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
         } => {
             if age.is_none() && !all {
-                bail!("clean requires either --age DAYS or --all");
+                return usage_error("clean requires either --age DAYS or --all");
             }
+            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
+            let prompt_disk_usage = disk_usage || !dry_run;
+            let report =
+                runtime::build_clean_report(&context, age, all, deep, prompt_disk_usage, dry_run)?;
             if !dry_run {
                 let action = if deep {
                     if all {
@@ -1867,10 +2003,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 } else {
                     "remove tracked job directories by age"
                 };
-                confirm::confirm_destructive_action(action, yes)?;
+                let details = runtime::clean_confirmation_details(&report, deep, prompt_disk_usage);
+                confirm::confirm_destructive_action_with_details(action, &details, yes)?;
             }
-            let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            runtime::clean(context, age, all, dry_run, deep, disk_usage, format)
+            runtime::finish_clean(report, dry_run, deep, disk_usage, format)
         }
         Commands::Context {
             format,
@@ -2182,10 +2318,12 @@ fn ensure_run_image_mode_uses_separator(options: &GlobalCommandOptions) -> Resul
         if value.starts_with('-') {
             continue;
         }
-        bail!("run --image mode requires the command after -- and cannot include a service name");
+        return usage_error(
+            "run --image mode requires the command after -- and cannot include a service name",
+        );
     }
     if !saw_separator {
-        bail!("run --image mode requires the command after --");
+        return usage_error("run --image mode requires the command after --");
     }
     Ok(())
 }
@@ -2228,6 +2366,7 @@ fn run_doctor_subcommand(
             doctor::doctor(
                 Some(format.or(parent_format).unwrap_or(OutputFormat::Text)),
                 &binaries,
+                None,
                 true,
                 out,
             )
@@ -2598,6 +2737,30 @@ mod tests {
     }
 
     #[test]
+    fn raw_json_output_detection_ignores_command_payload_after_separator() {
+        let json_command = vec![
+            OsString::from("hpc-compose"),
+            OsString::from("jobs"),
+            OsString::from("list"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        assert!(raw_args_request_json_output(&json_command));
+
+        let payload_args = vec![
+            OsString::from("hpc-compose"),
+            OsString::from("run"),
+            OsString::from("--image"),
+            OsString::from("docker://python:3.12"),
+            OsString::from("--"),
+            OsString::from("python"),
+            OsString::from("-c"),
+            OsString::from("print('--format json')"),
+        ];
+        assert!(!raw_args_request_json_output(&payload_args));
+    }
+
+    #[test]
     fn flag_helpers_and_strategy_validation_cover_remaining_paths() {
         let options = GlobalCommandOptions {
             raw_args: vec![
@@ -2703,6 +2866,8 @@ mod tests {
             Cli {
                 color: hpc_compose::cli::ColorPolicy::Auto,
                 quiet: false,
+                verbose: 0,
+                debug: false,
                 offline: false,
                 profile: None,
                 settings_file: None,
@@ -2741,6 +2906,8 @@ mod tests {
             Cli {
                 color: hpc_compose::cli::ColorPolicy::Auto,
                 quiet: false,
+                verbose: 0,
+                debug: false,
                 offline: false,
                 profile: None,
                 settings_file: None,
@@ -2793,6 +2960,8 @@ mod tests {
             Cli {
                 color: hpc_compose::cli::ColorPolicy::Auto,
                 quiet: false,
+                verbose: 0,
+                debug: false,
                 offline: false,
                 profile: None,
                 settings_file: None,

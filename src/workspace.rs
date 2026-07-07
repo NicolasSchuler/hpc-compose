@@ -132,21 +132,21 @@ pub fn load_workspace_state(path: &Path) -> Result<WorkspaceState> {
     match toml::from_str::<WorkspaceState>(&raw) {
         Ok(state) if state.version == WORKSPACE_STATE_SCHEMA_VERSION => Ok(state),
         Ok(state) => {
-            eprintln!(
-                "warning: workspace state {} has unsupported schema version {} (expected {}); \
-                 treating it as empty — it is a regenerable cache and will be rebuilt",
+            crate::diagnostics::warn(format!(
+                "workspace state {} has unsupported schema version {} (expected {}); \
+                 treating it as empty - it is a regenerable cache and will be rebuilt",
                 path.display(),
                 state.version,
                 WORKSPACE_STATE_SCHEMA_VERSION
-            );
+            ));
             Ok(WorkspaceState::default())
         }
         Err(err) => {
-            eprintln!(
-                "warning: workspace state {} is unreadable ({err}); treating it as empty — \
+            crate::diagnostics::warn(format!(
+                "workspace state {} is unreadable ({err}); treating it as empty - \
                  it is a regenerable cache and will be rebuilt",
                 path.display()
-            );
+            ));
             Ok(WorkspaceState::default())
         }
     }

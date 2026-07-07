@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FeedbackOutput",
+  "type": "object",
+  "properties": {
+    "issue_url": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "report": {
+      "$ref": "#/$defs/FeedbackReport"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "telemetry_sent": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "issue_url",
+    "report",
+    "telemetry_sent"
+  ],
+  "$defs": {
+    "FeedbackReport": {
+      "type": "object",
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "build_dirty": {
+          "type": "boolean"
+        },
+        "build_rev": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "os": {
+          "type": "string"
+        },
+        "package": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "package",
+        "version",
+        "repository",
+        "build_dirty",
+        "os",
+        "arch"
+      ]
+    }
+  }
+}

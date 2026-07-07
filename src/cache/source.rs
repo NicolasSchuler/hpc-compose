@@ -213,13 +213,13 @@ fn warn_hpcignore_exclusions(excluded: &[String]) {
         } else {
             String::new()
         };
-        eprintln!(
-            "  warning: .hpcignore excluded {} Python source file(s) from staging ({sample}{suffix}). \
+        crate::diagnostics::warn(format!(
+            ".hpcignore excluded {} Python source file(s) from staging ({sample}{suffix}). \
              A broad pattern like `data/` matches nested package subtrees such as `src/pkg/data/`; \
              anchor artifact patterns to the repo root (use `/data/` instead of `data/`). Set \
              HPC_COMPOSE_DEBUG_STAGING=1 to list every excluded path.",
             python.len()
-        );
+        ));
     }
     if staging_debug_enabled() && !excluded.is_empty() {
         eprintln!(

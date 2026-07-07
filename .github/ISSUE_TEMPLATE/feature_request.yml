@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a workflow, Compose subset, backend, docs, or ergonomics improvement.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        hpc-compose stays intentionally narrow: one Slurm allocation, one inspectable script, and explicit cluster behavior. Please describe the workflow need first so the design can stay grounded.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What are you trying to accomplish, and what is hard today?
+      placeholder: I want to run a database plus two workers in one allocation, but ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the CLI, spec, docs, or runtime behavior you would like.
+    validations:
+      required: true
+  - type: textarea
+    id: scope_fit
+    attributes:
+      label: Scope fit
+      description: How does this fit hpc-compose's one-allocation, Slurm-native model?
+      placeholder: This would still render to one sbatch script because ...
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What did you try instead?
+    validations:
+      required: false
+  - type: textarea
+    id: docs_examples
+    attributes:
+      label: Docs or examples that would help
+      description: Link related docs, examples, cluster policies, or Compose behavior.
+    validations:
+      required: false

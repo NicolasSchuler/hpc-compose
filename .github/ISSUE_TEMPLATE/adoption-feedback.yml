@@ -1,9 +1,26 @@
-name: Adoption feedback
-description: Report how hpc-compose fit or failed to fit your cluster workflow.
+name: Adoption feedback / cluster fit
+description: Share how hpc-compose fit, failed to fit, or stalled on a real cluster workflow.
 title: "[adoption] "
 labels:
   - feedback
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when you tried to map hpc-compose onto a cluster or workload and want to report fit, friction, or blockers. For a concrete reproducible defect, use the bug report form instead.
+  - type: dropdown
+    id: adoption_status
+    attributes:
+      label: Adoption status
+      description: Where did this feedback come from?
+      options:
+        - Trying it now
+        - Blocked before first run
+        - Ran a first job
+        - Decided not to adopt
+        - Using it successfully
+    validations:
+      required: true
   - type: textarea
     id: cluster_type
     attributes:
@@ -28,6 +45,14 @@ body:
       placeholder: authoring mismatch, unsupported Compose behavior, preflight issue, cluster-specific runtime problem, docs gap
     validations:
       required: true
+  - type: textarea
+    id: desired_outcome
+    attributes:
+      label: Desired outcome
+      description: What would have made this workflow feel successful?
+      placeholder: supported backend, clearer docs, different spec shape, better preflight guidance, more examples
+    validations:
+      required: false
   - type: textarea
     id: detail
     attributes:

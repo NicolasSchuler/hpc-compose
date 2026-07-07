@@ -147,6 +147,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     assert!(top_help_stdout.contains("Debug failed run:"));
     assert!(top_help_stdout.contains("debug -f compose.yaml --preflight"));
     assert!(top_help_stdout.contains("Workflow groups:"));
+    assert!(top_help_stdout.contains("new/init, evolve, setup, context"));
     assert!(top_help_stdout.contains("Plan/Run: inspect statically, then submit or launch"));
     assert!(top_help_stdout.contains("plan, up, when, alloc, run, shell, germinate"));
     assert!(top_help_stdout.contains("Observe/Debug: monitor, inspect, and diagnose runs"));
@@ -171,6 +172,7 @@ fn help_and_template_discovery_surface_guided_workflows() {
     let new_help_stdout = stdout_text(&new_help);
     assert!(new_help_stdout.contains("--list-templates"));
     assert!(new_help_stdout.contains("--describe-template <TEMPLATE>"));
+    assert!(new_help_stdout.contains("`init` is a visible alias for `new`"));
 
     let evolve_help = run_cli(tmpdir.path(), &["evolve", "--help"]);
     assert_success(&evolve_help);
@@ -181,7 +183,9 @@ fn help_and_template_discovery_surface_guided_workflows() {
 
     let init_help = run_cli(tmpdir.path(), &["init", "--help"]);
     assert_success(&init_help);
-    assert!(stdout_text(&init_help).contains("--list-templates"));
+    let init_help_stdout = stdout_text(&init_help);
+    assert!(init_help_stdout.contains("--list-templates"));
+    assert!(init_help_stdout.contains("`init` is a visible alias for `new`"));
 
     let cache_help = run_cli(tmpdir.path(), &["cache", "--help"]);
     assert_success(&cache_help);

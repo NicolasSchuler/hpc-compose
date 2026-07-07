@@ -400,10 +400,10 @@ fn artifacts_manifest_check(
         );
     }
 
-    if !record
+    if record
         .artifact_export_dir
         .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+        .is_none_or(|value| value.trim().is_empty())
     {
         return check(
             "artifacts-manifest",

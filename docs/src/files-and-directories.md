@@ -199,8 +199,19 @@ A repo-root `.hpcignore` adds extra excludes on top of `.gitignore` when the sou
 | `ENROOT_CACHE_PATH` | Set by hpc-compose | Exported to `<cache_dir>/runtime/<job-id>/cache` in the rendered batch script. |
 | `ENROOT_DATA_PATH` | Set by hpc-compose | Exported to `<cache_dir>/runtime/<job-id>/data`. |
 | `ENROOT_TEMP_PATH` | Set by hpc-compose | Exported to `<cache_dir>/runtime/<job-id>/tmp` at compute-node runtime; during prepare it defaults to `<cache_dir>/enroot/tmp` unless redirected (see `HPC_COMPOSE_ENROOT_TEMP_DIR`). |
+| `RUST_LOG` | Read from environment | Controls internal tracing filters. When set, it takes precedence over `-v`/`--verbose` and `--debug` defaults. |
 | `HPC_COMPOSE_ENROOT_TEMP_DIR` | Read from environment | Overrides the prepare-time enroot extraction scratch (default `<cache_dir>/enroot/tmp`). Mirrors `x-slurm.enroot_temp_dir`/`cache.enroot_temp_dir`; for `up --remote` prefer the spec or settings field, because a laptop env var does not propagate over SSH. |
 | `HPC_COMPOSE_PREPARE_GPU` | Read from environment | Opts prepare-time image building back into enroot's NVIDIA hook. Default is off: prepare runs CPU-only on the login node (`NVIDIA_VISIBLE_DEVICES=void`) so a CUDA image's baked GPU request does not make the hook fail where no driver is present; GPUs are injected at Slurm/Pyxis runtime instead. Set to `1`/`true`/`yes`/`on` only when the prepare host actually has a driver. |
+| `HPC_COMPOSE_PREPARE_VERBOSE` | Read from environment | Streams raw prepare-tool output instead of summarized progress. `up --prepare-verbose` is the portable flag form, and is preferred for `up --remote` because a local env var does not cross SSH. |
+| `HPC_COMPOSE_REMOTE_USER` | Read from environment | SSH username for `up --remote` when the destination does not already include `user@`; lower precedence than inline `user@`, higher precedence than settings and `~/.ssh/config`. |
+| `HPC_COMPOSE_REMOTE_INSTALL` | Read from environment | Overrides `--remote-install` for `up --remote` (`auto`, `never`, or `force`). |
+| `HPC_COMPOSE_REMOTE_INSTALL_URL` | Read from environment | Points remote auto-install at a custom installer or mirror URL. |
+| `HPC_COMPOSE_REMOTE_SSH_OPTS` | Read from environment | Whitespace-split extra SSH flags for `up --remote`, such as a one-off port or identity file. Prefer `~/.ssh/config` for persistent settings. |
+| `HPC_COMPOSE_SCHEDULER_COMMAND_TIMEOUT_MS` | Read from environment | Timeout for Slurm scheduler helper commands such as queue/status probes. |
+| `HPC_COMPOSE_WATCH_REFRESH_MS` | Read from environment | Scheduler/log refresh cadence for the watch UI (default 1000 ms, clamped). |
+| `HPC_COMPOSE_WATCH_METRICS_REFRESH_MS` | Read from environment | Metrics refresh cadence for the watch UI (default 5000 ms, clamped). |
+| `HPC_COMPOSE_WATCH_MOUSE` | Read from environment | Enables watch UI mouse capture when set to a non-zero value. |
+| `HPC_COMPOSE_FORCE_WATCH_UI` | Read from environment | Forces the alternate-screen watch UI even when terminal detection would normally fall back to line mode; intended for debugging terminal detection. |
 | `HPC_COMPOSE_BACKEND_OVERRIDE` | Read from environment | Selects the runtime backend used by the batch script (defaults to `slurm`). |
 | `HPC_COMPOSE_DEV_CONTROL_DIR` | Read from environment | When set, enables the dev control directory used for live restart requests during local smoke-tests. |
 | `HPC_COMPOSE_DEBUG_STAGING` | Read from environment | When truthy, lists every path excluded from the source snapshot by `.hpcignore` during staging (a staged-file manifest aid for debugging ignore rules). |

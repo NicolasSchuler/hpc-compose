@@ -477,13 +477,15 @@ fn restore_terminal_best_effort() {
         crossterm::cursor::Show,
         crossterm::terminal::LeaveAlternateScreen
     ) {
-        eprintln!("warning: failed to restore alternate-screen terminal state: {err}");
+        crate::diagnostics::warn(format!(
+            "failed to restore alternate-screen terminal state: {err}"
+        ));
     }
     if let Err(err) = terminal::disable_raw_mode() {
-        eprintln!("warning: failed to disable raw terminal mode: {err}");
+        crate::diagnostics::warn(format!("failed to disable raw terminal mode: {err}"));
     }
     if let Err(err) = stdout.flush() {
-        eprintln!("warning: failed to flush terminal restore output: {err}");
+        crate::diagnostics::warn(format!("failed to flush terminal restore output: {err}"));
     }
 }
 

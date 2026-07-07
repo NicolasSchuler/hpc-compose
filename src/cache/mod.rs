@@ -435,18 +435,46 @@ pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult>
 /// Returns an error when cache manifests cannot be scanned or when an unused
 /// manifest or artifact cannot be removed.
 pub fn prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePruneResult> {
+    let manifests = unused_cache_manifests(cache_dir, plan)?;
+    let mut removed = Vec::new();
+    for manifest in manifests {
+        let artifact = PathBuf::from(&manifest.artifact_path);
+        remove_manifest_and_artifact(cache_dir, &manifest)?;
+        removed.push(artifact);
+    }
+    Ok(CachePruneResult { removed })
+}
+
+/// Plans cached artifact removal for artifacts not referenced by the runtime plan.
+///
+/// This does not delete anything; it returns the same artifact set
+/// [`prune_all_unused`] would remove at the time of the scan.
+///
+/// # Errors
+///
+/// Returns an error when cache manifests cannot be scanned.
+pub fn plan_prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePruneResult> {
+    let manifests = unused_cache_manifests(cache_dir, plan)?;
+    Ok(CachePruneResult {
+        removed: manifests
+            .into_iter()
+            .map(|manifest| PathBuf::from(manifest.artifact_path))
+            .collect(),
+    })
+}
+
+fn unused_cache_manifests(cache_dir: &Path, plan: &RuntimePlan) -> Result<Vec<CacheEntryManifest>> {
     let referenced = referenced_artifacts(plan);
     let manifests = scan_cache(cache_dir)?;
-    let mut removed = Vec::new();
+    let mut unused = Vec::new();
     for manifest in manifests {
         let artifact = PathBuf::from(&manifest.artifact_path);
         if referenced.contains(&artifact) {
             continue;
         }
-        remove_manifest_and_artifact(cache_dir, &manifest)?;
-        removed.push(artifact);
+        unused.push(manifest);
     }
-    Ok(CachePruneResult { removed })
+    Ok(unused)
 }
 
 /// Returns the artifact paths referenced by a runtime plan.

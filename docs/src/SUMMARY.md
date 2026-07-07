@@ -6,6 +6,7 @@
 - [Support Matrix](support-matrix.md)
 - [Installation](installation.md)
 - [Quickstart](quickstart.md)
+- [FAQ](faq.md)
 
 # Understand the Model
 
