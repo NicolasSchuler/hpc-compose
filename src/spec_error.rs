@@ -1,6 +1,19 @@
 use std::fmt::Display;
 use std::path::PathBuf;
 
+/// Marks a generic parsing or validation failure as originating from a compose
+/// spec load. Specialized [`SpecError`] values remain unwrapped so their
+/// structured diagnostics are preserved.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct SpecValidationError(#[from] anyhow::Error);
+
+impl SpecValidationError {
+    pub(crate) fn new(source: anyhow::Error) -> Self {
+        Self(source)
+    }
+}
+
 #[derive(Debug, miette::Diagnostic, thiserror::Error)]
 pub(crate) enum SpecError {
     #[error("spec must contain a top-level 'services' or 'steps' mapping")]

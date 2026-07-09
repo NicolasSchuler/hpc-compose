@@ -33,6 +33,55 @@ fn validate_on_invalid_spec_exits_2() {
     );
 }
 
+#[test]
+fn validate_on_malformed_yaml_exits_2() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        "services:\n  app:\n    image: [unterminated\n",
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+
+    assert_failure(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "malformed YAML should exit 2\nstdout:\n{}\nstderr:\n{}",
+        stdout_text(&output),
+        stderr_text(&output),
+    );
+}
+
+#[test]
+fn validate_on_generic_semantic_spec_error_exits_2() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        "services:\n  app:\n    image: alpine:latest\nx-slurm:\n  watchdog:\n    grace_period_seconds: 0\n",
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &["validate", "-f", compose.to_str().expect("path")],
+    );
+
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains("grace_period_seconds must be at least 1"));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "semantic spec validation errors should exit 2\nstdout:\n{}\nstderr:\n{}",
+        stdout_text(&output),
+        stderr_text(&output),
+    );
+}
+
 /// A missing spec file is a validation error (SpecError::SpecFileNotFound): code 2.
 #[test]
 fn validate_on_missing_spec_file_exits_2() {

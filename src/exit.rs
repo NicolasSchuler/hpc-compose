@@ -27,7 +27,8 @@
 //! [`exit_code_for`] to derive the code by inspecting the error chain:
 //!
 //! - an [`ExitCodeError`] carries a child's status (pass-through);
-//! - a [`crate::spec_error::SpecError`] means the spec is invalid → code 2;
+//! - a [`crate::spec_error::SpecError`] or generic spec-validation carrier
+//!   means the spec is invalid (code 2);
 //! - a [`UsageError`] means a command-level flag or argument combination is invalid → code 2;
 //! - a [`LintFindingsError`] means lint findings failed the gate → code 4;
 //! - an [`EnvironmentError`] means a preflight/reachability check failed → code 3;
@@ -149,13 +150,16 @@ impl LintFindingsError {
 /// [`exit_code_for`] handles first; call [`exit_code_for`] for the final code.
 #[must_use]
 pub fn classify(error: &anyhow::Error) -> ExitCode {
-    // An invalid spec is a usage/validation error. SpecError is the typed carrier
-    // for every structural spec failure, so this covers `validate` and any other
-    // command that loads a bad spec. Checked before Environment so a spec error
+    // An invalid spec is a usage/validation error. Specialized failures use
+    // SpecError; generic parsing and validation failures are marked at the
+    // ComposeSpec load boundary. Checked before Environment so a spec error
     // surfaced from `preflight`/`doctor` is reported as 2, not 3.
     if error
         .downcast_ref::<crate::spec_error::SpecError>()
         .is_some()
+        || error
+            .downcast_ref::<crate::spec_error::SpecValidationError>()
+            .is_some()
     {
         return ExitCode::Usage;
     }
@@ -189,7 +193,7 @@ pub fn exit_code_for(error: &anyhow::Error) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec_error::SpecError;
+    use crate::spec_error::{SpecError, SpecValidationError};
 
     #[test]
     fn catalog_codes_are_stable() {
@@ -259,6 +263,14 @@ mod tests {
     fn classify_finds_spec_error_through_context() {
         // Commands wrap load failures with context; the code must still resolve.
         let err = anyhow::Error::from(SpecError::MissingServices).context("while loading the spec");
+        assert_eq!(classify(&err), ExitCode::Usage);
+        assert_eq!(exit_code_for(&err), 2);
+    }
+
+    #[test]
+    fn classify_maps_generic_spec_validation_carrier_to_usage() {
+        let err: anyhow::Error =
+            SpecValidationError::new(anyhow::anyhow!("invalid semantic value")).into();
         assert_eq!(classify(&err), ExitCode::Usage);
         assert_eq!(exit_code_for(&err), 2);
     }

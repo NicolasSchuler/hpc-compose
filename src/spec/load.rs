@@ -6,6 +6,17 @@ use anyhow::Result;
 use super::interpolate::interpolation_vars;
 use super::parse::{load_raw_spec, load_raw_spec_from_str};
 use super::{ComposeSpec, SecretSpec, SweepConfig, interpolate_optional_string};
+use crate::spec_error::{SpecError, SpecValidationError};
+
+fn mark_spec_validation_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<SpecError>().is_some()
+        || error.downcast_ref::<SpecValidationError>().is_some()
+    {
+        error
+    } else {
+        SpecValidationError::new(error).into()
+    }
+}
 
 impl ComposeSpec {
     /// Loads only the embedded sweep metadata without applying interpolation to
@@ -17,11 +28,14 @@ impl ComposeSpec {
     /// Returns an error when the file cannot be read, the YAML cannot be
     /// parsed, or the sweep block is invalid.
     pub fn load_sweep(path: &Path) -> Result<Option<SweepConfig>> {
-        let spec = load_raw_spec(path)?;
-        if let Some(sweep) = &spec.sweep {
-            sweep.validate()?;
-        }
-        Ok(spec.sweep)
+        (|| {
+            let spec = load_raw_spec(path)?;
+            if let Some(sweep) = &spec.sweep {
+                sweep.validate()?;
+            }
+            Ok(spec.sweep)
+        })()
+        .map_err(mark_spec_validation_error)
     }
 
     /// Loads only the top-level `secrets:` block from a compose file, without
@@ -33,11 +47,14 @@ impl ComposeSpec {
     /// Returns an error when the file cannot be parsed or a secret declares
     /// both or neither of `file`/`env`.
     pub fn load_secrets(path: &Path) -> Result<BTreeMap<String, SecretSpec>> {
-        let spec = load_raw_spec(path)?;
-        for (name, secret) in &spec.secrets {
-            secret.validate(name)?;
-        }
-        Ok(spec.secrets)
+        (|| {
+            let spec = load_raw_spec(path)?;
+            for (name, secret) in &spec.secrets {
+                secret.validate(name)?;
+            }
+            Ok(spec.secrets)
+        })()
+        .map_err(mark_spec_validation_error)
     }
 
     /// Loads only the top-level `secrets:` block from an in-memory root compose
@@ -51,11 +68,14 @@ impl ComposeSpec {
     /// Returns an error when the document cannot be parsed or a secret declares
     /// both or neither of `file`/`env`.
     pub fn load_secrets_from_str(path: &Path, raw: &str) -> Result<BTreeMap<String, SecretSpec>> {
-        let spec = load_raw_spec_from_str(path, raw)?;
-        for (name, secret) in &spec.secrets {
-            secret.validate(name)?;
-        }
-        Ok(spec.secrets)
+        (|| {
+            let spec = load_raw_spec_from_str(path, raw)?;
+            for (name, secret) in &spec.secrets {
+                secret.validate(name)?;
+            }
+            Ok(spec.secrets)
+        })()
+        .map_err(mark_spec_validation_error)
     }
 
     /// Loads, interpolates, and validates a compose file from disk.
@@ -65,8 +85,11 @@ impl ComposeSpec {
     /// Returns an error when the file cannot be read, the YAML cannot be
     /// parsed, interpolation fails, or semantic validation rejects the spec.
     pub fn load(path: &Path) -> Result<Self> {
-        let vars = interpolation_vars(path)?;
-        Self::load_with_interpolation_vars(path, &vars)
+        (|| {
+            let vars = interpolation_vars(path)?;
+            Self::load_with_interpolation_vars(path, &vars)
+        })()
+        .map_err(mark_spec_validation_error)
     }
 
     /// Loads, interpolates, and validates a compose file using explicit
@@ -80,8 +103,11 @@ impl ComposeSpec {
         path: &Path,
         vars: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        let spec = load_raw_spec(path)?;
-        Self::finish_load_with_interpolation_vars(path, spec, vars)
+        (|| {
+            let spec = load_raw_spec(path)?;
+            Self::finish_load_with_interpolation_vars(path, spec, vars)
+        })()
+        .map_err(mark_spec_validation_error)
     }
 
     /// Loads, interpolates, and validates an in-memory root compose document
@@ -99,8 +125,11 @@ impl ComposeSpec {
         raw: &str,
         vars: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        let spec = load_raw_spec_from_str(path, raw)?;
-        Self::finish_load_with_interpolation_vars(path, spec, vars)
+        (|| {
+            let spec = load_raw_spec_from_str(path, raw)?;
+            Self::finish_load_with_interpolation_vars(path, spec, vars)
+        })()
+        .map_err(mark_spec_validation_error)
     }
 
     /// Fuzz-only parser seam that exercises YAML decode, root validation,
@@ -114,9 +143,12 @@ impl ComposeSpec {
     /// feature.
     #[cfg(feature = "fuzzing")]
     pub fn load_fuzz_root_from_str(raw: &str) -> Result<Self> {
-        let mut spec = super::parse::load_fuzz_raw_spec_from_str(raw)?;
-        spec.validate()?;
-        Ok(spec)
+        (|| {
+            let mut spec = super::parse::load_fuzz_raw_spec_from_str(raw)?;
+            spec.validate()?;
+            Ok(spec)
+        })()
+        .map_err(mark_spec_validation_error)
     }
 
     fn finish_load_with_interpolation_vars(
