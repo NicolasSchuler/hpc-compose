@@ -1,5 +1,13 @@
 use super::scheduler::unix_timestamp_now;
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static ARTIFACT_EXPORT_TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
+const ARTIFACT_EXPORT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn artifact_export_lock_path(export_dir: &Path) -> PathBuf {
+    export_dir.join(".hpc-compose-export.lock")
+}
 
 /// Manifest produced when teardown exports tracked artifacts.
 #[allow(missing_docs)]
@@ -117,6 +125,248 @@ pub struct ArtifactExportOptions {
     pub tarball: bool,
 }
 
+#[derive(Debug)]
+struct PublishEntry {
+    staged_path: PathBuf,
+    final_path: PathBuf,
+    backup_path: Option<PathBuf>,
+    published: bool,
+}
+
+#[derive(Debug)]
+struct ArtifactExportTransaction {
+    root: PathBuf,
+    export_dir: PathBuf,
+    entries: Vec<PublishEntry>,
+    created_dirs: Vec<PathBuf>,
+    cleanup_on_drop: bool,
+}
+
+impl ArtifactExportTransaction {
+    fn new(export_dir: &Path) -> Result<Self> {
+        let mut last_collision = None;
+        for _ in 0..16 {
+            let counter = ARTIFACT_EXPORT_TRANSACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let root = export_dir.join(format!(
+                ".hpc-compose-export-transaction-{}-{nanos}-{counter}",
+                std::process::id()
+            ));
+            match fs::create_dir(&root) {
+                Ok(()) => {
+                    return Ok(Self {
+                        root,
+                        export_dir: export_dir.to_path_buf(),
+                        entries: Vec::new(),
+                        created_dirs: Vec::new(),
+                        cleanup_on_drop: true,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    last_collision = Some(error);
+                }
+                Err(error) => {
+                    return Err(error).context(format!(
+                        "failed to create an artifact export transaction under {}",
+                        export_dir.display()
+                    ));
+                }
+            }
+        }
+        Err(last_collision.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not create a unique artifact export transaction",
+            )
+        }))
+        .context(format!(
+            "failed to create an artifact export transaction under {}",
+            export_dir.display()
+        ))
+    }
+
+    fn bundle_staging_root(&self, index: usize) -> PathBuf {
+        self.root.join("staged").join(format!("bundle-{index}"))
+    }
+
+    fn staged_auxiliary_path(&self, index: usize, name: &str) -> PathBuf {
+        self.root
+            .join("staged")
+            .join(format!("aux-{index}"))
+            .join(name)
+    }
+
+    fn register(&mut self, staged_path: PathBuf, final_path: PathBuf) -> Result<()> {
+        self.validate_final_target(&final_path)?;
+        if !staged_path.starts_with(&self.root) {
+            bail!(
+                "artifact staging target {} must stay within {}",
+                staged_path.display(),
+                self.root.display()
+            );
+        }
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.final_path == final_path)
+        {
+            existing.staged_path = staged_path;
+            return Ok(());
+        }
+        self.entries.push(PublishEntry {
+            staged_path,
+            final_path,
+            backup_path: None,
+            published: false,
+        });
+        Ok(())
+    }
+
+    fn validate_final_target(&self, final_path: &Path) -> Result<()> {
+        if !final_path.starts_with(&self.export_dir) || final_path == self.export_dir {
+            bail!(
+                "artifact export target {} must stay below {}",
+                final_path.display(),
+                self.export_dir.display()
+            );
+        }
+        if final_path.starts_with(&self.root) || self.root.starts_with(final_path) {
+            bail!(
+                "artifact export target {} overlaps transaction workspace {}",
+                final_path.display(),
+                self.root.display()
+            );
+        }
+        let lock_path = artifact_export_lock_path(&self.export_dir);
+        if final_path.starts_with(&lock_path) || lock_path.starts_with(final_path) {
+            bail!(
+                "artifact export target {} is reserved for export serialization",
+                final_path.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn commit(mut self, fail_after_publishes: Option<usize>) -> Result<()> {
+        let publish_result = self.publish_all(fail_after_publishes);
+        if let Err(publish_error) = publish_result {
+            if let Err(rollback_error) = self.rollback() {
+                self.cleanup_on_drop = false;
+                bail!(
+                    "artifact export commit failed: {publish_error:#}; rollback also failed: {rollback_error:#}; recovery data remains at {}",
+                    self.root.display()
+                );
+            }
+            return Err(publish_error).context("artifact export commit failed and was rolled back");
+        }
+        Ok(())
+    }
+
+    fn publish_all(&mut self, fail_after_publishes: Option<usize>) -> Result<()> {
+        for published in 0..self.entries.len() {
+            if fail_after_publishes == Some(published) {
+                bail!("injected artifact export commit failure after {published} publish(es)");
+            }
+
+            let final_path = self.entries[published].final_path.clone();
+            self.prepare_final_parent(&final_path)?;
+            if path_entry_exists(&final_path)? {
+                let backup_path = self.root.join("backups").join(published.to_string());
+                if let Some(parent) = backup_path.parent() {
+                    fs::create_dir_all(parent)
+                        .context(format!("failed to create {}", parent.display()))?;
+                }
+                fs::rename(&final_path, &backup_path).context(format!(
+                    "failed to back up artifact export target {}",
+                    final_path.display()
+                ))?;
+                self.entries[published].backup_path = Some(backup_path);
+            }
+
+            let staged_path = self.entries[published].staged_path.clone();
+            fs::rename(&staged_path, &final_path).context(format!(
+                "failed to publish artifact export target {}",
+                final_path.display()
+            ))?;
+            self.entries[published].published = true;
+        }
+        Ok(())
+    }
+
+    fn prepare_final_parent(&mut self, final_path: &Path) -> Result<()> {
+        validate_destination_parent(&self.export_dir, final_path)?;
+        let parent = final_path.parent().context(format!(
+            "artifact export target {} has no parent",
+            final_path.display()
+        ))?;
+        let missing_dirs = missing_directories_below(&self.export_dir, parent);
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
+        for dir in missing_dirs {
+            if !self.created_dirs.contains(&dir) {
+                self.created_dirs.push(dir);
+            }
+        }
+        let canonical_root = self.export_dir.canonicalize().context(format!(
+            "failed to canonicalize {}",
+            self.export_dir.display()
+        ))?;
+        let canonical_parent = parent
+            .canonicalize()
+            .context(format!("failed to canonicalize {}", parent.display()))?;
+        if !canonical_parent.starts_with(canonical_root) {
+            bail!(
+                "artifact export destination parent {} resolves outside {}",
+                parent.display(),
+                self.export_dir.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        let mut rollback_errors = Vec::new();
+        for entry in self.entries.iter_mut().rev() {
+            if entry.published
+                && let Err(error) = remove_existing_destination(&entry.final_path)
+            {
+                rollback_errors.push(format!(
+                    "failed to remove published target {}: {error:#}",
+                    entry.final_path.display()
+                ));
+                continue;
+            }
+            if let Some(backup_path) = entry.backup_path.as_ref()
+                && let Err(error) = fs::rename(backup_path, &entry.final_path)
+            {
+                rollback_errors.push(format!(
+                    "failed to restore {} from {}: {error}",
+                    entry.final_path.display(),
+                    backup_path.display()
+                ));
+            }
+        }
+        for dir in self.created_dirs.iter().rev() {
+            let _ = fs::remove_dir(dir);
+        }
+        if rollback_errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("{}", rollback_errors.join("; "))
+        }
+    }
+}
+
+impl Drop for ArtifactExportTransaction {
+    fn drop(&mut self) {
+        if self.cleanup_on_drop {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
 pub(super) fn default_artifact_manifest_schema_version() -> u32 {
     1
 }
@@ -171,6 +421,36 @@ pub fn export_artifacts(
     job_id: Option<&str>,
     options: &ArtifactExportOptions,
 ) -> Result<ArtifactExportReport> {
+    export_artifacts_impl(spec_path, job_id, options, None, None)
+}
+
+#[cfg(test)]
+fn export_artifacts_with_commit_failure(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &ArtifactExportOptions,
+    fail_after_publishes: usize,
+) -> Result<ArtifactExportReport> {
+    export_artifacts_impl(spec_path, job_id, options, None, Some(fail_after_publishes))
+}
+
+#[cfg(test)]
+fn export_artifacts_with_staging_failure(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &ArtifactExportOptions,
+    fail_after_payloads: usize,
+) -> Result<ArtifactExportReport> {
+    export_artifacts_impl(spec_path, job_id, options, Some(fail_after_payloads), None)
+}
+
+fn export_artifacts_impl(
+    spec_path: &Path,
+    job_id: Option<&str>,
+    options: &ArtifactExportOptions,
+    fail_after_staged_payloads: Option<usize>,
+    fail_after_publishes: Option<usize>,
+) -> Result<ArtifactExportReport> {
     let record = load_submission_record(spec_path, job_id)?;
     let export_dir_template = record.artifact_export_dir.as_deref().context(format!(
         "tracked submission metadata for job {} does not include x-slurm.artifacts.export_dir; resubmit with artifact tracking enabled",
@@ -204,32 +484,67 @@ pub fn export_artifacts(
     let export_dir = resolve_export_dir(&record.compose_file, export_dir_template, &record.job_id);
     fs::create_dir_all(&export_dir)
         .context(format!("failed to create {}", export_dir.display()))?;
+    let lock_path = artifact_export_lock_path(&export_dir);
+    let _export_lock = crate::secure_io::acquire_flock_strict(
+        &lock_path,
+        crate::secure_io::LockKind::Exclusive,
+        ARTIFACT_EXPORT_LOCK_TIMEOUT,
+    )
+    .with_context(|| {
+        format!(
+            "failed to lock artifact export directory {}",
+            export_dir.display()
+        )
+    })?;
 
     let mut warnings = manifest.warnings.clone();
     let mut exported_paths = Vec::new();
     let bundles = manifest.normalized_bundles();
+    for bundle_name in bundles.keys() {
+        validate_manifest_bundle_name(bundle_name)?;
+    }
     let selected_bundles = resolve_selected_bundles(&bundles, &options.selected_bundles)?;
     let exported_at_unix = unix_timestamp_now();
     let mut bundle_reports = Vec::new();
     let mut tarball_paths = Vec::new();
+    let mut transaction = ArtifactExportTransaction::new(&export_dir)?;
+    let mut staged_payloads = 0;
 
-    for bundle_name in &selected_bundles {
+    for (bundle_index, bundle_name) in selected_bundles.iter().enumerate() {
         let bundle_manifest = bundles
             .get(bundle_name)
             .cloned()
             .context(format!("artifact bundle '{bundle_name}' is not available"))?;
         let bundle_export_dir = bundle_export_dir(&export_dir, bundle_name);
-        fs::create_dir_all(&bundle_export_dir)
-            .context(format!("failed to create {}", bundle_export_dir.display()))?;
+        let staged_bundle_root = transaction.bundle_staging_root(bundle_index);
+        fs::create_dir_all(&staged_bundle_root)
+            .context(format!("failed to create {}", staged_bundle_root.display()))?;
 
         let mut bundle_warnings = bundle_manifest.warnings.clone();
         let mut bundle_exported_paths = Vec::new();
+        let mut publish_relative_paths = Vec::new();
         let copied_relative_paths = bundle_manifest
             .copied_relative_paths
             .iter()
             .map(|relative_path| validate_manifest_relative_path(relative_path))
             .collect::<Result<Vec<_>>>()?;
         for relative in &copied_relative_paths {
+            let destination = bundle_export_dir.join(relative);
+            transaction.validate_final_target(&destination)?;
+            validate_destination_parent(&export_dir, &destination)?;
+            let staged_destination = staged_bundle_root.join(relative);
+            if !path_entry_exists(&staged_destination)? && path_entry_exists(&destination)? {
+                copy_existing_target_to_staging(
+                    &destination,
+                    &staged_destination,
+                    &staged_bundle_root,
+                )
+                .context(format!(
+                    "failed to stage previous artifact export '{}'",
+                    destination.display()
+                ))?;
+            }
+
             let source = payload_dir.join(relative);
             if !source.exists() {
                 let warning = format!(
@@ -242,26 +557,41 @@ pub fn export_artifacts(
                 continue;
             }
             validate_payload_source(&payload_dir, &source)?;
-            let destination = bundle_export_dir.join(relative);
-            copy_path_recursive_within(&source, &destination, &bundle_export_dir).context(
+            if fail_after_staged_payloads == Some(staged_payloads) {
+                bail!(
+                    "injected artifact export staging failure after {staged_payloads} payload(s)"
+                );
+            }
+            copy_path_recursive_within(&source, &staged_destination, &staged_bundle_root).context(
                 format!(
-                    "failed to export artifact '{}' to {}",
+                    "failed to stage artifact '{}' for {}",
                     source.display(),
                     destination.display()
                 ),
             )?;
             exported_paths.push(destination.clone());
             bundle_exported_paths.push(destination);
+            publish_relative_paths.push(relative.clone());
+            staged_payloads += 1;
         }
 
-        let files = collect_bundle_metadata(&bundle_export_dir, &copied_relative_paths)?;
+        for relative in minimal_publish_paths(&publish_relative_paths) {
+            transaction.register(
+                staged_bundle_root.join(&relative),
+                bundle_export_dir.join(&relative),
+            )?;
+        }
+
+        let files = collect_bundle_metadata(&staged_bundle_root, &copied_relative_paths)?;
         let provenance_path = export_dir
             .join("_hpc-compose")
             .join("bundles")
             .join(format!("{bundle_name}.json"));
         let tarball_path = if options.tarball {
             let tarball = export_dir.join(format!("{bundle_name}.tar.gz"));
-            write_bundle_tarball(&tarball, &bundle_export_dir, &copied_relative_paths)?;
+            let staged_tarball = transaction.staged_auxiliary_path(bundle_index, "bundle.tar.gz");
+            write_bundle_tarball(&staged_tarball, &staged_bundle_root, &copied_relative_paths)?;
+            transaction.register(staged_tarball, tarball.clone())?;
             tarball_paths.push(tarball.clone());
             Some(tarball)
         } else {
@@ -289,7 +619,9 @@ pub fn export_artifacts(
             warnings: bundle_warnings.clone(),
             files: files.clone(),
         };
-        write_json(&provenance_path, &provenance)?;
+        let staged_provenance = transaction.staged_auxiliary_path(bundle_index, "provenance.json");
+        write_json(&staged_provenance, &provenance)?;
+        transaction.register(staged_provenance, provenance_path.clone())?;
         bundle_reports.push(BundleExportReport {
             name: bundle_name.clone(),
             export_dir: bundle_export_dir,
@@ -300,6 +632,8 @@ pub fn export_artifacts(
             warnings: bundle_warnings,
         });
     }
+
+    transaction.commit(fail_after_publishes)?;
 
     Ok(ArtifactExportReport {
         record,
@@ -341,6 +675,62 @@ fn bundle_export_dir(export_dir: &Path, bundle_name: &str) -> PathBuf {
     } else {
         export_dir.join("bundles").join(bundle_name)
     }
+}
+
+fn validate_manifest_bundle_name(name: &str) -> Result<()> {
+    if name == "default" {
+        return Ok(());
+    }
+    if name.is_empty()
+        || !name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+    {
+        bail!("artifact manifest bundle name must match [A-Za-z0-9_-]+, got '{name}'");
+    }
+    Ok(())
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context(format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn minimal_publish_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut sorted = paths.to_vec();
+    sorted.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    let mut minimal = Vec::new();
+    for path in sorted {
+        if !minimal
+            .iter()
+            .any(|ancestor: &PathBuf| path.starts_with(ancestor))
+        {
+            minimal.push(path);
+        }
+    }
+    minimal
+}
+
+fn missing_directories_below(root: &Path, parent: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = parent;
+    while current != root && fs::symlink_metadata(current).is_err() {
+        missing.push(current.to_path_buf());
+        let Some(next) = current.parent() else {
+            break;
+        };
+        current = next;
+    }
+    missing.reverse();
+    missing
 }
 
 pub(super) fn validate_manifest_relative_path(relative_path: &str) -> Result<PathBuf> {
@@ -625,7 +1015,55 @@ pub(super) fn copy_path_recursive_within(
     Ok(())
 }
 
+fn copy_existing_target_to_staging(
+    source: &Path,
+    destination: &Path,
+    staging_root: &Path,
+) -> Result<()> {
+    copy_path_recursive_within(source, destination, staging_root)?;
+    mirror_directory_permissions(source, destination)
+}
+
+fn mirror_directory_permissions(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .context(format!("failed to read metadata for {}", source.display()))?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(source).context(format!("failed to read {}", source.display()))? {
+        let entry = entry?;
+        mirror_directory_permissions(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    fs::set_permissions(destination, metadata.permissions()).context(format!(
+        "failed to preserve permissions on staged directory {}",
+        destination.display()
+    ))
+}
+
 fn prepare_destination_parent(destination_root: &Path, destination: &Path) -> Result<()> {
+    validate_destination_parent(destination_root, destination)?;
+    let parent = destination.parent().context(format!(
+        "destination {} has no parent",
+        destination.display()
+    ))?;
+    fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
+    let canonical_root = fs::canonicalize(destination_root).context(format!(
+        "failed to canonicalize {}",
+        destination_root.display()
+    ))?;
+    let canonical_parent =
+        fs::canonicalize(parent).context(format!("failed to canonicalize {}", parent.display()))?;
+    if !canonical_parent.starts_with(canonical_root) {
+        bail!(
+            "artifact export destination parent {} resolves outside {}",
+            parent.display(),
+            destination_root.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_destination_parent(destination_root: &Path, destination: &Path) -> Result<()> {
     if !destination.starts_with(destination_root) {
         bail!(
             "artifact export destination {} must stay within {}",
@@ -650,16 +1088,6 @@ fn prepare_destination_parent(destination_root: &Path, destination: &Path) -> Re
         bail!(
             "artifact export destination parent {} resolves outside {}",
             nearest_existing.display(),
-            destination_root.display()
-        );
-    }
-    fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-    let canonical_parent =
-        fs::canonicalize(parent).context(format!("failed to canonicalize {}", parent.display()))?;
-    if !canonical_parent.starts_with(canonical_root) {
-        bail!(
-            "artifact export destination parent {} resolves outside {}",
-            parent.display(),
             destination_root.display()
         );
     }
@@ -788,6 +1216,52 @@ mod tests {
             serde_json::to_vec_pretty(manifest).expect("manifest json"),
         )
         .expect("write manifest");
+    }
+
+    fn snapshot_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<String, Vec<u8>>) {
+            let mut entries = fs::read_dir(path)
+                .expect("read snapshot directory")
+                .collect::<io::Result<Vec<_>>>()
+                .expect("snapshot entries");
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("snapshot relative path")
+                    .to_string_lossy()
+                    .to_string();
+                let metadata = fs::symlink_metadata(&path).expect("snapshot metadata");
+                if metadata.is_dir() {
+                    snapshot.insert(format!("dir:{relative}"), Vec::new());
+                    visit(root, &path, snapshot);
+                } else if metadata.file_type().is_symlink() {
+                    snapshot.insert(
+                        format!("link:{relative}"),
+                        fs::read_link(&path)
+                            .expect("snapshot symlink")
+                            .to_string_lossy()
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                } else {
+                    snapshot.insert(format!("file:{relative}"), fs::read(&path).expect("file"));
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    fn assert_no_transaction_debris(root: &Path) {
+        let debris = snapshot_tree(root)
+            .into_keys()
+            .filter(|path| path.contains(".hpc-compose-export-transaction-"))
+            .collect::<Vec<_>>();
+        assert!(debris.is_empty(), "transaction debris remains: {debris:?}");
     }
 
     #[test]
@@ -921,6 +1395,227 @@ mod tests {
                 && entry.entry_type == "symlink"
                 && entry.link_target.as_deref() == Some("app.log")
         }));
+    }
+
+    #[test]
+    fn export_artifacts_failures_restore_previous_complete_export() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = artifact_record(tmpdir.path(), "12345");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(payload_dir.join("metrics")).expect("metrics payload");
+        fs::create_dir_all(payload_dir.join("logs")).expect("logs payload");
+        fs::write(payload_dir.join("metrics/meta.json"), b"old metrics\n").expect("metrics");
+        fs::write(payload_dir.join("logs/app.log"), b"old log\n").expect("log");
+
+        let mut manifest = artifact_manifest("12345");
+        manifest.bundles = BTreeMap::from([
+            (
+                "default".into(),
+                ArtifactBundleManifest {
+                    declared_source_patterns: Vec::new(),
+                    matched_source_paths: Vec::new(),
+                    copied_relative_paths: vec!["metrics/meta.json".into()],
+                    warnings: Vec::new(),
+                },
+            ),
+            (
+                "logs".into(),
+                ArtifactBundleManifest {
+                    declared_source_patterns: Vec::new(),
+                    matched_source_paths: Vec::new(),
+                    copied_relative_paths: vec!["logs/app.log".into()],
+                    warnings: Vec::new(),
+                },
+            ),
+        ]);
+        write_artifact_manifest(&record, &manifest);
+
+        let export_dir = resolve_export_dir(
+            &record.compose_file,
+            record.artifact_export_dir.as_deref().expect("export dir"),
+            &record.job_id,
+        );
+        fs::create_dir_all(&export_dir).expect("export dir");
+        fs::write(export_dir.join("unrelated.txt"), b"leave me alone\n").expect("unrelated");
+        let options = ArtifactExportOptions {
+            selected_bundles: Vec::new(),
+            tarball: true,
+        };
+        export_artifacts(&record.compose_file, Some("12345"), &options)
+            .expect("initial complete export");
+        let previous = snapshot_tree(&export_dir);
+
+        fs::write(payload_dir.join("metrics/meta.json"), b"new metrics\n").expect("metrics");
+        fs::write(payload_dir.join("metrics/new.json"), b"brand new\n").expect("new metrics");
+        fs::write(payload_dir.join("logs/app.log"), b"new log\n").expect("log");
+        manifest
+            .bundles
+            .get_mut("default")
+            .expect("default bundle")
+            .copied_relative_paths
+            .push("metrics/new.json".into());
+        write_artifact_manifest(&record, &manifest);
+
+        let staging_error =
+            export_artifacts_with_staging_failure(&record.compose_file, Some("12345"), &options, 1)
+                .expect_err("staging failure must propagate");
+        assert!(format!("{staging_error:#}").contains("injected artifact export staging failure"));
+        assert_eq!(
+            snapshot_tree(&export_dir),
+            previous,
+            "staging failure changed the previous export"
+        );
+        assert_no_transaction_debris(&export_dir);
+
+        // Seven targets are published: two default payloads, two tarballs, two
+        // provenance files, and one named-bundle payload. Exercise rollback at
+        // the start, after publishing the new path, and near the end.
+        for fail_after in [0, 2, 4, 6] {
+            let error = export_artifacts_with_commit_failure(
+                &record.compose_file,
+                Some("12345"),
+                &options,
+                fail_after,
+            )
+            .expect_err("commit failure must propagate");
+            assert!(format!("{error:#}").contains("injected artifact export commit failure"));
+            assert_eq!(
+                snapshot_tree(&export_dir),
+                previous,
+                "failed commit after {fail_after} publishes changed the previous export"
+            );
+            assert_no_transaction_debris(&export_dir);
+        }
+    }
+
+    #[test]
+    fn export_artifacts_rejects_manifest_bundle_name_path_traversal() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = artifact_record(tmpdir.path(), "12345");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(&payload_dir).expect("payload dir");
+        fs::write(payload_dir.join("data.txt"), b"payload").expect("payload");
+
+        let mut manifest = artifact_manifest("12345");
+        manifest.bundles = BTreeMap::from([(
+            "../../outside".into(),
+            ArtifactBundleManifest {
+                declared_source_patterns: Vec::new(),
+                matched_source_paths: Vec::new(),
+                copied_relative_paths: vec!["data.txt".into()],
+                warnings: Vec::new(),
+            },
+        )]);
+        write_artifact_manifest(&record, &manifest);
+
+        let error = export_artifacts(
+            &record.compose_file,
+            Some("12345"),
+            &ArtifactExportOptions::default(),
+        )
+        .expect_err("bundle traversal must be rejected");
+        assert!(error.to_string().contains("bundle name must match"));
+        assert!(!tmpdir.path().join("outside").exists());
+    }
+
+    #[test]
+    fn export_artifacts_rejects_payload_target_overlapping_lock_file() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = artifact_record(tmpdir.path(), "12345");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(&payload_dir).expect("payload dir");
+        fs::write(payload_dir.join(".hpc-compose-export.lock"), b"payload").expect("payload");
+        let mut manifest = artifact_manifest("12345");
+        manifest.bundles = BTreeMap::from([(
+            "default".into(),
+            ArtifactBundleManifest {
+                declared_source_patterns: Vec::new(),
+                matched_source_paths: Vec::new(),
+                copied_relative_paths: vec![".hpc-compose-export.lock".into()],
+                warnings: Vec::new(),
+            },
+        )]);
+        write_artifact_manifest(&record, &manifest);
+
+        let error = export_artifacts(
+            &record.compose_file,
+            Some("12345"),
+            &ArtifactExportOptions::default(),
+        )
+        .expect_err("lock target must be reserved");
+        assert!(
+            error
+                .to_string()
+                .contains("reserved for export serialization")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_export_lock_serializes_exporters_and_retains_its_inode() {
+        use std::os::unix::fs::MetadataExt;
+        use std::sync::mpsc;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let record = artifact_record(tmpdir.path(), "12345");
+        let payload_dir = artifact_payload_dir_for_record(&record);
+        fs::create_dir_all(&payload_dir).expect("payload dir");
+        fs::write(payload_dir.join("data.txt"), b"payload").expect("payload");
+        let mut manifest = artifact_manifest("12345");
+        manifest.bundles = BTreeMap::from([(
+            "default".into(),
+            ArtifactBundleManifest {
+                declared_source_patterns: Vec::new(),
+                matched_source_paths: Vec::new(),
+                copied_relative_paths: vec!["data.txt".into()],
+                warnings: Vec::new(),
+            },
+        )]);
+        write_artifact_manifest(&record, &manifest);
+
+        let export_dir = resolve_export_dir(
+            &record.compose_file,
+            record.artifact_export_dir.as_deref().expect("export dir"),
+            &record.job_id,
+        );
+        fs::create_dir_all(&export_dir).expect("export dir");
+        let lock_path = artifact_export_lock_path(&export_dir);
+        let first = crate::secure_io::acquire_flock_strict(
+            &lock_path,
+            crate::secure_io::LockKind::Exclusive,
+            Duration::from_secs(1),
+        )
+        .expect("first lock");
+        let inode = fs::metadata(&lock_path).expect("lock metadata").ino();
+
+        let compose_file = record.compose_file.clone();
+        let (sender, receiver) = mpsc::channel();
+        let exporter = std::thread::spawn(move || {
+            sender
+                .send(export_artifacts(
+                    &compose_file,
+                    Some("12345"),
+                    &ArtifactExportOptions::default(),
+                ))
+                .expect("send export result");
+        });
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(100)).is_err(),
+            "second exporter must wait while the stable lock is held"
+        );
+        drop(first);
+
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("export result after unlock")
+            .expect("serialized export");
+        exporter.join().expect("export thread");
+        assert_eq!(
+            fs::metadata(&lock_path).expect("lock metadata").ino(),
+            inode,
+            "exporters must reuse the same lock inode"
+        );
+        assert!(lock_path.exists(), "lock file must be retained");
     }
 
     #[test]

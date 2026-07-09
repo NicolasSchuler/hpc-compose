@@ -59,6 +59,31 @@ pub fn write(
     }
 }
 
+/// Creates a new file at `path` and writes `contents`, refusing to replace or
+/// follow any pre-existing entry.
+///
+/// This is the non-atomic counterpart to [`write_atomic`] for callers that
+/// deliberately choose a unique destination path. `create_new` provides the
+/// security boundary: a pre-planted regular file or symlink is rejected. When
+/// `restricted` is true, the created file is forced to owner-only `0o600` on
+/// Unix. A short write removes the newly created file before returning.
+pub fn write_exclusive(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+    restricted: bool,
+) -> io::Result<()> {
+    use std::io::Write;
+
+    let path = path.as_ref();
+    let mut file = create_exclusive(path, AtomicFileMode::Restricted(restricted))?;
+    if let Err(error) = file.write_all(contents.as_ref()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Atomically writes `contents` to `path`.
 ///
 /// Writes to a unique temporary file in the same directory and renames it over
@@ -241,6 +266,97 @@ pub enum LockKind {
     Exclusive,
 }
 
+/// RAII guard for a strictly acquired advisory file lock.
+///
+/// Unlike [`with_flock`], strict acquisition never proceeds unlocked: opening,
+/// unsupported-lock, and timeout failures are returned to the caller. The lock
+/// file is intentionally retained after the guard drops so every process keeps
+/// locking the same inode.
+#[derive(Debug)]
+pub struct StrictFlockGuard {
+    file: fs::File,
+    #[cfg(not(unix))]
+    _process_guard: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Acquires a strict advisory lock, retrying until `timeout` expires.
+///
+/// On Unix this uses `flock(2)`. Other targets retain the stable lock file and
+/// serialize callers within the current process; hpc-compose's shared-cluster
+/// artifact export path runs on Unix, where the lock is process-wide.
+pub fn acquire_flock_strict(
+    lock_path: &Path,
+    kind: LockKind,
+    timeout: std::time::Duration,
+) -> io::Result<StrictFlockGuard> {
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(lock_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::io::AsRawFd;
+
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let operation = match kind {
+            LockKind::Shared => libc::LOCK_SH,
+            LockKind::Exclusive => libc::LOCK_EX,
+        };
+        let start = std::time::Instant::now();
+        loop {
+            // SAFETY: `file` owns this valid descriptor for the guard lifetime.
+            let result = unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) };
+            if result == 0 {
+                return Ok(StrictFlockGuard { file });
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(error);
+            }
+            if start.elapsed() >= timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("timed out waiting for lock {}", lock_path.display()),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        static PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _ = (kind, timeout);
+        let process_guard = PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Ok(StrictFlockGuard {
+            file,
+            _process_guard: process_guard,
+        })
+    }
+}
+
+impl Drop for StrictFlockGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: the descriptor remains valid until this guard is dropped.
+            unsafe {
+                libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+}
+
 /// Runs `f` while holding an advisory `flock(2)` lock on the sidecar file
 /// `lock_path`, then releases the lock.
 ///
@@ -389,6 +505,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn restricted_exclusive_write_is_owner_only_and_refuses_existing_entries() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret.sh");
+        write_exclusive(&path, b"secret", true).expect("exclusive write");
+        let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "restricted write must be owner-only");
+        assert_eq!(
+            write_exclusive(&path, b"replacement", true)
+                .expect_err("existing file must be refused")
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&path).expect("read original"), b"secret");
+
+        let outside = dir.path().join("outside");
+        fs::write(&outside, b"outside").expect("outside");
+        let link = dir.path().join("planted-link");
+        symlink(&outside, &link).expect("symlink");
+        assert_eq!(
+            write_exclusive(&link, b"replacement", true)
+                .expect_err("symlink must be refused")
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&outside).expect("read outside"), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn write_atomic_preserving_mode_keeps_private_destination_private() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -439,6 +586,41 @@ mod tests {
             lock.exists(),
             "lock file is created and intentionally retained"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_flock_times_out_and_reuses_the_stable_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = dir.path().join("strict.lock");
+        let first = acquire_flock_strict(
+            &lock,
+            LockKind::Exclusive,
+            std::time::Duration::from_secs(1),
+        )
+        .expect("first lock");
+        let inode = fs::metadata(&lock).expect("lock metadata").ino();
+
+        let error = acquire_flock_strict(
+            &lock,
+            LockKind::Exclusive,
+            std::time::Duration::from_millis(50),
+        )
+        .expect_err("second lock must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(first);
+
+        let second = acquire_flock_strict(
+            &lock,
+            LockKind::Exclusive,
+            std::time::Duration::from_secs(1),
+        )
+        .expect("lock after release");
+        assert_eq!(fs::metadata(&lock).expect("lock metadata").ino(), inode);
+        drop(second);
+        assert!(lock.exists(), "stable lock inode must never be unlinked");
     }
 
     // Proves the exclusive lock serializes a concurrent read-modify-write on the
