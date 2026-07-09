@@ -8,15 +8,37 @@ use crate::prepare::RuntimePlan;
 use crate::tracked_paths;
 
 /// Local launcher render options.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalRenderOptions {
     /// Enables the development control directory consumed by the local supervisor.
     pub dev_reload: bool,
+    /// Apptainer executable used when local mode wraps an Apptainer plan.
+    pub apptainer_bin: String,
+    /// Singularity executable used when rendering a Singularity plan. Local
+    /// submission does not currently admit Singularity, but keeping the render
+    /// option explicit avoids silently falling back to a different binary in
+    /// dry-run previews if the support gate changes later.
+    pub singularity_bin: String,
+    /// `huggingface-cli` used by `hf://` stage-in steps.
+    pub huggingface_cli_bin: String,
     /// Resolved absolute runtime root (the parent of `<job_id>/`) baked into the
     /// launcher so its `JOB_ROOT` and supervisor directories match the
     /// submission record under an `x-slurm.runtime_root` override. `None` keeps
     /// the default `$SLURM_SUBMIT_DIR/.hpc-compose` layout.
     pub runtime_root: Option<PathBuf>,
+}
+
+impl Default for LocalRenderOptions {
+    fn default() -> Self {
+        let render = RenderOptions::default();
+        Self {
+            dev_reload: false,
+            apptainer_bin: render.apptainer_bin,
+            singularity_bin: render.singularity_bin,
+            huggingface_cli_bin: render.huggingface_cli_bin,
+            runtime_root: None,
+        }
+    }
 }
 
 /// Renders a local launcher script that reuses the normal runtime orchestration.
@@ -37,6 +59,9 @@ pub fn render_local_script_with_options(
     let base = render_script_with_options(
         plan,
         &RenderOptions {
+            apptainer_bin: options.apptainer_bin.clone(),
+            singularity_bin: options.singularity_bin.clone(),
+            huggingface_cli_bin: options.huggingface_cli_bin.clone(),
             runtime_root: options.runtime_root.clone(),
             ..RenderOptions::default()
         },
@@ -112,7 +137,7 @@ fn render_local_srun_shim() -> &'static str {
     r#"#!/bin/bash
 set -euo pipefail
 if [[ "${1:-}" == "--help" ]]; then
-  echo "usage: srun --container-image=IMAGE"
+  echo "usage: srun [--container-image=IMAGE] COMMAND..."
   exit 0
 fi
 enroot_bin="${HPC_COMPOSE_LOCAL_ENROOT_BIN:?missing HPC_COMPOSE_LOCAL_ENROOT_BIN}"
@@ -151,8 +176,11 @@ while (($#)); do
   esac
 done
 if [[ -z "$container_image" ]]; then
-  echo "local srun shim requires --container-image" >&2
-  exit 1
+  if (($# == 0)); then
+    echo "local srun shim requires --container-image or a command" >&2
+    exit 1
+  fi
+  exec "$@"
 fi
 declare -a enroot_args=()
 declare -a mount_items=()

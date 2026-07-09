@@ -759,9 +759,9 @@ pass "sweep: sacct confirms every trial job COMPLETED 0:0"
 # 4i. Test (smoke command): `test --submit` runs a short Slurm job and passes only
 # when every service launched and completed successfully. Prove both verdicts: a
 # healthy spec passes (exit 0, "smoke test passed"), a broken spec fails (nonzero
-# exit, "smoke test failed"). --local is unavailable here (it needs the Linux
-# Pyxis/Enroot supervisor; the dev cluster is host-backend only), so this uses the
-# real-sbatch --submit path.
+# exit, "smoke test failed"). --local is unavailable here (it needs a Linux
+# local runtime backend on the host; the dev cluster is host-backend only), so
+# this uses the real-sbatch --submit path.
 note "Test (smoke command) block"
 tp_rel=".tmp/devcluster-e2e/specs/_extra/test-pass.yaml"
 tf_rel=".tmp/devcluster-e2e/specs/_extra/test-fail.yaml"

@@ -9927,6 +9927,314 @@ fn submit_local_dry_run_renders_local_launcher() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn submit_local_apptainer_dry_run_renders_apptainer_launcher() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sif");
+    fs::write(&local_image, "sif").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+runtime:
+  backend: apptainer
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+    let script_out = tmpdir.path().join("local-apptainer.sh");
+    let apptainer = tmpdir.path().join("site-apptainer");
+    write_script(
+        &apptainer,
+        "#!/bin/bash\nprintf 'fake apptainer\\n' >/dev/null\n",
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "--local",
+            "--dry-run",
+            "--skip-prepare",
+            "--no-preflight",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+            "--apptainer-bin",
+            apptainer.to_str().expect("path"),
+            "--script-out",
+            script_out.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    let payload: Value = serde_json::from_str(&stdout_text(&output)).expect("submit json");
+    assert_eq!(payload["backend"], Value::from("local"));
+    let script = fs::read_to_string(&script_out).expect("script");
+    assert!(script.contains(&format!(
+        "local -a runtime_cmd=({} 'exec')",
+        shell_quote(apptainer.to_str().expect("path"))
+    )));
+    assert!(script.contains("runtime_cmd+=(--bind \"$runtime_mounts\")"));
+    assert!(!script.contains("srun_cmd+=(--container-image="));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_local_apptainer_runs_through_local_supervisor() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sif");
+    fs::write(&local_image, "sif").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+name: local-apptainer-smoke
+runtime:
+  backend: apptainer
+services:
+  app:
+    image: {}
+    command: /bin/sh -lc "echo apptainer-local-ok"
+"#,
+            local_image.display()
+        ),
+    );
+    let runtime_log = tmpdir.path().join("apptainer.log");
+    let apptainer = tmpdir.path().join("apptainer");
+    write_script(
+        &apptainer,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+cmd="${{1:-}}"
+shift || true
+case "$cmd" in
+  exec|run)
+    while (($#)); do
+      case "$1" in
+        --bind)
+          shift 2
+          ;;
+        --nv)
+          shift
+          ;;
+        --*)
+          shift
+          ;;
+        *)
+          shift
+          break
+          ;;
+      esac
+    done
+    if [[ "$cmd" == "run" && $# == 0 ]]; then
+      exit 0
+    fi
+    exec "$@"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+            runtime_log.display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "test",
+            "--local",
+            "--skip-prepare",
+            "--no-preflight",
+            "--timeout",
+            "20s",
+            "-f",
+            compose.to_str().expect("path"),
+            "--apptainer-bin",
+            apptainer.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    assert!(stdout_text(&output).contains("smoke test passed"));
+    let log = fs::read_to_string(runtime_log).expect("runtime log");
+    assert!(log.contains("exec"));
+    assert!(log.contains(local_image.to_str().expect("image path")));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn submit_local_still_rejects_singularity_backend() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let local_image = tmpdir.path().join("local.sif");
+    fs::write(&local_image, "sif").expect("image");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        &format!(
+            r#"
+runtime:
+  backend: singularity
+services:
+  app:
+    image: {}
+    command: /bin/true
+"#,
+            local_image.display()
+        ),
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "up",
+            "--detach",
+            "--local",
+            "--dry-run",
+            "--skip-prepare",
+            "--no-preflight",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(stderr_text(&output).contains(
+        "--local currently supports only runtime.backend=pyxis or runtime.backend=apptainer"
+    ));
+}
+
+fn write_fake_devcluster_checkout(tmpdir: &Path, exec_status: i32) -> PathBuf {
+    fs::create_dir_all(tmpdir.join("scripts")).expect("scripts dir");
+    fs::create_dir_all(tmpdir.join("dev-cluster")).expect("dev-cluster dir");
+    fs::write(
+        tmpdir.join("dev-cluster/compose.yaml"),
+        "name: fake-devcluster\n",
+    )
+    .expect("compose");
+    let log = tmpdir.join("devcluster.log");
+    let script = tmpdir.join("scripts/devcluster.sh");
+    write_script(
+        &script,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+cmd="${{1:-}}"
+printf '%s' "$cmd" >> '{}'
+shift || true
+for arg in "$@"; do
+  printf ' <%s>' "$arg" >> '{}'
+done
+printf '\n' >> '{}'
+case "$cmd" in
+  up)
+    exit 0
+    ;;
+  exec)
+    echo "smoke test passed: 123"
+    exit {exec_status}
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+"#,
+            log.display(),
+            log.display(),
+            log.display()
+        ),
+    );
+    log
+}
+
+#[test]
+fn test_submit_dev_cluster_delegates_to_checked_in_wrapper() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let log = write_fake_devcluster_checkout(tmpdir.path(), 0);
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+runtime:
+  backend: host
+services:
+  app:
+    command: /bin/true
+"#,
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "test",
+            "--submit",
+            "--dev-cluster",
+            "--time",
+            "00:02:00",
+            "--timeout",
+            "42s",
+            "--skip-prepare",
+            "--no-preflight",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    assert!(stdout_text(&output).contains("smoke test passed: 123"));
+    let log = fs::read_to_string(log).expect("devcluster log");
+    let project_dir = fs::canonicalize(tmpdir.path()).expect("canonical tmpdir");
+    assert!(log.contains(&format!("up <--project> <{}>", project_dir.display())));
+    assert!(log.contains(
+        "exec <hpc-compose> <test> <--submit> <--time> <00:02:00> <--timeout> <42s> <-f> </workspace/compose.yaml>"
+    ));
+    assert!(log.contains("<--skip-prepare>"));
+    assert!(log.contains("<--no-preflight>"));
+    assert!(log.contains("<--format> <json>"));
+    assert!(!log.contains("--dev-cluster"));
+}
+
+#[test]
+fn test_submit_dev_cluster_propagates_child_exit_status() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let _log = write_fake_devcluster_checkout(tmpdir.path(), 7);
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        r#"
+runtime:
+  backend: host
+services:
+  app:
+    command: /bin/true
+"#,
+    );
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "test",
+            "--submit",
+            "--dev-cluster",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert_eq!(output.status.code(), Some(7));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn submit_local_lifecycle_covers_status_ps_watch_artifacts_and_stats() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_image = tmpdir.path().join("local.sqsh");

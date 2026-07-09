@@ -9,12 +9,14 @@
 # See dev-cluster/README.md for the full flow and the host-backend caveat.
 
 # --- Stage 1: build hpc-compose for the container target --------------------
-# Copy only the crate's build inputs (src + compile-time include_str! roots) so
-# edits to dev-cluster/ config don't bust the cargo cache layer.
+# Copy only the crate's build inputs (src + compile-time include/generation
+# roots) so edits to dev-cluster/ config don't bust the cargo cache layer.
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./
 COPY src ./src
+COPY docs ./docs
 COPY examples ./examples
 COPY schema ./schema
 RUN cargo build --release --locked --bin hpc-compose

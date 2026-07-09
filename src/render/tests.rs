@@ -390,6 +390,7 @@ fn local_launcher_strips_sbatch_and_keeps_shims_shell_syntax_valid() {
         &LocalRenderOptions {
             dev_reload: true,
             runtime_root: None,
+            ..LocalRenderOptions::default()
         },
     )
     .expect("local launcher");
@@ -421,6 +422,7 @@ fn local_launcher_bakes_runtime_root_override_into_job_root() {
         &LocalRenderOptions {
             dev_reload: true,
             runtime_root: Some(PathBuf::from("/shared/runs/.hpc-compose")),
+            ..LocalRenderOptions::default()
         },
     )
     .expect("local launcher");
@@ -437,6 +439,40 @@ fn local_launcher_bakes_runtime_root_override_into_job_root() {
     assert!(
         script.contains("HPC_COMPOSE_LOCAL_BIN_DIR=\"$HPC_COMPOSE_LOCAL_JOB_ROOT/.local-bin\"")
     );
+}
+
+#[test]
+fn local_launcher_apptainer_backend_uses_apptainer_runtime_wrapper() {
+    let mut service = runtime_service();
+    service.runtime_image = PathBuf::from("/shared/cache/worker.sif");
+    service.source = crate::planner::ImageSource::LocalSif(service.runtime_image.clone());
+    service.volumes = vec!["/shared/data:/data:ro".into()];
+    let plan = RuntimePlan {
+        name: "apptainer-local".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Apptainer,
+            gpu: RuntimeGpuPolicy::Auto,
+        },
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+
+    let script = render_local_script_with_options(
+        &plan,
+        "local-1",
+        "/opt/enroot/bin/enroot",
+        &LocalRenderOptions {
+            apptainer_bin: "/opt/site/bin/apptainer".into(),
+            ..LocalRenderOptions::default()
+        },
+    )
+    .expect("local launcher");
+    assert_bash_syntax(&script);
+    assert!(script.contains("local -a runtime_cmd=('/opt/site/bin/apptainer' 'exec')"));
+    assert!(script.contains("runtime_cmd+=(--bind \"$runtime_mounts\")"));
+    assert!(!script.contains("srun_cmd+=(--container-image="));
+    assert!(!script.contains("srun_cmd+=(\"--container-mounts="));
 }
 
 #[test]

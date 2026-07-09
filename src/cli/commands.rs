@@ -887,7 +887,7 @@ pub enum Commands {
         sacct_bin: String,
         #[arg(
             long,
-            help = "Launch the plan locally with Enroot instead of submitting it to Slurm",
+            help = "Launch the plan locally on this Linux host instead of submitting it to Slurm",
             conflicts_with_all = ["sbatch_bin", "srun_bin", "squeue_bin", "sacct_bin"]
         )]
         local: bool,
@@ -1093,19 +1093,22 @@ pub enum Commands {
         name = "test",
         display_order = 113,
         about = "Smoke-test a compose spec end to end",
-        long_about = "Validate, prepare, render, launch, and evaluate a finite compose smoke test. Choose --local for the local Pyxis/Enroot supervisor or --submit for a short Slurm submission.",
+        long_about = "Validate, prepare, render, launch, and evaluate a finite compose smoke test. Choose --local for the local Pyxis/Enroot or Apptainer supervisor, --submit for a short Slurm submission, or --submit --dev-cluster to delegate the submission to the checked-in local Slurm dev cluster.",
         after_help = TEST_HELP
     )]
     Test {
         #[command(flatten)]
         launch: RuntimeLaunchArgs,
-        #[arg(
-            long,
-            help = "Run the smoke test through the local Pyxis/Enroot supervisor"
-        )]
+        #[arg(long, help = "Run the smoke test through the local Linux supervisor")]
         local: bool,
         #[arg(long, help = "Submit the smoke test to Slurm")]
         submit: bool,
+        #[arg(
+            long,
+            requires = "submit",
+            help = "Run test --submit inside the checked-in local Slurm dev-cluster container"
+        )]
+        dev_cluster: bool,
         #[arg(
             long,
             help = "Submit a synthetic preemption drill: signal, requeue, observe attempt 2, and evaluate resume assertions"
@@ -1191,7 +1194,7 @@ pub enum Commands {
     #[command(
         display_order = 114,
         about = "Run a local hot-reload development loop",
-        long_about = "Launch the compose spec with the local Pyxis/Enroot supervisor, watch bind-mounted source directories, and request targeted service restarts when files change.",
+        long_about = "Launch the compose spec with the local Linux supervisor, watch bind-mounted source directories, and request targeted service restarts when files change.",
         after_help = DEV_HELP
     )]
     Dev {
@@ -2287,7 +2290,7 @@ pub enum Commands {
         output: Option<PathBuf>,
         #[arg(
             long,
-            help = "Run the ephemeral image locally through the local Pyxis-compatible launcher"
+            help = "Run the ephemeral image locally through the local Linux launcher"
         )]
         local: bool,
         #[arg(
@@ -2465,7 +2468,7 @@ pub enum Commands {
         env: Vec<String>,
         #[arg(
             long,
-            help = "Run on the current host through the local Pyxis-compatible launcher"
+            help = "Run on the current Linux host through the local launcher"
         )]
         local: bool,
         #[arg(

@@ -48,6 +48,9 @@ scripts/devcluster.sh sinfo
 # Submit the smallest end-to-end spec against the real scheduler.
 scripts/devcluster.sh run dev-cluster/specs/hello.yaml
 
+# Or drive the checked-in test --submit smoke path through the dev cluster.
+hpc-compose test --submit --dev-cluster -f dev-cluster/specs/_extra/test-pass.yaml
+
 # Prove multi-service ordering: a `client` waits on a `server` readiness gate
 # (depends_on) before hitting it, then the allocation drains to COMPLETED.
 scripts/devcluster.sh run dev-cluster/specs/multi-service.yaml
@@ -88,6 +91,7 @@ To work on your own project instead of this repo:
 ```bash
 scripts/devcluster.sh up --project /path/to/your/project
 scripts/devcluster.sh run compose.yaml
+hpc-compose test --submit --dev-cluster -f compose.smoke.yaml
 ```
 
 Everything the wrapper does is a thin shell over `docker/podman compose` and

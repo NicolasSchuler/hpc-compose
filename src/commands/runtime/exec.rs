@@ -503,13 +503,7 @@ pub(crate) fn run_ephemeral(
                 &runtime_plan,
                 job_id,
                 &context.binaries.enroot.value,
-                &LocalRenderOptions {
-                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
-                        &context.cwd,
-                        runtime_plan.slurm.runtime_root.as_deref(),
-                    )),
-                    ..LocalRenderOptions::default()
-                },
+                &local_render_options(&context, &runtime_plan, false),
             )
         } else {
             render_script_with_options(
@@ -909,13 +903,7 @@ pub(crate) fn notebook(
                 &runtime_plan,
                 job_id,
                 &context.binaries.enroot.value,
-                &LocalRenderOptions {
-                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
-                        &context.cwd,
-                        runtime_plan.slurm.runtime_root.as_deref(),
-                    )),
-                    ..LocalRenderOptions::default()
-                },
+                &local_render_options(&context, &runtime_plan, false),
             )
         } else {
             render_script_with_options(

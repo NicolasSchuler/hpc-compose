@@ -2532,7 +2532,7 @@ fn service_triage_rank(service: &PsServiceRow) -> u8 {
 }
 
 /// True when the record's backend runs a consumer for dev-control restart
-/// requests (the local Pyxis/Enroot supervisor). Slurm batch jobs do not.
+/// requests (the local supervisor). Slurm batch jobs do not.
 fn restart_supported(record: &SubmissionRecord) -> bool {
     record.backend == SubmissionBackend::Local
 }

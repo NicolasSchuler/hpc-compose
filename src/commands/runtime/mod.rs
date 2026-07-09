@@ -2,6 +2,7 @@
 // rely on a single `use super::*;`. Glob re-exports do not warn on unused items.
 pub(super) use std::collections::{BTreeMap, BTreeSet};
 pub(super) use std::env;
+pub(super) use std::ffi::OsString;
 pub(super) use std::fs::{self, OpenOptions};
 pub(super) use std::io::{self, Write};
 pub(super) use std::path::{Path, PathBuf};
@@ -904,9 +905,12 @@ fn ensure_local_host_supported() -> Result<()> {
 }
 
 fn ensure_local_plan_supported(plan: &RuntimePlan) -> Result<()> {
-    if plan.runtime.backend != hpc_compose::spec::RuntimeBackend::Pyxis {
+    if !matches!(
+        plan.runtime.backend,
+        hpc_compose::spec::RuntimeBackend::Pyxis | hpc_compose::spec::RuntimeBackend::Apptainer
+    ) {
         bail!(
-            "--local currently supports only runtime.backend=pyxis; got runtime.backend={}",
+            "--local currently supports only runtime.backend=pyxis or runtime.backend=apptainer; got runtime.backend={}",
             plan.runtime.backend.as_str()
         );
     }
@@ -960,6 +964,23 @@ fn warn_local_ignored_scheduler_settings(plan: &RuntimePlan) {
         hpc_compose::diagnostics::warn(
             "--local ignores x-slurm.error and writes batch stderr into the local batch log",
         );
+    }
+}
+
+fn local_render_options(
+    context: &ResolvedContext,
+    runtime_plan: &RuntimePlan,
+    dev_reload: bool,
+) -> LocalRenderOptions {
+    LocalRenderOptions {
+        dev_reload,
+        apptainer_bin: context.binaries.apptainer.value.clone(),
+        singularity_bin: context.binaries.singularity.value.clone(),
+        huggingface_cli_bin: context.huggingface_cli_bin.clone(),
+        runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
+            &context.cwd,
+            runtime_plan.slurm.runtime_root.as_deref(),
+        )),
     }
 }
 
@@ -1310,13 +1331,7 @@ where
             &runtime_plan,
             &local_job_id,
             &context.binaries.enroot.value,
-            &LocalRenderOptions {
-                dev_reload,
-                runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
-                    &context.cwd,
-                    runtime_plan.slurm.runtime_root.as_deref(),
-                )),
-            },
+            &local_render_options(context, &runtime_plan, dev_reload),
         )
     })?;
     let script_path = script_out.unwrap_or_else(|| output::default_local_script_path(&file));
@@ -2083,13 +2098,7 @@ pub(crate) fn launch(
                 &runtime_plan,
                 job_id,
                 &context.binaries.enroot.value,
-                &LocalRenderOptions {
-                    runtime_root: Some(crate::tracked_paths::resolve_runtime_root(
-                        &context.cwd,
-                        runtime_plan.slurm.runtime_root.as_deref(),
-                    )),
-                    ..LocalRenderOptions::default()
-                },
+                &local_render_options(&context, &runtime_plan, false),
             )
         } else {
             render_script_with_options(
@@ -2711,6 +2720,180 @@ fn cancel_smoke_timeout(context: &ResolvedContext, record: &SubmissionRecord) {
     }
 }
 
+fn smoke_test_via_dev_cluster(
+    context: &ResolvedContext,
+    time: &str,
+    timeout: &str,
+    script_out: Option<PathBuf>,
+    flags: PrepareFlags,
+    output_format: OutputFormat,
+    quiet: bool,
+) -> Result<()> {
+    let checkout_root = find_dev_cluster_checkout(&context.cwd)?;
+    let project_dir = hpc_compose::context::repo_root_or_cwd(&context.cwd);
+    let compose_file =
+        dev_cluster_container_path(&project_dir, &context.compose_file.value, "compose file")?;
+    let script_out = script_out
+        .map(|path| {
+            let absolute = crate::path_util::absolute_path(&path, &context.cwd);
+            dev_cluster_container_path(&project_dir, &absolute, "--script-out")
+        })
+        .transpose()?;
+    let devcluster_script = checkout_root.join("scripts/devcluster.sh");
+
+    let up_status = Command::new(&devcluster_script)
+        .arg("up")
+        .arg("--project")
+        .arg(&project_dir)
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to start local Slurm dev cluster via {}",
+                devcluster_script.display()
+            )
+        })?;
+    dev_cluster_child_status_result(
+        up_status,
+        "local Slurm dev-cluster startup terminated by signal",
+    )?;
+
+    let mut args = vec![OsString::from("exec"), OsString::from("hpc-compose")];
+    if quiet {
+        args.push(OsString::from("--quiet"));
+    }
+    if let Some(settings_path) = &context.settings_path {
+        let settings_path =
+            dev_cluster_container_path(&project_dir, settings_path, "--settings-file")?;
+        args.extend([
+            OsString::from("--settings-file"),
+            OsString::from(settings_path),
+        ]);
+    }
+    if let Some(profile) = &context.selected_profile {
+        args.extend([OsString::from("--profile"), OsString::from(profile)]);
+    }
+    args.extend([
+        OsString::from("test"),
+        OsString::from("--submit"),
+        OsString::from("--time"),
+        OsString::from(time),
+        OsString::from("--timeout"),
+        OsString::from(timeout),
+        OsString::from("-f"),
+        OsString::from(compose_file),
+    ]);
+    if let Some(path) = script_out {
+        args.extend([OsString::from("--script-out"), OsString::from(path)]);
+    }
+    if flags.keep_failed_prep {
+        args.push(OsString::from("--keep-failed-prep"));
+    }
+    if flags.skip_prepare {
+        args.push(OsString::from("--skip-prepare"));
+    }
+    if flags.force_rebuild {
+        args.push(OsString::from("--force-rebuild"));
+    }
+    if flags.no_preflight {
+        args.push(OsString::from("--no-preflight"));
+    }
+    if output_format == OutputFormat::Json {
+        args.extend([OsString::from("--format"), OsString::from("json")]);
+    }
+
+    let exec_status = Command::new(&devcluster_script)
+        .args(args)
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to run test --submit inside local Slurm dev cluster via {}",
+                devcluster_script.display()
+            )
+        })?;
+    dev_cluster_child_status_result(
+        exec_status,
+        "local Slurm dev-cluster smoke test terminated by signal",
+    )
+}
+
+fn find_dev_cluster_checkout(start: &Path) -> Result<PathBuf> {
+    if let Some(root) = find_dev_cluster_checkout_from(start) {
+        return Ok(root);
+    }
+    if let Ok(exe) = env::current_exe()
+        && let Some(root) = find_dev_cluster_checkout_from(&exe)
+    {
+        return Ok(root);
+    }
+    bail!(
+        "test --submit --dev-cluster requires an hpc-compose source checkout containing scripts/devcluster.sh and dev-cluster/compose.yaml"
+    );
+}
+
+fn find_dev_cluster_checkout_from(start: &Path) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        if dir.join("scripts/devcluster.sh").is_file()
+            && dir.join("dev-cluster/compose.yaml").is_file()
+        {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
+}
+
+fn dev_cluster_container_path(project_dir: &Path, host_path: &Path, label: &str) -> Result<String> {
+    let relative = dev_cluster_project_relative_path(project_dir, host_path).with_context(|| {
+        format!(
+            "test --submit --dev-cluster requires {label} '{}' to live under the mounted project directory '{}'",
+            host_path.display(),
+            project_dir.display()
+        )
+    })?;
+    Ok(Path::new("/workspace").join(relative).display().to_string())
+}
+
+fn dev_cluster_project_relative_path(project_dir: &Path, host_path: &Path) -> Result<PathBuf> {
+    if let Ok(relative) = host_path.strip_prefix(project_dir) {
+        return Ok(relative.to_path_buf());
+    }
+
+    let canonical_project = fs::canonicalize(project_dir)
+        .with_context(|| format!("failed to resolve {}", project_dir.display()))?;
+    let canonical_host = canonical_or_parent_joined(host_path)
+        .with_context(|| format!("failed to resolve {}", host_path.display()))?;
+    canonical_host
+        .strip_prefix(&canonical_project)
+        .map(Path::to_path_buf)
+        .with_context(|| "prefix not found")
+}
+
+fn canonical_or_parent_joined(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return fs::canonicalize(path)
+            .with_context(|| format!("failed to resolve {}", path.display()));
+    }
+    let parent = path
+        .parent()
+        .with_context(|| format!("path '{}' has no parent", path.display()))?;
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("path '{}' has no file name", path.display()))?;
+    Ok(fs::canonicalize(parent)
+        .with_context(|| format!("failed to resolve {}", parent.display()))?
+        .join(file_name))
+}
+
+fn dev_cluster_child_status_result(
+    status: std::process::ExitStatus,
+    signal_message: &str,
+) -> Result<()> {
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(code) => Err(crate::exit::ExitCodeError(code).into()),
+        None => bail!("{signal_message}"),
+    }
+}
+
 fn print_smoke_output(output_format: OutputFormat, report: &SmokeTestOutput) -> Result<()> {
     match output_format {
         OutputFormat::Text => {
@@ -2766,6 +2949,7 @@ pub(crate) fn smoke_test(
     context: ResolvedContext,
     local: bool,
     submit: bool,
+    dev_cluster: bool,
     preemption: bool,
     time: String,
     timeout: String,
@@ -2775,6 +2959,9 @@ pub(crate) fn smoke_test(
     format: Option<OutputFormat>,
     quiet: bool,
 ) -> Result<()> {
+    if dev_cluster && !submit {
+        bail!("test --dev-cluster requires --submit");
+    }
     let mode_count = [local, submit, preemption]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -2786,6 +2973,9 @@ pub(crate) fn smoke_test(
     }
     if preemption_grace.is_some() && !preemption {
         bail!("--preemption-grace is only valid with test --preemption");
+    }
+    if dev_cluster && preemption {
+        bail!("test --dev-cluster is only valid with test --submit smoke tests");
     }
     if submit || preemption {
         parse_slurm_time_limit(&time).context("test --time is invalid")?;
@@ -2800,6 +2990,17 @@ pub(crate) fn smoke_test(
         None => None,
     };
     let output_format = output::resolve_output_format(format);
+    if dev_cluster {
+        return smoke_test_via_dev_cluster(
+            &context,
+            &time,
+            &timeout,
+            script_out,
+            flags,
+            output_format,
+            quiet,
+        );
+    }
     let _up_lock = acquire_up_invocation_lock(&context.compose_file.value)?;
     let scheduler_options = SchedulerOptions {
         squeue_bin: context.binaries.squeue.value.clone(),

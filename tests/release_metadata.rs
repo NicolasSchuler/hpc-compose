@@ -866,6 +866,69 @@ fn devcluster_help_does_not_require_a_container_engine() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn devcluster_exec_omits_tty_flags_when_not_attached_to_tty() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let log = tmp.path().join("docker.log");
+    let docker = tmp.path().join("docker");
+    fs::write(
+        &docker,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+: "${FAKE_DOCKER_LOG:?}"
+printf '%s' "${1:-}" >> "$FAKE_DOCKER_LOG"
+for arg in "${@:2}"; do
+  printf ' <%s>' "$arg" >> "$FAKE_DOCKER_LOG"
+done
+printf '\n' >> "$FAKE_DOCKER_LOG"
+if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == "exec" ]]; then
+  exit 0
+fi
+exit 1
+"#,
+    )
+    .expect("write fake docker");
+    let mut perms = fs::metadata(&docker)
+        .expect("fake docker metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&docker, perms).expect("chmod fake docker");
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", tmp.path().display(), old_path.to_string_lossy());
+
+    let output = Command::new("bash")
+        .arg(repo_root().join("scripts/devcluster.sh"))
+        .arg("exec")
+        .arg("hpc-compose")
+        .arg("--version")
+        .env("PATH", path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .output()
+        .expect("run devcluster exec");
+
+    assert!(
+        output.status.success(),
+        "devcluster exec failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fs::read_to_string(log).expect("docker log");
+    assert!(
+        log.contains("exec <hpc-compose-devcluster> <hpc-compose> <--version>"),
+        "devcluster exec should call docker exec without tty flags in non-TTY mode:\n{log}"
+    );
+    assert!(
+        !log.contains("<-it>"),
+        "devcluster exec must not force an interactive TTY when stdout/stdin are not TTYs:\n{log}"
+    );
+}
+
 #[test]
 fn pre_commit_hooks_file_advertises_validate_and_lint() {
     let hooks = fs::read_to_string(repo_root().join(".pre-commit-hooks.yaml"))

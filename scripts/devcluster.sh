@@ -44,6 +44,14 @@ else
   die "need 'docker compose' or 'podman compose' on PATH (is the engine running?)"
 fi
 
+engine_exec() {
+  local -a exec_flags=()
+  if [[ -t 0 && -t 1 ]]; then
+    exec_flags=(-it)
+  fi
+  "$engine" exec "${exec_flags[@]}" "$container" "$@"
+}
+
 case "$cmd" in
   up)
     project="$repo_root"
@@ -74,14 +82,14 @@ case "$cmd" in
     spec="${1:-}"
     [[ -n "$spec" ]] || die "usage: devcluster.sh run SPEC [ARGS...]"
     shift
-    "$engine" exec -it "$container" hpc-compose up -f "$spec" "$@"
+    engine_exec hpc-compose up -f "$spec" "$@"
     ;;
   exec)
     [[ $# -gt 0 ]] || die "usage: devcluster.sh exec CMD [ARGS...]"
-    "$engine" exec -it "$container" "$@"
+    engine_exec "$@"
     ;;
   sinfo)
-    "$engine" exec -it "$container" sinfo "$@"
+    engine_exec sinfo "$@"
     ;;
   logs)
     "$engine" logs -f "$container"

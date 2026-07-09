@@ -246,10 +246,12 @@ pub(super) const TEST_HELP: &str = "\
 Examples:
   hpc-compose test --local -f compose.yaml
   hpc-compose test --submit --time 00:01:00 -f compose.yaml
+  hpc-compose test --submit --dev-cluster -f compose.yaml
   hpc-compose test --preemption --preemption-grace 10s -f compose.yaml
   hpc-compose test --submit --timeout 180s --format json -f compose.yaml
 
 Smoke tests are finite: every service must start, pass configured readiness, and complete successfully.
+--dev-cluster delegates test --submit to the checked-in local Slurm dev cluster from a source checkout.
 Preemption tests submit to Slurm, send the configured x-slurm.signal, requeue the job, and require a resumed attempt with passing service assertions.";
 
 pub(super) const DEV_HELP: &str = "\
