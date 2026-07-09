@@ -1,4 +1,16 @@
-use super::*;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};
+use hpc_compose::job::{SchedulerOptions, build_ps_snapshot, build_status_snapshot};
+use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
+use serde::Serialize;
+
+use super::{load_discovered_cluster_profile, resolve_tracked_record};
+use crate::commands::load;
+use crate::output;
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct DebugLogTail {
@@ -292,7 +304,8 @@ fn emit_debug_report(report: &DebugReport, output_format: OutputFormat) -> Resul
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(report).context("failed to serialize debug output")?
+                crate::output::to_pretty_json(report)
+                    .context("failed to serialize debug output")?
             );
         }
         OutputFormat::Text => {

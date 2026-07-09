@@ -13,9 +13,7 @@ pub(crate) fn search(
     let query = query_parts.join(" ");
     let report = search_docs(&query, limit);
     match output::resolve_output_format(format) {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
+        OutputFormat::Json => output::print_pretty_json(&report)?,
         OutputFormat::Text => print_text(&report),
     }
     Ok(())

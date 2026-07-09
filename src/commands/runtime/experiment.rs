@@ -15,13 +15,25 @@
 //! record file (and its latest-pointer duplicate when that pointer already
 //! names the job) via [`update_submission_record`].
 
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::context::ResolvedContext;
 use hpc_compose::job::{
-    ArtifactManifest, EfficiencyScoreReport, JobNote, JobProvenance, StatusSnapshot,
-    append_job_note, apply_tag_changes, artifact_manifest_path_for_record,
+    ArtifactManifest, EfficiencyScoreOptions, EfficiencyScoreReport, JobNote, JobProvenance,
+    SchedulerOptions, StatusSnapshot, SubmissionRecord, append_job_note, apply_tag_changes,
+    artifact_manifest_path_for_record, build_efficiency_score_report, build_status_snapshot,
     update_submission_record,
 };
+use hpc_compose::runtime_plan::RuntimePlan;
+use serde::Serialize;
 
-use super::*;
+use super::ssh_hint::{OTP_MULTIPLEX_NOTE, control_master_opts_str, ssh_forward_command};
+use super::{resolve_tracked_record, tracked_job_hint};
+use crate::commands::load;
+use crate::{output, term};
 
 /// One JSON object aggregating the read-only state of a single tracked run.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -94,7 +106,7 @@ pub(crate) fn experiment_show(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output)
+                crate::output::to_pretty_json(&output)
                     .context("failed to serialize experiment show output")?
             );
         }
@@ -260,7 +272,7 @@ pub(crate) fn experiment_tag(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output)
+                crate::output::to_pretty_json(&output)
                     .context("failed to serialize experiment tag output")?
             );
         }
@@ -298,7 +310,7 @@ pub(crate) fn experiment_note(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output)
+                crate::output::to_pretty_json(&output)
                     .context("failed to serialize experiment note output")?
             );
         }
@@ -426,7 +438,7 @@ mod tests {
         fs::write(&compose, yaml).expect("write compose");
         let spec = ComposeSpec::load(&compose).expect("spec");
         let plan = hpc_compose::planner::build_plan(&compose, spec).expect("plan");
-        hpc_compose::prepare::build_runtime_plan(&plan)
+        hpc_compose::runtime_plan::build_runtime_plan(&plan)
     }
 
     fn record_for(job_id: &str) -> SubmissionRecord {

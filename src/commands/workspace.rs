@@ -196,7 +196,7 @@ fn print_expiry_lines(
 fn print_json<T: Serialize>(output: &T, what: &str) -> Result<()> {
     println!(
         "{}",
-        serde_json::to_string_pretty(output)
+        crate::output::to_pretty_json(output)
             .with_context(|| format!("failed to serialize {what} output"))?
     );
     Ok(())

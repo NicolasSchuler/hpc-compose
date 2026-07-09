@@ -40,7 +40,7 @@ pub(crate) fn list(cache_dir: Option<PathBuf>, format: Option<OutputFormat>) -> 
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&manifests)
+                crate::output::to_pretty_json(&manifests)
                     .context("failed to serialize cache list output")?
             );
         }
@@ -66,7 +66,7 @@ pub(crate) fn inspect(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report)
+                crate::output::to_pretty_json(&report)
                     .context("failed to serialize cache inspect output")?
             );
         }
@@ -120,7 +120,7 @@ pub(crate) fn prune(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report)
+                crate::output::to_pretty_json(&report)
                     .context("failed to serialize cache prune output")?
             );
         }
@@ -206,7 +206,7 @@ pub(crate) fn prune_no_context(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report)
+                crate::output::to_pretty_json(&report)
                     .context("failed to serialize cache prune output")?
             );
         }

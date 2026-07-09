@@ -1,4 +1,22 @@
-use super::*;
+use std::env;
+use std::path::PathBuf;
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::context::{ResolvedContext, ValueSource};
+use hpc_compose::job::{
+    ArtifactExportOptions, CleanupMode, CleanupReport, SubmissionBackend, SubmissionRecord,
+    build_cleanup_report, build_deep_cleanup_report, export_artifacts, remove_submission_record,
+    run_cleanup_report, run_deep_cleanup_report, runtime_job_root_for_record, scan_job_inventory,
+};
+
+use super::{
+    cached_artifacts_for_teardown, kill_pid_if_running, latest_record_path, purge_cached_artifacts,
+    read_local_supervisor_pid, resolve_tracked_record,
+};
+use crate::commands::load;
+use crate::output;
 
 /// Exports tracked artifacts to the configured `export_dir` before teardown reaps
 /// the runtime payload, returning the export directory when an export ran. No-ops
@@ -101,7 +119,7 @@ pub(crate) fn cancel(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output::CancelOutput {
+                    crate::output::to_pretty_json(&output::CancelOutput {
                         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         job_id: resolved_job_id,
                         cancelled,
@@ -173,7 +191,7 @@ pub(crate) fn cancel(
             };
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::CancelOutput {
+                crate::output::to_pretty_json(&output::CancelOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     job_id: resolved_job_id,
                     cancelled: true,
@@ -267,7 +285,7 @@ pub(crate) fn jobs_list(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::JobListOutput::new(report))
+                crate::output::to_pretty_json(&output::contract::JobListOutput::new(report))
                     .context("failed to serialize jobs list output")?
             );
         }
@@ -395,7 +413,7 @@ pub(crate) fn finish_clean(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::CleanOutput::new(report))
+                crate::output::to_pretty_json(&output::contract::CleanOutput::new(report))
                     .context("failed to serialize clean output")?
             );
         }

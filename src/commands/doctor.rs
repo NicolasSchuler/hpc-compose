@@ -51,7 +51,7 @@ pub(crate) fn doctor(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&crate::output::contract::DoctorOutput::new(
+                crate::output::to_pretty_json(&crate::output::contract::DoctorOutput::new(
                     report.grouped(),
                 ))
                 .map_err(|e| anyhow::anyhow!("failed to serialize doctor report: {e}"))?
@@ -236,7 +236,7 @@ pub(crate) fn doctor_mpi_smoke(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&MpiSmokeJsonOutput {
+                crate::output::to_pretty_json(&MpiSmokeJsonOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     service: service.name.clone(),
                     requested_mpi_type,
@@ -459,7 +459,7 @@ pub(crate) fn doctor_fabric_smoke(
                 .unwrap_or(planned_checks);
             println!(
                 "{}",
-                serde_json::to_string_pretty(&FabricSmokeJsonOutput {
+                crate::output::to_pretty_json(&FabricSmokeJsonOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     service: service.name.clone(),
                     requested_mpi_type,
@@ -532,7 +532,7 @@ pub(crate) fn doctor_readiness(
             }
         }
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            println!("{}", crate::output::to_pretty_json(&output)?);
         }
     }
 
@@ -728,7 +728,7 @@ fn doctor_cluster_report(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&ClusterReportJsonOutput {
+                crate::output::to_pretty_json(&ClusterReportJsonOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     path: (!print_toml).then_some(out_path.as_path()),
                     wrote: !print_toml,

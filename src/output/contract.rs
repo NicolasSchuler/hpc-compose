@@ -35,8 +35,9 @@ use hpc_compose::job::{
     RightsizeReport, SpecDiffReport, StatsSnapshot, StatusSnapshot,
 };
 use hpc_compose::preflight::GroupedReport;
-use hpc_compose::prepare::{PrepareSummary, RuntimePlan};
+use hpc_compose::prepare::PrepareSummary;
 use hpc_compose::rendezvous::{RendezvousPruneReport, RendezvousRecord};
+use hpc_compose::runtime_plan::RuntimePlan;
 use hpc_compose::spec::EffectiveComposeConfig;
 use hpc_compose::weather::WeatherReport;
 

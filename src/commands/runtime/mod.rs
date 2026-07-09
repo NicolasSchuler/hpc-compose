@@ -1,76 +1,50 @@
-// Shared imports are re-exported to the command submodules below so each one can
-// rely on a single `use super::*;`. Glob re-exports do not warn on unused items.
-pub(super) use std::collections::{BTreeMap, BTreeSet};
-pub(super) use std::env;
-pub(super) use std::ffi::OsString;
-pub(super) use std::fs::{self, OpenOptions};
-pub(super) use std::io::{self, Write};
-pub(super) use std::path::{Path, PathBuf};
-pub(super) use std::process::{Command, Stdio};
-pub(super) use std::sync::atomic::{AtomicBool, Ordering};
-pub(super) use std::thread;
-pub(super) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::env;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub(super) use anyhow::{Context, Result, bail};
-pub(super) use hpc_compose::cli::{
-    CsvOutputFormat, HoldOnExit, OutputFormat, RemoteInstallMode, StatsOutputFormat, WatchMode,
-};
-pub(super) use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
-pub(super) use hpc_compose::context::{
-    BinaryOverrides, ResolveRequest, ResolvedContext, ValueSource, resolve,
-};
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::{HoldOnExit, OutputFormat, WatchMode};
+use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
+use hpc_compose::context::ResolvedContext;
 #[cfg(test)]
-pub(super) use hpc_compose::job::build_submission_record_with_backend;
-pub(super) use hpc_compose::job::{
-    ArtifactExportOptions, CleanupMode, CleanupReport, EfficiencyScoreOptions, MetricsProbeOptions,
-    QueueDiagnostics, RequestedWalltime, SWEEP_MANIFEST_SCHEMA_VERSION, SchedulerOptions,
-    SchedulerStatus, StatsOptions, SubmissionBackend, SubmissionKind, SubmissionRecord,
-    SubmissionRecordBuildOptions, SweepExpansionTrial, SweepManifest, SweepManifestTrial,
-    SweepTrialMetadata, build_array_status_snapshot, build_cleanup_report,
-    build_deep_cleanup_report, build_efficiency_score_report, build_job_diff_report,
-    build_job_matrix_report, build_metrics_probe_report, build_ps_snapshot, build_replay_report,
-    build_rightsize_report, build_spec_diff_report, build_stats_snapshot,
-    build_stats_snapshot_with_status, build_status_snapshot, build_status_snapshot_with_array,
-    build_status_snapshot_with_status, build_submission_record_with_backend_and_options,
-    build_submission_record_with_options, compose_file_sha256, detect_sweep_drift,
-    expand_sweep_with_limit, export_artifacts, find_submission_record_in_repo, generate_sweep_id,
-    interpolation_vars_for_sweep_metadata, interpolation_vars_for_sweep_trial, jobs_dir_for,
-    latest_canary_record_path_for, latest_notebook_record_path_for, latest_record_path_for,
-    latest_run_record_path_for, load_submission_record, load_submission_record_optional,
-    load_sweep_manifest, metadata_root_for, parse_log_since_duration, pid_is_running, print_logs,
-    probe_scheduler_status_many, remove_submission_record, resume_trial_positions,
-    run_cleanup_report, run_deep_cleanup_report, runtime_job_root_for_record, scan_job_inventory,
-    scan_job_records, scan_sweep_manifests, serialize_metrics_probe_report, state_path_for_record,
-    sweep_manifest_path_for, validate_metrics_probe_options, wait_for_job_start, watch_submission,
-    write_submission_record, write_sweep_manifest,
+use hpc_compose::job::build_submission_record_with_backend;
+use hpc_compose::job::{
+    RequestedWalltime, SchedulerOptions, SubmissionBackend, SubmissionKind, SubmissionRecord,
+    SubmissionRecordBuildOptions, build_status_snapshot,
+    build_submission_record_with_backend_and_options, build_submission_record_with_options,
+    find_submission_record_in_repo, jobs_dir_for, latest_canary_record_path_for,
+    latest_notebook_record_path_for, latest_record_path_for, latest_run_record_path_for,
+    load_submission_record, metadata_root_for, parse_log_since_duration, pid_is_running,
+    remove_submission_record, runtime_job_root_for_record, scan_job_records, state_path_for_record,
+    wait_for_job_start, watch_submission, write_submission_record,
 };
-pub(super) use hpc_compose::planner::{
-    ExecutionSpec, ImageSource, ServicePlacementMode, apply_resource_profile_defaults,
-};
-pub(super) use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
-pub(super) use hpc_compose::prepare::{
-    PrepareOptions, RuntimePlan, base_image_path_for_backend, prepare_runtime_plan_with_reporter,
-};
-pub(super) use hpc_compose::render::{
+use hpc_compose::planner::{ImageSource, ServicePlacementMode};
+use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
+use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan_with_reporter};
+use hpc_compose::render::{
     LocalRenderOptions, RenderOptions, log_file_name_for_service, render_local_script_with_options,
     render_script_with_options,
 };
-pub(super) use hpc_compose::rendezvous::{self, RendezvousRegisterRequest};
-pub(super) use hpc_compose::spec::{
-    ComposeSpec, MetricsCollector, MetricsConfig, RuntimeConfig, ServiceFailureMode,
-    SignalShellTarget, parse_slurm_time_limit,
+use hpc_compose::runtime_plan::{RuntimePlan, base_image_path_for_backend};
+use hpc_compose::spec::{
+    MetricsCollector, MetricsConfig, ServiceFailureMode, SignalShellTarget, parse_slurm_time_limit,
 };
-pub(super) use hpc_compose::when::{
+use hpc_compose::when::{
     MonitorOptions, RealMonitorRuntime, WhenConditionSummary, WhenConditions, monitor_until_ready,
 };
-pub(super) use serde::Serialize;
-pub(super) use sha2::{Digest, Sha256};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
-pub(super) use crate::commands::load;
-pub(super) use crate::output;
-pub(super) use crate::progress::{PrepareProgress, ProgressReporter};
-pub(super) use crate::term;
-pub(super) use crate::watch_ui;
+use crate::commands::load;
+use crate::output;
+use crate::progress::{PrepareProgress, ProgressReporter};
+use crate::watch_ui;
 
 pub(crate) mod notebook;
 pub(crate) mod notebook_promote;
@@ -78,10 +52,9 @@ mod resources;
 pub(crate) use notebook::NotebookKind;
 pub(crate) use resources::ResourceCliOptions;
 
-// Command-family submodules. The split is a pure move + visibility refactor; the
-// public surface used by `commands::mod` is unchanged. The launch/submit core and
-// the cross-cutting helpers stay in this facade module so the submodules can reach
-// them via `use super::*;`.
+// Command-family submodules. The launch/submit core and cross-cutting helpers
+// stay in this facade for now; children import only the specific helpers they
+// need, keeping their dependency boundaries visible.
 mod checkpoints;
 pub(crate) mod debug;
 mod dev;
@@ -111,7 +84,6 @@ pub(crate) use pull::*;
 pub(crate) use reach::*;
 pub(crate) use remote::*;
 pub(crate) use rendezvous_cmd::*;
-pub(crate) use ssh_hint::*;
 pub(crate) use sweep::*;
 
 /// Bundle of the four preparation-related flags shared across the runtime
@@ -534,7 +506,7 @@ fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
                 writeln!(
                     file,
                     "{}",
-                    serde_json::to_string_pretty(&content)
+                    crate::output::to_pretty_json(&content)
                         .context("failed to serialize lock file")?
                 )
                 .with_context(|| format!("failed to write {}", path.display()))?;
@@ -1426,7 +1398,7 @@ fn print_local_launch_outcome(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&outcome.submit_output)
+                crate::output::to_pretty_json(&outcome.submit_output)
                     .context("failed to serialize local launch output")?
             );
         }
@@ -1603,7 +1575,7 @@ fn print_slurm_submit_outcome(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&outcome.submit_output)
+                crate::output::to_pretty_json(&outcome.submit_output)
                     .context("failed to serialize up output")?
             );
         }
@@ -1899,7 +1871,7 @@ pub(crate) fn when(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&WhenSubmitOutput {
+                crate::output::to_pretty_json(&WhenSubmitOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     triggered: true,
                     conditions: &trigger.conditions,
@@ -2156,7 +2128,7 @@ pub(crate) fn launch(
                 };
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output::SubmitOutput {
+                    crate::output::to_pretty_json(&output::SubmitOutput {
                         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         backend,
                         compose_file: file,
@@ -2230,7 +2202,7 @@ pub(crate) fn launch(
                 };
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output::SubmitOutput {
+                    crate::output::to_pretty_json(&output::SubmitOutput {
                         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         backend: SubmissionBackend::Local,
                         compose_file: file.clone(),
@@ -2936,7 +2908,7 @@ fn print_smoke_output(output_format: OutputFormat, report: &SmokeTestOutput) -> 
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(report)
+                crate::output::to_pretty_json(report)
                     .context("failed to serialize smoke test output")?
             );
         }

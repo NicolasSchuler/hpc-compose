@@ -13,12 +13,11 @@ use hpc_compose::lint::{LintFinding, LintLevel};
 use hpc_compose::lint_fix::{self, AppliedFix};
 use hpc_compose::planner::ImageSource;
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
-use hpc_compose::prepare::{
-    PrepareOptions, RuntimePlan, build_runtime_plan, prepare_runtime_plan_with_reporter,
-};
+use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan_with_reporter};
 use hpc_compose::render::{
     ProvenanceSpan, RenderOptions, render_script_annotated, render_script_with_options,
 };
+use hpc_compose::runtime_plan::{RuntimePlan, build_runtime_plan};
 use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
 use serde::Serialize;
@@ -71,7 +70,7 @@ pub(crate) fn validate(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output_spec::build_validate_output(
+                crate::output::to_pretty_json(&output_spec::build_validate_output(
                     &plan,
                     cluster_warnings
                 ))
@@ -211,7 +210,7 @@ pub(crate) fn lint(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&LintOutput {
+                crate::output::to_pretty_json(&LintOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     passed,
                     compose_file: plan.spec_path,
@@ -352,7 +351,7 @@ pub(crate) fn render(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output_spec::RenderOutput {
+                crate::output::to_pretty_json(&output_spec::RenderOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     compose_file: plan.spec_path,
                     output_path,
@@ -370,7 +369,7 @@ pub(crate) struct PlanOutput {
     pub(crate) schema_version: u32,
     valid: bool,
     compose_file: PathBuf,
-    runtime_plan: hpc_compose::prepare::RuntimePlan,
+    runtime_plan: hpc_compose::runtime_plan::RuntimePlan,
     cluster_warnings: Vec<String>,
     explanations: Vec<PlanHint>,
     script: Option<String>,
@@ -479,7 +478,7 @@ pub(crate) fn plan(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&PlanOutput {
+                crate::output::to_pretty_json(&PlanOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     valid: true,
                     compose_file: plan.spec_path,
@@ -710,7 +709,7 @@ pub(crate) fn explain(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&ExplainOutput {
+                crate::output::to_pretty_json(&ExplainOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     compose_file: plan.spec_path,
                     entries,
@@ -854,7 +853,7 @@ pub(crate) fn prepare(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::PrepareOutput::new(summary))
+                crate::output::to_pretty_json(&output::contract::PrepareOutput::new(summary))
                     .context("failed to serialize prepare output")?
             );
         }
@@ -911,7 +910,7 @@ pub(crate) fn preflight(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::PreflightOutput::new(
+                crate::output::to_pretty_json(&output::contract::PreflightOutput::new(
                     report.grouped(),
                 ))
                 .context("failed to serialize preflight report")?
@@ -985,7 +984,7 @@ pub(crate) fn inspect(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output::contract::RightsizeOutput::new(report))
+                    crate::output::to_pretty_json(&output::contract::RightsizeOutput::new(report))
                         .context("failed to serialize rightsize output")?
                 );
             }
@@ -1005,7 +1004,7 @@ pub(crate) fn inspect(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&graph)
+                    crate::output::to_pretty_json(&graph)
                         .context("failed to serialize dependency graph output")?
                 );
             }
@@ -1051,7 +1050,7 @@ pub(crate) fn inspect(
                     .context("failed to serialize inspect output")?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&runtime_plan)
+                crate::output::to_pretty_json(&runtime_plan)
                     .context("failed to serialize inspect output")?
             );
         }
@@ -1095,7 +1094,7 @@ pub(crate) fn config(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output_spec::InterpolationVarsOutput {
+                    crate::output::to_pretty_json(&output_spec::InterpolationVarsOutput {
                         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         variables: vars,
                         sources: sources
@@ -1126,7 +1125,7 @@ pub(crate) fn config(
                     .context("failed to serialize config output")?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&redacted_config)
+                crate::output::to_pretty_json(&redacted_config)
                     .context("failed to serialize config output")?
             );
         }
@@ -1289,7 +1288,7 @@ pub(crate) fn context(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output)
+                crate::output::to_pretty_json(&output)
                     .context("failed to serialize context output")?
             );
         }

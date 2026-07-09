@@ -38,7 +38,7 @@ pub(crate) fn new_command(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output_init::TemplateListOutput {
+                    crate::output::to_pretty_json(&output_init::TemplateListOutput {
                         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         templates: output_init::template_infos(),
                         cache_dir_required: false,
@@ -56,7 +56,7 @@ pub(crate) fn new_command(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output_init::build_template_description(
+                    crate::output::to_pretty_json(&output_init::build_template_description(
                         &template_name,
                     )?)
                     .context("failed to serialize template description output")?
@@ -86,7 +86,7 @@ pub(crate) fn new_command(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output_init::TemplateWriteOutput {
+                crate::output::to_pretty_json(&output_init::TemplateWriteOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     template_name: answers.template_name,
                     app_name: answers.app_name,
@@ -329,7 +329,7 @@ pub(crate) fn setup(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&setup_output)
+                crate::output::to_pretty_json(&setup_output)
                     .context("failed to serialize setup output")?
             );
         }

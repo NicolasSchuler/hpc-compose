@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
 use super::*;
+use hpc_compose::cli::StatsOutputFormat;
 use hpc_compose::context::{ResolvedBinaries, ResolvedValue, ValueSource};
 
 fn write_compose(root: &Path) -> PathBuf {

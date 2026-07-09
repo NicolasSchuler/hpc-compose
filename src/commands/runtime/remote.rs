@@ -4,20 +4,28 @@
 //! propagating the remote exit code.
 //!
 //! Scope (Option B, "thin"): explicit opt-in, rsync-every-time (no content
-//! hash), and SSH ControlMaster multiplexing reused from [`ssh_hint`] so an OTP
+//! hash), and SSH ControlMaster multiplexing reused from `ssh_hint` so an OTP
 //! login node prompts once. This is deliberately NOT the full laptop thin client
 //! — there is no `login`/`logout` session, no `ssh -O check` fail-fast, no auto
 //! mode-detection, and no `--source-hash`/`--no-restage`. The destination's
 //! port, identity, and user belong in the caller's `~/.ssh/config`, which keeps
 //! the CLI surface a bare host (or host alias).
 
-use std::io::{BufRead, BufReader};
+use std::env;
+use std::fs;
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use anyhow::anyhow;
+use anyhow::{Context, Result, anyhow, bail};
+use hpc_compose::cli::{HoldOnExit, OutputFormat, RemoteInstallMode, WatchMode};
+use hpc_compose::context::ResolvedContext;
 
-use super::*;
+use super::MetricsOverrides;
+use super::ssh_hint::{CONTROL_MASTER_SSH_OPTS, NONINTERACTIVE_SSH_OPTS, OTP_MULTIPLEX_NOTE};
 use crate::exit::ExitCodeError;
 use crate::shell_quote;
+use crate::term;
 use hpc_compose::context::repo_root_or_cwd;
 
 /// Optional env var of extra ssh options (whitespace-split) appended to every

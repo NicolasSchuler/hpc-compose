@@ -6,14 +6,19 @@
 //! SSH connection multiplexing so an OTP login node prompts once). It never
 //! copies anything, opens a connection, or spawns a process.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::context::ResolvedContext;
 use hpc_compose::job::{
     ArtifactManifest, artifact_manifest_path_for_record, artifact_payload_dir_for_record,
     load_submission_record,
 };
+use serde::Serialize;
 
-use super::*;
+use super::ssh_hint::{OTP_MULTIPLEX_NOTE, control_master_opts_str};
+use crate::{output, term};
 
 /// Machine-readable output for `pull --format json`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -128,7 +133,7 @@ pub(crate) fn pull(
             };
             println!(
                 "{}",
-                serde_json::to_string_pretty(&out).context("failed to serialize pull output")?
+                crate::output::to_pretty_json(&out).context("failed to serialize pull output")?
             );
         }
         OutputFormat::Text => {

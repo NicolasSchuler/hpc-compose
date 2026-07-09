@@ -1,4 +1,11 @@
-use super::*;
+use std::io::{self, Write};
+
+use anyhow::{Context, Result};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::context::ResolvedContext;
+
+use super::{resolve_tracked_record, tracked_job_hint};
+use crate::output;
 
 /// Prints the attempt/requeue history for a tracked job from LOCAL state only.
 ///
@@ -19,7 +26,7 @@ pub(crate) fn checkpoints(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::CheckpointsOutput::new(history))
+                crate::output::to_pretty_json(&output::contract::CheckpointsOutput::new(history))
                     .context("failed to serialize checkpoints output")?
             );
             Ok(())

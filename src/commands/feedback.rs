@@ -35,7 +35,7 @@ pub(crate) fn feedback(kind: FeedbackKind, format: Option<OutputFormat>) -> Resu
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output)
+                crate::output::to_pretty_json(&output)
                     .context("failed to serialize feedback output")?
             );
         }

@@ -12,7 +12,7 @@ use hpc_compose::evolve::{
 };
 use hpc_compose::init::{next_commands, write_initialized_template};
 use hpc_compose::planner::{ServicePlacementMode, build_plan};
-use hpc_compose::prepare::build_runtime_plan;
+use hpc_compose::runtime_plan::build_runtime_plan;
 use hpc_compose::spec::ComposeSpec;
 use hpc_compose::term;
 use serde::Serialize;
@@ -80,7 +80,7 @@ pub(crate) fn command(
         OutputFormat::Text => print_run_report(&report),
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&crate::output::contract::EvolveOutput::new(report))
+            crate::output::to_pretty_json(&crate::output::contract::EvolveOutput::new(report))
                 .context("failed to serialize evolve run output")?
         ),
     }
@@ -436,7 +436,7 @@ fn print_lesson_list(format: Option<OutputFormat>) -> Result<()> {
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&LessonListOutput {
+                crate::output::to_pretty_json(&LessonListOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     lessons: lessons().iter().map(describe_lesson_output).collect(),
                 })
@@ -475,7 +475,7 @@ fn print_lesson_description(lesson: &EvolveLesson, format: Option<OutputFormat>)
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&describe_lesson_output(lesson))
+                crate::output::to_pretty_json(&describe_lesson_output(lesson))
                     .context("failed to serialize evolve lesson description")?
             );
             Ok(())

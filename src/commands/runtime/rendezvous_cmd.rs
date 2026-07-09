@@ -1,4 +1,12 @@
-use super::*;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::rendezvous::{self, RendezvousRegisterRequest};
+use serde::Serialize;
+
+use crate::output;
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct RendezvousRegisterOutput {
@@ -47,7 +55,7 @@ pub(crate) fn rendezvous_register(
         }
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&RendezvousRegisterOutput {
+            crate::output::to_pretty_json(&RendezvousRegisterOutput {
                 schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                 cache_dir,
                 record_path,
@@ -91,7 +99,7 @@ pub(crate) fn rendezvous_resolve(
         }
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&record)
+            crate::output::to_pretty_json(&record)
                 .context("failed to serialize rendezvous resolve output")?
         ),
     }
@@ -115,7 +123,7 @@ pub(crate) fn rendezvous_list(cache_dir: PathBuf, format: Option<OutputFormat>) 
         }
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&records)
+            crate::output::to_pretty_json(&records)
                 .context("failed to serialize rendezvous list output")?
         ),
     }
@@ -133,7 +141,7 @@ pub(crate) fn rendezvous_prune(cache_dir: PathBuf, format: Option<OutputFormat>)
         }
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&output::contract::RendezvousPruneOutput::new(report))
+            crate::output::to_pretty_json(&output::contract::RendezvousPruneOutput::new(report))
                 .context("failed to serialize rendezvous prune output")?
         ),
     }

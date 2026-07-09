@@ -22,13 +22,12 @@ use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, registry_host_for_remote,
 };
 use hpc_compose::preflight::Report;
-use hpc_compose::prepare::{
-    ArtifactAction, PrepareSummary, RuntimePlan, RuntimeService, base_image_path_for_backend,
-};
+use hpc_compose::prepare::{ArtifactAction, PrepareSummary};
 use hpc_compose::render::{
     display_srun_command_for_backend, distributed_environment_names_for_service, execution_argv,
     log_file_name_for_service, parallelism_environment_names_for_service,
 };
+use hpc_compose::runtime_plan::{RuntimePlan, RuntimeService, base_image_path_for_backend};
 use hpc_compose::spec::{
     DependencyCondition, EffectiveComposeConfig, ReadinessSpec, ServiceDependency,
     parse_slurm_time_limit,
@@ -48,6 +47,18 @@ pub(crate) mod spec;
 /// see `docs/src/json-output-stability.md`. Envelopes over foreign/persisted
 /// types carry their own per-type constant in `contract`.
 pub(crate) const OUTPUT_SCHEMA_VERSION: u32 = 1;
+
+/// Serializes a command output value using the stable human-readable JSON
+/// formatting shared by every `--format json` handler.
+pub(crate) fn to_pretty_json<T: Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string_pretty(value).context("failed to serialize JSON output")
+}
+
+/// Writes one pretty-printed JSON value to stdout followed by a newline.
+pub(crate) fn print_pretty_json<T: Serialize>(value: &T) -> Result<()> {
+    println!("{}", to_pretty_json(value)?);
+    Ok(())
+}
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct ValidateOutput {
@@ -3254,7 +3265,7 @@ fn write_cache_artifact_block(
     Ok(())
 }
 
-fn runtime_cache_state(service: &hpc_compose::prepare::RuntimeService) -> &'static str {
+fn runtime_cache_state(service: &hpc_compose::runtime_plan::RuntimeService) -> &'static str {
     if let Some(prepare) = &service.prepare {
         if prepare.force_rebuild {
             "rebuild on prepare"
@@ -3793,7 +3804,7 @@ fn readiness_description(readiness: Option<&hpc_compose::spec::ReadinessSpec>) -
     }
 }
 
-fn rebuild_reason(service: &hpc_compose::prepare::RuntimeService) -> Option<&'static str> {
+fn rebuild_reason(service: &hpc_compose::runtime_plan::RuntimeService) -> Option<&'static str> {
     let prepare = service.prepare.as_ref()?;
     if prepare.force_rebuild {
         Some("prepare.mounts are present")

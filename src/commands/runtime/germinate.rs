@@ -1,4 +1,31 @@
-use super::*;
+use std::collections::BTreeMap;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, SystemTime};
+
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::context::ResolvedContext;
+use hpc_compose::job::{
+    SchedulerOptions, StatsOptions, SubmissionKind, SubmissionRecordBuildOptions,
+    build_rightsize_report, build_status_snapshot, parse_log_since_duration,
+};
+use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
+use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan_with_reporter};
+use hpc_compose::render::{RenderOptions, render_script_with_options};
+use hpc_compose::runtime_plan::RuntimePlan;
+use hpc_compose::spec::{MetricsCollector, MetricsConfig, parse_slurm_time_limit};
+use serde::Serialize;
+
+use super::{
+    PrepareFlags, PreparedSlurmSubmission, collect_submit_provenance,
+    ensure_batch_submission_supported, latest_record_path, load_discovered_cluster_profile,
+    requested_walltime, submit_prepared_slurm_submission, tracked_cached_artifacts,
+};
+use crate::commands::load;
+use crate::output;
+use crate::progress::{PrepareProgress, ProgressReporter};
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct GerminateOutput<'a> {
@@ -173,7 +200,7 @@ pub(crate) fn germinate(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&GerminateOutput {
+                    crate::output::to_pretty_json(&GerminateOutput {
                         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                         compose_file: &file,
                         script_path: &script_path,
@@ -262,7 +289,7 @@ pub(crate) fn germinate(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&GerminateOutput {
+                crate::output::to_pretty_json(&GerminateOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     compose_file: &file,
                     script_path: &script_path,

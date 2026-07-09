@@ -64,7 +64,7 @@ fn print_examples(entries: &[ExampleInfo], format: ExamplesOutputFormat) -> Resu
         ExamplesOutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&ExamplesListOutput {
+                crate::output::to_pretty_json(&ExamplesListOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     examples: entries,
                 })?
@@ -119,7 +119,7 @@ fn print_recommendations(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&ExamplesRecommendOutput {
+                crate::output::to_pretty_json(&ExamplesRecommendOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     query,
                     required_tags: tags,

@@ -23,6 +23,82 @@ use hpc_compose::spec::{
     ServiceSlurmConfig, SlurmConfig,
 };
 
+#[test]
+fn pretty_json_boundary_preserves_serde_shape_and_trailing_newline_policy() {
+    let value = serde_json::json!({"schema_version": 1, "items": ["a", "b"]});
+    let expected = serde_json::to_string_pretty(&value).expect("serde baseline");
+    let actual = to_pretty_json(&value).expect("output boundary");
+    assert_eq!(actual.as_bytes(), expected.as_bytes());
+    assert!(!actual.ends_with('\n'), "printing owns the single newline");
+}
+
+fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).expect("read source directory") {
+            let path = entry.expect("read source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                sources.push(path);
+            }
+        }
+    }
+    sources
+}
+
+fn production_prefix(source: &str) -> &str {
+    source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production)
+}
+
+#[test]
+fn command_json_uses_the_output_serialization_boundary() {
+    let commands = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
+    let offenders: Vec<_> = rust_sources_under(&commands)
+        .into_iter()
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) != Some("tests.rs"))
+        .filter(|path| {
+            let source = fs::read_to_string(path).expect("read command source");
+            production_prefix(&source).contains("serde_json::to_string_pretty")
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "command handlers must use output::to_pretty_json: {offenders:?}"
+    );
+}
+
+#[test]
+fn runtime_children_use_explicit_dependencies() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/runtime");
+    let offenders: Vec<_> = rust_sources_under(&runtime)
+        .into_iter()
+        .filter(|path| {
+            !matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("mod.rs" | "tests.rs")
+            )
+        })
+        .filter(|path| {
+            let source = fs::read_to_string(path).expect("read runtime source");
+            production_prefix(&source).contains("use super::*;")
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "runtime command modules must name parent dependencies: {offenders:?}"
+    );
+
+    let facade = fs::read_to_string(runtime.join("mod.rs")).expect("read runtime facade");
+    assert!(
+        !facade.contains("pub(super) use"),
+        "runtime facade must not expose a hidden mega-prelude"
+    );
+}
+
 fn runtime_service(
     source: ImageSource,
     runtime_image: PathBuf,

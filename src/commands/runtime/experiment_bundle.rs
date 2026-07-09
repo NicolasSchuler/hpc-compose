@@ -4,7 +4,15 @@
 //! aggregate as `experiment show`, then delegates all filesystem materialization
 //! to `job::write_experiment_bundle`.
 
-use super::*;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::context::ResolvedContext;
+
+use super::experiment::collect_experiment_show_output;
+use super::{resolve_tracked_record, tracked_job_hint};
+use crate::{output, term};
 
 const DEFAULT_BUNDLE_PUE: f64 = 1.20;
 const DEFAULT_BUNDLE_GPU_TDP_W: f64 = 300.0;
@@ -45,7 +53,7 @@ pub(crate) fn experiment_bundle(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&manifest)
+                crate::output::to_pretty_json(&manifest)
                     .context("failed to serialize experiment bundle output")?
             );
         }

@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use hpc_compose::context::ResolvedContext;
 use hpc_compose::planner::{PlanOptions, build_plan_with_options};
-use hpc_compose::prepare::{RuntimePlan, build_runtime_plan};
+use hpc_compose::runtime_plan::{RuntimePlan, build_runtime_plan};
 use hpc_compose::spec::{
     ArtifactCollectPolicy, ArtifactsConfig, CommandSpec, ComposeSpec, DependsOnSpec,
     EnvironmentSpec, RuntimeConfig, ServiceEnrootConfig, ServiceRuntimeConfig, ServiceSlurmConfig,

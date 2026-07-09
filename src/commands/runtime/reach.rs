@@ -6,7 +6,17 @@
 //! connection multiplexing so an OTP login node only prompts once); `--open`
 //! runs that forward in the foreground (Ctrl-C to stop) and never daemonizes.
 
-use super::*;
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::OutputFormat;
+use hpc_compose::context::ResolvedContext;
+use hpc_compose::job::{SchedulerOptions, build_status_snapshot};
+use serde::Serialize;
+
+use super::exec::current_hostname;
+use super::ssh_hint::{CONTROL_MASTER_SSH_OPTS, OTP_MULTIPLEX_NOTE, ssh_forward_command};
+use super::{resolve_tracked_record, tracked_job_hint};
+use crate::commands::load;
+use crate::{output, term};
 
 /// Machine-readable output for `reach --format json`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -127,7 +137,7 @@ pub(crate) fn reach(
         };
         println!(
             "{}",
-            serde_json::to_string_pretty(&out).context("failed to serialize reach output")?
+            crate::output::to_pretty_json(&out).context("failed to serialize reach output")?
         );
         return Ok(());
     }

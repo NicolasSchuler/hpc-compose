@@ -1,4 +1,21 @@
-use super::*;
+use std::io::{self, Write};
+
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::{CsvOutputFormat, HoldOnExit, OutputFormat, StatsOutputFormat, WatchMode};
+use hpc_compose::context::ResolvedContext;
+use hpc_compose::job::{
+    ArtifactExportOptions, EfficiencyScoreOptions, MetricsProbeOptions, SchedulerOptions,
+    StatsOptions, build_array_status_snapshot, build_efficiency_score_report,
+    build_job_diff_report, build_job_matrix_report, build_metrics_probe_report, build_ps_snapshot,
+    build_replay_report, build_spec_diff_report, build_stats_snapshot,
+    build_status_snapshot_with_array, export_artifacts, interpolation_vars_for_sweep_metadata,
+    load_sweep_manifest, parse_log_since_duration, print_logs, serialize_metrics_probe_report,
+    validate_metrics_probe_options,
+};
+
+use super::{resolve_tracked_record, watch_with_fallback};
+use crate::commands::load;
+use crate::{output, watch_ui};
 
 pub(crate) fn status(
     context: ResolvedContext,
@@ -66,7 +83,7 @@ pub(crate) fn status(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::StatusOutput::new(snapshot))
+                crate::output::to_pretty_json(&output::contract::StatusOutput::new(snapshot))
                     .context("failed to serialize status output")?
             );
         }
@@ -108,7 +125,7 @@ pub(crate) fn stats(
         StatsOutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::StatsOutput::new(snapshot))
+                crate::output::to_pretty_json(&output::contract::StatsOutput::new(snapshot))
                     .context("failed to serialize stats output")?
             );
         }
@@ -186,7 +203,7 @@ pub(crate) fn score(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::ScoreOutput::new(report))
+                crate::output::to_pretty_json(&output::contract::ScoreOutput::new(report))
                     .context("failed to serialize score output")?
             );
         }
@@ -217,7 +234,7 @@ pub(crate) fn artifacts(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::ArtifactsOutput::new(report))
+                crate::output::to_pretty_json(&output::contract::ArtifactsOutput::new(report))
                     .context("failed to serialize artifacts output")?
             );
         }
@@ -255,7 +272,7 @@ pub(crate) fn diff(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::DiffOutput::new(report))
+                crate::output::to_pretty_json(&output::contract::DiffOutput::new(report))
                     .context("failed to serialize diff output")?
             );
         }
@@ -331,7 +348,7 @@ pub(crate) fn diff_against_spec(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::DiffSpecOutput::new(report))
+                crate::output::to_pretty_json(&output::contract::DiffSpecOutput::new(report))
                     .context("failed to serialize diff output")?
             );
         }
@@ -403,7 +420,7 @@ pub(crate) fn diff_matrix(
         CsvOutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::DiffMatrixOutput::new(report))
+                crate::output::to_pretty_json(&output::contract::DiffMatrixOutput::new(report))
                     .context("failed to serialize diff matrix")?
             );
         }
@@ -466,7 +483,7 @@ pub(crate) fn ps(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::PsOutput::new(snapshot))
+                crate::output::to_pretty_json(&output::contract::PsOutput::new(snapshot))
                     .context("failed to serialize ps output")?
             );
         }
@@ -520,7 +537,7 @@ pub(crate) fn replay(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output::contract::ReplayOutput::new(report))
+                crate::output::to_pretty_json(&output::contract::ReplayOutput::new(report))
                     .context("failed to serialize replay output")?
             );
             Ok(())

@@ -1,4 +1,39 @@
-use super::*;
+use std::collections::BTreeMap;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::{CsvOutputFormat, OutputFormat, StatsOutputFormat};
+use hpc_compose::context::ResolvedContext;
+use hpc_compose::job::{
+    EfficiencyScoreOptions, QueueDiagnostics, SWEEP_MANIFEST_SCHEMA_VERSION, SchedulerOptions,
+    SchedulerStatus, StatsOptions, SubmissionBackend, SubmissionKind, SubmissionRecord,
+    SubmissionRecordBuildOptions, SweepExpansionTrial, SweepManifest, SweepManifestTrial,
+    SweepTrialMetadata, build_efficiency_score_report, build_stats_snapshot_with_status,
+    build_status_snapshot, build_status_snapshot_with_status, compose_file_sha256,
+    detect_sweep_drift, expand_sweep_with_limit, generate_sweep_id,
+    interpolation_vars_for_sweep_trial, load_submission_record_optional, load_sweep_manifest,
+    probe_scheduler_status_many, resume_trial_positions, scan_sweep_manifests,
+    sweep_manifest_path_for, write_sweep_manifest,
+};
+use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
+use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan_with_reporter};
+use hpc_compose::render::{RenderOptions, render_script_with_options};
+use hpc_compose::spec::ComposeSpec;
+use serde::Serialize;
+
+use super::{
+    PreparedSlurmSubmission, collect_submit_provenance, latest_record_path,
+    load_discovered_cluster_profile, requested_walltime, resolve_tracked_record,
+    submit_prepared_slurm_submission, tracked_cached_artifacts,
+};
+use crate::commands::load;
+use crate::output;
+use crate::progress::{PrepareProgress, ProgressReporter};
+use crate::term;
 use crate::time_util::unix_timestamp_now;
 
 const DEFAULT_SWEEP_MAX_TRIALS: usize = 100;
@@ -751,7 +786,7 @@ fn print_sweep_submit_output(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&SweepSubmitOutput {
+                crate::output::to_pretty_json(&SweepSubmitOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     dry_run,
                     resumed,
@@ -816,7 +851,7 @@ pub(crate) fn sweep_status(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report)
+                crate::output::to_pretty_json(&report)
                     .context("failed to serialize sweep status output")?
             );
             Ok(())
@@ -1010,7 +1045,7 @@ pub(crate) fn sweep_list(context: ResolvedContext, format: Option<OutputFormat>)
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&SweepListOutput {
+                crate::output::to_pretty_json(&SweepListOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     compose_file: context.compose_file.value,
                     sweeps,
@@ -1567,7 +1602,7 @@ pub(crate) fn sweep_observe(
             OutputFormat::Json => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&report)
+                    crate::output::to_pretty_json(&report)
                         .context("failed to serialize sweep observe output")?
                 );
             }
@@ -1749,7 +1784,7 @@ pub(crate) fn sweep_stop(
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report)
+                crate::output::to_pretty_json(&report)
                     .context("failed to serialize sweep stop output")?
             );
         }
@@ -2072,7 +2107,7 @@ pub(crate) fn sweep_results(
         CsvOutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output)
+                crate::output::to_pretty_json(&output)
                     .context("failed to serialize sweep results output")?
             );
         }
@@ -2263,7 +2298,7 @@ pub(crate) fn score_sweep(
     match output::resolve_output_format(format) {
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&output)
+            crate::output::to_pretty_json(&output)
                 .context("failed to serialize sweep score output")?
         ),
         OutputFormat::Text => {
@@ -2376,7 +2411,7 @@ pub(crate) fn stats_sweep(
         }
         _ => println!(
             "{}",
-            serde_json::to_string_pretty(&output)
+            crate::output::to_pretty_json(&output)
                 .context("failed to serialize sweep stats output")?
         ),
     }

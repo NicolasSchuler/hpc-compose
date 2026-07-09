@@ -1,12 +1,50 @@
 use super::notebook::{
-    NotebookArgs, build_connection, build_connection_output, build_notebook_service_spec,
-    build_server_command, generate_token, preset_for, readiness_spec, resolve_image,
+    NotebookArgs, NotebookConnection, build_connection, build_connection_output,
+    build_notebook_service_spec, build_server_command, generate_token, preset_for, readiness_spec,
+    resolve_image,
 };
 use super::resources::{
     build_ephemeral_runtime_plan, build_synthetic_service_plan, parse_env_entries,
     push_slurm_salloc_options, push_slurm_srun_options, slurm_from_resource_options,
 };
-use super::*;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use hpc_compose::cli::{HoldOnExit, WatchMode};
+use hpc_compose::context::ResolvedContext;
+use hpc_compose::job::{
+    SchedulerOptions, SubmissionBackend, SubmissionKind, SubmissionRecordBuildOptions,
+    build_status_snapshot, build_submission_record_with_backend_and_options,
+    build_submission_record_with_options, wait_for_job_start, write_submission_record,
+};
+use hpc_compose::planner::{ExecutionSpec, apply_resource_profile_defaults};
+use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
+use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan_with_reporter};
+use hpc_compose::render::{
+    RenderOptions, render_local_script_with_options, render_script_with_options,
+};
+use hpc_compose::runtime_plan::RuntimePlan;
+use hpc_compose::spec::RuntimeConfig;
+use serde::Serialize;
+
+use super::{
+    PrepareFlags, ResourceCliOptions, active_allocation_job_id, allocation_bootstrap_script,
+    collect_submit_provenance, default_ephemeral_run_script_path, default_run_script_path,
+    enrich_sbatch_failure, ensure_batch_submission_supported, ensure_local_submit_supported,
+    generate_local_job_id, latest_record_path, load_discovered_cluster_profile,
+    local_render_options, print_local_launch_details, requested_walltime, rollback_local_tracking,
+    sbatch_cli_args, spawn_local_supervisor, strip_sbatch_directives, tracked_cached_artifacts,
+    warn_local_ignored_scheduler_settings, watch_with_fallback, write_local_runtime_state_stub,
+};
+use crate::commands::load;
+use crate::output;
+use crate::progress::{PrepareProgress, ProgressReporter};
+use crate::{term, watch_ui};
 use hpc_compose::cli::OutputFormat;
 
 pub(crate) fn alloc(
@@ -760,7 +798,7 @@ fn wait_for_notebook_log(log_path: &Path, pattern: &str, timeout: Duration) -> R
     }
 }
 
-fn print_notebook_connection(connection: &notebook::NotebookConnection) {
+fn print_notebook_connection(connection: &NotebookConnection) {
     println!();
     println!("{}", term::styled_section_header("Notebook ready"));
     println!(
@@ -935,7 +973,7 @@ pub(crate) fn notebook(
         if json_mode {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&NotebookDryRunOutput {
+                crate::output::to_pretty_json(&NotebookDryRunOutput {
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     dry_run: true,
                     submitted: false,
@@ -1103,7 +1141,7 @@ pub(crate) fn notebook(
             &record.job_id,
             &file,
         );
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", crate::output::to_pretty_json(&out)?);
     } else {
         print_notebook_connection(&connection);
         println!(
