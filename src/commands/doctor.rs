@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -15,9 +16,8 @@ use hpc_compose::cluster::{
 use hpc_compose::context::{ResolvedBinaries, ResolvedContext};
 use hpc_compose::planner::ExecutionSpec;
 use hpc_compose::preflight::{Item, Level, Report};
-use hpc_compose::prepare::{
-    PrepareOptions, RuntimePlan, RuntimeService, build_runtime_plan, prepare_runtime_plan,
-};
+use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan};
+use hpc_compose::process_probe;
 use hpc_compose::readiness_util::{
     ReadinessProbeDescription, ReadinessProbeResult, describe_readiness_probe, run_readiness_probe,
 };
@@ -25,12 +25,14 @@ use hpc_compose::render::{
     RenderOptions, display_srun_command_for_backend, log_file_name_for_service,
     render_script_with_options,
 };
+use hpc_compose::runtime_plan::{RuntimePlan, RuntimeService, build_runtime_plan};
 use hpc_compose::spec::{MpiProfile, ServiceFailurePolicy, SlurmConfig};
 
 use crate::commands::load;
 use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description, resolved_rank_count};
 use crate::output;
-use crate::time_util::unix_timestamp_millis;
+
+static SMOKE_SCRIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn doctor(
     format: Option<OutputFormat>,
@@ -154,24 +156,17 @@ pub(crate) fn doctor_mpi_smoke(
                 enroot_temp_dir: context.enroot_temp_dir.clone(),
             },
         )?;
-        let (script_path, cleanup) = match wrote_script.clone() {
-            Some(path) => (path, false),
-            None => {
-                let path = temp_smoke_script_path("mpi");
-                write_script(&path, &script)?;
-                (path, true)
-            }
+        let script_file = match wrote_script.clone() {
+            Some(path) => SmokeScriptFile::Explicit(path),
+            None => SmokeScriptFile::temporary("mpi", &script)?,
         };
         let mut result = run_sbatch_wait(
             &context.binaries.sbatch.value,
-            &script_path,
+            script_file.path(),
             Duration::from_secs(timeout_seconds),
         )?;
         result.service_log =
             read_smoke_service_log(&context.cwd, &result.stdout, service.name.as_str())?;
-        if cleanup {
-            let _ = fs::remove_file(&script_path);
-        }
         Some(result)
     } else {
         None
@@ -378,17 +373,13 @@ pub(crate) fn doctor_fabric_smoke(
                 enroot_temp_dir: context.enroot_temp_dir.clone(),
             },
         )?;
-        let (script_path, cleanup) = match wrote_script.clone() {
-            Some(path) => (path, false),
-            None => {
-                let path = temp_smoke_script_path("fabric");
-                write_script(&path, &script)?;
-                (path, true)
-            }
+        let script_file = match wrote_script.clone() {
+            Some(path) => SmokeScriptFile::Explicit(path),
+            None => SmokeScriptFile::temporary("fabric", &script)?,
         };
         let mut result = run_sbatch_wait(
             &context.binaries.sbatch.value,
-            &script_path,
+            script_file.path(),
             Duration::from_secs(timeout_seconds),
         )?;
         result.service_log =
@@ -398,9 +389,6 @@ pub(crate) fn doctor_fabric_smoke(
             .as_deref()
             .map(parse_smoke_check_records)
             .unwrap_or_default();
-        if cleanup {
-            let _ = fs::remove_file(&script_path);
-        }
         Some(result)
     } else {
         None
@@ -1535,15 +1523,62 @@ fn write_script(path: &Path, script: &str) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::write(path, script).with_context(|| format!("failed to write {}", path.display()))
+    crate::secure_io::write_atomic(path, script, true)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
-fn temp_smoke_script_path(kind: &str) -> PathBuf {
-    env::temp_dir().join(format!(
-        "hpc-compose-{kind}-smoke-{}-{}.sbatch",
-        std::process::id(),
-        unix_timestamp_millis()
-    ))
+enum SmokeScriptFile {
+    Explicit(PathBuf),
+    Temporary(PathBuf),
+}
+
+impl SmokeScriptFile {
+    fn temporary(kind: &str, script: &str) -> Result<Self> {
+        let temp_dir = env::temp_dir();
+        let mut last_collision = None;
+        for _ in 0..16 {
+            let counter = SMOKE_SCRIPT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let path = temp_dir.join(format!(
+                "hpc-compose-{kind}-smoke-{}-{nanos}-{counter}.sbatch",
+                std::process::id()
+            ));
+            match crate::secure_io::write_exclusive(&path, script, true) {
+                Ok(()) => return Ok(Self::Temporary(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_collision = Some(error);
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to write {}", path.display()));
+                }
+            }
+        }
+        Err(last_collision.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "could not create a unique temporary smoke script",
+            )
+        }))
+        .context("failed to create a temporary smoke script")
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::Explicit(path) | Self::Temporary(path) => path,
+        }
+    }
+}
+
+impl Drop for SmokeScriptFile {
+    fn drop(&mut self) {
+        if let Self::Temporary(path) = self {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn run_sbatch_wait(
@@ -1750,7 +1785,7 @@ fn check_optional_runtime(items: &mut Vec<Item>, name: &str, runtime_bin: &str) 
 }
 
 fn check_pyxis(items: &mut Vec<Item>, srun_bin: &str) {
-    match Command::new(srun_bin).arg("--help").output() {
+    match process_probe::capture(srun_bin, &["--help"], "srun") {
         Ok(output) => {
             let text = String::from_utf8_lossy(&output.stdout).to_string()
                 + &String::from_utf8_lossy(&output.stderr);
@@ -1779,7 +1814,7 @@ fn check_pyxis(items: &mut Vec<Item>, srun_bin: &str) {
 }
 
 fn check_gpu(items: &mut Vec<Item>) {
-    let output = Command::new("nvidia-smi").arg("-L").output();
+    let output = process_probe::capture("nvidia-smi", &["-L"], "nvidia-smi");
     match output {
         Ok(out) if out.status.success() => {
             let count = String::from_utf8_lossy(&out.stdout)
@@ -1874,7 +1909,7 @@ fn check_completions(items: &mut Vec<Item>) {
 }
 
 fn run_capture(bin: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(bin).args(args).output().ok()?;
+    let output = process_probe::capture(bin, args, bin).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2298,6 +2333,12 @@ x-slurm:
             false,
         )
         .expect("doctor mpi smoke");
+        let mode = fs::metadata(&script_out)
+            .expect("script metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "explicit smoke scripts may contain secrets");
         let script = fs::read_to_string(script_out).expect("script");
         assert!(script.contains("expected_ranks=2"));
         assert!(script.contains("--mpi=pmix"));
@@ -2305,5 +2346,29 @@ x-slurm:
         assert!(script.contains("/opt/mpi:/opt/mpi"));
         assert!(script.contains("LD_LIBRARY_PATH"));
         assert!(script.contains("mpi4py allreduce smoke"));
+    }
+
+    #[test]
+    fn temporary_smoke_script_is_private_and_cleans_up_on_early_error() {
+        fn create_then_fail(created_path: &mut Option<PathBuf>) -> Result<()> {
+            let script = SmokeScriptFile::temporary("cleanup-test", "#!/bin/sh\nsecret\n")?;
+            *created_path = Some(script.path().to_path_buf());
+            let mode = fs::metadata(script.path())
+                .expect("temporary script metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "temporary smoke scripts must be owner-only");
+            bail!("simulated submission failure")
+        }
+
+        let mut created_path = None;
+        let error = create_then_fail(&mut created_path).expect_err("failure must propagate");
+        assert!(error.to_string().contains("simulated submission failure"));
+        let created_path = created_path.expect("temporary path recorded");
+        assert!(
+            !created_path.exists(),
+            "temporary script guard must clean up during error unwinding"
+        );
     }
 }
