@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::Result;
 use hpc_compose::context::ResourceProfile;
 use hpc_compose::planner::{Plan, PlanOptions, build_plan_with_options};
-use hpc_compose::prepare::{RuntimePlan, build_runtime_plan};
+use hpc_compose::runtime_plan::{RuntimePlan, build_runtime_plan};
 use hpc_compose::spec::{ComposeSpec, EffectiveComposeConfig};
 
 #[cfg(test)]

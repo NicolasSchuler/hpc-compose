@@ -10,7 +10,7 @@ use super::scheduler::{
 use super::stats::SlurmSampleRow;
 use super::*;
 use crate::planner::{ExecutionSpec, ImageSource, ServicePlacement};
-use crate::prepare::RuntimeService;
+use crate::runtime_plan::RuntimeService;
 use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig};
 
 fn runtime_plan(tmpdir: &Path) -> RuntimePlan {

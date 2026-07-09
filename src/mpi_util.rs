@@ -1,6 +1,6 @@
 //! Shared MPI planning and diagnostic helpers.
 
-use crate::prepare::RuntimeService;
+use crate::runtime_plan::RuntimeService;
 use crate::spec::MpiProfile;
 
 pub(crate) fn preferred_mpi_type_description(profile: MpiProfile) -> &'static str {

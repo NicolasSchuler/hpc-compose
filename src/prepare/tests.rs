@@ -3,8 +3,14 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
-use crate::planner::{ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement};
-use crate::spec::{ServiceFailurePolicy, SlurmConfig};
+use crate::planner::{
+    ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement,
+};
+use crate::runtime_plan::{image_label, prepared_image_cache_key_from_plan};
+use crate::spec::{
+    ReadinessSpec, RuntimeConfig, ServiceDependency, ServiceFailurePolicy, ServiceSlurmConfig,
+    SlurmConfig,
+};
 use crate::test_support::env_lock;
 
 fn fake_service(tmpdir: &Path) -> RuntimeService {
@@ -530,7 +536,10 @@ fn helper_defaults_and_paths_cover_remaining_prepare_helpers() {
     };
     assert_eq!(base_image_cache_key(&service).len(), 64);
     assert!(temporary_rootfs_name(&service).starts_with("hpc-compose-svc_name-"));
-    assert_eq!(short_hash("1234567890abcdef1234"), "1234567890abcdef");
+    assert_eq!(
+        crate::domain::short_digest_prefix("1234567890abcdef1234"),
+        "1234567890abcdef"
+    );
     assert_eq!(sanitize_name("svc/name"), "svc_name");
     assert_eq!(image_label(&service.source), "local-image");
     let temp = cache_dir.join("enroot/tmp");

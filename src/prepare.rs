@@ -1,4 +1,4 @@
-//! Runtime artifact preparation and runtime-plan derivation.
+//! Runtime artifact preparation, with compatibility re-exports for runtime plans.
 
 use std::collections::HashSet;
 use std::fs;
@@ -13,45 +13,14 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::cache::{touch_manifest, upsert_base_manifest, upsert_prepared_manifest};
-use crate::domain::{artifact_cache_key, short_digest_prefix};
-use crate::planner::{
-    ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement,
-};
-use crate::spec::{
-    ReadinessSpec, RuntimeBackend, RuntimeConfig, ServiceAssertSpec, ServiceDependency,
-    ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
-};
+use crate::planner::{ImageSource, PreparedImageSpec};
+use crate::runtime_plan::{base_image_cache_key, prepared_image_cache_key};
+use crate::spec::RuntimeBackend;
 
-/// A plan with concrete runtime image paths for every service.
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct RuntimePlan {
-    pub name: String,
-    pub cache_dir: PathBuf,
-    pub runtime: RuntimeConfig,
-    pub slurm: SlurmConfig,
-    pub ordered_services: Vec<RuntimeService>,
-}
-
-/// A runtime-ready service entry with resolved image artifact paths.
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct RuntimeService {
-    pub name: String,
-    pub runtime_image: PathBuf,
-    pub execution: ExecutionSpec,
-    pub environment: Vec<(String, String)>,
-    pub volumes: Vec<String>,
-    pub working_dir: Option<String>,
-    pub depends_on: Vec<ServiceDependency>,
-    pub readiness: Option<ReadinessSpec>,
-    pub assertions: Option<ServiceAssertSpec>,
-    pub failure_policy: ServiceFailurePolicy,
-    pub placement: ServicePlacement,
-    pub slurm: ServiceSlurmConfig,
-    pub prepare: Option<PreparedImageSpec>,
-    pub source: ImageSource,
-}
+pub use crate::runtime_plan::{
+    RuntimePlan, RuntimeService, base_image_path, base_image_path_for_backend,
+    base_image_path_from_source, build_runtime_plan,
+};
 
 /// Options that control image import and prepare behavior.
 #[allow(missing_docs)]
@@ -325,36 +294,6 @@ pub struct ServicePrepareResult {
 #[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
 pub struct PrepareSummary {
     pub services: Vec<ServicePrepareResult>,
-}
-
-/// Converts a normalized [`Plan`] into a runtime plan with cache artifact paths.
-pub fn build_runtime_plan(plan: &Plan) -> RuntimePlan {
-    RuntimePlan {
-        name: plan.name.clone(),
-        cache_dir: plan.cache_dir.clone(),
-        runtime: plan.runtime.clone(),
-        slurm: plan.slurm.clone(),
-        ordered_services: plan
-            .ordered_services
-            .iter()
-            .map(|service| RuntimeService {
-                name: service.name.clone(),
-                runtime_image: runtime_image_path(plan, service),
-                execution: service.execution.clone(),
-                environment: service.environment.clone(),
-                volumes: service.volumes.clone(),
-                working_dir: service.working_dir.clone(),
-                depends_on: service.depends_on.clone(),
-                readiness: service.readiness.clone(),
-                assertions: service.assertions.clone(),
-                failure_policy: service.failure_policy.clone(),
-                placement: service.placement.clone(),
-                slurm: service.slurm.clone(),
-                prepare: service.prepare.clone(),
-                source: service.image.clone(),
-            })
-            .collect(),
-    }
 }
 
 /// Imports and prepares any missing runtime artifacts for the given plan.
@@ -1187,128 +1126,6 @@ fn sif_runtime_bin(backend: RuntimeBackend, options: &PrepareOptions) -> &str {
     }
 }
 
-/// Returns the cache location used for a service's imported base image.
-#[must_use]
-pub fn base_image_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf {
-    base_image_path_from_source_for_backend(cache_dir, &service.source, RuntimeBackend::Pyxis)
-}
-
-/// Returns the cache location used for a service's imported base image under a
-/// specific runtime backend.
-#[must_use]
-pub fn base_image_path_for_backend(
-    cache_dir: &Path,
-    service: &RuntimeService,
-    backend: RuntimeBackend,
-) -> PathBuf {
-    base_image_path_from_source_for_backend(cache_dir, &service.source, backend)
-}
-
-/// Returns the cache location for a base image given its source reference.
-#[must_use]
-pub fn base_image_path_from_source(cache_dir: &Path, source: &ImageSource) -> PathBuf {
-    base_image_path_from_source_for_backend(cache_dir, source, RuntimeBackend::Pyxis)
-}
-
-fn base_image_path_from_source_for_backend(
-    cache_dir: &Path,
-    source: &ImageSource,
-    backend: RuntimeBackend,
-) -> PathBuf {
-    let key = base_image_cache_key_from_source(source);
-    let extension = image_artifact_extension(source, backend);
-    cache_dir.join("base").join(format!(
-        "{}-{}.{}",
-        short_hash(&key),
-        sanitize_name(&image_label(source)),
-        extension
-    ))
-}
-
-fn runtime_image_path(plan: &Plan, service: &PlannedService) -> PathBuf {
-    let extension = image_artifact_extension(&service.image, plan.runtime.backend);
-    match (&service.image, &service.prepare) {
-        (ImageSource::LocalSqsh(path), None) => path.clone(),
-        (ImageSource::LocalSif(path), None) => path.clone(),
-        (ImageSource::Host, _) => PathBuf::new(),
-        (ImageSource::Remote(_), None) => base_image_path_from_source_for_backend(
-            &plan.cache_dir,
-            &service.image,
-            plan.runtime.backend,
-        ),
-        (_, Some(prepare)) => plan.cache_dir.join("prepared").join(format!(
-            "{}-{}.{}",
-            short_hash(&prepared_image_cache_key_from_plan(
-                service,
-                prepare,
-                plan.runtime.backend
-            )),
-            sanitize_name(&service.name),
-            extension
-        )),
-    }
-}
-
-fn prepared_image_cache_key_from_plan(
-    service: &PlannedService,
-    prepare: &PreparedImageSpec,
-    backend: RuntimeBackend,
-) -> String {
-    let mut parts = vec![
-        "prepared".to_string(),
-        env!("CARGO_PKG_VERSION").to_string(),
-        backend.as_str().to_string(),
-    ];
-    match &service.image {
-        ImageSource::LocalSqsh(path) => parts.push(path.to_string_lossy().into_owned()),
-        ImageSource::LocalSif(path) => parts.push(path.to_string_lossy().into_owned()),
-        ImageSource::Remote(remote) => parts.push(remote.clone()),
-        ImageSource::Host => parts.push("host".to_string()),
-    }
-    parts.extend(prepare.commands.iter().cloned());
-    parts.extend(prepare.mounts.iter().cloned());
-    parts.extend(prepare.env.iter().map(|(k, v)| format!("{k}={v}")));
-    parts.push(format!("root={}", prepare.root));
-    cache_key(&parts.iter().map(String::as_str).collect::<Vec<_>>())
-}
-
-fn prepared_image_cache_key(
-    service: &RuntimeService,
-    prepare: &PreparedImageSpec,
-    backend: RuntimeBackend,
-) -> String {
-    let mut parts = vec![
-        "prepared".to_string(),
-        env!("CARGO_PKG_VERSION").to_string(),
-        backend.as_str().to_string(),
-    ];
-    match &service.source {
-        ImageSource::LocalSqsh(path) => parts.push(path.to_string_lossy().into_owned()),
-        ImageSource::LocalSif(path) => parts.push(path.to_string_lossy().into_owned()),
-        ImageSource::Remote(remote) => parts.push(remote.clone()),
-        ImageSource::Host => parts.push("host".to_string()),
-    }
-    parts.extend(prepare.commands.iter().cloned());
-    parts.extend(prepare.mounts.iter().cloned());
-    parts.extend(prepare.env.iter().map(|(k, v)| format!("{k}={v}")));
-    parts.push(format!("root={}", prepare.root));
-    cache_key(&parts.iter().map(String::as_str).collect::<Vec<_>>())
-}
-
-fn base_image_cache_key(service: &RuntimeService) -> String {
-    base_image_cache_key_from_source(&service.source)
-}
-
-fn base_image_cache_key_from_source(source: &ImageSource) -> String {
-    let image_key = match source {
-        ImageSource::LocalSqsh(path) => path.to_string_lossy().into_owned(),
-        ImageSource::LocalSif(path) => path.to_string_lossy().into_owned(),
-        ImageSource::Remote(remote) => remote.clone(),
-        ImageSource::Host => "host".to_string(),
-    };
-    cache_key(&["base", image_key.as_str(), env!("CARGO_PKG_VERSION")])
-}
-
 fn temporary_rootfs_name(service: &RuntimeService) -> String {
     // Collision-resistant across concurrent prepares of the same service: a
     // whole-second timestamp alone let two processes derive the same name and
@@ -1336,14 +1153,6 @@ fn temporary_sandbox_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf
         .join(format!("{}.sandbox", temporary_rootfs_name(service)))
 }
 
-fn cache_key(parts: &[&str]) -> String {
-    artifact_cache_key(parts)
-}
-
-fn short_hash(hash: &str) -> &str {
-    short_digest_prefix(hash)
-}
-
 fn sanitize_name(value: &str) -> String {
     value
         .chars()
@@ -1355,37 +1164,6 @@ fn sanitize_name(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn image_label(source: &ImageSource) -> String {
-    match source {
-        ImageSource::LocalSqsh(path) => path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("local-image")
-            .to_string(),
-        ImageSource::LocalSif(path) => path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("local-image")
-            .to_string(),
-        ImageSource::Remote(remote) => remote
-            .rsplit('/')
-            .next()
-            .unwrap_or(remote.as_str())
-            .replace(':', "-"),
-        ImageSource::Host => "host".to_string(),
-    }
-}
-
-fn image_artifact_extension(source: &ImageSource, backend: RuntimeBackend) -> &'static str {
-    match source {
-        ImageSource::LocalSif(_) => "sif",
-        ImageSource::Remote(_) if backend.uses_sif() => "sif",
-        ImageSource::Remote(_) => "sqsh",
-        ImageSource::LocalSqsh(_) => "sqsh",
-        ImageSource::Host => "host",
-    }
 }
 
 fn create_cache_dirs(plan: &RuntimePlan) -> Result<()> {
@@ -1574,22 +1352,9 @@ fn ensure_dir(path: &Path) -> Result<()> {
 /// Returns an error when the provided binary path does not exist or the named
 /// binary cannot be found on the current `PATH`.
 pub fn ensure_binary_available(binary: &str, message: &str) -> Result<()> {
-    if binary.contains(std::path::MAIN_SEPARATOR) {
-        let path = Path::new(binary);
-        if path.exists() {
-            return Ok(());
-        }
-        bail!("{message}");
-    }
-
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(binary);
-        if candidate.exists() {
-            return Ok(());
-        }
-    }
-    bail!("{message}");
+    crate::process_probe::resolve_executable(binary)
+        .map(|_| ())
+        .map_err(|_| anyhow::anyhow!(message.to_string()))
 }
 
 #[cfg(test)]

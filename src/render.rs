@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::cluster::ClusterProfile;
 use crate::planner::{ExecutionSpec, ServicePlacementMode};
-use crate::prepare::{RuntimePlan, RuntimeService};
+use crate::runtime_plan::{RuntimePlan, RuntimeService};
 use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
     RendezvousRegisterConfig, RuntimeBackend, RuntimeCacheCleanupPolicy, RuntimeGpuPolicy,

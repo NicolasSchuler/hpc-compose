@@ -612,7 +612,7 @@ mod tests {
     use super::*;
     use crate::init::resolve_template;
     use crate::planner::{ServicePlacementMode, build_plan};
-    use crate::prepare::build_runtime_plan;
+    use crate::runtime_plan::build_runtime_plan;
     use crate::spec::{ComposeSpec, DependencyCondition, ServiceFailureMode};
 
     fn rendered_step(id: &str) -> String {

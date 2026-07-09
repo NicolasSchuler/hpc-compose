@@ -16,8 +16,9 @@ use crate::planner::{
     ExecutionSpec, ImageSource, cache_path_policy_issue, registry_host_for_remote,
     runtime_root_policy_issue,
 };
-use crate::prepare::RuntimePlan;
+use crate::process_probe;
 use crate::readiness_util::readiness_uses_implicit_localhost;
+use crate::runtime_plan::RuntimePlan;
 use crate::spec::{MetricsCollector, MpiProfile, ReadinessSpec, RuntimeBackend, ScratchScope};
 use crate::term;
 
@@ -494,7 +495,10 @@ fn execution_text(execution: &ExecutionSpec) -> String {
     }
 }
 
-fn service_has_any_env_prefix(service: &crate::prepare::RuntimeService, prefixes: &[&str]) -> bool {
+fn service_has_any_env_prefix(
+    service: &crate::runtime_plan::RuntimeService,
+    prefixes: &[&str],
+) -> bool {
     service.environment.iter().any(|(name, _)| {
         prefixes
             .iter()
@@ -503,7 +507,7 @@ fn service_has_any_env_prefix(service: &crate::prepare::RuntimeService, prefixes
 }
 
 fn service_env_value<'a>(
-    service: &'a crate::prepare::RuntimeService,
+    service: &'a crate::runtime_plan::RuntimeService,
     key: &str,
 ) -> Option<&'a str> {
     service
@@ -556,7 +560,7 @@ fn check_optional_binary(
 }
 
 fn check_pyxis_support(report: &mut Report, srun_bin: &str) {
-    match Command::new(srun_bin).arg("--help").output() {
+    match process_probe::capture(srun_bin, &["--help"], "srun") {
         Ok(output) => {
             let text = String::from_utf8_lossy(&output.stdout).to_string()
                 + &String::from_utf8_lossy(&output.stderr);
@@ -605,7 +609,7 @@ fn check_mpi_support(
         return;
     }
 
-    let output = match Command::new(srun_bin).arg("--mpi=list").output() {
+    let output = match process_probe::capture(srun_bin, &["--mpi=list"], "srun") {
         Ok(output) => output,
         Err(err) => {
             report.items.push(Item {
@@ -732,7 +736,7 @@ fn profile_mpi_type_remediation(profile: MpiProfile) -> &'static str {
     }
 }
 
-fn service_env_has(service: &crate::prepare::RuntimeService, key: &str) -> bool {
+fn service_env_has(service: &crate::runtime_plan::RuntimeService, key: &str) -> bool {
     service.environment.iter().any(|(name, _)| name == key)
 }
 
@@ -1810,14 +1814,7 @@ fn host_path_from_mount(mount: &str) -> &str {
 }
 
 fn find_binary(binary: &str) -> Option<PathBuf> {
-    if binary.contains(std::path::MAIN_SEPARATOR) {
-        let path = PathBuf::from(binary);
-        return path.exists().then_some(path);
-    }
-    let path_var = env::var_os("PATH")?;
-    env::split_paths(&path_var)
-        .map(|dir| dir.join(binary))
-        .find(|path| path.exists())
+    process_probe::resolve_executable(binary).ok()
 }
 
 fn registry_for_remote(remote: &str) -> String {
@@ -1901,7 +1898,7 @@ mod tests {
     use crate::planner::{
         ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement, ServicePlacementMode,
     };
-    use crate::prepare::RuntimeService;
+    use crate::runtime_plan::RuntimeService;
     use crate::spec::{
         MetricsCollector, MetricsConfig, MpiConfig, MpiProfile, MpiType, ReadinessSpec,
         ResumeConfig, ScratchConfig, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,

@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use hpc_compose::prepare::{ArtifactAction, PrepareReporter, PrepareSummary, RuntimePlan};
+use hpc_compose::prepare::{ArtifactAction, PrepareReporter, PrepareSummary};
+use hpc_compose::runtime_plan::RuntimePlan;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::term;

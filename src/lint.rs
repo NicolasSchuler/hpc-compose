@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::cluster::ClusterProfile;
 use crate::domain::{MountParts, split_mount_parts};
 use crate::planner::{ImageSource, Plan, cache_path_policy_issue};
-use crate::prepare::RuntimePlan;
+use crate::runtime_plan::RuntimePlan;
 use crate::spec::{DependencyCondition, ScratchScope, ServiceFailureMode, parse_memory_bytes};
 
 const LOW_MEMORY_PER_CPU_BYTES: u64 = 512 * 1_024 * 1_024;
@@ -539,7 +539,7 @@ fn path_is_under(path: &str, root: &str) -> bool {
     path == root || path.starts_with(root)
 }
 
-fn service_scratch_enabled(service: &crate::prepare::RuntimeService) -> bool {
+fn service_scratch_enabled(service: &crate::runtime_plan::RuntimeService) -> bool {
     service
         .slurm
         .scratch
@@ -582,7 +582,7 @@ mod tests {
     fn hpc007_lint_emits_warning_only_for_mutable_images() {
         use std::path::PathBuf;
 
-        use crate::prepare::{RuntimePlan, RuntimeService};
+        use crate::runtime_plan::{RuntimePlan, RuntimeService};
         use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig};
 
         fn service(name: &str, source: ImageSource) -> RuntimeService {

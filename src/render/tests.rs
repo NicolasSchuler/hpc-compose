@@ -3586,7 +3586,7 @@ fn render_from_spec(global: SlurmConfig, services: BTreeMap<String, ServiceSpec>
         crate::planner::PlanOptions::default(),
     )
     .expect("plan");
-    let runtime = crate::prepare::build_runtime_plan(&plan);
+    let runtime = crate::runtime_plan::build_runtime_plan(&plan);
     render_script(&runtime).expect("script")
 }
 

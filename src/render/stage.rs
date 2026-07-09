@@ -1,6 +1,6 @@
 use super::bash_array_literal;
 use crate::cache::dataset::{HfArtifactRef, render_hf_stage_command, staged_input_dir};
-use crate::prepare::RuntimePlan;
+use crate::runtime_plan::RuntimePlan;
 use crate::spec::{StageInConfig, StageMode, StageOutWhen};
 
 /// Whether any stage-in entry stages a `hf://` HuggingFace source.

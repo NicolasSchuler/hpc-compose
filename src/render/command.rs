@@ -2,7 +2,7 @@ use super::{
     DIST_ENV_NAMES, DIST_SLURM_RANK_ENV_NAMES, distributed_helpers_enabled, service_step_name,
 };
 use crate::planner::ExecutionSpec;
-use crate::prepare::RuntimeService;
+use crate::runtime_plan::RuntimeService;
 use crate::spec::RuntimeBackend;
 
 /// Converts an [`ExecutionSpec`] into the argv used inside the container.

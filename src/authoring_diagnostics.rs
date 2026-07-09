@@ -15,7 +15,7 @@ use crate::cluster::{discover_cluster_profile_path, load_cluster_profile};
 use crate::context::{ResolveRequest, resolve_with_compose_text};
 use crate::lint::{LintLevel, lint_plan};
 use crate::planner::{PlanOptions, build_plan_with_options};
-use crate::prepare::build_runtime_plan;
+use crate::runtime_plan::build_runtime_plan;
 use crate::spec::{ComposeSpec, missing_defaulted_variables_from_str};
 use crate::spec_error::SpecError;
 

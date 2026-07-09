@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use super::{RenderOptions, render_script_with_options, shell_quote};
-use crate::prepare::RuntimePlan;
+use crate::runtime_plan::RuntimePlan;
 use crate::tracked_paths;
 
 /// Local launcher render options.

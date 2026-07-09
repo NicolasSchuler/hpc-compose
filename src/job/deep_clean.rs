@@ -338,7 +338,7 @@ mod tests {
         let compose = write_compose(root.path(), cache.path());
         let spec = crate::spec::ComposeSpec::load(&compose).expect("load spec");
         let plan = crate::planner::build_plan(&compose, spec).expect("build plan");
-        let runtime_plan = crate::prepare::build_runtime_plan(&plan);
+        let runtime_plan = crate::runtime_plan::build_runtime_plan(&plan);
         let record = build_submission_record(
             &compose,
             root.path(),
@@ -389,7 +389,7 @@ mod tests {
         let second_spec = crate::spec::ComposeSpec::load(&second_compose).expect("load spec");
         let second_plan =
             crate::planner::build_plan(&second_compose, second_spec).expect("build plan");
-        let runtime_plan = crate::prepare::build_runtime_plan(&second_plan);
+        let runtime_plan = crate::runtime_plan::build_runtime_plan(&second_plan);
         let record = build_submission_record(
             &second_compose,
             &second,

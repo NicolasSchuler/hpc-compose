@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hpc_compose::context::ValueSource;
 use hpc_compose::planner::ExecutionSpec;
-use hpc_compose::prepare::RuntimePlan;
+use hpc_compose::runtime_plan::RuntimePlan;
 use serde::Serialize;
 
 /// Substrings (case-insensitive) that mark an environment name as sensitive

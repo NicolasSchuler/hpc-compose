@@ -756,7 +756,7 @@ fn doctor_cluster_report_writes_profile_from_profile_binary_overrides() {
     fs::create_dir_all(&home).expect("home");
 
     let enroot = tmpdir.path().join("enroot-custom");
-    fs::write(&enroot, "").expect("enroot marker");
+    write_script(&enroot, "#!/bin/sh\n");
     let sbatch = tmpdir.path().join("sbatch-custom");
     write_script(
         &sbatch,

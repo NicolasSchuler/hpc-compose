@@ -3,15 +3,15 @@ use super::runtime_state::{
     active_restart_failures_in_window, load_runtime_state, runtime_state_by_service,
 };
 use super::*;
+use crate::process_probe::{self, ProbeError, ProbeOptions};
 use crate::time_util::system_time_to_unix;
 use std::error::Error;
 use std::fmt;
-use std::process::{Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Output;
+use std::time::Duration;
 
 const DEFAULT_SCHEDULER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const SCHEDULER_COMMAND_TIMEOUT_ENV: &str = "HPC_COMPOSE_SCHEDULER_COMMAND_TIMEOUT_MS";
-const SCHEDULER_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug)]
 pub(crate) struct SchedulerCommandUnavailable {
@@ -78,78 +78,31 @@ pub(super) fn run_scheduler_command(
 fn run_scheduler_command_with_timeout(
     command: &mut Command,
     command_name: &str,
-    binary: &str,
+    _binary: &str,
     timeout: Duration,
 ) -> std::result::Result<Output, SchedulerCommandError> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|err| {
-        if command_unavailable_error(&err) {
-            SchedulerCommandError::Unavailable(SchedulerCommandUnavailable::new(
-                command_unavailable_detail(command_name, binary, &err),
-            ))
-        } else {
-            SchedulerCommandError::Io(err)
+    let output = process_probe::run(
+        command,
+        command_name,
+        ProbeOptions {
+            timeout,
+            ..ProbeOptions::default()
+        },
+    )
+    .map_err(|err| match err {
+        ProbeError::Unavailable { .. } | ProbeError::TimedOut { .. } => {
+            SchedulerCommandError::Unavailable(SchedulerCommandUnavailable::new(err.detail()))
         }
+        err @ ProbeError::OutputLimitExceeded { .. } => SchedulerCommandError::Io(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, err.detail()),
+        ),
+        ProbeError::Io(err) => SchedulerCommandError::Io(err),
     })?;
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_handle = stdout.map(read_pipe_thread);
-    let stderr_handle = stderr.map(read_pipe_thread);
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait().map_err(SchedulerCommandError::Io)? {
-            Some(status) => break status,
-            None if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = join_pipe(stdout_handle);
-                let _ = join_pipe(stderr_handle);
-                return Err(SchedulerCommandError::Unavailable(
-                    SchedulerCommandUnavailable::new(format!(
-                        "{command_name} timed out after {:.1}s at '{binary}'",
-                        timeout.as_secs_f64()
-                    )),
-                ));
-            }
-            None => std::thread::sleep(SCHEDULER_COMMAND_POLL_INTERVAL),
-        }
-    };
-
     Ok(Output {
-        status,
-        // A failed pipe read must not silently yield truncated output that then
-        // gets parsed into a confident-but-wrong scheduler state: route it through
-        // the same Io failure path the rest of this runner uses.
-        stdout: join_pipe(stdout_handle).map_err(SchedulerCommandError::Io)?,
-        stderr: join_pipe(stderr_handle).map_err(SchedulerCommandError::Io)?,
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
     })
-}
-
-fn read_pipe_thread(
-    mut pipe: impl Read + Send + 'static,
-) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        pipe.read_to_end(&mut bytes)?;
-        Ok(bytes)
-    })
-}
-
-fn join_pipe(
-    handle: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
-) -> std::io::Result<Vec<u8>> {
-    match handle {
-        Some(handle) => handle.join().unwrap_or_else(|_| {
-            Err(std::io::Error::other(
-                "scheduler output reader thread panicked",
-            ))
-        }),
-        None => Ok(Vec::new()),
-    }
 }
 
 /// Live walltime progress derived from a tracked job record and scheduler diagnostics.
@@ -1039,10 +992,7 @@ fn array_task_key(row: &ArrayTaskStatus) -> String {
 }
 
 pub(crate) fn command_unavailable_error(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-    )
+    process_probe::command_unavailable_error(err)
 }
 
 pub(crate) fn command_unavailable_detail(
@@ -1050,15 +1000,7 @@ pub(crate) fn command_unavailable_detail(
     binary: &str,
     err: &std::io::Error,
 ) -> String {
-    match err.kind() {
-        std::io::ErrorKind::NotFound => {
-            format!("{command_name} not available at '{binary}' ({err})")
-        }
-        std::io::ErrorKind::PermissionDenied => {
-            format!("{command_name} not executable at '{binary}' ({err})")
-        }
-        _ => format!("{command_name} unavailable at '{binary}' ({err})"),
-    }
+    process_probe::command_unavailable_detail(command_name, binary, err)
 }
 
 fn command_failure_detail(stdout: &[u8], stderr: &[u8]) -> String {

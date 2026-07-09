@@ -21,8 +21,8 @@
 //! use std::path::Path;
 //!
 //! use hpc_compose::planner::build_plan;
-//! use hpc_compose::prepare::build_runtime_plan;
 //! use hpc_compose::render::render_script;
+//! use hpc_compose::runtime_plan::build_runtime_plan;
 //! use hpc_compose::spec::ComposeSpec;
 //!
 //! let compose_path = Path::new("compose.yaml");
@@ -64,11 +64,13 @@ pub mod planner;
 pub(crate) mod platform;
 pub(crate) mod preflight;
 pub mod prepare;
+pub(crate) mod process_probe;
 pub(crate) mod progress;
 pub(crate) mod readiness_util;
 pub(crate) mod redaction;
 pub mod render;
 pub mod rendezvous;
+pub mod runtime_plan;
 pub(crate) mod schema;
 pub(crate) mod secure_io;
 pub(crate) mod shell_quote;

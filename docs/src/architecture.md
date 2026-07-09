@@ -1,6 +1,6 @@
 # Architecture for Contributors
 
-The library crate owns the core staged pipeline. The binary entrypoint delegates to command-family modules under `src/commands/`, while presentation lives under `src/output/`. Reusable planning, prepare, render, tracking, cache, context, and template logic stay in the library modules.
+The library crate owns the core staged pipeline. The binary entrypoint delegates to command-family modules under `src/commands/`, while presentation lives under `src/output/`. Reusable planning, runtime-plan derivation, prepare, render, tracking, cache, context, and template logic stay in the library modules.
 
 ## Module map
 
@@ -12,7 +12,8 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 - `context`: resolve `.hpc-compose/settings.toml`, profiles, env files, interpolation variables, and binary overrides
 - `cluster`: generate and apply best-effort cluster capability profiles from `doctor cluster-report`
 - `preflight`: check login-node prerequisites and cluster policy issues
-- `prepare`: import base images and rebuild prepared runtime artifacts
+- `runtime_plan`: derive the runtime-ready service model and deterministic cache artifact paths without performing I/O
+- `prepare`: import base images and rebuild prepared runtime artifacts described by a runtime plan
 - `render`: generate the final `sbatch` script and service launch commands
 - `job`: track submissions, logs, metrics, replay, status, and artifact export
 - `tracked_paths`: centralize the `.hpc-compose/` layout used by render and job tracking
@@ -32,7 +33,7 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 
 1. `ComposeSpec::load` parses YAML, resolves authoring `extends`, validates supported keys, interpolates variables, and applies semantic validation.
 2. `planner::build_plan` resolves paths, command shapes, dependencies, and prepare blocks into a normalized plan.
-3. `prepare::build_runtime_plan` computes concrete cache artifact locations.
+3. `runtime_plan::build_runtime_plan` computes concrete cache artifact locations. The former `prepare::*` paths for this model remain compatibility re-exports.
 4. `context` and optional cluster profiles provide resolved paths, binaries, env, and compatibility warnings.
 5. `authoring_diagnostics` can stop here for static editor/LSP feedback: it overlays the open root YAML buffer, builds a plan/runtime plan, and reports blocking errors or lint/cluster-profile warnings without prepare, render, Slurm, SSH, or network access.
 6. `preflight::run` checks cluster prerequisites before submission.

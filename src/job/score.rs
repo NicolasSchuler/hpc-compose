@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::prepare::RuntimePlan;
+use crate::runtime_plan::RuntimePlan;
 use crate::spec::{GIB, parse_memory_bytes, parse_slurm_time_limit};
 
 use super::accounting::{AccountingSnapshot, build_accounting_snapshot};

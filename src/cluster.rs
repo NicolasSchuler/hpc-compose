@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -12,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::context::ResolvedBinaries;
 use crate::diagnostics::{Item, Level, Report};
 use crate::mpi_util::advertised_mpi_types;
-use crate::prepare::RuntimePlan;
+use crate::process_probe;
+use crate::runtime_plan::RuntimePlan;
 use crate::spec::{
     MpiImplementation, MpiProfile, RuntimeBackend, ScratchScope, parse_slurm_time_limit,
 };
@@ -859,7 +859,7 @@ fn merge_scontrol_partitions(partitions: &mut Vec<PartitionProfile>, raw: &str) 
 }
 
 fn run_capture(bin: &str, args: &[&str], diagnostics: &mut Report) -> Option<String> {
-    match Command::new(bin).args(args).output() {
+    match process_probe::capture(bin, args, bin) {
         Ok(output) if output.status.success() => {
             diagnostics.items.push(Item {
                 level: Level::Ok,
@@ -927,7 +927,7 @@ fn is_slurm_command_version(program: &str) -> bool {
 }
 
 fn srun_has_pyxis(srun_bin: &str) -> bool {
-    let output = Command::new(srun_bin).arg("--help").output();
+    let output = process_probe::capture(srun_bin, &["--help"], "srun");
     let Ok(output) = output else {
         return false;
     };
@@ -937,12 +937,7 @@ fn srun_has_pyxis(srun_bin: &str) -> bool {
 }
 
 fn binary_available(binary: &str) -> bool {
-    if binary.contains(std::path::MAIN_SEPARATOR) {
-        return Path::new(binary).exists();
-    }
-    env::var_os("PATH")
-        .map(|path| env::split_paths(&path).any(|dir| dir.join(binary).exists()))
-        .unwrap_or(false)
+    process_probe::resolve_executable(binary).is_ok()
 }
 
 fn collect_mpi_installations(
@@ -1184,11 +1179,7 @@ fn best_lib_dir(root: &Path) -> Option<PathBuf> {
 }
 
 fn binary_path_in_path(binary: &str) -> Option<PathBuf> {
-    env::var_os("PATH").and_then(|path| {
-        env::split_paths(&path)
-            .map(|dir| dir.join(binary))
-            .find(|path| path.is_file())
-    })
+    process_probe::resolve_executable(binary).ok()
 }
 
 fn mpi_version_for_installation(
@@ -1219,7 +1210,8 @@ fn mpi_version_for_installation(
 }
 
 fn run_capture_quiet(command: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new(command).args(args).output().ok()?;
+    let output =
+        process_probe::capture(command.as_os_str(), args, &command.display().to_string()).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1411,7 +1403,7 @@ mod tests {
 
     use crate::context::{ResolvedValue, ValueSource};
     use crate::planner::{ExecutionSpec, ImageSource, ServicePlacement};
-    use crate::prepare::RuntimeService;
+    use crate::runtime_plan::RuntimeService;
     use crate::spec::{
         MpiConfig, MpiType, RuntimeConfig, ScratchConfig, ServiceFailurePolicy, ServiceSlurmConfig,
         SlurmConfig,
@@ -1658,7 +1650,7 @@ name = ""
     fn generate_cluster_profile_parses_fake_slurm_and_runtime_tools() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let enroot = tmpdir.path().join("enroot");
-        fs::write(&enroot, "").expect("enroot marker");
+        write_executable(&enroot, "#!/bin/sh\n");
         write_executable(
             &tmpdir.path().join("sbatch"),
             "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo 'slurm 24.05.1'; exit 0; fi\nexit 2\n",
@@ -1876,6 +1868,7 @@ name = ""
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let path = tmpdir.path().join("enroot");
         fs::write(&path, "").expect("marker");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
         assert!(binary_available(path.to_str().expect("path")));
         assert!(!binary_available(
             tmpdir.path().join("missing").to_str().expect("path")
