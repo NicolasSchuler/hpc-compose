@@ -13,8 +13,8 @@ runtime:
 
 | Backend | Launch shape | Required tools | Image/artifact shape | Notes |
 | --- | --- | --- | --- | --- |
-| `pyxis` | `srun --container-*` | Slurm with Pyxis support plus Enroot on the submission host | remote images or local `.sqsh` / `.squashfs` | Default path and the only backend supported by local development workflows. |
-| `apptainer` | `srun` plus `apptainer exec/run` | `apptainer` on submission and compute nodes | remote images prepared or reused as `.sif`; local `.sif` accepted | Use when the site standardizes on Apptainer instead of Pyxis. |
+| `pyxis` | `srun --container-*` | Slurm with Pyxis support plus Enroot on the submission host | remote images or local `.sqsh` / `.squashfs` | Default path; supported by Linux local mode. |
+| `apptainer` | `srun` plus `apptainer exec/run` | `apptainer` on submission and compute nodes | remote images prepared or reused as `.sif`; local `.sif` accepted | Use when the site standardizes on Apptainer instead of Pyxis; supported by Linux local mode. |
 | `singularity` | `srun` plus `singularity exec/run` | `singularity` on submission and compute nodes | remote images prepared or reused as `.sif`; local `.sif` accepted | Similar to Apptainer for sites that still use Singularity. |
 | `host` | direct `srun` command | Slurm client tools and host software/modules | no container image | Services must set `command` or `entrypoint`; image prepare and container bind mounts are not applied. |
 
@@ -68,14 +68,14 @@ services:
 `up --local`, `test --local`, `dev`, and `tmux` are intentionally narrow:
 
 - Linux only
-- `runtime.backend: pyxis` only
-- Pyxis-compatible Enroot tooling on the host
+- `runtime.backend: pyxis` or `runtime.backend: apptainer`
+- Pyxis-compatible Enroot tooling on the host for Pyxis, or `apptainer` for Apptainer
 - single-host specs only
 - no distributed or partitioned placement
 - no service-level MPI
 - no Slurm arrays or scheduler dependencies
 
-Use local mode to inspect and debug a Pyxis/Enroot single-host launch path. `dev` adds file-change restart requests to the local supervisor, and `tmux` tails tracked local service logs in panes. Neither command changes the process-supervision model, and local mode is not a replacement for Slurm distributed execution.
+Use local mode to inspect and debug a single-host Pyxis/Enroot or Apptainer launch path. `dev` adds file-change restart requests to the local supervisor, and `tmux` tails tracked local service logs in panes. Neither command changes the process-supervision model, and local mode is not a replacement for Slurm distributed execution. macOS is supported for authoring commands and the source-checkout dev-cluster smoke path, not for real local runtime execution.
 
 ## Host Runtime Notes
 

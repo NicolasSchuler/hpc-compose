@@ -77,14 +77,14 @@ Without `--job-id`, it launches a new local run. With `--job-id`, it attaches to
 `up --local`, `test --local`, `dev`, and `tmux` share the same current constraints:
 
 - Linux hosts only
-- `runtime.backend: pyxis` only
-- Pyxis-compatible Enroot tooling on the host
+- `runtime.backend: pyxis` or `runtime.backend: apptainer`
+- Pyxis-compatible Enroot tooling on the host for Pyxis, or `apptainer` for Apptainer
 - single-host specs only
 - no distributed or partitioned placement
 - no service-level MPI
 - no Slurm arrays or scheduler dependencies
 
-Use these commands to author and debug single-host launch behavior. Use `test --submit` or `up` on a Slurm login node for real scheduler behavior, or use the [Local Slurm Dev Cluster](local-slurm-dev-cluster.md) from a source checkout when you want a throwaway real `sbatch` smoke test without a cluster login.
+Use these commands to author and debug single-host launch behavior on Linux. Use `test --submit` or `up` on a Slurm login node for real scheduler behavior, or use `test --submit --dev-cluster` / the [Local Slurm Dev Cluster](local-slurm-dev-cluster.md) from a source checkout when you want a throwaway real `sbatch` smoke test without a cluster login. On macOS, local mode is authoring plus dev-cluster smoke only; real runtime execution still belongs on Linux.
 
 ## Example Recipe
 
@@ -100,6 +100,7 @@ The companion `examples/dev-python-smoke.yaml` keeps the same mounted source pat
 ```bash
 hpc-compose test --local -f examples/dev-python-smoke.yaml
 hpc-compose test --submit --time 00:01:00 -f examples/dev-python-smoke.yaml
+hpc-compose test --submit --dev-cluster -f dev-cluster/specs/_extra/test-pass.yaml
 ```
 
 ## Related Docs

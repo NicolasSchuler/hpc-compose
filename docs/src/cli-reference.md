@@ -8,9 +8,9 @@ Jump to the section that documents each command group:
 
 | Commands | Section |
 | --- | --- |
-| `new` / `init`, `examples`, `docs`, `evolve`, `setup`, `context`, `completions` | [Authoring and Setup](#authoring-and-setup) |
-| `--profile`, `--settings-file`, `setup`, `context`, `validate --strict-env`, `lint`, `schema` | [Settings-aware commands](#settings-aware-commands) |
-| `plan`, `validate`, `lint`, `config`, `schema`, `inspect`, `preflight`, `doctor`, `weather`, `prepare`, `render`, `up`, `test`, `dev`, `tmux`, `germinate`, `sweep`, `when`, `alloc`, `run`, `shell`, `notebook` | [Plan and Run](#plan-and-run) |
+| `new` / `init`, `examples`, `docs`, `evolve`, `setup`, `context`, `lsp`, `completions` | [Authoring and Setup](#authoring-and-setup) |
+| `--profile`, `--settings-file`, `setup`, `context`, `validate --strict-env`, `lint`, `lsp`, `schema` | [Settings-aware commands](#settings-aware-commands) |
+| `plan`, `validate`, `lint`, `lsp`, `config`, `schema`, `inspect`, `preflight`, `doctor`, `weather`, `prepare`, `render`, `up`, `test`, `dev`, `tmux`, `germinate`, `sweep`, `when`, `alloc`, `run`, `shell`, `notebook` | [Plan and Run](#plan-and-run) |
 | `lint` finding codes (`HPC001`-`HPC900`) | [Lint rules](#lint-rules) |
 | `debug`, `status`, `ps`, `watch`, `replay`, `checkpoints`, `logs`, `inspect --rightsize`, `stats`, `score`, `diff`, `artifacts`, `reach`, `pull`, `experiment`, `cancel`, `down`, `jobs`, `clean`, `rendezvous` | [Tracked Runtime](#tracked-runtime) |
 | `cache list`, `cache inspect`, `cache prune` | [Cache Maintenance](#cache-maintenance) |
@@ -75,6 +75,7 @@ and common practice.
 | `evolve` | Learn spec features through a progressive valid-spec tutorial | Use `--list-lessons`, `--describe-lesson <id>`, and `--until <step>` to inspect or stop at a lesson step. `--format json` requires `--yes`. |
 | `setup` | Create or update the project-local settings file | Records compose path, env files, env vars, binary overrides, and an optional profile cache default. |
 | `context` | Print the resolved execution context | Shows the selected profile, binaries, interpolation vars, runtime paths, and value sources. |
+| `lsp` | Run the diagnostics-only stdio Language Server | Static-safe semantic diagnostics for editor or agent authoring loops. It accepts full-document `file://` YAML buffers, reuses parser/validator/planner/lint semantics, and publishes `Diagnostic.data.field` plus `Diagnostic.data.recommendation`. |
 | `completions` | Generate shell completion scripts | Bash, Zsh, and Fish include live local values for service names, resource profiles, partitions/QOS, tracked job ids, sweep ids, tags, and artifact bundles. PowerShell and Elvish use static command/flag completions from Clap. |
 
 ```bash
@@ -99,6 +100,8 @@ hpc-compose setup
 hpc-compose setup --profile-name dev --cache-dir '<shared-cache-dir>' --default-profile dev --non-interactive
 hpc-compose context --format json
 hpc-compose context --show-values --format json
+hpc-compose lsp
+hpc-compose lsp --strict-env
 hpc-compose completions zsh
 ```
 
@@ -129,7 +132,20 @@ Use these commands and global flags when you want the project-local settings fil
 | `hpc-compose feedback` | Prepare a local feedback report | Prints version, OS/arch, build metadata, selected feedback kind, and a GitHub issue URL. It does not send telemetry, open a browser, contact GitHub, or perform a version ping. |
 | `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
 | `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. Auto-fixable findings can be applied with `--fix` (preview with `--fix --dry-run`). See [Lint rules](#lint-rules). |
-| `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` to print the `settings.toml` authoring schema. Rust validation remains the semantic source of truth. |
+| `hpc-compose lsp` | Serve semantic authoring diagnostics over stdio | Uses the same settings/profile resolution as static commands and diagnoses open editor buffers without saving first. Add `--strict-env` to match `validate --strict-env`. |
+| `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` to print the `settings.toml` authoring schema. Rust validation and `hpc-compose lsp` remain the semantic source of truth. |
+
+### `lsp` Agent Usage
+
+Agents can run `hpc-compose lsp` as a stdio JSON-RPC process. The transcript
+below omits `Content-Length` headers and most `initialize` fields for brevity:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
+{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///work/compose.yaml","languageId":"yaml","version":1,"text":"services:\n  app:\n    image: alpine:3.20\n    ports: []\n"}}}
+{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///work/compose.yaml","diagnostics":[{"source":"hpc-compose","code":"hpc_compose::spec::unsupported_key","message":"service 'app' uses unsupported key 'ports'","data":{"field":"services.app.ports","recommendation":"ports are not supported; use host-network semantics and explicit readiness checks"}}]}}
+{"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}
+```
 
 `RUST_LOG` is honored by the internal tracing subscriber and takes precedence over the default filters selected by `-v`/`--debug`. User-facing warnings are still written through hpc-compose's diagnostic notice channel; when a command writes machine-readable JSON to stdout, warnings on stderr are emitted as one JSON object per line using the checked-in `diagnostic-notice` output schema.
 
@@ -140,8 +156,9 @@ Use these commands and global flags when you want the project-local settings fil
 | `plan` | Validate and preview the static runtime plan | Recommended before every first run. `--show-script` prints the generated launcher to stdout without writing a file (add `--annotate` to interleave provenance comments mapping script lines back to spec fields); `--explain` adds actionable cache, resume, preflight, and next-command hints. |
 | `validate` | Check YAML shape and field validation | Add `--strict-env` when interpolation fallbacks should fail. |
 | `lint` | Run stricter opinionated static checks | Flags risky-but-valid specs such as weak dependency readiness, unusual memory/CPU ratios, ignored services that can write shared paths, node-local cache or volume paths, and implicit `depends_on` conditions. Warnings fail by default; add `--allow-warnings` to make warning-only results successful. Pass `--fix` to apply auto-fixable findings in place (preview with `--fix --dry-run`). |
+| `lsp` | Publish editor/agent diagnostics over stdio | Diagnostics-only Language Server. It advertises full-document text sync, handles open/change/save/close, and clears diagnostics when documents are valid or closed. No hover, completion, code actions, editor extension, Slurm, SSH, network, prepare, or render side effects. |
 | `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. `config --variables` reports only interpolation variables referenced by the compose file and redacts sensitive-looking names unless `--show-values` is passed. |
-| `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` for the `settings.toml` authoring schema. The compose schema is also published with the docs site for YAML Language Server and SchemaStore consumption. Rust validation remains the semantic source of truth. |
+| `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` for the `settings.toml` authoring schema. The compose schema is also published with the docs site for YAML Language Server and SchemaStore consumption. JSON Schema remains useful for shape and key completion; `hpc-compose lsp` provides real semantic diagnostics from Rust validation, planning, lint rules, and cluster-profile warnings. |
 | `inspect` | View the normalized runtime plan | `--verbose` shows resolved argv and final mount mappings with secret values redacted. Add `--dependencies` for a service DAG in text, DOT, or JSON form. |
 | `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. Add `--fs-probes` on a Slurm login node to submit a tiny active shared-filesystem probe. |
 | `doctor cluster-report` | Generate a best-effort cluster capability profile | Writes `.hpc-compose/cluster.toml` by default; use `--out -` to print the TOML profile. |
@@ -175,6 +192,8 @@ hpc-compose lint -f compose.yaml --allow-warnings
 hpc-compose lint -f compose.yaml --fix
 hpc-compose lint -f compose.yaml --fix --dry-run
 hpc-compose lint -f compose.yaml --format json
+hpc-compose lsp
+hpc-compose lsp --strict-env
 hpc-compose config -f compose.yaml
 hpc-compose config -f compose.yaml --variables
 hpc-compose schema > hpc-compose.schema.json
@@ -272,7 +291,7 @@ The checked-in schema is draft-07 JSON Schema and is published with the docs sit
 
 Useful workflow flags:
 
-- `--local` runs a Pyxis/Enroot plan on the current Linux host instead of calling `sbatch`.
+- `--local` runs a Pyxis/Enroot or Apptainer plan on the current Linux host instead of calling `sbatch`.
 - `--detach` submits or launches and returns after tracking metadata is written.
 - `--format text|json` is accepted with `--detach` or `--dry-run`.
 - `--watch-queue` waits in line-oriented queue output until the Slurm job reaches `RUNNING`, then opens the normal watch view.
@@ -441,7 +460,7 @@ There is no `x-when` YAML field. Conditional submission is intentionally a CLI w
 
 ### `up --local`
 
-`up --local` launches a Pyxis/Enroot plan on the current host instead of calling `sbatch`. It is useful for local authoring and script inspection, not for distributed Slurm execution.
+`up --local` launches a Pyxis/Enroot or Apptainer plan on the current Linux host instead of calling `sbatch`. It is useful for local authoring and script inspection, not for distributed Slurm execution.
 
 ```bash
 hpc-compose up --local --dry-run -f compose.yaml
@@ -457,7 +476,7 @@ path.
 Current constraints:
 
 - Linux hosts only
-- `runtime.backend: pyxis` only
+- `runtime.backend: pyxis` or `runtime.backend: apptainer`
 - single-host specs only
 - no distributed or partitioned placement
 - no `services.<name>.x-slurm.extra_srun_args`
@@ -469,7 +488,7 @@ Current constraints:
 
 `up --local` follows the tracked local launch immediately, just like `up` does for a submitted job. Add `--detach` when you want to launch and return.
 
-In local mode the batch script also exports `HPC_COMPOSE_BACKEND_OVERRIDE=local`, `HPC_COMPOSE_LOCAL_ENROOT_BIN` pointing to the resolved `enroot` binary, and `HPC_COMPOSE_LOCAL_BIN_DIR` containing a generated `srun` shim. These variables are internal to `hpc-compose` and not intended for direct use in compose specs.
+In local mode the batch script also exports `HPC_COMPOSE_BACKEND_OVERRIDE=local`, `HPC_COMPOSE_LOCAL_ENROOT_BIN` pointing to the resolved `enroot` binary for Pyxis launches, and `HPC_COMPOSE_LOCAL_BIN_DIR` containing a generated `srun` shim. These variables are internal to `hpc-compose` and not intended for direct use in compose specs.
 
 ### Development Workflow
 
@@ -480,6 +499,7 @@ In local mode the batch script also exports `HPC_COMPOSE_BACKEND_OVERRIDE=local`
 ```bash
 hpc-compose test --local -f compose.yaml
 hpc-compose test --submit --time 00:01:00 --timeout 180s -f compose.yaml
+hpc-compose test --submit --dev-cluster -f compose.yaml
 hpc-compose test --preemption --preemption-grace 10s -f compose.yaml
 hpc-compose test --submit --format json -f compose.yaml
 ```
@@ -494,6 +514,7 @@ Useful `test` options:
 | --- | --- |
 | `--local` | Run the finite smoke spec through the local supervisor. |
 | `--submit` | Submit the finite smoke spec to Slurm; required before any scheduler submission happens. |
+| `--dev-cluster` | With `--submit`, run the smoke test inside the checked-in local Slurm dev-cluster container. |
 | `--preemption` | Run the synthetic preemption drill through Slurm; it submits, signals, requeues, and verifies resume behavior. |
 | `--time <TIME>` | Override Slurm wall time for `--submit` and `--preemption`; defaults to `00:01:00`. |
 | `--timeout <DURATION>` | Stop waiting and best-effort cancel/cleanup after the timeout; defaults to `180s`. |

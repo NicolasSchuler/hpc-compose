@@ -83,7 +83,7 @@ Log lines are colored by inferred severity: lines mentioning `error`/`fatal`/`pa
 
 Use `--hold-on-exit never|failure|always` on `up` or `watch` to control whether the final TUI stays open after a terminal scheduler state. When the view is held, press `d`, `l`, or `s` to print the exact `debug`, `logs`, or `stats` command after leaving the alternate screen.
 
-The `r` restart action writes a request consumed by the local Pyxis/Enroot supervisor, the same mechanism `hpc-compose dev` uses for file-watch reloads; it applies to local supervised jobs and is reported as unavailable for Slurm batch jobs. Run `hpc-compose dev --tui` to get this live view during a dev session: file-watching keeps reloading changed services in the background while the watch UI (including `r` for an on-demand restart) runs in the foreground. Without `--tui`, `dev` keeps its line-oriented output, which is friendlier for CI and logs.
+The `r` restart action writes a request consumed by the local supervisor, the same mechanism `hpc-compose dev` uses for file-watch reloads; it applies to local supervised jobs and is reported as unavailable for Slurm batch jobs. Run `hpc-compose dev --tui` to get this live view during a dev session: file-watching keeps reloading changed services in the background while the watch UI (including `r` for an on-demand restart) runs in the foreground. Without `--tui`, `dev` keeps its line-oriented output, which is friendlier for CI and logs.
 
 The watch and replay views repaint only the rows that change between refreshes, which keeps the display flicker-free and minimizes bytes sent over SSH. Two environment variables tune the live view:
 

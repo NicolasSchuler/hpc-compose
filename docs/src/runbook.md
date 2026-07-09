@@ -248,7 +248,7 @@ Useful options:
 - `--resume-diff-only` prints resume-sensitive config diffs without launching.
 - `--allow-resume-changes` confirms intentional resume-coupled config drift.
 
-`up --local` is Linux + Pyxis-only and single-host. See [Runtime Backends](runtime-backends.md#local-mode).
+`up --local` is Linux-only, single-host, and limited to Pyxis/Enroot or Apptainer. See [Runtime Backends](runtime-backends.md#local-mode).
 
 Array jobs should be submitted with `up --detach`; use `SLURM_ARRAY_TASK_ID` in the service command and output patterns such as `%A_%a` for task-specific logs. Scheduler dependencies declared with `x-slurm.after_job` or `x-slurm.dependency` are passed to `sbatch --dependency=...` at submit time. Arrays and scheduler dependencies are not supported by `up --local`.
 

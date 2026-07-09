@@ -7,6 +7,8 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 - `spec`: parse, interpolate, and validate the supported Compose subset
 - `planner`: normalize the parsed spec into a deterministic plan
 - `lint`: run opinionated static checks over validated plans
+- `authoring_diagnostics`: diagnose one in-memory YAML document for editor and agent authoring loops
+- `lsp`: diagnostics-only stdio Language Server adapter over `authoring_diagnostics`
 - `context`: resolve `.hpc-compose/settings.toml`, profiles, env files, interpolation variables, and binary overrides
 - `cluster`: generate and apply best-effort cluster capability profiles from `doctor cluster-report`
 - `preflight`: check login-node prerequisites and cluster policy issues
@@ -32,11 +34,12 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 2. `planner::build_plan` resolves paths, command shapes, dependencies, and prepare blocks into a normalized plan.
 3. `prepare::build_runtime_plan` computes concrete cache artifact locations.
 4. `context` and optional cluster profiles provide resolved paths, binaries, env, and compatibility warnings.
-5. `preflight::run` checks cluster prerequisites before submission.
-6. `prepare::prepare_runtime_plan` imports or rebuilds artifacts when needed.
-7. `render::render_script` emits the batch script consumed by `sbatch`.
-8. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `ps`, `watch`, `replay`, `stats`, `logs`, `cancel`, and artifact export. `job::replay` reconstructs a best-effort timeline from existing state, service-exit, metrics, and log artifacts while reusing the watch renderer for playback.
-9. `commands/*` turns CLI variants into library calls, and `output` formats the final presentation.
+5. `authoring_diagnostics` can stop here for static editor/LSP feedback: it overlays the open root YAML buffer, builds a plan/runtime plan, and reports blocking errors or lint/cluster-profile warnings without prepare, render, Slurm, SSH, or network access.
+6. `preflight::run` checks cluster prerequisites before submission.
+7. `prepare::prepare_runtime_plan` imports or rebuilds artifacts when needed.
+8. `render::render_script` emits the batch script consumed by `sbatch`.
+9. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `ps`, `watch`, `replay`, `stats`, `logs`, `cancel`, and artifact export. `job::replay` reconstructs a best-effort timeline from existing state, service-exit, metrics, and log artifacts while reusing the watch renderer for playback.
+10. `commands/*` turns CLI variants into library calls, and `output` formats the final presentation.
 
 ## Tracked Runtime Layout
 

@@ -300,17 +300,20 @@ resumed attempt, and requires normal service assertions to pass.
 - **Effort:** M
 - **Builds on:** `test --local/--submit`, signal/resume/requeue, dev cluster.
 
-### 3.2 Resubmission policy (`x-slurm.retry`)
+### 3.2 ~~Resubmission policy (`x-slurm.retry`)~~ — dropped
 
-Requeue covers in-place scheduler requeues; add a declarative policy for
-*fresh resubmission* after terminal failures (exit-code allowlist,
-node-failure classes, max attempts, backoff), executed by a foreground
-babysitter in the `when`/`watch` mold — no daemon, staying true to
-no-control-plane.
+Dropped 2026-07-09 after roadmap review. Fresh resubmission after terminal
+failures would require hpc-compose to keep running as a foreground babysitter,
+spawn a detached controller, or install a cron/timer-style loop on the login
+node. The clusters this project targets can explicitly disallow long-running
+login-node processes, so the reliable version either violates the operating
+model or collapses back to Slurm-native `x-slurm.requeue`.
 
-- **Who:** long campaigns hit by transient NCCL/fabric flakes.
-- **Effort:** L
-- **Builds on:** `when` monitoring, tracked state, resume attempts.
+- **Decision:** not on the roadmap.
+- **Reason:** the feature needs a long-lived or periodically invoked controller
+  outside the Slurm job, which is not a safe default on managed login nodes.
+- **Replacement direction:** keep using `x-slurm.requeue`, `x-slurm.resume`,
+  `test --preemption`, and explicit user reruns from tracked state.
 
 ### 3.3 Cluster drift detection (`doctor cluster-report --diff`)
 
@@ -322,27 +325,32 @@ gone — and surface drift as a preflight warning instead of a mid-run mystery.
 - **Effort:** S–M
 - **Builds on:** `doctor cluster-report`, `preflight`.
 
-### 3.4 Failure classifier (`debug --classify`)
+### 3.4 ~~Failure classifier (`debug --classify`)~~ — dropped
 
-Encode the troubleshooting guide as a signature library over batch+service
-logs (CUDA OOM vs. host OOM, NCCL timeout, ESTALE, time-limit,
-readiness-never-met) emitting a typed diagnosis + next command, JSON for CI —
-`debug` already recommends next commands; this makes the mapping systematic
-and testable.
+Dropped 2026-07-09 after roadmap review: broad log classification is too
+application-dependent for the core CLI. Keep `debug` evidence-oriented
+(scheduler state, service state, log tails, and next-command hints), and let
+site- or application-specific classifiers live outside hpc-compose or behind
+explicit user-authored checks.
 
-- **Who:** new users; CI pipelines triaging red runs.
-- **Effort:** M
-- **Builds on:** `debug`, `logs --grep`, troubleshooting doc content.
+- **Decision:** not on the roadmap.
+- **Reason:** generic signatures would overfit a few workloads or emit vague
+  diagnoses that look more certain than the evidence supports.
+- **Replacement direction:** strengthen raw evidence, structured outputs, and
+  explicit checks rather than inferring arbitrary application failure modes.
 
 ### 3.5 Self-healing watch (`watch` action hints)
 
-When the classifier (3.4) fires during a live run, the TUI offers
-one-keystroke actions: "OOM detected — apply suggested mem patch and resubmit?
-(y/n)" — triage becomes interactive instead of archaeology.
+If this returns, it should consume explicit hpc-compose-owned findings
+(`status --verify`, watchdog observations, lint/right-sizing diagnostics) rather
+than infer application failures from arbitrary log text. The TUI could offer
+one-keystroke actions for those typed findings — triage becomes interactive
+without pretending that generic application classification is reliable.
 
 - **Who:** anyone babysitting a run.
-- **Effort:** M (after 3.4)
-- **Builds on:** watch TUI, lint patch application.
+- **Effort:** M
+- **Builds on:** watch TUI, lint patch application, explicit structured
+  diagnostics.
 
 ### 3.6 State reconciliation (`status --verify`)
 
@@ -662,13 +670,19 @@ worktree agents with adversarial review before PR.
 **Queued, in this order:**
 
 1. 4.9 Offline doc search (`hpc-compose docs <query>`)
-2. 3.4 Failure classifier (`debug --classify`)
+
+**Struck after review:**
+
+- 3.2 Resubmission policy (`x-slurm.retry`) — dropped because it requires a
+  long-lived or timer-style retry controller that does not fit managed
+  login-node constraints.
+- 3.4 Failure classifier (`debug --classify`) — dropped as too
+  application-dependent for the core CLI.
 
 **Second wave (after the 12 above):**
 
-13. 3.2 Resubmission policy (`x-slurm.retry`)
-14. 4.3 `hpc-compose lsp`
-15. 4.7 Local-mode backend parity
+13. 4.3 `hpc-compose lsp`
+14. 4.7 Local-mode backend parity
 
 **Additional items:**
 

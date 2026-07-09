@@ -16,7 +16,7 @@ Slurm node.
 | --- | --- | --- | --- |
 | Static authoring preview | `hpc-compose plan --show-script -f compose.yaml` | No | No |
 | Preflight, prepare, and render without submission | `hpc-compose up --dry-run -f compose.yaml` | No `sbatch` | Writes the rendered script |
-| Real local scheduler smoke test | `scripts/devcluster.sh run compose.yaml` | Local dev-cluster `sbatch` | Yes, inside the mounted project |
+| Real local scheduler smoke test | `scripts/devcluster.sh run compose.yaml` or `hpc-compose test --submit --dev-cluster -f compose.yaml` | Local dev-cluster `sbatch` | Yes, inside the mounted project |
 
 Use `plan` first for fast static feedback. Use `up --dry-run` when you want the
 same preflight and preparation path as submission but no `sbatch`. Use the dev
@@ -39,6 +39,7 @@ From the repository root:
 scripts/devcluster.sh up
 scripts/devcluster.sh sinfo
 scripts/devcluster.sh run dev-cluster/specs/hello.yaml
+hpc-compose test --submit --dev-cluster -f dev-cluster/specs/_extra/test-pass.yaml
 scripts/devcluster.sh down
 ```
 
@@ -47,8 +48,15 @@ To smoke-test another project tree with the same local Slurm node:
 ```bash
 scripts/devcluster.sh up --project /path/to/project
 scripts/devcluster.sh run compose.yaml
+hpc-compose test --submit --dev-cluster -f compose.smoke.yaml
 scripts/devcluster.sh down
 ```
+
+`test --submit --dev-cluster` is a source-checkout convenience wrapper: it starts
+the checked-in dev cluster with the current project mounted at `/workspace`, then
+runs `hpc-compose test --submit` inside the container. It is useful on macOS for
+a real local `sbatch` smoke test, but it does not make macOS a real runtime
+execution host.
 
 Specs run in the dev cluster should use `runtime.backend: host`. That keeps the
 local loop tractable and avoids nesting Pyxis/Enroot or Apptainer inside

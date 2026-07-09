@@ -74,7 +74,7 @@ stores credentials, so the OTP step stays entirely under your control.
 hpc-compose notebook --kind jupyter --local --volume ./src:/workspace
 ```
 
-Local mode requires a Linux host with Pyxis-compatible Enroot tooling, like the rest of the local-development command layer.
+Local mode requires a Linux host with Pyxis-compatible Enroot tooling or Apptainer, like the rest of the local-development command layer.
 
 ## Managing the session
 

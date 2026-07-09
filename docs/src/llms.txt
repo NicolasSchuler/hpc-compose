@@ -8,7 +8,8 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
 
 - Safe to run unprompted — never submits, cancels, allocates, or consumes quota:
   - Purely static (no scheduler contact at all): `new`, `validate`, `plan`,
-    `plan --show-script`, `inspect`, `render`, `explain`, `config`.
+    `plan --show-script`, `inspect`, `render`, `explain`, `config`, `lint`,
+    `schema`, `lsp`.
   - Static previews and authoring helpers: `up --dry-run`, `up --remote --dry-run`,
     `notebook --dry-run`, `notebook promote`, `germinate --dry-run`, and
     `sweep submit --dry-run` render/validate locally
@@ -28,7 +29,9 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
   `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel`.
 - Never submit, allocate, or cancel a Slurm job unprompted. Author the spec, then verify with the safe
   static checks (`validate` → `plan --show-script` → `inspect`). Only run a submitting command after the
-  user explicitly approves it, on a supported Linux Slurm submission host.
+  user explicitly approves it, on a supported Linux Slurm submission host. On macOS, use source-checkout
+  dev-cluster smoke (`test --submit --dev-cluster`) for local Slurm validation; do not present macOS as
+  a real runtime execution host.
 - Before a first real run, prefer `hpc-compose debug -f <file> --preflight` and `hpc-compose doctor cluster-report` on the login node.
 
 ## Canonical conventions (so you do not author broken specs)
@@ -37,6 +40,7 @@ This file is the agent entry point. If you are an AI agent helping a user adopt 
 - The cache dir MUST be storage shared between the login node (where `prepare` runs) and the compute nodes (where services run). Never `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` — they are node-local; static planning may resolve them, but `lint` warns (`HPC004`) and `preflight` reports them unsafe before a real run.
 - Replace Docker Compose `build:` with a base `image:` plus `x-runtime.prepare.commands`. `ports`, `networks` / `network_mode`, `restart`, and `deploy` are not supported. Use `127.0.0.1` for same-node helper services and hpc-compose allocation metadata for distributed services.
 - Machine-readable authoring schema: https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose.schema.json
+- Semantic authoring diagnostics: run `hpc-compose lsp` over stdio. It is diagnostics-only, static-safe, and publishes `Diagnostic.data.field` plus `Diagnostic.data.recommendation` for agent repair loops. JSON Schema is still useful for YAML shape and key completion; the LSP uses the real parser, validator, planner, lint rules, and cluster-profile warnings.
 
 ## Set up with an AI agent (start here)
 

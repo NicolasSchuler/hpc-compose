@@ -28,7 +28,7 @@ One-line definitions; follow the link for the owning reference section.
 <dd>Per-service restart behavior under <code>services.&lt;name&gt;.x-slurm.failure_policy</code>. See <a href="spec-reference.md#servicesnamex-slurmfailure_policy"><code>failure_policy</code></a>.</dd>
 
 <dt id="local-mode">local mode</dt>
-<dd>Running a plan on the current Linux host through the local Pyxis/Enroot supervisor instead of submitting to Slurm; single-host and Pyxis-only. See <a href="cli-reference.md#up---local"><code>up --local</code></a>.</dd>
+<dd>Running a plan on the current Linux host through the local supervisor instead of submitting to Slurm; single-host and limited to Pyxis/Enroot or Apptainer. See <a href="cli-reference.md#up---local"><code>up --local</code></a>.</dd>
 
 <dt id="login-node">login node / submission host</dt>
 <dd>The host where you run <code>hpc-compose</code> and from which jobs are submitted; "login node" and "submission host" name the same machine. See <a href="runbook.md">Operate a Real Cluster Run</a>.</dd>
