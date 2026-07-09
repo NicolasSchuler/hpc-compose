@@ -17,8 +17,9 @@
 //!
 //! Enumeration prefers git (`git ls-files -z --cached --others
 //! --exclude-standard`) so it sees working-tree bytes and honors `.gitignore`
-//! (excluding `.git/`, build output, virtualenvs); it falls back to a plain walk
-//! that skips `.git/` when the tree is not a git repo or git is unavailable.
+//! (excluding `.git/`, build output, virtualenvs); it falls back to a conservative
+//! conventional walk that honors a root `.gitignore` and skips common generated
+//! metadata/cache roots when the tree is not a git repo or git is unavailable.
 //!
 //! A `.hpcignore` at the snapshot root (gitignore/dockerignore-style) excludes
 //! additional paths on top of `.gitignore`, so a tracked file can still be kept
@@ -46,6 +47,14 @@ pub const SOURCE_SNAPSHOT_URI: &str = "source-tree";
 /// Domain/version tag mixed into every source hash so the hashing scheme can
 /// evolve later without silently colliding with snapshots from an older layout.
 const SOURCE_HASH_DOMAIN: &[u8] = b"hpc-compose-source-v1\0";
+const MAX_CAPTURE_ATTEMPTS: usize = 3;
+
+#[derive(Debug, thiserror::Error)]
+#[error("source changed while it was being captured (expected {expected}, copied {copied})")]
+struct SourceChangedDuringCapture {
+    expected: String,
+    copied: String,
+}
 
 /// The result of staging a working tree into the content-addressed store.
 #[derive(Debug, Clone)]
@@ -87,41 +96,74 @@ struct SourceEntry {
 /// Returns an error when the tree cannot be enumerated or read, or when the
 /// snapshot cannot be materialized into the store.
 pub fn stage_source(root: &Path, cache_dir: &Path) -> Result<SourceSnapshot> {
-    let entries = enumerate_source(root)
-        .with_context(|| format!("failed to enumerate source tree at {}", root.display()))?;
-    let content_hash = hash_source(&entries)
-        .with_context(|| format!("failed to hash source tree at {}", root.display()))?;
+    stage_source_with_hook(root, cache_dir, |_| {})
+}
 
-    let spec = StagedInputSpec::new(
-        StagedInputKind::Source,
-        SOURCE_SNAPSHOT_URI,
-        Some(content_hash.clone()),
-    );
-    let digest = content_hash.clone();
-    let (dir, action) = ensure_staged_input(cache_dir, &spec, |dest| {
-        copy_entries(&entries, dest)?;
-        Ok(StagedInputProof {
-            content_digest: Some(digest),
-        })
-    })
-    .with_context(|| {
-        format!(
-            "failed to stage source snapshot into {}",
-            cache_dir.display()
-        )
-    })?;
+fn stage_source_with_hook(
+    root: &Path,
+    cache_dir: &Path,
+    mut before_copy: impl FnMut(usize),
+) -> Result<SourceSnapshot> {
+    for attempt in 0..MAX_CAPTURE_ATTEMPTS {
+        let entries = enumerate_source(root)
+            .with_context(|| format!("failed to enumerate source tree at {}", root.display()))?;
+        let content_hash = hash_source(&entries)
+            .with_context(|| format!("failed to hash source tree at {}", root.display()))?;
 
-    Ok(SourceSnapshot {
-        dir,
-        content_hash,
-        action,
-        file_count: entries.len(),
-    })
+        let spec = StagedInputSpec::new(
+            StagedInputKind::Source,
+            SOURCE_SNAPSHOT_URI,
+            Some(content_hash.clone()),
+        );
+        let digest = content_hash.clone();
+        let staged = ensure_staged_input(cache_dir, &spec, |dest| {
+            before_copy(attempt);
+            copy_entries(&entries, dest)?;
+            let copied = hash_materialized_entries(&entries, dest)?;
+            if copied != digest {
+                return Err(SourceChangedDuringCapture {
+                    expected: digest.clone(),
+                    copied,
+                }
+                .into());
+            }
+            Ok(StagedInputProof {
+                content_digest: Some(digest.clone()),
+            })
+        });
+
+        match staged {
+            Ok((dir, action)) => {
+                return Ok(SourceSnapshot {
+                    dir,
+                    content_hash,
+                    action,
+                    file_count: entries.len(),
+                });
+            }
+            Err(err)
+                if err.downcast_ref::<SourceChangedDuringCapture>().is_some()
+                    && attempt + 1 < MAX_CAPTURE_ATTEMPTS =>
+            {
+                continue;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to stage a stable source snapshot into {} after {} capture attempt(s)",
+                        cache_dir.display(),
+                        attempt + 1
+                    )
+                });
+            }
+        }
+    }
+    unreachable!("capture loop always returns on its final attempt")
 }
 
 /// Enumerates the working-tree source file set rooted at `root`, sorted by
 /// relative path. Prefers git (working-tree bytes, `.gitignore`-aware) and falls
-/// back to a plain walk that skips `.git/`.
+/// back to a conventional `.gitignore`-aware walk.
 fn enumerate_source(root: &Path) -> Result<Vec<SourceEntry>> {
     let rels = match git_listed_files(root) {
         Some(rels) => rels,
@@ -265,9 +307,11 @@ fn git_listed_files(root: &Path) -> Option<Vec<String>> {
     Some(rels)
 }
 
-/// Recursively lists files under `root` (relative, `/`-separated), skipping any
-/// `.git` directory. The non-git fallback: it does not honor `.gitignore`.
+/// Recursively lists files under `root` (relative, `/`-separated). This is only
+/// the non-git fallback, so it conservatively honors root `.gitignore` rules and
+/// skips conventional generated/cache directories that should never be source.
 fn walk_files(root: &Path) -> Result<Vec<String>> {
+    let gitignore = HpcIgnore::load_named(root, ".gitignore");
     let mut rels = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -276,10 +320,6 @@ fn walk_files(root: &Path) -> Result<Vec<String>> {
         for entry in listing {
             let entry =
                 entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
-            // VCS metadata is never source.
-            if entry.file_name() == ".git" {
-                continue;
-            }
             let path = entry.path();
             let file_type = entry
                 .file_type()
@@ -287,17 +327,50 @@ fn walk_files(root: &Path) -> Result<Vec<String>> {
             // A symlink (even to a directory) reports as a symlink here, so we
             // never recurse through it — no traversal cycles.
             if file_type.is_dir() {
+                let rel = path
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(Path::to_str)
+                    .map(|rel| rel.replace('\\', "/"));
+                if is_conventional_fallback_exclusion(&entry.file_name())
+                    || rel
+                        .as_deref()
+                        .is_some_and(|rel| gitignore.can_prune_dir(rel))
+                {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }
             if let Ok(rel) = path.strip_prefix(root)
                 && let Some(rel) = rel.to_str()
             {
-                rels.push(rel.replace('\\', "/"));
+                let rel = rel.replace('\\', "/");
+                if !gitignore.is_ignored(&rel) {
+                    rels.push(rel);
+                }
             }
         }
     }
     Ok(rels)
+}
+
+fn is_conventional_fallback_exclusion(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            ".git"
+                | ".hpc-compose"
+                | "target"
+                | "node_modules"
+                | ".venv"
+                | "venv"
+                | "__pycache__"
+                | ".pytest_cache"
+                | ".mypy_cache"
+                | ".ruff_cache"
+        )
+    )
 }
 
 /// Whether a relative path is safe to materialize under the destination: only
@@ -383,6 +456,29 @@ fn copy_entries(entries: &[SourceEntry], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+fn hash_materialized_entries(entries: &[SourceEntry], dest: &Path) -> Result<String> {
+    let mut copied = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let abs = dest.join(&entry.rel);
+        let meta = fs::symlink_metadata(&abs)
+            .with_context(|| format!("failed to inspect copied source entry {}", abs.display()))?;
+        let file_type = meta.file_type();
+        if !file_type.is_file() && !file_type.is_symlink() {
+            anyhow::bail!(
+                "copied source entry {} has an unsupported type",
+                abs.display()
+            );
+        }
+        copied.push(SourceEntry {
+            rel: entry.rel.clone(),
+            abs,
+            is_symlink: file_type.is_symlink(),
+            is_exec: file_type.is_file() && is_executable(&meta),
+        });
+    }
+    hash_source(&copied)
+}
+
 #[cfg(unix)]
 fn is_executable(meta: &fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -431,7 +527,11 @@ struct IgnoreRule {
 impl HpcIgnore {
     /// Loads `<root>/.hpcignore`; a missing or unreadable file yields no rules.
     fn load(root: &Path) -> Self {
-        let contents = fs::read_to_string(root.join(".hpcignore")).unwrap_or_default();
+        Self::load_named(root, ".hpcignore")
+    }
+
+    fn load_named(root: &Path, name: &str) -> Self {
+        let contents = fs::read_to_string(root.join(name)).unwrap_or_default();
         let rules = contents.lines().filter_map(IgnoreRule::parse).collect();
         HpcIgnore { rules }
     }
@@ -450,6 +550,13 @@ impl HpcIgnore {
             }
         }
         ignored
+    }
+
+    fn can_prune_dir(&self, rel: &str) -> bool {
+        // Negation may re-include a descendant, so retain traversal in that
+        // case and filter individual files instead.
+        !self.rules.iter().any(|rule| rule.negated)
+            && self.is_ignored(&format!("{rel}/.hpc-compose-ignore-probe"))
     }
 }
 
@@ -669,6 +776,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stage_source_retries_when_source_changes_between_hash_and_copy() {
+        let src = tempfile::tempdir().expect("src");
+        let cache = tempfile::tempdir().expect("cache");
+        write(src.path(), "changing.txt", b"before");
+
+        let snapshot = stage_source_with_hook(src.path(), cache.path(), |attempt| {
+            if attempt == 0 {
+                write(src.path(), "changing.txt", b"after");
+            }
+        })
+        .expect("capture stabilizes on retry");
+
+        assert_eq!(
+            fs::read(snapshot.dir.join("changing.txt")).expect("staged bytes"),
+            b"after"
+        );
+        let current_entries = enumerate_source(src.path()).expect("current entries");
+        let copied_hash =
+            hash_materialized_entries(&current_entries, &snapshot.dir).expect("copied hash");
+        assert_eq!(snapshot.content_hash, copied_hash);
+        assert_eq!(
+            snapshot.content_hash,
+            hash_source(&current_entries).expect("live hash")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn stage_source_preserves_symlinks() {
@@ -707,6 +841,35 @@ mod tests {
             !rels.iter().any(|rel| rel.starts_with(".git")),
             "the .git dir must never be snapshotted: {rels:?}"
         );
+    }
+
+    #[test]
+    fn fallback_walk_honors_gitignore_and_skips_generated_roots() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root = dir.path();
+        write(root, "src/main.rs", b"keep");
+        write(root, ".gitignore", b"ignored/\n*.log\n");
+        write(root, "ignored/data.bin", b"ignored");
+        write(root, "notes.log", b"ignored");
+        write(root, ".hpc-compose/jobs/state.json", b"state");
+        write(root, "target/debug/binary", b"binary");
+        write(root, "node_modules/pkg/index.js", b"package");
+
+        let rels = walk_files(root).expect("fallback walk");
+        assert!(rels.contains(&"src/main.rs".to_string()));
+        assert!(rels.contains(&".gitignore".to_string()));
+        for excluded in [
+            "ignored/data.bin",
+            "notes.log",
+            ".hpc-compose/jobs/state.json",
+            "target/debug/binary",
+            "node_modules/pkg/index.js",
+        ] {
+            assert!(
+                !rels.contains(&excluded.to_string()),
+                "fallback should exclude {excluded}: {rels:?}"
+            );
+        }
     }
 
     #[test]

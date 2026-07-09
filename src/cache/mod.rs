@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::planner::{ImageSource, PreparedImageSpec, registry_host_for_remote};
-use crate::prepare::{RuntimePlan, RuntimeService, base_image_path_for_backend};
+use crate::runtime_plan::{RuntimePlan, RuntimeService, base_image_path_for_backend};
 use crate::time_util::{SECONDS_PER_DAY, unix_timestamp_now};
 
 /// The kind of artifact tracked in the cache manifest.
@@ -143,18 +143,27 @@ pub fn upsert_base_manifest(
     cache_key: &str,
 ) -> Result<CacheEntryManifest> {
     with_manifest_lock(artifact_path, || {
-        let mut manifest = load_manifest_if_exists(artifact_path)?
-            .unwrap_or_else(|| new_base_manifest(artifact_path, source, cache_key));
-        refresh_manifest_common(
-            &mut manifest,
-            artifact_path,
-            service_name,
-            source,
-            cache_key,
-        );
-        write_manifest(&manifest)?;
-        Ok(manifest)
+        upsert_base_manifest_locked(artifact_path, service_name, source, cache_key)
     })
+}
+
+fn upsert_base_manifest_locked(
+    artifact_path: &Path,
+    service_name: &str,
+    source: &ImageSource,
+    cache_key: &str,
+) -> Result<CacheEntryManifest> {
+    let mut manifest = load_manifest_if_exists(artifact_path)?
+        .unwrap_or_else(|| new_base_manifest(artifact_path, source, cache_key));
+    refresh_manifest_common(
+        &mut manifest,
+        artifact_path,
+        service_name,
+        source,
+        cache_key,
+    );
+    write_manifest(&manifest)?;
+    Ok(manifest)
 }
 
 /// Creates or updates the manifest for a prepared runtime image.
@@ -252,9 +261,7 @@ pub fn upsert_dataset_manifest(
         manifest.source_image = uri.to_string();
         manifest.uri = Some(uri.to_string());
         manifest.revision = revision.map(str::to_string);
-        if let Some(digest) = content_digest {
-            manifest.content_digest = Some(digest.to_string());
-        }
+        manifest.content_digest = content_digest.map(str::to_string);
         manifest.last_used_at = now;
         manifest.tool_version = env!("CARGO_PKG_VERSION").to_string();
         write_manifest_to(&manifest_path, &manifest)?;
@@ -299,7 +306,9 @@ pub(crate) fn read_staged_manifest_for_test(manifest_path: &Path) -> CacheEntryM
     serde_json::from_str(&raw).expect("parse staged manifest")
 }
 
-fn read_staged_manifest_if_exists(manifest_path: &Path) -> Result<Option<CacheEntryManifest>> {
+pub(crate) fn read_staged_manifest_if_exists(
+    manifest_path: &Path,
+) -> Result<Option<CacheEntryManifest>> {
     if !manifest_path.exists() {
         return Ok(None);
     }
@@ -373,7 +382,7 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
                     // completion marker (no sibling sidecar); synthesize its
                     // manifest so `cache list`/`prune` see it. A dir WITH a
                     // sidecar is listed via that sidecar file below instead.
-                    if let Some(manifest) = staged_input_manifest_from_marker(&path) {
+                    if let Some(manifest) = staged_input_manifest_from_marker(&path)? {
                         manifests.push(manifest);
                     }
                     continue;
@@ -414,6 +423,14 @@ pub fn scan_cache(cache_dir: &Path) -> Result<Vec<CacheEntryManifest>> {
 /// Returns an error when cache manifests cannot be scanned or when a stale
 /// manifest or artifact cannot be removed.
 pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult> {
+    prune_by_age_with_hook(cache_dir, age_days, |_| {})
+}
+
+fn prune_by_age_with_hook(
+    cache_dir: &Path,
+    age_days: u64,
+    mut before_remove: impl FnMut(&CacheEntryManifest),
+) -> Result<CachePruneResult> {
     let cutoff = unix_timestamp_now().saturating_sub(age_days.saturating_mul(SECONDS_PER_DAY));
     let manifests = scan_cache(cache_dir)?;
     let mut removed = Vec::new();
@@ -422,8 +439,12 @@ pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult>
         if last > cutoff {
             continue;
         }
-        remove_manifest_and_artifact(cache_dir, &manifest)?;
-        removed.push(PathBuf::from(&manifest.artifact_path));
+        before_remove(&manifest);
+        if remove_manifest_and_artifact_if(cache_dir, &manifest, |current| {
+            current.last_used_at.max(current.created_at) <= cutoff
+        })? {
+            removed.push(PathBuf::from(&manifest.artifact_path));
+        }
     }
     Ok(CachePruneResult { removed })
 }
@@ -435,12 +456,19 @@ pub fn prune_by_age(cache_dir: &Path, age_days: u64) -> Result<CachePruneResult>
 /// Returns an error when cache manifests cannot be scanned or when an unused
 /// manifest or artifact cannot be removed.
 pub fn prune_all_unused(cache_dir: &Path, plan: &RuntimePlan) -> Result<CachePruneResult> {
-    let manifests = unused_cache_manifests(cache_dir, plan)?;
+    let referenced = referenced_artifacts(plan);
+    let manifests = scan_cache(cache_dir)?;
     let mut removed = Vec::new();
     for manifest in manifests {
         let artifact = PathBuf::from(&manifest.artifact_path);
-        remove_manifest_and_artifact(cache_dir, &manifest)?;
-        removed.push(artifact);
+        if referenced.contains(&artifact) {
+            continue;
+        }
+        if remove_manifest_and_artifact_if(cache_dir, &manifest, |current| {
+            !referenced.contains(Path::new(&current.artifact_path))
+        })? {
+            removed.push(artifact);
+        }
     }
     Ok(CachePruneResult { removed })
 }
@@ -550,7 +578,37 @@ pub fn parse_remote_registry(source: &ImageSource) -> Option<String> {
     Some(registry_host_for_remote(remote))
 }
 
-fn remove_manifest_and_artifact(cache_dir: &Path, manifest: &CacheEntryManifest) -> Result<()> {
+fn remove_manifest_and_artifact_if(
+    cache_dir: &Path,
+    selected: &CacheEntryManifest,
+    should_remove: impl FnOnce(&CacheEntryManifest) -> bool,
+) -> Result<bool> {
+    let artifact = PathBuf::from(&selected.artifact_path);
+    with_manifest_lock(&artifact, || {
+        let manifest_path = sidecar_manifest_path_for_kind(&artifact, &selected.kind);
+        let mut current = match read_staged_manifest_if_exists(&manifest_path)? {
+            Some(current) => current,
+            None => match staged_input_manifest_from_marker(&artifact)? {
+                Some(current) => current,
+                None => return Ok(false),
+            },
+        };
+        current.artifact_path = artifact.display().to_string();
+        if current.kind != selected.kind
+            || current.cache_key != selected.cache_key
+            || !should_remove(&current)
+        {
+            return Ok(false);
+        }
+        remove_manifest_and_artifact_unlocked(cache_dir, &current)?;
+        Ok(true)
+    })
+}
+
+fn remove_manifest_and_artifact_unlocked(
+    cache_dir: &Path,
+    manifest: &CacheEntryManifest,
+) -> Result<()> {
     let artifact = Path::new(&manifest.artifact_path);
     let manifest_path = sidecar_manifest_path_for_kind(artifact, &manifest.kind);
     // Staged inputs (`Dataset`/`Model`) are directories; image artifacts are
@@ -573,10 +631,9 @@ fn remove_manifest_and_artifact(cache_dir: &Path, manifest: &CacheEntryManifest)
         fs::remove_file(&manifest_path)
             .context(format!("failed to remove {}", manifest_path.display()))?;
     }
-    // The whole entry is going away, so reap its advisory-lock sidecar too.
-    // Best-effort: a concurrent upsert recreating it is benign (it re-locks a
-    // fresh file), and a leftover lock is harmless if removal races.
-    let _ = fs::remove_file(manifest_lock_path_for(artifact));
+    // Advisory lock sidecars are permanent by contract. Unlinking one while a
+    // writer holds it lets another process lock a different inode and defeats
+    // mutual exclusion. The empty file is harmless after its entry is pruned.
     prune_empty_parents(cache_dir, artifact.parent());
     Ok(())
 }
@@ -667,12 +724,13 @@ fn is_staged_input_sidecar(path: &Path) -> bool {
 }
 
 /// Whether `dir` is a staged-input store directory, detected by either a
-/// sibling `<dir>.{dataset,model}.json` tracking sidecar (laptop-side store) or
-/// the in-dir [`dataset::HF_COMPLETE_MARKER`] (cluster-side hf:// download).
+/// sibling `<dir>.{dataset,model}.json` tracking sidecar, the atomic in-dir CAS
+/// completion record, or the cluster-side hf:// completion marker.
 fn is_staged_input_dir(dir: &Path) -> bool {
     dataset::sidecar_manifest_path_for_suffix(dir, "dataset").is_file()
         || dataset::sidecar_manifest_path_for_suffix(dir, "model").is_file()
         || dataset::sidecar_manifest_path_for_suffix(dir, "source").is_file()
+        || dir.join(dataset::STAGED_COMPLETE_MARKER).is_file()
         || dir.join(dataset::HF_COMPLETE_MARKER).is_file()
 }
 
@@ -681,27 +739,57 @@ fn is_staged_input_dir(dir: &Path) -> bool {
 /// `prune` track it. Returns `None` for a dir that has a sidecar (it is listed
 /// via that sidecar file instead, avoiding a double count) or that is not a
 /// recognized `datasets`/`models` staged dir.
-fn staged_input_manifest_from_marker(dir: &Path) -> Option<CacheEntryManifest> {
+fn staged_input_manifest_from_marker(dir: &Path) -> Result<Option<CacheEntryManifest>> {
+    let completion = dataset::read_staged_completion(dir)?;
     if dataset::sidecar_manifest_path_for_suffix(dir, "dataset").is_file()
         || dataset::sidecar_manifest_path_for_suffix(dir, "model").is_file()
+        || dataset::sidecar_manifest_path_for_suffix(dir, "source").is_file()
     {
-        return None;
+        return Ok(None);
     }
+    if let Some(completion) = completion {
+        let marker = dir.join(dataset::STAGED_COMPLETE_MARKER);
+        let used = fs::metadata(&marker)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        return Ok(Some(CacheEntryManifest {
+            kind: completion.kind.manifest_kind(),
+            artifact_path: dir.display().to_string(),
+            service_names: Vec::new(),
+            cache_key: completion.cache_key,
+            source_image: completion.uri.clone(),
+            registry: None,
+            prepare_commands: Vec::new(),
+            prepare_env: Vec::new(),
+            prepare_root: None,
+            prepare_mounts: Vec::new(),
+            force_rebuild_due_to_mounts: false,
+            created_at: used,
+            last_used_at: used,
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            uri: Some(completion.uri),
+            revision: completion.revision,
+            content_digest: completion.content_digest,
+        }));
+    }
+
     let marker = dir.join(dataset::HF_COMPLETE_MARKER);
     if !marker.is_file() {
-        return None;
+        return Ok(None);
     }
     let kind = match dir.parent().and_then(|p| p.file_name()?.to_str()) {
         Some("datasets") => CacheEntryKind::Dataset,
         Some("models") => CacheEntryKind::Model,
-        _ => return None,
+        _ => return Ok(None),
     };
     let used = fs::metadata(&marker)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs());
-    Some(CacheEntryManifest {
+    Ok(Some(CacheEntryManifest {
         kind,
         artifact_path: dir.display().to_string(),
         service_names: Vec::new(),
@@ -723,7 +811,7 @@ fn staged_input_manifest_from_marker(dir: &Path) -> Option<CacheEntryManifest> {
         uri: None,
         revision: None,
         content_digest: None,
-    })
+    }))
 }
 
 fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
@@ -862,7 +950,7 @@ mod tests {
 
     use super::*;
     use crate::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
-    use crate::prepare::{RuntimeService, base_image_path_for_backend};
+    use crate::runtime_plan::{RuntimeService, base_image_path_for_backend};
     use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig};
 
     fn runtime_service() -> RuntimeService {
@@ -1024,6 +1112,89 @@ mod tests {
         prune_empty_parents(cache, Some(&occupied));
         assert!(!occupied.exists());
         assert!(cache.join("keep").exists(), "non-empty parent kept");
+    }
+
+    #[test]
+    fn pruning_preserves_permanent_manifest_lock_inode() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let artifact = tmpdir.path().join("old.sqsh");
+        fs::write(&artifact, "x").expect("artifact");
+        let source = ImageSource::Remote("docker://redis:7".into());
+        upsert_base_manifest(&artifact, "svc", &source, "old-key").expect("manifest");
+        let lock = manifest_lock_path_for(&artifact);
+        assert!(lock.is_file(), "upsert provisions permanent lock sidecar");
+
+        let result = prune_by_age(tmpdir.path(), 0).expect("prune");
+        assert_eq!(result.removed, vec![artifact.clone()]);
+        assert!(!artifact.exists());
+        assert!(
+            lock.is_file(),
+            "prune must not unlink the inode used by concurrent lockers"
+        );
+    }
+
+    #[test]
+    fn prune_revalidates_after_concurrent_manifest_upsert() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache_dir = tmpdir.path().to_path_buf();
+        let artifact = cache_dir.join("old.sqsh");
+        fs::write(&artifact, "fresh artifact").expect("artifact");
+        let source = ImageSource::Remote("docker://redis:7".into());
+        upsert_base_manifest(&artifact, "old-service", &source, "same-key").expect("seed");
+        let mut stale = read_manifest(&artifact).expect("seed manifest");
+        stale.created_at = 0;
+        stale.last_used_at = 0;
+        write_manifest(&stale).expect("age manifest");
+
+        let writer_locked = Arc::new(Barrier::new(2));
+        let allow_writer = Arc::new(Barrier::new(2));
+        let selected_for_prune = Arc::new(Barrier::new(2));
+
+        let writer_artifact = artifact.clone();
+        let writer_source = source.clone();
+        let writer_locked_thread = Arc::clone(&writer_locked);
+        let allow_writer_thread = Arc::clone(&allow_writer);
+        let writer = thread::spawn(move || {
+            with_manifest_lock(&writer_artifact, || {
+                writer_locked_thread.wait();
+                allow_writer_thread.wait();
+                upsert_base_manifest_locked(
+                    &writer_artifact,
+                    "fresh-service",
+                    &writer_source,
+                    "same-key",
+                )?;
+                Ok(())
+            })
+            .expect("writer upsert");
+        });
+        writer_locked.wait();
+
+        let prune_cache = cache_dir.clone();
+        let selected_for_prune_thread = Arc::clone(&selected_for_prune);
+        let pruner = thread::spawn(move || {
+            prune_by_age_with_hook(&prune_cache, 1, |_| {
+                selected_for_prune_thread.wait();
+            })
+            .expect("prune")
+        });
+        selected_for_prune.wait();
+        allow_writer.wait();
+
+        writer.join().expect("writer thread");
+        let result = pruner.join().expect("pruner thread");
+        assert!(result.removed.is_empty(), "fresh entry must be revalidated");
+        assert!(artifact.is_file(), "prune deleted the refreshed artifact");
+        let manifest = read_manifest(&artifact).expect("fresh manifest remains");
+        assert!(
+            manifest
+                .service_names
+                .contains(&"fresh-service".to_string())
+        );
+        assert!(manifest.last_used_at > 0);
     }
 
     #[test]
@@ -1433,22 +1604,25 @@ mod tests {
 
     #[test]
     fn prune_by_age_and_prune_all_unused_remove_staged_input_dirs() {
-        // prune --age 0 removes a staged dir via remove_dir_all and reaps the
-        // now-empty kind-segment parent (but never the cache root).
+        // prune --age 0 removes a staged dir via remove_dir_all. Its permanent
+        // advisory lock remains, so the kind-segment parent remains too.
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let cache = tmpdir.path();
         let ds_dir = seed_staged(cache, StagedInputKind::Dataset, "hf://org/cifar10");
         assert!(ds_dir.is_dir());
         let sidecar = dataset::sidecar_manifest_path_for_suffix(&ds_dir, "dataset");
+        let lock = manifest_lock_path_for(&ds_dir);
         assert!(sidecar.is_file());
+        assert!(lock.is_file());
 
         let pruned = prune_by_age(cache, 0).expect("prune age 0");
         assert_eq!(pruned.removed, vec![ds_dir.clone()]);
         assert!(!ds_dir.exists(), "staged dir removed via remove_dir_all");
         assert!(!sidecar.exists(), "sidecar removed");
+        assert!(lock.is_file(), "permanent lock sidecar retained");
         assert!(
-            !cache.join("datasets").exists(),
-            "empty kind-segment parent pruned"
+            cache.join("datasets").exists(),
+            "lock keeps parent nonempty"
         );
         assert!(cache.exists(), "cache root never removed");
 
@@ -1518,6 +1692,40 @@ mod tests {
         assert_eq!(manifests.len(), 1, "one synthesized entry: {manifests:?}");
         assert_eq!(manifests[0].kind, CacheEntryKind::Model);
         assert_eq!(manifests[0].artifact_path, model_dir.display().to_string());
+    }
+
+    #[test]
+    fn prune_removes_marker_only_staged_entries() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache = tmpdir.path();
+
+        let cas_dir = seed_staged(cache, StagedInputKind::Dataset, "hf://org/cifar10");
+        let cas_sidecar = dataset::sidecar_manifest_path_for_suffix(&cas_dir, "dataset");
+        fs::remove_file(&cas_sidecar).expect("remove rebuildable sidecar");
+        assert!(cas_dir.join(dataset::STAGED_COMPLETE_MARKER).is_file());
+
+        let hf_dir = cache.join("models").join("deadbeefcafe0000");
+        fs::create_dir_all(&hf_dir).expect("hf dir");
+        fs::write(hf_dir.join(dataset::HF_COMPLETE_MARKER), b"").expect("hf marker");
+
+        let result = prune_by_age(cache, 0).expect("prune marker-only entries");
+        assert!(result.removed.contains(&cas_dir));
+        assert!(result.removed.contains(&hf_dir));
+        assert!(!cas_dir.exists(), "CAS completion-only entry removed");
+        assert!(!hf_dir.exists(), "HF marker-only entry removed");
+    }
+
+    #[test]
+    fn scan_cache_reports_corrupt_staged_completion_record() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let dir = seed_staged(tmpdir.path(), StagedInputKind::Dataset, "hf://org/cifar10");
+        let marker = dir.join(dataset::STAGED_COMPLETE_MARKER);
+        fs::write(&marker, b"{not-json").expect("corrupt marker");
+
+        let error = scan_cache(tmpdir.path()).expect_err("corrupt completion must be visible");
+        let detail = format!("{error:#}");
+        assert!(detail.contains("failed to parse"), "{detail}");
+        assert!(detail.contains(dataset::STAGED_COMPLETE_MARKER), "{detail}");
     }
 
     #[test]

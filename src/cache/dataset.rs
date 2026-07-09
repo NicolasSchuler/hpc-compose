@@ -18,8 +18,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::cache::{self, CacheEntryKind};
 use crate::domain::{artifact_cache_key, short_digest_prefix};
@@ -27,7 +29,8 @@ use crate::domain::{artifact_cache_key, short_digest_prefix};
 /// The kind of staged input. Used both to pick the on-disk subdirectory and to
 /// stamp the sidecar manifest. Reused by downstream `hf://` staging (#11) — do
 /// not introduce a parallel kind enum there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StagedInputKind {
     /// A dataset staged under `cache_dir/datasets/<key>`.
     Dataset,
@@ -65,7 +68,7 @@ impl StagedInputKind {
 
     /// The matching cache manifest kind.
     #[must_use]
-    fn manifest_kind(self) -> CacheEntryKind {
+    pub(super) fn manifest_kind(self) -> CacheEntryKind {
         match self {
             StagedInputKind::Dataset => CacheEntryKind::Dataset,
             StagedInputKind::Model => CacheEntryKind::Model,
@@ -107,6 +110,48 @@ pub const HF_URI_SCHEME: &str = "hf://";
 /// HuggingFace artifact has been fully fetched into its content-addressed
 /// directory. A subsequent job that finds this marker skips the download.
 pub const HF_COMPLETE_MARKER: &str = ".hpc-compose-hf-complete";
+
+/// In-directory publication record for login-node staged inputs.
+///
+/// The record is written into the temporary directory before that directory is
+/// atomically renamed into the CAS. Unlike the sibling tracking manifest, its
+/// presence therefore proves that the payload and its identifying metadata were
+/// published as one generation.
+pub const STAGED_COMPLETE_MARKER: &str = ".hpc-compose-staged-complete.json";
+
+const STAGED_COMPLETION_VERSION: u32 = 1;
+static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct StagedInputCompletion {
+    format_version: u32,
+    pub(super) kind: StagedInputKind,
+    pub(super) cache_key: String,
+    pub(super) uri: String,
+    pub(super) revision: Option<String>,
+    pub(super) content_digest: Option<String>,
+}
+
+impl StagedInputCompletion {
+    fn new(spec: &StagedInputSpec, cache_key: &str, proof: &StagedInputProof) -> Self {
+        Self {
+            format_version: STAGED_COMPLETION_VERSION,
+            kind: spec.kind,
+            cache_key: cache_key.to_string(),
+            uri: spec.uri.clone(),
+            revision: spec.revision.clone(),
+            content_digest: proof.content_digest.clone(),
+        }
+    }
+
+    fn matches(&self, spec: &StagedInputSpec, cache_key: &str) -> bool {
+        self.format_version == STAGED_COMPLETION_VERSION
+            && self.kind == spec.kind
+            && self.cache_key == cache_key
+            && self.uri == spec.uri
+            && self.revision == spec.revision
+    }
+}
 
 /// A parsed, validated `hf://org/name@rev` reference.
 ///
@@ -393,11 +438,92 @@ pub(crate) fn sidecar_manifest_path_for_suffix(staged_dir: &Path, suffix: &str) 
     staged_dir.with_file_name(name)
 }
 
-/// Whether a staged directory has a `COMPLETE` tracking sidecar (and so was
-/// fully materialized).
-fn is_complete(cache_dir: &Path, kind: StagedInputKind, key: &str) -> bool {
-    let dir = staged_input_dir(cache_dir, kind, key);
-    sidecar_manifest_path_for_suffix(&dir, kind.sidecar_suffix()).is_file()
+fn completion_marker_path(staged_dir: &Path) -> PathBuf {
+    staged_dir.join(STAGED_COMPLETE_MARKER)
+}
+
+pub(super) fn read_staged_completion(staged_dir: &Path) -> Result<Option<StagedInputCompletion>> {
+    let marker = completion_marker_path(staged_dir);
+    let raw = match fs::read_to_string(&marker) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).context(format!("failed to read {}", marker.display())),
+    };
+    serde_json::from_str(&raw)
+        .map(Some)
+        .context(format!("failed to parse {}", marker.display()))
+}
+
+fn write_staged_completion(staged_dir: &Path, completion: &StagedInputCompletion) -> Result<()> {
+    let marker = completion_marker_path(staged_dir);
+    let raw = serde_json::to_vec_pretty(completion)
+        .context("failed to serialize staged-input completion record")?;
+    crate::secure_io::write_atomic(&marker, raw, false)
+        .context(format!("failed to write {}", marker.display()))
+}
+
+fn refresh_tracking_manifest(staged_dir: &Path, completion: &StagedInputCompletion) -> Result<()> {
+    cache::upsert_dataset_manifest(
+        staged_dir,
+        completion.kind.manifest_kind(),
+        &completion.cache_key,
+        &completion.uri,
+        completion.revision.as_deref(),
+        completion.content_digest.as_deref(),
+    )
+    .context("failed to refresh staged-input manifest")?;
+    Ok(())
+}
+
+fn load_valid_completion(
+    staged_dir: &Path,
+    spec: &StagedInputSpec,
+    key: &str,
+) -> Result<Option<StagedInputCompletion>> {
+    let Some(completion) = read_staged_completion(staged_dir)? else {
+        return Ok(None);
+    };
+    if !completion.matches(spec, key) {
+        anyhow::bail!(
+            "staged directory {} has completion metadata for a different input",
+            staged_dir.display()
+        );
+    }
+    Ok(Some(completion))
+}
+
+/// Migrates a pre-completion-record entry whose sibling manifest is still
+/// present. This keeps existing caches reusable while ensuring subsequent
+/// reuse no longer depends on the sibling sidecar's presence.
+fn migrate_legacy_completion(
+    staged_dir: &Path,
+    spec: &StagedInputSpec,
+    key: &str,
+) -> Result<Option<StagedInputCompletion>> {
+    let sidecar = sidecar_manifest_path_for_suffix(staged_dir, spec.kind.sidecar_suffix());
+    let Some(manifest) = cache::read_staged_manifest_if_exists(&sidecar)? else {
+        return Ok(None);
+    };
+    if manifest.kind != spec.kind.manifest_kind()
+        || manifest.cache_key != key
+        || manifest.uri.as_deref() != Some(spec.uri.as_str())
+        || manifest.revision != spec.revision
+    {
+        anyhow::bail!(
+            "legacy staged-input manifest {} does not match its expected cache key",
+            sidecar.display()
+        );
+    }
+    let completion = StagedInputCompletion {
+        format_version: STAGED_COMPLETION_VERSION,
+        kind: spec.kind,
+        cache_key: key.to_string(),
+        uri: spec.uri.clone(),
+        revision: spec.revision.clone(),
+        content_digest: manifest.content_digest,
+    };
+    write_staged_completion(staged_dir, &completion)?;
+    Ok(Some(completion))
 }
 
 /// Write-through staged-input store.
@@ -405,11 +531,11 @@ fn is_complete(cache_dir: &Path, kind: StagedInputKind, key: &str) -> bool {
 /// Returns the staged directory and whether it was [`StagedInputAction::Reused`]
 /// or [`StagedInputAction::Built`]:
 ///
-/// * If a complete entry (staged dir + sidecar) already exists, the closure is
-///   **not** invoked; `last_used_at` is bumped and `Reused` is returned.
-/// * Otherwise any partial leftover is cleared, the closure materializes into a
-///   fresh temp dir, the temp dir is atomically renamed into place, and the
-///   `COMPLETE` sidecar is written last — then `Built` is returned.
+/// * If a complete entry exists, the closure is **not** invoked; its rebuildable
+///   sibling tracking manifest is refreshed and `Reused` is returned.
+/// * Otherwise the closure materializes into a fresh temp dir, a completion
+///   record is written inside it, and the whole generation is atomically renamed
+///   into place. A concurrent winner is reused without replacing its payload.
 ///
 /// The closure receives the destination directory (already created and empty)
 /// and returns a [`StagedInputProof`]. It must perform **all** I/O for the
@@ -429,24 +555,23 @@ pub fn ensure_staged_input(
     let key = dataset_cache_key(spec);
     let dir = staged_input_dir(cache_dir, kind, &key);
 
-    if is_complete(cache_dir, kind, &key) {
-        cache::touch_dataset_manifest(&dir, kind.manifest_kind())
-            .context("failed to refresh staged-input manifest")?;
+    let existing = match load_valid_completion(&dir, spec, &key)? {
+        Some(completion) => Some(completion),
+        None => migrate_legacy_completion(&dir, spec, &key)?,
+    };
+    if let Some(completion) = existing {
+        refresh_tracking_manifest(&dir, &completion)?;
         return Ok((dir, StagedInputAction::Reused));
     }
 
-    // Clear any partial leftover (the dir exists but its sidecar does not, e.g.
-    // an interrupted prior build) before re-materializing.
+    // A final directory without completion metadata may belong to a legacy
+    // writer between its directory rename and sidecar write. Never delete or
+    // replace it based only on the sibling sidecar being absent.
     if dir.exists() {
-        fs::remove_dir_all(&dir).context(format!(
-            "failed to clear partial staged dir {}",
+        anyhow::bail!(
+            "staged directory {} exists without valid completion metadata; refusing to replace a possibly concurrent publication",
             dir.display()
-        ))?;
-    }
-    // Also clear a stale sidecar with no directory.
-    let sidecar = sidecar_manifest_path_for_suffix(&dir, kind.sidecar_suffix());
-    if sidecar.exists() {
-        let _ = fs::remove_file(&sidecar);
+        );
     }
 
     let parent = dir
@@ -466,26 +591,26 @@ pub fn ensure_staged_input(
             return Err(err.context("staged-input materialization failed"));
         }
     };
+    let completion = StagedInputCompletion::new(spec, &key, &proof);
+    if let Err(err) = write_staged_completion(&temp, &completion) {
+        let _ = fs::remove_dir_all(&temp);
+        return Err(err);
+    }
 
-    // Atomic publish: rename the fully built temp dir into the final location.
-    // (A concurrent builder that won the race leaves a complete dir; treat the
-    // resulting AlreadyExists as a benign reuse.)
+    // Atomic publish. Any rename failure caused by a concurrent winner is a
+    // benign reuse only after validating the winner's in-directory record.
     match fs::rename(&temp, &dir) {
         Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+        Err(err) if dir.exists() => {
             let _ = fs::remove_dir_all(&temp);
-            if is_complete(cache_dir, kind, &key) {
-                cache::touch_dataset_manifest(&dir, kind.manifest_kind())
-                    .context("failed to refresh staged-input manifest")?;
+            if let Some(winner) = load_valid_completion(&dir, spec, &key)? {
+                refresh_tracking_manifest(&dir, &winner)?;
                 return Ok((dir, StagedInputAction::Reused));
             }
-            // The destination exists but is not complete: replace it.
-            fs::remove_dir_all(&dir).context(format!(
-                "failed to replace stale staged dir {}",
+            return Err(err).context(format!(
+                "failed to publish staged dir {}; destination exists without valid completion metadata",
                 dir.display()
-            ))?;
-            fs::rename(&temp, &dir)
-                .context(format!("failed to publish staged dir {}", dir.display()))?;
+            ));
         }
         Err(err) => {
             let _ = fs::remove_dir_all(&temp);
@@ -493,15 +618,11 @@ pub fn ensure_staged_input(
         }
     }
 
-    cache::upsert_dataset_manifest(
-        &dir,
-        kind.manifest_kind(),
-        &key,
-        &spec.uri,
-        spec.revision.as_deref(),
-        proof.content_digest.as_deref(),
-    )
-    .context("failed to write staged-input manifest")?;
+    // Always derive the rebuildable sidecar from the generation that actually
+    // won publication, never from a losing builder's local proof.
+    let published = load_valid_completion(&dir, spec, &key)?
+        .context("published staged-input directory has no completion record")?;
+    refresh_tracking_manifest(&dir, &published)?;
 
     Ok((dir, StagedInputAction::Built))
 }
@@ -510,6 +631,7 @@ pub fn ensure_staged_input(
 /// destination so the subsequent rename is atomic (not a cross-device copy).
 fn unique_temp_dir(dir: &Path) -> PathBuf {
     let pid = std::process::id();
+    let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -518,7 +640,7 @@ fn unique_temp_dir(dir: &Path) -> PathBuf {
         .file_name()
         .map(std::ffi::OsStr::to_os_string)
         .unwrap_or_default();
-    name.push(format!(".staging.{pid}.{nanos}"));
+    name.push(format!(".staging.{pid}.{counter}.{nanos}"));
     dir.with_file_name(name)
 }
 
@@ -596,6 +718,10 @@ mod tests {
         assert_eq!(action, StagedInputAction::Built);
         assert_eq!(calls, 1, "first call materializes");
         assert!(dir.join("data.bin").exists());
+        assert!(
+            dir.join(STAGED_COMPLETE_MARKER).is_file(),
+            "completion record is published with the payload"
+        );
         let sidecar = sidecar_manifest_path_for_suffix(&dir, "dataset");
         assert!(sidecar.is_file(), "COMPLETE sidecar written");
 
@@ -623,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_staged_input_recovers_from_partial_materialization() {
+    fn ensure_staged_input_refuses_to_replace_unproven_directory() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let cache = tmp.path();
         let spec = dataset_spec();
@@ -636,22 +762,95 @@ mod tests {
         fs::write(dir.join("partial.tmp"), b"half").expect("partial file");
         assert!(!sidecar_manifest_path_for_suffix(&dir, "dataset").is_file());
 
-        let mut calls = 0;
-        let (built_dir, action) = ensure_staged_input(cache, &spec, |dest| {
-            calls += 1;
-            assert!(
-                !dest.join("partial.tmp").exists(),
-                "stale partial contents must not leak into the fresh build"
-            );
-            fs::write(dest.join("data.bin"), b"payload").expect("write payload");
-            Ok(StagedInputProof::default())
+        let err = ensure_staged_input(cache, &spec, |_dest| {
+            panic!("an unproven final directory must not be overwritten");
         })
-        .expect("ensure after partial");
-        assert_eq!(action, StagedInputAction::Built);
-        assert_eq!(calls, 1, "incomplete entry is re-materialized");
-        assert!(built_dir.join("data.bin").exists());
-        assert!(!built_dir.join("partial.tmp").exists());
-        assert!(sidecar_manifest_path_for_suffix(&built_dir, "dataset").is_file());
+        .expect_err("unproven directory must fail safely");
+        assert!(format!("{err:#}").contains("refusing to replace"));
+        assert_eq!(
+            fs::read(dir.join("partial.tmp")).expect("original remains"),
+            b"half"
+        );
+    }
+
+    #[test]
+    fn missing_tracking_sidecar_is_rebuilt_from_completion_record() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let spec = dataset_spec();
+        let (dir, _) = ensure_staged_input(tmp.path(), &spec, |dest| {
+            fs::write(dest.join("data.bin"), b"payload").expect("payload");
+            Ok(StagedInputProof {
+                content_digest: Some("sha256:payload".into()),
+            })
+        })
+        .expect("build");
+        let sidecar = sidecar_manifest_path_for_suffix(&dir, "dataset");
+        fs::remove_file(&sidecar).expect("remove rebuildable sidecar");
+
+        let (_, action) = ensure_staged_input(tmp.path(), &spec, |_dest| {
+            panic!("published completion record must be reused");
+        })
+        .expect("reuse and heal");
+        assert_eq!(action, StagedInputAction::Reused);
+        let manifest = crate::cache::read_staged_manifest_for_test(&sidecar);
+        assert_eq!(manifest.content_digest.as_deref(), Some("sha256:payload"));
+    }
+
+    #[test]
+    fn concurrent_builders_converge_on_one_payload_and_proof() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let cache = Arc::new(tmp.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for label in ["a", "b"] {
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                ensure_staged_input(&cache, &dataset_spec(), |dest| {
+                    fs::write(dest.join("winner"), label).expect("write candidate");
+                    barrier.wait();
+                    Ok(StagedInputProof {
+                        content_digest: Some(format!("digest-{label}")),
+                    })
+                })
+                .expect("concurrent ensure")
+            }));
+        }
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("builder thread"))
+            .collect();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, action)| *action == StagedInputAction::Built)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, action)| *action == StagedInputAction::Reused)
+                .count(),
+            1
+        );
+
+        let dir = &results[0].0;
+        let winner = fs::read_to_string(dir.join("winner")).expect("winner payload");
+        let completion = read_staged_completion(dir)
+            .expect("read completion")
+            .expect("completion exists");
+        let sidecar = sidecar_manifest_path_for_suffix(dir, "dataset");
+        let manifest = crate::cache::read_staged_manifest_for_test(&sidecar);
+        let expected = format!("digest-{winner}");
+        assert_eq!(
+            completion.content_digest.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(manifest.content_digest.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
