@@ -15,6 +15,7 @@ keywords = ["slurm", "hpc", "compose", "containers", "enroot"]
 categories = ["command-line-utilities", "config"]
 
 [features]
+fuzzing = []
 manpage-bin = []
 
 [[bin]]

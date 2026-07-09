@@ -1,0 +1,8 @@
+services:
+  train:
+    image: python:3.12
+    command: python train.py --lr ${lr}
+sweep:
+  parameters:
+    lr: [0.1, 0.01]
+  matrix: full

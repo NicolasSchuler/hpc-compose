@@ -426,6 +426,112 @@ fn docs_use_canonical_job_id_placeholder() {
     }
 }
 
+#[test]
+fn ai_agent_setup_safety_boundary_matches_llms_contract() {
+    let ai_setup = fs::read_to_string(repo_root().join("docs/src/ai-agent-setup.md"))
+        .expect("read AI agent setup docs");
+    let llms = fs::read_to_string(repo_root().join("docs/src/llms.txt")).expect("read llms.txt");
+
+    for expected in [
+        "`new`",
+        "`validate`",
+        "`plan`",
+        "`plan --show-script`",
+        "`inspect`",
+        "`render`",
+        "`explain`",
+        "`config`",
+        "`lint`",
+        "`schema`",
+        "`lsp`",
+        "`up --dry-run`",
+        "`up --remote --dry-run`",
+        "`notebook --dry-run`",
+        "`notebook promote`",
+        "`germinate --dry-run`",
+        "`sweep submit --dry-run`",
+    ] {
+        assert!(
+            ai_setup.contains(expected),
+            "docs/src/ai-agent-setup.md should include safe command {expected}"
+        );
+        assert!(
+            llms.contains(expected),
+            "docs/src/llms.txt should include safe command {expected}"
+        );
+    }
+
+    for expected in [
+        "`up`",
+        "`run`",
+        "`test --submit`",
+        "`notebook`",
+        "`alloc`",
+        "`shell`",
+        "`sweep submit`",
+        "`down`",
+        "`cancel`",
+    ] {
+        assert!(
+            ai_setup.contains(expected),
+            "docs/src/ai-agent-setup.md should include approval-required command {expected}"
+        );
+        assert!(
+            llms.contains(expected),
+            "docs/src/llms.txt should include approval-required command {expected}"
+        );
+    }
+}
+
+#[test]
+fn ai_agent_setup_documents_openai_agent_manifest() {
+    let ai_setup = fs::read_to_string(repo_root().join("docs/src/ai-agent-setup.md"))
+        .expect("read AI agent setup docs");
+    let manifest = repo_root().join("skills/hpc-compose/agents/openai.yaml");
+    assert!(manifest.exists(), "OpenAI agent manifest should exist");
+    assert!(
+        ai_setup.contains("skills/hpc-compose/agents/openai.yaml"),
+        "AI setup docs should document the OpenAI/Codex agent manifest"
+    );
+}
+
+#[test]
+fn vscode_yaml_schema_settings_match_schemastore_entry() {
+    let settings: Value = serde_json::from_str(
+        &fs::read_to_string(repo_root().join(".vscode/settings.json"))
+            .expect("read VS Code settings"),
+    )
+    .expect("parse VS Code settings");
+    let catalog: Value = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("schema/schemastore-catalog-entry.json"))
+            .expect("read SchemaStore catalog entry"),
+    )
+    .expect("parse SchemaStore catalog entry");
+
+    let url = catalog["url"].as_str().expect("catalog url");
+    let expected_matches = catalog["fileMatch"]
+        .as_array()
+        .expect("catalog fileMatch")
+        .iter()
+        .map(|value| value.as_str().expect("fileMatch string"))
+        .collect::<BTreeSet<_>>();
+    let configured_matches = settings["yaml.schemas"][url]
+        .as_array()
+        .expect("yaml.schemas entry for published schema")
+        .iter()
+        .map(|value| value.as_str().expect("yaml schema glob"))
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        configured_matches, expected_matches,
+        ".vscode/settings.json should mirror the SchemaStore hpc-compose globs"
+    );
+    assert!(
+        !configured_matches.contains("compose.yaml"),
+        "generic compose.yaml should not be claimed by the hpc-compose schema"
+    );
+}
+
 fn collect_bin_flag_commands(
     command: &clap::Command,
     prefix: Vec<String>,

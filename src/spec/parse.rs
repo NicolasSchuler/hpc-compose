@@ -18,6 +18,21 @@ pub(super) fn load_raw_spec_from_str(path: &Path, raw: &str) -> Result<ComposeSp
     load_raw_spec_with_root_text(path, Some(raw))
 }
 
+#[cfg(feature = "fuzzing")]
+pub(super) fn load_fuzz_raw_spec_from_str(raw: &str) -> Result<ComposeSpec> {
+    let mut value: Value =
+        serde_norway::from_str(raw).context("failed to parse YAML from fuzz input")?;
+    validate_root(&value)?;
+    if value
+        .as_mapping()
+        .is_some_and(|root| root.contains_key(string_key("extends")))
+    {
+        bail!("fuzz parser does not resolve root extends");
+    }
+    normalize_raw_spec(&mut value)?;
+    serde_norway::from_value(value).context("failed to deserialize fuzz spec")
+}
+
 fn load_raw_spec_with_root_text(path: &Path, root_text: Option<&str>) -> Result<ComposeSpec> {
     let mut stack = Vec::new();
     let mut value = load_resolved_value(path, &mut stack, root_text)?;

@@ -1,0 +1,19 @@
+[package]
+name = "hpc-compose-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+hpc-compose = { path = "..", features = ["fuzzing"] }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "spec_parser"
+path = "fuzz_targets/spec_parser.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,8 @@
+services:
+  api:
+    image: python:3.12
+    command: python -m http.server 8000
+    readiness:
+      tcp:
+        port: 8000
+      timeout: 30s

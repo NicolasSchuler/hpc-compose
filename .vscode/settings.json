@@ -1,0 +1,10 @@
+{
+  "yaml.schemas": {
+    "https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose.schema.json": [
+      "hpc-compose.yaml",
+      "hpc-compose.yml",
+      "*.hpc-compose.yaml",
+      "*.hpc-compose.yml"
+    ]
+  }
+}

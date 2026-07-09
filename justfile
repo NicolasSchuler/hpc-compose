@@ -125,6 +125,9 @@ remote-gpu-e2e:
 dev-cluster-otp-e2e:
     scripts/devcluster_otp_e2e.sh
 
+fuzz-check:
+    cargo fuzz check spec_parser
+
 release-check: _require-cargo-subcommands
     cargo test --locked --test release_metadata
     cargo deny check

@@ -26,8 +26,10 @@ For a one-line nudge once the agent has context: *"Set up hpc-compose for my clu
 
 | Safe to run unprompted (never submits, cancels, or allocates; no quota) | Requires your explicit approval (submits/cancels/allocates) |
 | --- | --- |
-| Static, no scheduler contact: `new`, `validate`, `plan`, `plan --show-script`, `inspect`, `render`, `explain`, `config` | `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel` |
-| Read-only scheduler queries (`squeue`/`sacct`, no changes): `status`, `ps`, `stats`, `diff`, `logs` — avoid tight polling on rate-limited login nodes. `artifacts` also writes exported files to the local `export_dir` | — |
+| Static, no scheduler contact: `new`, `validate`, `plan`, `plan --show-script`, `inspect`, `render`, `explain`, `config`, `lint`, `schema`, `lsp` | `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel` |
+| Static previews and authoring helpers: `up --dry-run`, `up --remote --dry-run`, `notebook --dry-run`, `notebook promote`, `germinate --dry-run`, `sweep submit --dry-run` | — |
+| Read-only scheduler queries (`squeue`/`sacct`, no changes): `status`, `ps`, `stats`, `diff`, `logs` — avoid tight polling on rate-limited login nodes | — |
+| `artifacts` makes no scheduler contact but writes exported files to the local `export_dir` | — |
 
 A well-behaved agent authors and statically verifies a spec first, and only runs a submitting command after you approve it on a supported Linux Slurm submission host. On a login node it should prefer `hpc-compose debug -f <file> --preflight` and `hpc-compose doctor cluster-report` before a first `up`.
 
@@ -49,6 +51,7 @@ The bundle progressively loads detail as needed:
 | `skills/hpc-compose/references/haicore-kit.md` | HAICORE / NHR@KIT Slurm, GPU, filesystem, cache, and Pyxis/Enroot guidance. |
 | `skills/hpc-compose/references/cluster-adaptation.md` | General Slurm cluster reconnaissance and portable adaptation. |
 | `skills/hpc-compose/scripts/hpc_compose_repo_probe.py` | Heuristic repository probe for migration clues. |
+| `skills/hpc-compose/agents/openai.yaml` | OpenAI/Codex-facing interface manifest: display name, short description, and default setup prompt. |
 
 For local reconnaissance you (or the agent) can run the probe directly:
 
