@@ -304,6 +304,7 @@ fn offline_rejection_reason(command: &Commands) -> Option<&'static str> {
         },
         Commands::Validate { .. }
         | Commands::Lint { .. }
+        | Commands::Lsp { .. }
         | Commands::Render { .. }
         | Commands::Explain { .. }
         | Commands::Config { .. }
@@ -361,6 +362,12 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::lint(context, strict_env, allow_warnings, fix, dry_run, format)
         }
+        Commands::Lsp { strict_env } => hpc_compose::lsp::run_stdio(hpc_compose::lsp::LspOptions {
+            cwd: env::current_dir().context("failed to determine current working directory")?,
+            profile: options.profile.clone(),
+            settings_file: options.settings_file.clone(),
+            strict_env,
+        }),
         Commands::Render {
             file,
             output,

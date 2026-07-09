@@ -44,6 +44,8 @@ flate2 = "1.1.5"
 hex = "0.4.3"
 indicatif = "0.18"
 libc = "0.2.186"
+lsp-server = "0.8"
+lsp-types = "0.97"
 miette = { version = "7", features = ["fancy"] }
 owo-colors = "4"
 regex = "1"

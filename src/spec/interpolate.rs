@@ -37,6 +37,23 @@ pub fn missing_defaulted_variables(
     Ok(missing)
 }
 
+/// Returns variables that consumed `${VAR:-default}` or `${VAR-default}`
+/// defaults in an already-read compose document because `VAR` was missing from
+/// `vars`.
+///
+/// # Errors
+///
+/// Returns an error when the YAML or interpolation syntax is malformed.
+pub fn missing_defaulted_variables_from_str(
+    raw: &str,
+    vars: &BTreeMap<String, String>,
+) -> Result<BTreeSet<String>> {
+    let value: Value = serde_norway::from_str(raw).context("failed to parse YAML")?;
+    let mut missing = BTreeSet::new();
+    collect_missing_defaulted_variables_from_value(&value, vars, &mut missing)?;
+    Ok(missing)
+}
+
 /// Returns interpolation variable names referenced by YAML scalar values in a
 /// compose spec.
 ///

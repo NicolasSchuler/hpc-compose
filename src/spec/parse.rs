@@ -11,15 +11,27 @@ use crate::domain::{MountParts, split_mount_parts};
 use crate::spec_error::SpecError;
 
 pub(super) fn load_raw_spec(path: &Path) -> Result<ComposeSpec> {
+    load_raw_spec_with_root_text(path, None)
+}
+
+pub(super) fn load_raw_spec_from_str(path: &Path, raw: &str) -> Result<ComposeSpec> {
+    load_raw_spec_with_root_text(path, Some(raw))
+}
+
+fn load_raw_spec_with_root_text(path: &Path, root_text: Option<&str>) -> Result<ComposeSpec> {
     let mut stack = Vec::new();
-    let mut value = load_resolved_value(path, &mut stack)?;
+    let mut value = load_resolved_value(path, &mut stack, root_text)?;
     validate_root(&value)?;
     normalize_raw_spec(&mut value)?;
     serde_norway::from_value(value)
         .with_context(|| format!("failed to deserialize spec at {}", path.display()))
 }
 
-fn load_value(path: &Path, is_root: bool) -> Result<Value> {
+fn load_value(path: &Path, is_root: bool, root_text: Option<&str>) -> Result<Value> {
+    if is_root && let Some(raw) = root_text {
+        return serde_norway::from_str(raw)
+            .with_context(|| format!("failed to parse YAML at {}", path.display()));
+    }
     let raw = fs::read_to_string(path).map_err(|source| -> anyhow::Error {
         // A missing top-level spec is the most common first-run failure; point at
         // the scaffolding commands. Missing `extends` targets keep the generic load
@@ -40,7 +52,11 @@ fn load_value(path: &Path, is_root: bool) -> Result<Value> {
         .with_context(|| format!("failed to parse YAML at {}", path.display()))
 }
 
-fn load_resolved_value(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
+fn load_resolved_value(
+    path: &Path,
+    stack: &mut Vec<PathBuf>,
+    root_text: Option<&str>,
+) -> Result<Value> {
     let identity = spec_identity(path);
     if stack.contains(&identity) {
         bail!(
@@ -56,7 +72,7 @@ fn load_resolved_value(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
     stack.push(identity);
     let result = (|| {
         // `stack` already holds this path's identity, so len == 1 is the root spec.
-        let mut value = load_value(path, stack.len() == 1)?;
+        let mut value = load_value(path, stack.len() == 1, root_text)?;
         resolve_top_level_extends(path, &mut value, stack)?;
         normalize_steps_alias(&mut value)?;
         resolve_service_extends(path, &mut value, stack)?;
@@ -94,7 +110,7 @@ fn resolve_top_level_extends(
         bail!("root extends must be a file path string");
     };
     let base_path = resolve_extends_path(path, base_path);
-    let base = load_resolved_value(&base_path, stack)
+    let base = load_resolved_value(&base_path, stack, None)
         .with_context(|| format!("failed to resolve root extends {}", base_path.display()))?;
     normalize_steps_alias(value)?;
     let child = std::mem::replace(value, Value::Mapping(Mapping::new()));
@@ -188,12 +204,13 @@ fn resolve_service_value(
         }
         ServiceExtendsRef::External { file, service } => {
             let base_path = resolve_extends_path(path, &file);
-            let mut base_root = load_resolved_value(&base_path, stack).with_context(|| {
-                format!(
-                    "failed to resolve service '{service_name}' extends {}",
-                    base_path.display()
-                )
-            })?;
+            let mut base_root =
+                load_resolved_value(&base_path, stack, None).with_context(|| {
+                    format!(
+                        "failed to resolve service '{service_name}' extends {}",
+                        base_path.display()
+                    )
+                })?;
             let base_services = base_root
                 .as_mapping_mut()
                 .and_then(|root| {

@@ -300,6 +300,19 @@ pub enum Commands {
         format: Option<OutputFormat>,
     },
     #[command(
+        display_order = 410,
+        about = "Run the diagnostics-only stdio Language Server",
+        long_about = "Run a static-safe Language Server over stdio for hpc-compose YAML files. The MVP publishes semantic diagnostics only, using the real parser, validator, planner, cluster-profile warnings, and lint rules. It does not contact Slurm, SSH, or the network and does not prepare or render mutable artifacts.",
+        after_help = LSP_HELP
+    )]
+    Lsp {
+        #[arg(
+            long,
+            help = "Report when ${VAR:-default} or ${VAR-default} fallbacks are used because VAR is missing"
+        )]
+        strict_env: bool,
+    },
+    #[command(
         display_order = 430,
         about = "Render the generated sbatch script",
         long_about = "Render the sbatch script produced from the normalized plan. Use this to inspect generated SBATCH directives, srun invocations, mounts, and environment forwarding without submitting the job. With --annotate, provenance comments (`# <- x-slurm.mem` markers and `# --- section ---` banners) map script lines back to the spec fields that produced them; annotations are preview-only and never appear in submitted scripts.",

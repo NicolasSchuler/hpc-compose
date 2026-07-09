@@ -16,13 +16,15 @@ mod interpolate;
 mod parse;
 mod validation;
 
-pub use interpolate::{missing_defaulted_variables, referenced_variables};
+pub use interpolate::{
+    missing_defaulted_variables, missing_defaulted_variables_from_str, referenced_variables,
+};
 
 use interpolate::{
     InterpolationVars, interpolate_optional_string, interpolate_string, interpolate_vec_strings,
     interpolation_vars,
 };
-use parse::load_raw_spec;
+use parse::{load_raw_spec, load_raw_spec_from_str};
 use validation::{
     parse_duration_seconds, parse_healthcheck_argv, parse_http_probe, parse_nc_probe,
     validate_artifact_bundle_name, validate_artifact_path, validate_parallelism,
@@ -2487,6 +2489,24 @@ impl ComposeSpec {
         Ok(spec.secrets)
     }
 
+    /// Loads only the top-level `secrets:` block from an in-memory root compose
+    /// document, without applying interpolation.
+    ///
+    /// `extends` targets still resolve relative to `path` and are read from
+    /// disk; only the root document is overlaid by `raw`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the document cannot be parsed or a secret declares
+    /// both or neither of `file`/`env`.
+    pub fn load_secrets_from_str(path: &Path, raw: &str) -> Result<BTreeMap<String, SecretSpec>> {
+        let spec = load_raw_spec_from_str(path, raw)?;
+        for (name, secret) in &spec.secrets {
+            secret.validate(name)?;
+        }
+        Ok(spec.secrets)
+    }
+
     /// Loads, interpolates, and validates a compose file from disk.
     ///
     /// # Errors
@@ -2509,7 +2529,34 @@ impl ComposeSpec {
         path: &Path,
         vars: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        let mut spec = load_raw_spec(path)?;
+        let spec = load_raw_spec(path)?;
+        Self::finish_load_with_interpolation_vars(path, spec, vars)
+    }
+
+    /// Loads, interpolates, and validates an in-memory root compose document
+    /// using explicit interpolation variables.
+    ///
+    /// `extends`, `.env`, `env_file`, and secret file references stay resolved
+    /// relative to `path`; only the root YAML document comes from `raw`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the document cannot be parsed, interpolation fails,
+    /// or semantic validation rejects the spec.
+    pub fn load_with_interpolation_vars_from_str(
+        path: &Path,
+        raw: &str,
+        vars: &BTreeMap<String, String>,
+    ) -> Result<Self> {
+        let spec = load_raw_spec_from_str(path, raw)?;
+        Self::finish_load_with_interpolation_vars(path, spec, vars)
+    }
+
+    fn finish_load_with_interpolation_vars(
+        path: &Path,
+        mut spec: Self,
+        vars: &BTreeMap<String, String>,
+    ) -> Result<Self> {
         spec.interpolate_with_vars(vars)?;
         // Fold each service's `env_file:` into its `environment` before
         // validation so the merged keys are name-checked and the planner,

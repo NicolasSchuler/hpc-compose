@@ -565,6 +565,31 @@ pub fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
 /// Returns an error when settings parsing fails, a requested profile is
 /// missing, or a referenced env file cannot be read.
 pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
+    resolve_inner(request, None)
+}
+
+/// Resolves command context while reading the root compose document from an
+/// in-memory overlay for secret interpolation.
+///
+/// This is intended for static authoring tools. Settings, `.env`, `env_file`,
+/// `extends`, and secret files remain disk-backed.
+///
+/// # Errors
+///
+/// Returns an error when settings parsing fails, a requested profile is
+/// missing, a referenced env file cannot be read, or a top-level secret source
+/// in `compose_text` cannot be resolved.
+pub fn resolve_with_compose_text(
+    request: &ResolveRequest,
+    compose_text: &str,
+) -> Result<ResolvedContext> {
+    resolve_inner(request, Some(compose_text))
+}
+
+fn resolve_inner(
+    request: &ResolveRequest,
+    compose_text_override: Option<&str>,
+) -> Result<ResolvedContext> {
     let settings_path = if let Some(path) = request.settings_file.as_ref() {
         if !path.exists() {
             bail!("settings file does not exist: {}", path.display());
@@ -684,7 +709,12 @@ pub fn resolve(request: &ResolveRequest) -> Result<ResolvedContext> {
         interpolation_var_sources.insert(key.clone(), ValueSource::ProcessEnv);
         interpolation_vars.insert(key, value);
     }
-    let resolved_secrets = resolve_compose_secrets(&compose_file.value, &interpolation_vars)?;
+    let resolved_secrets = match compose_text_override {
+        Some(raw) => {
+            resolve_compose_secrets_from_str(&compose_file.value, raw, &interpolation_vars)?
+        }
+        None => resolve_compose_secrets(&compose_file.value, &interpolation_vars)?,
+    };
     for (name, value) in resolved_secrets {
         interpolation_var_sources.insert(name.clone(), ValueSource::Secret);
         interpolation_vars.insert(name, value);
@@ -1073,12 +1103,34 @@ fn resolve_compose_secrets(
     let Ok(secrets) = hpc_compose::spec::ComposeSpec::load_secrets(compose_file) else {
         return Ok(BTreeMap::new());
     };
+    resolve_secret_specs(compose_file, &secrets, lookup_vars)
+}
+
+fn resolve_compose_secrets_from_str(
+    compose_file: &Path,
+    raw: &str,
+    lookup_vars: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    // Mirror the disk-backed path: if the open buffer is not parseable yet,
+    // leave the normal spec loader to report that error and skip secrets here.
+    let Ok(secrets) = hpc_compose::spec::ComposeSpec::load_secrets_from_str(compose_file, raw)
+    else {
+        return Ok(BTreeMap::new());
+    };
+    resolve_secret_specs(compose_file, &secrets, lookup_vars)
+}
+
+fn resolve_secret_specs(
+    compose_file: &Path,
+    secrets: &BTreeMap<String, hpc_compose::spec::SecretSpec>,
+    lookup_vars: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
     let compose_dir = compose_file
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     let mut resolved = BTreeMap::new();
-    for (name, spec) in &secrets {
+    for (name, spec) in secrets {
         let value = if let Some(file_rel) = &spec.file {
             let path = resolve_string_path(file_rel, &compose_dir);
             let raw = fs::read_to_string(&path).with_context(|| {

@@ -37,6 +37,7 @@
 
 extern crate self as hpc_compose;
 
+pub(crate) mod authoring_diagnostics;
 pub mod cache;
 pub mod cli;
 pub(crate) mod cluster;
@@ -54,6 +55,7 @@ pub mod init;
 pub mod job;
 pub(crate) mod lint;
 pub(crate) mod lint_fix;
+pub(crate) mod lsp;
 pub mod manpages;
 pub(crate) mod mpi_util;
 pub(crate) mod output;

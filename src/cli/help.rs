@@ -67,6 +67,7 @@ pub(super) const WORKFLOW_GROUPS: &[(&str, &str, &[&str])] = &[
             "feedback",
             "validate",
             "lint",
+            "lsp",
             "inspect",
             "config",
             "render",
@@ -149,6 +150,17 @@ Examples:
   hpc-compose lint -f compose.yaml --fix
   hpc-compose lint -f compose.yaml --fix --dry-run
   hpc-compose lint -f compose.yaml --format json";
+
+pub(super) const LSP_HELP: &str = "\
+Examples:
+  hpc-compose lsp
+  hpc-compose lsp --strict-env
+  hpc-compose --profile gpu lsp
+
+The server speaks LSP over stdio and publishes diagnostics only. Editors and
+agents should send full-document file:// YAML documents and inspect
+Diagnostic.data.field and Diagnostic.data.recommendation for structured
+authoring guidance.";
 
 pub(super) const RENDER_HELP: &str = "\
 Examples:
@@ -1063,7 +1075,9 @@ mod tests {
         // discovery entrypoint, not tied to examples, specs, or tracked runs.
         // Bumped 51 -> 52 for `feedback`, an explicit no-telemetry community
         // signal surface with issue-template links.
-        const MAX_TOP_LEVEL_COMMANDS: usize = 52;
+        // Bumped 52 -> 53 for `lsp`, a diagnostics-only editor/agent authoring
+        // surface that must be launched as a long-lived stdio server.
+        const MAX_TOP_LEVEL_COMMANDS: usize = 53;
         let count = real_top_level_commands().len();
         assert!(
             count <= MAX_TOP_LEVEL_COMMANDS,
