@@ -985,7 +985,17 @@ pub fn render_script_annotated(
         out.push_str("CPU_COLLECTOR_NOTE=\"\"\n");
         out.push_str("GPU_COLLECTOR_LAST_SAMPLED_AT=\"\"\n");
         out.push_str("SLURM_COLLECTOR_LAST_SAMPLED_AT=\"\"\n");
-        out.push_str("CPU_COLLECTOR_LAST_SAMPLED_AT=\"\"\n\n");
+        out.push_str("CPU_COLLECTOR_LAST_SAMPLED_AT=\"\"\n");
+        out.push_str("GPU_COVERAGE_SCOPE=unknown\n");
+        out.push_str("GPU_COVERAGE_EXPECTED_NODES=1\n");
+        out.push_str("GPU_COVERAGE_OBSERVED_NODES=0\n");
+        out.push_str("GPU_COVERAGE_DEGRADED=0\n");
+        out.push_str("GPU_COVERAGE_REASON=\"\"\n");
+        out.push_str("CPU_COVERAGE_SCOPE=unknown\n");
+        out.push_str("CPU_COVERAGE_EXPECTED_NODES=1\n");
+        out.push_str("CPU_COVERAGE_OBSERVED_NODES=0\n");
+        out.push_str("CPU_COVERAGE_DEGRADED=0\n");
+        out.push_str("CPU_COVERAGE_REASON=\"\"\n\n");
         out.push_str("if [[ -n \"${HPC_COMPOSE_SLURM_COLLECTOR_ENABLED_OVERRIDE:-}\" ]]; then\n");
         out.push_str(
             "  SLURM_COLLECTOR_ENABLED=\"$HPC_COMPOSE_SLURM_COLLECTOR_ENABLED_OVERRIDE\"\n",

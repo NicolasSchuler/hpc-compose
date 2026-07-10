@@ -125,10 +125,12 @@ pub use score::{
     EfficiencyScoreReport, build_efficiency_score_report,
 };
 pub use stats::{
-    CollectorStatus, CpuNodeSample, CpuSnapshot, CpuSummary, FirstFailure, GpuDeviceSample,
-    GpuNodeSummary, GpuProcessSample, GpuSnapshot, SamplerSnapshot, SchedulerOptions,
-    SlurmSamplerSnapshot, StatsOptions, StatsSnapshot, StepStats, build_stats_snapshot,
-    build_stats_snapshot_with_status, metrics_dir_for_record,
+    CollectorCoverage, CollectorCoverageScope, CollectorCoverageSummary, CollectorStatus,
+    CpuNodeSample, CpuSnapshot, CpuSummary, FirstFailure, GpuDeviceSample, GpuNodeSummary,
+    GpuProcessSample, GpuSnapshot, SamplerSnapshot, SchedulerOptions, SlurmSamplerSnapshot,
+    StatsOptions, StatsSnapshot, StepStats, build_stats_snapshot, build_stats_snapshot_with_status,
+    collector_coverage_summaries, load_collector_coverage_summaries, metrics_dir_for_record,
+    telemetry_coverage_warnings,
 };
 pub use stats_rollup::{ReplicateStats, group_by_config, replicate_rollup};
 pub use sweep::{

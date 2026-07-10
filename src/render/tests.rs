@@ -2338,6 +2338,10 @@ fn render_metrics_sampler_when_enabled() {
     );
     assert!(script.contains("multi-node GPU fanout degraded to batch-node sampling"));
     assert!(script.contains("local fallback_status=$?"));
+    assert!(script.contains("GPU_COVERAGE_SCOPE=batch_node"));
+    assert!(script.contains("GPU_COVERAGE_OBSERVED_NODES=1"));
+    assert!(script.contains("GPU_COVERAGE_SCOPE=allocation"));
+    assert!(script.contains("GPU_COVERAGE_OBSERVED_NODES=${#gpu_files[@]}"));
     assert!(script.contains("METRICS_DIAGNOSTICS_DIR=\"$METRICS_DIR/diagnostics\""));
     assert!(script.contains("nvidia-smi topo -m"));
     // Sampled CPU collector: enabled flag, /proc/stat source, cpu.jsonl output,
@@ -2348,6 +2352,9 @@ fn render_metrics_sampler_when_enabled() {
     assert!(script.contains("${HPC_COMPOSE_PROC_STAT_PATH:-/proc/stat}"));
     assert!(script.contains("  sample_cpu_metrics\n"));
     assert!(script.contains("sample_cpu_metrics_all_nodes"));
+    assert!(script.contains("CPU_COVERAGE_SCOPE=batch_node"));
+    assert!(script.contains("CPU_COVERAGE_SCOPE=allocation"));
+    assert!(script.contains("CPU_COVERAGE_OBSERVED_NODES=${#cpu_files[@]}"));
     assert!(script.contains("write_cpu_sample_node_script"));
     assert!(
         script.contains("multi-node CPU fanout failed through srun; sampling the batch node only")
@@ -3252,6 +3259,11 @@ GPU_COLLECTOR_ENABLED=1
 GPU_COLLECTOR_AVAILABLE=0
 GPU_COLLECTOR_NOTE="nvidia-smi is not available on this node"
 GPU_COLLECTOR_LAST_SAMPLED_AT=""
+GPU_COVERAGE_SCOPE=batch_node
+GPU_COVERAGE_EXPECTED_NODES=4
+GPU_COVERAGE_OBSERVED_NODES=1
+GPU_COVERAGE_DEGRADED=1
+GPU_COVERAGE_REASON="multi-node GPU fanout failed through srun"
 SLURM_COLLECTOR_ENABLED=1
 SLURM_COLLECTOR_AVAILABLE=1
 SLURM_COLLECTOR_NOTE=""
@@ -3260,6 +3272,11 @@ CPU_COLLECTOR_ENABLED=1
 CPU_COLLECTOR_AVAILABLE=1
 CPU_COLLECTOR_NOTE=""
 CPU_COLLECTOR_LAST_SAMPLED_AT="2024-01-01T00:00:05Z"
+CPU_COVERAGE_SCOPE=allocation
+CPU_COVERAGE_EXPECTED_NODES=4
+CPU_COVERAGE_OBSERVED_NODES=4
+CPU_COVERAGE_DEGRADED=0
+CPU_COVERAGE_REASON=""
 write_metrics_meta
 "#,
         meta = meta.display()
@@ -3285,6 +3302,10 @@ write_metrics_meta
         "nvidia-smi is not available on this node"
     );
     assert_eq!(collectors[0]["last_sampled_at"], serde_json::Value::Null);
+    assert_eq!(collectors[0]["coverage"]["scope"], "batch_node");
+    assert_eq!(collectors[0]["coverage"]["expected_nodes"], 4);
+    assert_eq!(collectors[0]["coverage"]["observed_nodes"], 1);
+    assert_eq!(collectors[0]["coverage"]["degraded"], true);
     assert_eq!(collectors[1]["name"], "slurm");
     assert_eq!(collectors[1]["available"], true);
     assert_eq!(collectors[1]["note"], serde_json::Value::Null);
@@ -3293,6 +3314,8 @@ write_metrics_meta
     assert_eq!(collectors[2]["available"], true);
     assert_eq!(collectors[2]["note"], serde_json::Value::Null);
     assert_eq!(collectors[2]["last_sampled_at"], "2024-01-01T00:00:05Z");
+    assert_eq!(collectors[2]["coverage"]["scope"], "allocation");
+    assert_eq!(collectors[2]["coverage"]["observed_nodes"], 4);
 }
 
 #[test]

@@ -240,6 +240,8 @@ pub struct StatusSnapshot {
     pub log_dir: PathBuf,
     pub batch_log: BatchLogStatus,
     pub services: Vec<PsServiceRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub telemetry_coverage: Vec<CollectorCoverageSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<WatchdogSnapshot>,
     pub attempt: Option<u32>,
@@ -533,6 +535,9 @@ fn build_status_snapshot_core(
         now,
     )
     .snapshot;
+    let expected_nodes = super::stats::expected_nodes_for_record(spec_path, &record);
+    let telemetry_coverage =
+        super::stats::load_collector_coverage_summaries(&record, expected_nodes);
 
     Ok(StatusSnapshot {
         log_dir: log_dir_for_record(&record),
@@ -543,6 +548,7 @@ fn build_status_snapshot_core(
         array,
         verification: None,
         services,
+        telemetry_coverage,
         watchdog,
         attempt: runtime_state.as_ref().and_then(|state| state.attempt),
         is_resume: runtime_state.as_ref().and_then(|state| state.is_resume),

@@ -1,11 +1,12 @@
 use super::*;
 use hpc_compose::job::{
-    CpuNodeSample, CpuSnapshot, CpuSummary, GpuNodeSummary, PsSnapshot, QueueDiagnostics,
-    ReplayArtifactPaths, ReplayEvent, ReplayEventKind, ReplayFrame, ReplayReport,
-    ReplayServiceFrame, RequestedWalltime, SamplerSnapshot, SchedulerOptions, SchedulerSource,
-    SchedulerStatus, StatsSnapshot, SubmissionBackend, SubmissionKind, SubmissionRecord,
-    WalltimeProgress, WatchOutcome, WatchdogClassification, WatchdogObservation, WatchdogResource,
-    WatchdogSnapshot, WatchdogStatus, build_submission_record_with_backend, state_path_for_record,
+    CollectorCoverage, CollectorCoverageScope, CollectorStatus, CpuNodeSample, CpuSnapshot,
+    CpuSummary, GpuNodeSummary, PsSnapshot, QueueDiagnostics, ReplayArtifactPaths, ReplayEvent,
+    ReplayEventKind, ReplayFrame, ReplayReport, ReplayServiceFrame, RequestedWalltime,
+    SamplerSnapshot, SchedulerOptions, SchedulerSource, SchedulerStatus, StatsSnapshot,
+    SubmissionBackend, SubmissionKind, SubmissionRecord, WalltimeProgress, WatchOutcome,
+    WatchdogClassification, WatchdogObservation, WatchdogResource, WatchdogSnapshot,
+    WatchdogStatus, build_submission_record_with_backend, state_path_for_record,
     write_submission_record,
 };
 use hpc_compose::spec::WatchdogAction;
@@ -127,12 +128,37 @@ fn format_watch_metrics_line_includes_watchdog_warning() {
             memory_signal: Some("gpu_memory_used_total".into()),
             message: "low GPU compute with resident VRAM".into(),
         }],
+        telemetry_coverage: Vec::new(),
+        confidence_notes: Vec::new(),
     });
 
     assert_eq!(
         format_watch_metrics_line(&snapshot).as_deref(),
         Some("watchdog: low GPU compute with resident VRAM")
     );
+}
+
+#[test]
+fn format_watch_metrics_line_leads_with_plain_coverage_warning() {
+    let mut snapshot = stats_snapshot_with_cpu(None, true);
+    snapshot.sampler.as_mut().expect("sampler").collectors = vec![CollectorStatus {
+        name: "gpu".into(),
+        enabled: true,
+        available: true,
+        note: Some("fanout failed".into()),
+        last_sampled_at: Some("2026-04-05T10:00:10Z".into()),
+        coverage: Some(CollectorCoverage {
+            scope: CollectorCoverageScope::BatchNode,
+            expected_nodes: 4,
+            observed_nodes: 1,
+            degraded: true,
+            reason: Some("fanout failed".into()),
+        }),
+    }];
+
+    let line = format_watch_metrics_line(&snapshot).expect("metrics line");
+    assert!(line.starts_with("TELEMETRY DEGRADED: GPU covers batch node only (1/4)"));
+    assert!(line.ends_with("stats: sampler"));
 }
 
 #[test]

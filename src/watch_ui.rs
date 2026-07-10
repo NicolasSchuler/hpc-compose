@@ -26,8 +26,9 @@ use hpc_compose::cli::HoldOnExit;
 use hpc_compose::job::{
     GpuNodeSummary, PsServiceRow, PsSnapshot, ReplayReport, SchedulerOptions, SchedulerStatus,
     StatsOptions, StatsSnapshot, SubmissionBackend, SubmissionRecord, WalltimeProgress,
-    WatchOutcome, build_ps_snapshot, build_stats_snapshot_with_status, format_walltime_summary,
-    runtime_job_root_for_record, walltime_progress, walltime_progress_percent,
+    WatchOutcome, build_ps_snapshot, build_stats_snapshot_with_status,
+    collector_coverage_summaries, format_walltime_summary, runtime_job_root_for_record,
+    telemetry_coverage_warnings, walltime_progress, walltime_progress_percent,
 };
 
 const DATA_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -2678,6 +2679,19 @@ fn aggregate_gpu_nodes(nodes: &[GpuNodeSummary]) -> GpuNodeSummary {
 
 fn format_watch_metrics_line(snapshot: &StatsSnapshot) -> Option<String> {
     let mut parts = Vec::new();
+    let mut coverage_warnings = Vec::new();
+    if let Some(sampler) = &snapshot.sampler {
+        let coverage = collector_coverage_summaries(&sampler.collectors, 1);
+        coverage_warnings.extend(telemetry_coverage_warnings(&coverage));
+    }
+    if let Some(watchdog) = &snapshot.watchdog {
+        coverage_warnings.extend(telemetry_coverage_warnings(&watchdog.telemetry_coverage));
+    }
+    for warning in coverage_warnings {
+        if !parts.contains(&warning) {
+            parts.push(warning);
+        }
+    }
     if let Some(failure) = &snapshot.first_failure {
         parts.push(format!(
             "first failure: {} exit={}",

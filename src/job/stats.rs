@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use crate::spec::{ComposeSpec, EffectiveComposeConfig};
+
 use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
 use super::runtime_state::{ServiceRuntimeStateFile, load_runtime_state};
 use super::scheduler::{
@@ -113,6 +115,115 @@ pub struct CollectorStatus {
     pub available: bool,
     pub note: Option<String>,
     pub last_sampled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CollectorCoverage>,
+}
+
+/// Node scope covered by one job-local metrics collector.
+#[allow(missing_docs)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectorCoverageScope {
+    Allocation,
+    BatchNode,
+    #[default]
+    Unknown,
+}
+
+impl CollectorCoverageScope {
+    /// Stable snake-case label used by human-readable output.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allocation => "allocation",
+            Self::BatchNode => "batch_node",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Evidence completeness for one node-scoped metrics collector.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CollectorCoverage {
+    #[serde(default)]
+    pub scope: CollectorCoverageScope,
+    #[serde(default)]
+    pub expected_nodes: u32,
+    #[serde(default)]
+    pub observed_nodes: u32,
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl CollectorCoverage {
+    /// Returns whether this evidence can support allocation-wide conclusions.
+    #[must_use]
+    pub fn supports_allocation_conclusions(&self, expected_nodes: u32) -> bool {
+        let expected_nodes = self.expected_nodes.max(expected_nodes).max(1);
+        if self.degraded || self.scope == CollectorCoverageScope::BatchNode {
+            return false;
+        }
+        expected_nodes == 1
+            || (self.scope == CollectorCoverageScope::Allocation
+                && self.observed_nodes >= expected_nodes)
+    }
+
+    /// Returns a stable, non-color warning when coverage is incomplete.
+    #[must_use]
+    pub fn warning(&self, collector: &str) -> Option<String> {
+        let expected = self.expected_nodes.max(1);
+        let incomplete = self.degraded
+            || self.scope == CollectorCoverageScope::BatchNode
+            || (self.scope == CollectorCoverageScope::Unknown && expected > 1)
+            || self.observed_nodes < expected && self.observed_nodes > 0;
+        if !incomplete {
+            return None;
+        }
+        let collector = collector.to_ascii_uppercase();
+        let detail = match self.scope {
+            CollectorCoverageScope::BatchNode => "covers batch node only".to_string(),
+            CollectorCoverageScope::Allocation if self.observed_nodes > 0 => {
+                "covers only part of the allocation".to_string()
+            }
+            CollectorCoverageScope::Allocation => "has no allocation samples".to_string(),
+            CollectorCoverageScope::Unknown if self.observed_nodes == 0 => {
+                "coverage is unavailable".to_string()
+            }
+            CollectorCoverageScope::Unknown => "coverage is unknown".to_string(),
+        };
+        Some(format!(
+            "TELEMETRY DEGRADED: {collector} {detail} ({}/{expected})",
+            self.observed_nodes
+        ))
+    }
+
+    /// Returns a concise explanation suitable for machine-readable report notes.
+    #[must_use]
+    pub fn confidence_note(&self, collector: &str) -> Option<String> {
+        self.warning(collector).map(|warning| {
+            let mut note = warning;
+            if let Some(reason) = self.reason.as_deref()
+                && !reason.trim().is_empty()
+            {
+                note.push_str(": ");
+                note.push_str(reason);
+            }
+            note
+        })
+    }
+}
+
+/// Lightweight collector coverage row exposed by status and analysis reports.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CollectorCoverageSummary {
+    pub collector: String,
+    pub coverage: CollectorCoverage,
 }
 
 /// GPU telemetry snapshot collected by the job-local sampler.
@@ -222,6 +333,73 @@ impl Default for StatsOptions {
 pub(super) struct SamplerMetaFile {
     pub(super) interval_seconds: u64,
     pub(super) collectors: Vec<CollectorStatus>,
+}
+
+pub(crate) fn effective_collector_coverage(
+    collectors: &[CollectorStatus],
+    collector: &str,
+    expected_nodes: u32,
+) -> CollectorCoverage {
+    let expected_nodes = expected_nodes.max(1);
+    let mut coverage = collectors
+        .iter()
+        .find(|status| status.name == collector)
+        .and_then(|status| status.coverage.clone())
+        .unwrap_or_else(|| CollectorCoverage {
+            scope: CollectorCoverageScope::Unknown,
+            expected_nodes,
+            observed_nodes: 0,
+            degraded: expected_nodes > 1,
+            reason: Some("legacy collector metadata does not report node coverage".to_string()),
+        });
+    coverage.expected_nodes = coverage.expected_nodes.max(expected_nodes);
+    if coverage.expected_nodes > 1
+        && (coverage.scope == CollectorCoverageScope::Unknown
+            || coverage.observed_nodes < coverage.expected_nodes)
+    {
+        coverage.degraded = true;
+    }
+    coverage
+}
+
+/// Builds lightweight coverage rows for enabled node-scoped collectors.
+#[must_use]
+pub fn collector_coverage_summaries(
+    collectors: &[CollectorStatus],
+    expected_nodes: u32,
+) -> Vec<CollectorCoverageSummary> {
+    let mut summaries = collectors
+        .iter()
+        .filter(|collector| collector.enabled)
+        .filter(|collector| matches!(collector.name.as_str(), "gpu" | "cpu"))
+        .map(|collector| CollectorCoverageSummary {
+            collector: collector.name.clone(),
+            coverage: effective_collector_coverage(collectors, &collector.name, expected_nodes),
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| left.collector.cmp(&right.collector));
+    summaries
+}
+
+/// Reads only sampler metadata to summarize coverage for a tracked job.
+#[must_use]
+pub fn load_collector_coverage_summaries(
+    record: &SubmissionRecord,
+    expected_nodes: u32,
+) -> Vec<CollectorCoverageSummary> {
+    let meta_path = metrics_dir_for_record(record).join("meta.json");
+    read_json::<SamplerMetaFile>(&meta_path)
+        .map(|meta| collector_coverage_summaries(&meta.collectors, expected_nodes))
+        .unwrap_or_default()
+}
+
+/// Formats all incomplete-coverage warnings in deterministic collector order.
+#[must_use]
+pub fn telemetry_coverage_warnings(summaries: &[CollectorCoverageSummary]) -> Vec<String> {
+    summaries
+        .iter()
+        .filter_map(|summary| summary.coverage.warning(&summary.collector))
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -527,12 +705,27 @@ fn build_stats_snapshot_core(
     let attribution = runtime_state
         .as_ref()
         .map(|state| GpuAttributionContext::from_runtime_state(&job_id, state));
-    let SamplerLoadOutcome { sampler, mut notes } = if let Some(metrics_dir) = metrics_dir.as_ref()
-    {
+    let SamplerLoadOutcome {
+        mut sampler,
+        mut notes,
+    } = if let Some(metrics_dir) = metrics_dir.as_ref() {
         load_sampler_snapshot(metrics_dir, attribution.as_ref())
     } else {
         SamplerLoadOutcome::default()
     };
+    if let (Some(record), Some(sampler)) = (record.as_ref(), sampler.as_mut()) {
+        let expected_nodes = expected_nodes_for_record(spec_path, record);
+        let summaries = collector_coverage_summaries(&sampler.collectors, expected_nodes);
+        for summary in summaries {
+            if let Some(collector) = sampler
+                .collectors
+                .iter_mut()
+                .find(|collector| collector.name == summary.collector)
+            {
+                collector.coverage = Some(summary.coverage);
+            }
+        }
+    }
     let watchdog = record.as_ref().map(|record| {
         super::watchdog::build_watchdog_snapshot(
             spec_path,
@@ -680,6 +873,21 @@ pub fn metrics_dir_for_record(record: &SubmissionRecord) -> PathBuf {
     // Honor an explicit x-slurm.runtime_root override (schema v3+); rebuilding
     // the default root here silently lost all metrics for override jobs.
     tracked_paths::latest_metrics_dir(&runtime_job_root_for_record(record))
+}
+
+pub(crate) fn expected_nodes_for_record(spec_path: &Path, record: &SubmissionRecord) -> u32 {
+    record
+        .config_snapshot_yaml
+        .as_deref()
+        .and_then(|yaml| serde_norway::from_str::<EffectiveComposeConfig>(yaml).ok())
+        .map(|config| config.slurm.nodes.unwrap_or(1))
+        .or_else(|| {
+            ComposeSpec::load(spec_path)
+                .ok()
+                .map(|spec| spec.slurm.allocation_nodes())
+        })
+        .unwrap_or(1)
+        .max(1)
 }
 
 fn command_unavailable_anyhow(err: &anyhow::Error) -> bool {
@@ -2013,5 +2221,88 @@ mod tests {
             .unwrap_or("false");
         let sstat_err = probe_step_stats("123", false_bin).expect_err("sstat failure");
         assert!(sstat_err.to_string().contains("sstat failed for job 123"));
+    }
+
+    #[test]
+    fn collector_coverage_distinguishes_complete_fallback_unavailable_and_legacy() {
+        let complete = CollectorCoverage {
+            scope: CollectorCoverageScope::Allocation,
+            expected_nodes: 4,
+            observed_nodes: 4,
+            degraded: false,
+            reason: None,
+        };
+        assert!(complete.supports_allocation_conclusions(4));
+        assert_eq!(complete.warning("gpu"), None);
+
+        let fallback = CollectorCoverage {
+            scope: CollectorCoverageScope::BatchNode,
+            expected_nodes: 4,
+            observed_nodes: 1,
+            degraded: true,
+            reason: Some("multi-node GPU fanout failed through srun".into()),
+        };
+        assert!(!fallback.supports_allocation_conclusions(4));
+        assert_eq!(
+            fallback.warning("gpu").as_deref(),
+            Some("TELEMETRY DEGRADED: GPU covers batch node only (1/4)")
+        );
+
+        let unavailable = CollectorCoverage {
+            scope: CollectorCoverageScope::Unknown,
+            expected_nodes: 4,
+            observed_nodes: 0,
+            degraded: true,
+            reason: Some("nvidia-smi unavailable".into()),
+        };
+        assert_eq!(
+            unavailable.warning("gpu").as_deref(),
+            Some("TELEMETRY DEGRADED: GPU coverage is unavailable (0/4)")
+        );
+
+        let legacy: CollectorStatus = serde_json::from_str(
+            r#"{"name":"gpu","enabled":true,"available":true,"note":null,"last_sampled_at":"2026-04-05T10:00:00Z"}"#,
+        )
+        .expect("legacy collector metadata");
+        assert!(legacy.coverage.is_none());
+        let synthesized = effective_collector_coverage(&[legacy], "gpu", 4);
+        assert_eq!(synthesized.scope, CollectorCoverageScope::Unknown);
+        assert!(synthesized.degraded);
+        assert!(!synthesized.supports_allocation_conclusions(4));
+    }
+
+    #[test]
+    fn collector_coverage_summaries_are_deterministic() {
+        let status = |name: &str, enabled: bool| CollectorStatus {
+            name: name.to_string(),
+            enabled,
+            available: true,
+            note: None,
+            last_sampled_at: None,
+            coverage: Some(CollectorCoverage {
+                scope: CollectorCoverageScope::BatchNode,
+                expected_nodes: 4,
+                observed_nodes: 1,
+                degraded: true,
+                reason: None,
+            }),
+        };
+
+        let summaries = collector_coverage_summaries(
+            &[
+                status("gpu", true),
+                status("cpu", true),
+                status("gpu", false),
+            ],
+            4,
+        );
+
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|summary| summary.collector.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cpu", "gpu"]
+        );
     }
 }

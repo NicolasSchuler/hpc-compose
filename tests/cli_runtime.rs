@@ -830,6 +830,10 @@ services:
     );
     assert_success(&status);
     let status_json: Value = serde_json::from_str(&stdout_text(&status)).expect("status json");
+    assert_eq!(
+        status_json["telemetry_coverage"][0]["coverage"]["scope"],
+        Value::from("unknown")
+    );
     assert_eq!(status_json["watchdog"]["status"], Value::from("warning"));
     assert!(
         status_json["watchdog"]["message"]

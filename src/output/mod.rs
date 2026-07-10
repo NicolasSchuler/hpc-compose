@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -16,7 +16,8 @@ use hpc_compose::job::{
     ArtifactExportReport, CleanupReport, EfficiencyScoreReport, JobDiffChange, JobDiffReport,
     JobInventoryScan, JobMatrixReport, JobMatrixRow, PsSnapshot, RightsizeConfidence,
     RightsizeReport, SpecDiffReport, StatsSnapshot, StatusSnapshot, StatusVerificationReport,
-    SubmissionBackend, WatchOutcome, WatchdogSnapshot, scheduler_source_label,
+    SubmissionBackend, WatchOutcome, WatchdogSnapshot, collector_coverage_summaries,
+    scheduler_source_label, telemetry_coverage_warnings,
 };
 use hpc_compose::planner::{
     ExecutionSpec, ImageSource, Plan, ServicePlacementMode, registry_host_for_remote,
@@ -1042,6 +1043,15 @@ fn write_status_snapshot(writer: &mut impl Write, snapshot: &StatusSnapshot) -> 
             )?;
         }
     }
+    let watchdog_coverage = snapshot
+        .watchdog
+        .as_ref()
+        .map(|watchdog| watchdog.telemetry_coverage.as_slice())
+        .unwrap_or_default();
+    write_telemetry_coverage_warnings(
+        writer,
+        &[snapshot.telemetry_coverage.as_slice(), watchdog_coverage],
+    )?;
     if let Some(verification) = &snapshot.verification {
         write_status_verification(writer, verification)?;
     }
@@ -1320,6 +1330,21 @@ fn write_watchdog_snapshot(writer: &mut impl Write, watchdog: &WatchdogSnapshot)
     Ok(())
 }
 
+fn write_telemetry_coverage_warnings(
+    writer: &mut impl Write,
+    coverage_groups: &[&[hpc_compose::job::CollectorCoverageSummary]],
+) -> io::Result<()> {
+    let mut written = BTreeSet::new();
+    for coverage in coverage_groups {
+        for warning in telemetry_coverage_warnings(coverage) {
+            if written.insert(warning.clone()) {
+                writeln!(writer, "{warning}")?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_status_verification(
     writer: &mut impl Write,
     report: &StatusVerificationReport,
@@ -1569,6 +1594,17 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
     if let Some(reason) = &snapshot.reason {
         writeln!(writer, "stats reason: {reason}")?;
     }
+    let sampler_coverage = snapshot
+        .sampler
+        .as_ref()
+        .map(|sampler| collector_coverage_summaries(&sampler.collectors, 1))
+        .unwrap_or_default();
+    let watchdog_coverage = snapshot
+        .watchdog
+        .as_ref()
+        .map(|watchdog| watchdog.telemetry_coverage.as_slice())
+        .unwrap_or_default();
+    write_telemetry_coverage_warnings(writer, &[sampler_coverage.as_slice(), watchdog_coverage])?;
     for note in &snapshot.notes {
         writeln!(writer, "note: {note}")?;
     }
@@ -1638,14 +1674,26 @@ fn write_stats_snapshot(writer: &mut impl Write, snapshot: &StatsSnapshot) -> io
             }
             writeln!(
                 writer,
-                "collector '{}': {} (last sampled: {})",
+                "collector '{}': {} (last sampled: {}){}",
                 collector.name,
                 if collector.available {
                     "available"
                 } else {
                     "unavailable"
                 },
-                collector.last_sampled_at.as_deref().unwrap_or("never")
+                collector.last_sampled_at.as_deref().unwrap_or("never"),
+                collector
+                    .coverage
+                    .as_ref()
+                    .map_or_else(String::new, |coverage| {
+                        format!(
+                            " coverage={} {}/{}{}",
+                            coverage.scope.as_str(),
+                            coverage.observed_nodes,
+                            coverage.expected_nodes,
+                            if coverage.degraded { " degraded" } else { "" }
+                        )
+                    })
             )?;
         }
         if let Some(gpu) = &sampler.gpu {
@@ -1795,6 +1843,9 @@ fn write_rightsize_report(writer: &mut impl Write, report: &RightsizeReport) -> 
     for note in &report.notes {
         writeln!(writer, "note: {note}")?;
     }
+    for note in &report.confidence_notes {
+        writeln!(writer, "confidence note: {note}")?;
+    }
 
     if !report.observations.is_empty() {
         writeln!(writer)?;
@@ -1911,6 +1962,9 @@ fn write_efficiency_score_report(
     }
     for note in &report.notes {
         writeln!(writer, "note: {note}")?;
+    }
+    for note in &report.confidence_notes {
+        writeln!(writer, "confidence note: {note}")?;
     }
     Ok(())
 }
@@ -2131,6 +2185,7 @@ pub(crate) fn write_stats_snapshot_jsonl(
                     "available": collector.available,
                     "note": collector.note,
                     "last_sampled_at": collector.last_sampled_at,
+                    "coverage": collector.coverage,
                 }),
             )?;
         }

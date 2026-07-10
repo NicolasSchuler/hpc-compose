@@ -14,9 +14,10 @@ use super::read_json;
 use super::rightsize::{RightsizeConfidence, RightsizeRecommendation, build_rightsize_report};
 use super::scheduler::{build_status_snapshot, parse_scheduler_timestamp, scheduler_source_label};
 use super::stats::{
-    GpuDeviceSampleRow, GpuProcessSampleRow, SamplerMetaFile, SchedulerOptions, SlurmSampleRow,
-    StepStats, find_tres_value, metrics_dir_for_record, probe_step_stats,
-    step_from_slurm_sample_row,
+    CollectorCoverage, CollectorCoverageSummary, CollectorStatus, GpuDeviceSampleRow,
+    GpuProcessSampleRow, SamplerMetaFile, SchedulerOptions, SlurmSampleRow, StepStats,
+    collector_coverage_summaries, effective_collector_coverage, find_tres_value,
+    metrics_dir_for_record, probe_step_stats, step_from_slurm_sample_row,
 };
 
 const GPU_ACTIVE_UTILIZATION_PERCENT: f64 = 5.0;
@@ -95,11 +96,16 @@ pub struct EfficiencyScoreReport {
     pub tips: Vec<String>,
     pub sources: Vec<String>,
     pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub telemetry_coverage: Vec<CollectorCoverageSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confidence_notes: Vec<String>,
 }
 
 #[derive(Debug, Default)]
 struct ScoreSamplerHistory {
     interval_seconds: Option<u64>,
+    collectors: Vec<CollectorStatus>,
     gpu_samples: BTreeMap<String, GpuSampleSummary>,
     slurm_steps: Vec<StepStats>,
     slurm_active_timestamps: BTreeSet<String>,
@@ -196,6 +202,26 @@ pub fn build_efficiency_score_report(
         .as_ref()
         .filter(|snapshot| snapshot.available)
         .and_then(observed_elapsed_seconds);
+    let expected_nodes = plan.slurm.allocation_nodes();
+    let gpu_coverage = effective_collector_coverage(&sampler.collectors, "gpu", expected_nodes);
+    let mut telemetry_coverage = collector_coverage_summaries(&sampler.collectors, expected_nodes)
+        .into_iter()
+        .filter(|summary| summary.collector == "gpu")
+        .collect::<Vec<_>>();
+    if telemetry_coverage
+        .iter()
+        .all(|summary| summary.collector != "gpu")
+        && !sampler.gpu_samples.is_empty()
+    {
+        telemetry_coverage.push(CollectorCoverageSummary {
+            collector: "gpu".to_string(),
+            coverage: gpu_coverage.clone(),
+        });
+    }
+    let confidence_notes = telemetry_coverage
+        .iter()
+        .filter_map(|summary| summary.coverage.confidence_note(&summary.collector))
+        .collect::<Vec<_>>();
 
     let energy = estimate_energy(
         plan,
@@ -207,7 +233,7 @@ pub fn build_efficiency_score_report(
     );
 
     let components = vec![
-        gpu_utilization_component(&sampler, &steps),
+        gpu_utilization_component(&sampler, &steps, &gpu_coverage, expected_nodes),
         memory_utilization_component(plan, accounting.as_ref(), &steps),
         compute_time_component(&sampler, requested_walltime_seconds),
         energy_component(energy),
@@ -262,6 +288,8 @@ pub fn build_efficiency_score_report(
         tips,
         sources: sources.into_iter().collect(),
         notes,
+        telemetry_coverage,
+        confidence_notes,
     })
 }
 
@@ -274,7 +302,10 @@ fn load_score_sampler_history(metrics_dir: &Path, notes: &mut Vec<String>) -> Sc
     let meta_path = metrics_dir.join("meta.json");
     if meta_path.exists() {
         match read_json::<SamplerMetaFile>(&meta_path) {
-            Ok(meta) => history.interval_seconds = Some(meta.interval_seconds),
+            Ok(meta) => {
+                history.interval_seconds = Some(meta.interval_seconds);
+                history.collectors = meta.collectors;
+            }
             Err(err) => notes.push(format!(
                 "failed to parse metrics sampler metadata at {}: {err}",
                 meta_path.display()
@@ -408,25 +439,30 @@ fn load_slurm_sample_history(path: &Path) -> Result<(Vec<StepStats>, BTreeSet<St
 fn gpu_utilization_component(
     sampler: &ScoreSamplerHistory,
     steps: &[StepStats],
+    coverage: &CollectorCoverage,
+    expected_nodes: u32,
 ) -> EfficiencyScoreComponent {
     if let Some(percent) = sampler.mean_gpu_utilization_percent() {
         let score = percent_score(percent / 100.0);
+        let allocation_complete = coverage.supports_allocation_conclusions(expected_nodes);
         return EfficiencyScoreComponent {
             name: "gpu_utilization".to_string(),
             label: "GPU Util".to_string(),
-            available: true,
+            available: allocation_complete,
             weight: GPU_WEIGHT,
-            score: Some(score),
+            score: allocation_complete.then_some(score),
             utilization: Some(percent / 100.0),
             observed: Some(format!("{percent:.1}%")),
             requested: None,
             source: "sampler/gpu".to_string(),
-            confidence: if sampler.gpu_samples.len() >= 3 {
+            confidence: if !allocation_complete {
+                EfficiencyScoreConfidence::Low
+            } else if sampler.gpu_samples.len() >= 3 {
                 EfficiencyScoreConfidence::High
             } else {
                 EfficiencyScoreConfidence::Low
             },
-            note: None,
+            note: coverage.confidence_note("gpu"),
         };
     }
 
@@ -601,6 +637,8 @@ fn estimate_energy(
     elapsed_seconds: Option<u64>,
     options: &EfficiencyScoreOptions,
 ) -> EnergyEstimate {
+    let expected_nodes = plan.slurm.allocation_nodes();
+    let gpu_coverage = effective_collector_coverage(&sampler.collectors, "gpu", expected_nodes);
     let gpu_count = allocated_gpu_count(accounting)
         .or_else(|| requested_gpu_count(plan))
         .or_else(|| sampler.max_seen_gpu_devices().map(|value| value as u64))
@@ -620,7 +658,9 @@ fn estimate_energy(
         _ => None,
     };
 
-    if let Some((gpu_wh, seconds)) = sampler.integrated_gpu_power_draw_wh() {
+    if gpu_coverage.supports_allocation_conclusions(expected_nodes)
+        && let Some((gpu_wh, seconds)) = sampler.integrated_gpu_power_draw_wh()
+    {
         let cpu_wh = cpu_count as f64 * options.cpu_watts_per_core * seconds / 3_600.0;
         return EnergyEstimate {
             actual_kwh: Some((gpu_wh + cpu_wh) * options.pue / 1_000.0),
@@ -630,7 +670,9 @@ fn estimate_energy(
         };
     }
 
-    if let Some((gpu_wh, seconds)) = sampler.integrated_gpu_power_limit_wh() {
+    if gpu_coverage.supports_allocation_conclusions(expected_nodes)
+        && let Some((gpu_wh, seconds)) = sampler.integrated_gpu_power_limit_wh()
+    {
         let cpu_wh = cpu_count as f64 * options.cpu_watts_per_core * seconds / 3_600.0;
         return EnergyEstimate {
             actual_kwh: Some((gpu_wh + cpu_wh) * options.pue / 1_000.0),
@@ -1208,6 +1250,16 @@ fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 mod tests {
     use super::*;
 
+    fn allocation_coverage() -> CollectorCoverage {
+        CollectorCoverage {
+            scope: super::super::stats::CollectorCoverageScope::Allocation,
+            expected_nodes: 1,
+            observed_nodes: 1,
+            degraded: false,
+            reason: None,
+        }
+    }
+
     #[test]
     fn score_duration_parser_applies_walltime_range_rules() {
         assert_eq!(parse_slurm_duration_seconds("90"), Some(90));
@@ -1495,6 +1547,8 @@ mod tests {
                 gpu_util: Some("80".into()),
                 gpu_mem: None,
             }],
+            &allocation_coverage(),
+            1,
         );
 
         assert!(component.available);
@@ -1507,6 +1561,38 @@ mod tests {
                 .note
                 .as_deref()
                 .is_some_and(|note| note.contains("Slurm TRES accounting"))
+        );
+    }
+
+    #[test]
+    fn score_keeps_partial_gpu_observation_but_excludes_it_from_score() {
+        let mut history = ScoreSamplerHistory::default();
+        history.gpu_samples.insert(
+            "2026-04-10T10:00:00Z".into(),
+            GpuSampleSummary {
+                utilization_values: vec![10.0],
+                ..GpuSampleSummary::default()
+            },
+        );
+        let coverage = CollectorCoverage {
+            scope: super::super::stats::CollectorCoverageScope::BatchNode,
+            expected_nodes: 4,
+            observed_nodes: 1,
+            degraded: true,
+            reason: Some("fanout failed".into()),
+        };
+
+        let component = gpu_utilization_component(&history, &[], &coverage, 4);
+
+        assert!(!component.available);
+        assert_eq!(component.score, None);
+        assert_eq!(component.observed.as_deref(), Some("10.0%"));
+        assert_eq!(component.confidence, EfficiencyScoreConfidence::Low);
+        assert!(
+            component
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("batch node only"))
         );
     }
 

@@ -246,12 +246,79 @@
         "memory_basis"
       ]
     },
+    "CollectorCoverage": {
+      "description": "Evidence completeness for one node-scoped metrics collector.",
+      "type": "object",
+      "properties": {
+        "degraded": {
+          "type": "boolean",
+          "default": false
+        },
+        "expected_nodes": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "observed_nodes": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/CollectorCoverageScope",
+          "default": "unknown"
+        }
+      }
+    },
+    "CollectorCoverageScope": {
+      "description": "Node scope covered by one job-local metrics collector.",
+      "type": "string",
+      "enum": [
+        "allocation",
+        "batch_node",
+        "unknown"
+      ]
+    },
+    "CollectorCoverageSummary": {
+      "description": "Lightweight collector coverage row exposed by status and analysis reports.",
+      "type": "object",
+      "properties": {
+        "collector": {
+          "type": "string"
+        },
+        "coverage": {
+          "$ref": "#/$defs/CollectorCoverage"
+        }
+      },
+      "required": [
+        "collector",
+        "coverage"
+      ]
+    },
     "CollectorStatus": {
       "description": "Availability metadata for one configured metrics collector.",
       "type": "object",
       "properties": {
         "available": {
           "type": "boolean"
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CollectorCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "enabled": {
           "type": "boolean"
@@ -1453,6 +1520,12 @@
         "action": {
           "$ref": "#/$defs/WatchdogAction"
         },
+        "confidence_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -1472,6 +1545,12 @@
         },
         "status": {
           "$ref": "#/$defs/WatchdogStatus"
+        },
+        "telemetry_coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CollectorCoverageSummary"
+          }
         }
       },
       "required": [

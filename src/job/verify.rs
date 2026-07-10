@@ -594,6 +594,7 @@ mod tests {
                     nodelist: None,
                 })
                 .collect(),
+            telemetry_coverage: Vec::new(),
             watchdog: None,
             attempt: None,
             is_resume: None,

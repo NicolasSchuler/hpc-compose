@@ -329,7 +329,11 @@ fn scheduler_status_prefers_squeue_then_sacct() {
 fn build_status_snapshot_and_log_selection_cover_additional_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = tmpdir.path().join("compose.yaml");
-    fs::write(&compose, "services:\n  app:\n    image: redis:7\n").expect("compose");
+    fs::write(
+        &compose,
+        "x-slurm:\n  nodes: 4\nservices:\n  app:\n    image: redis:7\n",
+    )
+    .expect("compose");
     let plan = runtime_plan(tmpdir.path());
     let record = persist_submission_record(
         &compose,
@@ -348,6 +352,13 @@ fn build_status_snapshot_and_log_selection_cover_additional_paths() {
     for path in record.service_logs.values() {
         fs::write(path, "line one\nline two\n").expect("service log");
     }
+    let metrics_dir = metrics_dir_for_record(&record);
+    fs::create_dir_all(&metrics_dir).expect("metrics dir");
+    fs::write(
+        metrics_dir.join("meta.json"),
+        r#"{"interval_seconds":5,"collectors":[{"name":"gpu","enabled":true,"available":true,"note":"fanout failed","last_sampled_at":"2026-04-05T10:00:10Z","coverage":{"scope":"batch_node","expected_nodes":4,"observed_nodes":1,"degraded":true,"reason":"fanout failed"}}]}"#,
+    )
+    .expect("metrics meta");
     let now = unix_timestamp_now();
     fs::write(
         tmpdir.path().join(".hpc-compose/12345/state.json"),
@@ -426,6 +437,13 @@ fn build_status_snapshot_and_log_selection_cover_additional_paths() {
         Some(PathBuf::from("/shared/runs/demo"))
     );
     assert!(snapshot.batch_log.present);
+    assert_eq!(snapshot.telemetry_coverage.len(), 1);
+    assert_eq!(snapshot.telemetry_coverage[0].collector, "gpu");
+    assert_eq!(
+        snapshot.telemetry_coverage[0].coverage.scope,
+        CollectorCoverageScope::BatchNode
+    );
+    assert_eq!(snapshot.telemetry_coverage[0].coverage.observed_nodes, 1);
     assert_eq!(snapshot.services.len(), 2);
     let api = snapshot
         .services

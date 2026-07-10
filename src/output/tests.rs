@@ -11,11 +11,11 @@ use hpc_compose::cli::{
 };
 use hpc_compose::job::{
     ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
-    CollectorStatus, CpuNodeSample, CpuSnapshot, CpuSummary, GpuDeviceSample, GpuProcessSample,
-    GpuSnapshot, JobInventoryEntry, JobInventoryScan, QueueDiagnostics, SamplerSnapshot,
-    SchedulerSource, SchedulerStatus, ServiceAssertionStatus, ServiceLogStatus, StatsSnapshot,
-    StatusSnapshot, StatusVerificationCheck, StatusVerificationReport, StepStats, SubmissionKind,
-    SubmissionRecord,
+    CollectorCoverage, CollectorCoverageScope, CollectorCoverageSummary, CollectorStatus,
+    CpuNodeSample, CpuSnapshot, CpuSummary, GpuDeviceSample, GpuProcessSample, GpuSnapshot,
+    JobInventoryEntry, JobInventoryScan, QueueDiagnostics, SamplerSnapshot, SchedulerSource,
+    SchedulerStatus, ServiceAssertionStatus, ServiceLogStatus, StatsSnapshot, StatusSnapshot,
+    StatusVerificationCheck, StatusVerificationReport, StepStats, SubmissionKind, SubmissionRecord,
 };
 use hpc_compose::planner::{ExecutionSpec, ImageSource, PreparedImageSpec, ServicePlacement};
 use hpc_compose::spec::{
@@ -816,6 +816,16 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
             status: Some("ready".into()),
             ..sample_service_status(tmpdir.path().join(".hpc-compose/12345/logs/svc.log"))
         }],
+        telemetry_coverage: vec![CollectorCoverageSummary {
+            collector: "gpu".into(),
+            coverage: CollectorCoverage {
+                scope: CollectorCoverageScope::BatchNode,
+                expected_nodes: 4,
+                observed_nodes: 1,
+                degraded: true,
+                reason: Some("fanout failed".into()),
+            },
+        }],
         watchdog: None,
         attempt: Some(1),
         is_resume: Some(true),
@@ -833,6 +843,9 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
     assert!(status_plain.contains("  eligible time: 2026-04-06T10:00:00"));
     assert!(status_plain.contains("  start time: 2026-04-06T10:05:00"));
     assert!(status_plain.contains("Runtime:"));
+    let warning = "TELEMETRY DEGRADED: GPU covers batch node only (1/4)";
+    assert!(status_plain.contains(warning));
+    assert!(status_plain.find(warning) < status_plain.find("Runtime:"));
     assert!(status_plain.contains("  attempt: 1"));
     assert!(status_plain.contains("  is resume: yes"));
     assert!(status_plain.contains("  resume dir: /shared/runs/demo"));
@@ -898,6 +911,7 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
             updated_age_seconds: None,
         },
         services: Vec::new(),
+        telemetry_coverage: Vec::new(),
         watchdog: None,
         attempt: None,
         is_resume: None,
@@ -940,6 +954,13 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
                     available: true,
                     note: None,
                     last_sampled_at: Some("2026-04-05T10:00:10Z".into()),
+                    coverage: Some(CollectorCoverage {
+                        scope: CollectorCoverageScope::BatchNode,
+                        expected_nodes: 4,
+                        observed_nodes: 1,
+                        degraded: true,
+                        reason: Some("fanout failed".into()),
+                    }),
                 },
                 CollectorStatus {
                     name: "slurm".into(),
@@ -947,6 +968,7 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
                     available: false,
                     note: None,
                     last_sampled_at: None,
+                    coverage: None,
                 },
             ],
             gpu: Some(GpuSnapshot {
@@ -1010,6 +1032,8 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
     write_stats_snapshot(&mut stats_out, &stats).expect("stats");
     let stats_text = String::from_utf8(stats_out).expect("utf8");
     assert!(stats_text.contains("collector 'gpu': available"));
+    assert!(stats_text.contains(warning));
+    assert!(stats_text.find(warning) < stats_text.find("gpu snapshot:"));
     assert!(stats_text.contains("attempt: 1"));
     assert!(stats_text.contains("is resume: yes"));
     assert!(stats_text.contains("resume dir: /shared/runs/demo"));
@@ -1037,6 +1061,13 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
     assert!(jsonl_text.contains("\"record_type\":\"step\""));
     assert!(jsonl_text.contains("\"attempt\":1"));
     assert!(jsonl_text.contains("\"is_resume\":true"));
+    let collector_row = jsonl_text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|row| row["record_type"] == "collector" && row["name"] == "gpu")
+        .expect("GPU collector JSONL row");
+    assert_eq!(collector_row["coverage"]["scope"], "batch_node");
+    assert_eq!(collector_row["coverage"]["observed_nodes"], 1);
 
     let unavailable_stats = StatsSnapshot {
         available: false,
@@ -1342,6 +1373,7 @@ fn stdout_entrypoints_cover_public_output_wrappers() {
             updated_age_seconds: None,
         },
         services: Vec::new(),
+        telemetry_coverage: Vec::new(),
         watchdog: None,
         attempt: Some(1),
         is_resume: Some(false),
@@ -1895,6 +1927,7 @@ fn write_status_snapshot_omits_window_for_non_restart_or_legacy_state() {
                 readiness_configured: None,
             },
         ],
+        telemetry_coverage: Vec::new(),
         watchdog: None,
         attempt: None,
         is_resume: None,

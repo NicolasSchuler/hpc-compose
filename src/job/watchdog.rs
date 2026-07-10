@@ -14,8 +14,9 @@ use super::model::SubmissionRecord;
 use super::read_json;
 use super::scheduler::{JobState, SchedulerStatus, parse_scheduler_timestamp};
 use super::stats::{
-    GpuDeviceSampleRow, SamplerMetaFile, SlurmSampleRow, StepStats, find_tres_value,
-    metrics_dir_for_record, step_from_slurm_sample_row,
+    CollectorCoverage, CollectorCoverageSummary, GpuDeviceSampleRow, SamplerMetaFile,
+    SlurmSampleRow, StepStats, collector_coverage_summaries, effective_collector_coverage,
+    expected_nodes_for_record, find_tres_value, metrics_dir_for_record, step_from_slurm_sample_row,
 };
 
 /// Status of the advisory idle-resource watchdog.
@@ -119,6 +120,10 @@ pub struct WatchdogSnapshot {
     pub message: String,
     pub grace_period_seconds: u64,
     pub observations: Vec<WatchdogObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub telemetry_coverage: Vec<CollectorCoverageSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confidence_notes: Vec<String>,
 }
 
 impl WatchdogSnapshot {
@@ -138,6 +143,7 @@ pub(crate) struct WatchdogBuildOutcome {
 #[derive(Debug, Default)]
 struct WatchdogHistory {
     interval_seconds: Option<u64>,
+    collectors: Vec<super::stats::CollectorStatus>,
     gpu_samples: BTreeMap<String, ResourceWindowSample>,
     cpu_samples: BTreeMap<String, ResourceWindowSample>,
     notes: Vec<String>,
@@ -185,7 +191,9 @@ pub(crate) fn build_watchdog_snapshot(
         };
     }
 
-    let snapshot = classify_watchdog_for_record(record, scheduler, started_at, now, config);
+    let expected_nodes = expected_nodes_for_record(spec_path, record);
+    let snapshot =
+        classify_watchdog_for_record(record, scheduler, started_at, now, config, expected_nodes);
     WatchdogBuildOutcome {
         snapshot: Some(snapshot),
         notes,
@@ -221,6 +229,7 @@ fn classify_watchdog_for_record(
     started_at: Option<u64>,
     now: u64,
     config: EffectiveWatchdogConfig,
+    expected_nodes: u32,
 ) -> WatchdogSnapshot {
     if JobState::parse(&scheduler.state) != JobState::Running {
         return WatchdogSnapshot {
@@ -233,6 +242,8 @@ fn classify_watchdog_for_record(
             ),
             grace_period_seconds: config.grace_period_seconds,
             observations: Vec::new(),
+            telemetry_coverage: Vec::new(),
+            confidence_notes: Vec::new(),
         };
     }
 
@@ -249,25 +260,43 @@ fn classify_watchdog_for_record(
             ),
             grace_period_seconds: config.grace_period_seconds,
             observations: Vec::new(),
+            telemetry_coverage: Vec::new(),
+            confidence_notes: Vec::new(),
         };
     }
 
     let metrics_dir = metrics_dir_for_record(record);
     let history = load_watchdog_history(&metrics_dir);
+    let gpu_coverage = effective_collector_coverage(&history.collectors, "gpu", expected_nodes);
+    let cpu_coverage = effective_collector_coverage(&history.collectors, "cpu", expected_nodes);
+    let telemetry_coverage = collector_coverage_summaries(&history.collectors, expected_nodes);
     let observations = vec![
-        classify_resource_window(
-            WatchdogResource::Gpu,
-            &config.gpu,
-            &history.gpu_samples,
-            history.interval_seconds,
+        suppress_unsafe_idle_conclusion(
+            classify_resource_window(
+                WatchdogResource::Gpu,
+                &config.gpu,
+                &history.gpu_samples,
+                history.interval_seconds,
+            ),
+            &gpu_coverage,
+            expected_nodes,
         ),
-        classify_resource_window(
-            WatchdogResource::Cpu,
-            &config.cpu,
-            &history.cpu_samples,
-            history.interval_seconds,
+        suppress_unsafe_idle_conclusion(
+            classify_resource_window(
+                WatchdogResource::Cpu,
+                &config.cpu,
+                &history.cpu_samples,
+                history.interval_seconds,
+            ),
+            &cpu_coverage,
+            expected_nodes,
         ),
     ];
+
+    let confidence_notes = telemetry_coverage
+        .iter()
+        .filter_map(|summary| summary.coverage.confidence_note(&summary.collector))
+        .collect();
 
     let status = overall_status(&observations, &history.notes);
     let message = overall_message(status, &observations, &history.notes);
@@ -278,6 +307,8 @@ fn classify_watchdog_for_record(
         message,
         grace_period_seconds: config.grace_period_seconds,
         observations,
+        telemetry_coverage,
+        confidence_notes,
     }
 }
 
@@ -293,7 +324,10 @@ fn load_watchdog_history(metrics_dir: &Path) -> WatchdogHistory {
 
     let meta_path = metrics_dir.join("meta.json");
     match read_json::<SamplerMetaFile>(&meta_path) {
-        Ok(meta) => history.interval_seconds = Some(meta.interval_seconds),
+        Ok(meta) => {
+            history.interval_seconds = Some(meta.interval_seconds);
+            history.collectors = meta.collectors;
+        }
         Err(err) => history.notes.push(format!(
             "failed to parse metrics sampler metadata at {}: {err}",
             meta_path.display()
@@ -643,6 +677,29 @@ fn classify_resource_window(
     }
 }
 
+fn suppress_unsafe_idle_conclusion(
+    mut observation: WatchdogObservation,
+    coverage: &CollectorCoverage,
+    expected_nodes: u32,
+) -> WatchdogObservation {
+    if coverage.supports_allocation_conclusions(expected_nodes)
+        || observation.status != WatchdogStatus::Warning
+    {
+        return observation;
+    }
+
+    let resource = observation.resource.as_str().to_ascii_uppercase();
+    let coverage_note = coverage
+        .confidence_note(observation.resource.as_str())
+        .unwrap_or_else(|| format!("{resource} telemetry coverage is incomplete"));
+    observation.status = WatchdogStatus::Unavailable;
+    observation.classification = WatchdogClassification::MissingComputeSignal;
+    observation.message = format!(
+        "{coverage_note}; partial observations cannot support an allocation-wide idle classification"
+    );
+    observation
+}
+
 struct RecentWindow<'a> {
     samples: Vec<(&'a str, &'a ResourceWindowSample, u64)>,
     observed_seconds: u64,
@@ -746,6 +803,12 @@ fn overall_status(observations: &[WatchdogObservation], notes: &[String]) -> Wat
     {
         return WatchdogStatus::Ok;
     }
+    if observations
+        .iter()
+        .any(|observation| observation.status == WatchdogStatus::Unavailable)
+    {
+        return WatchdogStatus::Unavailable;
+    }
     if !notes.is_empty() {
         return WatchdogStatus::Unavailable;
     }
@@ -769,9 +832,11 @@ fn overall_message(
             .first()
             .map(|observation| observation.message.clone())
             .unwrap_or_else(|| "watchdog is collecting sampler history".to_string()),
-        WatchdogStatus::Unavailable => notes
-            .first()
-            .cloned()
+        WatchdogStatus::Unavailable => observations
+            .iter()
+            .find(|observation| observation.status == WatchdogStatus::Unavailable)
+            .map(|observation| observation.message.clone())
+            .or_else(|| notes.first().cloned())
             .unwrap_or_else(|| "watchdog sampler history unavailable".to_string()),
     }
 }
@@ -869,5 +934,32 @@ mod tests {
             observation.classification,
             WatchdogClassification::InsufficientWindow
         );
+    }
+
+    #[test]
+    fn degraded_multi_node_coverage_suppresses_idle_classification() {
+        let samples = BTreeMap::from([
+            ("2026-04-10T10:00:00Z".to_string(), sample(0.0, Some(1.0))),
+            ("2026-04-10T10:01:00Z".to_string(), sample(0.0, Some(1.0))),
+        ]);
+        let raw = classify_resource_window(WatchdogResource::Gpu, &policy(), &samples, Some(60));
+        assert_eq!(raw.classification, WatchdogClassification::Idle);
+        let coverage = CollectorCoverage {
+            scope: super::super::stats::CollectorCoverageScope::BatchNode,
+            expected_nodes: 4,
+            observed_nodes: 1,
+            degraded: true,
+            reason: Some("fanout failed".into()),
+        };
+
+        let suppressed = suppress_unsafe_idle_conclusion(raw, &coverage, 4);
+
+        assert_eq!(suppressed.status, WatchdogStatus::Unavailable);
+        assert_eq!(
+            suppressed.classification,
+            WatchdogClassification::MissingComputeSignal
+        );
+        assert!(suppressed.message.contains("batch node only"));
+        assert!(suppressed.message.contains("cannot support"));
     }
 }

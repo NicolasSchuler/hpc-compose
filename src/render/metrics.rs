@@ -44,21 +44,31 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     );
     out.push_str("    printf '  \"interval_seconds\": %s,\\n' \"$METRICS_INTERVAL_SECONDS\"\n");
     out.push_str("    printf '  \"collectors\": [\\n'\n");
-    out.push_str("    printf '    {\"name\":\"gpu\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s},\\n' \\\n");
+    out.push_str("    printf '    {\"name\":\"gpu\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s,\"coverage\":{\"scope\":%s,\"expected_nodes\":%s,\"observed_nodes\":%s,\"degraded\":%s,\"reason\":%s}},\\n' \\\n");
     out.push_str("      \"$(json_bool_from_flag \"$GPU_COLLECTOR_ENABLED\")\" \\\n");
     out.push_str("      \"$(json_bool_from_flag \"$GPU_COLLECTOR_AVAILABLE\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$GPU_COLLECTOR_NOTE\")\" \\\n");
-    out.push_str("      \"$(json_string_or_null \"$GPU_COLLECTOR_LAST_SAMPLED_AT\")\"\n");
+    out.push_str("      \"$(json_string_or_null \"$GPU_COLLECTOR_LAST_SAMPLED_AT\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$GPU_COVERAGE_SCOPE\")\" \\\n");
+    out.push_str("      \"$GPU_COVERAGE_EXPECTED_NODES\" \\\n");
+    out.push_str("      \"$GPU_COVERAGE_OBSERVED_NODES\" \\\n");
+    out.push_str("      \"$(json_bool_from_flag \"$GPU_COVERAGE_DEGRADED\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$GPU_COVERAGE_REASON\")\"\n");
     out.push_str("    printf '    {\"name\":\"slurm\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s},\\n' \\\n");
     out.push_str("      \"$(json_bool_from_flag \"$SLURM_COLLECTOR_ENABLED\")\" \\\n");
     out.push_str("      \"$(json_bool_from_flag \"$SLURM_COLLECTOR_AVAILABLE\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$SLURM_COLLECTOR_NOTE\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$SLURM_COLLECTOR_LAST_SAMPLED_AT\")\"\n");
-    out.push_str("    printf '    {\"name\":\"cpu\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s}\\n' \\\n");
+    out.push_str("    printf '    {\"name\":\"cpu\",\"enabled\":%s,\"available\":%s,\"note\":%s,\"last_sampled_at\":%s,\"coverage\":{\"scope\":%s,\"expected_nodes\":%s,\"observed_nodes\":%s,\"degraded\":%s,\"reason\":%s}}\\n' \\\n");
     out.push_str("      \"$(json_bool_from_flag \"$CPU_COLLECTOR_ENABLED\")\" \\\n");
     out.push_str("      \"$(json_bool_from_flag \"$CPU_COLLECTOR_AVAILABLE\")\" \\\n");
     out.push_str("      \"$(json_string_or_null \"$CPU_COLLECTOR_NOTE\")\" \\\n");
-    out.push_str("      \"$(json_string_or_null \"$CPU_COLLECTOR_LAST_SAMPLED_AT\")\"\n");
+    out.push_str("      \"$(json_string_or_null \"$CPU_COLLECTOR_LAST_SAMPLED_AT\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$CPU_COVERAGE_SCOPE\")\" \\\n");
+    out.push_str("      \"$CPU_COVERAGE_EXPECTED_NODES\" \\\n");
+    out.push_str("      \"$CPU_COVERAGE_OBSERVED_NODES\" \\\n");
+    out.push_str("      \"$(json_bool_from_flag \"$CPU_COVERAGE_DEGRADED\")\" \\\n");
+    out.push_str("      \"$(json_string_or_null \"$CPU_COVERAGE_REASON\")\"\n");
     out.push_str("    printf '  ]\\n}\\n'\n");
     out.push_str("  } > \"$tmp_meta\"\n");
     out.push_str("  mv \"$tmp_meta\" \"$METRICS_META_FILE\"\n");
@@ -67,13 +77,16 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("mark_gpu_collector_unavailable() {\n");
     out.push_str("  GPU_COLLECTOR_AVAILABLE=0\n");
     out.push_str("  GPU_COLLECTOR_NOTE=$1\n");
+    out.push_str("  GPU_COVERAGE_SCOPE=unknown\n");
+    out.push_str("  GPU_COVERAGE_OBSERVED_NODES=0\n");
+    out.push_str("  GPU_COVERAGE_DEGRADED=1\n");
+    out.push_str("  GPU_COVERAGE_REASON=$1\n");
     out.push_str("  write_metrics_meta\n");
     out.push_str("  metrics_warning_once gpu \"$1\"\n");
     out.push_str("}\n\n");
 
     out.push_str("mark_gpu_collector_success() {\n");
     out.push_str("  GPU_COLLECTOR_AVAILABLE=1\n");
-    out.push_str("  GPU_COLLECTOR_NOTE=\"\"\n");
     out.push_str("  GPU_COLLECTOR_LAST_SAMPLED_AT=$1\n");
     out.push_str("  write_metrics_meta\n");
     out.push_str("}\n\n");
@@ -95,15 +108,48 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("mark_cpu_collector_unavailable() {\n");
     out.push_str("  CPU_COLLECTOR_AVAILABLE=0\n");
     out.push_str("  CPU_COLLECTOR_NOTE=$1\n");
+    out.push_str("  CPU_COVERAGE_SCOPE=unknown\n");
+    out.push_str("  CPU_COVERAGE_OBSERVED_NODES=0\n");
+    out.push_str("  CPU_COVERAGE_DEGRADED=1\n");
+    out.push_str("  CPU_COVERAGE_REASON=$1\n");
     out.push_str("  write_metrics_meta\n");
     out.push_str("  metrics_warning_once cpu \"$1\"\n");
     out.push_str("}\n\n");
 
     out.push_str("mark_cpu_collector_success() {\n");
     out.push_str("  CPU_COLLECTOR_AVAILABLE=1\n");
-    out.push_str("  CPU_COLLECTOR_NOTE=\"\"\n");
     out.push_str("  CPU_COLLECTOR_LAST_SAMPLED_AT=$1\n");
     out.push_str("  write_metrics_meta\n");
+    out.push_str("}\n\n");
+
+    out.push_str("set_gpu_current_node_coverage() {\n");
+    out.push_str("  GPU_COVERAGE_OBSERVED_NODES=1\n");
+    out.push_str("  if (( GPU_COVERAGE_EXPECTED_NODES > 1 )); then\n");
+    out.push_str("    GPU_COVERAGE_SCOPE=batch_node\n");
+    out.push_str("    GPU_COVERAGE_DEGRADED=1\n");
+    out.push_str(
+        "    GPU_COVERAGE_REASON=\"multi-node allocation sampled on the batch node only\"\n",
+    );
+    out.push_str("  else\n");
+    out.push_str("    GPU_COVERAGE_SCOPE=allocation\n");
+    out.push_str("    GPU_COVERAGE_DEGRADED=0\n");
+    out.push_str("    GPU_COVERAGE_REASON=\"\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+
+    out.push_str("set_cpu_current_node_coverage() {\n");
+    out.push_str("  CPU_COVERAGE_OBSERVED_NODES=1\n");
+    out.push_str("  if (( CPU_COVERAGE_EXPECTED_NODES > 1 )); then\n");
+    out.push_str("    CPU_COVERAGE_SCOPE=batch_node\n");
+    out.push_str("    CPU_COVERAGE_DEGRADED=1\n");
+    out.push_str(
+        "    CPU_COVERAGE_REASON=\"multi-node allocation sampled on the batch node only\"\n",
+    );
+    out.push_str("  else\n");
+    out.push_str("    CPU_COVERAGE_SCOPE=allocation\n");
+    out.push_str("    CPU_COVERAGE_DEGRADED=0\n");
+    out.push_str("    CPU_COVERAGE_REASON=\"\"\n");
+    out.push_str("  fi\n");
     out.push_str("}\n\n");
 
     // Best-effort per-PID attribution probes (cgroup + task environment).
@@ -150,6 +196,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
 
     out.push_str("sample_gpu_metrics_current_node() {\n");
     out.push_str("  [[ \"$GPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  GPU_COLLECTOR_NOTE=\"\"\n");
     out.push_str("  if ! command -v nvidia-smi >/dev/null 2>&1; then\n");
     out.push_str(
         "    mark_gpu_collector_unavailable \"nvidia-smi is not available on this node\"\n",
@@ -164,6 +211,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("    mark_gpu_collector_unavailable \"nvidia-smi GPU query failed: $(trim_whitespace \"${output//$'\\n'/; }\")\"\n");
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
+    out.push_str("  set_gpu_current_node_coverage\n");
     out.push_str("  local line\n");
     out.push_str("  while IFS= read -r line; do\n");
     out.push_str("    [[ -z \"$(trim_whitespace \"$line\")\" ]] && continue\n");
@@ -339,6 +387,10 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str(
         "      GPU_COLLECTOR_NOTE=\"multi-node GPU fanout degraded to batch-node sampling\"\n",
     );
+    out.push_str("      GPU_COVERAGE_SCOPE=batch_node\n");
+    out.push_str("      GPU_COVERAGE_OBSERVED_NODES=1\n");
+    out.push_str("      GPU_COVERAGE_DEGRADED=1\n");
+    out.push_str("      GPU_COVERAGE_REASON=\"multi-node GPU fanout failed through srun\"\n");
     out.push_str("      write_metrics_meta\n");
     out.push_str("    fi\n");
     out.push_str("    return \"$fallback_status\"\n");
@@ -351,9 +403,18 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("    mark_gpu_collector_unavailable \"nvidia-smi produced no GPU samples on allocation nodes\"\n");
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
+    out.push_str("  GPU_COVERAGE_SCOPE=allocation\n");
+    out.push_str("  GPU_COVERAGE_OBSERVED_NODES=${#gpu_files[@]}\n");
+    out.push_str("  GPU_COVERAGE_DEGRADED=0\n");
+    out.push_str("  GPU_COVERAGE_REASON=\"\"\n");
+    out.push_str("  GPU_COLLECTOR_NOTE=\"\"\n");
+    out.push_str("  if (( GPU_COVERAGE_OBSERVED_NODES < GPU_COVERAGE_EXPECTED_NODES || ${#status_files[@]} > 0 )); then\n");
+    out.push_str("    GPU_COVERAGE_DEGRADED=1\n");
+    out.push_str("    GPU_COVERAGE_REASON=\"GPU samples covered ${GPU_COVERAGE_OBSERVED_NODES}/${GPU_COVERAGE_EXPECTED_NODES} allocation nodes\"\n");
+    out.push_str("  fi\n");
     out.push_str("  cat \"${gpu_files[@]}\" >> \"$GPU_METRICS_FILE\"\n");
     out.push_str("  if (( ${#proc_files[@]} > 0 )); then cat \"${proc_files[@]}\" >> \"$GPU_PROCESSES_FILE\"; fi\n");
-    out.push_str("  if (( ${#status_files[@]} > 0 )); then GPU_COLLECTOR_NOTE=\"$(paste -sd '; ' \"${status_files[@]}\" 2>/dev/null || true)\"; fi\n");
+    out.push_str("  if (( ${#status_files[@]} > 0 )); then GPU_COLLECTOR_NOTE=\"$(paste -sd '; ' \"${status_files[@]}\" 2>/dev/null || true)\"; GPU_COVERAGE_REASON=\"$GPU_COLLECTOR_NOTE\"; fi\n");
     out.push_str("  mark_gpu_collector_success \"$sampled_at\"\n");
     out.push_str("}\n\n");
 
@@ -434,6 +495,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
 
     out.push_str("sample_cpu_metrics_current_node() {\n");
     out.push_str("  [[ \"$CPU_COLLECTOR_ENABLED\" == \"1\" ]] || return 0\n");
+    out.push_str("  CPU_COLLECTOR_NOTE=\"\"\n");
     out.push_str("  local sampled_at\n");
     out.push_str("  sampled_at=$(metrics_timestamp)\n");
     out.push_str("  local sample_node=\"${HPC_COMPOSE_CPU_SAMPLE_NODE:-${SLURMD_NODENAME:-${HOSTNAME:-}}}\"\n");
@@ -447,6 +509,7 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     );
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
+    out.push_str("  set_cpu_current_node_coverage\n");
     out.push_str("  mark_cpu_collector_success \"$sampled_at\"\n");
     out.push_str("}\n\n");
 
@@ -500,6 +563,10 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str(
         "      CPU_COLLECTOR_NOTE=\"multi-node CPU fanout degraded to batch-node sampling\"\n",
     );
+    out.push_str("      CPU_COVERAGE_SCOPE=batch_node\n");
+    out.push_str("      CPU_COVERAGE_OBSERVED_NODES=1\n");
+    out.push_str("      CPU_COVERAGE_DEGRADED=1\n");
+    out.push_str("      CPU_COVERAGE_REASON=\"multi-node CPU fanout failed through srun\"\n");
     out.push_str("      write_metrics_meta\n");
     out.push_str("    fi\n");
     out.push_str("    return \"$fallback_status\"\n");
@@ -511,8 +578,17 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
     out.push_str("    mark_cpu_collector_unavailable \"/proc/stat produced no CPU samples on allocation nodes\"\n");
     out.push_str("    return 0\n");
     out.push_str("  fi\n");
+    out.push_str("  CPU_COVERAGE_SCOPE=allocation\n");
+    out.push_str("  CPU_COVERAGE_OBSERVED_NODES=${#cpu_files[@]}\n");
+    out.push_str("  CPU_COVERAGE_DEGRADED=0\n");
+    out.push_str("  CPU_COVERAGE_REASON=\"\"\n");
+    out.push_str("  CPU_COLLECTOR_NOTE=\"\"\n");
+    out.push_str("  if (( CPU_COVERAGE_OBSERVED_NODES < CPU_COVERAGE_EXPECTED_NODES || ${#status_files[@]} > 0 )); then\n");
+    out.push_str("    CPU_COVERAGE_DEGRADED=1\n");
+    out.push_str("    CPU_COVERAGE_REASON=\"CPU samples covered ${CPU_COVERAGE_OBSERVED_NODES}/${CPU_COVERAGE_EXPECTED_NODES} allocation nodes\"\n");
+    out.push_str("  fi\n");
     out.push_str("  cat \"${cpu_files[@]}\" >> \"$CPU_METRICS_FILE\"\n");
-    out.push_str("  if (( ${#status_files[@]} > 0 )); then CPU_COLLECTOR_NOTE=\"$(paste -sd '; ' \"${status_files[@]}\" 2>/dev/null || true)\"; fi\n");
+    out.push_str("  if (( ${#status_files[@]} > 0 )); then CPU_COLLECTOR_NOTE=\"$(paste -sd '; ' \"${status_files[@]}\" 2>/dev/null || true)\"; CPU_COVERAGE_REASON=\"$CPU_COLLECTOR_NOTE\"; fi\n");
     out.push_str("  mark_cpu_collector_success \"$sampled_at\"\n");
     out.push_str("}\n\n");
 
@@ -573,6 +649,10 @@ pub(super) fn render_metrics_helpers(out: &mut String) {
 
     out.push_str("start_metrics_sampler() {\n");
     out.push_str("  mkdir -p \"$METRICS_DIR\"\n");
+    out.push_str("  GPU_COVERAGE_EXPECTED_NODES=${HPC_COMPOSE_NODE_COUNT:-1}\n");
+    out.push_str("  CPU_COVERAGE_EXPECTED_NODES=${HPC_COMPOSE_NODE_COUNT:-1}\n");
+    out.push_str("  if (( GPU_COVERAGE_EXPECTED_NODES > 1 )); then GPU_COVERAGE_DEGRADED=1; GPU_COVERAGE_REASON=\"no successful GPU sample yet\"; fi\n");
+    out.push_str("  if (( CPU_COVERAGE_EXPECTED_NODES > 1 )); then CPU_COVERAGE_DEGRADED=1; CPU_COVERAGE_REASON=\"no successful CPU sample yet\"; fi\n");
     out.push_str("  : > \"$GPU_METRICS_FILE\"\n");
     out.push_str("  : > \"$GPU_PROCESSES_FILE\"\n");
     out.push_str("  : > \"$SLURM_METRICS_FILE\"\n");

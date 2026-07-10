@@ -451,6 +451,8 @@ mod tests {
             tips: vec!["raise ntasks".to_string()],
             sources: vec!["sacct".to_string()],
             notes: Vec::new(),
+            telemetry_coverage: Vec::new(),
+            confidence_notes: Vec::new(),
         }
     }
 

@@ -8,15 +8,17 @@ use serde::Serialize;
 use crate::runtime_plan::{RuntimePlan, RuntimeService};
 use crate::spec::{GIB, parse_memory_bytes, parse_slurm_time_limit};
 
-use super::StatsOptions;
 use super::accounting::{AccountingRow, AccountingSnapshot, build_accounting_snapshot};
 use super::model::{SubmissionBackend, SubmissionRecord};
 use super::runtime_state::{load_runtime_state, runtime_state_by_service};
 use super::scheduler::{build_status_snapshot, scheduler_source_label};
 use super::stats::{
-    GpuDeviceSampleRow, GpuProcessSampleRow, SlurmSampleRow, StepStats, metrics_dir_for_record,
-    probe_step_stats, step_from_slurm_sample_row,
+    CollectorCoverage, CollectorCoverageSummary, CollectorStatus, GpuDeviceSampleRow,
+    GpuProcessSampleRow, SamplerMetaFile, SlurmSampleRow, StepStats, collector_coverage_summaries,
+    effective_collector_coverage, metrics_dir_for_record, probe_step_stats,
+    step_from_slurm_sample_row,
 };
+use super::{StatsOptions, read_json};
 
 const MEMORY_HEADROOM_PERCENT: f64 = 1.25;
 const MEMORY_ABSOLUTE_HEADROOM_BYTES: u64 = 2 * GIB;
@@ -39,6 +41,10 @@ pub struct RightsizeReport {
     pub notes: Vec<String>,
     pub observations: Vec<RightsizeObservation>,
     pub recommendations: Vec<RightsizeRecommendation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub telemetry_coverage: Vec<CollectorCoverageSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confidence_notes: Vec<String>,
 }
 
 /// One resource usage observation used by the right-sizing assistant.
@@ -84,6 +90,7 @@ pub enum RightsizeConfidence {
 struct SamplerHistory {
     slurm_steps: Vec<StepStats>,
     gpu: Option<GpuActivitySummary>,
+    collectors: Vec<CollectorStatus>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -144,6 +151,26 @@ pub fn build_rightsize_report(
     if sampler.gpu.is_some() {
         sources.insert("sampler/gpu".to_string());
     }
+    let expected_nodes = plan.slurm.allocation_nodes();
+    let gpu_coverage = effective_collector_coverage(&sampler.collectors, "gpu", expected_nodes);
+    let mut telemetry_coverage = collector_coverage_summaries(&sampler.collectors, expected_nodes)
+        .into_iter()
+        .filter(|summary| summary.collector == "gpu")
+        .collect::<Vec<_>>();
+    if telemetry_coverage
+        .iter()
+        .all(|summary| summary.collector != "gpu")
+        && sampler.gpu.is_some()
+    {
+        telemetry_coverage.push(CollectorCoverageSummary {
+            collector: "gpu".to_string(),
+            coverage: gpu_coverage.clone(),
+        });
+    }
+    let confidence_notes = telemetry_coverage
+        .iter()
+        .filter_map(|summary| summary.coverage.confidence_note(&summary.collector))
+        .collect::<Vec<_>>();
 
     let accounting =
         match build_accounting_snapshot(&record.job_id, Some(record), &options.scheduler.sacct_bin)
@@ -201,6 +228,8 @@ pub fn build_rightsize_report(
     add_gpu_rightsize(
         plan,
         sampler.gpu.as_ref(),
+        &gpu_coverage,
+        expected_nodes,
         &mut observations,
         &mut recommendations,
         &mut notes,
@@ -226,6 +255,8 @@ pub fn build_rightsize_report(
         notes,
         observations,
         recommendations,
+        telemetry_coverage,
+        confidence_notes,
     })
 }
 
@@ -386,6 +417,8 @@ fn add_cpu_rightsize(
 fn add_gpu_rightsize(
     plan: &RuntimePlan,
     gpu: Option<&GpuActivitySummary>,
+    coverage: &CollectorCoverage,
+    expected_nodes: u32,
     observations: &mut Vec<RightsizeObservation>,
     recommendations: &mut Vec<RightsizeRecommendation>,
     notes: &mut Vec<String>,
@@ -398,6 +431,7 @@ fn add_gpu_rightsize(
         notes.push("GPU sampler data is available, but no explicit x-slurm.gpus request was found to compare against".to_string());
         return;
     };
+    let allocation_complete = coverage.supports_allocation_conclusions(expected_nodes);
     observations.push(RightsizeObservation {
         resource: "gpus".to_string(),
         scope: scope.clone(),
@@ -406,12 +440,30 @@ fn add_gpu_rightsize(
         observed: Some(summary.max_active_devices.to_string()),
         utilization: Some(summary.max_active_devices as f64 / requested_gpus as f64),
         source: "sampler/gpu".to_string(),
-        confidence: gpu_confidence(summary),
-        note: Some(format!(
-            "observed {} sampler snapshot(s), with up to {} visible device(s)",
-            summary.sample_count, summary.max_seen_devices
-        )),
+        confidence: if allocation_complete {
+            gpu_confidence(summary)
+        } else {
+            RightsizeConfidence::Low
+        },
+        note: Some(match coverage.confidence_note("gpu") {
+            Some(note) => format!(
+                "observed {} partial sampler snapshot(s), with up to {} visible device(s); {note}",
+                summary.sample_count, summary.max_seen_devices
+            ),
+            None => format!(
+                "observed {} sampler snapshot(s), with up to {} visible device(s)",
+                summary.sample_count, summary.max_seen_devices
+            ),
+        }),
     });
+
+    if !allocation_complete {
+        notes.push(
+            "GPU reduction recommendation suppressed because sampler evidence is not allocation-complete"
+                .to_string(),
+        );
+        return;
+    }
 
     let suggested = summary.max_active_devices.saturating_add(1).max(1);
     if should_recommend_u32(suggested, requested_gpus) {
@@ -510,6 +562,13 @@ fn load_sampler_history(metrics_dir: &Path, notes: &mut Vec<String>) -> SamplerH
     if !metrics_dir.is_dir() {
         return SamplerHistory::default();
     }
+    let collectors = match read_json::<SamplerMetaFile>(&metrics_dir.join("meta.json")) {
+        Ok(meta) => meta.collectors,
+        Err(err) => {
+            notes.push(format!("failed to parse metrics sampler metadata: {err}"));
+            Vec::new()
+        }
+    };
     SamplerHistory {
         slurm_steps: match load_slurm_step_history(&metrics_dir.join("slurm.jsonl")) {
             Ok(steps) => steps,
@@ -525,6 +584,7 @@ fn load_sampler_history(metrics_dir: &Path, notes: &mut Vec<String>) -> SamplerH
                 None
             }
         },
+        collectors,
     }
 }
 
@@ -934,6 +994,51 @@ mod tests {
             ..low.clone()
         };
         assert_eq!(gpu_confidence(&single), RightsizeConfidence::Low);
+    }
+
+    #[test]
+    fn degraded_multi_node_gpu_coverage_suppresses_reduction_recommendation() {
+        let plan = RuntimePlan {
+            name: "coverage-test".into(),
+            cache_dir: std::env::temp_dir(),
+            runtime: Default::default(),
+            slurm: crate::spec::SlurmConfig {
+                nodes: Some(4),
+                gpus: Some(4),
+                ..Default::default()
+            },
+            ordered_services: Vec::new(),
+        };
+        let summary = GpuActivitySummary {
+            sample_count: 4,
+            max_active_devices: 1,
+            max_seen_devices: 1,
+        };
+        let coverage = CollectorCoverage {
+            scope: super::super::stats::CollectorCoverageScope::BatchNode,
+            expected_nodes: 4,
+            observed_nodes: 1,
+            degraded: true,
+            reason: Some("fanout failed".into()),
+        };
+        let mut observations = Vec::new();
+        let mut recommendations = Vec::new();
+        let mut notes = Vec::new();
+
+        add_gpu_rightsize(
+            &plan,
+            Some(&summary),
+            &coverage,
+            4,
+            &mut observations,
+            &mut recommendations,
+            &mut notes,
+        );
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].confidence, RightsizeConfidence::Low);
+        assert!(recommendations.is_empty());
+        assert!(notes.iter().any(|note| note.contains("suppressed")));
     }
 
     #[test]
