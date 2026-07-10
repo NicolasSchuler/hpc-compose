@@ -1,0 +1,364 @@
+{
+  "schema_version": 1,
+  "slug": "haicore",
+  "title": "HAICORE@KIT",
+  "output": "docs/src/haicore-guide.md",
+  "verification": {
+    "verified_on": "2026-07-09",
+    "state": "transitional",
+    "note": "The legacy HAICORE pages and the HoreKa 2 migration page describe different access, architecture, and partition models. The facts below describe the legacy HAICORE endpoint and queues where the cited legacy pages are explicit. Before provisioning storage or submitting, confirm which system your account currently reaches and re-check the migration page, batch page, and support portal. Do not apply future HoreKa 2 or HAICORE 3 statements to the legacy service until the site marks them active for your account."
+  },
+  "sources": [
+    {
+      "id": "migration",
+      "title": "Migration to HoreKa 2",
+      "url": "https://www.nhr.kit.edu/userdocs/horeka2/",
+      "covers": "transition timeline, architecture, access-model, and data-migration changes"
+    },
+    {
+      "id": "access",
+      "title": "HAICORE interactive login",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/login/",
+      "covers": "login endpoint, 2FA flow, allowed networks, and login-node boundary"
+    },
+    {
+      "id": "registration",
+      "title": "HAICORE account registration",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/registration/",
+      "covers": "legacy FeLS registration and 2FA requirements"
+    },
+    {
+      "id": "batch",
+      "title": "HAICORE batch system",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/batch/",
+      "covers": "legacy partitions, limits, Slurm fields, GRES names, and queue commands"
+    },
+    {
+      "id": "hardware",
+      "title": "HAICORE hardware overview",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/hardware/",
+      "covers": "legacy node topology, accelerators, local disks, and interconnect"
+    },
+    {
+      "id": "filesystems",
+      "title": "HAICORE file systems",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/filesystems/",
+      "covers": "HOME, workspaces, TMPDIR, BeeOND, lifetimes, snapshots, and backup"
+    },
+    {
+      "id": "beeond",
+      "title": "HAICORE BeeOND",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/batch_slurm_beeond/",
+      "covers": "BEEOND constraint, job-local mount, capacity, and copy-out requirement"
+    },
+    {
+      "id": "containers",
+      "title": "HAICORE containers",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/containers/",
+      "covers": "Apptainer, Enroot, Pyxis, cache locations, and legacy mount examples"
+    },
+    {
+      "id": "software",
+      "title": "HAICORE software modules",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/software/",
+      "covers": "module discovery, loading, purging, and EasyBuild transition"
+    },
+    {
+      "id": "support",
+      "title": "HAICORE support channels",
+      "url": "https://www.nhr.kit.edu/userdocs/haicore/support/",
+      "covers": "authoritative support escalation"
+    }
+  ],
+  "access": {
+    "login_host": "haicore.scc.kit.edu",
+    "login_command": "ssh <username>@haicore.scc.kit.edu",
+    "requirements": [
+      "Use the login username shown by FeLS, not an assumed institutional username.",
+      "The legacy service uses an OTP plus a dedicated service password.",
+      "Connect from an allowed network or through the VPN of your home institution.",
+      "Use the login node for file management, authoring, static planning, image preparation, and Slurm management. Run compute work only through a Slurm allocation."
+    ]
+  },
+  "scheduler": {
+    "accounts": [
+      {
+        "name": "assigned project/account",
+        "hpc_compose": "x-slurm.account",
+        "evidence": "The batch page documents `--account=<group-name>` and says it may be needed when more than one group is assigned; it does not publish a universal account value."
+      }
+    ],
+    "partitions": [
+      {
+        "name": "normal",
+        "access": "legacy default for users with access",
+        "limits": "up to 1 node, 72 hours, and 4 full GPUs per job",
+        "hpc_compose": "x-slurm.partition: normal"
+      },
+      {
+        "name": "advanced",
+        "access": "special privilege requested through support",
+        "limits": "legacy page lists up to 10 nodes and 72 hours",
+        "hpc_compose": "x-slurm.partition: advanced"
+      }
+    ],
+    "qos": [
+      {
+        "name": "not confirmed",
+        "hpc_compose": "omit x-slurm.qos unless the site or your project gives a value",
+        "evidence": "No HAICORE-specific QOS name was published on the primary pages reviewed."
+      }
+    ],
+    "gres": [
+      {
+        "name": "full A100",
+        "request": "gpu:full:N",
+        "notes": "The current legacy batch page explicitly requires the `full` type; for one GPU use `x-slurm.gres: gpu:full:1`."
+      },
+      {
+        "name": "MIG 1g.5gb",
+        "request": "gpu:1g.5gb:N",
+        "notes": "Confirm the profile is still offered before submission."
+      },
+      {
+        "name": "MIG 2g.10gb",
+        "request": "gpu:2g.10gb:N",
+        "notes": "Confirm the profile is still offered before submission."
+      },
+      {
+        "name": "MIG 4g.20gb",
+        "request": "gpu:4g.20gb:N",
+        "notes": "Confirm the profile is still offered before submission."
+      }
+    ]
+  },
+  "runtimes": [
+    {
+      "name": "Pyxis / Enroot",
+      "hpc_compose": "runtime.backend: pyxis",
+      "verification": "`srun --help` must list `--container-image`; re-check the current site-required mounts.",
+      "status": "Documented on the legacy container page."
+    },
+    {
+      "name": "Apptainer",
+      "hpc_compose": "runtime.backend: apptainer",
+      "verification": "Run `command -v apptainer` on the login node and verify it inside a small allocation.",
+      "status": "Documented as supported; Singularity was replaced by Apptainer in the legacy environment."
+    },
+    {
+      "name": "Host modules",
+      "hpc_compose": "runtime.backend: host plus x-slurm.setup",
+      "verification": "Use `module spider`, `module show`, and a finite allocation-backed smoke test.",
+      "status": "Available for software provided through modules; exact names are site state."
+    }
+  ],
+  "modules": {
+    "discovery_commands": [
+      "module -t avail",
+      "module spider",
+      "module spider <name>",
+      "module show <category/name/version>"
+    ],
+    "setup_example": [
+      "module purge",
+      "module load <category/name/version>",
+      "module list"
+    ],
+    "notes": [
+      "Put required loads in `x-slurm.setup` so the batch environment is reproducible.",
+      "The HoreKa 2 transition page says the software environment moves to EasyBuild and module names differ; discover names on the actual target login node instead of copying legacy examples.",
+      "Do not leave a noisy `module avail` in production job scripts."
+    ]
+  },
+  "storage": [
+    {
+      "name": "$HOME",
+      "visibility": "global",
+      "lifetime": "permanent",
+      "hpc_compose_role": "small configuration, source, and credentials under site policy",
+      "avoid": "large caches, datasets, or high-volume run output"
+    },
+    {
+      "name": "workspace",
+      "visibility": "global",
+      "lifetime": "limited; legacy page says initially up to 60 days with at most 3 extensions",
+      "hpc_compose_role": "cache, recomputable data, run state, and checkpoint staging",
+      "avoid": "the only copy of durable results; workspace data is not backed up"
+    },
+    {
+      "name": "$TMPDIR",
+      "visibility": "one node",
+      "lifetime": "job walltime",
+      "hpc_compose_role": "node-local temporary extraction or scratch inside a job",
+      "avoid": "x-slurm.cache_dir or cross-node handoff"
+    },
+    {
+      "name": "BeeOND",
+      "visibility": "nodes in one job",
+      "lifetime": "job walltime",
+      "hpc_compose_role": "temporary multi-node high-throughput data",
+      "avoid": "persistent cache, resume source, or data not copied out before job end"
+    },
+    {
+      "name": "LSDF",
+      "visibility": "login and compute nodes for users with access",
+      "lifetime": "site-managed",
+      "hpc_compose_role": "durable or shared project data when your account is entitled",
+      "avoid": "assuming access without checking the site-specific environment and constraint"
+    }
+  ],
+  "provisioning": [
+    {
+      "title": "Inspect or allocate the configured workspace through hpc-compose",
+      "commands": [
+        "hpc-compose workspace status --format json",
+        "hpc-compose workspace allocate --duration-days 30",
+        "hpc-compose workspace extend --days 30"
+      ],
+      "notes": [
+        "Configure the workspace name and site tools in `.hpc-compose/settings.toml` first.",
+        "`workspace release` is destructive and deliberately omitted from setup steps."
+      ]
+    },
+    {
+      "title": "Use the site tools directly when hpc-compose is not configured",
+      "commands": [
+        "ws_allocate <workspace-name> 30",
+        "ws_find <workspace-name>",
+        "ws_list"
+      ],
+      "notes": [
+        "The legacy site page documents 60 days as the maximum initial lifetime; choose the shortest useful duration and confirm current limits.",
+        "Record the path returned by `ws_find`; do not guess it."
+      ]
+    },
+    {
+      "title": "Create the directories referenced by the spec",
+      "commands": [
+        "export CACHE_DIR=\"$(ws_find <workspace-name>)/hpc-compose-cache\"",
+        "mkdir -p \"$CACHE_DIR\" \"$(dirname <checkpoint-path>)\" <artifact-export-dir>",
+        "test -w \"$CACHE_DIR\""
+      ],
+      "notes": [
+        "A successful login-node write test is necessary but does not prove compute-node visibility; use the allocation-backed filesystem probe below before production."
+      ]
+    }
+  ],
+  "cache_policy": {
+    "cache": "Put `x-slurm.cache_dir` on a globally visible workspace or other approved shared filesystem. Do not use `$TMPDIR`, `/tmp`, BeeOND, or another job-local path.",
+    "temporary": "For Enroot extraction scratch, prefer a node-local path such as `/tmp/${USER}-hpc-compose-enroot` through `x-slurm.enroot_temp_dir`; keep the final image cache on shared storage.",
+    "durability": "Treat workspace expiry as an operational deadline. Keep canonical checkpoints and exported results in an approved durable location, and rehearse copying them out before expiry or job teardown.",
+    "beeond": "Request BeeOND with `x-slurm.constraint: BEEOND` only for job-local shared scratch and copy results to global storage before the allocation exits."
+  },
+  "smoke_probes": [
+    {
+      "name": "Static plan",
+      "consumes_allocation": false,
+      "commands": [
+        "hpc-compose --offline validate -f compose.yaml",
+        "hpc-compose --offline lint --allow-warnings -f compose.yaml",
+        "hpc-compose --offline plan -f compose.yaml"
+      ],
+      "expected": "valid spec, understood lint findings, and the intended partition/account/GRES in the plan"
+    },
+    {
+      "name": "Login-node capability snapshot",
+      "consumes_allocation": false,
+      "commands": [
+        "scontrol show partition normal",
+        "srun --help | grep container-image",
+        "hpc-compose doctor cluster-report --out .hpc-compose/haicore-cluster.toml"
+      ],
+      "expected": "the target partition is visible and the selected backend is discoverable"
+    },
+    {
+      "name": "Strict preflight",
+      "consumes_allocation": false,
+      "commands": [
+        "hpc-compose preflight --strict -f compose.yaml"
+      ],
+      "expected": "no blocking backend, mount, cache, or profile mismatch"
+    },
+    {
+      "name": "Shared-filesystem visibility",
+      "consumes_allocation": true,
+      "commands": [
+        "hpc-compose preflight --strict --fs-probes -f compose.yaml"
+      ],
+      "expected": "the compute-node probe can see and safely rename data on cache/runtime/resume/artifact paths"
+    },
+    {
+      "name": "Finite GPU smoke job",
+      "consumes_allocation": true,
+      "commands": [
+        "hpc-compose test --submit --time 00:02:00 -f <site-adapted-cuda-probe.yaml>"
+      ],
+      "expected": "the requested device is visible and the finite assertion completes"
+    },
+    {
+      "name": "Distributed fabric smoke",
+      "consumes_allocation": true,
+      "commands": [
+        "hpc-compose doctor fabric-smoke -f compose.yaml --service <distributed-service> --checks auto --submit"
+      ],
+      "expected": "requested MPI/NCCL probes complete on the actual runtime path"
+    }
+  ],
+  "restrictions": [
+    "Legacy `normal` is documented as single-node; do not submit a multi-node spec there. `advanced` needs explicit privilege.",
+    "The legacy page documents 5000 GPU-hours per user per year and at most 3 concurrently running jobs. These are quota facts, not reservations; re-check them during the migration.",
+    "A full GPU request is `gpu:full:N` on the current legacy batch page. Do not simplify it to `gpu:N` unless the target system's current page or `scontrol` output confirms that spelling.",
+    "No HAICORE-specific QOS name was confirmed. Omit `x-slurm.qos` rather than guessing.",
+    "The login pages and batch pages disagree on the number of login nodes behind the service. Use the documented endpoint and treat host count as an implementation detail.",
+    "The migration page describes x86 and ARM login/compute targets, new partitions, project-based HAICORE access, and data movement. Those future/transition facts are not silently substituted into this legacy guide.",
+    "Queue and idle-resource observations are advisory. They neither reserve resources nor guarantee that a job starts immediately."
+  ],
+  "common_failures": [
+    {
+      "symptom": "SSH never reaches the OTP prompt",
+      "interpretation": "wrong login username, disallowed network, or missing VPN",
+      "checks": "FeLS username, current network/VPN, then the support portal"
+    },
+    {
+      "symptom": "Partition, account, or GRES rejected",
+      "interpretation": "legacy/new-system mismatch, missing advanced privilege, wrong account, or stale GPU spelling",
+      "checks": "migration page, `scontrol show partition`, rendered SBATCH directives, and support"
+    },
+    {
+      "symptom": "`--container-image` is unknown",
+      "interpretation": "Pyxis is unavailable on this target or the environment changed",
+      "checks": "`srun --help`, current container page, or switch only to a backend the site confirms"
+    },
+    {
+      "symptom": "Cache or bind path fails preflight",
+      "interpretation": "workspace expired, directory was never created, or the path is node-local",
+      "checks": "`workspace status`, `ws_find`, `test -w`, then `preflight --fs-probes`"
+    },
+    {
+      "symptom": "Enroot import fails near squashfs creation with `Stale file handle`",
+      "interpretation": "extraction scratch may be on shared storage",
+      "checks": "move only `x-slurm.enroot_temp_dir` to node-local temporary storage; keep final cache shared"
+    },
+    {
+      "symptom": "Data disappears after the job or workspace expiry",
+      "interpretation": "BeeOND/TMPDIR was treated as durable or workspace copy-out was not completed",
+      "checks": "artifact export, canonical checkpoint path, workspace expiry, and durable destination"
+    }
+  ],
+  "support": {
+    "url": "https://support.nhr.kit.edu/",
+    "when": [
+      "the legacy and migration pages do not identify which endpoint, partitions, account, or architecture applies to you",
+      "advanced access, account/project assignment, or a QOS value is required",
+      "documented runtime options or storage paths differ from live cluster behavior",
+      "a small, reproducible scheduler/backend/filesystem probe fails"
+    ],
+    "include": [
+      "verification date and source URLs consulted",
+      "target login endpoint and whether the system identifies as legacy or HoreKa 2",
+      "job id plus partition/account/GRES (never credentials or tokens)",
+      "the smallest redacted command and exact error",
+      "relevant `hpc-compose --version`, `preflight --format json`, or `debug` evidence"
+    ]
+  }
+}

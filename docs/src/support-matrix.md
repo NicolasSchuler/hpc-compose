@@ -24,10 +24,25 @@ This page separates what `hpc-compose` can build, what CI currently exercises, a
 | Platform | What is tested today |
 | --- | --- |
 | Ubuntu 24.04 `x86_64` | formatting, clippy, unit/integration tests, docs build, link checks, installer smoke tests, and coverage |
+| Ubuntu 24.04 `arm64` | native arm64 authoring-focused tests plus validate, render, and schema command smoke tests |
 | macOS `arm64` | authoring-focused tests, validate/render/schema smoke tests, installer smoke tests, and Homebrew smoke tests |
 | macOS `x86_64` | authoring-focused tests, validate/render/schema smoke tests, and Homebrew smoke tests |
 
-Current CI validates full runtime-facing behavior on Ubuntu and authoring/distribution behavior on macOS. Other published builds should be treated as lower-confidence until corresponding CI coverage exists.
+### Linux arm64 evidence limits
+
+Linux arm64 remains officially supported and has two concrete distribution
+signals: a native `linux-arm64-authoring` CI job runs on `ubuntu-24.04-arm`, and
+the release workflow builds a Linux arm64 archive. Runtime behavior is
+principally exercised through the portable fake-tool suites used across the
+project. There is currently **no real arm64 Slurm/backend end-to-end CI lane**;
+the privileged local Slurm dev-cluster lane runs on Linux x86_64. Do not cite
+the authoring job or release archive as evidence of real arm64 cluster runtime
+coverage.
+
+Current CI validates full runtime-facing behavior on Ubuntu x86_64,
+authoring-focused behavior on Linux arm64, and authoring/distribution behavior
+on macOS. Other published builds should be treated as lower-confidence until
+corresponding CI coverage exists.
 
 ## Release-built
 

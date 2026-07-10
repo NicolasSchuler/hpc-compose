@@ -1,6 +1,9 @@
 # Examples
 
-These examples are the fastest way to understand the intended `hpc-compose` workflows and adapt them to a real application.
+This page owns example selection: which shipped template or repository file is
+closest to a workload, what it demonstrates, and which prerequisites it assumes.
+After choosing, use [Quickstart](quickstart.md) for the canonical first-run
+checklist.
 
 There are two starting points:
 
@@ -17,25 +20,9 @@ hpc-compose examples list --tag mpi
 hpc-compose examples search 'vllm worker'
 ```
 
-`hpc-compose examples recommend` is static and authoring-only: it uses the checked-in example registry, tags, and prerequisite notes; it does not inspect the cluster, contact Slurm, or submit jobs. Each result explains why it matched and prints safe next commands such as `hpc-compose new`, `cp`, `plan`, and `plan --show-script`.
-
-Before launching anything, run the safe authoring path first:
-
-```bash
-hpc-compose new --template minimal-batch --name my-app --output compose.yaml
-hpc-compose plan -f compose.yaml
-hpc-compose plan --show-script -f compose.yaml
-```
-
-If you are reading from a source checkout, you can run the same static checks directly against `examples/minimal-batch.yaml`.
-
-Some repository examples keep an explicit `${CACHE_DIR:-/cluster/shared/hpc-compose-cache}` for portability, while starter examples rely on the settings/builtin cache default. Before running on a real cluster, configure a shared path visible from both the submission host and the compute nodes:
-
-```bash
-export CACHE_DIR=/cluster/shared/hpc-compose-cache
-mkdir -p "$CACHE_DIR"
-test -w "$CACHE_DIR"
-```
+`hpc-compose examples recommend` is static and authoring-only: it uses the
+checked-in registry, tags, and prerequisite notes; it does not inspect the
+cluster, contact Slurm, or submit jobs. Each result explains why it matched.
 
 ## Start Here: The Four Promoted Examples
 
@@ -44,29 +31,25 @@ These four examples are the intended conversion funnel.
 ### `minimal-batch.yaml`
 
 - Demonstrates: one service, no dependencies, no image prepare step
-- Expected prerequisites: any machine for `plan`; a Linux Slurm login node plus the selected runtime backend for `up`
-- Cluster run, Linux Slurm login node only: `hpc-compose up -f examples/minimal-batch.yaml`
+- Expected prerequisites: selected runtime backend plus ordinary Slurm resources
 - Success signal: the batch log prints `Hello from Slurm!`
 
 ### `app-redis-worker.yaml`
 
 - Demonstrates: multi-service startup ordering plus TCP readiness inside one allocation
 - Expected prerequisites: a normal Slurm + Enroot submission host and shared `CACHE_DIR`
-- Cluster run, Linux Slurm login node only: `hpc-compose up -f examples/app-redis-worker.yaml`
 - Success signal: `worker.log` shows a successful Redis `PING` followed by repeated `INCR jobs` calls
 
 ### `llm-curl-workflow-workdir.yaml`
 
 - Demonstrates: one GPU-backed LLM service plus one client service in the same job
 - Expected prerequisites: a GGUF model at `$HOME/models/model.gguf`, a GPU-capable Slurm target, and shared `CACHE_DIR`
-- Cluster run, Linux Slurm login node only: `hpc-compose up -f examples/llm-curl-workflow-workdir.yaml`
 - Success signal: `curl_client.log` contains a JSON response from `/v1/chat/completions`
 
 ### `training-resume.yaml`
 
 - Demonstrates: checkpoint export, resume-aware reruns, and attempt-aware training state
 - Expected prerequisites: shared storage for `x-slurm.resume.path` plus shared `CACHE_DIR`
-- Cluster run, Linux Slurm login node only: `hpc-compose up -f examples/training-resume.yaml`
 - Success signal: `results/<job-id>/` contains exported checkpoints and later attempts resume from the previously saved epoch
 
 ## Beginner Ladder
@@ -77,8 +60,7 @@ For a guided version of the first five concepts, run `hpc-compose evolve --outpu
 
 | Stage | Start here | Why |
 | --- | --- | --- |
-| Authoring only | `minimal-batch.yaml` with `plan` and `plan --show-script` | Confirms the tool understands a spec without touching Slurm. |
-| First cluster run | `minimal-batch.yaml` on a Linux Slurm login node | Smallest real submission and log-check path. |
+| First spec and cluster run | `minimal-batch.yaml` | Smallest one-service shape; Quickstart owns the execution steps. |
 | Single-node multi-service | `app-redis-worker.yaml` | Shows `depends_on` plus TCP readiness. |
 | GPU or LLM serving | `llm-curl-workflow-workdir.yaml`, `llama-app.yaml`, or `vllm-openai.yaml` | Adds accelerator resources and service/client coordination. |
 | Durable training | `training-checkpoints.yaml` or `training-resume.yaml` | Adds artifacts, checkpoints, and resume semantics. |
@@ -155,19 +137,6 @@ The matrix below covers the broader set of runnable examples beyond the four pro
 | [`reservation-licenses.yaml`](example-source.md#reservation-licenses) | Repository file | `reservation`, `licenses`, `sbatch`, `scheduling` | First-class x-slurm.reservation and x-slurm.licenses rendered as #SBATCH directives. | Ops handed you a reservation or your job must hold software licenses. |
 | [`preemptible-checkpoint.yaml`](example-source.md#preemptible-checkpoint) | Repository file | `training`, `preemption`, `requeue`, `signal`, `resume`, `checkpoints` | Requeue-on-preemption plus an x-slurm.signal early-warning SIGUSR1 that drives checkpoint-and-resume. | Your training runs on a preemptible partition and must checkpoint before it is requeued. |
 
-## Which Example Should I Start From?
-
-Run `hpc-compose examples recommend` with no query for the default beginner path, or pass a short workflow description when you already know the shape you need:
-
-```bash
-hpc-compose examples recommend
-hpc-compose examples recommend 'checkpoint resume training'
-hpc-compose examples recommend 'workflow engine bridge'
-hpc-compose examples recommend 'separate rendezvous jobs' --format json
-```
-
-The recommendation output is the maintained chooser. It reuses the same registry metadata that feeds the coverage table below, so new examples, tags, and prerequisite notes only need to be updated in one place.
-
 Companion notes for the more involved examples live alongside the example assets:
 
 - [`examples/llm-curl/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/llm-curl/README.md)
@@ -175,38 +144,26 @@ Companion notes for the more involved examples live alongside the example assets
 - [`examples/vllm-uv-worker/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/vllm-uv-worker/README.md)
 - [`examples/models/README.md`](https://github.com/NicolasSchuler/hpc-compose/blob/main/examples/models/README.md)
 
-## Development Workflow Recipe
+## Adapt the Selected Shape
 
-`examples/dev-python-app.yaml` mounts `examples/app/` and runs a long-lived Python process, so it is best for hot reload:
+After copying or scaffolding the closest example:
 
-```bash
-hpc-compose dev -f examples/dev-python-app.yaml
-hpc-compose tmux -f examples/dev-python-app.yaml --no-attach
-```
+- replace the example `image`, `command`, `environment`, and `volumes`;
+- keep fast-changing source in `volumes` and slower-changing dependency setup in
+  `x-runtime.prepare.commands`;
+- retain readiness only where a dependent service needs a real ready signal;
+- replace site-specific resources, storage paths, modules, and fabric settings
+  with values verified for the target cluster;
+- keep the example's topology unless you have re-evaluated it through [Choose
+  Your Workflow](task-guide.md).
 
-`examples/dev-python-smoke.yaml` keeps the same mounted-source shape but uses a finite command, so it is suitable for smoke tests:
-
-```bash
-hpc-compose test --local -f examples/dev-python-smoke.yaml
-hpc-compose test --submit --time 00:01:00 -f examples/dev-python-smoke.yaml
-```
-
-## Adaptation Checklist
-
-1. Copy the closest repository example to your own `compose.yaml`, or run `hpc-compose new --template <name> --name my-app --output compose.yaml` when a matching built-in template exists.
-2. Configure a cache path visible from both the login node and compute nodes through `hpc-compose setup --cache-dir`, `x-slurm.cache_dir`, or `[defaults.cache]` / `[profiles.<name>.cache]`.
-3. Override `CACHE_DIR` before running repository examples that use `${CACHE_DIR:-...}`, or replace the default cache path in your copied file.
-4. Replace the example `image`, `command`, `environment`, and `volumes` with your workload.
-5. Keep active source in `volumes` and keep slower-changing dependency installation in `x-runtime.prepare.commands`.
-6. Add `readiness` to services that must be reachable before dependents continue.
-7. Adjust top-level or per-service `x-slurm` settings for your cluster.
-8. Run `hpc-compose plan -f compose.yaml` before the first run, and `hpc-compose debug -f compose.yaml --preflight` if that run fails.
-9. Run cluster `up` only from a supported Linux Slurm submission host with the selected runtime backend available.
+Then return to [Quickstart](quickstart.md); do not treat an example's existence
+as evidence that its resources or backend are valid for the current site.
 
 ## Related Docs
 
 - [Guided Authoring Tutorial](evolve.md)
-- [Task Guide](task-guide.md)
+- [Choose Your Workflow](task-guide.md)
 - [Migrate a docker-compose.yaml](docker-compose-migration.md)
 - [Spec Reference](spec-reference.md)
 - [Runbook](runbook.md)

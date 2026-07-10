@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use hpc_compose::cli::build_cli_command;
 use hpc_compose::evolve;
@@ -415,6 +416,116 @@ fn content_pages_have_navigation_footer() {
 }
 
 #[test]
+fn generated_site_guides_are_current() {
+    let status = Command::new("python3")
+        .arg(repo_root().join("scripts/generate_site_guides.py"))
+        .arg("--check")
+        .current_dir(repo_root())
+        .status()
+        .expect("run site-guide generator check");
+    assert!(
+        status.success(),
+        "generated site guides should match their validated JSON facts and template"
+    );
+}
+
+#[test]
+fn generated_site_guide_facts_keep_verification_and_primary_sources() {
+    let facts_path = repo_root().join("docs/site-guides/sites/haicore.json");
+    let facts: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&facts_path).expect("read HAICORE site facts"))
+            .expect("parse HAICORE site facts");
+
+    let verified_on = facts["verification"]["verified_on"]
+        .as_str()
+        .expect("verification date");
+    assert_eq!(
+        verified_on.split('-').map(str::len).collect::<Vec<_>>(),
+        vec![4, 2, 2],
+        "site verification date should use ISO YYYY-MM-DD"
+    );
+
+    let sources = facts["sources"].as_array().expect("primary sources");
+    assert!(
+        !sources.is_empty(),
+        "site facts should cite primary sources"
+    );
+    assert!(
+        sources.iter().all(|source| source["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("https://www.nhr.kit.edu/"))),
+        "HAICORE facts should cite the official NHR@KIT documentation"
+    );
+}
+
+#[test]
+fn living_backlog_has_one_source_and_auditable_rows() {
+    let source = fs::read_to_string(repo_root().join("docs/plans/2026-07-feature-brainstorm.md"))
+        .expect("read living backlog");
+    let published =
+        fs::read_to_string(repo_root().join("docs/src/backlog.md")).expect("read backlog include");
+
+    assert!(
+        published.starts_with("{{#include ../plans/2026-07-feature-brainstorm.md}}"),
+        "manual backlog should include, not duplicate, the living source"
+    );
+    for required in ["**Last reviewed:**", "**Current release baseline:**"] {
+        assert!(
+            source.contains(required),
+            "backlog should declare {required}"
+        );
+    }
+    for removed in ["Top Five", "Runners-up", "Agreed roadmap"] {
+        assert!(
+            !source.contains(removed),
+            "backlog should not retain duplicated section '{removed}'"
+        );
+    }
+
+    let allowed = ["shipped", "candidate", "rejected", "superseded"];
+    let mut ids = std::collections::BTreeSet::new();
+    let mut rows = 0;
+    for line in source.lines().filter(|line| line.starts_with("| ")) {
+        let cells = line.split('|').map(str::trim).collect::<Vec<_>>();
+        if cells.len() < 7 || !cells[1].contains('-') || !cells[3].starts_with('`') {
+            continue;
+        }
+        let id = cells[1];
+        let status = cells[3].trim_matches('`');
+        assert!(
+            allowed.contains(&status),
+            "{id} has unsupported status {status}"
+        );
+        assert!(ids.insert(id), "backlog ID {id} appears more than once");
+        assert!(
+            !cells[4].is_empty(),
+            "{id} should have evidence or a decision link"
+        );
+        assert!(!cells[5].is_empty(), "{id} should have a next condition");
+        if status == "shipped" {
+            assert!(
+                cells[4].contains("nicolasschuler.github.io/hpc-compose")
+                    || cells[4].contains("/docs/src/"),
+                "shipped row {id} should link user docs"
+            );
+            assert!(
+                cells[4].contains("test"),
+                "shipped row {id} should link tests"
+            );
+            assert!(
+                cells[4].contains("manpage"),
+                "shipped row {id} should link a manpage"
+            );
+        }
+        rows += 1;
+    }
+    assert!(
+        rows >= 40,
+        "expected the complete living backlog, found {rows} rows"
+    );
+}
+
+#[test]
 fn docs_use_canonical_job_id_placeholder() {
     for (name, content) in docs_src_markdown_files() {
         for placeholder in [".hpc-compose/12345/", "{job_id}", "{JOB_ID}", "<JOB_ID>"] {
@@ -427,72 +538,52 @@ fn docs_use_canonical_job_id_placeholder() {
 }
 
 #[test]
-fn ai_agent_setup_safety_boundary_matches_llms_contract() {
+fn ai_agent_setup_links_canonical_generated_contracts() {
     let ai_setup = fs::read_to_string(repo_root().join("docs/src/ai-agent-setup.md"))
         .expect("read AI agent setup docs");
-    let llms = fs::read_to_string(repo_root().join("docs/src/llms.txt")).expect("read llms.txt");
+    let llms = fs::read_to_string(repo_root().join("llms.txt")).expect("read root llms.txt");
 
     for expected in [
-        "`new`",
-        "`validate`",
-        "`plan`",
-        "`plan --show-script`",
-        "`inspect`",
-        "`render`",
-        "`explain`",
-        "`config`",
-        "`lint`",
-        "`schema`",
-        "`lsp`",
-        "`up --dry-run`",
-        "`up --remote --dry-run`",
-        "`notebook --dry-run`",
-        "`notebook promote`",
-        "`germinate --dry-run`",
-        "`sweep submit --dry-run`",
+        "llms.txt",
+        "agent-command-safety.md",
+        "agent-command-policy.json",
+        "hpc-compose --offline docs",
+        "hpc-compose-skill-v${VERSION}.tar.gz",
     ] {
         assert!(
             ai_setup.contains(expected),
-            "docs/src/ai-agent-setup.md should include safe command {expected}"
-        );
-        assert!(
-            llms.contains(expected),
-            "docs/src/llms.txt should include safe command {expected}"
+            "docs/src/ai-agent-setup.md should reference canonical agent artifact {expected}"
         );
     }
-
     for expected in [
-        "`up`",
-        "`run`",
-        "`test --submit`",
-        "`notebook`",
-        "`alloc`",
-        "`shell`",
-        "`sweep submit`",
-        "`down`",
-        "`cancel`",
+        "/raw/ai-agent-setup.md",
+        "/raw/agent-command-safety.md",
+        "/agent-command-policy.json",
     ] {
         assert!(
-            ai_setup.contains(expected),
-            "docs/src/ai-agent-setup.md should include approval-required command {expected}"
-        );
-        assert!(
             llms.contains(expected),
-            "docs/src/llms.txt should include approval-required command {expected}"
+            "root llms.txt should publish canonical agent artifact {expected}"
         );
     }
 }
 
 #[test]
-fn ai_agent_setup_documents_openai_agent_manifest() {
-    let ai_setup = fs::read_to_string(repo_root().join("docs/src/ai-agent-setup.md"))
-        .expect("read AI agent setup docs");
+fn openai_agent_manifest_has_required_interface_fields() {
     let manifest = repo_root().join("skills/hpc-compose/agents/openai.yaml");
     assert!(manifest.exists(), "OpenAI agent manifest should exist");
-    assert!(
-        ai_setup.contains("skills/hpc-compose/agents/openai.yaml"),
-        "AI setup docs should document the OpenAI/Codex agent manifest"
-    );
+    let manifest = fs::read_to_string(manifest).expect("read OpenAI agent manifest");
+    for expected in [
+        "interface:",
+        "display_name:",
+        "short_description:",
+        "default_prompt:",
+        "$hpc-compose",
+    ] {
+        assert!(
+            manifest.contains(expected),
+            "OpenAI agent manifest should contain {expected}"
+        );
+    }
 }
 
 #[test]

@@ -98,7 +98,7 @@ For a fresh single-template scaffold, use [`hpc-compose new`](cli-reference.md#a
 ## Related Docs
 
 - [Examples](examples.md)
-- [Task Guide](task-guide.md)
+- [Choose Your Workflow](task-guide.md)
 - [Migrate a docker-compose.yaml](docker-compose-migration.md)
 - [CLI Reference](cli-reference.md)
 - [Spec Reference](spec-reference.md)

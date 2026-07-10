@@ -275,6 +275,6 @@ Unlike the `.env` loader, `env_file:` values are per-service and do **not** feed
 
 - [Examples](examples.md)
 - [Guided Authoring Tutorial](evolve.md)
-- [Task Guide](task-guide.md)
+- [Choose Your Workflow](task-guide.md)
 - [Execution Model](execution-model.md)
 - [Spec Reference](spec-reference.md)

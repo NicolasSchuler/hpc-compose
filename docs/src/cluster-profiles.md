@@ -1,6 +1,8 @@
 # Onboard a Cluster Site
 
-Cluster profiles let `validate` and `preflight` compare a spec against site-specific Slurm, runtime, MPI, storage, and policy hints.
+Cluster profiles let `validate` and `preflight` compare a spec against
+site-specific Slurm, runtime, MPI, storage, and policy hints. They are advisory
+snapshots, not provisioning or authorization records.
 
 For HAICORE-specific resource, workspace, and container notes, see [HAICORE Guide](haicore-guide.md).
 
@@ -47,7 +49,23 @@ Support teams can edit optional sections such as:
 
 Policy sections warn and suggest snippets. They do not silently add modules, bind mounts, environment variables, or SBATCH directives to user specs.
 
-`hpc-compose` stages your repo but does not allocate cluster workspaces or create site storage directories (see [Repo staging vs cluster workspace provisioning](files-and-directories.md#repo-staging-vs-cluster-workspace-provisioning)); a future site pack could carry the site's workspace/provisioning command so onboarding docs can point at it.
+## Policy, Provisioning, and In-Allocation Setup
+
+Keep these boundaries separate:
+
+| Layer | What it does | What it does not do |
+| --- | --- | --- |
+| `.hpc-compose/cluster.toml` | Gives validation/preflight advisory facts and site hints | Grant account/QOS access, allocate storage, or alter the spec |
+| `hpc-compose workspace status/allocate/extend/release` | Drives a configured site's shipped `ws_*` lifecycle and records observed path/expiry | Create cache/checkpoint/artifact subdirectories or move durable data before release |
+| `x-slurm.setup` | Runs explicit module/environment commands inside the started allocation | Repair missing submission-host paths or provision resources before `sbatch` |
+
+`hpc-compose up` and `up --remote` deliberately do not provision accounts,
+partitions, reservations, workspaces, or host directories. Remote mode stages
+the repository; it does not create the cluster resources referenced by that
+repository. Allocate/locate the workspace, create every host path, and verify
+its lifetime before submission. See [Repo staging vs cluster workspace
+provisioning](files-and-directories.md#repo-staging-vs-cluster-workspace-provisioning)
+and [Manage Cluster Workspaces](workspaces.md).
 
 ## MPI Smoke Probe
 

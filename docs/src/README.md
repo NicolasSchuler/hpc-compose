@@ -3,100 +3,74 @@
 <div class="hpc-compose-hero">
   <div class="hpc-compose-hero-copy">
     <img class="hpc-compose-hero-mark" src="favicon.png" alt="" aria-hidden="true">
-    <p class="hpc-compose-tagline">Compose-style multi-service workflows, compiled into one inspectable Slurm job.</p>
+    <p class="hpc-compose-tagline">Compose-style workflows, compiled into one inspectable Slurm job.</p>
     <p class="hpc-compose-trust">One allocation &middot; one script &middot; Slurm-native runtime.</p>
-    <p><code>hpc-compose</code> gives research and HPC teams a small YAML authoring model for services, startup order, readiness checks, runtime backends, logs, artifacts, and follow-up commands.</p>
-    <nav class="hpc-compose-actions" aria-label="Start using hpc-compose">
-      <a class="primary" href="quickstart.html">Quickstart</a>
-      <a href="examples.html">Examples</a>
-      <a href="support-matrix.html">Support Matrix</a>
-    </nav>
+    <p>Choose the shape closest to your workload. Each path joins the same canonical first-run checklist before it can submit.</p>
   </div>
-  <div class="hpc-compose-proof" aria-label="Static plan preview">
-    <pre><code>services:&#10;  app:&#10;    image: python:3.12-slim&#10;    command: python train.py&#10;&#10;$ hpc-compose plan --show-script -f compose.yaml&#10;spec is valid&#10;service order: app&#10;&#35;SBATCH --job-name=my-app</code></pre>
+  <div class="hpc-compose-proof" aria-label="hpc-compose execution model">
+    <pre><code>compose.yaml&#10;    │ validate · lint · plan&#10;    ▼&#10;one generated batch script&#10;    │ explicit submission&#10;    ▼&#10;one tracked Slurm allocation</code></pre>
   </div>
 </div>
 
-Use `hpc-compose` when you want Docker Compose-style authoring on Slurm without adding Kubernetes, a long-running control plane, or custom cluster-side services.
+## Choose Your Path
 
-Start with the [Support Matrix](support-matrix.md) before planning a real runtime workflow. Linux is the maintained runtime target; macOS is intended for authoring, validation, rendering, and inspection.
+<section class="journey-grid" aria-label="Choose a workload journey">
+  <article class="journey-card">
+    <p class="journey-kicker">One finite command</p>
+    <h3>Single batch job</h3>
+    <p>Start with <code>minimal-batch</code>, then follow the only first-cluster-run checklist.</p>
+    <a href="quickstart.html">Run the Quickstart <span aria-hidden="true">→</span></a>
+  </article>
+  <article class="journey-card">
+    <p class="journey-kicker">Services that coordinate</p>
+    <h3>Multi-service application</h3>
+    <p>Learn dependency conditions and readiness from <code>app-redis-worker</code> before adapting your own stack.</p>
+    <a href="example-source.html#app-redis-worker">Open the worked example <span aria-hidden="true">→</span></a>
+  </article>
+  <article class="journey-card">
+    <p class="journey-kicker">One service across nodes</p>
+    <h3>Distributed training</h3>
+    <p>Choose the framework and topology first, then begin with <code>multi-node-torchrun</code>.</p>
+    <a href="task-guide.html#2-choose-the-topology">Choose a topology <span aria-hidden="true">→</span></a>
+  </article>
+</section>
 
-## Safe First Path
+All three paths use the same safety boundary:
 
-These commands are safe from a laptop, workstation, or login node because `new` writes a local starter spec and `plan` is purely static. It does not call `sbatch`, import images, or write a script file:
+1. [Choose Your Workflow](task-guide.md) selects the backend, topology,
+   execution style, run multiplicity, and submission context.
+2. [Quickstart](quickstart.md) owns the first successful cluster run from
+   version check through logs.
+3. [Operate a Real Cluster Run](runbook.md) owns repeat operations after that
+   first success.
 
-```bash
-hpc-compose new --template minimal-batch --name my-app --output compose.yaml
-hpc-compose plan -f compose.yaml
-hpc-compose plan --show-script -f compose.yaml
-```
+## The Mental Model
 
-`plan` validates the spec and resolves service order; `plan --show-script` adds the rendered batch script. Expected output includes:
+`hpc-compose` is a compiler and run tracker, not a long-running orchestrator.
+It validates a small Compose-like YAML model, produces a normalized plan and
+one generated Slurm script, submits only after an explicit runtime command,
+then records enough state for status, logs, metrics, artifacts, and recovery.
 
-```text
-spec is valid
-service order: app
-Rendered script:
-#SBATCH --job-name=my-app
-```
+Use [Command Families](command-families.md) when the next question is “which
+command answers this?” Use the [Spec Reference](spec-reference.md) when the
+question is “which YAML fields are legal?”
 
-For real cluster runs, configure a cache path visible from both the Slurm submission host and compute nodes, either in `x-slurm.cache_dir`, `hpc-compose setup --cache-dir`, or `[defaults.cache]` / `[profiles.<name>.cache]` settings. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
+## Scope at a Glance
 
-Run `hpc-compose up -f compose.yaml` only on a supported Linux Slurm submission host with the runtime backend your spec selects. If it fails, start with `hpc-compose debug -f compose.yaml --preflight`.
+- One Slurm allocation per application.
+- Single-node services or one explicit distributed service spanning the allocation.
+- Pyxis/Enroot, Apptainer, Singularity, or host runtime backends.
+- Service ordering, readiness, finite tests, metrics, artifacts, and resume-aware reruns.
+- No Docker daemon, Kubernetes control plane, custom Docker networks, dynamic node bin-packing, or per-service partitions in one allocation.
 
-If you have a source checkout and want to exercise real `sbatch` without a cluster login, use the [Local Slurm Dev Cluster](local-slurm-dev-cluster.md) as a host-backend smoke test.
-
-Download the [asciinema-style quickstart demo cast](quickstart-demo.cast) if you want the same flow as a terminal recording.
-
-## Terms To Know
-
-| Term | Meaning |
-| --- | --- |
-| spec | The YAML file that describes services, runtime backend, and Slurm settings. |
-| allocation | The Slurm job allocation where all planned services run. |
-| runtime backend | The mechanism used to launch services: Pyxis/Enroot, Apptainer, Singularity, or host. |
-| preflight | Checks that inspect local tools, paths, backend support, and optional cluster profiles before a run. |
-| prepare | The login-node image import/customization phase used before compute-node runtime. |
-| tracked job | Submission metadata under `.hpc-compose/jobs/<job-id>.json` plus runtime artifacts under `<runtime-root>/<job-id>`, which let `status`, `ps`, `watch`, `logs`, `stats`, and `artifacts` reconnect later. |
-| `x-slurm` | The spec section for Slurm settings and hpc-compose runtime extensions. |
-
-See the [Glossary](glossary.md) for the full set of terms.
-
-## What It Is For
-
-- model serving plus helper services inside one Slurm allocation
-- data and ETL pipelines with startup ordering or stage-completion dependencies
-- training jobs with checkpoint export, artifact tracking, and resume-aware reruns
-- explicit multi-node launch patterns that still fit inside one allocation
-
-## What It Is Not
-
-`hpc-compose` is not a full Docker Compose runtime and is not a general cluster orchestrator.
-
-Unsupported Compose features include:
-
-- `build:`
-- `ports`
-- `networks` / `network_mode`
-- Compose `restart` as a Docker key
-- `deploy`
-- dynamic node bin packing
-
-For exact boundaries, read [Execution Model](execution-model.md), [Slurm Capability Scope](slurm-capability-scope.md), and [Spec Reference](spec-reference.md).
+Check the [Support Matrix](support-matrix.md) before assuming a platform or
+cluster can run the workflow. For exact boundaries, read the [Execution
+Model](execution-model.md) and [Slurm Capability Scope](slurm-capability-scope.md).
 
 ## Read Next
 
-1. [Why hpc-compose](why-hpc-compose.md) for the problem it solves.
-2. [Quickstart](quickstart.md) for the shortest safe path.
-3. [Examples](examples.md) to choose a starting spec.
-4. [Runtime Backends](runtime-backends.md) before changing `runtime.backend`.
-5. [Runbook](runbook.md) when adapting a real workload on a cluster.
-6. [Troubleshooting](troubleshooting.md) when the first cluster run fails.
-
-## Reference
-
 - [Installation](installation.md)
-- [Task Guide](task-guide.md)
-- [CLI Reference](cli-reference.md)
-- [Spec Reference](spec-reference.md)
-- [Roadmap and Non-Goals](roadmap.md)
+- [Choose Your Workflow](task-guide.md)
+- [Quickstart](quickstart.md)
+- [Examples](examples.md)
+- [Production Readiness](production-readiness.md)

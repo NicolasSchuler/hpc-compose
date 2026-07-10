@@ -102,9 +102,79 @@
   white-space: pre-wrap;
 }
 
+.journey-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+
+.journey-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 1.1rem;
+  border: 1px solid var(--quote-border);
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--bg) 94%, var(--quote-bg));
+}
+
+.journey-card h3 {
+  margin: 0.2rem 0 0.55rem;
+  line-height: 1.25;
+}
+
+.journey-card p {
+  margin: 0 0 0.8rem;
+}
+
+.journey-card .journey-kicker {
+  color: var(--links);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.journey-card a {
+  align-self: flex-start;
+  margin-top: auto;
+  padding: 0.35rem 0;
+  font-weight: 700;
+}
+
+.journey-card:focus-within {
+  border-color: var(--links);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--links) 35%, transparent);
+}
+
+.table-scroll {
+  max-width: 100%;
+  margin: 1rem 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.table-scroll table {
+  margin: 0;
+}
+
+.table-scroll:focus-visible {
+  outline: 3px solid var(--links);
+  outline-offset: 2px;
+}
+
 @media (max-width: 820px) {
   .hpc-compose-hero {
     grid-template-columns: 1fr;
+  }
+
+  .journey-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .table-scroll.wide table {
+    min-width: 50rem;
   }
 }
 
@@ -136,6 +206,32 @@ textarea:focus-visible {
 
 .callout.warning {
   border-left-color: var(--blockquote-warning-color, #c55a11);
+}
+
+.risk-label {
+  display: inline-block;
+  margin-right: 0.35rem;
+  padding: 0.08rem 0.38rem;
+  border: 1px solid var(--quote-border);
+  border-radius: 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.025em;
+  vertical-align: 0.08em;
+}
+
+.risk-label.safe {
+  background: color-mix(in srgb, var(--bg) 86%, #2d8a4b);
+}
+
+.risk-label.quota {
+  border-color: #a56300;
+  background: color-mix(in srgb, var(--bg) 82%, #d98c00);
+}
+
+.risk-label.destructive {
+  border-color: #a52a2a;
+  background: color-mix(in srgb, var(--bg) 82%, #cc3d3d);
 }
 
 .focusable-skip:focus {

@@ -1,42 +1,51 @@
 # Quickstart
 
-This is the shortest safe path from an empty shell to a static plan, a first real Slurm run, and one-command failure triage.
+This is the canonical first successful cluster run: verify the binary, create
+and check one spec, configure shared storage, run strict preflight, submit once,
+then reconnect through status and logs. Other pages choose or explain; this page
+owns the executable checklist.
 
-If Slurm terms such as `sbatch`, `srun`, allocation, job step, Pyxis, or Enroot are unfamiliar, read [Slurm And Container Basics](slurm-container-basics.md) before the first real cluster run.
+If `sbatch`, `srun`, allocation, Pyxis, or Enroot are unfamiliar, read [Slurm
+and Container Basics](slurm-container-basics.md) first. Check the [Support
+Matrix](support-matrix.md) before expecting a runtime workflow to work on the
+current machine.
 
-## 1. Install The CLI
+## How to Read the Checklist
 
-[Installation](installation.md) is the single owner of install, verify, mirror, and source-build commands. Install the CLI from there, confirm `hpc-compose --version` works, then return here.
+- **Authoring host** means a laptop, workstation, or login node with the CLI.
+- **Submission host** means a supported Linux login node with Slurm and the
+  selected backend. Commands after the submission boundary run there.
+- **Compute quota** means CPU/GPU allocation time. Storage writes may still
+  count against a filesystem quota.
+- Expected signals are deliberately short and stable. Full transcripts vary by
+  backend, site, cache state, and scheduler.
 
-## 2. Learn The Safe Authoring Path First
+## 1. Verify the Installed Version
 
-The safe authoring path runs entirely on a laptop, workstation, or login node — `new` writes a local starter spec and `plan` is purely static (no `sbatch`, no image import):
+| Property | Value |
+| --- | --- |
+| Run on | Any authoring host |
+| Slurm contact | None |
+| Compute quota | None |
 
 ```bash
-hpc-compose new --template minimal-batch --name my-app --output compose.yaml
-hpc-compose plan -f compose.yaml
-hpc-compose plan --show-script -f compose.yaml
+hpc-compose --version
 ```
 
-`plan` validates the spec and resolves service order; `plan --show-script` adds the rendered batch script. Run that block first on macOS, a laptop, or any machine where you want to evaluate the authoring model before touching a real cluster. The Overview page covers the same walkthrough with full expected output.
+Expected signal: one line beginning with `hpc-compose` and a semantic version.
+Record it when asking for help; embedded docs and schemas match this binary.
 
-If you want a guided learning path instead of a single starter template, run the Spec Metamorphosis tutorial:
+Failure fork: if the command is missing or the version is not the one your
+project expects, stop and follow [Installation](installation.md). Do not debug a
+cluster with an unidentified binary.
 
-```bash
-hpc-compose evolve --output compose.yaml
-```
+## 2. Create the Smallest Batch Spec
 
-The normal workflow to remember is:
-
-```bash
-hpc-compose plan -f compose.yaml
-hpc-compose up -f compose.yaml
-hpc-compose debug -f compose.yaml --preflight
-```
-
-## 3. Choose A Starting Spec
-
-Use the built-in starter templates when you want a fresh `compose.yaml` with your application name filled in:
+| Property | Value |
+| --- | --- |
+| Run on | Any authoring host, in the project directory |
+| Slurm contact | None |
+| Compute quota | None; writes only `compose.yaml` |
 
 ```bash
 hpc-compose new \
@@ -45,123 +54,226 @@ hpc-compose new \
   --output compose.yaml
 ```
 
-Add `--cache-dir '<shared-cache-dir>'` when you want the generated file to include an explicit `x-slurm.cache_dir`. Otherwise the plan uses the active settings cache default or `$HOME/.cache/hpc-compose`.
+Expected signal: `compose.yaml` exists and names one `app` service.
 
-From a source checkout, you can also inspect a known-good repository example:
+Failure fork: if the file already exists or a template name is rejected, do not
+force an overwrite. Run `hpc-compose new --list-templates`, choose the intended
+output path, then repeat this step.
+
+## 3. Validate, Then Lint
+
+| Property | Value |
+| --- | --- |
+| Run on | Any authoring host |
+| Slurm contact | Forbidden by global `--offline` |
+| Compute quota | None |
 
 ```bash
-hpc-compose plan -f examples/minimal-batch.yaml
+hpc-compose --offline validate --strict-env -f compose.yaml
+hpc-compose --offline lint --allow-warnings --format json -f compose.yaml
 ```
 
-The [Examples](examples.md) page is the single selection guide for beginner, LLM, training, distributed, and pipeline workflows.
+Expected signals:
 
-Use [Spec Metamorphosis](evolve.md) when you want to learn those concepts progressively in one evolving valid spec.
+- validation exits successfully without unsupported-field errors;
+- lint emits a JSON object, and every finding has a stable `HPC...` code;
+- `--allow-warnings` keeps advisory findings visible without turning this first
+  pass into an unexplained non-zero exit.
 
-## 4. Pick And Test A Cache Directory
+Failure fork:
 
-`cache_dir` is optional in the spec, but real clusters usually need a site-specific shared path because image preparation happens before the job starts and compute nodes must later see those artifacts.
+- Invalid YAML or field: fix the named field, then rerun `validate`; do not move
+  on to planning.
+- Missing interpolation variable: set it explicitly or intentionally encode a
+  default; rerun `validate --strict-env`.
+- Lint finding: run `hpc-compose --offline lint -f compose.yaml` for the human
+  explanation. Preview auto-fixes with `lint --fix --dry-run`; do not apply a
+  rewrite you have not reviewed.
 
-Ask your cluster documentation or support team for a project scratch, work, or shared filesystem path, then test it:
+## 4. Inspect the Static Execution Plan
+
+| Property | Value |
+| --- | --- |
+| Run on | Any authoring host |
+| Slurm contact | Forbidden by global `--offline` |
+| Compute quota | None |
 
 ```bash
-export CACHE_DIR=/cluster/shared/hpc-compose-cache
+hpc-compose --offline plan --format json -f compose.yaml
+hpc-compose --offline inspect --format json -f compose.yaml
+```
+
+Expected signals: one service named `app`, a deterministic service order, the
+selected runtime backend, one allocation geometry, and normalized mount/image
+information. Static planning does not import images, call `sbatch`, or write a
+batch script.
+
+Failure fork: run `hpc-compose --offline plan --explain -f compose.yaml` and
+follow the first concrete hint. If the problem is a runtime/backend assumption,
+return to [Choose Your Workflow](task-guide.md) instead of adding arbitrary
+Slurm flags.
+
+## 5. Configure Shared Cache and Project Context
+
+Move to the real submission host for this step. Ask the site's documentation or
+support channel for an approved project/work/scratch path visible from login
+and compute nodes.
+
+| Property | Value |
+| --- | --- |
+| Run on | Slurm submission host |
+| Slurm contact | None |
+| Compute quota | None; directory creation may consume storage quota |
+
+```bash
+export CACHE_DIR=<shared-cache-dir>
 mkdir -p "$CACHE_DIR"
 test -w "$CACHE_DIR"
+hpc-compose setup \
+  --profile-name cluster \
+  --cache-dir "$CACHE_DIR" \
+  --default-profile cluster \
+  --non-interactive
+hpc-compose context --format json
 ```
 
-Persist it in project settings when you want the same value every time:
+Expected signals: the write test succeeds, and context JSON reports the
+`cluster` profile plus the intended cache path and source.
+
+Failure fork:
+
+- Missing or expired site workspace: use [cluster onboarding](cluster-profiles.md),
+  the applicable generated site guide, or `hpc-compose workspace status`;
+  provision it before continuing.
+- Context shows a fallback under `$HOME/.cache`: correct the selected profile
+  or explicit `x-slurm.cache_dir`.
+- Never substitute `/tmp`, `/var/tmp`, `/private/tmp`, `/dev/shm`, `$TMPDIR`, or
+  job-local burst storage for a shared cache.
+
+## 6. Run Strict Preflight
+
+| Property | Value |
+| --- | --- |
+| Run on | Slurm submission host |
+| Slurm contact | May read scheduler/capability state; does not submit without `--fs-probes` |
+| Compute quota | None without `--fs-probes` |
 
 ```bash
-hpc-compose setup --profile-name dev --cache-dir "$CACHE_DIR" --default-profile dev --non-interactive
+hpc-compose preflight --strict --format json -f compose.yaml
 ```
 
-Or keep using an environment-backed explicit spec value and persist it next to your copied spec:
+Expected signal: JSON reports no blocking failure for Slurm tools, selected
+backend, cache policy, mounts, image inputs, cluster profile, or distributed
+configuration.
+
+Failure fork: fix the first failed prerequisite and rerun the same command. Use
+`hpc-compose debug --preflight -f compose.yaml` only when tracked context also
+matters. Do not bypass a failure with `up --no-preflight` on a first run.
+
+For production-bound shared paths, add the active compute-node probe only with
+explicit quota authorization:
+
+| Property | Value |
+| --- | --- |
+| Run on | Slurm submission host |
+| Slurm contact | **Submits a tiny job** |
+| Compute quota | **Yes** |
 
 ```bash
-printf 'CACHE_DIR=%s\n' "$CACHE_DIR" > .env
+hpc-compose preflight --strict --fs-probes -f compose.yaml
 ```
 
-Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for `x-slurm.cache_dir`. Validation may accept those strings, but `preflight` reports them as unsafe because prepare happens before runtime and compute nodes must later see the cached artifacts.
-
-## 5. Before Your First Cluster Run
-
-| Command category | Where to run it | Required tools | Notes |
-| --- | --- | --- | --- |
-| Authoring: `new`, `plan`, `validate`, `inspect`, `render`, `config`, `schema` | laptop, workstation, or login node | `hpc-compose` | `plan` is the recommended static pre-run check. |
-| Local real-scheduler smoke test | source checkout on a machine with Docker/Podman | `docker compose` or `podman compose` | The [Local Slurm Dev Cluster](local-slurm-dev-cluster.md) runs real local `sbatch`; `test --submit --dev-cluster` is the CLI shortcut; use `runtime.backend: host`. |
-| Prepare: `prepare` | Linux host with selected runtime backend | Pyxis needs Enroot; Apptainer needs `apptainer`; Singularity needs `singularity`; host backend needs no container runtime | Does not call `sbatch`, but needs runtime tools for image work. |
-| Cluster checks: `preflight`, `doctor cluster-report` | Linux Slurm login node | Slurm client tools plus selected backend tools | Use `preflight --strict` when warnings should block launch. |
-| Run: `up`, `run` | Linux Slurm login node | `sbatch`, `srun`, scheduler tools, selected backend tools | `up` is the normal cluster execution path. |
-| Local launch: `up --local` | Linux host only | Enroot with `runtime.backend: pyxis`, or Apptainer with `runtime.backend: apptainer` | Single-host only; not a distributed Slurm substitute. |
-
-For Pyxis, `srun --help` should mention `--container-image`.
+Expected signal: compute-node visibility, rename behavior, and headroom probes
+pass for the configured shared paths. Failure fork: move the path to approved
+shared storage or contact site support; do not treat the login-node write test
+as equivalent evidence.
 
 ---
 
-> **Everything above is safe on any machine. Everything below requires a real Slurm submission host.**
+> **Submission boundary:** the next command prepares external image content,
+> calls Slurm, and can consume allocation quota. Confirm the plan, account,
+> partition, walltime, and accelerator request before continuing.
 
-The steps up to here only author specs, prepare a cache path, and read static plans. From this point the commands call `sbatch`, `srun`, and the runtime backend, so run them only on a supported Linux Slurm submission host.
+## 7. Submit Once and Detach
 
-## 6. Submit On A Real Cluster
-
-When you move to a supported Linux submission host, the normal run is:
-
-```bash
-hpc-compose up -f compose.yaml
-```
-
-`up` runs preflight, prepares missing artifacts, renders the batch script, submits it through `sbatch`, then follows scheduler state and tracked logs. On the first run (or after cache eviction) the prepare step imports your container image with enroot — a multi-GB download, then extract and squashfs build — which can take several minutes; later runs reuse the cache, and an interactive terminal streams live import sub-progress. On an interactive TTY it opens the full-screen watch UI; otherwise it falls back to line-oriented output. Add `--watch-queue` when you want line-oriented queue polling until the Slurm job reaches `RUNNING` before the normal watch view opens; `--queue-warn-after <DURATION>` controls the one-time long-pending warning. The watch UI holds the final screen on failures by default; use `--hold-on-exit never|failure|always` to tune that behavior. Use `hpc-compose up --detach -f compose.yaml` when you want submit-and-return behavior.
-
-Success looks like:
-
-- the job is submitted or launched
-- a tracked job id is recorded
-- the watch UI or text follower shows scheduler progress
-- `status`, `ps`, and `logs` can reconnect to the tracked run later
-
-## 7. If The First Cluster Run Fails
-
-| Symptom | Best next command | Why |
-| --- | --- | --- |
-| Missing `sbatch`, `srun`, `enroot`, `apptainer`, or `singularity` | `hpc-compose debug -f compose.yaml --preflight` | Reruns prerequisite checks and keeps the latest tracked context in one report. |
-| `srun` does not advertise `--container-image` | `hpc-compose doctor cluster-report` | Pyxis support is unavailable or not loaded on that node. |
-| Job submitted but no service log appeared | `hpc-compose debug -f compose.yaml` | Shows scheduler state, batch log tail, service log hints, and the next command. |
-| Cache path warning or error | `hpc-compose debug -f compose.yaml --preflight` | Confirms whether `x-slurm.cache_dir` looks shared and is writable from the login node. On a login node, run `hpc-compose preflight -f compose.yaml --fs-probes` to submit a tiny compute-node visibility and rename probe. |
-| Services start in the wrong order | `hpc-compose plan --explain --verbose -f compose.yaml` | Shows normalized dependencies, readiness gates, and planner hints before running. |
-
-The longer symptom guide is [Troubleshooting](troubleshooting.md).
-
-## 8. Revisit A Tracked Run Later
+| Property | Value |
+| --- | --- |
+| Run on | Slurm submission host |
+| Slurm contact | **Calls `sbatch` and scheduler tools** |
+| Compute quota | **Yes, once the allocation starts** |
 
 ```bash
-hpc-compose jobs list
-hpc-compose status -f compose.yaml
-hpc-compose ps -f compose.yaml
-hpc-compose watch -f compose.yaml
-hpc-compose stats -f compose.yaml
-hpc-compose logs -f compose.yaml --follow
+hpc-compose up --detach --format json -f compose.yaml
 ```
 
-Use `jobs list` first when you need to rediscover tracked runs under the current repo tree. Use `ps` for a stable per-service snapshot, `watch` to reconnect to the live UI, and `logs --follow` for a text-only follower.
+Expected signals: one JSON object with a tracked Slurm job id and next-command
+context. First use of an image may spend several minutes importing and preparing
+it before submission; later runs can reuse the cache.
 
-## From A Source Checkout
+Failure fork:
 
-If you are developing from a local checkout instead of an installed binary:
+- Preparation/backend error before a job id: rerun strict preflight, then use
+  `hpc-compose prepare -f compose.yaml` only to isolate image preparation.
+- Submission rejected: read the exact account/partition/GRES message and compare
+  the site guide; do not immediately resubmit the same request.
+- Tracked failure after a job id exists: run
+  `hpc-compose debug --preflight -f compose.yaml`.
+
+## 8. Read Scheduler and Service Status
+
+| Property | Value |
+| --- | --- |
+| Run on | Slurm submission host |
+| Slurm contact | Scheduler reads (`squeue` / `sacct` as available) |
+| Compute quota | No new allocation; a running tracked job continues consuming its request |
 
 ```bash
-cargo build --release
-target/release/hpc-compose validate -f examples/minimal-batch.yaml
-target/release/hpc-compose plan -f examples/minimal-batch.yaml
-target/release/hpc-compose plan --show-script -f examples/minimal-batch.yaml
+hpc-compose status --format json -f compose.yaml
 ```
+
+Expected signal: the same job id plus an explicit scheduler state such as
+`PENDING`, `RUNNING`, or `COMPLETED`, with tracked service information when
+available.
+
+Failure fork:
+
+- No tracked job: run `hpc-compose jobs list --format json` and select the
+  intended id explicitly.
+- `PENDING`: inspect the scheduler reason; this is queue evidence, not a reason
+  to submit a duplicate.
+- Terminal failure or contradictory evidence: run
+  `hpc-compose status --verify --format json -f compose.yaml`, then `debug`.
+
+## 9. Read the First Log
+
+| Property | Value |
+| --- | --- |
+| Run on | Slurm submission host |
+| Slurm contact | None for local tracked logs |
+| Compute quota | None; a running job continues independently |
+
+```bash
+hpc-compose logs --service app --lines 100 -f compose.yaml
+```
+
+Expected signal: output from the `app` service, or an explicit “not available
+yet”/path hint while the job is pending or starting. Use `--follow` only when a
+stream is useful; the bounded command above is deterministic for scripts and
+support captures.
+
+Failure fork: run `hpc-compose debug -f compose.yaml`. If the batch job ran but
+the service log did not appear, the debug report distinguishes scheduler,
+launcher, readiness, and service-exit evidence.
+
+The first run is successful when the job reaches `COMPLETED`, the service exits
+successfully, and its expected log is readable. Continue with the [Runbook](runbook.md)
+for repeat operations or [Worked Failure Recovery](failure-recovery.md) when a
+stage does not reach its expected signal.
 
 ## Read Next
 
-- [Installation](installation.md)
-- [Support Matrix](support-matrix.md)
-- [Why hpc-compose](why-hpc-compose.md)
-- [Slurm And Container Basics](slurm-container-basics.md)
-- [Examples](examples.md)
-- [Runtime Backends](runtime-backends.md)
-- [Runbook](runbook.md)
+- [Command Families](command-families.md)
+- [Operate a Real Cluster Run](runbook.md)
+- [Production Readiness](production-readiness.md)
+- [Worked Failure Recovery](failure-recovery.md)
 - [Troubleshooting](troubleshooting.md)

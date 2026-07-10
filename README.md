@@ -17,29 +17,18 @@
 
 Use it when you want Docker Compose-style authoring on Slurm without adding Kubernetes, a long-running control plane, or a pile of hand-written `sbatch` glue.
 
-## Safe First Path
+## Choose A Starting Path
 
-These commands work from a laptop, workstation, or login node because `new` writes a local starter spec and `plan` is purely static:
+| Your workload | Start here | Then follow |
+| --- | --- | --- |
+| One finite batch command | `minimal-batch` | [Quickstart](docs/src/quickstart.md) |
+| Services with readiness or dependency ordering | `app-redis-worker` | [Examples](docs/src/examples.md) |
+| Distributed training across nodes | `multi-node-torchrun` | [Choose Your Workflow](docs/src/task-guide.md) |
 
-```bash
-hpc-compose new --template minimal-batch --name my-app --output compose.yaml
-hpc-compose plan -f compose.yaml
-hpc-compose plan --show-script -f compose.yaml
-```
-
-For real cluster runs, configure a cache path visible from both the Slurm submission host and compute nodes, either in `x-slurm.cache_dir`, `hpc-compose setup --cache-dir`, or `[defaults.cache]` / `[profiles.<name>.cache]` settings. From a source checkout, you can also inspect the checked-in examples with `hpc-compose plan -f examples/minimal-batch.yaml`.
-
-Expected signals:
-
-```text
-spec is valid
-service order: app
-Rendered script:
-```
-
-Additional lines (runtime mode, cache dir, allocation geometry, per-service image state) are normal.
-
-Run `hpc-compose up -f compose.yaml` only after moving to a supported Linux Slurm submission host with the runtime backend your spec selects. From a source checkout, the [local Slurm dev cluster](docs/src/local-slurm-dev-cluster.md) can smoke-test host-backend specs against real local `sbatch` before you use a shared cluster. If a run fails, start triage with `hpc-compose debug -f compose.yaml --preflight`.
+The manual keeps one canonical first-cluster-run checklist in
+[Quickstart](docs/src/quickstart.md). Static authoring does not submit; runtime
+commands do. Check the [Support Matrix](docs/src/support-matrix.md) before a real
+cluster run.
 
 ## Scope
 
@@ -92,9 +81,12 @@ Installer availability is not the same as full runtime support. Check the [Suppo
 - [Support Matrix](docs/src/support-matrix.md)
 - [Installation](docs/src/installation.md)
 - [Quickstart](docs/src/quickstart.md)
+- [Choose Your Workflow](docs/src/task-guide.md)
+- [Command Families](docs/src/command-families.md)
+- [Production Readiness](docs/src/production-readiness.md)
+- [Worked Failure Recovery](docs/src/failure-recovery.md)
 - [FAQ](docs/src/faq.md)
 - [Examples](docs/src/examples.md)
-- [Task Guide](docs/src/task-guide.md)
 - [Development Workflow](docs/src/development-workflow.md)
 - [Runtime Backends](docs/src/runtime-backends.md)
 - [Runbook](docs/src/runbook.md)
@@ -106,7 +98,7 @@ Installer availability is not the same as full runtime support. Check the [Suppo
 
 You can ask any LLM agent (Claude, Codex, Copilot, Cursor) to set up hpc-compose on your cluster. Point it at the published machine-readable map first, which carries a curated doc index, a safety contract (which commands are static-safe vs. which submit Slurm jobs), and the canonical spec conventions:
 
-- Agent entry map: [`docs/src/llms.txt`](docs/src/llms.txt), served at `https://nicolasschuler.github.io/hpc-compose/llms.txt`
+- Agent entry map: [`llms.txt`](llms.txt), copied to the Pages root at `https://nicolasschuler.github.io/hpc-compose/llms.txt`
 - Walkthrough and copy-paste prompt: [Set Up With an AI Agent](docs/src/ai-agent-setup.md)
 - Drop-in skill bundle: [`skills/hpc-compose/SKILL.md`](skills/hpc-compose/SKILL.md)
 

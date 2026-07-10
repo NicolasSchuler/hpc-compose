@@ -1,705 +1,104 @@
-# Feature Brainstorm — Ideas & Further Improvements
-
-- **Date:** 2026-07-04
-- **Status:** brainstorm / candidate backlog (nothing here is committed work)
-- **Baseline:** hpc-compose v0.2.0
-- **Scope:** product ideas spanning quick wins to ambitious bets, in four lanes:
-  researcher workflow, cluster citizenship, robustness & operations, developer
-  experience. Each idea lists a one-sentence pitch, who benefits, rough effort
-  (S/M/L), and the existing subsystem it builds on.
-
-## Grounding
-
-This brainstorm is grounded in the README, the docs (roadmap, execution model,
-sweeps, canary runs, artifacts/resume, runtime observability, full CLI
-reference), the ~60-command CLI tree in `src/cli/commands.rs`, and the
-`examples/` directory. Existing surface deliberately built around rather than
-duplicated:
-
-- Sweeps already have objectives, replicates, `--stop-when` early termination,
-  and scaling reports; Bayesian/adaptive *selection* is declared out of scope,
-  but the docs note the objective/stop machinery "is the foundation any future
-  optimizer would build on."
-- `score` already models energy (`--pue`, `--gpu-tdp-w`,
-  `--cpu-watts-per-core`).
-- `weather`, `when`, `germinate`, `inspect --rightsize`, `experiment show`,
-  `replay`, `checkpoints`, `reach`, `rendezvous`, and cluster profiles
-  (`doctor cluster-report` → `.hpc-compose/cluster.toml`) all exist.
-- Per-service cgroup GPU attribution landed in v0.2.0.
-- Heterogeneous jobs are already a declared planned epic in the roadmap.
-- Remote mode (`up --remote`, `--remote` on follow-up commands) operates over
-  a one-OTP-per-session SSH ControlMaster contract.
-
----
-
-## Lane 1 — Researcher workflow
-
-What does a PhD student running ML experiments still do manually around
-hpc-compose?
-
-### 1.1 `sweep submit --resume` (delta submission)
-
-Re-submit only the failed/missing/never-submitted trials of an existing
-manifest instead of starting over — today submission is sequential and a
-single `sbatch` failure strands a partial manifest that must be repaired by
-hand (documented as a limitation in `sweeps.md`).
-
-- **Who:** anyone running sweeps > 10 trials on a flaky login node.
-- **Effort:** S
-- **Builds on:** sweep manifest + per-trial status.
-
-### 1.2 `experiment compare` (cross-run results table)
-
-Aggregate N tracked runs — not just sweep siblings — into one table combining
-parsed objective, efficiency score, key spec deltas, and provenance.
-`diff --jobs` compares specs and `sweep results` compares trials, but nothing
-compares *results* of ad-hoc run sets ("Tuesday's baseline vs. today's fix").
-
-- **Who:** PhD students keeping results in a spreadsheet today.
-- **Effort:** M
-- **Builds on:** `experiment show`, `diff --jobs` matrix, sweep objective
-  parsing.
-
-### 1.3 `experiment bundle` (paper-ready reproducibility archive)
-
-One command emits a citeable tarball: compose spec, fully resolved config,
-rendered sbatch, image digests, git SHA + dirty flag, sweep seeds, metrics
-CSV, `checkpoints` attempt history, and a generated "methods appendix"
-markdown.
-
-- **Who:** researchers writing the reproducibility section; reviewers.
-- **Effort:** S–M
-- **Builds on:** submit-time provenance already captured by `experiment show`,
-  artifacts bundles, `config --format json`.
-
-### 1.4 Run tagging and notes (`experiment tag/note`)
-
-Attach tags ("baseline", "lr-bug") and freeform notes to tracked job records,
-filterable in `jobs list` and shown in `experiment show` — the sticky-note
-layer every researcher currently keeps in a text file.
-
-- **Who:** anyone with more than ~20 tracked runs.
-- **Effort:** S
-- **Builds on:** tracked job JSON records.
-
-### 1.5 Run lineage graph
-
-Record and render parent→child edges: resumed-from-checkpoint,
-sweep-spawned-from-base, re-run-after-diff — `experiment lineage` prints the
-ancestry of any run (text/DOT), answering "which run produced the checkpoint
-this run loaded?"
-
-- **Who:** long training campaigns with resume chains.
-- **Effort:** M
-- **Builds on:** resume attempts, sweep trial records (`kind: sweep_trial`),
-  `inspect --dependencies` DOT rendering.
-
-### 1.6 W&B/MLflow offline bridge
-
-A `x-slurm.trackers:` block that injects the right env/mounts for
-offline-mode tracking inside airgapped compute nodes, then surfaces
-`wandb sync` / `mlflow` upload as a post-run "Next:" hint (or runs it during
-`artifacts` export from the login node, where there *is* network).
-
-- **Who:** labs standardized on W&B whose compute nodes have no egress.
-- **Effort:** M
-- **Builds on:** artifacts export stage, existing "Next:" hint machinery,
-  hooks.
-
-### 1.7 `notebook promote`
-
-Convert a tracked notebook session plus an `.ipynb` into a batch compose spec
-(papermill execution, same image, same resources, parameters exposed as
-interpolation variables) — the interactive→batch cliff is where
-reproducibility currently dies.
-
-- **Who:** every researcher who prototypes in Jupyter.
-- **Effort:** M
-- **Builds on:** `notebook` tracked sessions, `new` template machinery, sweep
-  interpolation.
-
-### 1.8 `sweep report --html`
-
-Emit a single self-contained HTML report per sweep: ranked table, per-config
-mean±std, scaling plot, objective-vs-trial chart, links to logs — dropped into
-`export_dir` beside the bundles.
-
-- **Who:** advisors/PIs who will never SSH in.
-- **Effort:** M
-- **Builds on:** `sweep observe/results/--scaling` JSON, artifacts export.
-
-### 1.9 First-class staged-data provenance
-
-Promote the `hf-stage-model` pattern into a spec-level `x-data.stage:` with
-content hashes recorded into run provenance, so `experiment show` answers
-"exactly which dataset/model bytes did this run see."
-
-- **Who:** anyone whose results changed because the dataset silently did.
-- **Effort:** M
-- **Builds on:** cache staged entries, provenance capture.
-
-### 1.10 ASHA-style rung pruning for sweeps
-
-Not Bayesian *selection* (explicitly out of scope), but generalized early
-*termination*: parse intermediate objectives at rung checkpoints and `scancel`
-the bottom fraction — the docs themselves position the objective/stop
-machinery as the foundation any future optimizer would build on.
-
-- **Who:** GPU-hour-constrained sweep users.
-- **Effort:** M–L
-- **Builds on:** `sweep observe --watch --stop-when`, `sweep stop`'s scancel
-  path.
-
----
-
-## Lane 2 — Cluster citizenship
-
-Features that make jobs cheaper, greener, and friendlier to co-users of the
-cluster.
-
-### 2.1 Queue-wait estimates from your own history (`plan --eta`)
-
-Compute Submit→Start quantiles from the user's own `sacct` history bucketed by
-geometry (partition, GPUs, time limit) and show "requests like this waited
-p50 40m / p90 6h" at plan time — honest quantiles, not prediction theater.
-
-- **Who:** everyone deciding between 4 GPUs now vs. 8 GPUs someday.
-- **Effort:** M–L
-- **Builds on:** `stats --accounting` sacct plumbing, `weather`.
-
-### 2.2 Backfill-fit advisor
-
-Suggest the largest walltime that likely fits the current backfill hole, using
-`squeue --start` estimates and running-job end times — "cap at 3h50m and
-you'll likely start now." Must degrade gracefully: some sites (HAICORE among
-them) deny `sinfo` to regular users, so build on `squeue`-visible data first.
-
-- **Who:** short-job users stuck behind whales.
-- **Effort:** M–L
-- **Builds on:** `weather`, `when --free-nodes` polling.
-
-### 2.3 `x-slurm.energy_budget`
-
-Declare a kWh (or CO₂) budget per run; `plan` estimates
-geometry × TDP × walltime against it, `score` reports actual vs. budget, and a
-hook fires on breach — turns the existing energy math from retrospective into
-a contract.
-
-- **Who:** green-computing-mandated labs (increasingly all of them, especially
-  in Germany).
-- **Effort:** S–M
-- **Builds on:** `score --pue/--gpu-tdp-w/--cpu-watts-per-core`, hooks.
-
-### 2.4 Carbon/time-of-use windows for `when`
-
-New conditions — `--carbon-below <gCO2/kWh>` (pluggable source:
-electricityMaps API or a static tariff table in the cluster profile) — so
-deferrable jobs land in green/cheap windows; `--between` already proves the
-pattern.
-
-- **Who:** sweep and batch users with flexible deadlines.
-- **Effort:** M
-- **Builds on:** `when` condition machinery, cluster profiles.
-
-### 2.5 Fair-share interpreter (`weather --me`)
-
-`weather` already pulls `sshare`/`sprio`; translate them into plain language
-and action: "your account consumed 140% of its share; expected priority
-penalty ~X; smaller/shorter requests will backfill" — raw fair-share numbers
-are famously unreadable.
-
-- **Who:** every user who has ever asked the admin "why is my job pending."
-- **Effort:** S–M
-- **Builds on:** `weather`.
-
-### 2.6 Historical right-size lint
-
-A lint rule that checks the spec against past runs of the same spec name:
-"last 5 runs peaked at 38% of requested mem — HPC9xx, suggested patch:
-`mem: 24G`," with `lint --fix` applying it — closes the loop from
-`inspect --rightsize` back into authoring, where it actually changes behavior.
-
-- **Who:** chronic over-requesters (i.e., everyone).
-- **Effort:** M
-- **Builds on:** `inspect --rightsize`, tracked history, lint's patch
-  machinery.
-
-### 2.7 Idle resource watchdog
-
-Implemented as an opt-in, read-side advisory watchdog (`x-slurm.watchdog`):
-`status`, `stats`, and `watch` warn when sustained sampler history shows low
-compute after a grace period. The scope is broader than the original GPU-only
-sketch: GPU compute (`utilization_gpu`) is separated from GPU memory residency
-(`memory_used_mib / memory_total_mib`), and CPU jobs are covered through
-`cpu.jsonl` utilization with RSS-vs-`AllocTRES` memory residency when Slurm
-reports enough data.
-
-This first pass intentionally does not fire hooks or cancel jobs.
-`action: cancel` is reserved and rejected by validation until there is a
-runtime-side enforcement path with focused tests.
-
-- **Who:** users and the admins who email them.
-- **Effort:** M
-- **Builds on:** metrics sampler + per-service GPU attribution, failure-policy
-  hooks.
-- **Follow-ups:** runtime hook/cancel enforcement, per-service warning grouping,
-  richer CPU memory signals on clusters that do not expose memory TRES.
-
-### 2.8 Lab citizenship report (`score --account --period`)
-
-Aggregate efficiency and energy across a group's tracked runs for a month:
-total GPU-hours, mean utilization, energy, worst offenders — a PDF-able report
-card a PI can circulate.
-
-- **Who:** PIs, allocation-renewal proposals.
-- **Effort:** M
-- **Builds on:** `score`, sacct accounting.
-
-### 2.9 Preemptible conversion advisor
-
-Detect scavenger/preemptible QOS in the cluster profile and offer the exact
-YAML patch (requeue + signal + resume, per the `preemptible-checkpoint`
-pattern) with an estimate of queue-time savings — most users don't use
-preemptible tiers because the checkpoint wiring feels risky.
-
-- **Who:** users with resumable workloads sitting in the priority queue.
-- **Effort:** M
-- **Builds on:** `doctor cluster-report`, lint patch output, the existing
-  requeue/resume contract.
-
-### 2.10 Personal flaky-node memory
-
-Record nodelists of failed runs; when the same node correlates with repeated
-NCCL/ESTALE/exit-code failures in *your* history, suggest an `--exclude` list
-at submit — honest about being a personal heuristic, not cluster telemetry.
-
-- **Who:** multi-node training users on aging clusters.
-- **Effort:** M
-- **Builds on:** tracked state nodelists, failure records.
-
----
-
-## Lane 3 — Robustness & operations
-
-### 3.1 Preemption-contract verification (`test --preemption`)
-
-Extend `test` to run the spec briefly, deliver the configured signal,
-kill/requeue, restart as attempt 2, and assert the workload actually resumed
-(attempt counter advanced, user-provided resume assertion passed) — today the
-whole requeue+signal+resume contract is unverifiable until real preemption at
-hour 40.
-
-Status: implemented locally as `hpc-compose test --preemption`. The first pass
-submits a finite Slurm smoke run, waits for launched/ready services, sends the
-configured `x-slurm.signal` via `scancel --signal`, waits
-`--preemption-grace` (default `10s`), runs `scontrol requeue`, observes a
-resumed attempt, and requires normal service assertions to pass.
-
-- **Who:** everyone using `x-slurm.resume`; CI via the local Slurm dev
-  cluster.
-- **Effort:** M
-- **Builds on:** `test --local/--submit`, signal/resume/requeue, dev cluster.
-
-### 3.2 ~~Resubmission policy (`x-slurm.retry`)~~ — dropped
-
-Dropped 2026-07-09 after roadmap review. Fresh resubmission after terminal
-failures would require hpc-compose to keep running as a foreground babysitter,
-spawn a detached controller, or install a cron/timer-style loop on the login
-node. The clusters this project targets can explicitly disallow long-running
-login-node processes, so the reliable version either violates the operating
-model or collapses back to Slurm-native `x-slurm.requeue`.
-
-- **Decision:** not on the roadmap.
-- **Reason:** the feature needs a long-lived or periodically invoked controller
-  outside the Slurm job, which is not a safe default on managed login nodes.
-- **Replacement direction:** keep using `x-slurm.requeue`, `x-slurm.resume`,
-  `test --preemption`, and explicit user reruns from tracked state.
-
-### 3.3 Cluster drift detection (`doctor cluster-report --diff`)
-
-Re-probe capabilities and diff against the checked-in `cluster.toml` —
-partitions renamed, GRES changed, Pyxis/Enroot version bumped, default account
-gone — and surface drift as a preflight warning instead of a mid-run mystery.
-
-- **Who:** everyone after a cluster maintenance window.
-- **Effort:** S–M
-- **Builds on:** `doctor cluster-report`, `preflight`.
-
-### 3.4 ~~Failure classifier (`debug --classify`)~~ — dropped
-
-Dropped 2026-07-09 after roadmap review: broad log classification is too
-application-dependent for the core CLI. Keep `debug` evidence-oriented
-(scheduler state, service state, log tails, and next-command hints), and let
-site- or application-specific classifiers live outside hpc-compose or behind
-explicit user-authored checks.
-
-- **Decision:** not on the roadmap.
-- **Reason:** generic signatures would overfit a few workloads or emit vague
-  diagnoses that look more certain than the evidence supports.
-- **Replacement direction:** strengthen raw evidence, structured outputs, and
-  explicit checks rather than inferring arbitrary application failure modes.
-
-### 3.5 Self-healing watch (`watch` action hints)
-
-If this returns, it should consume explicit hpc-compose-owned findings
-(`status --verify`, watchdog observations, lint/right-sizing diagnostics) rather
-than infer application failures from arbitrary log text. The TUI could offer
-one-keystroke actions for those typed findings — triage becomes interactive
-without pretending that generic application classification is reliable.
-
-- **Who:** anyone babysitting a run.
-- **Effort:** M
-- **Builds on:** watch TUI, lint patch application, explicit structured
-  diagnostics.
-
-### 3.6 State reconciliation (`status --verify`)
-
-Cross-check tracked state vs. `sacct` vs. on-disk runtime files and flag
-contradictions ("tracked says running; sacct says NODE_FAIL 2h ago") with
-repair suggestions — tracked metadata can silently diverge when sessions die
-mid-watch.
-
-- **Who:** remote/laptop-driven users reconnecting after the fact.
-- **Effort:** S–M
-- **Builds on:** `status`, `checkpoints` degraded-notes pattern.
-
-### 3.7 Multi-cluster profiles (`up --cluster <profile>`)
-
-Same spec, N clusters: profiles already carry settings; add per-profile
-login_host/partition/account mapping and `jobs list --all-clusters`, so moving
-a workload from HAICORE to a second site is a flag, not a fork of the YAML.
-
-- **Who:** users with allocations on 2+ machines (common near paper
-  deadlines).
-- **Effort:** L
-- **Builds on:** profiles, `--remote` mode, cluster profiles.
-
-### 3.8 Shared-FS behavior probes in preflight
-
-Probe rename atomicity, close-to-open consistency, and quota headroom on the
-cache and runtime paths, recording results into the cluster profile — ESTALE
-on HAICORE was reproduced in the field; make its preconditions detectable
-before submission.
-
-- **Who:** every Lustre/NFS-backed site.
-- **Effort:** M
-- **Builds on:** `preflight`, `doctor cluster-report`, the enroot
-  node-local-temp mitigation already shipped.
-
-### 3.9 Unified residue reaper
-
-One `clean --deep` that handles today's three separate leftovers — stale
-tracked jobs, expired rendezvous records, orphaned per-job enroot runtime dirs
-from crashed allocations — with a dry-run report first.
-
-- **Who:** long-lived project directories; admins auditing shared caches.
-- **Effort:** S–M
-- **Builds on:** `clean`, `cache prune`, `rendezvous prune`.
-
-### 3.10 Walltime-risk warning
-
-At plan time, compare the requested time limit against historical runtimes of
-the same spec name: "p90 runtime 3h50m vs. limit 4h — enable signal+resume or
-raise time" — the cheapest possible insurance against the most common
-late-stage failure.
-
-- **Who:** iterating researchers who never update `time:`.
-- **Effort:** S
-- **Builds on:** tracked runtime history, plan hints.
-
----
-
-## Lane 4 — Developer experience
-
-### 4.1 `render --annotate` / `hpc-compose explain`
-
-Render the batch script with interleaved provenance comments (this `#SBATCH`
-line ← `x-slurm.mem`; this block ← `readiness.http`), and an
-`explain <line|field>` query in both directions — makes the core brand promise
-("one inspectable script") tangible and teachable.
-
-- **Who:** new users, reviewers, and AI agents consuming llms.txt.
-- **Effort:** S (annotate) → M (query form)
-- **Builds on:** renderer, `plan --explain`.
-
-### 4.2 Live-value shell completions
-
-Make completions dynamic: `--partition <TAB>` from the cluster profile,
-`--job-id <TAB>` from tracked runs, `--sweep-id <TAB>` from manifests,
-`--service <TAB>` from the compose file.
-
-- **Who:** daily CLI users.
-- **Effort:** S–M
-- **Builds on:** `completions`, `cluster.toml`, tracked state.
-
-### 4.3 `hpc-compose lsp`
-
-A language server wrapping the *real* Rust validator (not just the published
-JSON Schema): live semantic diagnostics with HPC lint codes, hover docs
-sourced from spec-reference, quick-fixes from `lint --fix`.
-
-- **Who:** VS Code/Neovim spec authors.
-- **Effort:** L
-- **Builds on:** `schema`, `validate`, `lint --fix`.
-
-### 4.4 Interactive spec builder (`new --interactive`)
-
-A TUI wizard: choose template → answer topology/GPU/readiness questions →
-watch the rendered script preview update live → write spec; `evolve` is
-currently a doc-guided tutorial, this is its executable form.
-
-- **Who:** first-hour users.
-- **Effort:** M–L
-- **Builds on:** `new` templates, `examples recommend`, ratatui infra from
-  `watch`.
-
-### 4.5 Compose overlays (`-f base.yaml -f site.yaml`)
-
-Docker-compose-style multi-file merge so labs can separate the experiment
-(shared, in git) from site bindings (partition, cache_dir, account) — profiles
-cover settings but not service-level overrides.
-
-- **Who:** multi-site labs, shared example repos.
-- **Effort:** M–L (merge semantics become a contract — design carefully)
-- **Builds on:** config resolution, profiles.
-
-### 4.6 Strict `--dry-run`/`--offline` contract
-
-Audit and guarantee that every command's dry-run touches nothing (the HAICORE
-e2e found `up --remote --dry-run` still runs prepare), plus a global
-`--offline` that forbids SSH/scheduler calls — then document it in the
-llms.txt safety contract.
-
-- **Who:** AI-agent setups, cautious first-time cluster users.
-- **Effort:** S–M
-- **Builds on:** existing static-safety classification in llms.txt.
-
-### 4.7 Local-mode backend parity
-
-Extend `up --local` beyond pyxis/Linux: apptainer backend locally, and a
-`test --submit --dev-cluster` path that transparently targets the checked-in
-local Slurm container so macOS users get a real sbatch smoke test without
-leaving the laptop.
-
-- **Who:** Mac-based developers (including the maintainer).
-- **Effort:** L
-- **Builds on:** `up --local`, local Slurm dev cluster.
-
-### 4.8 Spec migration assistant (`lint --migrate`)
-
-With breaking changes accepted pre-1.0, ship the counterweight: version-aware
-rewriting of old specs to current semantics, with a diff preview — turns
-"breaking changes OK" into "breaking changes painless."
-
-- **Who:** early adopters across upgrades.
-- **Effort:** M
-- **Builds on:** lint --fix rewriting, schema versioning.
-
-### 4.9 Offline doc search (`hpc-compose docs <query>`)
-
-Embed the mdBook content and fuzzy-search it from the CLI — login nodes often
-have no browser, and the manual is 20+ substantial pages.
-
-- **Who:** SSH-bound users.
-- **Effort:** S–M
-- **Builds on:** docs build, llms.txt curation.
-
-### 4.10 `diff --against-spec` (pre-submit what-changed)
-
-Diff the *current* compose file against the spec snapshot of the last tracked
-run before submitting — "you changed lr and the image tag since job 12345" —
-catching the accidental-variable problem before it costs GPU-hours.
-
-- **Who:** iterating experimenters.
-- **Effort:** S
-- **Builds on:** `diff`, submit-time spec snapshots.
-
----
-
-## Top 5 by value ÷ effort
-
-### 1. `sweep submit --resume` (1.1, S)
-
-This is the highest ratio on the board: the failure mode is documented in the
-project's own docs as a known limitation ("if a submission fails, later trials
-are not submitted and the partial manifest is kept"), the manifest already
-contains everything needed to compute the delta, and sweeps are a flagship
-feature that this footgun directly undermines. A login-node hiccup at trial 40
-of 100 currently means manual manifest surgery or a duplicate sweep; after
-this, it means re-running the same command. Why now: sweeps just gained
-replicates, objectives, and scaling reports — the feature is attracting
-exactly the heavy users who will hit sequential-submit failure first.
-
-### 2. Preemption-contract verification, `test --preemption` (3.1, M)
-
-hpc-compose has quietly built the best preemption story in the Slurm-tooling
-space — requeue + signal + resume + attempt tracking unified through
-`SLURM_RESTART_COUNT` — but no user can find out whether *their* spec honors
-the contract until a real preemption 40 hours into a run. A test mode that
-signals, kills, restarts, and asserts resume converts the whole contract from
-"trust me" to "verified in 90 seconds," and the local Slurm dev cluster
-(already in-tree) makes it CI-able. Why now: v0.2.0 just completed the
-resume/requeue unification; verification is the natural capstone, and it
-hard-differentiates against every hand-rolled sbatch setup.
-
-### 3. `render --annotate` + `explain` (4.1, S→M)
-
-The project's core pitch is "one generated batch script you can inspect" —
-annotation makes inspection self-explanatory, and it compounds everywhere:
-onboarding (new users learn Slurm *through* the annotations), debugging (which
-spec field caused this flag), docs (examples become self-documenting), and the
-AI-agent story (agents can ground answers in provenance rather than guessing).
-The annotate form is days of work because the renderer already knows the
-mapping; it just doesn't say it. Why now: cheap, on-brand, and it amplifies
-the llms.txt/agent-setup investment already made.
-
-### 4. Cluster drift detection, `doctor cluster-report --diff` (3.3, S–M)
-
-Cluster profiles are static snapshots of a moving target — the HAICORE e2e
-alone surfaced multiple reality-vs-assumption gaps (denied `sinfo`, missing
-`gpu:full` GRES, partition quirks). Every maintenance window silently
-invalidates some of the profile, and today users discover it as a confusing
-mid-submit failure. Re-probing and diffing is mostly recombining existing
-probe code, and wiring a one-line warning into `preflight` puts it exactly
-where users already look. Why now: the project is onboarding its second
-cluster site; drift detection is what makes the cluster-profile concept
-trustworthy at N > 1.
-
-### 5. Fair-share interpreter + walltime-risk warning (2.5 + 3.10, S each)
-
-Bundled because they share a theme — turning data hpc-compose already has into
-judgment. `weather` already fetches `sshare`/`sprio` but presents raw numbers
-no grad student can act on; tracked history already knows the p90 runtime
-that's about to blow through the requested time limit. Both are pure
-interpretation layers, both prevent the two most common queue-related miseries
-(mysterious pending, death at the time limit), and both make the tool feel
-like it has an experienced HPC admin inside it. Why now: they're weekend-sized
-wins that convert existing plumbing into daily-felt value, and they warm up
-the historical-sacct machinery that queue-ETA (2.1) would later need.
-
-### Runners-up
-
-Just missed the cut: idle-GPU watchdog (2.7) — very timely after the
-cgroup-attribution merge but needs careful policy design before it touches
-`scancel`; reproducibility bundle (1.3) — high academic value, held back only
-because `experiment show` + `pull` already cover 60% of it.
-
----
-
-## Moonshots (honest about Slurm)
-
-### M1. Heterogeneous jobs — the declared epic, taken seriously
-
-Per-service partition/account/QOS via `#SBATCH hetjob` components and
-`srun --het-group`, letting a CPU data-loader service live in the cheap
-partition beside a GPU trainer. Slurm genuinely permits this, but honesty: it
-reshapes the planner's single-allocation assumption end to end, MPI across het
-groups is fragile, and some sites disable hetjobs outright — so it needs a
-capability probe in `cluster-report` before anything else.
-
-### M2. Elastic trial-queue sweeps on plain arrays
-
-Instead of one allocation per trial, submit one Slurm *array* of N worker
-tasks that pull trial configs from a shared-filesystem queue — a poor-man's
-Ray Tune with zero daemons, which also makes ASHA pruning nearly free (a
-worker just doesn't pick up a pruned config). Slurm permits everything
-required (arrays + shared FS + file locking); the honest cost is trading the
-current one-trial-one-job inspectability for throughput, so it should be an
-opt-in sweep mode, not a replacement.
-
-### M3. First-to-start multi-cluster racing
-
-Submit the same spec to two clusters, let whichever starts first claim the
-run, cancel the loser. Nothing in Slurm forbids it — but the clusters share no
-filesystem, so the claim step needs an external rendezvous (an object-store
-lock or even a git ref), and the race window means occasionally burning a few
-duplicate node-minutes. Builds directly on multi-cluster profiles (3.7);
-honest prerequisite: that lands first.
-
-### M4. Hot-swap dev inside a held allocation
-
-Marry `alloc` (live allocation, `run` reuses it) with `dev`'s file-watching
-hot-reload and the dual-mode Mac↔login-node source sync: edit on the laptop,
-service restarts *inside the standing compute allocation* in seconds. Slurm
-permits it cleanly — new `srun` steps into a live allocation is exactly the
-mechanism — the hard parts are the sync contract over one-OTP SSH and not
-letting the held allocation become the idle-GPU waste that lane 2 fights (the
-watchdog, 2.7, is the natural guardrail).
-
-### M5. Power-capped runs (`x-slurm.power`)
-
-Declare a power posture: CPU side via Slurm's real, existing `--cpu-freq` flag
-(works today, unprivileged), GPU side via clock capping for the
-well-documented ~10% throughput / ~30% energy trade. Honesty:
-`nvidia-smi -lgc` generally needs root or site prolog support, so GPU capping
-ships as "generate the request for your admin" plus detection of sites that
-allow it — the CPU half and the score-integrated energy accounting are real on
-day one.
-
-### M6. Queue digital twin
-
-"When would this start if I asked for 2 GPUs instead of 4?" answered by
-simulating the scheduler against current queue state. Honest: full Slurm
-simulators are research-grade artifacts nobody maintains; the shippable core
-is quantile regression over your own sacct history (2.1) with per-geometry
-what-if deltas — call it estimation, not simulation, and it's actually
-buildable.
-
-## Agreed roadmap (updated 2026-07-06)
-
-Sequence agreed with Nicolas. Each item gets an architecture sketch (grounded
-in subsystem recon) before implementation; implementation runs via isolated
-worktree agents with adversarial review before PR.
-
-**Done / in flight:**
-
-- 1.1 `sweep submit --resume` — PR #68 open
-- 4.10 `diff --against-spec` — implemented locally
-- 1.3 `experiment bundle` — implemented locally
-- 3.6 State reconciliation (`status --verify`) — implemented locally
-- 3.9 Unified residue reaper — implemented locally
-- 4.2 Live-value shell completions — implemented locally
-- 4.6 Strict `--dry-run`/`--offline` contract — implemented locally
-- 1.7 `notebook promote` — implemented locally
-- 2.7 Idle resource watchdog — implemented locally
-- 1.4 `experiment tag/note` — in implementation
-- 4.1 `render --annotate` + `explain` — in implementation
-- 3.1 Preemption-contract verification (`test --preemption`) — implemented locally
-- 3.8 Shared-FS behavior probes in preflight — implemented locally
-
-**Queued, in this order:**
-
-1. 4.9 Offline doc search (`hpc-compose docs <query>`)
-
-**Struck after review:**
-
-- 3.2 Resubmission policy (`x-slurm.retry`) — dropped because it requires a
-  long-lived or timer-style retry controller that does not fit managed
-  login-node constraints.
-- 3.4 Failure classifier (`debug --classify`) — dropped as too
-  application-dependent for the core CLI.
-
-**Second wave (after the 12 above):**
-
-13. 4.3 `hpc-compose lsp`
-14. 4.7 Local-mode backend parity
-
-**Additional items:**
-
-- **Workspace lifecycle automation** — strengthen support for HPC workspace
-  creation and management (the `ws_allocate`/`ws_find`/`ws_extend`/`ws_release`
-  family on KIT-style clusters) so users never interact with those tools
-  directly: auto-allocate/resolve a workspace for cache and job data, track
-  expiry, extend or warn before data loss, and release on teardown. New idea
-  from Nicolas 2026-07-05; interpretation confirmed. Sketch to be produced
-  alongside 4.10; Nicolas slots it afterwards (touches cache_dir resolution,
-  setup, preflight, and remote mode).
-- **LLM usability overhaul (closes the roadmap)** — after everything above,
-  re-investigate, redesign, and sketch the agent-facing surface: the
-  `skills/hpc-compose/SKILL.md` bundle, `docs/src/llms.txt` entry map, and
-  the AI-agent-setup walkthrough. Target outcome: a user can task any LLM
-  agent with "prepare my repo for this cluster" and the agent reliably knows
-  where to look things up, what is static-safe vs. what submits jobs, and how
-  to author + verify a spec end to end. By then the CLI surface will include
-  everything above, so this is deliberately last — the redesign documents the
-  final shape rather than chasing a moving target.
+# Product Backlog
+
+- **Last reviewed:** 2026-07-09
+- **Current release baseline:** hpc-compose v0.2.0
+- **Source of truth:** this file; the manual publishes it through an include
+- **Scope:** product candidates and explicit decisions beyond the short strategic roadmap
+
+This is a living, evidence-linked backlog, not a commitment schedule. Every idea
+has one stable ID and one of exactly four statuses:
+
+| Status | Meaning |
+| --- | --- |
+| `shipped` | The public CLI path exists and is backed by user docs, generated manpages, and focused tests at this baseline. |
+| `candidate` | Worth retaining, but not committed; the next condition must be met before implementation. |
+| `rejected` | Deliberately outside the current product direction; reconsider only if the stated constraint changes. |
+| `superseded` | The original shape was replaced by a narrower or safer shipped direction; do not implement under this ID. |
+
+When a release changes a row, update its evidence and next condition in the same
+change. A claim is not `shipped` merely because code exists on a branch: the
+Clap path, tests, manpage, and user docs must agree.
+
+## Researcher Workflow
+
+| ID | Proposal | Status | Evidence or decision | Next condition |
+| --- | --- | --- | --- | --- |
+| RW-01 | Resume a partial sweep by submitting only failed, missing, or never-submitted trials. | `shipped` | [`sweep submit --resume` docs](https://nicolasschuler.github.io/hpc-compose/sweeps.html#resume-a-partial-sweep), [CLI tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_sweep.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-sweep-submit.1) | Keep manifest drift guards and dry-run output backward-compatible. |
+| RW-02 | Compare results, objective values, efficiency, and provenance across arbitrary tracked runs. | `candidate` | [`diff` and `experiment show` building blocks](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#tracked-runtime) | Define result-source precedence and a stable comparison schema before adding a new command. |
+| RW-03 | Produce a paper-ready reproducibility bundle for one tracked run. | `shipped` | [`experiment bundle` docs](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html#experiment-bundles), [runtime tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-experiment-bundle.1) | Extend only when new provenance fields have durable recorded sources. |
+| RW-04 | Attach tags and timestamped notes to tracked runs and filter by tag. | `shipped` | [`experiment tag` / `note` docs](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html#tag-and-annotate-runs), [runtime tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [`tag` manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-experiment-tag.1), [`note` manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-experiment-note.1) | Preserve append-only notes and sorted, bounded tags. |
+| RW-05 | Record and render parent-child lineage across resume, sweep, and rerun edges. | `candidate` | [`checkpoints` and provenance building blocks](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html#checkpoints) | Specify identity, cross-directory discovery, and legacy-record degradation before storing edges. |
+| RW-06 | Add an offline W&B/MLflow bridge with explicit post-run sync hints. | `candidate` | [`artifacts` export boundary](https://nicolasschuler.github.io/hpc-compose/artifacts-and-resume.html) | Demonstrate a tracker-neutral contract that never assumes compute-node egress or leaks credentials. |
+| RW-07 | Promote a tracked notebook and notebook file into a Papermill batch spec. | `shipped` | [`notebook promote` docs](https://nicolasschuler.github.io/hpc-compose/notebook.html#promote-a-notebook-to-batch), [CLI tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-notebook-promote.1) | Keep promotion static and require explicit overrides when old records lack provenance. |
+| RW-08 | Emit a self-contained HTML sweep report. | `candidate` | [`sweep results` and scaling reports](https://nicolasschuler.github.io/hpc-compose/sweeps.html#scaling-reports) | Choose a dependency and accessibility strategy plus a deterministic fixture-based renderer. |
+| RW-09 | Record content-addressed provenance for staged datasets and models. | `candidate` | [`stage_in` and cache inventory](https://nicolasschuler.github.io/hpc-compose/spec-reference.html) | Define digest acquisition for local and remote sources without forcing network access during static planning. |
+| RW-10 | Generalize sweep early termination to ASHA-style rung pruning. | `candidate` | [`sweep observe --stop-when`](https://nicolasschuler.github.io/hpc-compose/sweeps.html#objectives-and-early-termination) | Specify intermediate-objective durability, cancellation authorization, and reproducible pruning semantics. |
+
+## Cluster Citizenship
+
+| ID | Proposal | Status | Evidence or decision | Next condition |
+| --- | --- | --- | --- | --- |
+| CC-01 | Estimate queue wait from the user's own accounting history (`plan --eta`). | `candidate` | [`weather` and accounting surfaces](https://nicolasschuler.github.io/hpc-compose/canary-runs.html) | Validate useful, honest quantiles across at least two sites and define sparse-history behavior. |
+| CC-02 | Advise on walltimes likely to fit visible backfill windows. | `candidate` | [`weather` / `when` advisory boundary](https://nicolasschuler.github.io/hpc-compose/canary-runs.html) | Prove a useful result from user-visible `squeue` data without implying reservation or start-time certainty. |
+| CC-03 | Declare and report a run-level energy or carbon budget. | `candidate` | [`score` energy accounting](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html) | Define estimation error, site power-data precedence, and non-enforcing default behavior. |
+| CC-04 | Add carbon-intensity or time-of-use conditions to `when`. | `candidate` | [`when` conditions](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#plan-and-run) | Choose a pluggable source with offline fallback, provenance, and failure behavior that cannot silently block forever. |
+| CC-05 | Translate fair-share and priority data into plain-language guidance. | `candidate` | [`weather` command](https://nicolasschuler.github.io/hpc-compose/canary-runs.html) | Validate interpretations with administrators because site weighting and visibility differ. |
+| CC-06 | Lint current requests against historical utilization for the same workload. | `candidate` | [`inspect --rightsize`](https://nicolasschuler.github.io/hpc-compose/canary-runs.html) | Define workload identity, minimum evidence, coverage requirements, and a no-auto-fix first release. |
+| CC-07 | Warn on sustained idle CPU/GPU resources without cancelling jobs. | `shipped` | [watchdog docs](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html#idle-resource-watchdog), [runtime tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [spec schema guard](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/release_metadata.rs), [`watch` manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-watch.1) | Keep `action: cancel` rejected until a separately authorized, runtime-enforced contract exists. |
+| CC-08 | Aggregate an account-period citizenship report from tracked runs. | `candidate` | [`score` reports](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#tracked-runtime) | Define discovery scope, missing-run bias, group privacy, and export format. |
+| CC-09 | Recommend a preemptible checkpoint/requeue patch when site policy supports it. | `candidate` | [preemption contract](https://nicolasschuler.github.io/hpc-compose/artifacts-and-resume.html#requeue-and-the-resume-attempt-counter) | Require profile-backed policy evidence and a passing `test --preemption` drill before recommending conversion. |
+| CC-10 | Remember user-observed flaky nodes and suggest exclusions. | `candidate` | [`status --verify` evidence model](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html#status-verification) | Quantify false-positive risk and keep the heuristic personal, explainable, and opt-in. |
+
+## Robustness and Operations
+
+| ID | Proposal | Status | Evidence or decision | Next condition |
+| --- | --- | --- | --- | --- |
+| OP-01 | Exercise signal, requeue, attempt-two resume, and assertions through `test --preemption`. | `shipped` | [`test --preemption` CLI docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#finite-smoke-tests), [focused tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_dev_workflow.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-test.1) | Add real-cluster evidence per site without weakening the explicit quota boundary. |
+| OP-02 | Freshly resubmit terminal failures through `x-slurm.retry`. | `rejected` | [one-allocation execution model](https://nicolasschuler.github.io/hpc-compose/execution-model.html) | Reconsider only if a safe, site-approved controller exists outside login-node babysitting; use Slurm requeue/resume meanwhile. |
+| OP-03 | Diff a newly probed cluster report against a checked-in profile. | `candidate` | [cluster profiles](https://nicolasschuler.github.io/hpc-compose/cluster-profiles.html) | Define stable versus volatile fields and maintenance-window acceptance workflow. |
+| OP-04 | Classify arbitrary application failures from logs (`debug --classify`). | `rejected` | [evidence-oriented troubleshooting model](https://nicolasschuler.github.io/hpc-compose/troubleshooting.html) | Reconsider only for explicit typed checks; application-specific classifiers remain outside core. |
+| OP-05 | Add one-keystroke self-healing actions inferred by `watch`. | `superseded` | [`status --verify` and watchdog diagnostics](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html) | Propose each future action separately against a typed finding and the command authorization policy; do not infer mutation from arbitrary logs. |
+| OP-06 | Reconcile tracked records, scheduler state, runtime files, checkpoints, and artifacts. | `shipped` | [`status --verify` docs](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html#status-verification), [runtime tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-status.1) | Keep findings diagnostic-only and degrade clearly when evidence is unavailable. |
+| OP-07 | Select among multiple remote cluster profiles and list cross-cluster jobs. | `candidate` | [`up --remote` and profiles](https://nicolasschuler.github.io/hpc-compose/runbook.html#5b-submit-from-your-laptop-with-up---remote) | Define cluster identity, record discovery, version skew, and credential boundaries. |
+| OP-08 | Probe shared-filesystem visibility and rename behavior from a compute node. | `shipped` | [`preflight --fs-probes` docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#plan-and-run), [focused tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_spec.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-preflight.1) | Add site evidence without making an allocation-consuming probe implicit. |
+| OP-09 | Reap tracked-state, rendezvous, and orphaned runtime residue in one dry-run-first flow. | `shipped` | [`clean --deep` docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#tracked-runtime), [focused tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-clean.1) | Preserve dry-run parity and explicit confirmation for deletion. |
+| OP-10 | Warn when requested walltime is close to historical runtime. | `candidate` | [`stats --accounting`](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html) | Define workload identity, censored-run handling, minimum sample size, and conservative thresholds. |
+
+## Developer Experience
+
+| ID | Proposal | Status | Evidence or decision | Next condition |
+| --- | --- | --- | --- | --- |
+| DX-01 | Annotate rendered scripts and map spec fields to generated lines with `explain`. | `shipped` | [`render --annotate` / `explain` docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#plan-and-run), [CLI tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_spec.rs), [`render` manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-render.1), [`explain` manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-explain.1) | Preserve redaction and line-number provenance as renderer behavior evolves. |
+| DX-02 | Complete services, profiles, partitions, job IDs, sweep IDs, tags, and bundles dynamically. | `shipped` | [`completions` docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#authoring-and-setup), [completion tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_init.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-completions.1) | Keep dynamic lookup local and fast; shells without dynamic support retain static completion. |
+| DX-03 | Serve validator/planner/lint diagnostics through `hpc-compose lsp`. | `shipped` | [LSP docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#lsp-agent-usage), [focused tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_lsp.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-lsp.1) | Add capabilities only when they reuse the Rust semantic source of truth. |
+| DX-04 | Build a full-screen interactive spec wizard. | `superseded` | [`evolve` and `examples recommend`](https://nicolasschuler.github.io/hpc-compose/evolve.html) | Reopen only with user evidence that the progressive tutorial and recommender cannot address without a TUI. |
+| DX-05 | Merge Compose-style base and site overlay files. | `candidate` | [settings/profile boundary](https://nicolasschuler.github.io/hpc-compose/files-and-directories.html) | Write and test merge, deletion, interpolation, provenance, and resume-diff semantics before accepting multiple `-f` inputs. |
+| DX-06 | Guarantee static-safe `--offline` behavior and mutation-free dry-run overrides. | `shipped` | [`--offline` contract](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#common-flags), [offline/dry-run tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_spec.rs), [root manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose.1) | Keep every new external path covered by the command-action policy and dry-run regressions. |
+| DX-07 | Extend local execution to Apptainer and expose a real local Slurm smoke path. | `shipped` | [local mode docs](https://nicolasschuler.github.io/hpc-compose/runtime-backends.html#local-mode), [dev-cluster docs](https://nicolasschuler.github.io/hpc-compose/local-slurm-dev-cluster.html), [runtime suites](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [`up` manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-up.1), [`test` manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-test.1) | Keep local mode single-host and keep dev-cluster submission explicit. |
+| DX-08 | Migrate older spec versions with a diff-previewing `lint --migrate`. | `candidate` | [`lint --fix` foundation](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#lint-rules) | Introduce a spec-version contract and at least one real migration before adding the command. |
+| DX-09 | Search version-matched embedded documentation offline. | `shipped` | [`hpc-compose docs` reference](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#authoring-and-setup), [CLI tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_spec.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-docs.1) | Keep indexing deterministic and version-matched to the binary. |
+| DX-10 | Compare the current effective spec against a tracked run before submission. | `shipped` | [`diff --against-spec` docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#tracked-runtime), [runtime tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-diff.1) | Preserve secret redaction and sweep-variable replay. |
+
+## Cross-Cutting and Long-Horizon Items
+
+| ID | Proposal | Status | Evidence or decision | Next condition |
+| --- | --- | --- | --- | --- |
+| SITE-01 | Manage expiring `ws_*` workspaces through hpc-compose. | `shipped` | [workspace lifecycle docs](https://github.com/NicolasSchuler/hpc-compose/blob/main/docs/src/workspaces.md), [CLI tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_workspace.rs), [`workspace` manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-workspace.1) | Add adapters only for named sites with primary-source verification; never make release implicit. |
+| META-01 | Rebuild LLM discovery, version matching, safety policy, and the progressive skill. | `candidate` | [AI setup boundary](https://nicolasschuler.github.io/hpc-compose/ai-agent-setup.html) | Mark shipped only when generated policy/context/skill artifacts and unauthorized-action forward tests all pass. |
+| MOON-01 | Support Slurm heterogeneous-job components per service. | `candidate` | [declared roadmap epic](https://nicolasschuler.github.io/hpc-compose/roadmap.html#heterogeneous-jobs) | Complete capability probing and a planner/render/runtime design that preserves one inspectable submission. |
+| MOON-02 | Run elastic sweep workers from a shared trial queue. | `candidate` | [current one-trial-one-allocation model](https://nicolasschuler.github.io/hpc-compose/sweeps.html) | Demonstrate crash-safe locking and preserve per-trial provenance before trading inspectability for throughput. |
+| MOON-03 | Race equivalent submissions across clusters and cancel the loser. | `candidate` | [remote execution boundary](https://nicolasschuler.github.io/hpc-compose/runbook.html#5b-submit-from-your-laptop-with-up---remote) | First ship multi-cluster identity and an external atomic claim mechanism with explicit duplicate-quota authorization. |
+| MOON-04 | Hot-swap laptop edits inside a held allocation. | `candidate` | [`alloc` and development modes](https://nicolasschuler.github.io/hpc-compose/development-workflow.html) | Prove robust one-OTP synchronization and an idle-allocation guard before combining the workflows. |
+| MOON-05 | Add CPU/GPU power postures and power-capped runs. | `candidate` | [`score` energy accounting](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html) | Separate unprivileged Slurm CPU controls from site-admin GPU controls and require capability evidence. |
+| MOON-06 | Estimate queue what-if outcomes across resource geometries. | `candidate` | [`weather` advisory model](https://nicolasschuler.github.io/hpc-compose/canary-runs.html) | Start with measured personal-history quantiles; never label an estimate a scheduler simulation. |
+
+## Review Rules
+
+- Reconcile `shipped` rows against Clap, focused tests, generated manpages, and
+  user docs at every release baseline change.
+- Prefer a new stable ID when a proposal's authorization boundary or core
+  semantics materially change; use `superseded` to close the old shape.
+- Keep rejected ideas visible so the same unsafe or out-of-scope design is not
+  repeatedly rediscovered.
+- The [short roadmap](https://nicolasschuler.github.io/hpc-compose/roadmap.html)
+  owns strategy. This backlog owns item-level state and evidence.

@@ -25,8 +25,9 @@ x-slurm:
   time: "00:10:00"
   cpus_per_task: 2
   mem: 8G
-  # Request one GPU. Some sites (e.g. HAICORE) prefer an explicit gres such as
-  # `gres: gpu:1`; set partition/account via settings, --profile, or flags.
+  # Request one GPU. Some sites require an explicit typed GRES instead; for
+  # example, the legacy HAICORE page currently documents `gres: gpu:full:1`.
+  # Re-check the target site's current policy before submission.
   gpus: 1
   cache_dir: ${CACHE_DIR:-/cluster/shared/hpc-compose-cache}
 

@@ -17,6 +17,9 @@ config:
   MD029: false # ordered lists deliberately interrupted by fenced code blocks
 globs:
   - "docs/src/**/*.md"
+  - "docs/plans/2026-07-feature-brainstorm.md"
+  - "skills/hpc-compose/**/*.md"
+  - "llms.txt"
   - "README.md"
   - "CONTRIBUTING.md"
   - "SECURITY.md"

@@ -2,6 +2,10 @@
 
 This roadmap is intentionally short. `hpc-compose` is not trying to become a general-purpose orchestrator.
 
+The [living product backlog](backlog.md) records item-level `shipped`,
+`candidate`, `rejected`, and `superseded` state with evidence. This page owns
+only the durable strategic direction and non-goals.
+
 ## Authoring Ergonomics
 
 - make the supported Compose subset easier to discover from examples and docs
@@ -33,6 +37,7 @@ This is a planned epic, not a shipped feature. It reshapes the planner (which cu
 ## Related Docs
 
 - [Full Example Specs](example-source.md)
+- [Living Product Backlog](backlog.md)
 - [Glossary](glossary.md)
 - [Support Matrix](support-matrix.md)
 - [Architecture for Contributors](architecture.md)

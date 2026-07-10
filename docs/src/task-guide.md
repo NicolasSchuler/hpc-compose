@@ -1,95 +1,98 @@
-# Task Guide
+# Choose Your Workflow
 
-Use this page when you know what you want to do, but not yet which command or example should be your starting point.
+Use this page to choose a workflow shape. It deliberately stops before the
+first-run commands; [Quickstart](quickstart.md) is the sole checklist for the
+first successful cluster run.
 
-## First run
+Work through these decisions in order. Later choices depend on the earlier
+ones.
 
-- Read [Quickstart](quickstart.md).
-- Run `hpc-compose evolve --output compose.yaml` if you want a guided progression from `minimal` through `multi-node-placement`.
-- Run `hpc-compose new --list-templates` if you want to inspect the built-in starter templates before choosing one.
-- Run `hpc-compose examples recommend` for a static, no-Slurm starting-point recommendation with match reasons and safe next commands. Add a workflow description, such as `hpc-compose examples recommend 'vllm worker'`, when you want registry-backed recommendations for a narrower shape.
-- Run `hpc-compose examples list` or `hpc-compose examples search 'vllm worker'` when you want to browse the broader example coverage map by workflow or tag.
-- Start from `minimal-batch` with `hpc-compose new --template minimal-batch --name my-app --output compose.yaml`.
-- Before running on a cluster, configure a shared cache with `hpc-compose setup --cache-dir '<shared-cache-dir>'` or explicit `x-slurm.cache_dir`. If you copy a repository example that uses `CACHE_DIR`, override it for your cluster before running.
-- Run `hpc-compose plan -f compose.yaml` before the first real run. Add `--show-script` when you want to inspect the generated launcher without writing a file.
-- Run `hpc-compose up -f compose.yaml` only from a supported Linux Slurm submission host.
+## 1. Choose the Runtime Backend
 
-## Remember directory/data/env settings once
+| What exists on the target? | Choose | Verify before runtime | Good starting point |
+| --- | --- | --- | --- |
+| Pyxis options in `srun --help` plus Enroot on the submission host | `runtime.backend: pyxis` | `srun --help` lists `--container-image`; shared cache is visible to compute nodes | [`minimal-batch`](example-source.md#minimal-batch) |
+| `apptainer` on login and compute nodes | `runtime.backend: apptainer` | A finite allocation can execute the chosen `.sif` or OCI source | [`minimal-batch`](example-source.md#minimal-batch) after changing the backend |
+| `singularity` on login and compute nodes | `runtime.backend: singularity` | The site's installed version and bind behavior match the spec | [`minimal-batch`](example-source.md#minimal-batch) after changing the backend |
+| Site modules or vendor software, no container required | `runtime.backend: host` | Required `module load` commands work inside an allocation | [`host-modules`](example-source.md#host-modules) |
 
-- Run `hpc-compose setup` to create or update the project-local settings file (`.hpc-compose/settings.toml`).
-- Use `hpc-compose --profile dev up` so compose path, env files, env vars, and binary paths come from the selected profile.
-- Run `hpc-compose context --format json` to inspect resolved paths plus value sources. Interpolation variables are scoped to names referenced by the compose file and sensitive-looking values are redacted unless you add `--show-values`.
-- Use `--settings-file <PATH>` when you need an explicit settings file instead of upward discovery.
+If more than one path is available, prefer the backend the site supports for
+your workload and interconnect. Do not infer Pyxis from Enroot alone. See
+[Runtime Backends](runtime-backends.md).
 
-## Migrate from Docker Compose
+## 2. Choose the Topology
 
-- Read [Docker Compose Migration](docker-compose-migration.md).
-- Replace `build:` with `image:` plus `x-runtime.prepare.commands`.
-- Replace service-name networking with `127.0.0.1` or explicit allocation metadata where appropriate.
+```text
+one command or co-located services?
+├─ one node ───────────────► single-node plan
+└─ more than one node
+   ├─ one distributed service spans the allocation ─► supported pattern
+   └─ independent services dynamically placed ──────► outside current scope
+```
 
-## Pick a starting example
+| Need | Start from | Key decision |
+| --- | --- | --- |
+| One finite service | [`minimal-batch`](example-source.md#minimal-batch) | Request only the CPU, memory, and accelerator resources it needs. |
+| Co-located service plus worker/client | [`app-redis-worker`](example-source.md#app-redis-worker) | Use readiness and dependency conditions only where a consumer truly waits. |
+| MPI across the allocation | [`multi-node-mpi`](example-source.md#multi-node-mpi) | Verify the site's MPI/PMIx path before the application. |
+| PyTorch distributed training | [`multi-node-torchrun`](example-source.md#multi-node-torchrun) | Use generated rendezvous and rank metadata; do not build SSH fanout. |
+| DeepSpeed, Accelerate, Horovod, JAX, Ray, Dask, or Spark | [distributed examples](examples.md) | Choose the framework-native launcher that fits the one-allocation model. |
 
-- Browse the annotated catalog and chooser in [Examples](examples.md); it owns the per-example filename, tag, and prerequisite map.
-- Run `hpc-compose examples recommend '<workflow description>'` for a registry-backed starting point, e.g. `'multi-service app'`, `'multi-node training'`, `'checkpoint resume training'`, or `'vllm worker'`.
+For unfamiliar fabric or MPI setups, render `doctor mpi-smoke` or `doctor
+fabric-smoke` first. Adding `--submit` consumes an allocation and belongs after
+authorization.
 
-## Single-node multi-service app
+## 3. Choose Batch, Interactive, or Notebook Execution
 
-- Use [Execution Model](execution-model.md) to confirm which services can rely on localhost.
-- Add `depends_on` and `readiness` only where ordering really matters.
+| Working style | Command family | Boundary |
+| --- | --- | --- |
+| Finite unattended run | `up` or `test --submit` | Normal production path; submission consumes quota. |
+| Iterate inside one allocation | `alloc`, then `run SERVICE -- ...` | The held allocation continues consuming resources while idle. |
+| JupyterLab or VS Code | `notebook` | Tracked interactive job; requires an explicit stop/cancel plan. |
+| Local hot reload before Slurm | `dev` / `tmux` | Single-host development, not evidence of cluster compatibility. |
 
-## Multi-node distributed training
+Promote a successful notebook into a reproducible batch spec with `notebook
+promote`; promotion itself is static authoring. See [Notebook](notebook.md) and
+[Development Workflow](development-workflow.md).
 
-- Use generated distributed metadata such as `HPC_COMPOSE_DIST_RDZV_ENDPOINT`, `HPC_COMPOSE_DIST_NODE_RANK`, and `HPC_COMPOSE_DIST_NPROC_PER_NODE` instead of Docker-style service discovery.
-- Put cluster-specific NCCL/UCX/OFI fabric variables in `.hpc-compose/cluster.toml` under `[distributed.env]` so specs stay portable.
+## 4. Choose One Run, an Array, or a Sweep
 
-## Checkpoint and resume workflows
+| Multiplicity | Choose | Use when |
+| --- | --- | --- |
+| One tracked allocation | ordinary `up` | One configuration or one distributed run. |
+| Slurm array | top-level `x-slurm.array` | Tasks share one script shape and differ mainly by `SLURM_ARRAY_TASK_ID`. |
+| hpc-compose sweep | top-level `sweep` plus `sweep submit` | Named parameters, replicates, objectives, per-trial records, or resume of partial fanout matter. |
 
-- See [Artifacts and Resume](artifacts-and-resume.md) for the export-vs-resume split.
-- Keep the canonical resume source in `x-slurm.resume.path`, not in exported artifact bundles.
+Arrays and sweeps can consume many allocations. Dry-run and inspect the trial
+count first; authorization for one job does not imply authorization for a
+fanout. See [Sweeps](sweeps.md).
 
-## LLM serving workflows
+## 5. Choose Where the Command Runs
 
-- Use `volumes` for model directories and fast-changing code.
-- Use `x-runtime.prepare.commands` for slower-changing dependencies.
+| Context | Use it for | Important boundary |
+| --- | --- | --- |
+| Login node | static checks, preflight, prepare, submission, and tracked operations | Do not run sustained application compute directly on the login node. |
+| Laptop to remote login node | `up --remote` after settings identify the login host | Stages the repository and delegates; it does not allocate site storage or accounts. |
+| Local runtime | `up --local`, `test --local`, `dev`, or `tmux` on a supported Linux host | Single-host evidence only; not a distributed Slurm substitute. |
+| Local Slurm dev cluster | `test --submit --dev-cluster` from a source checkout | Real local `sbatch`, but fake/local hardware and host backend do not prove a production site. |
 
-## Debug cluster readiness
+Cluster profiles are advisory policy. Site workspace allocation, storage
+directories, and account access must exist before `up` or `up --remote` can use
+them. Read [Onboard a Cluster Site](cluster-profiles.md) and the applicable
+generated site guide.
 
-- Run `hpc-compose validate -f compose.yaml`.
-- Run `hpc-compose validate -f compose.yaml --strict-env` when default interpolation fallbacks should be treated as failures.
-- Run `hpc-compose plan --verbose -f compose.yaml`.
-- Run `hpc-compose preflight -f compose.yaml`.
-- Run `hpc-compose debug -f compose.yaml --preflight` after a failed tracked run.
-- Run `hpc-compose doctor readiness -f compose.yaml --service <name>` to inspect the normalized readiness probe, or add `--run` when the target service, tunnel, or log file is already reachable from the current host.
-- Read [Troubleshooting](troubleshooting.md).
+## Your Next Page
 
-## Cache and artifact management
-
-- Use `hpc-compose cache list` to inspect imported/prepared artifacts.
-- Use `hpc-compose cache inspect -f compose.yaml` to see per-service reuse expectations.
-- Use `hpc-compose --profile dev cache prune --age 14` when you want age-based cleanup to follow the active context cache dir.
-- Use `hpc-compose cache prune --age 7 --cache-dir '<shared-cache-dir>'` when you want a direct cache cleanup that does not depend on compose resolution.
-- Use `hpc-compose artifacts -f compose.yaml` after a run to export tracked payloads.
-
-## Find and clean tracked runs
-
-- Use `hpc-compose jobs list` to scan the current repo tree for tracked runs.
-- Use `hpc-compose ps -f compose.yaml` when you want a one-shot per-service runtime table.
-- Use `hpc-compose watch -f compose.yaml` to reconnect to the live watch UI for the latest tracked job.
-- Use `hpc-compose jobs list --disk-usage` when you need a quick size estimate before deleting old state.
-- Use `hpc-compose clean -f compose.yaml --dry-run --age 7` to preview what a cleanup would remove.
-- Use `hpc-compose clean -f compose.yaml --all --format json` when automation needs a stable cleanup report for one compose context, including effective latest IDs plus stale-pointer diagnostics.
-
-## Automation and scripting with JSON output
-
-- Prefer `--format json` for machine-readable output on non-streaming commands such as `new`, `plan`, `validate`, `render`, `prepare`, `preflight`, `config`, `inspect`, `debug`, `status`, `ps`, `stats`, `score`, `artifacts`, `down`, `cancel`, `setup`, `cache list`/`cache inspect`/`cache prune`, `clean`, and `context`. For `up`, `--format json` requires `--detach` or `--dry-run`.
-- Include `context --format json` when automation needs resolved compose path, binaries, referenced interpolation vars, and runtime path roots.
-- Use `hpc-compose stats --format jsonl` or `--format csv` when downstream tooling wants row-oriented metrics.
-- Use `--format json` for machine-readable output on non-streaming commands. Streaming commands such as `logs --follow`, `watch`, and `completions` keep their native text or script output.
+- Ready for the first cluster run: [Quickstart](quickstart.md).
+- Migrating an existing stack: [Migrate a docker-compose.yaml](docker-compose-migration.md).
+- Choosing among concrete specs: [Examples](examples.md).
+- Operating a workflow that already ran once: [Runbook](runbook.md).
+- Preparing for costly or long runs: [Production Readiness](production-readiness.md).
 
 ## Related Docs
 
+- [Quickstart](quickstart.md)
 - [Examples](examples.md)
-- [Guided Authoring Tutorial](evolve.md)
-- [Migrate a docker-compose.yaml](docker-compose-migration.md)
-- [CLI Reference](cli-reference.md)
-- [Runbook](runbook.md)
+- [Runtime Backends](runtime-backends.md)
+- [Execution Model](execution-model.md)
+- [Slurm Capability Scope](slurm-capability-scope.md)
