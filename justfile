@@ -77,14 +77,21 @@ check: workflow-check
     cargo test --locked
 
 docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "typos" "markdownlint-cli2" "curl" "python3")
+    python3 scripts/generate_site_guides.py --check
+    python3 scripts/generate_agent_assets.py --check
+    python3 scripts/package_skill.py --check
+    python3 -m unittest discover -s scripts/tests -v
+    python3 -m unittest discover -s skills/hpc-compose/tests -v
     mdbook build docs
+    python3 scripts/generate_agent_assets.py --site-dir target/mdbook
+    python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook
     RUSTFLAGS="-D warnings" cargo doc --locked --no-deps
     cargo run --locked --features manpage-bin --bin gen-manpages -- --check
-    typos docs/src README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
+    typos docs/src docs/plans/2026-07-feature-brainstorm.md skills/hpc-compose llms.txt README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
     markdownlint-cli2
-    shopt -s globstar nullglob; lychee --no-progress --fallback-extensions md --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' --exclude-path 'target/mdbook/404\.html$' README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md docs/src/**/*.md target/mdbook/**/*.html
+    shopt -s globstar nullglob; lychee --no-progress --fallback-extensions md --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' --exclude '^https://nicolasschuler\.github\.io/hpc-compose/(raw/|llms-ctx(-full)?\.txt$|agent-command-policy(-v[0-9.]+)?\.json$|schema/)' --exclude-path 'target/mdbook/404\.html$' README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md llms.txt docs/plans/2026-07-feature-brainstorm.md docs/src/**/*.md skills/hpc-compose/**/*.md target/mdbook/**/*.html
     python3 scripts/gen_pa11y_urls.py
-    python3 -m http.server 3000 --directory target/mdbook >/tmp/hpc-compose-docs-http.log 2>&1 & server_pid=$!; trap 'kill "$server_pid"' EXIT; for _ in $(seq 1 30); do if curl -fsS http://127.0.0.1:3000/ >/dev/null; then break; fi; sleep 1; done; pa11y-ci --config .pa11yci.json
+    python3 -m http.server 3000 --directory target/mdbook >/tmp/hpc-compose-docs-http.log 2>&1 & server_pid=$!; trap 'kill "$server_pid"' EXIT; for _ in $(seq 1 30); do if curl -fsS http://127.0.0.1:3000/ >/dev/null; then break; fi; sleep 1; done; python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook --base-url http://127.0.0.1:3000; pa11y-ci --config .pa11yci.json
 
 examples-check: (_require-tools "shellcheck")
     cargo build --locked

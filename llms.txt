@@ -1,0 +1,52 @@
+# hpc-compose
+
+> hpc-compose turns a Compose-style YAML specification into one inspectable Slurm allocation and launcher script for single-job, multi-service, and distributed HPC workflows.
+
+Invariant: services in one spec share one allocation. Establish the installed CLI version and execution context before authoring. Use version-matched embedded docs and machine-readable JSON, and apply the command policy before every action. Discovery is not authorization.
+
+## Start here
+
+- [Overview](https://nicolasschuler.github.io/hpc-compose/raw/README.md): Choose the workflow and understand the one-allocation model.
+- [Quickstart](https://nicolasschuler.github.io/hpc-compose/raw/quickstart.md): Complete the canonical first successful cluster run.
+- [Choose your workflow](https://nicolasschuler.github.io/hpc-compose/raw/task-guide.md): Select a backend, topology, execution mode, run shape, and launch context.
+- [Install hpc-compose](https://nicolasschuler.github.io/hpc-compose/raw/installation.md): Install a versioned release and verify the binary.
+
+## Authoring and interfaces
+
+- [Examples and recommender](https://nicolasschuler.github.io/hpc-compose/raw/examples.md): Select shipped examples with `examples recommend --format json`.
+- [Specification reference](https://nicolasschuler.github.io/hpc-compose/raw/spec-reference.md): Author every supported YAML field.
+- [CLI reference](https://nicolasschuler.github.io/hpc-compose/raw/cli-reference.md): Inspect every public command and flag.
+- [Compose authoring schema](https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose.schema.json): Validate authoring shape and keys.
+- [Settings authoring schema](https://nicolasschuler.github.io/hpc-compose/schema/hpc-compose-settings.schema.json): Validate project settings and profiles.
+- [JSON output stability](https://nicolasschuler.github.io/hpc-compose/raw/json-output-stability.md): Interpret versioned command outputs and inspect their published schemas.
+
+## Operations and recovery
+
+- [Real-cluster runbook](https://nicolasschuler.github.io/hpc-compose/raw/runbook.md): Operate submission, observation, logs, and cleanup.
+- [Runtime observability](https://nicolasschuler.github.io/hpc-compose/raw/runtime-observability.md): Use status, logs, watch, stats, and score.
+- [Troubleshooting](https://nicolasschuler.github.io/hpc-compose/raw/troubleshooting.md): Diagnose symptoms with evidence and safe next commands.
+- [Artifacts and resume](https://nicolasschuler.github.io/hpc-compose/raw/artifacts-and-resume.md): Export recovery artifacts and preserve restart contracts.
+
+## AI agents
+
+- [Set up with an AI agent](https://nicolasschuler.github.io/hpc-compose/raw/ai-agent-setup.md): Install version-matched guidance and use the copy-paste prompt.
+- [Command safety](https://nicolasschuler.github.io/hpc-compose/raw/agent-command-safety.md): Apply flag-aware effects, authorization tiers, and the independent sensitive-output guard.
+- [Machine-readable command policy](https://nicolasschuler.github.io/hpc-compose/agent-command-policy.json): Consume the version-matched authoritative policy JSON.
+- [Essential documentation context](https://nicolasschuler.github.io/hpc-compose/llms-ctx.txt): Use the expanded essential Markdown pages as one context file.
+- [Full documentation context](https://nicolasschuler.github.io/hpc-compose/llms-ctx-full.txt): Include the optional pages below in one context file.
+
+## Cluster sites
+
+- [Cluster profiles and onboarding](https://nicolasschuler.github.io/hpc-compose/raw/cluster-profiles.md): Separate advisory policy from provisioning and runtime setup.
+- [HAICORE at KIT](https://nicolasschuler.github.io/hpc-compose/raw/haicore-guide.md): Apply the verified generated site guide and its support boundary.
+- [Runtime backends](https://nicolasschuler.github.io/hpc-compose/raw/runtime-backends.md): Choose Pyxis/Enroot, Apptainer, Singularity, or host execution.
+
+## Optional
+
+- [Execution model](https://nicolasschuler.github.io/hpc-compose/raw/execution-model.md): Follow validation, planning, rendering, preparation, and launch data flow.
+- [Docker Compose migration](https://nicolasschuler.github.io/hpc-compose/raw/docker-compose-migration.md): Translate a service-oriented local spec into HPC semantics.
+- [Sweeps](https://nicolasschuler.github.io/hpc-compose/raw/sweeps.md): Expand, resume, observe, and stop parameter sweeps.
+- [Canary runs](https://nicolasschuler.github.io/hpc-compose/raw/canary-runs.md): Observe capacity, measure a canary, and right-size cautiously.
+- [Secrets](https://nicolasschuler.github.io/hpc-compose/raw/secrets.md): Source secrets without exposing values in generated artifacts or agent output.
+- [Files and directories](https://nicolasschuler.github.io/hpc-compose/raw/files-and-directories.md): Understand local state, cache, runtime, and artifact paths.
+- [Support matrix](https://nicolasschuler.github.io/hpc-compose/raw/support-matrix.md): Distinguish authoring support from real-cluster runtime evidence.

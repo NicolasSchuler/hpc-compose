@@ -681,6 +681,26 @@ fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
 }
 
 #[test]
+fn release_workflow_packages_a_version_matched_skill_and_checksum() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release workflow");
+    for expected in [
+        "scripts/generate_agent_assets.py --check",
+        "scripts/package_skill.py --version \"${RELEASE_TAG}\"",
+        "hpc-compose-skill-${RELEASE_TAG}.tar.gz",
+        "hpc-compose/SKILL.md",
+        "hpc-compose/VERSION",
+        "name: release-skill",
+        "needs: [build, skill]",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "release workflow should package version-matched skill evidence `{expected}`"
+        );
+    }
+}
+
+#[test]
 fn release_template_mentions_verification_commands() {
     let template = fs::read_to_string(repo_root().join(".github/RELEASE_TEMPLATE.md"))
         .expect("read release template");
@@ -745,6 +765,32 @@ fn ci_docs_qa_tools_are_version_pinned() {
             && workflow.contains("markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"),
         "CI should pin markdownlint-cli2 so markdown lint remains reproducible"
     );
+}
+
+#[test]
+fn linux_arm64_support_claim_keeps_ci_evidence_and_limit_together() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    let support = fs::read_to_string(repo_root().join("docs/src/support-matrix.md"))
+        .expect("read support matrix");
+
+    for expected in ["linux-arm64-authoring:", "runs-on: ubuntu-24.04-arm"] {
+        assert!(
+            workflow.contains(expected),
+            "Linux arm64 support requires CI evidence `{expected}`"
+        );
+    }
+    for expected in [
+        "native `linux-arm64-authoring` CI job",
+        "release workflow builds a Linux arm64 archive",
+        "portable fake-tool suites",
+        "no real arm64 Slurm/backend end-to-end CI lane",
+    ] {
+        assert!(
+            support.contains(expected),
+            "support matrix should keep the Linux arm64 evidence limitation `{expected}`"
+        );
+    }
 }
 
 #[test]

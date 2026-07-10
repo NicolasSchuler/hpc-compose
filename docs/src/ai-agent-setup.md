@@ -1,80 +1,105 @@
 # Set Up With an AI Agent
 
-You can hand hpc-compose setup to an AI agent — Claude, Codex, Copilot, Cursor, or any LLM that can read a repository and run shell commands. This page is the agent-agnostic entry point: a copy-paste prompt, the safety boundary every agent must respect, and how to install the bundled skill for agents that support skills.
+An AI agent can inspect a repository, author an hpc-compose spec, run static checks, and prepare a cluster handoff. It must use guidance that matches the installed binary and stop at the authorization tier for the next action.
 
-The machine-readable entry point is the published map [`llms.txt`](llms.txt), served at `https://nicolasschuler.github.io/hpc-compose/llms.txt`. Point an agent at that URL first; it carries the curated doc map, the safety contract, and the canonical spec conventions in a token-lean form.
+The root [`llms.txt`](https://nicolasschuler.github.io/hpc-compose/llms.txt) is the concise discovery map. It follows the [llms.txt proposal](https://github.com/AnswerDotAI/llms-txt): one H1, a summary blockquote, brief invariant notes, H2 link lists, and a skippable Optional section. It is not an authorization mechanism. The generated [command-safety page](agent-command-safety.md) and [JSON policy](agent-command-policy.json) are the command contract.
 
-## Copy-paste prompt for any agent
+The bundled skill follows the [Agent Skills specification](https://agentskills.io/specification): discovery metadata in `SKILL.md`, a short activated router, and focused references or scripts loaded only when needed.
 
-```text
-Help me set up hpc-compose for my Slurm cluster.
+## Match the binary and guidance
 
-First read https://nicolasschuler.github.io/hpc-compose/llms.txt and honor its
-safety contract: never submit, allocate, or cancel a Slurm job without my explicit
-approval. Author the spec and verify it with the safe static checks
-(validate, plan --show-script, inspect) before proposing any real run.
-
-Then: inspect this repository, ask me what you need about my cluster (account,
-partition, runtime backend, and a shared cache path visible from login and compute
-nodes), and produce an hpc-compose spec plus the exact login-node commands. Stop and
-ask before any command that submits or cancels a job.
-```
-
-For a one-line nudge once the agent has context: *"Set up hpc-compose for my cluster, read the published llms.txt first, and don't submit any Slurm job without my approval."*
-
-## The safety boundary (what an agent may run unprompted)
-
-| Safe to run unprompted (never submits, cancels, or allocates; no quota) | Requires your explicit approval (submits/cancels/allocates) |
-| --- | --- |
-| Static, no scheduler contact: `new`, `validate`, `plan`, `plan --show-script`, `inspect`, `render`, `explain`, `config`, `lint`, `schema`, `lsp` | `up`, `run`, `test --submit`, `notebook`, `alloc`, `shell`, `sweep submit`, `down`, `cancel` |
-| Static previews and authoring helpers: `up --dry-run`, `up --remote --dry-run`, `notebook --dry-run`, `notebook promote`, `germinate --dry-run`, `sweep submit --dry-run` | — |
-| Read-only scheduler queries (`squeue`/`sacct`, no changes): `status`, `ps`, `stats`, `diff`, `logs` — avoid tight polling on rate-limited login nodes | — |
-| `artifacts` makes no scheduler contact but writes exported files to the local `export_dir` | — |
-
-A well-behaved agent authors and statically verifies a spec first, and only runs a submitting command after you approve it on a supported Linux Slurm submission host. On a login node it should prefer `hpc-compose debug -f <file> --preflight` and `hpc-compose doctor cluster-report` before a first `up`.
-
-## Install the bundled skill (Claude, Codex, and other skill-aware agents)
-
-This repository ships a drop-in skill bundle at `skills/hpc-compose/` — the source of truth for the setup recipe. Copy it into your agent's skills directory and start a fresh session so skill discovery reloads:
-
-- Claude Code: `~/.claude/skills/hpc-compose` (user scope) or `.claude/skills/hpc-compose` (project scope)
-- Codex: `$CODEX_HOME/skills/hpc-compose` or `~/.codex/skills/hpc-compose`
-- Other runtimes: the skills location your agent documents
-
-The bundle progressively loads detail as needed:
-
-| Path | Purpose |
-| --- | --- |
-| `skills/hpc-compose/SKILL.md` | Trigger description, the safe-first core workflow, adaptation rules, and output expectations. |
-| `skills/hpc-compose/references/environment-setup.md` | Onboarding: installation, cluster-requirement discovery, shared-cache setup, profile/context checks, and the first safe cluster handoff. |
-| `skills/hpc-compose/references/hpc-compose-workflow.md` | Command path, Docker Compose migration, backend selection, verification, and troubleshooting. |
-| `skills/hpc-compose/references/haicore-kit.md` | HAICORE / NHR@KIT Slurm, GPU, filesystem, cache, and Pyxis/Enroot guidance. |
-| `skills/hpc-compose/references/cluster-adaptation.md` | General Slurm cluster reconnaissance and portable adaptation. |
-| `skills/hpc-compose/scripts/hpc_compose_repo_probe.py` | Heuristic repository probe for migration clues. |
-| `skills/hpc-compose/agents/openai.yaml` | OpenAI/Codex-facing interface manifest: display name, short description, and default setup prompt. |
-
-For local reconnaissance you (or the agent) can run the probe directly:
+Start by identifying the binary that will actually run:
 
 ```bash
-python3 skills/hpc-compose/scripts/hpc_compose_repo_probe.py .
+command -v hpc-compose
+hpc-compose --version
+uname -sm
 ```
 
-The probe is intentionally heuristic — treat its output as an inventory and a set of hypotheses, then confirm against repository files, current cluster documentation, and hpc-compose static checks.
+The installed binary carries version-matched documentation and schemas:
 
-## What to expect from a good agent run
+```bash
+hpc-compose --offline docs "first cluster run" --format json
+hpc-compose --offline schema
+hpc-compose --offline schema --kind settings
+```
 
-An agent helping with hpc-compose should:
+Published Pages and `/raw/*.md` describe the latest published release. They may mention commands or fields absent from an older binary. When they disagree, use the installed binary's help, embedded docs, and schemas.
 
-- inspect the target repository before proposing a spec;
-- discover your environment (cluster, access method, workload, backend, shared filesystem, account/partition/QOS) before writing cluster-specific files;
-- prefer `x-runtime.prepare.commands` and a shared cache path (never `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm`);
-- verify with `validate`, `plan --show-script`, and `inspect` before any real submission;
-- ask before any command that submits or cancels jobs or consumes allocation quota;
-- leave you with the created files, the static checks it ran, the cluster assumptions still unverified, and the next safest command.
+## Install the version-matched skill
+
+Every GitHub release publishes `hpc-compose-skill-vX.Y.Z.tar.gz` and its checksum alongside the binary archives. Download the skill from the same release as the installed CLI, verify it, and extract the top-level `hpc-compose/` directory into the agent's skill directory.
+
+```bash
+VERSION=0.2.0
+curl -fLO "https://github.com/NicolasSchuler/hpc-compose/releases/download/v${VERSION}/hpc-compose-skill-v${VERSION}.tar.gz"
+curl -fLO "https://github.com/NicolasSchuler/hpc-compose/releases/download/v${VERSION}/hpc-compose-skill-v${VERSION}.tar.gz.sha256"
+shasum -a 256 -c "hpc-compose-skill-v${VERSION}.tar.gz.sha256"
+tar -xzf "hpc-compose-skill-v${VERSION}.tar.gz"
+```
+
+Install the extracted directory in one of these locations, then start a fresh agent session:
+
+- Codex: `$CODEX_HOME/skills/hpc-compose` or `~/.codex/skills/hpc-compose`;
+- Claude Code: `~/.claude/skills/hpc-compose` or `.claude/skills/hpc-compose`;
+- another skill-aware client: its documented Agent Skills directory.
+
+The source tree under `skills/hpc-compose/` matches the current checkout, not necessarily the installed release. Its `VERSION` file is an explicit mismatch guard.
+
+## Copy-paste prompt
+
+```text
+Use $hpc-compose to adapt this repository for my Slurm cluster.
+
+First establish the installed hpc-compose version and whether this machine is an
+authoring workstation, login/submission host, active allocation, local Linux
+runtime host, or dev cluster. Use the installed binary's `--offline docs`, help,
+and schemas as the version-matched source of truth.
+
+Inspect the repository with the skill's evidence-only JSON probe. Pass its
+derived workload phrases to `examples recommend --format json`; do not select an
+example from keywords alone. Iterate through redacted `validate`, `lint`, `plan`,
+`inspect`, and `explain` JSON, inspecting each output schema before depending on
+fields.
+
+Apply the generated command policy before every action. Do not submit, allocate,
+execute workload code, use SSH, provision external storage, cancel, requeue,
+delete, or expose sensitive output without the required explicit authorization.
+Stop with the exact next command, its execution location, effects, and tier.
+```
+
+## Authorization model
+
+The policy orders actions from automatic read-only through scoped local mutation, explicit runtime or external mutation, explicit quota, and explicit destructive action. Flag overrides matter: for example, `preflight --fs-probes`, smoke-probe `--submit`, preemption drills, sweep cancellation paths, local-runtime modes, and workspace lifecycle commands do not share the base command's effects.
+
+Sensitive output is independent of authorization tier. An agent must not echo or ingest unredacted `plan --show-script`, `render`, `plan --verbose`, `--show-values`, logs, or debug output. Prefer:
+
+```bash
+hpc-compose --offline plan -f compose.hpc.yaml --format json
+hpc-compose --offline explain -f compose.hpc.yaml --format json
+```
+
+If you explicitly request a generated script file, authorize the named local destination. The agent should create it owner-only and should not read it back into the conversation.
+
+See [Command Safety for Agents](agent-command-safety.md) for the complete generated classification. Approval applies to the named invocation; `--yes`, a prior run, or available credentials do not broaden it.
+
+## Expected workflow
+
+A good agent run should leave you with:
+
+- the installed binary version and skill version comparison;
+- the execution context and repository evidence paths;
+- a spec chosen through the shipped example recommender;
+- redacted machine-readable validation, lint, plan, inspect, and provenance checks;
+- confirmed cluster facts separated from assumptions;
+- the exact next command, where it runs, whether it contacts Slurm or consumes quota, and its authorization tier;
+- an explicit statement that no runtime, SSH, scheduler mutation, deletion, or sensitive-output ingestion occurred when the work stopped at authoring.
+
+For a larger preloaded context, use [`llms-ctx.txt`](https://nicolasschuler.github.io/hpc-compose/llms-ctx.txt). Use [`llms-ctx-full.txt`](https://nicolasschuler.github.io/hpc-compose/llms-ctx-full.txt) only when the Optional pages are relevant.
 
 ## Related Docs
 
-- [Quickstart](quickstart.md)
-- [Task Guide](task-guide.md)
-- [Installation](installation.md)
+- [Command Safety for Agents](agent-command-safety.md)
+- [Command Families](command-families.md)
 - [CLI Reference](cli-reference.md)
+- [JSON Output Stability](json-output-stability.md)

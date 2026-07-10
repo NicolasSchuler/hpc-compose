@@ -84,10 +84,18 @@ jobs:
           npm install --global "pa11y-ci@${PA11Y_CI_VERSION}" "markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"
 
       - name: Build mdBook docs
-        run: mdbook build docs
+        run: |
+          python3 scripts/generate_site_guides.py --check
+          python3 scripts/generate_agent_assets.py --check
+          python3 scripts/package_skill.py --check
+          python3 -m unittest discover -s scripts/tests -v
+          python3 -m unittest discover -s skills/hpc-compose/tests -v
+          mdbook build docs
+          python3 scripts/generate_agent_assets.py --site-dir target/mdbook
+          python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook
 
       - name: Spell check docs
-        run: typos docs/src README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
+        run: typos docs/src docs/plans/2026-07-feature-brainstorm.md skills/hpc-compose llms.txt README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
 
       - name: Lint markdown
         run: markdownlint-cli2
@@ -108,8 +116,9 @@ jobs:
           lychee --no-progress \
             --fallback-extensions md \
             --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' \
+            --exclude '^https://nicolasschuler\.github\.io/hpc-compose/(raw/|llms-ctx(-full)?\.txt$|agent-command-policy(-v[0-9.]+)?\.json$|schema/)' \
             --exclude-path 'target/mdbook/404\.html$' \
-            README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md docs/src/**/*.md target/mdbook/**/*.html
+            README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md llms.txt docs/plans/2026-07-feature-brainstorm.md docs/src/**/*.md skills/hpc-compose/**/*.md target/mdbook/**/*.html
 
       - name: Check docs accessibility
         shell: bash
@@ -125,6 +134,7 @@ jobs:
             fi
             sleep 1
           done
+          python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook --base-url http://127.0.0.1:3000
           pa11y-ci --config .pa11yci.json
 
   fmt:

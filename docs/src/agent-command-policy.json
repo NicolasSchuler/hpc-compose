@@ -1,0 +1,1397 @@
+{
+  "schema_version": 1,
+  "policy_version": "1.0.0",
+  "cli_version": "0.2.0",
+  "title": "hpc-compose agent command policy",
+  "description": "Flag-aware effects and authorization requirements for every public hpc-compose command path.",
+  "effect_tags": {
+    "local-read": "Reads local files or process metadata without changing them.",
+    "local-write": "Creates or changes local files, tracked records, caches, or generated artifacts.",
+    "local-delete": "Deletes local files, cache entries, tracked state, or workspace data.",
+    "executes-user-code": "Runs workload commands, preparation commands, probes, or an interactive runtime.",
+    "network-or-ssh": "Uses the network, pulls remote content, opens a tunnel, or delegates over SSH.",
+    "scheduler-read": "Queries Slurm or another external scheduler without changing scheduler state.",
+    "scheduler-submit": "Submits a job or opens an allocation and may consume quota.",
+    "scheduler-cancel": "Cancels, signals, requeues, or otherwise destructively changes a scheduled job.",
+    "polls": "Repeats local, network, or scheduler observations until completion or interruption.",
+    "sensitive-output": "May expose secrets, commands, scripts, paths, logs, tokens, or other sensitive material."
+  },
+  "authorization_tiers": [
+    {
+      "id": "automatic-read-only",
+      "order": 1,
+      "description": "May run automatically when its independent sensitive-output guard is also satisfied."
+    },
+    {
+      "id": "scoped-local-mutation",
+      "order": 2,
+      "description": "Requires authorization for the named local write scope."
+    },
+    {
+      "id": "explicit-runtime-or-external-mutation",
+      "order": 3,
+      "description": "Requires explicit authorization before executing workload code or changing an external non-scheduler resource."
+    },
+    {
+      "id": "explicit-quota",
+      "order": 4,
+      "description": "Requires explicit authorization for scheduler submission, allocation, or quota consumption."
+    },
+    {
+      "id": "explicit-destructive",
+      "order": 5,
+      "description": "Requires explicit authorization for deletion, cancellation, requeue, or other destructive mutation."
+    }
+  ],
+  "global_overrides": [
+    {
+      "flag": "--offline",
+      "remove_effects": [
+        "network-or-ssh",
+        "scheduler-read",
+        "scheduler-submit",
+        "scheduler-cancel",
+        "polls"
+      ],
+      "description": "The CLI rejects SSH, network-backed delegation, scheduler contact, submissions, allocations, and cancels before invoking external tools. Local mutation and sensitive-output guards still apply."
+    },
+    {
+      "flag": "--verbose",
+      "add_effects": [
+        "sensitive-output"
+      ],
+      "description": "Verbose diagnostics may reveal resolved paths, runtime details, or command material."
+    },
+    {
+      "flag": "--debug",
+      "add_effects": [
+        "sensitive-output"
+      ],
+      "description": "Debug diagnostics may reveal resolved paths, runtime details, or command material."
+    }
+  ],
+  "commands": [
+    {
+      "path": "alloc",
+      "authorization_tier": "explicit-quota",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "scheduler-read",
+        "scheduler-submit",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Prepare images, open a Slurm allocation, and run a shell or command."
+    },
+    {
+      "path": "artifacts",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write"
+      ],
+      "summary": "Export tracked artifact bundles into the configured local destination."
+    },
+    {
+      "path": "cache",
+      "authorization_tier": "automatic-read-only",
+      "effects": [],
+      "summary": "Command group; a subcommand is required."
+    },
+    {
+      "path": "cache inspect",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Inspect one cache entry."
+    },
+    {
+      "path": "cache list",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "List cache entries."
+    },
+    {
+      "path": "cache prune",
+      "authorization_tier": "explicit-destructive",
+      "effects": [
+        "local-read",
+        "local-write",
+        "local-delete"
+      ],
+      "summary": "Delete old or unused cache entries."
+    },
+    {
+      "path": "cancel",
+      "authorization_tier": "explicit-destructive",
+      "effects": [
+        "local-read",
+        "local-write",
+        "local-delete",
+        "scheduler-cancel"
+      ],
+      "summary": "Cancel a tracked job and reap tracked state."
+    },
+    {
+      "path": "checkpoints",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Read local checkpoint and requeue history."
+    },
+    {
+      "path": "clean",
+      "authorization_tier": "explicit-destructive",
+      "effects": [
+        "local-read",
+        "local-write",
+        "local-delete"
+      ],
+      "summary": "Delete tracked job and optional deep runtime state.",
+      "overrides": [
+        {
+          "flags": [
+            "--dry-run"
+          ],
+          "authorization_tier": "automatic-read-only",
+          "remove_effects": [
+            "local-write",
+            "local-delete"
+          ],
+          "description": "Preview the cleanup plan without deleting files."
+        }
+      ]
+    },
+    {
+      "path": "completions",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Print a shell completion program to stdout."
+    },
+    {
+      "path": "config",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Print the normalized effective compose configuration with redaction by default.",
+      "overrides": [
+        {
+          "flags": [
+            "--show-values"
+          ],
+          "add_effects": [
+            "sensitive-output"
+          ],
+          "description": "Disables redaction of sensitive-looking values. Agents must not use or ingest this output."
+        }
+      ]
+    },
+    {
+      "path": "context",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Print selected settings, interpolation sources, binaries, and runtime paths with redaction by default.",
+      "overrides": [
+        {
+          "flags": [
+            "--show-values"
+          ],
+          "add_effects": [
+            "sensitive-output"
+          ],
+          "description": "Disables redaction of sensitive-looking interpolation values. Agents must not use or ingest this output."
+        }
+      ]
+    },
+    {
+      "path": "debug",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read",
+        "sensitive-output"
+      ],
+      "summary": "Collect tracked state, scheduler state, and log tails for diagnosis."
+    },
+    {
+      "path": "dev",
+      "authorization_tier": "explicit-runtime-or-external-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Prepare and run the workload under the local supervisor with file watching."
+    },
+    {
+      "path": "diff",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Compare tracked runs or a tracked snapshot with the current spec."
+    },
+    {
+      "path": "docs",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Search version-matched documentation embedded in the binary."
+    },
+    {
+      "path": "doctor",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Run non-submitting environment and scheduler diagnostics."
+    },
+    {
+      "path": "doctor cluster-report",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Read cluster capabilities and print an advisory profile.",
+      "overrides": [
+        {
+          "flags": [
+            "--out"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Writes the generated advisory cluster profile to the requested path; '-' remains stdout-only."
+        }
+      ]
+    },
+    {
+      "path": "doctor fabric-smoke",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "sensitive-output"
+      ],
+      "summary": "Render a fabric smoke script without submitting it.",
+      "overrides": [
+        {
+          "flags": [
+            "--script-out"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Writes the rendered probe script to the requested path."
+        },
+        {
+          "flags": [
+            "--submit"
+          ],
+          "authorization_tier": "explicit-quota",
+          "add_effects": [
+            "local-write",
+            "executes-user-code",
+            "scheduler-read",
+            "scheduler-submit",
+            "polls"
+          ],
+          "description": "Submits and waits for the fabric probe."
+        }
+      ]
+    },
+    {
+      "path": "doctor mpi-smoke",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "sensitive-output"
+      ],
+      "summary": "Render an MPI smoke script without submitting it.",
+      "overrides": [
+        {
+          "flags": [
+            "--script-out"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Writes the rendered probe script to the requested path."
+        },
+        {
+          "flags": [
+            "--submit"
+          ],
+          "authorization_tier": "explicit-quota",
+          "add_effects": [
+            "local-write",
+            "executes-user-code",
+            "scheduler-read",
+            "scheduler-submit",
+            "polls"
+          ],
+          "description": "Submits and waits for the MPI probe."
+        }
+      ]
+    },
+    {
+      "path": "doctor readiness",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Explain one readiness probe without running it.",
+      "overrides": [
+        {
+          "flags": [
+            "--run"
+          ],
+          "authorization_tier": "explicit-runtime-or-external-mutation",
+          "add_effects": [
+            "executes-user-code",
+            "network-or-ssh"
+          ],
+          "description": "Runs the spec-defined readiness probe from the current host."
+        }
+      ]
+    },
+    {
+      "path": "down",
+      "authorization_tier": "explicit-destructive",
+      "effects": [
+        "local-read",
+        "local-write",
+        "local-delete",
+        "scheduler-cancel"
+      ],
+      "summary": "Cancel a tracked job, export by default, and reap tracked state."
+    },
+    {
+      "path": "evolve",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write"
+      ],
+      "summary": "Interactively evolve and write an authoring-only spec.",
+      "overrides": [
+        {
+          "flags": [
+            "--list-lessons"
+          ],
+          "authorization_tier": "automatic-read-only",
+          "remove_effects": [
+            "local-write"
+          ],
+          "description": "Lists built-in lessons without writing a spec."
+        },
+        {
+          "flags": [
+            "--describe-lesson"
+          ],
+          "authorization_tier": "automatic-read-only",
+          "remove_effects": [
+            "local-write"
+          ],
+          "description": "Describes one built-in lesson without writing a spec."
+        }
+      ]
+    },
+    {
+      "path": "examples",
+      "authorization_tier": "automatic-read-only",
+      "effects": [],
+      "summary": "Command group; a subcommand is required."
+    },
+    {
+      "path": "examples coverage",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Print static example coverage metadata."
+    },
+    {
+      "path": "examples list",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "List shipped examples from embedded registry metadata."
+    },
+    {
+      "path": "examples recommend",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Recommend shipped examples from a workload description and tags."
+    },
+    {
+      "path": "examples search",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Search shipped examples and templates."
+    },
+    {
+      "path": "experiment",
+      "authorization_tier": "automatic-read-only",
+      "effects": [],
+      "summary": "Command group; a subcommand is required."
+    },
+    {
+      "path": "experiment bundle",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "sensitive-output"
+      ],
+      "summary": "Write a reproducibility bundle that may contain scripts and resolved run metadata."
+    },
+    {
+      "path": "experiment note",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write"
+      ],
+      "summary": "Append a note to a tracked run record."
+    },
+    {
+      "path": "experiment show",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read",
+        "sensitive-output"
+      ],
+      "summary": "Aggregate status, score, artifact metadata, and provenance for one run."
+    },
+    {
+      "path": "experiment tag",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write"
+      ],
+      "summary": "Add or remove tags on a tracked run record."
+    },
+    {
+      "path": "explain",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Map generated script provenance without echoing the complete script."
+    },
+    {
+      "path": "feedback",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Print a local feedback report and issue URL without opening or sending it."
+    },
+    {
+      "path": "germinate",
+      "authorization_tier": "explicit-quota",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "scheduler-read",
+        "scheduler-submit",
+        "polls"
+      ],
+      "summary": "Submit and measure a canary allocation.",
+      "overrides": [
+        {
+          "flags": [
+            "--dry-run"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "remove_effects": [
+            "executes-user-code",
+            "network-or-ssh",
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel",
+            "polls"
+          ],
+          "add_effects": [
+            "sensitive-output"
+          ],
+          "description": "Skips preparation and submission but writes an owner-only canary script to the explicit or default path."
+        },
+        {
+          "flags": [
+            "--script-out"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Writes the rendered canary script to the requested path."
+        }
+      ]
+    },
+    {
+      "path": "inspect",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Show normalized topology, resources, mounts, and dependencies.",
+      "overrides": [
+        {
+          "flags": [
+            "--rightsize"
+          ],
+          "add_effects": [
+            "scheduler-read"
+          ],
+          "description": "Reads tracked post-run metrics and scheduler accounting for right-sizing."
+        }
+      ]
+    },
+    {
+      "path": "jobs",
+      "authorization_tier": "automatic-read-only",
+      "effects": [],
+      "summary": "Command group; a subcommand is required."
+    },
+    {
+      "path": "jobs list",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Scan for and list tracked jobs."
+    },
+    {
+      "path": "lint",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Run static authoring diagnostics.",
+      "overrides": [
+        {
+          "flags": [
+            "--fix"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Applies auto-fixable findings to the spec."
+        },
+        {
+          "flags": [
+            "--dry-run"
+          ],
+          "authorization_tier": "automatic-read-only",
+          "remove_effects": [
+            "local-write"
+          ],
+          "add_effects": [
+            "sensitive-output"
+          ],
+          "description": "With --fix, prints a proposed diff without writing."
+        }
+      ]
+    },
+    {
+      "path": "logs",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "sensitive-output"
+      ],
+      "summary": "Print tracked service logs. Agents must treat log content as sensitive.",
+      "overrides": [
+        {
+          "flags": [
+            "--follow"
+          ],
+          "add_effects": [
+            "polls"
+          ],
+          "description": "Continues reading appended log data until interrupted."
+        },
+        {
+          "flags": [
+            "--remote"
+          ],
+          "add_effects": [
+            "network-or-ssh"
+          ],
+          "description": "Delegates the read over SSH."
+        }
+      ]
+    },
+    {
+      "path": "lsp",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "polls"
+      ],
+      "summary": "Run the static diagnostics-only language server over stdio."
+    },
+    {
+      "path": "new",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-write"
+      ],
+      "summary": "Write a starter spec.",
+      "overrides": [
+        {
+          "flags": [
+            "--list-templates"
+          ],
+          "authorization_tier": "automatic-read-only",
+          "remove_effects": [
+            "local-write"
+          ],
+          "description": "Lists built-in templates without writing a spec."
+        },
+        {
+          "flags": [
+            "--describe-template"
+          ],
+          "authorization_tier": "automatic-read-only",
+          "remove_effects": [
+            "local-write"
+          ],
+          "description": "Describes one built-in template without writing a spec."
+        }
+      ]
+    },
+    {
+      "path": "notebook",
+      "authorization_tier": "explicit-quota",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "scheduler-read",
+        "scheduler-submit",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Prepare and launch a tracked Jupyter or VS Code session.",
+      "overrides": [
+        {
+          "flags": [
+            "--dry-run"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "remove_effects": [
+            "executes-user-code",
+            "network-or-ssh",
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel",
+            "polls"
+          ],
+          "description": "Skips preparation and submission but writes an owner-only notebook script to the explicit or default path."
+        },
+        {
+          "flags": [
+            "--local"
+          ],
+          "authorization_tier": "explicit-runtime-or-external-mutation",
+          "remove_effects": [
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel"
+          ],
+          "description": "Runs the interactive service through the local supervisor instead of Slurm."
+        },
+        {
+          "flags": [
+            "--script-out"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Writes the rendered script to the requested path."
+        }
+      ]
+    },
+    {
+      "path": "notebook promote",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write"
+      ],
+      "summary": "Write a batch compose spec from a tracked notebook record."
+    },
+    {
+      "path": "plan",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Validate and build a redacted static plan without touching Slurm.",
+      "overrides": [
+        {
+          "flags": [
+            "--show-script"
+          ],
+          "add_effects": [
+            "sensitive-output"
+          ],
+          "description": "Prints the generated script, which can contain commands, paths, and expanded values. Prefer explain; do not ingest unredacted script output."
+        }
+      ]
+    },
+    {
+      "path": "preflight",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Check submission-host prerequisites without submitting by default.",
+      "overrides": [
+        {
+          "flags": [
+            "--fs-probes"
+          ],
+          "authorization_tier": "explicit-quota",
+          "add_effects": [
+            "local-write",
+            "executes-user-code",
+            "scheduler-submit",
+            "polls"
+          ],
+          "description": "Submits a tiny Slurm job to probe shared filesystem behavior."
+        }
+      ]
+    },
+    {
+      "path": "prepare",
+      "authorization_tier": "explicit-runtime-or-external-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "sensitive-output"
+      ],
+      "summary": "Import images and execute prepare commands on the submission host."
+    },
+    {
+      "path": "ps",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Read per-service tracked and scheduler state.",
+      "overrides": [
+        {
+          "flags": [
+            "--remote"
+          ],
+          "add_effects": [
+            "network-or-ssh"
+          ],
+          "description": "Delegates the read over SSH."
+        }
+      ]
+    },
+    {
+      "path": "pull",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "sensitive-output"
+      ],
+      "summary": "Print an rsync command; does not copy or connect by default.",
+      "overrides": [
+        {
+          "flags": [
+            "--remote"
+          ],
+          "add_effects": [
+            "network-or-ssh"
+          ],
+          "description": "Delegates command resolution over SSH."
+        }
+      ]
+    },
+    {
+      "path": "reach",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read",
+        "sensitive-output"
+      ],
+      "summary": "Print an SSH port-forward command without opening it.",
+      "overrides": [
+        {
+          "flags": [
+            "--open"
+          ],
+          "authorization_tier": "explicit-runtime-or-external-mutation",
+          "add_effects": [
+            "network-or-ssh",
+            "polls"
+          ],
+          "description": "Opens the SSH tunnel in the foreground."
+        }
+      ]
+    },
+    {
+      "path": "render",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "sensitive-output"
+      ],
+      "summary": "Print a generated script. Prefer explain when full script contents are unnecessary.",
+      "overrides": [
+        {
+          "flags": [
+            "--output"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Writes the generated script to the requested path. The caller must request an owner-only destination and must not read it back into the conversation."
+        }
+      ]
+    },
+    {
+      "path": "rendezvous",
+      "authorization_tier": "automatic-read-only",
+      "effects": [],
+      "summary": "Command group; a subcommand is required."
+    },
+    {
+      "path": "rendezvous list",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "List provider records in the shared cache."
+    },
+    {
+      "path": "rendezvous prune",
+      "authorization_tier": "explicit-destructive",
+      "effects": [
+        "local-read",
+        "local-write",
+        "local-delete"
+      ],
+      "summary": "Delete expired provider records from the shared cache."
+    },
+    {
+      "path": "rendezvous register",
+      "authorization_tier": "explicit-runtime-or-external-mutation",
+      "effects": [
+        "local-read",
+        "local-write"
+      ],
+      "summary": "Write a provider record to shared cache storage."
+    },
+    {
+      "path": "rendezvous resolve",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Resolve one provider record from the shared cache."
+    },
+    {
+      "path": "replay",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Replay tracked state and logs locally."
+    },
+    {
+      "path": "run",
+      "authorization_tier": "explicit-quota",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "scheduler-read",
+        "scheduler-submit",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Prepare and run a one-off command through Slurm by default.",
+      "overrides": [
+        {
+          "flags": [
+            "--local"
+          ],
+          "authorization_tier": "explicit-runtime-or-external-mutation",
+          "remove_effects": [
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel"
+          ],
+          "description": "Runs workload code through the local launcher instead of Slurm."
+        },
+        {
+          "flags": [
+            "--script-out"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Writes the rendered script to the requested path."
+        }
+      ]
+    },
+    {
+      "path": "schema",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Print an embedded authoring or command-output JSON Schema."
+    },
+    {
+      "path": "score",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Compute a post-run score from tracked metrics and scheduler accounting.",
+      "overrides": [
+        {
+          "flags": [
+            "--remote"
+          ],
+          "add_effects": [
+            "network-or-ssh"
+          ],
+          "description": "Delegates the read over SSH."
+        }
+      ]
+    },
+    {
+      "path": "setup",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "sensitive-output"
+      ],
+      "summary": "Create or update project settings, including possible environment values."
+    },
+    {
+      "path": "shell",
+      "authorization_tier": "explicit-quota",
+      "effects": [
+        "executes-user-code",
+        "scheduler-submit",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Open an interactive container through srun."
+    },
+    {
+      "path": "stats",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Read tracked metrics and optional scheduler accounting.",
+      "overrides": [
+        {
+          "flags": [
+            "--remote"
+          ],
+          "add_effects": [
+            "network-or-ssh"
+          ],
+          "description": "Delegates the read over SSH."
+        }
+      ]
+    },
+    {
+      "path": "status",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Read tracked submission and scheduler state.",
+      "overrides": [
+        {
+          "flags": [
+            "--remote"
+          ],
+          "add_effects": [
+            "network-or-ssh"
+          ],
+          "description": "Delegates the read over SSH."
+        }
+      ]
+    },
+    {
+      "path": "sweep",
+      "authorization_tier": "automatic-read-only",
+      "effects": [],
+      "summary": "Command group; a subcommand is required."
+    },
+    {
+      "path": "sweep list",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "List persisted sweep manifests."
+    },
+    {
+      "path": "sweep observe",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "scheduler-read"
+      ],
+      "summary": "Parse terminal objectives and write them back to the sweep manifest.",
+      "overrides": [
+        {
+          "flags": [
+            "--watch",
+            "--stop-when"
+          ],
+          "authorization_tier": "explicit-destructive",
+          "add_effects": [
+            "scheduler-cancel",
+            "polls"
+          ],
+          "description": "Polls until a condition matches and then cancels remaining trials."
+        }
+      ]
+    },
+    {
+      "path": "sweep results",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Tabulate sweep results without changing the manifest."
+    },
+    {
+      "path": "sweep status",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read"
+      ],
+      "summary": "Read scheduler and tracked state for sweep trials."
+    },
+    {
+      "path": "sweep stop",
+      "authorization_tier": "explicit-destructive",
+      "effects": [
+        "local-read",
+        "local-write",
+        "scheduler-read",
+        "scheduler-cancel"
+      ],
+      "summary": "Cancel non-terminal trials and record the stop."
+    },
+    {
+      "path": "sweep submit",
+      "authorization_tier": "explicit-quota",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "scheduler-read",
+        "scheduler-submit"
+      ],
+      "summary": "Prepare, render, submit, and persist all sweep trials, including resume submissions.",
+      "overrides": [
+        {
+          "flags": [
+            "--dry-run"
+          ],
+          "authorization_tier": "automatic-read-only",
+          "remove_effects": [
+            "local-write",
+            "executes-user-code",
+            "network-or-ssh",
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel",
+            "polls"
+          ],
+          "description": "Validates and prints expanded trials without writing scripts or submitting jobs."
+        }
+      ]
+    },
+    {
+      "path": "test",
+      "authorization_tier": "explicit-runtime-or-external-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Run a finite local smoke test unless a submitting mode is selected.",
+      "overrides": [
+        {
+          "flags": [
+            "--submit"
+          ],
+          "authorization_tier": "explicit-quota",
+          "add_effects": [
+            "scheduler-read",
+            "scheduler-submit"
+          ],
+          "description": "Submits the finite smoke test to Slurm."
+        },
+        {
+          "flags": [
+            "--preemption"
+          ],
+          "authorization_tier": "explicit-destructive",
+          "add_effects": [
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel"
+          ],
+          "description": "Submits, signals, requeues, and observes a synthetic preemption drill."
+        }
+      ]
+    },
+    {
+      "path": "tmux",
+      "authorization_tier": "explicit-runtime-or-external-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Launch or attach a local workload log dashboard in tmux."
+    },
+    {
+      "path": "up",
+      "authorization_tier": "explicit-quota",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "scheduler-read",
+        "scheduler-submit",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Run the full prepare, submit or local launch, tracking, and watch workflow.",
+      "overrides": [
+        {
+          "flags": [
+            "--dry-run"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "remove_effects": [
+            "executes-user-code",
+            "network-or-ssh",
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel",
+            "polls"
+          ],
+          "description": "Skips preparation and submission but writes an owner-only launcher script to the explicit or default path."
+        },
+        {
+          "flags": [
+            "--dry-run",
+            "--remote"
+          ],
+          "authorization_tier": "explicit-runtime-or-external-mutation",
+          "add_effects": [
+            "network-or-ssh"
+          ],
+          "description": "Still creates a remote staging directory, probes or installs the remote binary, rsyncs the project, and delegates the dry run over SSH."
+        },
+        {
+          "flags": [
+            "--resume-diff-only"
+          ],
+          "authorization_tier": "automatic-read-only",
+          "remove_effects": [
+            "local-write",
+            "executes-user-code",
+            "network-or-ssh",
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel",
+            "polls"
+          ],
+          "description": "Prints only the resume-sensitive diff and exits."
+        },
+        {
+          "flags": [
+            "--local"
+          ],
+          "authorization_tier": "explicit-runtime-or-external-mutation",
+          "remove_effects": [
+            "scheduler-read",
+            "scheduler-submit",
+            "scheduler-cancel"
+          ],
+          "description": "Runs workload code through the local launcher instead of Slurm."
+        },
+        {
+          "flags": [
+            "--script-out"
+          ],
+          "authorization_tier": "scoped-local-mutation",
+          "add_effects": [
+            "local-write"
+          ],
+          "description": "Writes the rendered script to the requested path."
+        }
+      ]
+    },
+    {
+      "path": "validate",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read"
+      ],
+      "summary": "Parse, normalize, and validate a spec without cluster contact."
+    },
+    {
+      "path": "watch",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "local-read",
+        "scheduler-read",
+        "polls",
+        "sensitive-output"
+      ],
+      "summary": "Continuously display scheduler state and logs for a tracked run."
+    },
+    {
+      "path": "weather",
+      "authorization_tier": "automatic-read-only",
+      "effects": [
+        "scheduler-read"
+      ],
+      "summary": "Read one-shot cluster queue, node, fairshare, and priority signals."
+    },
+    {
+      "path": "when",
+      "authorization_tier": "explicit-quota",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code",
+        "network-or-ssh",
+        "scheduler-read",
+        "scheduler-submit",
+        "polls"
+      ],
+      "summary": "Prepare, poll conditions, and submit automatically when they match."
+    },
+    {
+      "path": "workspace",
+      "authorization_tier": "automatic-read-only",
+      "effects": [],
+      "summary": "Command group; a subcommand is required."
+    },
+    {
+      "path": "workspace allocate",
+      "authorization_tier": "explicit-runtime-or-external-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code"
+      ],
+      "summary": "Allocate external site workspace storage and persist resolved facts."
+    },
+    {
+      "path": "workspace extend",
+      "authorization_tier": "explicit-runtime-or-external-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code"
+      ],
+      "summary": "Extend an external site workspace and refresh persisted facts."
+    },
+    {
+      "path": "workspace release",
+      "authorization_tier": "explicit-destructive",
+      "effects": [
+        "local-read",
+        "local-write",
+        "local-delete",
+        "executes-user-code"
+      ],
+      "summary": "Release external site workspace storage after safety checks."
+    },
+    {
+      "path": "workspace status",
+      "authorization_tier": "scoped-local-mutation",
+      "effects": [
+        "local-read",
+        "local-write",
+        "executes-user-code"
+      ],
+      "summary": "Query site workspace tools, refresh persisted workspace state, and report status."
+    }
+  ]
+}

@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-"""Probe a repository for hpc-compose adaptation clues.
-
-The script is intentionally heuristic. It does not validate an hpc-compose spec;
-it gives Codex a compact starting inventory for migration decisions.
-"""
+"""Emit bounded, evidence-only JSON signals for hpc-compose adaptation."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+
+SCHEMA_VERSION = 1
+MAX_FILES = 25_000
+MAX_TOTAL_TEXT_BYTES = 64 * 1024 * 1024
+MAX_FILE_TEXT_BYTES = 256 * 1024
+MAX_EVIDENCE_PATHS = 20
 
 SKIP_DIRS = {
     ".cache",
     ".cargo",
     ".git",
-    ".github",
-    ".hpc-compose",
     ".hg",
     ".mypy_cache",
     ".nox",
@@ -43,239 +45,328 @@ SKIP_DIRS = {
 }
 
 TEXT_SUFFIXES = {
-    ".Dockerfile",
     ".cfg",
     ".conf",
     ".ini",
+    ".jl",
     ".json",
-    ".md",
     ".py",
+    ".r",
+    ".rs",
     ".sh",
     ".slurm",
     ".sbatch",
     ".toml",
-    ".txt",
     ".yaml",
     ".yml",
 }
 
 PACKAGE_FILES = {
-    "requirements.txt",
-    "pyproject.toml",
-    "environment.yml",
-    "environment.yaml",
-    "conda.yml",
-    "conda.yaml",
-    "package.json",
     "Cargo.toml",
-    "Project.toml",
     "Manifest.toml",
     "Makefile",
+    "Project.toml",
     "Snakefile",
+    "conda.yaml",
+    "conda.yml",
+    "environment.yaml",
+    "environment.yml",
     "nextflow.config",
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+}
+
+SECRET_NAMES = {
+    ".env",
+    ".npmrc",
+    ".pypirc",
+    "credentials.json",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
 }
 
 
-def iter_files(root: Path) -> Iterable[Path]:
-    for dirpath, dirnames, filenames in os.walk(root):
-        kept_dirs = []
-        for dirname in dirnames:
-            child = Path(dirpath) / dirname
-            if dirname in SKIP_DIRS:
-                continue
-            if dirname.startswith("."):
-                continue
-            if (child / "SKILL.md").exists() and (child / "agents").is_dir():
-                continue
-            kept_dirs.append(dirname)
-        dirnames[:] = kept_dirs
-        for filename in filenames:
-            path = Path(dirpath) / filename
-            try:
-                if path.stat().st_size > 1_000_000:
-                    continue
-            except OSError:
-                continue
-            yield path
+@dataclass(frozen=True)
+class ScanLimits:
+    max_files: int = MAX_FILES
+    max_total_text_bytes: int = MAX_TOTAL_TEXT_BYTES
+    max_file_text_bytes: int = MAX_FILE_TEXT_BYTES
+    max_evidence_paths: int = MAX_EVIDENCE_PATHS
 
 
-def rel(path: Path, root: Path) -> str:
-    return path.relative_to(root).as_posix()
+@dataclass
+class ScanMetadata:
+    limits: dict[str, int]
+    files_seen: int = 0
+    text_files_read: int = 0
+    text_bytes_read: int = 0
+    skipped_symlinks: int = 0
+    skipped_hidden_dirs: int = 0
+    skipped_sensitive_files: int = 0
+    skipped_binary_files: int = 0
+    per_file_truncations: int = 0
+    truncated: bool = False
+    truncation_reasons: list[str] = field(default_factory=list)
+
+    def truncate(self, reason: str) -> None:
+        self.truncated = True
+        if reason not in self.truncation_reasons:
+            self.truncation_reasons.append(reason)
+
+
+@dataclass
+class Signal:
+    name: str
+    confidence: str
+    workload_phrase: str
+    evidence_paths: list[str] = field(default_factory=list)
+    evidence_truncated: bool = False
+
+
+@dataclass(frozen=True)
+class ContentRule:
+    name: str
+    workload_phrase: str
+    pattern: re.Pattern[str]
+    confidence: str = "high"
+
+
+CONTENT_RULES = (
+    ContentRule(
+        "pytorch",
+        "PyTorch training or inference",
+        re.compile(r"\b(?:import\s+torch|from\s+torch\b|pytorch\b|torchrun\b)", re.I),
+    ),
+    ContentRule("deepspeed", "distributed DeepSpeed training", re.compile(r"\bdeepspeed\b", re.I)),
+    ContentRule(
+        "accelerate",
+        "distributed Hugging Face Accelerate training",
+        re.compile(r"\b(?:accelerate\s+launch|from\s+accelerate|import\s+accelerate)\b", re.I),
+    ),
+    ContentRule("jax", "distributed JAX workload", re.compile(r"\b(?:import\s+jax|from\s+jax)\b", re.I)),
+    ContentRule(
+        "mpi",
+        "multi-node MPI workload",
+        re.compile(
+            r"\b(?:from\s+mpi4py|import\s+mpi4py|mpirun|mpiexec|openmpi|pmix|srun\s+[^\n]*--mpi(?:=|\s))\b",
+            re.I,
+        ),
+    ),
+    ContentRule(
+        "gpu",
+        "GPU or CUDA workload",
+        re.compile(r"\b(?:cuda|nvidia-smi|nccl|gres\s*:\s*gpu|gpus?_per_node)\b", re.I),
+    ),
+    ContentRule("redis", "multi-service application with Redis", re.compile(r"\bredis(?:-server)?\b", re.I)),
+    ContentRule("snakemake", "Snakemake workflow", re.compile(r"\bsnakemake\b", re.I)),
+    ContentRule("nextflow", "Nextflow workflow", re.compile(r"\bnextflow\b", re.I)),
+    ContentRule("vllm", "LLM serving with vLLM", re.compile(r"\bvllm\b", re.I)),
+)
+
+
+class SignalSet:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self._signals: dict[str, Signal] = {}
+
+    def add(self, name: str, confidence: str, workload_phrase: str, path: str) -> None:
+        signal = self._signals.setdefault(name, Signal(name, confidence, workload_phrase))
+        if confidence_rank(confidence) > confidence_rank(signal.confidence):
+            signal.confidence = confidence
+        if path in signal.evidence_paths:
+            return
+        if len(signal.evidence_paths) < self.limit:
+            signal.evidence_paths.append(path)
+            signal.evidence_paths.sort()
+        else:
+            signal.evidence_truncated = True
+
+    def values(self) -> list[Signal]:
+        return [self._signals[name] for name in sorted(self._signals)]
+
+
+def confidence_rank(value: str) -> int:
+    return {"low": 0, "medium": 1, "high": 2}[value]
+
+
+def is_sensitive_file(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        name in SECRET_NAMES
+        or name.startswith(".env.")
+        or name.startswith("credentials.")
+        or name.startswith("secrets.")
+        or path.suffix.lower() in {".key", ".pem", ".p12", ".pfx"}
+    )
 
 
 def looks_text(path: Path) -> bool:
-    if path.name in PACKAGE_FILES:
-        return True
-    if path.name.startswith("Dockerfile"):
-        return True
-    if path.suffix in TEXT_SUFFIXES:
-        return True
-    return False
-
-
-def read_lower(path: Path) -> str:
-    if not looks_text(path):
-        return ""
-    try:
-        return path.read_text(errors="ignore").lower()
-    except OSError:
-        return ""
-
-
-def collect(root: Path) -> dict[str, object]:
-    files = list(iter_files(root))
-    rels = [rel(p, root) for p in files]
-    lower_by_file = {rel(p, root): read_lower(p) for p in files}
-    signal_text = "\n".join(
-        text
-        for filename, text in lower_by_file.items()
-        if Path(filename).suffix != ".md" and Path(filename).name != "hpc_compose_repo_probe.py"
+    return (
+        path.name in PACKAGE_FILES
+        or path.name.startswith("Dockerfile")
+        or path.suffix.lower() in TEXT_SUFFIXES
     )
 
-    docker_compose = [
-        f
-        for f in rels
-        if Path(f).name in {"docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"}
-        or Path(f).name.startswith("docker-compose.")
-    ]
-    dockerfiles = [f for f in rels if Path(f).name.startswith("Dockerfile")]
-    hpc_specs = [f for f in rels if "hpc" in Path(f).name.lower() and Path(f).suffix in {".yml", ".yaml"}]
-    slurm_scripts = [
-        f
-        for f, text in lower_by_file.items()
-        if f.endswith((".slurm", ".sbatch", ".job", ".sh")) and "#sbatch" in text
-    ]
-    package_files = [f for f in rels if Path(f).name in PACKAGE_FILES]
 
-    signals = {
-        "docker_compose": docker_compose,
-        "dockerfiles": dockerfiles,
-        "existing_hpc_like_specs": hpc_specs,
-        "slurm_scripts": slurm_scripts,
-        "package_files": package_files,
-        "mentions_torch": "torch" in signal_text or "pytorch" in signal_text,
-        "mentions_deepspeed": "deepspeed" in signal_text,
-        "mentions_accelerate": "accelerate" in signal_text,
-        "mentions_jax": "jax" in signal_text,
-        "mentions_mpi": "mpi" in signal_text or "mpirun" in signal_text or "srun" in signal_text,
-        "mentions_vllm_or_llama": "vllm" in signal_text or "llama" in signal_text or "gguf" in signal_text,
-        "mentions_snakemake": "snakemake" in signal_text or any(Path(f).name == "Snakefile" for f in rels),
-        "mentions_nextflow": "nextflow" in signal_text or any(Path(f).name == "nextflow.config" for f in rels),
-        "mentions_redis_or_db": any(word in signal_text for word in ["redis", "postgres", "mysql", "mongodb"]),
-        "mentions_cuda_or_gpu": any(word in signal_text for word in ["cuda", "gpu", "nvidia", "nccl"]),
+def iter_files(root: Path, metadata: ScanMetadata, limits: ScanLimits) -> Iterable[Path]:
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        current = Path(dirpath)
+        kept_dirs: list[str] = []
+        for dirname in sorted(dirnames):
+            child = current / dirname
+            # Hidden directories are tool/configuration state, not workload
+            # evidence. Browser and agent capture directories can contain
+            # arbitrary copied page text that must not influence recommendations.
+            if dirname.startswith("."):
+                metadata.skipped_hidden_dirs += 1
+                continue
+            if dirname in SKIP_DIRS:
+                continue
+            if (child / "SKILL.md").is_file() and (child / "agents").is_dir():
+                continue
+            if child.is_symlink():
+                metadata.skipped_symlinks += 1
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
+
+        for filename in sorted(filenames):
+            path = current / filename
+            if path.is_symlink():
+                metadata.skipped_symlinks += 1
+                continue
+            if metadata.files_seen >= limits.max_files:
+                metadata.truncate("file_limit")
+                return
+            metadata.files_seen += 1
+            if path.is_file():
+                yield path
+
+
+def relative(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def code_text(path: Path, text: str) -> str:
+    """Remove prose and comment-only lines before token-aware workload matching."""
+    if path.suffix.lower() not in TEXT_SUFFIXES or path.suffix.lower() in {".json"}:
+        return text
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#") and not stripped.upper().startswith("#SBATCH"):
+            continue
+        if stripped.startswith("//"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def record_path_signals(path: Path, rel: str, signals: SignalSet) -> None:
+    name = path.name
+    lowered = name.lower()
+    if lowered in {"compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"} or lowered.startswith(
+        "docker-compose."
+    ):
+        signals.add("docker-compose", "high", "Docker Compose migration", rel)
+    if name.startswith("Dockerfile"):
+        signals.add("dockerfile", "high", "containerized workload with image preparation", rel)
+    if "hpc" in lowered and path.suffix.lower() in {".yaml", ".yml"}:
+        signals.add("hpc-compose-spec", "medium", "existing HPC compose specification", rel)
+    if name in PACKAGE_FILES:
+        signals.add("package-manifest", "high", "application with managed dependencies", rel)
+    if name == "Snakefile":
+        signals.add("snakemake", "high", "Snakemake workflow", rel)
+    if name == "nextflow.config":
+        signals.add("nextflow", "high", "Nextflow workflow", rel)
+
+
+def read_bounded_text(
+    path: Path, metadata: ScanMetadata, limits: ScanLimits
+) -> str | None:
+    if is_sensitive_file(path):
+        metadata.skipped_sensitive_files += 1
+        return None
+    if not looks_text(path):
+        return None
+    if metadata.text_bytes_read >= limits.max_total_text_bytes:
+        metadata.truncate("total_text_byte_limit")
+        return None
+    try:
+        size = path.stat(follow_symlinks=False).st_size
+    except OSError:
+        return None
+    remaining = limits.max_total_text_bytes - metadata.text_bytes_read
+    read_limit = min(limits.max_file_text_bytes, remaining)
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(read_limit)
+    except OSError:
+        return None
+    metadata.text_files_read += 1
+    metadata.text_bytes_read += len(data)
+    if size > limits.max_file_text_bytes:
+        metadata.per_file_truncations += 1
+        metadata.truncate("per_file_text_byte_limit")
+    if size > remaining:
+        metadata.truncate("total_text_byte_limit")
+    if b"\x00" in data:
+        metadata.skipped_binary_files += 1
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def scan_repository(root: Path, limits: ScanLimits = ScanLimits()) -> dict[str, object]:
+    metadata = ScanMetadata(
+        limits={
+            "max_files": limits.max_files,
+            "max_total_text_bytes": limits.max_total_text_bytes,
+            "max_file_text_bytes": limits.max_file_text_bytes,
+            "max_evidence_paths_per_signal": limits.max_evidence_paths,
+        }
+    )
+    signals = SignalSet(limits.max_evidence_paths)
+    for path in iter_files(root, metadata, limits):
+        rel = relative(path, root)
+        record_path_signals(path, rel, signals)
+        text = read_bounded_text(path, metadata, limits)
+        if text is None:
+            continue
+        searchable = code_text(path, text)
+        if path.suffix.lower() in {".slurm", ".sbatch", ".job", ".sh"} and re.search(
+            r"(?im)^\s*#SBATCH\b", text
+        ):
+            signals.add("slurm-script", "high", "migration from an existing Slurm script", rel)
+        for rule in CONTENT_RULES:
+            if rule.pattern.search(searchable):
+                signals.add(rule.name, rule.confidence, rule.workload_phrase, rel)
+
+    signal_values = signals.values()
+    phrases = sorted({signal.workload_phrase for signal in signal_values})
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "root": str(root),
+        "scan": asdict(metadata),
+        "signals": [asdict(signal) for signal in signal_values],
+        "workload_phrases": phrases,
     }
-    return signals
 
 
-def recommend(signals: dict[str, object]) -> tuple[list[str], list[str], list[str]]:
-    observations: list[str] = []
-    hypotheses: list[str] = []
-    recommendations: list[str] = []
-
-    if signals["docker_compose"]:
-        observations.append(f"Found Docker Compose files: {', '.join(signals['docker_compose'])}")
-        recommendations.append("Read docker-compose-migration.md and create a separate compose.hpc.yaml.")
-    if signals["dockerfiles"]:
-        observations.append(f"Found Dockerfiles: {', '.join(signals['dockerfiles'])}")
-        recommendations.append("Replace Docker Compose build steps with image plus x-runtime.prepare.commands.")
-    if signals["slurm_scripts"]:
-        observations.append(f"Found Slurm scripts: {', '.join(signals['slurm_scripts'])}")
-        recommendations.append("Map existing #SBATCH resources into first-class x-slurm fields before raw submit_args.")
-    if signals["existing_hpc_like_specs"]:
-        observations.append(f"Found existing HPC-like YAML specs: {', '.join(signals['existing_hpc_like_specs'])}")
-    if signals["package_files"]:
-        observations.append(f"Found package/runtime files: {', '.join(signals['package_files'])}")
-
-    if signals["mentions_vllm_or_llama"]:
-        hypotheses.append("The repository may fit an LLM serving/client hpc-compose example.")
-        recommendations.append("Compare against llm-curl-workflow-workdir, llama-app, vllm-openai, or vllm-uv-worker.")
-    if signals["mentions_deepspeed"]:
-        hypotheses.append("The workload may need a DeepSpeed distributed template.")
-        recommendations.append("Compare against multi-node-deepspeed and verify cluster fabric settings.")
-    elif signals["mentions_accelerate"]:
-        hypotheses.append("The workload may need a Hugging Face Accelerate distributed template.")
-        recommendations.append("Compare against multi-node-accelerate.")
-    elif signals["mentions_jax"]:
-        hypotheses.append("The workload may need a JAX distributed template.")
-        recommendations.append("Compare against multi-node-jax.")
-    elif signals["mentions_torch"]:
-        hypotheses.append("The workload may be a PyTorch training or inference job.")
-        recommendations.append("Compare against training-resume, training-checkpoints, or multi-node-torchrun.")
-    if signals["mentions_mpi"]:
-        hypotheses.append("The workload or existing scripts mention MPI or srun.")
-        recommendations.append("Check srun --mpi=list and compare against multi-node-mpi or mpi-hello.")
-    if signals["mentions_snakemake"]:
-        hypotheses.append("The repository may be a Snakemake workflow.")
-        recommendations.append("Consider snakemake-bridge when hpc-compose should wrap tracking around the workflow engine.")
-    if signals["mentions_nextflow"]:
-        hypotheses.append("The repository may be a Nextflow workflow.")
-        recommendations.append("Consider nextflow-bridge when hpc-compose should wrap tracking around the workflow engine.")
-    if signals["mentions_redis_or_db"]:
-        hypotheses.append("The workload may have a same-allocation helper service.")
-        recommendations.append("Use readiness and 127.0.0.1 for same-node helper services.")
-    if signals["mentions_cuda_or_gpu"]:
-        hypotheses.append("The workload likely needs GPU resources.")
-        recommendations.append("Map requested GPUs through x-slurm.gres or x-slurm.gpus and verify site-specific GRES syntax.")
-
-    if not observations:
-        observations.append("No obvious Docker Compose, Slurm, or package-manager entrypoint was found in the scanned files.")
-        recommendations.append("Ask for the intended run command, container image, resource needs, and target cluster.")
-
-    recommendations.append("Run hpc-compose validate and plan before any real Slurm submission.")
-    return observations, hypotheses, recommendations
-
-
-def markdown_report(root: Path, signals: dict[str, object]) -> str:
-    observations, hypotheses, recommendations = recommend(signals)
-    open_questions = [
-        "What is the exact command or service entrypoint to run on the cluster?",
-        "Which cluster, partition, account/QOS, and walltime should be used?",
-        "Which shared filesystem path should hold x-slurm.cache_dir?",
-        "Is Pyxis/Enroot available, or should the spec use Apptainer/Singularity/host?",
-        "Is a real Slurm submission approved, or should work stop at validate/plan/preflight?",
-    ]
-
-    lines = [f"# hpc-compose repository probe: {root}", ""]
-    for title, items in [
-        ("Observation", observations),
-        ("Hypothesis", hypotheses or ["No strong workload-specific hypothesis yet."]),
-        ("Recommendation", recommendations),
-        ("Open question", open_questions),
-    ]:
-        lines.append(f"## {title}")
-        lines.extend(f"- {item}" for item in items)
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("repo", nargs="?", default=".", help="Repository path to scan")
+    return parser.parse_args()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Probe a repository for hpc-compose adaptation clues.")
-    parser.add_argument("repo", nargs="?", default=".", help="Repository path to scan.")
-    parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
-    args = parser.parse_args()
-
+    args = parse_args()
     root = Path(args.repo).resolve()
-    if not root.exists() or not root.is_dir():
-        parser.error(f"repo path is not a directory: {root}")
-
-    signals = collect(root)
-    if args.format == "json":
-        observations, hypotheses, recommendations = recommend(signals)
-        print(
-            json.dumps(
-                {
-                    "root": str(root),
-                    "signals": signals,
-                    "observations": observations,
-                    "hypotheses": hypotheses,
-                    "recommendations": recommendations,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
-    else:
-        print(markdown_report(root, signals), end="")
+    if not root.is_dir():
+        raise SystemExit(f"repository path is not a directory: {root}")
+    print(json.dumps(scan_repository(root), indent=2, sort_keys=True))
     return 0
 
 

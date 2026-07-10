@@ -39,9 +39,12 @@ jobs:
 
       - name: Build docs site
         run: |
+          python3 scripts/generate_site_guides.py --check
+          python3 scripts/generate_agent_assets.py --check
+          python3 scripts/package_skill.py --check
           mdbook build docs
-          mkdir -p target/mdbook/schema
-          cp schema/hpc-compose.schema.json target/mdbook/schema/hpc-compose.schema.json
+          python3 scripts/generate_agent_assets.py --site-dir target/mdbook
+          python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9

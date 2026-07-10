@@ -1,78 +1,102 @@
 ---
 name: hpc-compose
-description: Help set up and use hpc-compose, a Compose-like launcher for one Slurm allocation with services run through Pyxis/Enroot, Apptainer, Singularity, or host runtimes. Use when Codex is asked to install or configure hpc-compose for a user's HPC cluster, discover cluster requirements, make a repository work with hpc-compose, migrate Docker Compose or Slurm scripts to hpc-compose, author or validate hpc-compose specs, choose HAICORE/NHR@KIT or other cluster settings, configure shared cache/storage, debug hpc-compose preflight/run failures, or guide a user toward a first real HPC submission.
+description: Set up, author, migrate, validate, operate, and recover hpc-compose workflows for Slurm with Pyxis/Enroot, Apptainer, Singularity, or host runtimes. Use when an agent needs to inspect a repository, choose a shipped example, create or repair an hpc-compose spec, configure a cluster or shared cache, migrate Docker Compose or sbatch workflows, diagnose a tracked run, or prepare a safe first cluster submission without crossing authorization boundaries.
 ---
 
 # hpc-compose
 
-Use this skill to turn a repository into an inspectable hpc-compose workflow for Slurm without overclaiming cluster readiness. Favor a safe authoring path first, then cluster-specific checks, then explicit user approval before real submissions.
+Build an evidence-backed, version-matched workflow and stop at the applicable authorization boundary.
 
-## Core Workflow
+## 1. Establish version and execution context
 
-1. Inspect the target repository before proposing a spec.
-   - Run `scripts/hpc_compose_repo_probe.py <repo>` when useful.
-   - Look for `docker-compose*.yml`, `compose*.yaml`, `Dockerfile*`, `*.sbatch`, `requirements.txt`, `pyproject.toml`, `environment.yml`, `package.json`, workflow-engine files, training scripts, model-serving code, and existing README run commands.
-2. Read the relevant references only as needed.
-   - `references/environment-setup.md`: user onboarding, installation, cluster requirement discovery, `setup`, `context`, first smoke plan, and handoff.
-   - `references/hpc-compose-workflow.md`: command path, migration rules, templates, verification gates, and troubleshooting.
-   - `references/haicore-kit.md`: HAICORE-specific Slurm, GPU, filesystem, Pyxis/Enroot, and cache guidance.
-   - `references/cluster-adaptation.md`: general cluster-doc reconnaissance and non-HAICORE adaptation.
-3. State findings as observations, hypotheses, recommendations, and open questions when cluster facts or workload intent are uncertain.
-4. Create or adapt an hpc-compose spec conservatively.
-   - Prefer `compose.hpc.yaml` if the repo already has Docker Compose files.
-   - Keep cluster-specific values in `.hpc-compose/settings.toml`, `.hpc-compose/cluster.toml`, `.env`, or documented profile choices when possible.
-   - Preserve existing Docker Compose, Slurm, and CI files unless the user explicitly asks to replace them.
-5. Verify with static checks before any real cluster action.
-   - Use `hpc-compose validate -f <file>`.
-   - Use `hpc-compose plan -f <file>` and often `hpc-compose plan --show-script -f <file>`.
-   - Use `hpc-compose inspect --verbose -f <file>` when resource mapping or dependencies matter.
-6. Treat real Slurm operations as user-approved actions.
-   - Ask before `hpc-compose up`, `run`, `test --submit`, `down`, `cancel`, or any command that submits/cancels jobs or consumes allocation quota.
-   - On a login node, prefer `hpc-compose debug -f <file> --preflight` and `hpc-compose doctor cluster-report` before first `up`.
+Before relying on command names or fields:
 
-## Environment Setup Assistant Workflow
+```bash
+command -v hpc-compose
+hpc-compose --version
+uname -sm
+pwd
+```
 
-When the user wants help setting up hpc-compose for their own HPC cluster, read `references/environment-setup.md` first. Use that path to:
+Read `VERSION` and compare it with the installed CLI version. If they differ, treat the installed binary's help, embedded docs, and schemas as authoritative; do not apply a command or field only because this skill mentions it. Offer the matching release skill archive or a CLI upgrade, but do not download or install without authorization.
 
-- Discover the user's cluster, access method, workload, runtime backend, shared filesystem, Slurm account/partition/QOS, and first-run risk tolerance before writing cluster-specific files.
-- Reference the primary manual pages explicitly: Installation, Quickstart, Runbook, Task Guide, Cluster Profiles, Cache Management, Runtime Backends, Troubleshooting, and the site-specific HAICORE guide when applicable.
-- Install or verify the CLI only on appropriate machines, then run safe local checks before cluster checks.
-- Prefer `hpc-compose setup`, `.hpc-compose/settings.toml`, `.env`, and `hpc-compose context --format json` for user-specific paths and profiles.
-- Leave the user with exact login-node commands and a clear boundary between completed setup, unverified cluster assumptions, and any submission that still needs approval.
+Classify the current machine as one of: authoring workstation, Slurm login/submission host, active allocation, local Linux runtime host, or checked-in dev cluster. Then inspect the redacted context:
 
-## Adaptation Rules
+```bash
+hpc-compose --offline context --format json
+```
 
-- Use `runtime.backend: pyxis` by default for HAICORE-like Slurm + Enroot/Pyxis sites. Switch to `apptainer`, `singularity`, or `host` only when site docs or observed tools justify it.
-- Configure `x-slurm.cache_dir` or `hpc-compose setup --cache-dir` to a shared path visible from both login and compute nodes. Do not use `/tmp`, `/var/tmp`, `/private/tmp`, or `/dev/shm` for the cache.
-- For Docker Compose migration:
-  - Keep `image`, `command`, `entrypoint`, `environment`, `volumes`, `depends_on`, and `working_dir` when compatible.
-  - Replace `build:` with a base `image:` plus `x-runtime.prepare.commands`.
-  - Remove `ports`, `networks`, `network_mode`, `restart`, and `deploy`.
-  - Replace service-name DNS with `127.0.0.1` only for same-node helper services; use hpc-compose allocation metadata for distributed jobs.
-  - Convert simple healthchecks to `readiness` with `tcp`, `http`, `log`, or `sleep`.
-- For Slurm resource mapping, use first-class `x-slurm` fields before raw pass-through: `partition`, `account`, `time`, `nodes`, `ntasks`, `cpus_per_task`, `mem`, `gres`, `gpus`, `gpus_per_node`, `mem_per_gpu`, and binding fields.
-- Use raw `x-slurm.submit_args` and service `extra_srun_args` only for site-specific flags that hpc-compose does not model.
-- Keep source code mounted through `volumes` during iteration; put slower dependency installation in `x-runtime.prepare.commands`.
-- Add readiness gates only where startup order matters. Plain `depends_on` means started, not healthy.
-- For finite smoke checks, create a short-running companion spec or command instead of testing a long service by hoping it exits.
+## 2. Apply the safety gate
 
-## HAICORE Default Posture
+Read [command-safety.md](references/command-safety.md) before invoking hpc-compose commands. It is generated from the versioned command policy.
 
-For NHR@KIT HAICORE, start by reading `references/haicore-kit.md` and verify current live docs when network access is available. Default assumptions to check:
+- Tier 1 may run automatically only when the independent sensitive-output guard is satisfied.
+- Tier 2 requires an explicitly scoped local write, unless the user's request already names that write.
+- Tiers 3–5 always require explicit authorization for runtime/external mutation, quota, or destruction.
+- Never treat `--yes`, a prior submission, or access to credentials as authorization.
+- Never echo or ingest unredacted scripts, values, logs, or debug output.
 
-- Slurm is the batch system.
-- `normal` is the broadly available queue; `advanced` requires extra privilege.
-- Full A100 GPU requests on the HAICORE `normal` partition use Slurm GRES such as `gpu:<count>` (for example `gpu:1`); MIG profiles use profile-specific GRES.
-- A workspace path is usually the right starting point for shared hpc-compose cache and prepared images.
-- `$TMPDIR` is node-local and job-lifetime only; it is good for runtime scratch, not for hpc-compose cache reuse across prepare and compute nodes.
-- Pyxis/Enroot support should be confirmed with `srun --help | grep container-image` or `hpc-compose doctor cluster-report`.
+## 3. Load only the applicable reference
 
-## Output Expectations
+- Read [authoring-migration.md](references/authoring-migration.md) for new specs, repository adaptation, Docker Compose/sbatch migration, topology, readiness, and the static repair loop.
+- Read [cluster-setup.md](references/cluster-setup.md) for installation, execution context, site facts, profiles, shared storage, workspace provisioning, runtime backends, or remote submission.
+- Read [operations-recovery.md](references/operations-recovery.md) for a tracked failure, observation, artifacts, resume, preemption, sweeps, right-sizing, or cleanup.
 
-When implementing for a repository, leave the user with:
+For site-specific facts, retrieve the installed version's embedded guide instead of relying on copied site prose:
 
-- The created or changed hpc-compose files.
-- The exact static checks run and their outcome.
-- The cluster assumptions that remain unverified.
-- The next safest command for the target environment.
-- A short note if a real submission was intentionally not run.
+```bash
+hpc-compose --offline docs "<site and question>" --format json
+```
+
+Use published `/raw/*.md` only when no suitable installed binary is available, and label it as latest-release guidance rather than version-matched guidance.
+
+## 4. Gather repository evidence
+
+Run the bounded evidence-only probe bundled with this skill when adapting an existing repository. Resolve `<skill-dir>` to this installed skill directory; do not expect the target repository to contain the probe:
+
+```bash
+python3 <skill-dir>/scripts/hpc_compose_repo_probe.py /path/to/repository
+```
+
+The JSON output contains confidence-labelled signals, evidence paths, scan limits, and derived `workload_phrases`; it contains no snippets or secret-file contents. Confirm material signals against the named files. Pass the derived phrases to the shipped recommender—do not select examples in the probe:
+
+```bash
+hpc-compose --offline examples recommend "<derived workload phrases>" --format json
+```
+
+Preserve existing Docker Compose, sbatch, CI, and user files unless replacement is explicitly requested. Prefer a separate `compose.hpc.yaml` for migration.
+
+## 5. Use machine-readable, redacted interfaces
+
+Inspect a command's output schema before depending on fields:
+
+```bash
+hpc-compose --offline schema --output validate
+hpc-compose --offline schema --output lint
+hpc-compose --offline schema --output plan
+hpc-compose --offline schema --output spec-inspect
+```
+
+Iterate on the smallest coherent spec change:
+
+```bash
+hpc-compose --offline validate -f compose.hpc.yaml --format json
+hpc-compose --offline lint -f compose.hpc.yaml --format json
+hpc-compose --offline plan -f compose.hpc.yaml --format json
+hpc-compose --offline inspect -f compose.hpc.yaml --format json
+hpc-compose --offline explain -f compose.hpc.yaml --format json
+```
+
+Do not use `plan --show-script`, `render` to stdout, `--show-values`, verbose planning, logs, or debug output in an agent context. If the user explicitly requests a script file, authorize the scoped write, create it owner-only, and do not read it back.
+
+## 6. Stop and hand off
+
+Before any allocation-consuming preflight probe such as `preflight --fs-probes`, preparation, local runtime, SSH, workspace lifecycle, submission, allocation, cancellation, cleanup, or deletion, resolve the exact flags through the policy and stop if its tier lacks authorization. Ordinary non-submitting `preflight` is a scheduler-read action and follows its base policy classification.
+
+Report:
+
+- observations and evidence paths;
+- files changed and static JSON checks run;
+- cluster facts still unverified;
+- the next command and its authorization tier;
+- whether no runtime, SSH, scheduler mutation, or destructive action was performed.

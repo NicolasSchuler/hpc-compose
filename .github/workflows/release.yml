@@ -297,9 +297,46 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  skill:
+    name: Package version-matched Agent Skill
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Validate and package skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/generate_agent_assets.py --check
+          python3 scripts/package_skill.py --version "${RELEASE_TAG}" --output-dir dist
+          archive="hpc-compose-skill-${RELEASE_TAG}.tar.gz"
+          (cd dist && shasum -a 256 -c "${archive}.sha256")
+          tar -tzf "dist/${archive}" | grep -Fx 'hpc-compose/SKILL.md'
+          tar -tzf "dist/${archive}" | grep -Fx 'hpc-compose/VERSION'
+
+      - name: Attest skill assets
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        with:
+          subject-path: dist/*
+
+      - name: Upload skill assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-skill
+          path: dist/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [build, skill]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
