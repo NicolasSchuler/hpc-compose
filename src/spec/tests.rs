@@ -6418,3 +6418,170 @@ services:
         "{err}"
     );
 }
+
+#[test]
+fn readiness_rejects_unknown_fields_and_non_operational_values() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cases = [
+        (
+            "unknown field",
+            "type: log\n      pattern: ready\n      timeout_second: 5",
+            "unknown field `timeout_second`",
+        ),
+        (
+            "empty log pattern",
+            "type: log\n      pattern: '   '",
+            "readiness.pattern must not be empty",
+        ),
+        (
+            "zero tcp port",
+            "type: tcp\n      port: 0",
+            "readiness.port must be at least 1",
+        ),
+        (
+            "zero timeout",
+            "type: http\n      url: http://127.0.0.1\n      timeout_seconds: 0",
+            "readiness.timeout_seconds must be at least 1",
+        ),
+        (
+            "invalid HTTP status",
+            "type: http\n      url: http://127.0.0.1\n      status_code: 700",
+            "readiness.status_code must be between 100 and 599",
+        ),
+    ];
+
+    for (label, readiness, expected) in cases {
+        let path = write_spec(
+            tmpdir.path(),
+            &format!("services:\n  app:\n    image: redis:7\n    readiness:\n      {readiness}\n"),
+        );
+        let err = ComposeSpec::load(&path).expect_err(label);
+        assert!(
+            format!("{err:#}").contains(expected),
+            "{label} should mention {expected}; got {err:#}"
+        );
+    }
+}
+
+#[test]
+fn secret_names_must_be_interpolation_variable_names() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        r#"
+secrets:
+  bad-name:
+    env: TOKEN
+services:
+  app:
+    image: redis:7
+"#,
+    );
+    let err = ComposeSpec::load(&path).expect_err("invalid secret name");
+    assert!(
+        err.to_string()
+            .contains("is not a safe environment variable name"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn empty_slurm_time_and_incompatible_resource_forms_are_rejected() {
+    let empty_time = SlurmConfig {
+        time: Some("   ".into()),
+        ..SlurmConfig::default()
+    };
+    assert!(
+        empty_time
+            .validate()
+            .expect_err("empty time")
+            .to_string()
+            .contains("x-slurm.time must not be empty")
+    );
+
+    for config in [
+        SlurmConfig {
+            cpus_per_task: Some(4),
+            cpus_per_gpu: Some(2),
+            ..SlurmConfig::default()
+        },
+        SlurmConfig {
+            mem: Some("16G".into()),
+            mem_per_gpu: Some("8G".into()),
+            ..SlurmConfig::default()
+        },
+    ] {
+        assert!(config.validate().is_err());
+    }
+
+    let service = ServiceSlurmConfig {
+        cpus_per_task: Some(4),
+        cpus_per_gpu: Some(2),
+        ..ServiceSlurmConfig::default()
+    };
+    assert!(service.validate("app").is_err());
+}
+
+#[test]
+fn planner_owned_raw_flags_are_rejected_even_without_typed_values() {
+    for raw in ["--nodes=2", "-N2", "-n4"] {
+        let config = SlurmConfig {
+            submit_args: vec![raw.into()],
+            ..SlurmConfig::default()
+        };
+        let err = config.validate().expect_err("planner-owned submit flag");
+        assert!(err.to_string().contains("planner-owned"), "{raw}: {err:#}");
+    }
+
+    for raw in ["--ntasks=4", "-n4", "-G2"] {
+        let config = ServiceSlurmConfig {
+            extra_srun_args: vec![raw.into()],
+            ..ServiceSlurmConfig::default()
+        };
+        let err = config.validate("app").expect_err("planner-owned srun flag");
+        assert!(err.to_string().contains("planner-owned"), "{raw}: {err:#}");
+    }
+}
+
+#[test]
+fn strict_env_follows_typed_interpolation_and_resolved_extends() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let literal = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: redis:7
+    command: 'echo ${SHELL_DEFAULT:-literal}'
+"#,
+    );
+    assert!(
+        missing_defaulted_variables(&literal, &BTreeMap::new())
+            .expect("literal shell command")
+            .is_empty(),
+        "shell-form commands are intentionally not interpolated"
+    );
+
+    fs::write(
+        tmpdir.path().join("base.yaml"),
+        r#"
+services:
+  app:
+    image: "${BASE_IMAGE:-redis:7}"
+"#,
+    )
+    .expect("base");
+    let child = write_spec(
+        tmpdir.path(),
+        r#"
+extends: base.yaml
+services:
+  app:
+    command: ["redis-server"]
+"#,
+    );
+    assert_eq!(
+        missing_defaulted_variables(&child, &BTreeMap::new()).expect("extended defaults"),
+        BTreeSet::from(["BASE_IMAGE".to_string()])
+    );
+}

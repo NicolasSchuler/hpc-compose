@@ -1146,6 +1146,194 @@ fn plan_step_task_geometry_respects_service_overrides_before_allocation_defaults
 }
 
 #[test]
+fn single_node_steps_inherit_allocation_task_geometry() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = tmpdir.path().join("compose.yaml");
+    std::fs::write(&compose, "services: {}\n").expect("write");
+
+    for (slurm, expected_ntasks, expected_per_node) in [
+        (
+            SlurmConfig {
+                nodes: Some(1),
+                ntasks: Some(4),
+                ..SlurmConfig::default()
+            },
+            Some(4),
+            None,
+        ),
+        (
+            SlurmConfig {
+                nodes: Some(1),
+                ntasks_per_node: Some(3),
+                ..SlurmConfig::default()
+            },
+            None,
+            Some(3),
+        ),
+    ] {
+        let plan = build_plan(
+            &compose,
+            ComposeSpec {
+                secrets: BTreeMap::new(),
+                runtime: RuntimeConfig::default(),
+                name: Some("single-node".into()),
+                slurm,
+                software_env: crate::spec::SoftwareEnvConfig::default(),
+                sweep: None,
+                services: BTreeMap::from([("app".into(), service("alpine:3.20"))]),
+            },
+        )
+        .expect("single-node plan");
+        let placement = &plan.ordered_services[0].placement;
+        assert_eq!(placement.ntasks, expected_ntasks);
+        assert_eq!(placement.ntasks_per_node, expected_per_node);
+    }
+}
+
+#[test]
+fn service_step_cannot_exceed_explicit_allocation_resources() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = tmpdir.path().join("compose.yaml");
+    std::fs::write(&compose, "services: {}\n").expect("write");
+
+    let err = build_plan(
+        &compose,
+        ComposeSpec {
+            secrets: BTreeMap::new(),
+            runtime: RuntimeConfig::default(),
+            name: Some("gpu-fit".into()),
+            slurm: SlurmConfig {
+                gpus: Some(1),
+                ..SlurmConfig::default()
+            },
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        gpus: Some(2),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("alpine:3.20")
+                },
+            )]),
+        },
+    )
+    .expect_err("oversized GPU step");
+    assert!(
+        err.to_string()
+            .contains("requests 2 GPUs, but the allocation requests only 1"),
+        "{err:#}"
+    );
+
+    let err = build_plan(
+        &compose,
+        ComposeSpec {
+            secrets: BTreeMap::new(),
+            runtime: RuntimeConfig::default(),
+            name: Some("task-fit".into()),
+            slurm: SlurmConfig {
+                ntasks: Some(2),
+                ..SlurmConfig::default()
+            },
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        ntasks: Some(4),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("alpine:3.20")
+                },
+            )]),
+        },
+    )
+    .expect_err("oversized task step");
+    assert!(
+        err.to_string()
+            .contains("resolves to 4 task(s), but the allocation requests only 2 task(s)"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn multi_node_gres_is_compared_as_an_allocation_wide_gpu_total() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = tmpdir.path().join("compose.yaml");
+    std::fs::write(&compose, "services: {}\n").expect("write");
+
+    let plan = build_plan(
+        &compose,
+        ComposeSpec {
+            secrets: BTreeMap::new(),
+            runtime: RuntimeConfig::default(),
+            name: Some("gpu-fit".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                gres: Some("gpu:4".into()),
+                ..SlurmConfig::default()
+            },
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        gpus: Some(8),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("alpine:3.20")
+                },
+            )]),
+        },
+    )
+    .expect("eight allocation-wide GPUs fit gpu:4 across two nodes");
+    assert_eq!(plan.ordered_services[0].placement.nodes, 2);
+}
+
+#[test]
+fn multi_node_service_gres_cannot_exceed_allocation_wide_gpus() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = tmpdir.path().join("compose.yaml");
+    std::fs::write(&compose, "services: {}\n").expect("write");
+
+    let err = build_plan(
+        &compose,
+        ComposeSpec {
+            secrets: BTreeMap::new(),
+            runtime: RuntimeConfig::default(),
+            name: Some("gpu-fit".into()),
+            slurm: SlurmConfig {
+                nodes: Some(2),
+                gpus: Some(8),
+                ..SlurmConfig::default()
+            },
+            software_env: crate::spec::SoftwareEnvConfig::default(),
+            sweep: None,
+            services: BTreeMap::from([(
+                "app".into(),
+                ServiceSpec {
+                    slurm: ServiceSlurmConfig {
+                        gres: Some("gpu:5".into()),
+                        ..ServiceSlurmConfig::default()
+                    },
+                    ..service("alpine:3.20")
+                },
+            )]),
+        },
+    )
+    .expect_err("gpu:5 across two nodes exceeds eight allocation-wide GPUs");
+    assert!(
+        err.to_string()
+            .contains("requests 10 GPUs, but the allocation requests only 8"),
+        "{err:#}"
+    );
+}
+
+#[test]
 fn plan_rejects_missing_resource_profile_reference() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = tmpdir.path().join("compose.yaml");

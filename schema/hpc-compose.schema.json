@@ -242,6 +242,7 @@
     },
     "secrets": {
       "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
       "additionalProperties": { "$ref": "#/definitions/secretSource" },
       "description": "Map of secret name to source. Each value is resolved into the interpolation map tagged as a secret."
     },
@@ -252,7 +253,17 @@
       "properties": {
         "file": { "type": "string" },
         "env": { "type": "string" }
-      }
+      },
+      "oneOf": [
+        {
+          "required": ["file"],
+          "not": { "required": ["env"] }
+        },
+        {
+          "required": ["env"],
+          "not": { "required": ["file"] }
+        }
+      ]
     },
     "sweep": {
       "type": "object",
@@ -323,6 +334,16 @@
           "description": "Name of a sweep parameter (e.g. nodes, model_size) to use as the x-axis for the post-hoc scaling report printed by `sweep observe --scaling`. Must name a key under sweep.parameters whose values parse as numbers."
         }
       },
+      "oneOf": [
+        {
+          "required": ["log_pattern"],
+          "not": { "required": ["json_path"] }
+        },
+        {
+          "required": ["json_path", "json_field"],
+          "not": { "required": ["log_pattern"] }
+        }
+      ],
       "description": "Set exactly one of log_pattern or json_path."
     },
     "sweepParameterValue": {
@@ -375,6 +396,10 @@
     "slurm": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        { "not": { "required": ["cpus_per_task", "cpus_per_gpu"] } },
+        { "not": { "required": ["mem", "mem_per_gpu"] } }
+      ],
       "properties": {
         "resources": { "$ref": "#/definitions/lineSafeString" },
         "job_name": { "$ref": "#/definitions/lineSafeString" },
@@ -441,7 +466,7 @@
         "submit_args": {
           "type": "array",
           "items": { "$ref": "#/definitions/lineSafeString" },
-          "description": "Raw SBATCH pass-through lines. hpc-compose validates line safety but not Slurm semantics."
+          "description": "Raw SBATCH pass-through lines for options without a typed field. Planner-owned first-class flags are rejected; remaining entries are line-safe but not otherwise validated against Slurm semantics."
         },
         "rendezvous": { "$ref": "#/definitions/rendezvousClient" },
         "parallelism": { "$ref": "#/definitions/parallelism" }
@@ -764,6 +789,20 @@
               "x-env": { "required": ["modules"] }
             }
           }
+        },
+        {
+          "not": {
+            "required": ["readiness", "healthcheck"]
+          }
+        },
+        {
+          "not": {
+            "required": ["x-runtime", "x-enroot"],
+            "properties": {
+              "x-runtime": { "required": ["prepare"] },
+              "x-enroot": { "required": ["prepare"] }
+            }
+          }
         }
       ],
       "properties": {
@@ -832,8 +871,8 @@
           "properties": {
             "type": { "const": "tcp" },
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "host": { "type": "string" },
-            "timeout_seconds": { "$ref": "#/definitions/nonNegativeInteger" }
+            "host": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "timeout_seconds": { "$ref": "#/definitions/positiveInteger" }
           }
         },
         {
@@ -842,8 +881,8 @@
           "required": ["type", "pattern"],
           "properties": {
             "type": { "const": "log" },
-            "pattern": { "type": "string" },
-            "timeout_seconds": { "$ref": "#/definitions/nonNegativeInteger" }
+            "pattern": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "timeout_seconds": { "$ref": "#/definitions/positiveInteger" }
           }
         },
         {
@@ -852,9 +891,9 @@
           "required": ["type", "url"],
           "properties": {
             "type": { "const": "http" },
-            "url": { "type": "string" },
+            "url": { "type": "string", "minLength": 1, "pattern": "\\S" },
             "status_code": { "type": "integer", "minimum": 100, "maximum": 599 },
-            "timeout_seconds": { "$ref": "#/definitions/nonNegativeInteger" }
+            "timeout_seconds": { "$ref": "#/definitions/positiveInteger" }
           }
         }
       ]
@@ -896,6 +935,9 @@
     "serviceSlurm": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        { "not": { "required": ["cpus_per_task", "cpus_per_gpu"] } }
+      ],
       "properties": {
         "nodes": { "$ref": "#/definitions/positiveInteger" },
         "placement": { "$ref": "#/definitions/servicePlacement" },
@@ -903,7 +945,7 @@
         "ntasks_per_node": { "$ref": "#/definitions/positiveInteger" },
         "cpus_per_task": { "$ref": "#/definitions/positiveInteger" },
         "gpus": { "$ref": "#/definitions/positiveInteger" },
-        "gres": { "type": "string" },
+        "gres": { "$ref": "#/definitions/lineSafeString" },
         "gpus_per_node": { "$ref": "#/definitions/positiveInteger" },
         "gpus_per_task": { "$ref": "#/definitions/positiveInteger" },
         "cpus_per_gpu": { "$ref": "#/definitions/positiveInteger" },
@@ -913,8 +955,12 @@
         "mem_bind": { "$ref": "#/definitions/lineSafeString" },
         "distribution": { "$ref": "#/definitions/lineSafeString" },
         "hint": { "$ref": "#/definitions/lineSafeString" },
-        "time_limit": { "type": "string" },
-        "extra_srun_args": { "$ref": "#/definitions/stringList" },
+        "time_limit": { "$ref": "#/definitions/walltime" },
+        "extra_srun_args": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/lineSafeString" },
+          "description": "Raw srun arguments for options without a typed service field. Planner-owned resource, placement, and binding flags are rejected."
+        },
         "mpi": { "$ref": "#/definitions/mpi" },
         "failure_policy": { "$ref": "#/definitions/failurePolicy" },
         "prologue": { "$ref": "#/definitions/serviceHook" },

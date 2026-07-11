@@ -38,8 +38,20 @@ fn load_raw_spec_with_root_text(path: &Path, root_text: Option<&str>) -> Result<
     let mut value = load_resolved_value(path, &mut stack, root_text)?;
     validate_root(&value)?;
     normalize_raw_spec(&mut value)?;
-    serde_norway::from_value(value)
-        .with_context(|| format!("failed to deserialize spec at {}", path.display()))
+    // Deserialize through a path tracker so a type mismatch names the exact
+    // field (e.g. `services.app.x-slurm.nodes`), not just the file.
+    serde_path_to_error::deserialize(value).map_err(|err| {
+        let field = err.path().to_string();
+        let inner = anyhow::Error::from(err.into_inner());
+        if field == "." {
+            inner.context(format!("failed to deserialize spec at {}", path.display()))
+        } else {
+            inner.context(format!(
+                "failed to deserialize spec at {} (field '{field}')",
+                path.display()
+            ))
+        }
+    })
 }
 
 fn load_value(path: &Path, is_root: bool, root_text: Option<&str>) -> Result<Value> {

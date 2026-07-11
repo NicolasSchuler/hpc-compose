@@ -300,6 +300,16 @@ fn lint_memory_cpu_ratio(plan: &Plan, findings: &mut Vec<LintFinding>) {
     let Some(bytes) = parse_memory_bytes(mem) else {
         return;
     };
+    // Slurm reads a unit-less --mem value as megabytes (the same semantics
+    // HPC009 warns about), so scale a bare number accordingly rather than
+    // treating it as a byte count.
+    let trimmed = mem.trim();
+    let bytes = if !trimmed.is_empty() && trimmed.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+    {
+        bytes.saturating_mul(1_024 * 1_024)
+    } else {
+        bytes
+    };
     let cpus = allocation_cpu_count(plan);
     if cpus == 0 {
         return;

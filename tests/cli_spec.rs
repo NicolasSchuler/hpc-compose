@@ -1574,11 +1574,10 @@ x-slurm:
   nodes: 4
   ntasks: 16
   ntasks_per_node: 4
-  cpus_per_task: 2
   gres: gpu:a100:4
   gpus_per_node: 1
   gpus_per_task: 1
-  cpus_per_gpu: 4
+  cpus_per_gpu: 8
   mem_per_gpu: 24G
   gpu_bind: closest
   cpu_bind: cores
@@ -1616,7 +1615,6 @@ services:
         allow_overlap: true
       ntasks: 3
       ntasks_per_node: 1
-      cpus_per_task: 4
       gpus_per_node: 1
       gpus_per_task: 1
       cpus_per_gpu: 6
@@ -1660,11 +1658,10 @@ services:
     assert_eq!(slurm["nodes"], Value::from(4));
     assert_eq!(slurm["ntasks"], Value::from(16));
     assert_eq!(slurm["ntasks_per_node"], Value::from(4));
-    assert_eq!(slurm["cpus_per_task"], Value::from(2));
     assert_eq!(slurm["gres"], Value::from("gpu:a100:4"));
     assert_eq!(slurm["gpus_per_node"], Value::from(1));
     assert_eq!(slurm["gpus_per_task"], Value::from(1));
-    assert_eq!(slurm["cpus_per_gpu"], Value::from(4));
+    assert_eq!(slurm["cpus_per_gpu"], Value::from(8));
     assert_eq!(slurm["mem_per_gpu"], Value::from("24G"));
     assert_eq!(slurm["gpu_bind"], Value::from("closest"));
     assert_eq!(slurm["cpu_bind"], Value::from("cores"));
@@ -1715,7 +1712,6 @@ services:
     );
     assert_eq!(service_slurm["ntasks"], Value::from(3));
     assert_eq!(service_slurm["ntasks_per_node"], Value::from(1));
-    assert_eq!(service_slurm["cpus_per_task"], Value::from(4));
     assert_eq!(service_slurm["gpus_per_node"], Value::from(1));
     assert_eq!(service_slurm["gpus_per_task"], Value::from(1));
     assert_eq!(service_slurm["cpus_per_gpu"], Value::from(6));
@@ -1755,9 +1751,9 @@ services:
     image: pytorch:latest
     command: /train.sh
     x-slurm:
-      gpus_per_node: 4
+      gpus_per_node: 2
       parallelism:
-        tensor: 4
+        tensor: 2
         pipeline: 1
 "#,
             cache_root.path().display()
@@ -1782,7 +1778,7 @@ services:
     );
     assert_eq!(
         value["services"]["trainer"]["x-slurm"]["parallelism"],
-        serde_json::json!({ "tensor": 4, "pipeline": 1 })
+        serde_json::json!({ "tensor": 2, "pipeline": 1 })
     );
 }
 
@@ -2504,6 +2500,61 @@ fn schema_matches_new_resource_validation_surface() {
         serde_json::json!(["tensor", "pipeline"])
     );
     assert_eq!(parallelism["additionalProperties"], Value::from(false));
+}
+
+#[test]
+fn schema_encodes_runtime_conditionals_and_readiness_bounds() {
+    let value = load_schema_json();
+
+    assert_eq!(
+        value["definitions"]["secrets"]["propertyNames"]["pattern"],
+        Value::from("^[A-Za-z_][A-Za-z0-9_]*$")
+    );
+    assert_eq!(
+        value["definitions"]["secretSource"]["oneOf"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        value["definitions"]["sweepObjective"]["oneOf"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+
+    let service_constraints = value["definitions"]["service"]["allOf"]
+        .as_array()
+        .expect("service constraints");
+    for required in [
+        serde_json::json!(["readiness", "healthcheck"]),
+        serde_json::json!(["x-runtime", "x-enroot"]),
+    ] {
+        assert!(
+            service_constraints
+                .iter()
+                .any(|constraint| constraint["not"]["required"] == required),
+            "missing service exclusion for {required}"
+        );
+    }
+
+    let readiness = value["definitions"]["readiness"]["oneOf"]
+        .as_array()
+        .expect("readiness variants");
+    for variant in readiness.iter().skip(1) {
+        assert_eq!(
+            variant["properties"]["timeout_seconds"]["$ref"],
+            Value::from("#/definitions/positiveInteger")
+        );
+    }
+    assert_eq!(
+        readiness[2]["properties"]["pattern"]["minLength"],
+        Value::from(1)
+    );
+    assert_eq!(
+        readiness[3]["properties"]["url"]["minLength"],
+        Value::from(1)
+    );
 }
 
 fn load_schema_json() -> Value {

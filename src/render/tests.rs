@@ -1364,6 +1364,35 @@ fn render_gres_takes_precedence_over_gpus_at_allocation_and_service_levels() {
 }
 
 #[test]
+fn render_combines_non_gpu_gres_with_gpus_at_allocation_and_service_levels() {
+    let mut service = runtime_service();
+    service.slurm = ServiceSlurmConfig {
+        gpus: Some(2),
+        gres: Some("bandwidth:lustre:100".into()),
+        ..ServiceSlurmConfig::default()
+    };
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            gpus: Some(2),
+            gres: Some("bandwidth:lustre:100".into()),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("#SBATCH --gres=bandwidth:lustre:100"));
+    assert!(script.contains("#SBATCH --gpus=2"));
+
+    let args = display_srun_command(&plan.ordered_services[0]);
+    assert!(args.contains(&"--gres=bandwidth:lustre:100".to_string()));
+    assert!(args.contains(&"--gpus=2".to_string()));
+}
+
+#[test]
 fn render_gres_precedence_preserves_gpu_subresource_directives() {
     let mut service = runtime_service();
     service.name = "trainer".into();
@@ -1709,10 +1738,24 @@ fn distributed_env_derives_nproc_from_overrides_gpu_and_tasks() {
     service.slurm.gpus_per_node = Some(4);
     assert_eq!(derive_nproc_per_node(&service, &slurm), 6);
 
-    assert_eq!(parse_gres_gpu_count("gpu:tesla:8"), Some(8));
-    assert_eq!(parse_gres_gpu_count("gres/gpu:h100:2"), Some(2));
-    assert_eq!(parse_gres_gpu_count("gpu"), Some(1));
-    assert_eq!(parse_gres_gpu_count("cpu:4"), None);
+    assert_eq!(gres_gpu_count("gpu:tesla:8"), Some(8));
+    assert_eq!(gres_gpu_count("gres/gpu:h100:2"), Some(2));
+    assert_eq!(gres_gpu_count("GPU:a100:2,gpu:h100:3"), Some(5));
+    assert_eq!(gres_gpu_count("gpu"), Some(1));
+    assert_eq!(gres_gpu_count("cpu:4"), None);
+    assert_eq!(gres_gpu_count("mygpu:4"), None);
+}
+
+#[test]
+fn runtime_gpu_auto_uses_exact_case_insensitive_gres_names() {
+    let mut service = runtime_service();
+    let runtime = RuntimeConfig::default();
+
+    service.slurm.gres = Some("GPU:a100:1".into());
+    assert!(service_needs_nv(&service, &runtime, false));
+
+    service.slurm.gres = Some("mygpu:1".into());
+    assert!(!service_needs_nv(&service, &runtime, false));
 }
 
 #[test]

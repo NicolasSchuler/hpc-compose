@@ -14,7 +14,8 @@ use crate::mpi_util::advertised_mpi_types;
 use crate::process_probe;
 use crate::runtime_plan::RuntimePlan;
 use crate::spec::{
-    MpiImplementation, MpiProfile, RuntimeBackend, ScratchScope, parse_slurm_time_limit,
+    MpiImplementation, MpiProfile, RuntimeBackend, ScratchScope, gres_requests_gpu,
+    parse_slurm_time_limit,
 };
 use crate::time_util::unix_timestamp_now;
 
@@ -1273,7 +1274,7 @@ fn collect_gpu_models(partitions: &[PartitionProfile]) -> Vec<String> {
         };
         for part in gres.split(',') {
             let fields = part.split(':').collect::<Vec<_>>();
-            if fields.first().is_some_and(|value| value.contains("gpu"))
+            if gres_requests_gpu(part)
                 && let Some(model) = fields.get(1)
                 && !model.chars().all(|ch| ch.is_ascii_digit())
             {
@@ -1350,7 +1351,7 @@ fn partition_state_looks_available(state: &str) -> bool {
 }
 
 fn partition_supports_gpu(partition: &PartitionProfile) -> bool {
-    partition.gres.as_deref().is_some_and(contains_gpu)
+    partition.gres.as_deref().is_some_and(gres_requests_gpu)
 }
 
 fn constraint_matches_features(constraint: &str, features: &[String]) -> bool {
@@ -1381,19 +1382,15 @@ fn plan_requests_gpu(plan: &RuntimePlan) -> bool {
         || plan.slurm.gpus_per_task.unwrap_or(0) > 0
         || plan.slurm.cpus_per_gpu.unwrap_or(0) > 0
         || plan.slurm.mem_per_gpu.is_some()
-        || plan.slurm.gres.as_deref().is_some_and(contains_gpu)
+        || plan.slurm.gres.as_deref().is_some_and(gres_requests_gpu)
         || plan.ordered_services.iter().any(|service| {
             service.slurm.gpus.unwrap_or(0) > 0
                 || service.slurm.gpus_per_node.unwrap_or(0) > 0
                 || service.slurm.gpus_per_task.unwrap_or(0) > 0
                 || service.slurm.cpus_per_gpu.unwrap_or(0) > 0
                 || service.slurm.mem_per_gpu.is_some()
-                || service.slurm.gres.as_deref().is_some_and(contains_gpu)
+                || service.slurm.gres.as_deref().is_some_and(gres_requests_gpu)
         })
-}
-
-fn contains_gpu(value: &str) -> bool {
-    value.to_ascii_lowercase().contains("gpu")
 }
 
 #[cfg(test)]
@@ -1956,9 +1953,10 @@ name = ""
         assert_eq!(normalize_constraint_token("(a100"), "a100");
         assert_eq!(normalize_constraint_token("ib)&"), "ib");
         assert_eq!(normalize_constraint_token("gpu-v100"), "gpu-v100");
-        assert!(contains_gpu("gpu:a100:4"));
-        assert!(contains_gpu("GRES/GPU:1"));
-        assert!(!contains_gpu("cpu:8"));
+        assert!(gres_requests_gpu("gpu:a100:4"));
+        assert!(gres_requests_gpu("GRES/GPU:1"));
+        assert!(!gres_requests_gpu("cpu:8"));
+        assert!(!gres_requests_gpu("mygpu:8"));
     }
 
     #[test]

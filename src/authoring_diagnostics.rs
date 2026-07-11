@@ -16,7 +16,7 @@ use crate::context::{ResolveRequest, resolve_with_compose_text};
 use crate::lint::{LintLevel, lint_plan};
 use crate::planner::{PlanOptions, build_plan_with_options};
 use crate::runtime_plan::build_runtime_plan;
-use crate::spec::{ComposeSpec, missing_defaulted_variables_from_str};
+use crate::spec::{ComposeSpec, missing_defaulted_variables_from_str_at_path};
 use crate::spec_error::SpecError;
 
 const CODE_CONTEXT: &str = "hpc_compose::authoring::context";
@@ -297,8 +297,9 @@ fn diagnose_document_inner(
     .map_err(|source| Error::from(AuthoringPhaseError::new(CODE_PLAN, REC_PLAN, source)))?;
     let runtime_plan = build_runtime_plan(&plan);
     if options.strict_env {
-        let missing = missing_defaulted_variables_from_str(text, &context.interpolation_vars)
-            .map_err(|source| {
+        let missing =
+            missing_defaulted_variables_from_str_at_path(path, text, &context.interpolation_vars)
+                .map_err(|source| {
                 Error::from(AuthoringPhaseError::new(
                     CODE_STRICT_ENV,
                     REC_STRICT_ENV,
@@ -717,7 +718,7 @@ services:
 services:
   app:
     image: alpine:3.20
-    command: \"echo ${MISSING:-fallback}\"
+    command: [\"sh\", \"-lc\", \"echo ${MISSING:-fallback}\"]
 ",
             &AuthoringDiagnosticOptions {
                 strict_env: true,

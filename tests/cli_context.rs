@@ -923,7 +923,7 @@ fn validate_strict_env_detects_missing_fallback_and_accepts_profile_env() {
 services:
   app:
     image: redis:7
-    command: "echo ${NEEDED_VAR:-fallback}"
+    command: ["sh", "-lc", "echo ${NEEDED_VAR:-fallback}"]
 "#,
     );
 

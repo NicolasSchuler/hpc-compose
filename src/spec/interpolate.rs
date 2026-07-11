@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -9,6 +10,21 @@ use serde_norway::Value;
 use crate::spec_error::SpecError;
 
 pub(super) type InterpolationVars = BTreeMap<String, String>;
+
+#[derive(Default)]
+struct DefaultUsageTracker {
+    missing: BTreeSet<String>,
+}
+
+thread_local! {
+    /// `strict-env` must follow the real typed interpolation traversal, but it
+    /// is a diagnostic pass rather than a second load: missing required
+    /// variables are handled by the normal loader and must not prevent this
+    /// pass from reporting default fallbacks. The thread-local keeps that
+    /// diagnostic mode scoped to one interpolation traversal without widening
+    /// every interpolation helper's public contract.
+    static DEFAULT_USAGE_TRACKER: RefCell<Option<DefaultUsageTracker>> = const { RefCell::new(None) };
+}
 
 pub(super) fn interpolation_vars(path: &Path) -> Result<InterpolationVars> {
     let mut vars = load_dotenv_vars(path.parent().unwrap_or_else(|| Path::new(".")))?;
@@ -28,13 +44,8 @@ pub fn missing_defaulted_variables(
     path: &Path,
     vars: &BTreeMap<String, String>,
 ) -> Result<BTreeSet<String>> {
-    let raw =
-        fs::read_to_string(path).context(format!("failed to read spec at {}", path.display()))?;
-    let value: Value = serde_norway::from_str(&raw)
-        .context(format!("failed to parse YAML at {}", path.display()))?;
-    let mut missing = BTreeSet::new();
-    collect_missing_defaulted_variables_from_value(&value, vars, &mut missing)?;
-    Ok(missing)
+    let mut spec = super::parse::load_raw_spec(path)?;
+    track_missing_default_usage(|| spec.interpolate_with_vars(vars))
 }
 
 /// Returns variables that consumed `${VAR:-default}` or `${VAR-default}`
@@ -48,10 +59,18 @@ pub fn missing_defaulted_variables_from_str(
     raw: &str,
     vars: &BTreeMap<String, String>,
 ) -> Result<BTreeSet<String>> {
-    let value: Value = serde_norway::from_str(raw).context("failed to parse YAML")?;
-    let mut missing = BTreeSet::new();
-    collect_missing_defaulted_variables_from_value(&value, vars, &mut missing)?;
-    Ok(missing)
+    missing_defaulted_variables_from_str_at_path(Path::new("compose.yaml"), raw, vars)
+}
+
+/// Path-aware in-memory variant used by authoring diagnostics so `extends`
+/// files resolve exactly as they do during the real load.
+pub(crate) fn missing_defaulted_variables_from_str_at_path(
+    path: &Path,
+    raw: &str,
+    vars: &BTreeMap<String, String>,
+) -> Result<BTreeSet<String>> {
+    let mut spec = super::parse::load_raw_spec_from_str(path, raw)?;
+    track_missing_default_usage(|| spec.interpolate_with_vars(vars))
 }
 
 /// Returns interpolation variable names referenced by YAML scalar values in a
@@ -194,116 +213,31 @@ fn collect_referenced_from_braced_expr(
     Ok(())
 }
 
-fn collect_missing_defaulted_variables_from_value(
-    value: &Value,
-    vars: &BTreeMap<String, String>,
-    out: &mut BTreeSet<String>,
-) -> Result<()> {
-    match value {
-        Value::String(current) => collect_missing_defaulted_variables_in_string(current, vars, out),
-        Value::Sequence(items) => {
-            for item in items {
-                collect_missing_defaulted_variables_from_value(item, vars, out)?;
-            }
-            Ok(())
-        }
-        Value::Mapping(entries) => {
-            for value in entries.values() {
-                collect_missing_defaulted_variables_from_value(value, vars, out)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
+fn track_missing_default_usage(
+    interpolate: impl FnOnce() -> Result<()>,
+) -> Result<BTreeSet<String>> {
+    DEFAULT_USAGE_TRACKER.with(|tracker| {
+        let previous = tracker.replace(Some(DefaultUsageTracker::default()));
+        debug_assert!(previous.is_none(), "default-usage tracking must not nest");
+
+        let result = interpolate();
+        let tracked = tracker
+            .replace(previous)
+            .expect("default-usage tracker was installed");
+        result.map(|()| tracked.missing)
+    })
 }
 
-fn collect_missing_defaulted_variables_in_string(
-    input: &str,
-    vars: &BTreeMap<String, String>,
-    out: &mut BTreeSet<String>,
-) -> Result<()> {
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] != '$' {
-            index += 1;
-            continue;
+fn record_missing_default(name: &str) {
+    DEFAULT_USAGE_TRACKER.with(|tracker| {
+        if let Some(active) = tracker.borrow_mut().as_mut() {
+            active.missing.insert(name.to_string());
         }
-        if matches!(chars.get(index + 1), Some('$')) {
-            index += 2;
-            continue;
-        }
-        if matches!(chars.get(index + 1), Some('{')) {
-            let start = index;
-            index += 2;
-            let (expr, next_index) = read_braced_expression(&chars, index, input, start)?;
-            index = next_index;
-            collect_missing_from_braced_expr(&expr, vars, out, input, start)?;
-            continue;
-        }
-        index += 1;
-    }
-    Ok(())
+    });
 }
 
-fn collect_missing_from_braced_expr(
-    expr: &str,
-    vars: &BTreeMap<String, String>,
-    out: &mut BTreeSet<String>,
-    input: &str,
-    start: usize,
-) -> Result<()> {
-    let mut chars = expr.chars();
-    let Some(first) = chars.next() else {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    };
-    if !is_var_start(first) {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    }
-    let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
-    let name = &expr[..name_len];
-    let suffix = &expr[name_len..];
-
-    match suffix {
-        "" => {}
-        _ if suffix.starts_with(":?") => {
-            // A required variable is a hard error, not a silent default, so it is
-            // never reported as "consumed a default" (mirrors bare `${VAR}`). The
-            // message may still contain real `:-`/`-` defaults, so walk it.
-            let required_but_missing = match vars.get(name) {
-                Some(value) => value.is_empty(),
-                None => true,
-            };
-            if required_but_missing {
-                collect_missing_defaulted_variables_in_string(&suffix[2..], vars, out)?;
-            }
-        }
-        _ if suffix.starts_with(":-") => {
-            let default_used = match vars.get(name) {
-                Some(value) => value.is_empty(),
-                None => true,
-            };
-            if !vars.contains_key(name) {
-                out.insert(name.to_string());
-            }
-            if default_used {
-                collect_missing_defaulted_variables_in_string(&suffix[2..], vars, out)?;
-            }
-        }
-        _ if suffix.starts_with('?') => {
-            if !vars.contains_key(name) {
-                collect_missing_defaulted_variables_in_string(&suffix[1..], vars, out)?;
-            }
-        }
-        _ if suffix.starts_with('-') => {
-            if !vars.contains_key(name) {
-                out.insert(name.to_string());
-                collect_missing_defaulted_variables_in_string(&suffix[1..], vars, out)?;
-            }
-        }
-        _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
-    }
-    Ok(())
+fn default_usage_tracking_active() -> bool {
+    DEFAULT_USAGE_TRACKER.with(|tracker| tracker.borrow().is_some())
 }
 
 /// The reason a single `.env`/`env_file` line failed the `KEY=VALUE` grammar.
@@ -482,10 +416,11 @@ pub(super) fn interpolate_string(input: &str, vars: &InterpolationVars) -> Resul
             }
         }
 
-        let Some(value) = vars.get(&name) else {
-            bail!("missing variable '{name}' referenced in '{input}'");
-        };
-        out.push_str(value);
+        match vars.get(&name) {
+            Some(value) => out.push_str(value),
+            None if default_usage_tracking_active() => {}
+            None => bail!("missing variable '{name}' referenced in '{input}'"),
+        }
     }
 
     Ok(out)
@@ -557,7 +492,11 @@ fn resolve_braced_variable(
             let default = &suffix[2..];
             match vars.get(name) {
                 Some(value) if !value.is_empty() => Ok(value.clone()),
-                _ => interpolate_string(default, vars),
+                Some(_) => interpolate_string(default, vars),
+                None => {
+                    record_missing_default(name);
+                    interpolate_string(default, vars)
+                }
             }
         }
         _ if suffix.starts_with('?') => {
@@ -565,16 +504,21 @@ fn resolve_braced_variable(
         }
         _ if suffix.starts_with('-') => match vars.get(name) {
             Some(value) => Ok(value.clone()),
-            None => interpolate_string(&suffix[1..], vars),
+            None => {
+                record_missing_default(name);
+                interpolate_string(&suffix[1..], vars)
+            }
         },
         _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
     }
 }
 
 fn resolve_required_variable(name: &str, vars: &InterpolationVars) -> Result<String> {
-    vars.get(name)
-        .cloned()
-        .context(format!("missing variable '{name}'"))
+    match vars.get(name) {
+        Some(value) => Ok(value.clone()),
+        None if default_usage_tracking_active() => Ok(String::new()),
+        None => Err(anyhow::anyhow!("missing variable '{name}'")),
+    }
 }
 
 /// Resolves a `${VAR:?message}` (`require_non_empty`) or `${VAR?message}`
@@ -593,6 +537,13 @@ fn resolve_required_variable_with_message(
     let value = vars.get(name);
     if let Some(value) = value.filter(|value| !(require_non_empty && value.is_empty())) {
         return Ok(value.clone());
+    }
+
+    if default_usage_tracking_active() {
+        if !raw_message.is_empty() {
+            let _ = interpolate_string(raw_message, vars)?;
+        }
+        return Ok(String::new());
     }
 
     let message = if raw_message.is_empty() {
@@ -841,9 +792,8 @@ mod tests {
         fs::write(
             &path,
             r#"
-"${KEY_IGNORED:-not-a-value}": mapping key is ignored
 services:
-  app:
+  "${KEY_IGNORED:-not-a-value}":
     image: "${IMAGE:-redis:7}"
     command:
       - sh
@@ -852,8 +802,6 @@ services:
     environment:
       PRESENT: "${PRESENT:-unused}"
       EMPTY: "${EMPTY:-empty-default}"
-      BOOL: true
-      NUMBER: 7
 "#,
         )
         .expect("compose");

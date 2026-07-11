@@ -13,7 +13,7 @@ use crate::readiness_util::readiness_uses_implicit_localhost;
 use crate::spec::{
     CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, RuntimeBackend,
     RuntimeConfig, ServiceAssertSpec, ServiceDependency, ServiceFailureMode, ServiceFailurePolicy,
-    ServiceSlurmConfig, SlurmConfig,
+    ServiceSlurmConfig, SlurmConfig, gres_gpu_count,
 };
 
 use crate::tracked_paths::JOB_CONTAINER_DIR;
@@ -171,6 +171,19 @@ pub fn build_plan(spec_path: &Path, spec: ComposeSpec) -> Result<Plan> {
 /// violates semantic validation rules, or service dependencies and placement
 /// cannot be resolved into one supported Slurm allocation plan.
 pub fn build_plan_with_options(
+    spec_path: &Path,
+    spec: ComposeSpec,
+    options: PlanOptions,
+) -> Result<Plan> {
+    // Every rejection in the planner is a semantic spec-validation failure
+    // (undefined dependency, missing image, unsatisfiable geometry, ...), so it
+    // must classify as an invalid spec (exit 2) exactly like failures at the
+    // `ComposeSpec` load boundary, not as a generic exit-1 error.
+    build_plan_with_options_inner(spec_path, spec, options)
+        .map_err(crate::spec::mark_spec_validation_error)
+}
+
+fn build_plan_with_options_inner(
     spec_path: &Path,
     mut spec: ComposeSpec,
     options: PlanOptions,
@@ -437,6 +450,7 @@ fn assign_service_placements(
         service.placement = placement;
     }
 
+    validate_service_resource_fit(slurm, services)?;
     validate_service_placement_readiness(allocation_nodes, services)?;
     validate_service_placement_overlaps(allocation_nodes, services)?;
     validate_mpi_expected_ranks(services)?;
@@ -711,28 +725,107 @@ fn resolve_step_tasks(
     slurm: &SlurmConfig,
     nodes: u32,
 ) -> (Option<u32>, Option<u32>) {
-    if nodes > 1 {
-        (
-            service.slurm.ntasks.or(slurm.ntasks),
-            service.slurm.ntasks_per_node.or_else(|| {
-                if service.slurm.ntasks.is_some() {
-                    None
-                } else {
-                    slurm
-                        .ntasks_per_node
-                        .or_else(|| slurm.ntasks.is_none().then_some(1))
-                }
-            }),
-        )
-    } else {
-        (
-            service
-                .slurm
-                .ntasks
-                .or_else(|| service.slurm.ntasks_per_node.is_none().then_some(1)),
-            service.slurm.ntasks_per_node,
-        )
+    let mut ntasks = service.slurm.ntasks.or(slurm.ntasks);
+    let mut ntasks_per_node = service.slurm.ntasks_per_node.or_else(|| {
+        if service.slurm.ntasks.is_some() {
+            None
+        } else {
+            slurm.ntasks_per_node
+        }
+    });
+
+    if ntasks.is_none() && ntasks_per_node.is_none() {
+        if nodes > 1 {
+            ntasks_per_node = Some(1);
+        } else {
+            ntasks = Some(1);
+        }
     }
+
+    (ntasks, ntasks_per_node)
+}
+
+fn validate_service_resource_fit(
+    slurm: &SlurmConfig,
+    services: &BTreeMap<String, PlannedService>,
+) -> Result<()> {
+    let allocation_nodes = slurm.allocation_nodes();
+    let allocation_tasks = slurm.ntasks.or_else(|| {
+        slurm
+            .ntasks_per_node
+            .and_then(|tasks| tasks.checked_mul(allocation_nodes))
+    });
+    let allocation_gpus = total_gpu_count(slurm.gpus, slurm.gres.as_deref(), allocation_nodes);
+
+    for service in services.values() {
+        if let Some(capacity) = allocation_tasks {
+            let requested = resolved_rank_count(&service.placement);
+            if requested > capacity {
+                bail!(
+                    "service '{}' resolves to {} task(s), but the allocation requests only {} task(s)",
+                    service.name,
+                    requested,
+                    capacity
+                );
+            }
+        }
+
+        let service_gpus = total_gpu_count(
+            service.slurm.gpus,
+            service.slurm.gres.as_deref(),
+            service.placement.nodes,
+        );
+        validate_step_limit(service_gpus, allocation_gpus, &service.name, "GPUs")?;
+        validate_step_limit(
+            service.slurm.gpus_per_node,
+            slurm.gpus_per_node,
+            &service.name,
+            "GPUs per node",
+        )?;
+        validate_step_limit(
+            service.slurm.gpus_per_task,
+            slurm.gpus_per_task,
+            &service.name,
+            "GPUs per task",
+        )?;
+        validate_step_limit(
+            service.slurm.cpus_per_task,
+            slurm.cpus_per_task,
+            &service.name,
+            "CPUs per task",
+        )?;
+        validate_step_limit(
+            service.slurm.cpus_per_gpu,
+            slurm.cpus_per_gpu,
+            &service.name,
+            "CPUs per GPU",
+        )?;
+    }
+
+    Ok(())
+}
+
+fn total_gpu_count(gpus: Option<u32>, gres: Option<&str>, nodes: u32) -> Option<u32> {
+    gpus.or_else(|| {
+        gres.and_then(gres_gpu_count)
+            .and_then(|gpus_per_node| gpus_per_node.checked_mul(nodes))
+    })
+}
+
+fn validate_step_limit(
+    requested: Option<u32>,
+    allocated: Option<u32>,
+    service_name: &str,
+    resource: &str,
+) -> Result<()> {
+    if let (Some(requested), Some(allocated)) = (requested, allocated)
+        && requested > allocated
+    {
+        bail!(
+            "service '{service_name}' requests {requested} {resource}, but the allocation requests only {allocated}"
+        );
+    }
+    Ok(())
 }
 
 fn validate_mpi_expected_ranks(services: &BTreeMap<String, PlannedService>) -> Result<()> {

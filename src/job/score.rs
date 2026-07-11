@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::runtime_plan::RuntimePlan;
-use crate::spec::{GIB, parse_memory_bytes, parse_slurm_time_limit};
+use crate::spec::{GIB, gres_gpu_count, parse_memory_bytes, parse_slurm_time_limit};
 
 use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
 use super::model::{SubmissionBackend, SubmissionRecord};
@@ -1046,7 +1046,7 @@ fn requested_gpu_count(plan: &RuntimePlan) -> Option<u64> {
         return Some(u64::from(per_node.saturating_mul(nodes)));
     }
     if let Some(gres) = plan.slurm.gres.as_deref()
-        && let Some(gpus) = parse_gres_gpu_count(gres)
+        && let Some(gpus) = gres_gpu_count(gres)
     {
         return Some(u64::from(gpus));
     }
@@ -1116,24 +1116,6 @@ fn gpu_device_key(row: &GpuDeviceSampleRow) -> String {
                 row.index.as_deref().unwrap_or("unknown-index")
             )
         })
-}
-
-fn parse_gres_gpu_count(gres: &str) -> Option<u32> {
-    for part in gres.split(',') {
-        let part = part.trim();
-        if !part.to_ascii_lowercase().contains("gpu") {
-            continue;
-        }
-        if let Some(value) = part
-            .rsplit(':')
-            .next()
-            .and_then(|last| last.parse::<u32>().ok())
-        {
-            return Some(value);
-        }
-        return Some(1);
-    }
-    None
 }
 
 fn tres_gpu_count(values: &BTreeMap<String, String>) -> Option<u64> {

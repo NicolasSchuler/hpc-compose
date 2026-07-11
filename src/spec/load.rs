@@ -8,7 +8,7 @@ use super::parse::{load_raw_spec, load_raw_spec_from_str};
 use super::{ComposeSpec, SecretSpec, SweepConfig, interpolate_optional_string};
 use crate::spec_error::{SpecError, SpecValidationError};
 
-fn mark_spec_validation_error(error: anyhow::Error) -> anyhow::Error {
+pub(crate) fn mark_spec_validation_error(error: anyhow::Error) -> anyhow::Error {
     if error.downcast_ref::<SpecError>().is_some()
         || error.downcast_ref::<SpecValidationError>().is_some()
     {
@@ -170,7 +170,7 @@ impl ComposeSpec {
         Ok(spec)
     }
 
-    fn interpolate_with_vars(&mut self, vars: &BTreeMap<String, String>) -> Result<()> {
+    pub(super) fn interpolate_with_vars(&mut self, vars: &BTreeMap<String, String>) -> Result<()> {
         interpolate_optional_string(&mut self.name, vars)?;
         self.software_env.interpolate(vars)?;
         self.slurm.interpolate(vars)?;

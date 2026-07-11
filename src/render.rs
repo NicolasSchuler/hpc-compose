@@ -12,7 +12,7 @@ use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
     RendezvousRegisterConfig, RuntimeBackend, RuntimeCacheCleanupPolicy, RuntimeGpuPolicy,
     ScratchCleanupPolicy, ScratchScope, ServiceFailureMode, ServiceHookContext, ServiceHookEvent,
-    SignalConfig, SlurmConfig, SoftwareEnvConfig,
+    SignalConfig, SlurmConfig, SoftwareEnvConfig, gres_gpu_count, gres_requests_gpu,
 };
 use crate::tracked_paths;
 
@@ -256,8 +256,8 @@ fn derive_nproc_per_node(service: &RuntimeService, slurm: &SlurmConfig) -> u32 {
     nproc_per_node_from_env(service)
         .or(service.slurm.gpus_per_node)
         .or(slurm.gpus_per_node)
-        .or_else(|| service.slurm.gres.as_deref().and_then(parse_gres_gpu_count))
-        .or_else(|| slurm.gres.as_deref().and_then(parse_gres_gpu_count))
+        .or_else(|| service.slurm.gres.as_deref().and_then(gres_gpu_count))
+        .or_else(|| slurm.gres.as_deref().and_then(gres_gpu_count))
         .or_else(|| gpus_evenly_per_node(service.slurm.gpus, service.placement.nodes))
         .or_else(|| gpus_evenly_per_node(slurm.gpus, service.placement.nodes))
         .or(service.placement.ntasks_per_node)
@@ -280,21 +280,6 @@ fn nproc_per_node_from_env(service: &RuntimeService) -> Option<u32> {
 fn gpus_evenly_per_node(gpus: Option<u32>, nodes: u32) -> Option<u32> {
     let gpus = gpus?;
     (nodes > 0 && gpus > 0 && gpus % nodes == 0).then_some(gpus / nodes)
-}
-
-fn parse_gres_gpu_count(gres: &str) -> Option<u32> {
-    gres.split(',').find_map(|part| {
-        let part = part.trim();
-        if !part.to_ascii_lowercase().contains("gpu") {
-            return None;
-        }
-        let count = part
-            .split(':')
-            .next_back()
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(1);
-        (count > 0).then_some(count)
-    })
 }
 
 /// Renders the complete `sbatch` script for a runtime plan with explicit
@@ -476,7 +461,10 @@ pub fn render_script_annotated(
     }
     if let Some(gres) = &plan.slurm.gres {
         sbatch::push_directive(&mut out, &mut ann, "x-slurm.gres", "gres", gres);
-    } else if let Some(gpus) = plan.slurm.gpus {
+    }
+    if let Some(gpus) = plan.slurm.gpus
+        && !plan.slurm.gres.as_deref().is_some_and(gres_requests_gpu)
+    {
         sbatch::push_directive(&mut out, &mut ann, "x-slurm.gpus", "gpus", gpus);
     }
     if let Some(gpus_per_node) = plan.slurm.gpus_per_node {
@@ -3129,10 +3117,7 @@ fn allocation_requests_gpu(slurm: &crate::spec::SlurmConfig) -> bool {
         || slurm.gpus_per_task.unwrap_or(0) > 0
         || slurm.cpus_per_gpu.unwrap_or(0) > 0
         || slurm.mem_per_gpu.is_some()
-        || slurm
-            .gres
-            .as_deref()
-            .is_some_and(|gres| gres.contains("gpu"))
+        || slurm.gres.as_deref().is_some_and(gres_requests_gpu)
 }
 
 fn service_needs_nv(
@@ -3150,11 +3135,7 @@ fn service_needs_nv(
                 || service.slurm.gpus_per_task.unwrap_or(0) > 0
                 || service.slurm.cpus_per_gpu.unwrap_or(0) > 0
                 || service.slurm.mem_per_gpu.is_some()
-                || service
-                    .slurm
-                    .gres
-                    .as_deref()
-                    .is_some_and(|gres| gres.contains("gpu"))
+                || service.slurm.gres.as_deref().is_some_and(gres_requests_gpu)
         }
     }
 }

@@ -17,9 +17,11 @@ mod parse;
 mod sweep;
 mod validation;
 
+pub(crate) use interpolate::missing_defaulted_variables_from_str_at_path;
 pub use interpolate::{
     missing_defaulted_variables, missing_defaulted_variables_from_str, referenced_variables,
 };
+pub(crate) use load::mark_spec_validation_error;
 pub use sweep::{
     ObjectiveDirection, SweepConfig, SweepMatrix, SweepObjective, SweepParameterValue,
 };
@@ -84,6 +86,7 @@ impl SecretSpec {
     ///
     /// Returns an error when both or neither source is configured.
     pub fn validate(&self, name: &str) -> Result<()> {
+        validate_safe_env_name(name, "secrets")?;
         match (&self.file, &self.env) {
             (Some(_), None) => Ok(()),
             (None, Some(_)) => Ok(()),
@@ -2032,7 +2035,7 @@ impl EnvFileSpec {
 
 /// Readiness checks supported by `hpc-compose`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadinessSpec {
     /// Wait for a fixed amount of time.
     Sleep {
@@ -2069,6 +2072,66 @@ pub enum ReadinessSpec {
         #[serde(default)]
         timeout_seconds: Option<u64>,
     },
+}
+
+impl ReadinessSpec {
+    fn validate(&self, service_name: &str) -> Result<()> {
+        let field = format!("service '{service_name}' readiness");
+        match self {
+            ReadinessSpec::Sleep { .. } => Ok(()),
+            ReadinessSpec::Tcp {
+                port,
+                host,
+                timeout_seconds,
+            } => {
+                if *port == 0 {
+                    bail!("{field}.port must be at least 1");
+                }
+                if host.as_deref().is_some_and(|host| host.trim().is_empty()) {
+                    bail!("{field}.host must not be empty");
+                }
+                if host.as_deref().is_some_and(|host| host.contains('\0')) {
+                    bail!("{field}.host must not contain null bytes");
+                }
+                validate_readiness_timeout(*timeout_seconds, &field)
+            }
+            ReadinessSpec::Log {
+                pattern,
+                timeout_seconds,
+            } => {
+                if pattern.trim().is_empty() {
+                    bail!("{field}.pattern must not be empty");
+                }
+                if pattern.contains('\0') {
+                    bail!("{field}.pattern must not contain null bytes");
+                }
+                validate_readiness_timeout(*timeout_seconds, &field)
+            }
+            ReadinessSpec::Http {
+                url,
+                status_code,
+                timeout_seconds,
+            } => {
+                if url.trim().is_empty() {
+                    bail!("{field}.url must not be empty");
+                }
+                if url.contains('\0') {
+                    bail!("{field}.url must not contain null bytes");
+                }
+                if !(100..=599).contains(status_code) {
+                    bail!("{field}.status_code must be between 100 and 599");
+                }
+                validate_readiness_timeout(*timeout_seconds, &field)
+            }
+        }
+    }
+}
+
+fn validate_readiness_timeout(timeout_seconds: Option<u64>, field: &str) -> Result<()> {
+    if matches!(timeout_seconds, Some(0)) {
+        bail!("{field}.timeout_seconds must be at least 1");
+    }
+    Ok(())
 }
 
 /// Compose-compatible healthcheck block accepted as sugar for `readiness`.
@@ -2140,6 +2203,9 @@ impl ComposeSpec {
         for (name, service) in &mut self.services {
             service.normalize_script_and_command(name)?;
             service.normalize_healthcheck(name)?;
+            if let Some(readiness) = &service.readiness {
+                readiness.validate(name)?;
+            }
             if service.runtime.prepare.is_some() && service.enroot.prepare.is_some() {
                 return Err(SpecError::DuplicatePrepareHook {
                     service: name.clone(),
@@ -2966,6 +3032,12 @@ impl SlurmConfig {
         validate_positive_u32(self.gpus_per_node, "x-slurm.gpus_per_node")?;
         validate_positive_u32(self.gpus_per_task, "x-slurm.gpus_per_task")?;
         validate_positive_u32(self.cpus_per_gpu, "x-slurm.cpus_per_gpu")?;
+        if self.cpus_per_task.is_some() && self.cpus_per_gpu.is_some() {
+            bail!("x-slurm.cpus_per_task cannot be combined with x-slurm.cpus_per_gpu");
+        }
+        if self.mem.is_some() && self.mem_per_gpu.is_some() {
+            bail!("x-slurm.mem cannot be combined with x-slurm.mem_per_gpu");
+        }
         validate_sbatch_safe_string(self.job_name.as_deref(), "x-slurm.job-name")?;
         validate_sbatch_safe_string(self.partition.as_deref(), "x-slurm.partition")?;
         validate_sbatch_safe_string(self.account.as_deref(), "x-slurm.account")?;
@@ -3280,9 +3352,10 @@ fn validate_slurm_time_format(value: Option<&str>, field: &str) -> Result<()> {
         return Ok(());
     };
     if raw.trim().is_empty() {
-        // Empty/whitespace values are caught by other validation paths; do not
-        // shadow those messages with a time-format complaint.
-        return Ok(());
+        return Err(SpecError::EmptyField {
+            field: field.to_string(),
+        }
+        .into());
     }
     if parse_slurm_time_limit(raw).is_err() {
         return Err(SpecError::InvalidSlurmTime {
@@ -3297,13 +3370,47 @@ fn validate_slurm_time_format(value: Option<&str>, field: &str) -> Result<()> {
 /// Returns true when a `gres` string requests GPUs (any comma-separated entry
 /// whose resource name is `gpu`, e.g. `gpu:2` or `gpu:a100:4`). Case-insensitive
 /// to mirror the renderer's GPU detection.
-fn gres_requests_gpu(gres: &str) -> bool {
+/// Returns whether a comma-separated Slurm GRES value contains an exact GPU
+/// resource name (`gpu` or `gres/gpu`, case-insensitively).
+#[must_use]
+pub fn gres_requests_gpu(gres: &str) -> bool {
     gres.split(',').any(|part| {
         part.trim()
             .split(':')
             .next()
-            .is_some_and(|name| name.eq_ignore_ascii_case("gpu"))
+            .is_some_and(gres_resource_name_is_gpu)
     })
+}
+
+fn gres_resource_name_is_gpu(name: &str) -> bool {
+    name.eq_ignore_ascii_case("gpu") || name.eq_ignore_ascii_case("gres/gpu")
+}
+
+/// Returns the summed GPU count from exact GPU GRES entries. Model-qualified
+/// forms without an explicit count (for example `gpu:a100`) count as one;
+/// similarly named non-GPU resources such as `mygpu:2` are ignored.
+pub(crate) fn gres_gpu_count(gres: &str) -> Option<u32> {
+    let mut found = false;
+    let mut total = 0_u32;
+    for part in gres.split(',') {
+        let fields = part.trim().split(':').collect::<Vec<_>>();
+        if !fields
+            .first()
+            .is_some_and(|name| gres_resource_name_is_gpu(name))
+        {
+            continue;
+        }
+        found = true;
+        let count = fields
+            .last()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1);
+        if count == 0 {
+            return None;
+        }
+        total = total.checked_add(count)?;
+    }
+    found.then_some(total)
 }
 
 /// Hard-errors when both a plain `gpus` count and a GPU-carrying `gres` request
@@ -3742,6 +3849,11 @@ impl ServiceSlurmConfig {
             self.cpus_per_gpu,
             &format!("service '{service_name}' x-slurm.cpus_per_gpu"),
         )?;
+        if self.cpus_per_task.is_some() && self.cpus_per_gpu.is_some() {
+            bail!(
+                "service '{service_name}' x-slurm.cpus_per_task cannot be combined with x-slurm.cpus_per_gpu"
+            );
+        }
         validate_sbatch_safe_string(
             self.mem_per_gpu.as_deref(),
             &format!("service '{service_name}' x-slurm.mem_per_gpu"),
@@ -4373,9 +4485,10 @@ fn validate_mpi_type_token(value: &str) -> Result<()> {
 
 // Every first-class top-level `x-slurm` field that the renderer turns into an
 // sbatch flag, paired with each `sbatch` spelling (long form plus short form
-// where Slurm has one). Setting the field and also passing the raw flag in
-// `submit_args` is a conflict. `mail-user`/`mail-type` are intentionally absent:
-// they derive from `x-slurm.notify`, which has its own dedicated conflict guard.
+// where Slurm has one). These flags are planner-owned even when the typed field
+// is omitted: allowing a raw value would desynchronize the validated plan from
+// the rendered scheduler request. `mail-user`/`mail-type` are intentionally
+// absent because they derive from `x-slurm.notify`, which has its own guard.
 const FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS: &[(&str, &str)] = &[
     ("job_name", "--job-name"),
     ("job_name", "-J"),
@@ -4454,13 +4567,23 @@ const FIRST_CLASS_SERVICE_SLURM_FLAGS: &[(&str, &str)] = &[
 
 fn validate_submit_arg_conflicts(slurm: &SlurmConfig) -> Result<()> {
     for (field, flag) in FIRST_CLASS_TOP_LEVEL_SLURM_FLAGS {
-        if top_level_slurm_field_is_set(slurm, field)
-            && slurm
-                .submit_args
-                .iter()
-                .any(|arg| raw_arg_has_flag(arg, flag))
+        if slurm
+            .submit_args
+            .iter()
+            .any(|arg| raw_arg_has_flag(arg, flag))
         {
-            bail!("x-slurm.{field} cannot be combined with raw {flag} in x-slurm.submit_args");
+            let field = if *flag == "--dependency" {
+                if slurm.after_job.is_some() {
+                    "after_job"
+                } else {
+                    "dependency"
+                }
+            } else {
+                field
+            };
+            bail!(
+                "x-slurm.{field} cannot be combined with raw {flag} in x-slurm.submit_args; {flag} is planner-owned, so use x-slurm.{field} instead"
+            );
         }
     }
     Ok(())
@@ -4468,85 +4591,28 @@ fn validate_submit_arg_conflicts(slurm: &SlurmConfig) -> Result<()> {
 
 fn validate_extra_srun_arg_conflicts(slurm: &ServiceSlurmConfig, service_name: &str) -> Result<()> {
     for (field, flag) in FIRST_CLASS_SERVICE_SLURM_FLAGS {
-        if service_slurm_field_is_set(slurm, field)
-            && slurm
-                .extra_srun_args
-                .iter()
-                .any(|arg| raw_arg_has_flag(arg, flag))
+        if slurm
+            .extra_srun_args
+            .iter()
+            .any(|arg| raw_arg_has_flag(arg, flag))
         {
             bail!(
-                "service '{service_name}' x-slurm.{field} cannot be combined with raw {flag} in service-level x-slurm.extra_srun_args"
+                "service '{service_name}' x-slurm.{field} cannot be combined with raw {flag} in service-level x-slurm.extra_srun_args; {flag} is planner-owned, so use service-level x-slurm.{field} instead"
             );
         }
     }
     Ok(())
 }
 
-fn top_level_slurm_field_is_set(slurm: &SlurmConfig, field: &str) -> bool {
-    match field {
-        "job_name" => slurm.job_name.is_some(),
-        "nodes" => slurm.nodes.is_some(),
-        "ntasks" => slurm.ntasks.is_some(),
-        "ntasks_per_node" => slurm.ntasks_per_node.is_some(),
-        "partition" => slurm.partition.is_some(),
-        "account" => slurm.account.is_some(),
-        "qos" => slurm.qos.is_some(),
-        "reservation" => slurm.reservation.is_some(),
-        "licenses" => slurm.licenses.is_some(),
-        "time" => slurm.time.is_some(),
-        "cpus_per_task" => slurm.cpus_per_task.is_some(),
-        "mem" => slurm.mem.is_some(),
-        "gres" => slurm.gres.is_some(),
-        "gpus" => slurm.gpus.is_some(),
-        "constraint" => slurm.constraint.is_some(),
-        "output" => slurm.output.is_some(),
-        "error" => slurm.error.is_some(),
-        "chdir" => slurm.chdir.is_some(),
-        "gpus_per_node" => slurm.gpus_per_node.is_some(),
-        "gpus_per_task" => slurm.gpus_per_task.is_some(),
-        "cpus_per_gpu" => slurm.cpus_per_gpu.is_some(),
-        "mem_per_gpu" => slurm.mem_per_gpu.is_some(),
-        "gpu_bind" => slurm.gpu_bind.is_some(),
-        "cpu_bind" => slurm.cpu_bind.is_some(),
-        "mem_bind" => slurm.mem_bind.is_some(),
-        "distribution" => slurm.distribution.is_some(),
-        "hint" => slurm.hint.is_some(),
-        "array" => slurm.array.is_some(),
-        "after_job" => slurm.after_job.is_some(),
-        "dependency" => slurm.dependency.is_some(),
-        "requeue" => slurm.requeue.is_some(),
-        "signal" => slurm.signal.is_some(),
-        _ => false,
-    }
-}
-
-fn service_slurm_field_is_set(slurm: &ServiceSlurmConfig, field: &str) -> bool {
-    match field {
-        "nodes" => slurm.nodes.is_some(),
-        "ntasks" => slurm.ntasks.is_some(),
-        "ntasks_per_node" => slurm.ntasks_per_node.is_some(),
-        "cpus_per_task" => slurm.cpus_per_task.is_some(),
-        "gres" => slurm.gres.is_some(),
-        "gpus" => slurm.gpus.is_some(),
-        "gpus_per_node" => slurm.gpus_per_node.is_some(),
-        "gpus_per_task" => slurm.gpus_per_task.is_some(),
-        "cpus_per_gpu" => slurm.cpus_per_gpu.is_some(),
-        "mem_per_gpu" => slurm.mem_per_gpu.is_some(),
-        "gpu_bind" => slurm.gpu_bind.is_some(),
-        "cpu_bind" => slurm.cpu_bind.is_some(),
-        "mem_bind" => slurm.mem_bind.is_some(),
-        "distribution" => slurm.distribution.is_some(),
-        "hint" => slurm.hint.is_some(),
-        _ => false,
-    }
-}
-
 fn raw_arg_has_flag(arg: &str, flag: &str) -> bool {
     let trimmed = arg.trim_start();
-    trimmed == flag
-        || trimmed
-            .strip_prefix(flag)
-            .is_some_and(|rest| rest.starts_with('=') || rest.starts_with(char::is_whitespace))
+    let Some(rest) = trimmed.strip_prefix(flag) else {
+        return false;
+    };
+    rest.is_empty()
+        || rest.starts_with('=')
+        || rest.starts_with(char::is_whitespace)
+        || (flag.starts_with('-') && !flag.starts_with("--") && flag.len() == 2)
 }
 
 fn submit_args_contain_mail_settings(args: &[String]) -> bool {

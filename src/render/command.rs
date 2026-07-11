@@ -146,7 +146,14 @@ pub(super) fn build_srun_command_for_backend_with_extra_container_env(
     }
     if let Some(gres) = &service.slurm.gres {
         args.push(format!("--gres={gres}"));
-    } else if let Some(gpus) = service.slurm.gpus {
+    }
+    if let Some(gpus) = service.slurm.gpus
+        && !service
+            .slurm
+            .gres
+            .as_deref()
+            .is_some_and(crate::spec::gres_requests_gpu)
+    {
         args.push(format!("--gpus={gpus}"));
     }
     if let Some(gpus_per_node) = service.slurm.gpus_per_node {

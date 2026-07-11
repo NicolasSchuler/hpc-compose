@@ -21,6 +21,7 @@ services:
       seconds: 1
     x-slurm:
       nodes: 1
+      ntasks: 1
 
   mpi:
     image: python:3.11-slim
