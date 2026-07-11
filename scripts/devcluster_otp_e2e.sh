@@ -174,6 +174,8 @@ status=0
 sed 's/^/    | /' "$out"
 [[ "$status" == 0 ]] || fail "up --remote exited $status"
 grep -q 'Submitted batch job' "$out" || fail "no remote sbatch submission found"
+remote_jobid="$(grep -oE 'Submitted batch job [0-9]+' "$out" | head -n1 | grep -oE '[0-9]+')"
+[[ -n "$remote_jobid" ]] || fail "could not parse the remote job id"
 grep -q 'final state: COMPLETED' "$out" || fail "remote job did not reach COMPLETED"
 grep -q 'only prompts on the first connection' "$out" \
   || fail "up --remote did not print the OTP/ControlMaster multiplexing note"
@@ -187,14 +189,13 @@ ssh "${conn_opts[@]}" -o ControlPath="$control_socket" -O check root@localhost >
   || fail "ssh -O check did not find a live master after command 1"
 pass "ControlMaster socket is live ($control_socket)"
 
-# Command 2: a second, distinct hpc-compose laptop command in the same session.
-note "Command 2: up --remote --dry-run (second laptop command)"
+# Command 2: a second, distinct remote hpc-compose command in the same session.
+note "Command 2: status --remote (second laptop command)"
 out2="$(mktemp)"
 status=0
-"$bin" up --remote=root@localhost -f "$spec" --dry-run >"$out2" 2>&1 || status=$?
-[[ "$status" == 0 ]] || { sed 's/^/    | /' "$out2" >&2; fail "up --remote --dry-run exited $status"; }
-grep -q 'skipping sbatch submission' "$out2" || fail "dry-run did not report skipping submission"
-! grep -q 'Submitted batch job' "$out2" || fail "dry-run unexpectedly submitted a job"
+"$bin" status --remote=root@localhost --format json -f "$spec" >"$out2" 2>&1 || status=$?
+[[ "$status" == 0 ]] || { sed 's/^/    | /' "$out2" >&2; fail "remote status exited $status"; }
+grep -q "$remote_jobid" "$out2" || fail "remote status did not report job $remote_jobid"
 c2="$(otp_count)"
 [[ "$c2" == 1 ]] || fail "command 2 re-authenticated (count now $c2); ControlMaster not reused"
 pass "command 2 reused the master — still exactly 1 OTP authentication"

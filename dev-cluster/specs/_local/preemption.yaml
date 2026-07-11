@@ -1,0 +1,60 @@
+name: dev-cluster-local-preemption
+
+# Opt-in local-only synthetic preemption drill. The first attempt waits for the
+# CLI to send USR1, atomically writes a checkpoint into the resume directory,
+# and is then requeued. The resumed attempt fails unless that checkpoint is
+# visible, so success proves signal forwarding, persistence, requeue, and resume.
+runtime:
+  backend: host
+
+x-slurm:
+  job_name: devcluster-preempt-${DEVCLUSTER_CASE_ID:-manual}
+  time: "00:01:00"
+  nodes: 1
+  cpus_per_task: 1
+  mem: 256M
+  cache_dir: /var/cache/hpc-compose
+  requeue: true
+  signal:
+    name: USR1
+    at_seconds: 30
+    shell: step
+  resume:
+    path: /var/cache/hpc-compose/resume/devcluster-preempt-${DEVCLUSTER_CASE_ID:-manual}
+
+services:
+  app:
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        set -u
+        resume_dir="$$HPC_COMPOSE_RESUME_DIR"
+        checkpoint="$$resume_dir/preemption.checkpoint"
+        mkdir -p "$$resume_dir"
+
+        if [[ "$$HPC_COMPOSE_ATTEMPT" -gt 0 ]]; then
+          test "$$HPC_COMPOSE_IS_RESUME" = "1"
+          test -f "$$checkpoint"
+          test "$$(cat "$$checkpoint")" = "signal=USR1 attempt=0"
+          echo "devcluster-preemption-resumed attempt=$$HPC_COMPOSE_ATTEMPT checkpoint=$$checkpoint"
+          exit 0
+        fi
+
+        test "$$HPC_COMPOSE_ATTEMPT" = "0"
+        test "$$HPC_COMPOSE_IS_RESUME" = "0"
+        test ! -e "$$checkpoint"
+        checkpoint_on_signal() {
+          tmp="$$checkpoint.tmp.$$$$"
+          printf 'signal=USR1 attempt=%s\n' "$$HPC_COMPOSE_ATTEMPT" >"$$tmp"
+          mv "$$tmp" "$$checkpoint"
+          echo "devcluster-preemption-checkpointed attempt=$$HPC_COMPOSE_ATTEMPT path=$$checkpoint"
+        }
+        trap checkpoint_on_signal USR1
+        echo "devcluster-preemption-armed attempt=0"
+
+        while :; do
+          sleep 1 || true
+        done
+    assert:
+      exit_code: 0

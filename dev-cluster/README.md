@@ -75,16 +75,15 @@ accounting database stay untouched. It works both ways:
 # and submits nothing. Add --format json for {submitted:false, job_id:null, dry_run:true}.
 scripts/devcluster.sh run dev-cluster/specs/hello.yaml --dry-run
 
-# Host -> login node: stages the project over rsync and renders the sbatch ON the
-# node, but submits no job (stages-but-doesn't-submit). The dev-cluster stand-in
-# listens on port 2222 with key-only root login, so point ssh at it the way the
-# remote harness does (a host in your ~/.ssh/config needs no env var):
+# Host preview with a remote target configured: still renders locally and exits
+# before SSH, rsync, preparation, or submission. The target may be unreachable.
 HPC_COMPOSE_REMOTE_SSH_OPTS="-p 2222 -i <your-key> -o StrictHostKeyChecking=no" \
   hpc-compose up --remote=root@localhost -f dev-cluster/specs/hello.yaml --dry-run
 ```
 
-Both paths are asserted end to end (the rendered script exists and is a valid
-sbatch; `squeue`/`sacct` show no new job) — see "Automated end-to-end check".
+Both paths are asserted end to end: the rendered script exists and is valid,
+the remote preview creates no staged project, and `squeue`/`sacct` show no new
+job. See "Automated end-to-end check".
 
 To work on your own project instead of this repo:
 
@@ -136,11 +135,11 @@ part):
 - `alloc` opens a real `salloc` and `run` reuses that allocation via `srun`
   instead of a fresh `sbatch`
 - safe dry-runs: `up --dry-run` (in-container) and `up --remote --dry-run`
-  (host→node) render the real sbatch but submit nothing — proven against the live
-  controller (the queue and accounting db are unchanged)
+  (host-side) render the real sbatch locally but submit nothing; the remote form
+  also proves that no SSH session or remote stage is created
 - the **one-OTP-per-session** property of the laptop thin client: the login-node
   stand-in is flipped into an OTP/2FA-requiring sshd, and a multi-command session
-  (`up --remote`, a second `up --remote --dry-run`, and a `pull`-style transfer)
+  (`up --remote`, a remote `status`, and a `pull`-style transfer)
   is shown to authenticate **exactly once** via SSH ControlMaster multiplexing
 - read-side affordances over the live scheduler: `weather` (live node/queue
   signals), `diff` (pairwise + N-way comparison of two real runs), `when`
@@ -175,6 +174,31 @@ For successful specs, the harness also checks `score` against `sacct`-backed
 efficiency data. For all specs, it checks `stats` does not regress into the
 known `sstat`/`AllocTRES` field mismatch.
 
+### Selectable local cases (not CI)
+
+Three higher-impact scheduler contracts are available as opt-in local cases.
+They are deliberately **not** added to the CI E2E matrix:
+
+```bash
+just dev-cluster-cases
+just dev-cluster-case preemption
+just dev-cluster-case fs-probes
+just dev-cluster-case remote-reads
+```
+
+`preemption` proves a real `USR1` checkpoint, `scontrol requeue`, attempt-2
+resume, and checkpoint history. `fs-probes` runs the active `sbatch --wait`
+visibility/rename/headroom probe. `remote-reads` submits an artifact-producing
+job through the SSH stand-in, then reads that same job through remote `status`,
+`stats`, `logs`, `score`, and `pull` without creating another allocation.
+
+The cluster stays up between cases for fast local iteration. Set
+`DEVCLUSTER_E2E_DOWN=1` on a case invocation to tear it down afterward. A failed
+case preserves scheduler and container diagnostics under
+`.tmp/devcluster-cases/`; a successful case removes its temporary state. The
+runner serializes local cases, snapshots the pre-existing queue, and avoids
+blanket cleanup for these selectable cases.
+
 Specs that self-terminate to a terminal state ride this generic
 `up --watch-mode line` loop. Specs that need a different flow — `--detach` plus
 polling, multi-job orchestration, or a `scancel` — live under `specs/_extra/`
@@ -197,8 +221,9 @@ The same image is also an SSH-reachable login-node stand-in (`sshd` + `rsync`,
 port `2222`), which `scripts/devcluster_remote_e2e.sh` uses to exercise the thin
 remote-submit path (`up --remote`) from the host: it rsyncs the project to the
 node and submits over SSH, asserting a real remote `sbatch` tracked to
-COMPLETED, then that `up --remote --dry-run` stages-but-doesn't-submit. That
-harness injects a throwaway per-run key (no credentials are baked into the image).
+COMPLETED, then that `up --remote --dry-run` remains a local static preview and
+does not recreate the remote stage. That harness injects a throwaway per-run key
+(no credentials are baked into the image).
 
 `scripts/devcluster_otp_e2e.sh` (also `just dev-cluster-otp-e2e`) closes the
 last laptop-thin-client gap: real login nodes demand an OTP/2FA per SSH session,
@@ -206,8 +231,8 @@ and hpc-compose copes via SSH ControlMaster multiplexing so a whole session
 authenticates **once**. The harness flips the stand-in into an OTP-requiring
 sshd (publickey **plus** an interactive second factor counted by a `pam_exec`
 hook — see `otp-sim.sh`), verifies a key-only login is now *rejected*, then
-drives a multi-command laptop session (`up --remote`, a second `up --remote
---dry-run`, and a `pull`-style `rsync`) and asserts **exactly one**
+drives a multi-command laptop session (`up --remote`, a remote `status`, and a
+`pull`-style `rsync`) and asserts **exactly one**
 authentication occurred — corroborated by the live ControlMaster socket and `ssh
 -O check`. It restores the key-only sshd and removes the control socket on exit.
 
@@ -284,8 +309,13 @@ unrelated production jobs — removes this run's remote stage dir
 | `specs/_extra/test-fail.yaml` | Failing half of the `test --submit` smoke block (service exits nonzero → "smoke test failed", nonzero exit) |
 | `specs/_extra/germinate.yaml` | `germinate` renders + submits a minimized canary, waits for terminal, and rightsizes from sacct accounting |
 | `specs/_extra/down.yaml` | A long sleep used by the `down --job-id --yes` block: real scancel → CANCELLED plus tracked-state reaping |
+| `specs/_local/preemption.yaml` | Opt-in local-only USR1 checkpoint → requeue → resumed-attempt contract |
+| `specs/_local/fs-probes.yaml` | Opt-in local-only input for the active shared-filesystem probe |
 | `../scripts/devcluster.sh` | `up` / `run` / `exec` / `sinfo` / `logs` / `down` wrapper |
+| `../scripts/devcluster_case.sh` | Selectable local-only case dispatcher (`preemption`, `fs-probes`, `remote-reads`); not run in CI |
+| `../scripts/devcluster_local_case.sh` | Shared lifecycle, scoped cleanup, and failure diagnostics for in-container local cases |
+| `../scripts/devcluster_case_assert.py` | Stable JSON contract assertions used by the selectable local cases |
 | `../scripts/devcluster_e2e.sh` | UC1 end-to-end harness (generic loop + `_extra/` dedicated blocks; checks `sacct`/`status`/`ps`/`score`/`pull`) |
-| `../scripts/devcluster_remote_e2e.sh` | UC2 end-to-end harness: drives `up --remote` from the host against this node as an SSH login-node stand-in (`sshd` + `rsync` in the image; port `2222`); also asserts remote `--dry-run` stages-but-doesn't-submit |
+| `../scripts/devcluster_remote_e2e.sh` | UC2 end-to-end harness: drives `up --remote` from the host against this node as an SSH login-node stand-in (`sshd` + `rsync` in the image; port `2222`); also asserts remote `--dry-run` is a local static preview with no remote stage or submission |
 | `../scripts/devcluster_otp_e2e.sh` | UC3 end-to-end harness: flips the stand-in into an OTP/2FA-requiring sshd and proves a multi-command laptop session authenticates exactly once via SSH ControlMaster multiplexing |
 | `../scripts/remote_gpu_e2e.sh` | Opt-in **real-GPU** manual check (`just remote-gpu-e2e`, HAICORE by default; **not** in CI): one-OTP session that `up --remote`s a 1-GPU job and asserts the metrics pipeline (`gpu.jsonl`, `cpu.jsonl`, `stats --format json` sampler nodes + `gpu_count`) against real hardware |

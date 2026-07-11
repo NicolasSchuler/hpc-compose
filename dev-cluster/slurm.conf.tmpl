@@ -15,6 +15,10 @@ MailProg=/bin/true
 
 AuthType=auth/munge
 CryptoType=crypto/munge
+# Slurm also uses the job-step credential lifetime as the ordinary requeue
+# delay. Keep it short in this single-node disposable cluster so local
+# checkpoint/requeue tests do not spend two minutes pending between attempts.
+AuthInfo=cred_expire=10
 
 StateSaveLocation=/var/spool/slurmctld
 SlurmdSpoolDir=/var/spool/slurmd

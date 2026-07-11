@@ -107,6 +107,17 @@ examples-check: (_require-tools "shellcheck")
 dev-cluster-e2e:
     scripts/devcluster_e2e.sh
 
+# List the opt-in local-only real-scheduler cases. These are intentionally not
+# wired into CI; use them while changing preemption, active probes, or remote
+# follow-up behavior.
+dev-cluster-cases:
+    @scripts/devcluster_case.sh --list
+
+# Run one opt-in local-only dev-cluster case while reusing the running cluster.
+# Example: `just dev-cluster-case preemption`.
+dev-cluster-case case:
+    scripts/devcluster_case.sh "{{case}}"
+
 # Boot the dev cluster as an SSH login-node stand-in and exercise the thin
 # remote-submit path (`up --remote`) from this host: rsync the project over,
 # submit on the node via real sbatch, and track to COMPLETED. Same privileged
