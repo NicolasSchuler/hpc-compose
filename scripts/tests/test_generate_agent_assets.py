@@ -55,6 +55,12 @@ class AgentAssetGeneratorTests(unittest.TestCase):
         self.assertIn(Path("llms.txt"), outputs)
         self.assertIn(Path("llms-ctx.txt"), outputs)
         self.assertIn(Path("llms-ctx-full.txt"), outputs)
+        self.assertLessEqual(
+            len(outputs[Path("llms-ctx.txt")]), assets.MAX_ESSENTIAL_CONTEXT_BYTES
+        )
+        self.assertLessEqual(
+            len(outputs[Path("llms-ctx-full.txt")]), assets.MAX_FULL_CONTEXT_BYTES
+        )
         self.assertIn(Path("agent-command-policy.json"), outputs)
         self.assertIn(
             Path(f"agent-command-policy-v{assets.crate_version()}.json"), outputs

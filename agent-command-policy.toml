@@ -170,15 +170,9 @@ summary = "Run non-submitting environment and scheduler diagnostics."
 
 [[commands]]
 path = "doctor cluster-report"
-authorization_tier = "automatic-read-only"
-effects = ["local-read", "scheduler-read"]
-summary = "Read cluster capabilities and print an advisory profile."
-
-[[commands.overrides]]
-flags = ["--out"]
 authorization_tier = "scoped-local-mutation"
-add_effects = ["local-write"]
-description = "Writes the generated advisory cluster profile to the requested path; '-' remains stdout-only."
+effects = ["local-read", "local-write", "scheduler-read"]
+summary = "Read cluster capabilities and write an advisory profile to .hpc-compose/cluster.toml or --out; --out - is stdout-only."
 
 [[commands]]
 path = "doctor fabric-smoke"
@@ -411,7 +405,7 @@ summary = "Run the static diagnostics-only language server over stdio."
 path = "new"
 authorization_tier = "scoped-local-mutation"
 effects = ["local-write"]
-summary = "Write a starter spec."
+summary = "Write a starter spec. `init` is the CLI alias for this command; apply this entry to it."
 
 [[commands.overrides]]
 flags = ["--list-templates"]
@@ -724,12 +718,6 @@ flags = ["--dry-run"]
 authorization_tier = "scoped-local-mutation"
 remove_effects = ["executes-user-code", "network-or-ssh", "scheduler-read", "scheduler-submit", "scheduler-cancel", "polls"]
 description = "Skips preparation and submission but writes an owner-only launcher script to the explicit or default path."
-
-[[commands.overrides]]
-flags = ["--dry-run", "--remote"]
-authorization_tier = "explicit-runtime-or-external-mutation"
-add_effects = ["network-or-ssh"]
-description = "Still creates a remote staging directory, probes or installs the remote binary, rsyncs the project, and delegates the dry run over SSH."
 
 [[commands.overrides]]
 flags = ["--resume-diff-only"]

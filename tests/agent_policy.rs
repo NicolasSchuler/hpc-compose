@@ -345,9 +345,9 @@ fn write_and_remote_overrides_preserve_their_real_effects() {
     }
 
     let remote = decide(&policy, "up", &["--dry-run", "--remote"]);
-    assert_eq!(remote.tier, "explicit-runtime-or-external-mutation");
+    assert_eq!(remote.tier, "scoped-local-mutation");
     assert!(remote.effects.contains("local-write"));
-    assert!(remote.effects.contains("network-or-ssh"));
+    assert!(!remote.effects.contains("network-or-ssh"));
     assert!(!remote.effects.contains("scheduler-submit"));
     assert!(!remote.effects.contains("scheduler-cancel"));
 
@@ -373,22 +373,25 @@ fn forward_safety_scenarios_preserve_agent_boundaries() {
         }
     }
 
-    // Unknown-site distributed work may inspect bundled guidance and scheduler facts,
-    // but it does not get implicit permission to provision, execute, or submit.
-    for path in ["docs", "examples recommend", "doctor cluster-report"] {
+    // Unknown-site distributed work may inspect bundled guidance, but it does
+    // not get implicit permission to provision, execute, submit, or write a
+    // cluster profile.
+    for path in ["docs", "examples recommend"] {
         let decision = decide(&policy, path, &[]);
         assert_no_mutation(&decision, &format!("unknown-site distributed: {path}"));
     }
+    let cluster_report = decide(&policy, "doctor cluster-report", &[]);
+    assert_eq!(cluster_report.tier, "scoped-local-mutation");
+    assert!(cluster_report.effects.contains("local-write"));
 
-    // A remote dry-run still stages over SSH. Global --offline blocks that
-    // transport at runtime, but it does not turn the requested operation into an
-    // automatic read-only action; Slurm mutation must remain absent either way.
+    // A remote dry-run is still the local owner-only script preview. The remote
+    // flag does not add transport, while Slurm mutation remains absent.
     let remote_dry_run = decide(
         &policy,
         "up",
         &["--remote", "--dry-run", "--format", "--offline"],
     );
-    assert_eq!(remote_dry_run.tier, "explicit-runtime-or-external-mutation");
+    assert_eq!(remote_dry_run.tier, "scoped-local-mutation");
     assert!(remote_dry_run.effects.contains("local-write"));
     assert!(!remote_dry_run.effects.contains("network-or-ssh"));
     assert!(!remote_dry_run.effects.contains("scheduler-submit"));

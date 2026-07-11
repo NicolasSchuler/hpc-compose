@@ -216,7 +216,7 @@ pub fn touch_manifest(artifact_path: &Path) -> Result<()> {
 /// The `staged_dir` is the materialized content-addressed directory; the
 /// manifest lands at the `<staged_dir>.{dataset,model}.json` sidecar. Like the
 /// image upserts this serializes its read-modify-write under
-/// [`with_manifest_lock`] so concurrent sweeps of the same key do not lose an
+/// `with_manifest_lock` so concurrent sweeps of the same key do not lose an
 /// update, and an existing manifest's `created_at`/`service_names` survive.
 ///
 /// # Errors

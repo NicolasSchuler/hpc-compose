@@ -48,7 +48,9 @@ For site-specific facts, retrieve the installed version's embedded guide instead
 hpc-compose --offline docs "<site and question>" --format json
 ```
 
-Use published `/raw/*.md` only when no suitable installed binary is available, and label it as latest-release guidance rather than version-matched guidance.
+Use published `/raw/*.md` only when no suitable installed binary is available,
+and label it as current-`main` guidance that may be newer than the installed
+release rather than as version-matched guidance.
 
 ## 4. Gather repository evidence
 

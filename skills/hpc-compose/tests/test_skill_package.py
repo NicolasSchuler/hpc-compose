@@ -20,10 +20,7 @@ class SkillPackageTests(unittest.TestCase):
     def test_skill_contract_and_budgets_validate(self) -> None:
         files = package_skill.validate_skill(package_skill.crate_version())
         relative = {path.relative_to(package_skill.SKILL).as_posix() for path in files}
-        self.assertIn("SKILL.md", relative)
-        self.assertIn("VERSION", relative)
-        self.assertIn("agents/openai.yaml", relative)
-        self.assertIn("references/command-safety.md", relative)
+        self.assertEqual(relative, package_skill.SKILL_PAYLOAD)
         self.assertNotIn("agents/README.md", relative)
         self.assertFalse(any(path.startswith("tests/") for path in relative))
         self.assertFalse(any(path.is_symlink() for path in files))

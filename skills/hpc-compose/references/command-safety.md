@@ -8,13 +8,13 @@ Apply the highest matching authorization tier. `sensitive-output` is an independ
 
 May run automatically when its independent sensitive-output guard is also satisfied.
 
-`cache`, `cache inspect`, `cache list`, `checkpoints`, `completions`, `config`, `context`, `debug`, `diff`, `docs`, `doctor`, `doctor cluster-report`, `doctor fabric-smoke`, `doctor mpi-smoke`, `doctor readiness`, `examples`, `examples coverage`, `examples list`, `examples recommend`, `examples search`, `experiment`, `experiment show`, `explain`, `feedback`, `inspect`, `jobs`, `jobs list`, `lint`, `logs`, `lsp`, `plan`, `preflight`, `ps`, `pull`, `reach`, `render`, `rendezvous`, `rendezvous list`, `rendezvous resolve`, `replay`, `schema`, `score`, `stats`, `status`, `sweep`, `sweep list`, `sweep results`, `sweep status`, `validate`, `watch`, `weather`, `workspace`.
+`cache`, `cache inspect`, `cache list`, `checkpoints`, `completions`, `config`, `context`, `debug`, `diff`, `docs`, `doctor`, `doctor fabric-smoke`, `doctor mpi-smoke`, `doctor readiness`, `examples`, `examples coverage`, `examples list`, `examples recommend`, `examples search`, `experiment`, `experiment show`, `explain`, `feedback`, `inspect`, `jobs`, `jobs list`, `lint`, `logs`, `lsp`, `plan`, `preflight`, `ps`, `pull`, `reach`, `render`, `rendezvous`, `rendezvous list`, `rendezvous resolve`, `replay`, `schema`, `score`, `stats`, `status`, `sweep`, `sweep list`, `sweep results`, `sweep status`, `validate`, `watch`, `weather`, `workspace`.
 
 ## 2. `scoped-local-mutation`
 
 Requires authorization for the named local write scope.
 
-`artifacts`, `evolve`, `experiment bundle`, `experiment note`, `experiment tag`, `new`, `notebook promote`, `setup`, `sweep observe`, `workspace status`.
+`artifacts`, `doctor cluster-report`, `evolve`, `experiment bundle`, `experiment note`, `experiment tag`, `new`, `notebook promote`, `setup`, `sweep observe`, `workspace status`.
 
 ## 3. `explicit-runtime-or-external-mutation`
 
@@ -46,7 +46,6 @@ Apply every matching row in policy order. An unchanged tier does not remove an i
 | `clean` | `--dry-run` | `automatic-read-only` | removes `local-write`, `local-delete` | Preview the cleanup plan without deleting files. |
 | `config` | `--show-values` | unchanged | adds `sensitive-output` | Disables redaction of sensitive-looking values. Agents must not use or ingest this output. |
 | `context` | `--show-values` | unchanged | adds `sensitive-output` | Disables redaction of sensitive-looking interpolation values. Agents must not use or ingest this output. |
-| `doctor cluster-report` | `--out` | `scoped-local-mutation` | adds `local-write` | Writes the generated advisory cluster profile to the requested path; '-' remains stdout-only. |
 | `doctor fabric-smoke` | `--script-out` | `scoped-local-mutation` | adds `local-write` | Writes the rendered probe script to the requested path. |
 | `doctor fabric-smoke` | `--submit` | `explicit-quota` | adds `local-write`, `executes-user-code`, `scheduler-read`, `scheduler-submit`, `polls` | Submits and waits for the fabric probe. |
 | `doctor mpi-smoke` | `--script-out` | `scoped-local-mutation` | adds `local-write` | Writes the rendered probe script to the requested path. |
@@ -82,7 +81,6 @@ Apply every matching row in policy order. An unchanged tier does not remove an i
 | `test` | `--submit` | `explicit-quota` | adds `scheduler-read`, `scheduler-submit` | Submits the finite smoke test to Slurm. |
 | `test` | `--preemption` | `explicit-destructive` | adds `scheduler-read`, `scheduler-submit`, `scheduler-cancel` | Submits, signals, requeues, and observes a synthetic preemption drill. |
 | `up` | `--dry-run` | `scoped-local-mutation` | removes `executes-user-code`, `network-or-ssh`, `scheduler-read`, `scheduler-submit`, `scheduler-cancel`, `polls` | Skips preparation and submission but writes an owner-only launcher script to the explicit or default path. |
-| `up` | `--dry-run` + `--remote` | `explicit-runtime-or-external-mutation` | adds `network-or-ssh` | Still creates a remote staging directory, probes or installs the remote binary, rsyncs the project, and delegates the dry run over SSH. |
 | `up` | `--resume-diff-only` | `automatic-read-only` | removes `local-write`, `executes-user-code`, `network-or-ssh`, `scheduler-read`, `scheduler-submit`, `scheduler-cancel`, `polls` | Prints only the resume-sensitive diff and exits. |
 | `up` | `--local` | `explicit-runtime-or-external-mutation` | removes `scheduler-read`, `scheduler-submit`, `scheduler-cancel` | Runs workload code through the local launcher instead of Slurm. |
 | `up` | `--script-out` | `scoped-local-mutation` | adds `local-write` | Writes the rendered script to the requested path. |

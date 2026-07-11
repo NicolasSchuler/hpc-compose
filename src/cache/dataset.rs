@@ -400,7 +400,7 @@ pub struct StagedInputProof {
 
 /// Derives the deterministic 16-hex on-disk key for a staged input.
 ///
-/// Reuses [`crate::domain::artifact_cache_key`] + [`short_digest_prefix`] (the
+/// Reuses `crate::domain::artifact_cache_key` + `short_digest_prefix` (the
 /// same machinery the image cache uses), keyed on the spec — identical
 /// (uri, revision, kind) yield the same key; any difference yields a different
 /// one. The tool version is intentionally *not* mixed in: a staged input is the

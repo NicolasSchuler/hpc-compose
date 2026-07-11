@@ -85,18 +85,18 @@ docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "typos" "markdownlint-c
     mdbook build docs
     python3 scripts/generate_agent_assets.py --site-dir target/mdbook
     python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook
-    RUSTFLAGS="-D warnings" cargo doc --locked --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
     cargo run --locked --features manpage-bin --bin gen-manpages -- --check
-    typos docs/src docs/plans/2026-07-feature-brainstorm.md skills/hpc-compose llms.txt README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
+    typos docs/src docs/brand docs/plans/2026-07-feature-brainstorm.md examples dev-cluster/README.md skills/hpc-compose llms.txt README.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md
     markdownlint-cli2
-    shopt -s globstar nullglob; lychee --no-progress --fallback-extensions md --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' --exclude '^https://nicolasschuler\.github\.io/hpc-compose/(raw/|llms-ctx(-full)?\.txt$|agent-command-policy(-v[0-9.]+)?\.json$|schema/)' --exclude-path 'target/mdbook/404\.html$' README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md llms.txt docs/plans/2026-07-feature-brainstorm.md docs/src/**/*.md skills/hpc-compose/**/*.md target/mdbook/**/*.html
-    python3 scripts/gen_pa11y_urls.py
-    python3 -m http.server 3000 --directory target/mdbook >/tmp/hpc-compose-docs-http.log 2>&1 & server_pid=$!; trap 'kill "$server_pid"' EXIT; for _ in $(seq 1 30); do if curl -fsS http://127.0.0.1:3000/ >/dev/null; then break; fi; sleep 1; done; python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook --base-url http://127.0.0.1:3000; pa11y-ci --config .pa11yci.json
+    shopt -s globstar nullglob; lychee --no-progress --include-fragments=anchor-only --fallback-extensions md --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' --exclude '^https://nicolasschuler\.github\.io/hpc-compose/(raw/|llms-ctx(-full)?\.txt$|agent-command-policy(-v[0-9.]+)?\.json$|schema/)' --exclude '^https://nicolasschuler\.github\.io/hpc-compose/[^#]+\.html#' --exclude-path 'target/mdbook/404\.html$' README.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md llms.txt dev-cluster/README.md docs/brand/README.md docs/plans/2026-07-feature-brainstorm.md docs/src/**/*.md examples/**/*.md skills/hpc-compose/**/*.md target/mdbook/**/*.html
+    python3 scripts/gen_pa11y_urls.py --output target/pa11y-ci.json
+    python3 -m http.server 3000 --directory target/mdbook >/tmp/hpc-compose-docs-http.log 2>&1 & server_pid=$!; trap 'kill "$server_pid"' EXIT; for _ in $(seq 1 30); do if curl -fsS http://127.0.0.1:3000/ >/dev/null; then break; fi; sleep 1; done; python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook --base-url http://127.0.0.1:3000; pa11y-ci --config target/pa11y-ci.json
 
 examples-check: (_require-tools "shellcheck")
     cargo build --locked
     for f in examples/*.yaml; do echo "Validating $f"; env -u CACHE_DIR cargo run --locked -- validate -f "$f"; done
-    shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh scripts/devcluster_otp_e2e.sh scripts/remote_gpu_e2e.sh dev-cluster/otp-sim.sh
+    shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_case.sh scripts/devcluster_local_case.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh scripts/devcluster_otp_e2e.sh scripts/remote_gpu_e2e.sh dev-cluster/otp-sim.sh
     tmpdir="$(mktemp -d)"; trap 'rm -rf "$tmpdir"' EXIT; for f in examples/*.yaml; do echo "Shellchecking rendered $f"; out="$tmpdir/$(basename "$f" .yaml).sbatch"; env -u CACHE_DIR cargo run --locked -- render -f "$f" --output "$out"; shellcheck -e SC2034 -x -s bash "$out"; done
 
 # Boot the local single-node Slurm dev cluster and run the real

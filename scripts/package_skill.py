@@ -17,6 +17,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills/hpc-compose"
 LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+SKILL_PAYLOAD = {
+    "SKILL.md",
+    "VERSION",
+    "agents/openai.yaml",
+    "references/authoring-migration.md",
+    "references/cluster-setup.md",
+    "references/command-safety.md",
+    "references/operations-recovery.md",
+    "scripts/hpc_compose_repo_probe.py",
+}
 
 
 class SkillError(RuntimeError):
@@ -111,6 +121,13 @@ def validate_skill(version: str) -> list[Path]:
         and "tests" not in path.relative_to(SKILL).parts
         and "__pycache__" not in path.relative_to(SKILL).parts
     ]
+    relative_files = {path.relative_to(SKILL).as_posix() for path in files}
+    if relative_files != SKILL_PAYLOAD:
+        missing = sorted(SKILL_PAYLOAD - relative_files)
+        unexpected = sorted(relative_files - SKILL_PAYLOAD)
+        raise SkillError(
+            f"skill payload differs from allowlist; missing={missing}, unexpected={unexpected}"
+        )
     return sorted(files, key=lambda path: path.relative_to(SKILL).as_posix())
 
 

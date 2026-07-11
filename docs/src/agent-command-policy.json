@@ -266,24 +266,13 @@
     },
     {
       "path": "doctor cluster-report",
-      "authorization_tier": "automatic-read-only",
+      "authorization_tier": "scoped-local-mutation",
       "effects": [
         "local-read",
+        "local-write",
         "scheduler-read"
       ],
-      "summary": "Read cluster capabilities and print an advisory profile.",
-      "overrides": [
-        {
-          "flags": [
-            "--out"
-          ],
-          "authorization_tier": "scoped-local-mutation",
-          "add_effects": [
-            "local-write"
-          ],
-          "description": "Writes the generated advisory cluster profile to the requested path; '-' remains stdout-only."
-        }
-      ]
+      "summary": "Read cluster capabilities and write an advisory profile to .hpc-compose/cluster.toml or --out; --out - is stdout-only."
     },
     {
       "path": "doctor fabric-smoke",
@@ -670,7 +659,7 @@
       "effects": [
         "local-write"
       ],
-      "summary": "Write a starter spec.",
+      "summary": "Write a starter spec. `init` is the CLI alias for this command; apply this entry to it.",
       "overrides": [
         {
           "flags": [
@@ -1253,17 +1242,6 @@
             "polls"
           ],
           "description": "Skips preparation and submission but writes an owner-only launcher script to the explicit or default path."
-        },
-        {
-          "flags": [
-            "--dry-run",
-            "--remote"
-          ],
-          "authorization_tier": "explicit-runtime-or-external-mutation",
-          "add_effects": [
-            "network-or-ssh"
-          ],
-          "description": "Still creates a remote staging directory, probes or installs the remote binary, rsyncs the project, and delegates the dry run over SSH."
         },
         {
           "flags": [

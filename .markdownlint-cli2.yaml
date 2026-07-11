@@ -13,7 +13,7 @@ config:
     siblings_only: true
   # Disabled below: false positives on this project's valid GFM / mdBook syntax.
   MD056: false # pipes inside code spans in table cells are valid GFM but miscounted
-  MD051: false # mdBook custom heading anchors ({ #id }); lychee validates real links
+  MD051: false # mdBook custom heading anchors ({ #id }); lychee validates links and anchors
   MD029: false # ordered lists deliberately interrupted by fenced code blocks
 globs:
   - "docs/src/**/*.md"
@@ -21,8 +21,13 @@ globs:
   - "skills/hpc-compose/**/*.md"
   - "llms.txt"
   - "README.md"
+  - "CHANGELOG.md"
   - "CONTRIBUTING.md"
+  - "GOVERNANCE.md"
   - "SECURITY.md"
   - "CODE_OF_CONDUCT.md"
+  - "dev-cluster/README.md"
+  - "docs/brand/README.md"
+  - "examples/**/*.md"
 ignores:
   - "docs/src/SUMMARY.md" # mdBook part headers intentionally use multiple H1s
