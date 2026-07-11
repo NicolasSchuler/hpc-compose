@@ -9,8 +9,8 @@ Jump to the section that documents each command group:
 | Commands | Section |
 | --- | --- |
 | `new` / `init`, `examples`, `docs`, `evolve`, `setup`, `context`, `lsp`, `completions` | [Authoring and Setup](#authoring-and-setup) |
-| `--profile`, `--settings-file`, `setup`, `context`, `validate --strict-env`, `lint`, `lsp`, `schema` | [Settings-aware commands](#settings-aware-commands) |
-| `plan`, `validate`, `lint`, `lsp`, `config`, `schema`, `inspect`, `preflight`, `doctor`, `weather`, `prepare`, `render`, `up`, `test`, `dev`, `tmux`, `germinate`, `sweep`, `when`, `alloc`, `run`, `shell`, `notebook` | [Plan and Run](#plan-and-run) |
+| `--profile`, `--settings-file`, `setup`, `context`, `validate --strict-env`, `lint`, `lsp`, `schema`, `feedback` | [Settings-aware commands](#settings-aware-commands) |
+| `plan`, `validate`, `lint`, `lsp`, `config`, `schema`, `inspect`, `preflight`, `doctor`, `weather`, `prepare`, `render`, `explain`, `up`, `test`, `dev`, `tmux`, `germinate`, `sweep`, `when`, `alloc`, `run`, `shell`, `notebook` | [Plan and Run](#plan-and-run) |
 | `lint` finding codes (`HPC001`-`HPC900`) | [Lint rules](#lint-rules) |
 | `debug`, `status`, `ps`, `watch`, `replay`, `checkpoints`, `logs`, `inspect --rightsize`, `stats`, `score`, `diff`, `artifacts`, `reach`, `pull`, `experiment`, `cancel`, `down`, `jobs`, `clean`, `rendezvous` | [Tracked Runtime](#tracked-runtime) |
 | `cache list`, `cache inspect`, `cache prune` | [Cache Maintenance](#cache-maintenance) |
@@ -130,7 +130,7 @@ Use these commands and global flags when you want the project-local settings fil
 | `hpc-compose setup` | Create or update the project-local settings file | Interactive by default; supports `--non-interactive` with `--profile-name`, `--compose-file`, `--env-file`, `--env`, `--binary`, `--cache-dir`, and `--default-profile`. `--login-host <host>` and `--login-user <user>` persist the `up --remote` SSH destination onto the selected profile (`[profiles.<name>]`). |
 | `hpc-compose context` | Print fully resolved execution context | Shows selected settings/profile, compose path, binaries, referenced interpolation vars, runtime paths, and value sources; supports `--format json`. Sensitive-looking interpolation values are redacted unless `--show-values` is passed. |
 | `hpc-compose feedback` | Prepare a local feedback report | Prints version, OS/arch, build metadata, selected feedback kind, and a GitHub issue URL. It does not send telemetry, open a browser, contact GitHub, or perform a version ping. |
-| `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing. |
+| `hpc-compose validate --strict-env` | Fail when interpolation fell back to defaults | Detects when `${VAR:-...}` or `${VAR-...}` consumed fallback values because `VAR` was missing, following resolved `extends` and only fields the typed loader actually interpolates. |
 | `hpc-compose lint` | Run opinionated authoring checks | Builds on validation and planning, then reports stable finding codes for risky dependency, memory, and shared-write patterns. Auto-fixable findings can be applied with `--fix` (preview with `--fix --dry-run`). See [Lint rules](#lint-rules). |
 | `hpc-compose lsp` | Serve semantic authoring diagnostics over stdio | Uses the same settings/profile resolution as static commands and diagnoses open editor buffers without saving first. Add `--strict-env` to match `validate --strict-env`. |
 | `hpc-compose schema` | Print the checked-in JSON Schema | Useful for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` to print the `settings.toml` authoring schema. Rust validation and `hpc-compose lsp` remain the semantic source of truth. |
@@ -292,8 +292,10 @@ The checked-in schema is draft-07 JSON Schema and is published with the docs sit
 Useful workflow flags:
 
 - `--local` runs a Pyxis/Enroot or Apptainer plan on the current Linux host instead of calling `sbatch`.
+- `--dry-run` renders the submission-script preview to `./hpc-compose.sbatch` (owner-only permissions; combine with `--script-out` to pick the path) without preflight, preparation, SSH, Slurm, launch, or tracking.
 - `--detach` submits or launches and returns after tracking metadata is written.
 - `--format text|json` is accepted with `--detach` or `--dry-run`.
+- `--print-endpoints` includes readiness-derived service endpoints (host/port/url) and suggested next commands in the JSON output (with `--detach` or `--dry-run`).
 - `--watch-queue` waits in line-oriented queue output until the Slurm job reaches `RUNNING`, then opens the normal watch view.
 - `--queue-warn-after <DURATION>` warns once when `--watch-queue` stays `PENDING` longer than the threshold; the default is `10m`, and `0` disables the warning.
 - `--watch-mode auto|tui|line` selects the live output mode.
@@ -304,6 +306,8 @@ Useful workflow flags:
 - `--remote[=<DEST>]` delegates submission to a login node over SSH; without `<DEST>` it uses `login_host` from settings. `<DEST>` may be a host, an `~/.ssh/config` alias, or `user@host`. Without an inline `user@`, the SSH user is taken from `HPC_COMPOSE_REMOTE_USER`, then settings `login_user` (profile over defaults), then your `~/.ssh/config`. It cannot be combined with `--local`, `--watch-queue`, `--script-out`, or non-detached `--watch-mode tui`. See [Submit From Your Laptop With `up --remote`](runbook.md#5b-submit-from-your-laptop-with-up---remote).
 - `--remote-install <auto|never|force>` (default `auto`; env `HPC_COMPOSE_REMOTE_INSTALL`) controls remote auto-install. `up --remote` probes the login node for `hpc-compose` and, under `auto`, installs the newest release into `~/.local/bin` when it is missing or older than your local version. `force` always reinstalls before delegating; `never` only probes and fails with the manual install command when the binary is missing or old (use on locked-down or air-gapped login nodes).
 - `--force-rebuild` refreshes imported and prepared artifacts before launch.
+- `--prepare-verbose` streams the raw image-prepare tool output (enroot/apptainer) live instead of summarized phase lines; with `--remote` it enables verbose prepare on the login node.
+- `--metrics-interval <SECONDS>` enables runtime metrics sampling and overrides `x-slurm.metrics.interval_seconds` for this run; `--no-metrics` disables metrics sampling for this run.
 - `--skip-prepare` reuses an already-prepared image cache and builds nothing. On a first run (or after cache eviction) the image is not prepared yet, so preflight reports it as not-yet-prepared; run `up`/`prepare` once without `--skip-prepare` first. See [Troubleshooting](troubleshooting.md#common-symptoms).
 - `--keep-failed-prep` leaves the failed Enroot rootfs behind for inspection.
 - Array jobs (`x-slurm.array`) require `--detach` because live watch/log fan-out is not array-aware yet.
@@ -357,7 +361,7 @@ Useful options:
 - `--canary-time <TIME>` defaults to `00:01:00`.
 - `--metrics-interval <SECONDS>` defaults to `5` and is forced on in the canary plan.
 - `--timeout <DURATION>` defaults to `30m`.
-- `--min-cpus <N>`, `--min-mem <MEM>`, and `--min-gpus <N>` set canary floors.
+- `--min-cpus <CPUS>`, `--min-mem <MEM>`, and `--min-gpus <GPUS>` set canary floors.
 - `--dry-run` renders the canary script without calling `sbatch`.
 - `--skip-prepare`, `--force-rebuild`, `--keep-failed-prep`, `--no-preflight`, and `--script-out` match the normal preparation flags.
 
@@ -736,8 +740,8 @@ Drive the site's hpc-workspace (`ws_*`) tools for the workspace configured in se
 | Command | Use it for | Notes |
 | --- | --- | --- |
 | `workspace status` | Show the configured workspace's path, remaining lifetime, and available extensions | Read-only; refreshes `.hpc-compose/workspace-state.toml`. |
-| `workspace allocate` | Create the workspace when it does not exist yet | Idempotent: an existing workspace is reported as already allocated. `--duration-days <N>` overrides the settings `duration_days` (default 30). |
-| `workspace extend` | Renew the workspace's lifetime | `--days <N>` overrides the settings `duration_days` (default 30). |
+| `workspace allocate` | Create the workspace when it does not exist yet | Idempotent: an existing workspace is reported as already allocated. `--duration-days <DAYS>` overrides the settings `duration_days` (default 30). |
+| `workspace extend` | Renew the workspace's lifetime | `--days <DAYS>` overrides the settings `duration_days` (default 30). |
 | `workspace release` | Free the workspace and everything inside it | Destructive: prompts unless `--yes`; refuses while tracked jobs keep cache or runtime state under the workspace. |
 
 The `ws_*` executables resolve from `PATH` and can be overridden per invocation with `--ws-find-bin`, `--ws-allocate-bin`, `--ws-extend-bin`, `--ws-release-bin`, and `--ws-list-bin`.

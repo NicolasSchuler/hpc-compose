@@ -51,19 +51,24 @@ a published schema always matches the real output byte-for-byte in shape.
 
 ## A few outputs are intentionally unwrapped
 
-Three commands emit a bare JSON array or a record that already carries its own
-version, so a top-level `schema_version` cannot be added without a breaking
-reshape. These keep their exact current output and are versioned only through
-their published schema (and, where present, the record's own field):
+A handful of commands emit a bare JSON array, a record that already carries its
+own version, or a mirror of the compose spec surface, so a top-level
+`schema_version` cannot be added without a breaking reshape. These keep their
+exact current output and are versioned only through their published schema
+(and, where present, the record's own field):
 
 * `cache list` and `rendezvous list` — bare arrays.
 * `rendezvous resolve` — a record whose own `schema_version` is its disk format.
+* `config` and `inspect` — mirror the compose spec surface (see below), so
+  their top-level object has no `schema_version` field either.
 
 ## Notes for the effective-config outputs
 
-`spec config` and `spec inspect` print the resolved compose configuration. Their
-structure follows the compose spec surface documented in the
-[Spec Reference](spec-reference.md); secret values are redacted before printing.
+`config` and `inspect` print the resolved compose configuration (their
+published schema names are `spec-config` and `spec-inspect`, as in
+`hpc-compose schema --output spec-config`). Their structure follows the compose
+spec surface documented in the [Spec Reference](spec-reference.md); secret
+values are redacted before printing.
 
 ## Related Docs
 

@@ -66,7 +66,7 @@ Allow submission even when resume config drift is detected.
 Print the resume config diff and exit without preparing or submitting.
 .TP
 \fB--dry\-run\fR
-Run preflight, prepare, and render without calling sbatch (prepare still imports images; add \-\-skip\-prepare for a no\-side\-effect render, or use `plan`).
+Render an owner\-only submission\-script preview (written to ./hpc\-compose.sbatch unless \-\-script\-out is set) without preflight, preparation, SSH, Slurm, launch, or tracking.
 .TP
 \fB--detach\fR
 Submit or launch and return without watching logs.

@@ -157,7 +157,7 @@ Normal commands do not expand the sweep matrix. If the runnable spec contains `$
 
 ## `secrets`
 
-`secrets` maps secret names to local `file:` or `env:` sources. Each value is resolved into the interpolation map tagged as a secret, so `${name}` works in `environment:` and is **redacted** in `config`/`context`/inspect output regardless of its name.
+`secrets` maps secret names to local `file:` or `env:` sources. Names must be valid interpolation variable names (`[A-Za-z_][A-Za-z0-9_]*`), and each secret must set exactly one source. Each value is resolved into the interpolation map tagged as a secret, so `${name}` works in `environment:` and is **redacted** in `config`/`context`/inspect output regardless of its name.
 
 ```yaml
 secrets:
@@ -238,14 +238,14 @@ These fields live under the top-level `x-slurm` block.
 | `nodes` | positive integer | omitted | Slurm allocation node count. Defaults to `1` when omitted. |
 | `ntasks` | positive integer | omitted | Passed through to `#SBATCH --ntasks`. |
 | `ntasks_per_node` | positive integer | omitted | Passed through to `#SBATCH --ntasks-per-node`. |
-| `cpus_per_task` | positive integer | omitted | Top-level Slurm CPU request. |
-| `mem` | string | omitted | Passed through to `#SBATCH --mem`. |
+| `cpus_per_task` | positive integer | omitted | Top-level Slurm CPU request. Cannot be combined with `cpus_per_gpu`. |
+| `mem` | string | omitted | Passed through to `#SBATCH --mem`. Cannot be combined with `mem_per_gpu`. |
 | `gres` | string | omitted | Passed through to `#SBATCH --gres`. |
 | `gpus` | positive integer | omitted | Cannot be combined with a `gpu:` `gres` request (validation error). |
 | `gpus_per_node` | positive integer | omitted | Passed through to `#SBATCH --gpus-per-node`. |
 | `gpus_per_task` | positive integer | omitted | Passed through to `#SBATCH --gpus-per-task`. |
-| `cpus_per_gpu` | positive integer | omitted | Passed through to `#SBATCH --cpus-per-gpu`. |
-| `mem_per_gpu` | string | omitted | Passed through to `#SBATCH --mem-per-gpu`. |
+| `cpus_per_gpu` | positive integer | omitted | Passed through to `#SBATCH --cpus-per-gpu`. Cannot be combined with `cpus_per_task`. |
+| `mem_per_gpu` | string | omitted | Passed through to `#SBATCH --mem-per-gpu`. Cannot be combined with `mem`. |
 | `gpu_bind` | string | omitted | Passed through to `#SBATCH --gpu-bind`. |
 | `cpu_bind` | string | omitted | Passed through to `#SBATCH --cpu-bind`. |
 | `mem_bind` | string | omitted | Passed through to `#SBATCH --mem-bind`. |
@@ -274,7 +274,7 @@ These fields live under the top-level `x-slurm` block.
 | `resume` | mapping | omitted | Enables checkpoint-aware resume semantics with a shared host path mounted into every service. |
 | `notify` | mapping | omitted | First-class Slurm email notification settings. |
 | `setup` | list of strings | omitted | Raw shell lines inserted into the generated batch script before service launches. |
-| `submit_args` | list of strings | omitted | Extra raw Slurm arguments appended as `#SBATCH ...` lines. |
+| `submit_args` | list of strings | omitted | Raw Slurm arguments for options without a typed field, appended as `#SBATCH ...` lines. Planner-owned first-class flags are rejected here. |
 | `rendezvous` | string, list, or mapping | omitted | Resolve cross-job service records from the shared cache and inject `HPC_COMPOSE_RDZV_*` env vars. |
 | `parallelism` | mapping `{ tensor, pipeline }` | omitted | Descriptive tensor/pipeline geometry. Validation-only: no `#SBATCH`/`srun` flag is emitted. See [`x-slurm.parallelism`](#x-slurmparallelism). |
 
@@ -431,7 +431,7 @@ x-slurm:
   - Each entry is emitted as `#SBATCH {arg}`.
   - Entries are rejected if they contain line breaks or null bytes.
   - Entries are not validated against Slurm option syntax.
-  - First-class fields reject conflicting raw entries for the same option. Prefer `x-slurm.reservation` and `x-slurm.licenses` over raw `--reservation`/`--licenses` (`-L`), and use `x-slurm.array`, `x-slurm.after_job`, or `x-slurm.dependency` instead of raw `--array` or `--dependency`.
+  - Flags represented by first-class fields are planner-owned and rejected here even when the typed field is omitted. This includes long options and attached short forms such as `-N2`, `-n4`, or `-G1`. Use the corresponding typed field (`nodes`, `ntasks`, `gpus`, `reservation`, `licenses`, `array`, `after_job`, and so on); reserve `submit_args` for site options hpc-compose does not model.
 
 ### `x-slurm.notify`
 
@@ -808,11 +808,11 @@ Services that configure `services.<name>.x-slurm.parallelism` also receive:
 - `HPC_COMPOSE_TP_SIZE` (the declared `tensor` value)
 - `HPC_COMPOSE_PP_SIZE` (the declared `pipeline` value)
 
-These are descriptive literal exports. They are emitted for every service that declares `parallelism`, including single-node services, and are per-service only: a top-level `x-slurm.parallelism` block is validated and shown in `config --effective` but does not by itself export env into services.
+These are descriptive literal exports. They are emitted for every service that declares `parallelism`, including single-node services, and are per-service only: a top-level `x-slurm.parallelism` block is validated and shown by `hpc-compose config` (or `config --format json`) but does not by itself export env into services.
 
 ### `gres` and `gpus`
 
-Setting both a GPU-carrying `gres` (for example `gres: gpu:2`) and `gpus` at the same level is rejected at validation time: the two express the same request and can contradict each other. Use one or the other. A non-GPU `gres` (for example a license or bandwidth resource) can still be combined with `gpus`.
+Setting both a GPU-carrying `gres` (for example `gres: gpu:2`) and `gpus` at the same level is rejected at validation time: the two express the same request and can contradict each other. GPU resource names are recognized case-insensitively and exactly (`gpu` or `gres/gpu`); similarly named resources such as `mygpu` do not enable GPU passthrough. Use one GPU request form. A non-GPU `gres` (for example a license or bandwidth resource) can still be combined with `gpus`.
 
 ## Service fields
 
@@ -828,7 +828,7 @@ Setting both a GPU-carrying `gres` (for example `gres: gpu:2`) and `gpus` at the
 | `modules` | list of strings | omitted | List-only shorthand for service `x-env.modules.load`; cannot be combined with service `x-env.modules`. |
 | `volumes` | list of `host_path:container_path` strings | omitted | Runtime bind mounts. Host paths resolve against the compose file directory. |
 | `working_dir` | string | omitted | Valid only when the service also has an explicit `command` or `entrypoint`. |
-| `depends_on` | list or mapping | omitted | Dependency list with `service_started` or `service_healthy` conditions. |
+| `depends_on` | list or mapping | omitted | Dependency list with `service_started`, `service_healthy`, or `service_completed_successfully` conditions. |
 | `readiness` | mapping | omitted | Post-launch readiness gate. |
 | `healthcheck` | mapping | omitted | Compose-compatible sugar for a subset of `readiness`. Mutually exclusive with `readiness`. |
 | `assert` | mapping | omitted | Post-run service contract checked during batch cleanup and surfaced in `status`. |
@@ -1019,6 +1019,7 @@ readiness:
 
 - `host` defaults to `127.0.0.1`.
 - `timeout_seconds` defaults to `60`.
+- `port` and an explicit `timeout_seconds` must be at least `1`; an explicit `host` must not be empty.
 
 ### Log
 
@@ -1030,6 +1031,7 @@ readiness:
 ```
 
 - `timeout_seconds` defaults to `60`.
+- `pattern` must not be empty, and an explicit `timeout_seconds` must be at least `1`.
 
 ### HTTP
 
@@ -1043,6 +1045,7 @@ readiness:
 
 - `status_code` defaults to `200`.
 - `timeout_seconds` defaults to `60`.
+- `url` must not be empty, `status_code` must be from `100` through `599`, and an explicit `timeout_seconds` must be at least `1`.
 - The readiness check polls the URL through `curl`.
 
 ## `healthcheck`
@@ -1104,12 +1107,12 @@ These fields live under `services.<name>.x-slurm`.
 | `placement` | mapping | omitted | Explicit node-index placement inside the allocation. |
 | `ntasks` | positive integer | omitted | Adds `--ntasks` to that service's `srun`. |
 | `ntasks_per_node` | positive integer | omitted | Adds `--ntasks-per-node` to that service's `srun`. |
-| `cpus_per_task` | positive integer | omitted | Adds `--cpus-per-task` to that service's `srun`. |
+| `cpus_per_task` | positive integer | omitted | Adds `--cpus-per-task` to that service's `srun`. Cannot be combined with service `cpus_per_gpu`. |
 | `gpus` | positive integer | omitted | Adds `--gpus`. Cannot be combined with a `gpu:` `gres` request (validation error). |
-| `gres` | string | omitted | Adds `--gres` to that service's `srun`. Takes priority over `gpus`. |
+| `gres` | string | omitted | Adds `--gres` to that service's `srun`. A GPU-carrying value cannot be combined with service `gpus`. |
 | `gpus_per_node` | positive integer | omitted | Adds `--gpus-per-node` to that service's `srun`. |
 | `gpus_per_task` | positive integer | omitted | Adds `--gpus-per-task` to that service's `srun`. |
-| `cpus_per_gpu` | positive integer | omitted | Adds `--cpus-per-gpu` to that service's `srun`. |
+| `cpus_per_gpu` | positive integer | omitted | Adds `--cpus-per-gpu` to that service's `srun`. Cannot be combined with service `cpus_per_task`. |
 | `mem_per_gpu` | string | omitted | Adds `--mem-per-gpu` to that service's `srun`. |
 | `gpu_bind` | string | omitted | Adds `--gpu-bind` to that service's `srun`. |
 | `cpu_bind` | string | omitted | Adds `--cpu-bind` to that service's `srun`. |
@@ -1117,7 +1120,7 @@ These fields live under `services.<name>.x-slurm`.
 | `distribution` | string | omitted | Adds `--distribution` to that service's `srun`. |
 | `hint` | string | omitted | Adds `--hint` to that service's `srun`. |
 | `time_limit` | string | omitted | Advisory per-service time limit. Validated against Slurm time formats but not passed to `srun`. `inspect` surfaces warnings when the limit exceeds allocation time or conflicts with dependencies. Accepted formats: `MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, `D-HH:MM:SS`. |
-| `extra_srun_args` | list of strings | omitted | Appended directly to the service's `srun` command. |
+| `extra_srun_args` | list of strings | omitted | Appended directly to the service's `srun` command. Planner-owned service flags are rejected; use typed service fields for nodes, tasks, CPU/GPU resources, and binding/distribution. |
 | `mpi` | mapping | omitted | Adds first-class MPI launch metadata and `srun --mpi=<type>`. |
 | `failure_policy` | mapping | omitted | Per-service failure handling (`fail_job`, `ignore`, `restart_on_failure`). |
 | `prologue` | string or mapping | omitted | Per-service shell hook run before each launch attempt. String shorthand runs on the host. |
@@ -1147,7 +1150,7 @@ The rule per field is:
 Consequences worth noting:
 
 - A top-level `cpus_per_task`, `gpus`, `gres`, or the other GPU/binding/distribution fields sets the `#SBATCH` header but does **not** flow onto any service's `srun` line. Set these under `services.<name>.x-slurm` when a step needs the corresponding `srun` flag.
-- `gres` still takes priority over `gpus` on the `srun` line: when a service sets `gres`, its `gpus` is ignored for the `--gpus`/`--gres` choice.
+- When comparable numeric allocation and service values are both explicit, planning rejects a service step that asks for more tasks, GPUs, GPUs per node/task, or CPUs per task/GPU than the allocation requested.
 - The torchrun `--nproc-per-node` helper export (`HPC_COMPOSE_DIST_NPROC_PER_NODE`) is derived separately and *does* fall back from the service's `gpus_per_node`/`gres`/`gpus` to the top-level values; this affects only that descriptive env var, not the `srun` resource flags.
 
 ### `services.<name>.x-slurm.rendezvous`

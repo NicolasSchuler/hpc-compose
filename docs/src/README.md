@@ -5,7 +5,7 @@
     <img class="hpc-compose-hero-mark" src="favicon.png" alt="" aria-hidden="true">
     <p class="hpc-compose-tagline">Compose-style workflows, compiled into one inspectable Slurm job.</p>
     <p class="hpc-compose-trust">One allocation &middot; one script &middot; Slurm-native runtime.</p>
-    <p>Choose the shape closest to your workload. Each path joins the same canonical first-run checklist before it can submit.</p>
+    <p>Choose the shape closest to your workload. Each path joins the same minimal cluster smoke before the selected workload can submit.</p>
   </div>
   <div class="hpc-compose-proof" aria-label="hpc-compose execution model">
     <pre><code>compose.yaml&#10;    │ validate · lint · plan&#10;    ▼&#10;one generated batch script&#10;    │ explicit submission&#10;    ▼&#10;one tracked Slurm allocation</code></pre>
@@ -25,7 +25,7 @@
     <p class="journey-kicker">Services that coordinate</p>
     <h3>Multi-service application</h3>
     <p>Learn dependency conditions and readiness from <code>app-redis-worker</code> before adapting your own stack.</p>
-    <a href="example-source.html#app-redis-worker">Open the worked example <span aria-hidden="true">→</span></a>
+    <a href="examples.html#app-redis-workeryaml">Open the example guide <span aria-hidden="true">→</span></a>
   </article>
   <article class="journey-card">
     <p class="journey-kicker">One service across nodes</p>
@@ -39,10 +39,10 @@ All three paths use the same safety boundary:
 
 1. [Choose Your Workflow](task-guide.md) selects the backend, topology,
    execution style, run multiplicity, and submission context.
-2. [Quickstart](quickstart.md) owns the first successful cluster run from
-   version check through logs.
-3. [Operate a Real Cluster Run](runbook.md) owns repeat operations after that
-   first success.
+2. [Quickstart](quickstart.md) proves that site and backend with one deliberately
+   small `minimal-batch` run, regardless of the eventual workload shape.
+3. [Examples](examples.md) owns workload selection and adaptation; [Operate a
+   Real Cluster Run](runbook.md) owns repeat operations after the smoke succeeds.
 
 ## The Mental Model
 

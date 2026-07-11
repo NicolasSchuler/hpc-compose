@@ -28,11 +28,12 @@ Most `1` exits are unexpected failures, but a few commands use it as a deliberat
 
 - Parse-level usage errors — an unknown flag, a missing argument — are reported by the argument parser, which exits `2` before any command runs.
 - Command-level usage errors — semantic flag or argument combinations that must be checked after parsing — also exit `2`.
-- `validate`, and any command that loads a malformed `compose.yaml`, exits `2`.
+- `validate`, and any command that loads a malformed `compose.yaml`, exits `2`. This covers semantic planning failures too — an undefined `depends_on` target, a service without an `image`, or an unsatisfiable allocation geometry all exit `2`.
 
 ### Code 3 — preflight and environment
 
 - `preflight` exits `3` when it finds errors, or warnings under `--strict`.
+- The inline preflight gate that `up`, `alloc`, `run`, `shell`, `notebook`, `germinate`, `dev`, `when`, `debug`, and `sweep submit` run before launching also exits `3` on errors, matching the standalone command.
 - `doctor` exits `3` when a smoke or readiness probe fails.
 - `up --remote` and the remote follow-up commands (`status`/`stats`/`logs`/`score`/`pull --remote`) exit `3` when the login node is unreachable — the `ssh`, `rsync`, or version probe connection fails.
 

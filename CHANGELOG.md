@@ -75,14 +75,47 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (`auto_allocate`, `auto_extend`, `warn_days_left`, `queue_buffer_days`) are
   already part of the settings surface.
 
+### Changed
+
+- Semantic planning failures (an undefined `depends_on` target, a service
+  without an `image`, an empty `services:` map, unsatisfiable allocation
+  geometry) now exit `2` like every other invalid-spec failure, instead of the
+  generic `1`. This makes `validate`'s documented exit-code contract hold for
+  the whole validation surface, so CI gates that branch on `2` classify these
+  correctly.
+- The inline preflight gate in `up`, `alloc`, `run`, `shell`, `notebook`,
+  `germinate`, `dev`, `when`, `debug`, and `sweep submit` now exits `3`
+  (environment not ready), matching the standalone `preflight` command instead
+  of the generic `1`.
+- Spec type mismatches now name the exact offending field
+  (`failed to deserialize spec at compose.yaml (field 'x-slurm.nodes')`)
+  instead of only the file.
+- Preflight helper-mount findings are now site-neutral ("site Pyxis helper
+  path ...") instead of naming HAICORE on every cluster.
+- `new` now includes `hpc-compose validate` in its printed next-step commands,
+  matching the quickstart's validate-first flow.
+- Lint finding `HPC002` now interprets a unit-less `x-slurm.mem` value as
+  megabytes — the same reading Slurm applies and `HPC009` warns about —
+  instead of bytes, so its per-CPU figure is no longer misleading.
+
+### Fixed
+
+- `prepare --help` and the `hpc-compose-prepare(1)` man page showed an example
+  using a nonexistent `--force` flag; the example now uses `--force-rebuild`.
+- `new --list-templates` omitted the `jupyter` template because its
+  `interactive` category was missing from the text listing's category order;
+  the listing now derives categories from the catalog so no template can be
+  silently dropped.
+
 ## [0.2.0] - 2026-07-04
 
 ### Added
 
 - Added a versioned JSON output-schema contract for `--format json`. Every JSON
   command output is now backed by a `schemars`-pinned schema, and a new `schema`
-  subcommand emits the JSON Schemas (`schema --output <dir>`) so downstream
-  tooling can validate hpc-compose output against a stable, checked-in contract.
+  subcommand prints a command's output schema (`schema --output <command>`, e.g.
+  `schema --output status`) so downstream tooling can validate hpc-compose
+  output against a stable, checked-in contract.
 - Added sampled CPU utilization to the metrics pipeline. `stats`, `watch`, and
   the metrics JSONL now carry per-sample CPU usage alongside the existing GPU and
   memory samples.

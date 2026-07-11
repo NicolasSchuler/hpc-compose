@@ -1,8 +1,8 @@
 # Choose Your Workflow
 
-Use this page to choose a workflow shape. It deliberately stops before the
-first-run commands; [Quickstart](quickstart.md) is the sole checklist for the
-first successful cluster run.
+Use this page to choose a workflow shape. It deliberately stops before runtime
+commands; [Quickstart](quickstart.md) is the sole checklist for the small
+`minimal-batch` cluster smoke that precedes the selected workload.
 
 Work through these decisions in order. Later choices depend on the earlier
 ones.
@@ -14,7 +14,7 @@ ones.
 | Pyxis options in `srun --help` plus Enroot on the submission host | `runtime.backend: pyxis` | `srun --help` lists `--container-image`; shared cache is visible to compute nodes | [`minimal-batch`](example-source.md#minimal-batch) |
 | `apptainer` on login and compute nodes | `runtime.backend: apptainer` | A finite allocation can execute the chosen `.sif` or OCI source | [`minimal-batch`](example-source.md#minimal-batch) after changing the backend |
 | `singularity` on login and compute nodes | `runtime.backend: singularity` | The site's installed version and bind behavior match the spec | [`minimal-batch`](example-source.md#minimal-batch) after changing the backend |
-| Site modules or vendor software, no container required | `runtime.backend: host` | Required `module load` commands work inside an allocation | [`host-modules`](example-source.md#host-modules) |
+| Site modules or vendor software, no container required | `runtime.backend: host` | Required `module load` commands work inside an allocation | [Host runtime notes](runtime-backends.md#host-runtime-notes) |
 
 If more than one path is available, prefer the backend the site supports for
 your workload and interconnect. Do not infer Pyxis from Enroot alone. See
@@ -83,7 +83,7 @@ generated site guide.
 
 ## Your Next Page
 
-- Ready for the first cluster run: [Quickstart](quickstart.md).
+- Ready to prove the cluster path with the minimal smoke: [Quickstart](quickstart.md).
 - Migrating an existing stack: [Migrate a docker-compose.yaml](docker-compose-migration.md).
 - Choosing among concrete specs: [Examples](examples.md).
 - Operating a workflow that already ran once: [Runbook](runbook.md).

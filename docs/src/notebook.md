@@ -63,8 +63,19 @@ ssh -fN <login-node>                          # OTP entered here, once
 ssh -L 8888:<compute-node>:8888 <login-node>  # reuses the master — no OTP
 ```
 
-`hpc-compose` only prints the tunnel command; it never opens a connection or
-stores credentials, so the OTP step stays entirely under your control.
+You do not have to assemble that forward by hand: `hpc-compose reach` resolves
+the compute node from tracked status and the port from the service readiness,
+and prints the ready-to-run `ssh -L` command (or runs it in the foreground
+with `--open`):
+
+```sh
+hpc-compose reach jupyter -f compose.yaml            # print the tunnel command
+hpc-compose reach jupyter --port 8888 --open         # run it, Ctrl-C to stop
+```
+
+`hpc-compose` only prints (or foregrounds) the tunnel command; it never
+daemonizes a connection or stores credentials, so the OTP step stays entirely
+under your control.
 
 ## Local mode
 

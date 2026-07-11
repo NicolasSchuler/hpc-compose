@@ -11,7 +11,7 @@ This example is the smallest end-to-end `hpc-compose` LLM workflow:
 
 - a supported login node with `enroot`, `srun`, and `sbatch`,
 - `CACHE_DIR` set to a shared path visible from the submission host and compute nodes,
-- a GGUF model at [`../models/model.gguf`](../models/model.gguf) for the repo-local example, or at `$HOME/models/model.gguf` for the home-directory example.
+- a GGUF model at `examples/models/model.gguf` for the repo-local example, or at `$HOME/models/model.gguf` for the home-directory example (the model file is not checked into this repository).
 
 ## Normal run
 

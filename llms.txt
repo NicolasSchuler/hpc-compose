@@ -7,7 +7,7 @@ Invariant: services in one spec share one allocation. Establish the installed CL
 ## Start here
 
 - [Overview](https://nicolasschuler.github.io/hpc-compose/raw/README.md): Choose the workflow and understand the one-allocation model.
-- [Quickstart](https://nicolasschuler.github.io/hpc-compose/raw/quickstart.md): Complete the canonical first successful cluster run.
+- [Quickstart](https://nicolasschuler.github.io/hpc-compose/raw/quickstart.md): Prove the site and runtime path with the canonical minimal cluster smoke.
 - [Choose your workflow](https://nicolasschuler.github.io/hpc-compose/raw/task-guide.md): Select a backend, topology, execution mode, run shape, and launch context.
 - [Install hpc-compose](https://nicolasschuler.github.io/hpc-compose/raw/installation.md): Install a versioned release and verify the binary.
 
@@ -29,9 +29,9 @@ Invariant: services in one spec share one allocation. Establish the installed CL
 
 ## AI agents
 
-- [Set up with an AI agent](https://nicolasschuler.github.io/hpc-compose/raw/ai-agent-setup.md): Install version-matched guidance and use the copy-paste prompt.
+- [Set up with an AI agent](https://nicolasschuler.github.io/hpc-compose/raw/ai-agent-setup.md): Match guidance to the installed binary and use the copy-paste prompt.
 - [Command safety](https://nicolasschuler.github.io/hpc-compose/raw/agent-command-safety.md): Apply flag-aware effects, authorization tiers, and the independent sensitive-output guard.
-- [Machine-readable command policy](https://nicolasschuler.github.io/hpc-compose/agent-command-policy.json): Consume the version-matched authoritative policy JSON.
+- [Machine-readable command policy](https://nicolasschuler.github.io/hpc-compose/agent-command-policy.json): Read the current-main policy JSON and compare its `cli_version` with the installed binary.
 - [Essential documentation context](https://nicolasschuler.github.io/hpc-compose/llms-ctx.txt): Use the expanded essential Markdown pages as one context file.
 - [Full documentation context](https://nicolasschuler.github.io/hpc-compose/llms-ctx-full.txt): Include the optional pages below in one context file.
 

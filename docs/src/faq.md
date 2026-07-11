@@ -8,16 +8,16 @@ Use [Why hpc-compose](why-hpc-compose.md) and [Slurm Capability Scope](slurm-cap
 
 ## What can I run before touching Slurm?
 
-Use static authoring commands first:
+Everything through [Quickstart step 4](quickstart.md#4-inspect-the-static-execution-plan)
+is static authoring and can be forced offline with the global `--offline` flag.
+That path validates, lints, plans, and inspects without contacting Slurm,
+importing images, or writing a batch script.
 
-```bash
-hpc-compose validate -f compose.yaml
-hpc-compose plan -f compose.yaml
-hpc-compose plan --show-script -f compose.yaml
-hpc-compose inspect -f compose.yaml
-```
-
-Those commands are meant for local authoring and do not submit jobs. Before the first real run on a login node, use `hpc-compose debug -f compose.yaml --preflight` to check cluster prerequisites.
+On the submission host, [strict preflight](quickstart.md#6-run-strict-preflight)
+may read scheduler and backend capability state but does not submit a job unless
+you add the allocation-consuming `--fs-probes` flag. Follow the Quickstart
+boundary labels instead of treating every diagnostic command as equally safe;
+full rendered scripts and verbose plans can contain sensitive values.
 
 ## Why must the cache directory be shared storage?
 
@@ -66,6 +66,8 @@ For sensitive security issues, use the private reporting process in [SECURITY.md
 ## Related Docs
 
 - [Overview](./)
+- [Choose Your Workflow](task-guide.md)
+- [Quickstart](quickstart.md)
 - [Why hpc-compose](why-hpc-compose.md)
 - [Support Matrix](support-matrix.md)
 - [Runtime Backends](runtime-backends.md)

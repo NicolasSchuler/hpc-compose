@@ -14,13 +14,13 @@ Slurm node.
 
 | Goal | Command | Scheduler contact | Writes runtime state |
 | --- | --- | --- | --- |
-| Static authoring preview | `hpc-compose plan --show-script -f compose.yaml` | No | No |
-| Preflight, prepare, and render without submission | `hpc-compose up --dry-run -f compose.yaml` | No `sbatch` | Writes the rendered script |
+| Redacted static plan | `hpc-compose --offline plan --format json -f compose.yaml` | None | No |
+| Owner-only submission-script preview | `hpc-compose up --dry-run -f compose.yaml` | None | Writes only the rendered script |
 | Real local scheduler smoke test | `scripts/devcluster.sh run compose.yaml` or `hpc-compose test --submit --dev-cluster -f compose.yaml` | Local dev-cluster `sbatch` | Yes, inside the mounted project |
 
-Use `plan` first for fast static feedback. Use `up --dry-run` when you want the
-same preflight and preparation path as submission but no `sbatch`. Use the dev
-cluster when you specifically want to exercise hpc-compose's real
+Use `plan` first for fast, redacted static feedback. Use `up --dry-run` only
+when you need the exact rendered script; it skips preflight, preparation, SSH,
+Slurm, launch, and tracking. Use the dev cluster when you specifically want to exercise hpc-compose's real
 `up -> sbatch -> slurmd -> sacct` path without a cluster login.
 
 ## Requirements
@@ -64,6 +64,25 @@ Docker/Podman. If your production spec uses a container backend, keep a small
 host-backend smoke variant for local scheduler validation and revalidate the
 container runtime on the real cluster.
 
+## Selectable Local Cases
+
+Use the opt-in case runner when changing scheduler behavior that the ordinary
+fake-tool tests cannot prove:
+
+```bash
+just dev-cluster-cases
+just dev-cluster-case preemption
+just dev-cluster-case fs-probes
+just dev-cluster-case remote-reads
+```
+
+These cases are local developer tools and are not part of CI. They cover a real
+signal/checkpoint/requeue/resume cycle, the active shared-filesystem probe, and
+remote read commands over the SSH login-node stand-in. The cluster stays up by
+default so consecutive cases reuse it; set `DEVCLUSTER_E2E_DOWN=1` to tear it
+down after one case. Failed runs retain diagnostics under
+`.tmp/devcluster-cases/` while successful runs clean their temporary state.
+
 ## Automated Check
 
 Maintainers can run the checked-in real-scheduler suite with:
@@ -90,11 +109,12 @@ just dev-cluster-otp-e2e      # scripts/devcluster_otp_e2e.sh
 - **Remote submit** (`devcluster_remote_e2e.sh`) drives `hpc-compose up --remote`
   from the host and proves the thin remote-submit path: the project is staged
   over `rsync`, a real `sbatch` runs on the node and tracks to `COMPLETED`, and
-  `up --remote --dry-run` stages-but-doesn't-submit. It injects a throwaway
-  per-run SSH key, so no credentials are baked into the image.
+  `up --remote --dry-run` remains a local static preview with no second stage or
+  submission. It injects a throwaway per-run SSH key, so no credentials are
+  baked into the image.
 - **One OTP per session** (`devcluster_otp_e2e.sh`) flips the stand-in into an
   OTP/2FA-requiring sshd, then runs a multi-command laptop session
-  (`up --remote`, a second `up --remote --dry-run`, and a `pull`-style transfer)
+  (`up --remote`, a remote `status` follow-up, and a `pull`-style transfer)
   and asserts it authenticates **exactly once** — the SSH ControlMaster
   multiplexing hpc-compose relies on so a real login node prompts only on the
   first connection.
@@ -123,6 +143,9 @@ Validated locally:
 - tracked-state readers over a real run (`experiment`, `replay`, `debug`, `checkpoints`, `jobs`, `clean`)
 - the host-backend resume dir resolving to a real on-node path
 - `alloc` + `run` reusing one allocation via `srun`
+- synthetic preemption: USR1 checkpoint, requeue, resumed attempt, and history
+- active shared-filesystem visibility, atomic rename, and headroom probes
+- remote `status`, `stats`, `logs`, `score`, and `pull` over one staged run
 
 Still validate on the real cluster:
 

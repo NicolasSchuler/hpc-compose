@@ -1,9 +1,15 @@
 # Quickstart
 
-This is the canonical first successful cluster run: verify the binary, create
-and check one spec, configure shared storage, run strict preflight, submit once,
-then reconnect through status and logs. Other pages choose or explain; this page
-owns the executable checklist.
+This is the canonical `minimal-batch` cluster smoke: verify the binary, create
+and check the smallest spec, configure shared storage, run strict preflight,
+submit once, then reconnect through status and logs. It deliberately proves the
+site and runtime path before you submit the multi-service, distributed, or
+production workload you ultimately selected.
+
+This page is not a generic execution recipe for every example: its commands and
+expected signals intentionally name the single `app` service created below.
+After it succeeds, return to [Examples](examples.md) and adapt the selected
+workload shape.
 
 If `sbatch`, `srun`, allocation, Pyxis, or Enroot are unfamiliar, read [Slurm
 and Container Basics](slurm-container-basics.md) first. Check the [Support
@@ -19,6 +25,14 @@ current machine.
   count against a filesystem quota.
 - Expected signals are deliberately short and stable. Full transcripts vary by
   backend, site, cache state, and scheduler.
+
+Before starting, use [Choose Your Workflow](task-guide.md#1-choose-the-runtime-backend)
+to confirm which runtime backend the site supports. The `minimal-batch` template
+created in step 2 omits `runtime.backend`, so it selects the default, `pyxis`.
+After creating the file, set `runtime.backend` explicitly when the site uses
+Apptainer or Singularity. For `host`, also remove the image and choose a finite
+site-provided command as described in [Host Runtime Notes](runtime-backends.md#host-runtime-notes).
+Do not submit until the static plan reports a backend the target site supports.
 
 ## 1. Verify the Installed Version
 
@@ -76,9 +90,10 @@ hpc-compose --offline lint --allow-warnings --format json -f compose.yaml
 Expected signals:
 
 - validation exits successfully without unsupported-field errors;
-- lint emits a JSON object, and every finding has a stable `HPC...` code;
+- lint emits a JSON object, and every finding has a stable `HPC...` code (the
+  pristine template lints clean, so expect an empty `findings` array here);
 - `--allow-warnings` keeps advisory findings visible without turning this first
-  pass into an unexplained non-zero exit.
+  pass into an unexplained non-zero exit once your spec grows real content.
 
 Failure fork:
 
@@ -112,6 +127,19 @@ Failure fork: run `hpc-compose --offline plan --explain -f compose.yaml` and
 follow the first concrete hint. If the problem is a runtime/backend assumption,
 return to [Choose Your Workflow](task-guide.md) instead of adding arbitrary
 Slurm flags.
+
+> **No cluster yet? Preview the full submission locally.** You can see exactly
+> what `up` would submit without any Slurm access:
+>
+> ```bash
+> hpc-compose up --dry-run -f compose.yaml   # any host, incl. macOS
+> ```
+>
+> This renders the complete submission script to `./hpc-compose.sbatch` (use
+> `--script-out` to choose the path) and reports `"dry_run": true` — no
+> preflight, SSH, or Slurm contact. On a Linux machine without Slurm you can go
+> one step further and execute the job with `hpc-compose up --local`. Steps 5-9
+> below need a real submission host.
 
 ## 5. Configure Shared Cache and Project Context
 
@@ -265,9 +293,10 @@ Failure fork: run `hpc-compose debug -f compose.yaml`. If the batch job ran but
 the service log did not appear, the debug report distinguishes scheduler,
 launcher, readiness, and service-exit evidence.
 
-The first run is successful when the job reaches `COMPLETED`, the service exits
-successfully, and its expected log is readable. Continue with the [Runbook](runbook.md)
-for repeat operations or [Worked Failure Recovery](failure-recovery.md) when a
+The smoke is successful when the job reaches `COMPLETED`, the service exits
+successfully, and its expected log is readable. Return to [Examples](examples.md)
+to adapt the selected workload, continue with the [Runbook](runbook.md) for
+repeat operations, or use [Worked Failure Recovery](failure-recovery.md) when a
 stage does not reach its expected signal.
 
 ## Read Next

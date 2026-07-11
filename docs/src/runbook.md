@@ -77,7 +77,7 @@ or equivalent identifiers. Scheduler dependencies in `x-slurm.after_job` or
 `x-slurm.dependency` remain submit-time Slurm dependencies. Arrays and
 scheduler dependencies are not supported by `up --local`.
 
-## 5b. Submit From Your Laptop With `up --remote`
+## Submit From Your Laptop With `up --remote` {#5b-submit-from-your-laptop-with-up---remote}
 
 Remote mode lets the laptop stage a project and delegate the same Linux/Slurm
 operation to a login node:
@@ -142,8 +142,9 @@ hpc-compose pull --remote=alice@login01 --format json -f compose.yaml
 ```
 
 Use the same destination/settings context as the original remote launch. A
-missing remote stage is not fixed by guessing its internal path; run a reviewed
-remote dry-run/stage flow first.
+missing remote stage is not fixed by guessing its internal path, and
+`up --remote --dry-run` remains local rather than creating one. Review the
+settings and perform an explicitly authorized remote stage/submission flow.
 
 ## Monitor and Reconnect
 

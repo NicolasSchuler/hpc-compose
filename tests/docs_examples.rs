@@ -7,6 +7,7 @@ use hpc_compose::cli::build_cli_command;
 use hpc_compose::evolve;
 use hpc_compose::examples::{ExampleAvailability, examples};
 use hpc_compose::init::templates;
+use regex::Regex;
 use serde_json::Value;
 
 fn repo_root() -> &'static Path {
@@ -109,19 +110,30 @@ fn examples_docs_include_registry_tags_and_availability() {
     let examples_guide =
         fs::read_to_string(repo_root().join("docs/src/examples.md")).expect("read examples guide");
     for example in examples() {
+        let row = examples_guide
+            .lines()
+            .find(|line| {
+                line.starts_with("| [") && line.contains(&format!("{}.yaml", example.name))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "examples docs should contain a matrix row for {}",
+                    example.name
+                )
+            });
         assert!(
-            examples_guide.contains(&format!("{}.yaml", example.name)),
+            row.contains(&format!("{}.yaml", example.name)),
             "examples docs should mention {}.yaml",
             example.name
         );
         assert!(
-            examples_guide.contains(example.availability.label()),
+            row.contains(example.availability.label()),
             "examples docs should mention availability {}",
             example.availability.label()
         );
         for tag in example.tags {
             assert!(
-                examples_guide.contains(&format!("`{tag}`")),
+                row.contains(&format!("`{tag}`")),
                 "examples docs should mention tag `{tag}` for {}",
                 example.name
             );
@@ -171,11 +183,13 @@ fn cli_reference_mentions_every_public_command_path() {
 
     for path in command_paths {
         let command_name = path.split_whitespace().next().expect("command name");
+        let exact = cli_reference.contains(&format!("`{path}`"))
+            || cli_reference.contains(&format!("hpc-compose {path}"));
+        let top_level_fallback = !path.contains(' ')
+            && (cli_reference.contains(&format!("`{command_name} "))
+                || cli_reference.contains(&format!("hpc-compose {command_name} ")));
         assert!(
-            cli_reference.contains(&format!("`{path}`"))
-                || cli_reference.contains(&format!("hpc-compose {path}"))
-                || cli_reference.contains(&format!("`{command_name} "))
-                || cli_reference.contains(&format!("hpc-compose {command_name} ")),
+            exact || top_level_fallback,
             "docs/src/cli-reference.md should mention public command path '{path}'"
         );
     }
@@ -322,6 +336,102 @@ fn docs_link_checks_exclude_generated_edit_urls() {
         justfile.contains(exclude),
         "local docs-check lychee should ignore mdBook edit links because GitHub can transiently reject them"
     );
+    for (surface, content) in [
+        ("CI", workflow.as_str()),
+        ("local docs-check", justfile.as_str()),
+    ] {
+        assert!(
+            content.contains("--include-fragments=anchor-only"),
+            "{surface} lychee must validate local and published heading anchors"
+        );
+    }
+}
+
+#[test]
+fn onboarding_docs_keep_one_minimal_cluster_smoke_contract() {
+    let landing =
+        fs::read_to_string(repo_root().join("docs/src/README.md")).expect("read docs landing");
+    let quickstart =
+        fs::read_to_string(repo_root().join("docs/src/quickstart.md")).expect("read quickstart");
+    let faq = fs::read_to_string(repo_root().join("docs/src/faq.md")).expect("read FAQ");
+    let root_readme = fs::read_to_string(repo_root().join("README.md")).expect("read root README");
+    let task_guide =
+        fs::read_to_string(repo_root().join("docs/src/task-guide.md")).expect("read task guide");
+
+    for expected in [
+        "canonical `minimal-batch` cluster smoke",
+        "return to [Examples](examples.md)",
+        "selects the default, `pyxis`",
+    ] {
+        assert!(
+            quickstart.contains(expected),
+            "Quickstart should preserve the minimal-smoke contract detail '{expected}'"
+        );
+    }
+    assert!(
+        landing.contains("examples.html#app-redis-workeryaml"),
+        "the multi-service landing path should route through the annotated example guide"
+    );
+    assert!(
+        !landing.contains("example-source.html#app-redis-worker"),
+        "the landing page should not bypass example selection for the raw source appendix"
+    );
+    assert!(
+        !faq.contains("plan --show-script") && !root_readme.contains("plan --show-script"),
+        "onboarding should route to the canonical redacted/offline authoring flow instead of a sensitive script preview"
+    );
+    assert!(
+        task_guide.contains("runtime-backends.md#host-runtime-notes"),
+        "host-backend selection should link a shipped guide instead of a phantom example"
+    );
+}
+
+#[test]
+fn published_docs_are_tied_to_the_verified_commit_and_describe_version_skew() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/docs-pages.yml"))
+        .expect("read Pages workflow");
+    let ai_setup = fs::read_to_string(repo_root().join("docs/src/ai-agent-setup.md"))
+        .expect("read AI setup docs");
+
+    assert!(
+        workflow.contains("ref: ${{ github.event.workflow_run.head_sha }}"),
+        "Pages must build the exact commit whose CI result triggered deployment"
+    );
+    assert!(
+        !workflow.contains("workflow_dispatch"),
+        "Pages deployment must not bypass the full CI docs gate through manual dispatch"
+    );
+    for expected in [
+        "CI-verified snapshot of the `main`",
+        "newer than the latest GitHub release",
+        "Older releases may",
+        "VERSION=\"$(hpc-compose --version | awk",
+    ] {
+        assert!(
+            ai_setup.contains(expected),
+            "AI setup docs should explain version skew and matching assets: '{expected}'"
+        );
+    }
+    assert!(
+        !ai_setup.contains("VERSION=0.2.0"),
+        "AI setup docs must not hard-code an unreleased or stale skill version"
+    );
+}
+
+#[test]
+fn rustdoc_gate_denies_documentation_warnings() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("read justfile");
+
+    assert!(
+        workflow.contains("RUSTDOCFLAGS: -D warnings"),
+        "CI must deny rustdoc warnings with RUSTDOCFLAGS"
+    );
+    assert!(
+        justfile.contains("RUSTDOCFLAGS=\"-D warnings\" cargo doc --locked --no-deps"),
+        "local docs-check must deny rustdoc warnings with RUSTDOCFLAGS"
+    );
 }
 
 #[test]
@@ -369,6 +479,81 @@ fn docs_src_markdown_files() -> Vec<(String, String)> {
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     files
+}
+
+fn markdown_heading_anchors(content: &str) -> BTreeSet<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+            if level == 0
+                || level > 6
+                || !trimmed
+                    .as_bytes()
+                    .get(level)
+                    .is_some_and(u8::is_ascii_whitespace)
+            {
+                return None;
+            }
+            let mut heading = trimmed[level..].trim().trim_end_matches('#').trim();
+            if let Some(without_brace) = heading.strip_suffix('}')
+                && let Some(marker) = without_brace.rfind(" {#")
+            {
+                let anchor = &without_brace[marker + 3..];
+                if !anchor.is_empty() {
+                    return Some(anchor.to_string());
+                }
+                heading = heading[..marker].trim();
+            }
+
+            let mut anchor = String::new();
+            let mut previous_dash = false;
+            for ch in heading.chars().flat_map(char::to_lowercase) {
+                if ch.is_ascii_alphanumeric() {
+                    anchor.push(ch);
+                    previous_dash = false;
+                } else if (ch.is_whitespace() || matches!(ch, '-' | '_' | '/' | ':'))
+                    && !anchor.is_empty()
+                    && !previous_dash
+                {
+                    anchor.push('-');
+                    previous_dash = true;
+                }
+            }
+            while anchor.ends_with('-') {
+                anchor.pop();
+            }
+            (!anchor.is_empty()).then_some(anchor)
+        })
+        .collect()
+}
+
+#[test]
+fn published_manual_fragment_links_match_local_headings() {
+    let source = fs::read_to_string(repo_root().join("docs/plans/2026-07-feature-brainstorm.md"))
+        .expect("read living backlog");
+    let links = Regex::new(
+        r"https://nicolasschuler\.github\.io/hpc-compose/([a-z0-9-]+)\.html#([a-z0-9_-]+)",
+    )
+    .expect("same-site docs link regex");
+    let mut checked = 0;
+
+    for captures in links.captures_iter(&source) {
+        let page = captures.get(1).expect("page capture").as_str();
+        let fragment = captures.get(2).expect("fragment capture").as_str();
+        let content = fs::read_to_string(repo_root().join(format!("docs/src/{page}.md")))
+            .unwrap_or_else(|error| panic!("read docs page {page}: {error}"));
+        assert!(
+            markdown_heading_anchors(&content).contains(fragment),
+            "published link {page}.html#{fragment} does not match a local heading"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 10,
+        "expected to verify the backlog's evidence links"
+    );
 }
 
 #[test]

@@ -37,6 +37,10 @@ For opaque CLI failures, add global `-v` or `--debug`; set `RUST_LOG` when you n
 | Local mode is unsupported | Local workflows require Linux plus either Pyxis-compatible Enroot behavior or Apptainer. | Use authoring commands on non-Linux hosts; on macOS use `test --submit --dev-cluster` from a source checkout for local Slurm smoke tests, then run `test --submit` or `up` on a supported Slurm login node for real runtime execution. |
 | `up --remote` reports the remote `hpc-compose` is missing or older | The login node has no `hpc-compose` on `PATH` or `~/.local/bin`, or has an older version than your local one. | Default `--remote-install auto` downloads and installs the newest release into `~/.local/bin` over the same SSH connection. On a locked-down/air-gapped node, use `--remote-install never` and install manually with the printed one-liner. |
 | `up --remote` job cannot see part of your source tree | The compose file lives in a subdirectory with no repo-root settings, so only that subdir was staged (watch for the "staged only a subdir" warning). | Put `.hpc-compose/settings.toml` at the repo root (or run `hpc-compose setup` there) so the whole source tree is staged. |
+| `--remote` fails with `Permission denied (publickey)`, a host-key mismatch, or `Connection refused`/timeout (exit `3`) | SSH itself cannot reach or authenticate to the login node; hpc-compose delegates all authentication to your SSH setup. | Confirm `ssh <login-node>` works on its own first; fix keys/`~/.ssh/config` there, then rerun. See [exit codes](exit-codes.md). |
+| OTP/2FA login node prompts on every command, or the OTP prompt never appears | Each SSH connection re-authenticates; without connection multiplexing every remote command costs one OTP, and a broken `ControlMaster` socket can swallow the prompt. | Set up `ControlMaster`/`ControlPersist` so one interactive login is reused, as shown in [OTP / 2FA login nodes](notebook.md#login-nodes-that-require-an-otp--2fa); remove a stale `ControlPath` socket file if the prompt never appears. |
+| Job sits in `PENDING` and nothing happens | Queue wait is normal; the priority, partition, or resource shape decides how long. | Follow [Stage 3: The Job Is Pending](failure-recovery.md#stage-3-the-job-is-pending); use `hpc-compose weather` for queue conditions and `up --watch-queue --queue-warn-after` to get an explicit nudge. |
+| Files disappeared after some days, or the cache path no longer exists | The site workspace (`ws_*`-managed storage) expired and was cleaned up. | Check `hpc-compose workspace status`, re-allocate or extend via [workspaces](workspaces.md), and export results you need to keep (see `artifacts`). |
 | `--skip-prepare` reports the runtime image is not prepared | `--skip-prepare` reuses an existing image cache and builds nothing; on a first run (or after cache eviction) the image does not exist yet. | Run `hpc-compose up` or `hpc-compose prepare` once without `--skip-prepare`, then reuse the cache with `--skip-prepare`. |
 | enroot import fails at `Creating squashfs filesystem...` with `Stale file handle` | The default extraction scratch (`<cache_dir>/enroot/tmp`) is on a shared NFS/Lustre/GPFS filesystem, where the extract-then-`mksquashfs` import triggers ESTALE. | Point the prepare scratch at node-local storage (opt-in): set `x-slurm.enroot_temp_dir` in the spec (e.g. `/tmp/${USER}-hpc-compose-enroot`), `cache.enroot_temp_dir` in `.hpc-compose/settings.toml`, or `HPC_COMPOSE_ENROOT_TEMP_DIR`. `hpc-compose` retries once on a clean temp dir before failing. |
 | prepare command fails when a `prepare.mounts` source is on a network filesystem | The prepare step binds that source on the login node, where a network/shared-FS mount can fail. | Use a dependency-only prepare (install deps into the image, mount the source as a runtime `volumes` entry), or ensure the mount source is stable on the login node. `examples/dev-python-app.yaml` shows the pattern. |
@@ -75,11 +79,17 @@ Use `plan` for the static preview. It never prepares images, runs preflight, cal
 hpc-compose plan --show-script -f compose.yaml
 ```
 
-Use `up --dry-run` only when you intentionally want to exercise preflight, prepare, and render without calling `sbatch`:
+Use `up --dry-run` when you need an owner-only rendered script without running
+preflight, preparing images, contacting SSH or Slurm, launching, or writing
+tracked job state:
 
 ```bash
 hpc-compose up --dry-run -f compose.yaml
 ```
+
+This static preview does not prove that runtime prerequisites or prepared images
+exist. Run explicit preflight and preparation checks separately when you need
+evidence from those boundaries.
 
 ## Clean Old Tracked Runs
 

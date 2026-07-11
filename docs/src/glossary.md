@@ -18,6 +18,9 @@ One-line definitions; follow the link for the owning reference section.
 <dt id="cache-directory">cache directory</dt>
 <dd>Shared storage for imported and prepared images, visible from both the submission host and the compute nodes. See <a href="spec-reference.md#x-slurmcache_dir"><code>x-slurm.cache_dir</code></a>.</dd>
 
+<dt id="checkpoint">checkpoint</dt>
+<dd>Per-attempt run state recorded under <code>.hpc-compose/&lt;job-id&gt;/attempts/&lt;n&gt;/</code> for resume-aware runs, reconstructed with <code>hpc-compose checkpoints</code>; distinct from any model checkpoints your training code writes. See <a href="failure-recovery.md">Recover From Failures</a>.</dd>
+
 <dt id="compose-file">compose file / spec</dt>
 <dd>The YAML file describing services, runtime backend, and Slurm settings; "spec" and "compose file" are the same thing. See <a href="spec-reference.md">Spec Reference</a>.</dd>
 
@@ -68,6 +71,9 @@ One-line definitions; follow the link for the owning reference section.
 
 <dt id="tracked-job">tracked job / tracked run</dt>
 <dd>Metadata under <code>.hpc-compose/&lt;job-id&gt;/</code> that lets <code>status</code>, <code>ps</code>, <code>watch</code>, <code>logs</code>, <code>stats</code>, and <code>artifacts</code> reconnect to a run later; "tracked job" and "tracked run" are the same thing. See <a href="cli-reference.md#tracked-runtime">Tracked Runtime</a>.</dd>
+
+<dt id="workspace">workspace</dt>
+<dd>Site-managed storage with an expiry date, allocated through the <code>ws_*</code> tools and managed with <code>hpc-compose workspace status/allocate/extend/release</code>; a common home for the shared cache directory. See <a href="workspaces.md">Manage Cluster Workspaces</a>.</dd>
 
 <dt id="x-runtime-prepare"><code>x-runtime.prepare</code></dt>
 <dd>The spec block for image-preparation commands and mounts; <code>x-enroot.prepare</code> is an accepted Pyxis/Enroot alias. See <a href="spec-reference.md#x-runtimeprepare-and-x-enrootprepare"><code>x-runtime.prepare</code></a>.</dd>

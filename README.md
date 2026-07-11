@@ -17,18 +17,20 @@
 
 Use it when you want Docker Compose-style authoring on Slurm without adding Kubernetes, a long-running control plane, or a pile of hand-written `sbatch` glue.
 
-## Choose A Starting Path
+## Start Here
 
-| Your workload | Start here | Then follow |
-| --- | --- | --- |
-| One finite batch command | `minimal-batch` | [Quickstart](docs/src/quickstart.md) |
-| Services with readiness or dependency ordering | `app-redis-worker` | [Examples](docs/src/examples.md) |
-| Distributed training across nodes | `multi-node-torchrun` | [Choose Your Workflow](docs/src/task-guide.md) |
+1. [Choose Your Workflow](docs/src/task-guide.md) to confirm the runtime
+   backend, topology, execution style, and submission context.
+2. [Run the Quickstart](docs/src/quickstart.md), which deliberately uses the
+   smallest `minimal-batch` spec to prove the cluster path before your real
+   workload consumes resources.
+3. [Choose and adapt an example](docs/src/examples.md), then use the
+   [Runbook](docs/src/runbook.md) for repeat operations.
 
-The manual keeps one canonical first-cluster-run checklist in
-[Quickstart](docs/src/quickstart.md). Static authoring does not submit; runtime
-commands do. Check the [Support Matrix](docs/src/support-matrix.md) before a real
-cluster run.
+The [published manual](https://nicolasschuler.github.io/hpc-compose/) opens with
+three workload paths for batch jobs, multi-service applications, and
+distributed training. Static authoring does not submit; runtime commands do.
+Check the [Support Matrix](docs/src/support-matrix.md) before a real cluster run.
 
 ## Scope
 
@@ -75,24 +77,17 @@ Other install paths:
 
 Installer availability is not the same as full runtime support. Check the [Support Matrix](docs/src/support-matrix.md) before assuming a platform or cluster can run submission workflows end to end.
 
-## Start From Docs
+## Documentation
 
-- [Published manual](https://nicolasschuler.github.io/hpc-compose/)
-- [Support Matrix](docs/src/support-matrix.md)
-- [Installation](docs/src/installation.md)
-- [Quickstart](docs/src/quickstart.md)
-- [Choose Your Workflow](docs/src/task-guide.md)
-- [Command Families](docs/src/command-families.md)
-- [Production Readiness](docs/src/production-readiness.md)
-- [Worked Failure Recovery](docs/src/failure-recovery.md)
-- [FAQ](docs/src/faq.md)
-- [Examples](docs/src/examples.md)
-- [Development Workflow](docs/src/development-workflow.md)
-- [Runtime Backends](docs/src/runtime-backends.md)
-- [Runbook](docs/src/runbook.md)
-- [Troubleshooting](docs/src/troubleshooting.md)
-- [CLI Reference](docs/src/cli-reference.md)
-- [Spec Reference](docs/src/spec-reference.md)
+- [Published manual](https://nicolasschuler.github.io/hpc-compose/) — complete,
+  grouped navigation and built-in search.
+- [Choose Your Workflow](docs/src/task-guide.md) and
+  [Quickstart](docs/src/quickstart.md) — decisions and the minimal cluster smoke.
+- [Examples](docs/src/examples.md) — select and adapt a shipped workload shape.
+- [Runbook](docs/src/runbook.md) and
+  [Troubleshooting](docs/src/troubleshooting.md) — operate and recover real runs.
+- [CLI Reference](docs/src/cli-reference.md) and
+  [Spec Reference](docs/src/spec-reference.md) — exact command and YAML contracts.
 
 ## Set Up With an AI Agent
 
@@ -102,7 +97,9 @@ You can ask any LLM agent (Claude, Codex, Copilot, Cursor) to set up hpc-compose
 - Walkthrough and copy-paste prompt: [Set Up With an AI Agent](docs/src/ai-agent-setup.md)
 - Drop-in skill bundle: [`skills/hpc-compose/SKILL.md`](skills/hpc-compose/SKILL.md)
 
-Agents author and statically verify a spec (`validate`, `plan --show-script`, `inspect`) before any real run, and ask before submitting jobs.
+Agents author and statically verify a spec with redacted `validate`, `lint`,
+`plan --format json`, and `inspect --format json` output before any real run,
+then apply the command policy before submitting jobs.
 
 ## Feedback
 

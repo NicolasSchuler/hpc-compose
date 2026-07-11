@@ -24,14 +24,22 @@ hpc-compose --offline schema
 hpc-compose --offline schema --kind settings
 ```
 
-Published Pages and `/raw/*.md` describe the latest published release. They may mention commands or fields absent from an older binary. When they disagree, use the installed binary's help, embedded docs, and schemas.
+Published Pages and `/raw/*.md` describe a CI-verified snapshot of the `main`
+branch. They can be newer than the latest GitHub release and may mention commands
+or fields absent from an installed binary. When they disagree, use the installed
+binary's help, embedded docs, and schemas.
 
-## Install the version-matched skill
+## Install a matching release skill when available
 
-Every GitHub release publishes `hpc-compose-skill-vX.Y.Z.tar.gz` and its checksum alongside the binary archives. Download the skill from the same release as the installed CLI, verify it, and extract the top-level `hpc-compose/` directory into the agent's skill directory.
+The release workflow publishes `hpc-compose-skill-vX.Y.Z.tar.gz` and its checksum
+alongside binary archives for releases that contain the agent bundle. On the
+[release matching the installed CLI](https://github.com/NicolasSchuler/hpc-compose/releases),
+confirm that both skill assets exist before downloading them. Older releases may
+predate the bundle; do not substitute the current `main` skill for an older
+binary and call it version-matched.
 
 ```bash
-VERSION=0.2.0
+VERSION="$(hpc-compose --version | awk '{print $2}')"
 curl -fLO "https://github.com/NicolasSchuler/hpc-compose/releases/download/v${VERSION}/hpc-compose-skill-v${VERSION}.tar.gz"
 curl -fLO "https://github.com/NicolasSchuler/hpc-compose/releases/download/v${VERSION}/hpc-compose-skill-v${VERSION}.tar.gz.sha256"
 shasum -a 256 -c "hpc-compose-skill-v${VERSION}.tar.gz.sha256"
@@ -44,7 +52,10 @@ Install the extracted directory in one of these locations, then start a fresh ag
 - Claude Code: `~/.claude/skills/hpc-compose` or `.claude/skills/hpc-compose`;
 - another skill-aware client: its documented Agent Skills directory.
 
-The source tree under `skills/hpc-compose/` matches the current checkout, not necessarily the installed release. Its `VERSION` file is an explicit mismatch guard.
+If the matching release does not contain the archive, keep using the binary's
+embedded docs and schemas. Upgrade the CLI only when requested, or use
+`skills/hpc-compose/` from an exact matching source checkout. That directory's
+`VERSION` file is an explicit mismatch guard.
 
 ## Copy-paste prompt
 

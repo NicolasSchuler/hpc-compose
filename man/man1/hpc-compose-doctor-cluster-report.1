@@ -8,14 +8,14 @@ hpc\-compose doctor cluster\-report [OPTIONS]
 .fi
 .SH DESCRIPTION
 .PP
-Generate a best\-effort cluster capability profile
+Generate a best\-effort cluster capability profile. Writes .hpc\-compose/cluster.toml by default; use \-\-out \- to print TOML without writing the profile.
 .SH OPTIONS
 .TP
 \fB--format\fR \fIFORMAT\fR
 Output format. Possible values: text, json.
 .TP
 \fB--out\fR \fIPATH\fR
-Write the cluster profile to this path; use '\-' to print TOML.
+Write the cluster profile to this path (default: .hpc\-compose/cluster.toml); use '\-' to print TOML.
 .TP
 \fB--color\fR \fIWHEN\fR
 Controls colored output. Default: auto. Possible values: auto, always, never.

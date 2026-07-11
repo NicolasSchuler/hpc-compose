@@ -9,7 +9,7 @@ This guide helps you convert an existing `docker-compose.yaml` into an `hpc-comp
 | `image` | `image` (same syntax, auto-prefixed with `docker://`) |
 | `command` | `command` (string or list, same syntax) |
 | `entrypoint` | `entrypoint` (string or list, same syntax) |
-| `environment` | `environment` (map or list, same syntax) |
+| `environment` | `environment` (map of string values or list of `KEY=VALUE` strings; bare pass-through names and null values are not supported) |
 | `env_file` | `env_file` (string or list, same syntax; read on the submit host, later files win, inline `environment` wins) |
 | `volumes` | `volumes` (host:container bind mounts, same syntax) |
 | `depends_on` | `depends_on` (list or map with `condition: service_started` / `service_healthy` / `service_completed_successfully`) |

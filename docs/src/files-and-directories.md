@@ -215,6 +215,7 @@ A repo-root `.hpcignore` adds extra excludes on top of `.gitignore` when the sou
 | `HPC_COMPOSE_BACKEND_OVERRIDE` | Read from environment | Selects the runtime backend used by the batch script (defaults to `slurm`). |
 | `HPC_COMPOSE_DEV_CONTROL_DIR` | Read from environment | When set, enables the dev control directory used for live restart requests during local smoke-tests. |
 | `HPC_COMPOSE_DEBUG_STAGING` | Read from environment | When truthy, lists every path excluded from the source snapshot by `.hpcignore` during staging (a staged-file manifest aid for debugging ignore rules). |
+| `HPC_COMPOSE_DEBUG_LOCKS` | Read from environment | When set, prints a one-line note whenever a state-file lock could not be acquired and the operation degraded to lock-free execution (diagnostic aid; normal runs stay silent). |
 | `HPC_COMPOSE_SERVICE_LOG` | Set by hpc-compose | Points each service and its hooks at the in-container path of that service's log file. |
 | `HPC_COMPOSE_RESUME_DIR` | Set by hpc-compose | The in-container path of the resume directory for resume-aware runs. |
 
