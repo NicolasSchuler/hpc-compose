@@ -16,8 +16,8 @@ use std::fs;
 use support::*;
 
 /// Compose file with a rich `x-slurm` resource block so we can assert the full
-/// set of derived `salloc` flags. `submit_args` carries a passthrough flag the
-/// planner does not otherwise emit.
+/// set of derived `salloc` flags. `submit_args` carries an unmodeled
+/// passthrough flag while reservation uses its first-class field.
 fn write_alloc_compose(dir: &std::path::Path, cache_dir: &std::path::Path) -> std::path::PathBuf {
     let local_image = dir.join("image.sqsh");
     fs::write(&local_image, "sqsh").expect("image");
@@ -38,8 +38,9 @@ x-slurm:
   cpus_per_task: 8
   mem: 16G
   gpus: 2
+  reservation: dev
   submit_args:
-    - --reservation=dev
+    - --exclusive
 services:
   app:
     image: {image}
@@ -95,8 +96,9 @@ fn alloc_invokes_salloc_with_derived_flags_and_runs_inner_command() {
     assert!(args.contains("--cpus-per-task=8"), "argv: {args}");
     assert!(args.contains("--mem=16G"), "argv: {args}");
     assert!(args.contains("--gpus=2"), "argv: {args}");
-    // User-supplied passthrough flag survives to salloc.
     assert!(args.contains("--reservation=dev"), "argv: {args}");
+    // User-supplied unmodeled passthrough flag survives to salloc.
+    assert!(args.contains("--exclusive"), "argv: {args}");
     // The bootstrap wrapper and the sentinel arg are appended after the options.
     assert!(args.contains("hpc-compose-alloc"), "argv: {args}");
 

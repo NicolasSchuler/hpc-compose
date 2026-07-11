@@ -903,7 +903,7 @@ pub enum Commands {
         resume_diff_only: bool,
         #[arg(
             long,
-            help = "Run preflight, prepare, and render without calling sbatch (prepare still imports images; add --skip-prepare for a no-side-effect render, or use `plan`)"
+            help = "Render an owner-only submission-script preview (written to ./hpc-compose.sbatch unless --script-out is set) without preflight, preparation, SSH, Slurm, launch, or tracking"
         )]
         dry_run: bool,
         #[arg(long, help = "Submit or launch and return without watching logs")]
@@ -2934,14 +2934,17 @@ pub enum CompletionValueKind {
 
 #[derive(Debug, Subcommand)]
 pub enum DoctorCommands {
-    #[command(about = "Generate a best-effort cluster capability profile")]
+    #[command(
+        about = "Generate a best-effort cluster capability profile",
+        long_about = "Generate a best-effort cluster capability profile. Writes .hpc-compose/cluster.toml by default; use --out - to print TOML without writing the profile."
+    )]
     ClusterReport {
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
         format: Option<OutputFormat>,
         #[arg(
             long = "out",
             value_name = "PATH",
-            help = "Write the cluster profile to this path; use '-' to print TOML"
+            help = "Write the cluster profile to this path (default: .hpc-compose/cluster.toml); use '-' to print TOML"
         )]
         out: Option<PathBuf>,
     },

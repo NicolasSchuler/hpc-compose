@@ -415,14 +415,16 @@ pub fn next_commands(output: &Path) -> Vec<String> {
     if crate::platform::is_macos() {
         // macOS is authoring-only: keep the user on safe static commands and
         // flag that `up` must run on a Linux Slurm login node, matching the
-        // README's Safe First Path.
+        // README's Safe First Path and the quickstart's validate-first flow.
         vec![
+            format!("hpc-compose validate -f {path}"),
             format!("hpc-compose plan -f {path}"),
             format!("hpc-compose plan --show-script -f {path}"),
             format!("hpc-compose up -f {path}   # run from a Linux Slurm login node"),
         ]
     } else {
         vec![
+            format!("hpc-compose validate -f {path}"),
             format!("hpc-compose plan -f {path}"),
             format!("hpc-compose up -f {path}"),
         ]
@@ -518,7 +520,8 @@ mod tests {
     fn cache_dir_placeholder_and_next_commands_match_expected_defaults() {
         assert_eq!(cache_dir_placeholder(), "<shared-cache-dir>");
         let commands = next_commands(Path::new("/tmp/demo.yaml"));
-        assert_eq!(commands[0], "hpc-compose plan -f /tmp/demo.yaml");
+        assert_eq!(commands[0], "hpc-compose validate -f /tmp/demo.yaml");
+        assert_eq!(commands[1], "hpc-compose plan -f /tmp/demo.yaml");
         if cfg!(target_os = "macos") {
             assert!(
                 commands
@@ -534,6 +537,7 @@ mod tests {
             assert_eq!(
                 commands,
                 vec![
+                    "hpc-compose validate -f /tmp/demo.yaml",
                     "hpc-compose plan -f /tmp/demo.yaml",
                     "hpc-compose up -f /tmp/demo.yaml",
                 ]

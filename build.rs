@@ -61,6 +61,7 @@ struct DocSource {
 #[derive(Debug)]
 struct DocSection {
     heading: String,
+    anchor: Option<String>,
     body: String,
 }
 
@@ -125,6 +126,15 @@ fn build_docs_search_index(docs_dir: &Path) -> Result<String, String> {
         for section in sections {
             output.push_str("            EmbeddedSection { heading: ");
             output.push_str(&rust_string_literal(&section.heading));
+            output.push_str(", anchor: ");
+            match &section.anchor {
+                Some(anchor) => {
+                    output.push_str("Some(");
+                    output.push_str(&rust_string_literal(anchor));
+                    output.push(')');
+                }
+                None => output.push_str("None"),
+            }
             output.push_str(", body: ");
             output.push_str(&rust_string_literal(&section.body));
             output.push_str(" },\n");
@@ -140,12 +150,76 @@ fn read_doc_source(
     relative_path: String,
     title_hint: Option<String>,
 ) -> Result<DocSource, String> {
-    let body = fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    let repo_root = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR")
+            .ok_or_else(|| "CARGO_MANIFEST_DIR is not set".to_string())?,
+    )
+    .canonicalize()
+    .map_err(|err| format!("resolve repository root: {err}"))?;
+    let body = expand_includes(path, &repo_root, &mut Vec::new())?;
     Ok(DocSource {
         relative_path,
         title_hint,
         body,
     })
+}
+
+fn expand_includes(
+    path: &Path,
+    repo_root: &Path,
+    stack: &mut Vec<PathBuf>,
+) -> Result<String, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|err| format!("resolve included docs path {}: {err}", path.display()))?;
+    if !canonical.starts_with(repo_root) {
+        return Err(format!(
+            "included docs path escapes repository root: {}",
+            canonical.display()
+        ));
+    }
+    if stack.contains(&canonical) {
+        return Err(format!(
+            "recursive mdBook include detected: {}",
+            canonical.display()
+        ));
+    }
+
+    let source = fs::read_to_string(&canonical)
+        .map_err(|err| format!("read {}: {err}", canonical.display()))?;
+    stack.push(canonical.clone());
+    let mut expanded = String::new();
+    for line in source.lines() {
+        if let Some(include) = include_path(line) {
+            let include_path = canonical
+                .parent()
+                .ok_or_else(|| format!("included file has no parent: {}", canonical.display()))?
+                .join(include);
+            let included = expand_includes(&include_path, repo_root, stack)?;
+            expanded.push_str(&included);
+            if !included.ends_with('\n') {
+                expanded.push('\n');
+            }
+        } else {
+            expanded.push_str(line);
+            expanded.push('\n');
+        }
+    }
+    stack.pop();
+    Ok(expanded)
+}
+
+fn include_path(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let path = trimmed
+        .strip_prefix("{{#include ")?
+        .strip_suffix("}}")?
+        .trim();
+    if path.is_empty() || path.chars().any(char::is_whitespace) {
+        None
+    } else {
+        Some(path)
+    }
 }
 
 fn summary_links(summary: &str) -> Vec<(String, String)> {
@@ -202,28 +276,60 @@ fn extract_title(markdown: &str) -> Option<String> {
     markdown
         .lines()
         .find_map(markdown_heading)
-        .and_then(|(level, heading)| if level == 1 { Some(heading) } else { None })
+        .and_then(|(level, heading, _anchor)| if level == 1 { Some(heading) } else { None })
 }
 
 fn extract_sections(markdown: &str, fallback_heading: &str) -> Vec<DocSection> {
     let mut sections = Vec::new();
     let mut current_heading = fallback_heading.to_string();
+    let mut current_anchor = None;
     let mut current_body = String::new();
+    let mut fence = None;
 
     for line in markdown.lines() {
-        if let Some((_level, heading)) = markdown_heading(line) {
-            push_section(&mut sections, &current_heading, &mut current_body);
+        let trimmed = line.trim_start();
+        let line_fence = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if let Some(marker) = line_fence {
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+            current_body.push_str(line);
+            current_body.push('\n');
+        } else if fence.is_none()
+            && let Some((_level, heading, anchor)) = markdown_heading(line)
+        {
+            push_section(
+                &mut sections,
+                &current_heading,
+                current_anchor.take(),
+                &mut current_body,
+            );
             current_heading = heading;
+            current_anchor = anchor;
         } else {
             current_body.push_str(line);
             current_body.push('\n');
         }
     }
-    push_section(&mut sections, &current_heading, &mut current_body);
+    push_section(
+        &mut sections,
+        &current_heading,
+        current_anchor,
+        &mut current_body,
+    );
 
     if sections.is_empty() {
         sections.push(DocSection {
             heading: fallback_heading.to_string(),
+            anchor: None,
             body: markdown.to_string(),
         });
     }
@@ -231,7 +337,12 @@ fn extract_sections(markdown: &str, fallback_heading: &str) -> Vec<DocSection> {
     sections
 }
 
-fn push_section(sections: &mut Vec<DocSection>, heading: &str, body: &mut String) {
+fn push_section(
+    sections: &mut Vec<DocSection>,
+    heading: &str,
+    anchor: Option<String>,
+    body: &mut String,
+) {
     if sections.is_empty() && body.trim().is_empty() {
         body.clear();
         return;
@@ -242,11 +353,12 @@ fn push_section(sections: &mut Vec<DocSection>, heading: &str, body: &mut String
     }
     sections.push(DocSection {
         heading: heading.to_string(),
+        anchor,
         body: std::mem::take(body),
     });
 }
 
-fn markdown_heading(line: &str) -> Option<(usize, String)> {
+fn markdown_heading(line: &str) -> Option<(usize, String, Option<String>)> {
     let trimmed = line.trim_start();
     let level = trimmed.chars().take_while(|ch| *ch == '#').count();
     if level == 0 || level > 6 {
@@ -264,11 +376,33 @@ fn markdown_heading(line: &str) -> Option<(usize, String)> {
         .trim_end_matches('#')
         .trim()
         .to_string();
+    let (heading, anchor) = split_explicit_anchor(heading);
     if heading.is_empty() {
         None
     } else {
-        Some((level, heading))
+        Some((level, heading, anchor))
     }
+}
+
+fn split_explicit_anchor(heading: String) -> (String, Option<String>) {
+    let Some(without_brace) = heading.strip_suffix('}') else {
+        return (heading, None);
+    };
+    let Some(marker) = without_brace.rfind(" {#") else {
+        return (heading, None);
+    };
+    let anchor = &without_brace[marker + 3..];
+    if anchor.is_empty()
+        || anchor
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '{' | '}'))
+    {
+        return (heading, None);
+    }
+    (
+        heading[..marker].trim().to_string(),
+        Some(anchor.to_string()),
+    )
 }
 
 fn title_from_path(path: &str) -> String {

@@ -950,7 +950,8 @@ fn examples_commands_list_search_and_coverage() {
     assert!(recommend_text.contains("multi-node-torchrun"));
     assert!(recommend_text.contains("Why:"));
     assert!(recommend_text.contains("Prerequisites to review:"));
-    assert!(recommend_text.contains("hpc-compose plan -f compose.yaml"));
+    assert!(recommend_text.contains("hpc-compose plan --format json -f compose.yaml"));
+    assert!(!recommend_text.contains("--show-script"));
     assert!(!recommend_text.contains("hpc-compose up"));
 
     let recommend_json = run_cli(

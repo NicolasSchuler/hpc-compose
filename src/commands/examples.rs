@@ -123,7 +123,7 @@ fn print_recommendations(
                     schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
                     query,
                     required_tags: tags,
-                    safe_authoring_note: "Recommendation commands only copy or scaffold a spec and run static plan checks; they do not contact Slurm.",
+                    safe_authoring_note: "Recommendation commands scaffold built-in templates or inspect repository examples in place, then run static validation and plan checks; they do not contact Slurm.",
                     recommendations,
                 })?
             );
@@ -140,7 +140,7 @@ fn print_recommendations_text(
     let label = recommendation_label(query, tags);
     println!("{}", term::styled_section_header(&label));
     println!(
-        "Safe authoring path only: these commands copy or scaffold a spec and run plan checks without contacting Slurm."
+        "Safe authoring path only: these commands scaffold templates or inspect repository examples in place, then validate and plan without contacting Slurm."
     );
     println!();
 
@@ -250,7 +250,7 @@ mod tests {
             recommendations[0]
                 .next_commands
                 .iter()
-                .any(|command| command.contains("hpc-compose plan -f compose.yaml"))
+                .any(|command| command.contains("hpc-compose plan --format json -f compose.yaml"))
         );
     }
 }

@@ -3445,7 +3445,23 @@ pub(crate) fn template_infos() -> Vec<TemplateInfoOutput> {
 }
 
 pub(crate) fn print_template_list() {
-    for category in ["basics", "llm", "training", "distributed", "workflow"] {
+    // Preferred presentation order; categories the catalog uses beyond these
+    // are appended so a template can never silently vanish from the listing.
+    let mut categories = vec![
+        "basics",
+        "interactive",
+        "llm",
+        "training",
+        "distributed",
+        "workflow",
+    ];
+    for template in templates() {
+        let category = template_category(template.name);
+        if !categories.contains(&category) {
+            categories.push(category);
+        }
+    }
+    for category in categories {
         let grouped = templates()
             .iter()
             .filter(|template| template_category(template.name) == category)

@@ -17,21 +17,21 @@
 //! Codes 1-4 are what `hpc-compose` emits for *its own* failures. Direct-execution
 //! commands (`run`, `alloc`, `shell`, `notebook`, `reach`, `exec`) instead exec a
 //! child on the user's behalf; that child's exit status is surfaced verbatim via
-//! [`ExitCodeError`] and may coincide with a reserved code, exactly as `env(1)`,
+//! [`crate::exit::ExitCodeError`] and may coincide with a reserved code, exactly as `env(1)`,
 //! `timeout(1)`, and shells behave.
 //!
 //! ## How a failure gets its code
 //!
 //! Command code never calls `process::exit`; `main.rs` is the only exit site. A
 //! failing command returns an [`anyhow::Error`], and `main.rs` calls
-//! [`exit_code_for`] to derive the code by inspecting the error chain:
+//! [`crate::exit::exit_code_for`] to derive the code by inspecting the error chain:
 //!
-//! - an [`ExitCodeError`] carries a child's status (pass-through);
-//! - a [`crate::spec_error::SpecError`] or generic spec-validation carrier
+//! - an [`crate::exit::ExitCodeError`] carries a child's status (pass-through);
+//! - a `crate::spec_error::SpecError` or generic spec-validation carrier
 //!   means the spec is invalid (code 2);
-//! - a [`UsageError`] means a command-level flag or argument combination is invalid → code 2;
-//! - a [`LintFindingsError`] means lint findings failed the gate → code 4;
-//! - an [`EnvironmentError`] means a preflight/reachability check failed → code 3;
+//! - a [`crate::exit::UsageError`] means a command-level flag or argument combination is invalid → code 2;
+//! - a [`crate::exit::LintFindingsError`] means lint findings failed the gate → code 4;
+//! - an [`crate::exit::EnvironmentError`] means a preflight/reachability check failed → code 3;
 //! - anything else is an uncategorized failure → code 1.
 //!
 //! Clap already exits with code 2 for parse-level usage errors (unknown flags,

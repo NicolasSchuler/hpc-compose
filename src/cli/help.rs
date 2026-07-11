@@ -184,7 +184,7 @@ form), not to a submitted .sbatch, which can bake absolute runtime paths.";
 pub(super) const PREPARE_HELP: &str = "\
 Examples:
   hpc-compose prepare -f compose.yaml
-  hpc-compose prepare -f compose.yaml --force
+  hpc-compose prepare -f compose.yaml --force-rebuild
   hpc-compose prepare -f compose.yaml --format json";
 
 pub(super) const PREFLIGHT_HELP: &str = "\
@@ -679,7 +679,7 @@ const RENDER_EXAMPLES: &[&str] = &[
 
 const PREPARE_EXAMPLES: &[&str] = &[
     "hpc-compose prepare -f compose.yaml",
-    "hpc-compose prepare -f compose.yaml --force",
+    "hpc-compose prepare -f compose.yaml --force-rebuild",
     "hpc-compose prepare -f compose.yaml --format json",
 ];
 

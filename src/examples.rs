@@ -8,7 +8,7 @@ use std::{collections::BTreeSet, fmt};
 pub enum ExampleAvailability {
     /// The example can be rendered by `hpc-compose new --template`.
     BuiltInTemplate,
-    /// The example is a repository YAML file users copy directly.
+    /// The example is a repository YAML file used in place with adjacent assets.
     RepositoryFile,
 }
 
@@ -285,15 +285,18 @@ fn default_recommendation_rank(name: &str) -> Option<u8> {
 }
 
 fn next_authoring_commands(example: &ExampleInfo) -> Vec<String> {
-    let mut commands = match example.availability {
-        ExampleAvailability::BuiltInTemplate => vec![format!(
-            "hpc-compose new --template {} --name my-app --output compose.yaml",
-            example.name
-        )],
-        ExampleAvailability::RepositoryFile => vec![format!("cp {} compose.yaml", example.path)],
+    let (mut commands, compose_path) = match example.availability {
+        ExampleAvailability::BuiltInTemplate => (
+            vec![format!(
+                "hpc-compose new --template {} --name my-app --output compose.yaml",
+                example.name
+            )],
+            "compose.yaml",
+        ),
+        ExampleAvailability::RepositoryFile => (Vec::new(), example.path),
     };
-    commands.push("hpc-compose plan -f compose.yaml".to_string());
-    commands.push("hpc-compose plan --show-script -f compose.yaml".to_string());
+    commands.push(format!("hpc-compose validate -f {compose_path}"));
+    commands.push(format!("hpc-compose plan --format json -f {compose_path}"));
     commands
 }
 
@@ -846,5 +849,45 @@ mod tests {
             no_cross_match.is_empty(),
             "query terms and required tags should both narrow recommendations"
         );
+    }
+
+    #[test]
+    fn recommendations_keep_repository_assets_and_avoid_sensitive_previews() {
+        let repository = recommend_examples(Some("env-file"), &[], 1)
+            .into_iter()
+            .next()
+            .expect("repository recommendation");
+        assert_eq!(repository.example.name, "env-file");
+        assert!(
+            repository
+                .next_commands
+                .iter()
+                .all(|command| command.contains("examples/env-file.yaml"))
+        );
+        assert!(
+            repository
+                .next_commands
+                .iter()
+                .all(|command| !command.contains("--show-script") && !command.starts_with("cp "))
+        );
+
+        for recommendation in recommend_examples(None, &[], examples().len()) {
+            for command in &recommendation.next_commands {
+                assert!(
+                    ![
+                        "--show-script",
+                        "--show-values",
+                        "--verbose",
+                        "hpc-compose render",
+                        "hpc-compose logs",
+                        "hpc-compose debug",
+                    ]
+                    .iter()
+                    .any(|sensitive| command.contains(sensitive)),
+                    "{} recommended a sensitive-output command: {command}",
+                    recommendation.example.name
+                );
+            }
+        }
     }
 }

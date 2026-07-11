@@ -30,7 +30,7 @@
           "const": "built-in-template"
         },
         {
-          "description": "The example is a repository YAML file users copy directly.",
+          "description": "The example is a repository YAML file used in place with adjacent assets.",
           "type": "string",
           "const": "repository-file"
         }

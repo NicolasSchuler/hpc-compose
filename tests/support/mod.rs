@@ -572,6 +572,9 @@ if [[ -n "$output_path" ]]; then
   mkdir -p "$(dirname "$output_path")"
   printf 'ready\n' >> "$output_path"
 fi
+if [[ "$*" == *"--job-name=hpc-compose:bootstrap"* ]]; then
+  sleep 2
+fi
 exit 0
 "#,
             log_path.display(),

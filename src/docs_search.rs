@@ -22,6 +22,7 @@ struct EmbeddedDoc {
 #[derive(Debug, Clone, Copy)]
 struct EmbeddedSection {
     heading: &'static str,
+    anchor: Option<&'static str>,
     body: &'static str,
 }
 
@@ -168,7 +169,14 @@ impl Candidate<'_> {
     fn into_hit(self, query: &ParsedQuery) -> DocsSearchHit {
         let heading = best_heading(self.doc, self.section);
         let location = match &heading {
-            Some(heading) => format!("{}#{}", self.doc.path, anchor_for_heading(heading)),
+            Some(heading) => format!(
+                "{}#{}",
+                self.doc.path,
+                self.section
+                    .anchor
+                    .map(str::to_string)
+                    .unwrap_or_else(|| anchor_for_heading(heading))
+            ),
             None => self.doc.path.to_string(),
         };
         DocsSearchHit {
@@ -489,5 +497,53 @@ mod tests {
 
         let broader = search_docs("readiness", 20);
         assert!(broader.matches.len() >= limited.matches.len());
+    }
+
+    #[test]
+    fn preserves_explicit_mdbook_heading_anchors() {
+        let report = search_docs("observe capacity", 5);
+        let hit = report
+            .matches
+            .iter()
+            .find(|hit| hit.location.starts_with("canary-runs.md#"))
+            .expect("canary capacity section");
+
+        assert_eq!(hit.location, "canary-runs.md#observe-capacity-with-weather");
+        assert_eq!(
+            hit.heading.as_deref(),
+            Some("Observe Capacity With `weather`")
+        );
+        assert!(!hit.snippet.contains("{#observe-capacity-with-weather}"));
+    }
+
+    #[test]
+    fn searches_content_expanded_from_mdbook_includes() {
+        let report = search_docs("no_ssh", 5);
+
+        assert!(
+            report.matches.iter().any(|hit| {
+                hit.location
+                    .starts_with("example-source.md#multi-node-deepspeed")
+                    && hit.snippet.contains("no_ssh")
+            }),
+            "matches were: {:#?}",
+            report.matches
+        );
+    }
+
+    #[test]
+    fn headings_inside_included_code_fences_do_not_become_sections() {
+        let report = search_docs("file-sourced secret interpolated", 5);
+        let hit = report
+            .matches
+            .iter()
+            .find(|hit| {
+                hit.location
+                    .starts_with("example-source.md#secrets-hf-token")
+            })
+            .expect("included secrets example");
+
+        assert_eq!(hit.heading.as_deref(), Some("Secrets HF Token"));
+        assert!(!hit.location.contains("file-sourced-secret"));
     }
 }

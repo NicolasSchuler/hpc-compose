@@ -639,7 +639,11 @@ fn submit_sweep_trial(
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed for sweep trial {}", trial.trial_id);
+            return Err(crate::exit::EnvironmentError::new(format!(
+                "preflight failed for sweep trial {}",
+                trial.trial_id
+            ))
+            .into());
         }
     }
 

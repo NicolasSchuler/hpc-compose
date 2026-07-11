@@ -104,7 +104,10 @@ pub(crate) fn alloc(
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed; fix the reported errors before opening an allocation");
+            return Err(crate::exit::EnvironmentError::new(
+                "preflight failed; fix the reported errors before opening an allocation",
+            )
+            .into());
         }
     }
 
@@ -236,7 +239,10 @@ pub(crate) fn run_service(
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed; fix the reported errors before running");
+            return Err(crate::exit::EnvironmentError::new(
+                "preflight failed; fix the reported errors before running",
+            )
+            .into());
         }
     }
 
@@ -507,7 +513,10 @@ pub(crate) fn run_ephemeral(
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed; fix the reported errors before running");
+            return Err(crate::exit::EnvironmentError::new(
+                "preflight failed; fix the reported errors before running",
+            )
+            .into());
         }
     }
 
@@ -907,7 +916,10 @@ pub(crate) fn notebook(
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed; fix the reported errors before launching the notebook");
+            return Err(crate::exit::EnvironmentError::new(
+                "preflight failed; fix the reported errors before launching the notebook",
+            )
+            .into());
         }
     }
 

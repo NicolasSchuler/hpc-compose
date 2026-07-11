@@ -233,7 +233,7 @@ fn is_contextual_warning(item: &Item) -> bool {
         && (item
             .message
             .starts_with("neither /etc/slurm/task_prolog.hk nor /etc/slurm/task_prolog exists")
-            || item.message.starts_with("HAICORE helper path is")
+            || item.message.starts_with("site Pyxis helper path is")
             || item.message.starts_with("metrics collector"))
 }
 
@@ -574,7 +574,7 @@ fn check_pyxis_support(report: &mut Report, srun_bin: &str) {
                 report.items.push(Item {
                     level: Level::Error,
                     message: "srun does not advertise --container-image; Pyxis support appears unavailable".to_string(),
-                    remediation: Some("Check whether the Pyxis plugin is enabled on this cluster or run on a supported HAICORE login node.".to_string()),
+                    remediation: Some("Check whether the Pyxis plugin is enabled on this cluster or run on a login node that provides Pyxis.".to_string()),
                 });
             }
         }
@@ -1679,14 +1679,14 @@ fn check_haicore_mount_helpers_with_paths(
     if task_prolog.exists() || fallback_prolog.exists() {
         report.items.push(Item {
             level: Level::Ok,
-            message: "found a Slurm task_prolog helper mount expected by HAICORE/Pyxis".to_string(),
+            message: "found a Slurm task_prolog helper mount used by Pyxis sites".to_string(),
             remediation: None,
         });
     } else {
         report.items.push(Item {
             level: Level::Warn,
             message: "neither /etc/slurm/task_prolog.hk nor /etc/slurm/task_prolog exists on this node".to_string(),
-            remediation: Some("This is expected on non-cluster machines, but on HAICORE you should verify the required Pyxis helper mount path.".to_string()),
+            remediation: Some("This is expected on non-cluster machines; on sites whose Pyxis setup relies on a task_prolog helper mount, verify the required path.".to_string()),
         });
     }
 
@@ -1694,13 +1694,13 @@ fn check_haicore_mount_helpers_with_paths(
         if p.exists() {
             report.items.push(Item {
                 level: Level::Ok,
-                message: format!("HAICORE helper path is present: {}", p.display()),
+                message: format!("site Pyxis helper path is present: {}", p.display()),
                 remediation: None,
             });
         } else {
             report.items.push(Item {
                 level: Level::Warn,
-                message: format!("HAICORE helper path is absent on this node: {}", p.display()),
+                message: format!("site Pyxis helper path is absent on this node: {}", p.display()),
                 remediation: Some("This is only a problem on the actual cluster if Pyxis requires this helper mount.".to_string()),
             });
         }
@@ -2083,7 +2083,7 @@ echo "Submitted batch job 999"
             remediation: None,
         };
         assert!(is_contextual_warning(&warn(
-            "HAICORE helper path is /opt/missing"
+            "site Pyxis helper path is /opt/missing"
         )));
         assert!(is_contextual_warning(&warn(
             "metrics collector nvidia-smi not found on host"
@@ -2767,7 +2767,7 @@ echo "Submitted batch job 999"
         );
         let text = report.render_verbose();
         assert!(text.contains("found a Slurm task_prolog helper mount"));
-        assert!(text.contains("HAICORE helper path is present"));
+        assert!(text.contains("site Pyxis helper path is present"));
     }
 
     #[test]

@@ -1269,7 +1269,10 @@ where
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed; fix the reported errors before local launch");
+            return Err(crate::exit::EnvironmentError::new(
+                "preflight failed; fix the reported errors before local launch",
+            )
+            .into());
         }
     }
 
@@ -1715,7 +1718,10 @@ where
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed; fix the reported errors before conditional submission");
+            return Err(crate::exit::EnvironmentError::new(
+                "preflight failed; fix the reported errors before conditional submission",
+            )
+            .into());
         }
     }
 
@@ -2036,7 +2042,10 @@ pub(crate) fn launch(
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed; fix the reported errors before submitting");
+            return Err(crate::exit::EnvironmentError::new(
+                "preflight failed; fix the reported errors before submitting",
+            )
+            .into());
         }
     }
 

@@ -1077,7 +1077,7 @@ fn local_watch_cancel_and_rollback_helpers_cover_terminal_paths() {
     fs::write(
             &reservation_compose,
             format!(
-                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n  error: local.err\n  submit_args:\n    - --reservation=debug\n",
+                "name: demo\nservices:\n  app:\n    image: {}\n    command: /bin/true\nx-slurm:\n  cache_dir: {}\n  error: local.err\n  submit_args:\n    - --exclusive\n",
                 local_image.display(),
                 tmpdir.path().join("cache-reservation").display()
             ),
@@ -1088,8 +1088,8 @@ fn local_watch_cancel_and_rollback_helpers_cover_terminal_paths() {
     warn_local_ignored_scheduler_settings(&reservation_plan);
 
     // First-class reservation/licenses exercise their own --local ignore warnings.
-    // Kept separate from `reservation_compose` above, whose `submit_args` entry
-    // would trip the first-class/raw conflict guard if combined here.
+    // Kept separate from `reservation_compose` above, which exercises an
+    // unmodeled raw scheduler option while this one covers typed fields.
     let first_class_compose = tmpdir.path().join("compose-first-class.yaml");
     fs::write(
             &first_class_compose,

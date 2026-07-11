@@ -252,8 +252,7 @@ x-slurm:
   job_name: alloc-demo
   nodes: 2
   time: "00:10:00"
-  submit_args:
-    - --reservation=dev
+  reservation: dev
 services:
   app:
     image: {}

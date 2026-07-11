@@ -15,7 +15,9 @@ use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan_with_reporter};
 use hpc_compose::render::{RenderOptions, render_script_with_options};
 use hpc_compose::runtime_plan::RuntimePlan;
-use hpc_compose::spec::{MetricsCollector, MetricsConfig, parse_slurm_time_limit};
+use hpc_compose::spec::{
+    MetricsCollector, MetricsConfig, gres_requests_gpu, parse_slurm_time_limit,
+};
 use serde::Serialize;
 
 use super::{
@@ -138,7 +140,10 @@ pub(crate) fn germinate(
             output::print_report(&report, false);
         }
         if report.has_errors() {
-            bail!("preflight failed; fix the reported errors before submitting a canary");
+            return Err(crate::exit::EnvironmentError::new(
+                "preflight failed; fix the reported errors before submitting a canary",
+            )
+            .into());
         }
     }
 
@@ -400,20 +405,12 @@ fn allocation_or_service_requests_gpus(plan: &RuntimePlan) -> bool {
     plan.slurm.gpus.unwrap_or(0) > 0
         || plan.slurm.gpus_per_node.unwrap_or(0) > 0
         || plan.slurm.gpus_per_task.unwrap_or(0) > 0
-        || plan
-            .slurm
-            .gres
-            .as_deref()
-            .is_some_and(|gres| gres.contains("gpu"))
+        || plan.slurm.gres.as_deref().is_some_and(gres_requests_gpu)
         || plan.ordered_services.iter().any(|service| {
             service.slurm.gpus.unwrap_or(0) > 0
                 || service.slurm.gpus_per_node.unwrap_or(0) > 0
                 || service.slurm.gpus_per_task.unwrap_or(0) > 0
-                || service
-                    .slurm
-                    .gres
-                    .as_deref()
-                    .is_some_and(|gres| gres.contains("gpu"))
+                || service.slurm.gres.as_deref().is_some_and(gres_requests_gpu)
         })
 }
 

@@ -1905,7 +1905,7 @@ x-slurm:
 services:
   app:
     image: redis:7
-    command: /bin/sh -lc "echo ${{NEEDS_DEFAULT:-fallback}}"
+    command: ["/bin/sh", "-lc", "echo ${{NEEDS_DEFAULT:-fallback}}"]
 "#,
                 tmpdir.path().join("cache-strict").display()
             ),

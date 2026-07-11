@@ -804,6 +804,7 @@
               "const": "sleep"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "seconds"
@@ -843,6 +844,7 @@
               "const": "tcp"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "port"
@@ -871,6 +873,7 @@
               "const": "log"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "pattern"
@@ -907,6 +910,7 @@
               "type": "string"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "url"

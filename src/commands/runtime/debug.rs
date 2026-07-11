@@ -145,7 +145,7 @@ pub(crate) fn debug(
         };
         emit_debug_report(&report, output_format)?;
         if preflight_failed {
-            bail!("preflight failed");
+            return Err(crate::exit::EnvironmentError::new("preflight failed").into());
         }
         return Ok(());
     };
@@ -227,7 +227,7 @@ pub(crate) fn debug(
     };
     emit_debug_report(&report, output_format)?;
     if preflight_failed {
-        bail!("preflight failed");
+        return Err(crate::exit::EnvironmentError::new("preflight failed").into());
     }
     Ok(())
 }
