@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-11
+
 ### Added
 
 - Added `sweep submit --resume [--sweep-id <ID>]` to re-drive a partial sweep
