@@ -93,6 +93,7 @@ The watch and replay views repaint only the rows that change between refreshes, 
 | `HPC_COMPOSE_WATCH_METRICS_REFRESH_MS` | Metrics refresh cadence in milliseconds (default 5000, clamped to 500–600000). |
 | `HPC_COMPOSE_WATCH_MOUSE` | Set to a non-zero value to enable mouse capture; the scroll wheel then drives the log pane. Off by default so native terminal text selection keeps working. |
 | `HPC_COMPOSE_FORCE_WATCH_UI` | Force the alternate-screen watch UI even when terminal detection would normally fall back to line mode. Intended for debugging terminal detection. |
+| `HPC_COMPOSE_DISABLE_WATCH_UI` | Disable alternate-screen UI initialization and use line-mode fallback. Takes precedence over `HPC_COMPOSE_FORCE_WATCH_UI`; useful for automation with a controlling terminal. |
 
 These display preferences can also be set per-project in `.hpc-compose/settings.toml` under a `[watch]` section; environment variables take precedence over the file:
 
@@ -184,7 +185,12 @@ hpc-compose-bundle-<job-id>/
 |   |-- submission-record.json
 |   |-- effective-config.yaml      # when the tracked record has a snapshot
 |   |-- submitted.sbatch           # when the persisted script is readable
-|   `-- checkpoint-history.json
+|   |-- checkpoint-history.json
+|   `-- evidence/                  # when validated run evidence is available
+|       |-- manifest.json
+|       |-- inputs.lock.json
+|       |-- events.jsonl
+|       `-- view.json              # rebuilt from the validated event stream
 |-- provenance/
 |   `-- provenance.json            # when submit-time provenance was recorded
 `-- artifacts/
@@ -193,6 +199,8 @@ hpc-compose-bundle-<job-id>/
 ```
 
 `manifest.json` is the authoritative index: it records the schema version, job id, creation time, bundle root, optional tarball path, whether artifact payload was included, selected artifact bundles, every materialized file with size and SHA-256 where applicable, and any warnings. Warnings are expected for legacy records that predate config snapshots or provenance, unreadable submitted scripts, missing artifact manifests, missing payload files, or degraded checkpoint history.
+
+When additive run evidence exists, bundle export validates the immutable manifest and exact input-lock digest, validates the event stream, and rebuilds the exported view from those events. Missing evidence preserves the legacy bundle layout with a warning. Corrupt or incomplete evidence fails closed and is omitted with a warning; the read-only export never initializes, repairs, or appends evidence.
 
 The current compose file is used only to resolve the tracked run context and to produce the same bundle-time aggregate that `experiment show` would print. It is not copied as submit-time evidence. Prefer `run/effective-config.yaml`, `run/submitted.sbatch`, `provenance/provenance.json`, and any provenance `source_content_hash` when they are present.
 

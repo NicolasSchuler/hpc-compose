@@ -472,6 +472,14 @@ pub enum Commands {
         #[arg(
             long,
             value_name = "PATH",
+            default_value = "scancel",
+            help_heading = "Tool overrides",
+            help = "Path to the scancel executable used to clean up timed-out filesystem probes"
+        )]
+        scancel_bin: String,
+        #[arg(
+            long,
+            value_name = "PATH",
             default_value = "srun",
             help_heading = "Tool overrides",
             help = "Path to the srun executable"

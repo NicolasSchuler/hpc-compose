@@ -1301,6 +1301,50 @@ steps:
 }
 
 #[test]
+fn effective_snapshot_rejects_unresolved_service_extends() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = tmpdir.path().join("deleted-compose.yaml");
+    let snapshot = r#"
+name: historical
+services:
+  app:
+    extends: base
+    image: docker://alpine:3.20
+    command: ["true"]
+"#;
+
+    let error = ComposeSpec::load_effective_snapshot_from_str(&path, snapshot)
+        .expect_err("effective snapshots must be self-contained");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("service 'app'") && rendered.contains("extends"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn effective_snapshot_rejects_unresolved_steps_alias_extends() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = tmpdir.path().join("deleted-compose.yaml");
+    let snapshot = r#"
+name: historical
+steps:
+  app:
+    extends: base
+    image: docker://alpine:3.20
+    command: ["true"]
+"#;
+
+    let error = ComposeSpec::load_effective_snapshot_from_str(&path, snapshot)
+        .expect_err("effective snapshots must reject unresolved steps aliases");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("service 'app'") && rendered.contains("extends"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn service_extends_supports_same_file_and_external_file_shorthand() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     fs::write(

@@ -7,6 +7,45 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-11
+
+### Added
+
+- Added an additive, local-first run-evidence protocol for new tracked jobs:
+  immutable run manifests and input locks, typed append-only annotation events,
+  and an atomically rebuilt view under `.hpc-compose/evidence/<job-id>/`.
+  `experiment bundle` is the first read-only consumer and includes only
+  evidence that validates; comparison, generalized results, lineage, workspace,
+  sweep-control, and other product features remain deferred.
+- Added a bounded lifecycle for opt-in shared-filesystem probes, including a
+  configurable `scancel` binary and `HPC_COMPOSE_FS_PROBE_TIMEOUT_MS`. The probe
+  now records the parsable Slurm job id, cancels accepted work after client-side
+  failure or timeout, and retains bounded diagnostics.
+
+### Fixed
+
+- Hardened tracked-job persistence and cleanup against unsafe job ids, corrupt
+  or symlinked metadata, stale cleanup inventories, concurrent annotations and
+  latest-pointer updates, scheduler-id reuse, and caller-supplied deletion
+  paths. Cleanup now derives destructive paths from a locked, validated
+  canonical record.
+- Made image preparation and pruning transactional at the artifact boundary:
+  builders publish through unique staging files under a strict per-artifact
+  lock, manifests act as commit markers and self-heal after a successful
+  rebuild, local image content participates in cache identity, and prepare
+  diagnostics remain byte-bounded even for newline-free output.
+- Historical experiment views now reconstruct from the persisted effective
+  configuration without consulting changed interpolation inputs or requiring
+  the original compose file, and rank-count arithmetic reports overflow instead
+  of panicking.
+- Hardened remote SSH/rsync operand validation, made watch/replay tests
+  explicitly non-interactive, preserved bounded subprocess output on failures,
+  and made release/formula automation reject stale releases and safely update
+  an existing refresh branch.
+- CI now captures bounded, redacted dev-cluster evidence before teardown, while
+  release metadata tracks the latest actually published GitHub release instead
+  of assuming the crate version already has downloadable assets.
+
 ## [0.2.1] - 2026-07-11
 
 ### Added

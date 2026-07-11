@@ -2291,8 +2291,17 @@ fn cleanup_report_dedupes_paths_and_repairs_latest_pointer() {
         .find(|job| job.inventory.job_id == "500")
         .expect("selected job");
     // record json + per-job runtime root (runtime_job_root == legacy here,
-    // deduped) + per-job enroot runtime cache dir + managed default batch log.
-    assert_eq!(selected.removable_paths.len(), 4);
+    // deduped) + per-job enroot runtime cache dir + additive run evidence +
+    // managed default batch log.
+    assert_eq!(selected.removable_paths.len(), 5);
+    assert!(
+        selected
+            .removable_paths
+            .contains(&crate::tracked_paths::run_evidence_dir_for(
+                &compose_path,
+                "500"
+            ))
+    );
 
     run_cleanup_report(&report).expect("run cleanup");
     let latest = load_submission_record(&compose_path, None).expect("latest after cleanup");

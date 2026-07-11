@@ -87,7 +87,7 @@ Global `--offline` removes network/SSH and scheduler effects, but it does not ma
 | `hpc-compose notebook` | `explicit-quota` | `local-read`, `local-write`, `executes-user-code`, `network-or-ssh`, `scheduler-read`, `scheduler-submit`, `polls`, `sensitive-output` | `--dry-run`: tier `scoped-local-mutation`, removes `executes-user-code`, `network-or-ssh`, `scheduler-read`, `scheduler-submit`, `scheduler-cancel`, `polls`<br>`--local`: tier `explicit-runtime-or-external-mutation`, removes `scheduler-read`, `scheduler-submit`, `scheduler-cancel`<br>`--script-out`: tier `scoped-local-mutation`, adds `local-write` |
 | `hpc-compose notebook promote` | `scoped-local-mutation` | `local-read`, `local-write` | — |
 | `hpc-compose plan` | `automatic-read-only` | `local-read` | `--show-script`: adds `sensitive-output` |
-| `hpc-compose preflight` | `automatic-read-only` | `local-read`, `scheduler-read` | `--fs-probes`: tier `explicit-quota`, adds `local-write`, `executes-user-code`, `scheduler-submit`, `polls` |
+| `hpc-compose preflight` | `automatic-read-only` | `local-read`, `scheduler-read` | `--fs-probes`: tier `explicit-quota`, adds `local-write`, `executes-user-code`, `scheduler-submit`, `scheduler-cancel`, `polls` |
 | `hpc-compose prepare` | `explicit-runtime-or-external-mutation` | `local-read`, `local-write`, `executes-user-code`, `network-or-ssh`, `sensitive-output` | — |
 | `hpc-compose ps` | `automatic-read-only` | `local-read`, `scheduler-read` | `--remote`: adds `network-or-ssh` |
 | `hpc-compose pull` | `automatic-read-only` | `local-read`, `sensitive-output` | `--remote`: adds `network-or-ssh` |

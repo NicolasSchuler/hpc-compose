@@ -36,6 +36,14 @@ impl Default for ExperimentBundleOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BundleEvidenceAvailability {
+    config: bool,
+    script: bool,
+    provenance: bool,
+    run_evidence: bool,
+}
+
 /// Authoritative manifest written at the root of an experiment bundle.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -121,6 +129,13 @@ pub fn write_experiment_bundle<T: Serialize>(
         warnings.push(format!("checkpoint history degraded: {degraded}"));
     }
     let provenance_written = write_provenance(record, &staging_root, &mut warnings)?;
+    let run_evidence_written = write_run_evidence(record, &staging_root, &mut warnings)?;
+    let evidence_availability = BundleEvidenceAvailability {
+        config: config_written,
+        script: script_written,
+        provenance: provenance_written,
+        run_evidence: run_evidence_written,
+    };
     let selected_bundles = write_artifact_section(record, &staging_root, options, &mut warnings)?;
 
     write_text(
@@ -129,6 +144,7 @@ pub fn write_experiment_bundle<T: Serialize>(
             record,
             options.include_artifacts,
             &selected_bundles,
+            &evidence_availability,
             &warnings,
         ),
     )?;
@@ -138,9 +154,7 @@ pub fn write_experiment_bundle<T: Serialize>(
             record,
             options.include_artifacts,
             &selected_bundles,
-            config_written,
-            script_written,
-            provenance_written,
+            &evidence_availability,
             &warnings,
         ),
     )?;
@@ -306,6 +320,42 @@ fn write_provenance(
     Ok(true)
 }
 
+fn write_run_evidence(
+    record: &SubmissionRecord,
+    staging_root: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<bool> {
+    let record_identity = super::record::submission_record_identity_sha256(record)?;
+    let files = match super::evidence::export_run_evidence_files(
+        &record.compose_file,
+        &record.job_id,
+        &record_identity,
+    ) {
+        Ok(Some(files)) => files,
+        Ok(None) => {
+            warnings.push(
+                "no run evidence is available for this tracked record; run/evidence was omitted"
+                    .to_string(),
+            );
+            return Ok(false);
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "run evidence for job {} was invalid or unreadable and was omitted: {error:#}",
+                record.job_id
+            ));
+            return Ok(false);
+        }
+    };
+
+    let evidence_root = staging_root.join("run").join("evidence");
+    write_bytes(&evidence_root.join("manifest.json"), &files.manifest)?;
+    write_bytes(&evidence_root.join("inputs.lock.json"), &files.inputs_lock)?;
+    write_bytes(&evidence_root.join("events.jsonl"), &files.events)?;
+    write_bytes(&evidence_root.join("view.json"), &files.view)?;
+    Ok(true)
+}
+
 fn write_artifact_section(
     record: &SubmissionRecord,
     bundle_root: &Path,
@@ -434,6 +484,7 @@ fn bundle_readme(
     record: &SubmissionRecord,
     include_artifacts: bool,
     selected_bundles: &[String],
+    evidence_availability: &BundleEvidenceAvailability,
     warnings: &[String],
 ) -> String {
     let artifact_payload = if include_artifacts {
@@ -447,6 +498,11 @@ fn bundle_readme(
         }
     } else {
         "not included; only artifact metadata is present".to_string()
+    };
+    let run_evidence = if evidence_availability.run_evidence {
+        "included as a validated snapshot under `run/evidence/`"
+    } else {
+        "not included; see bundle warnings"
     };
     let warnings_block = if warnings.is_empty() {
         "No bundle warnings were recorded.\n".to_string()
@@ -470,10 +526,12 @@ provenance/source hash when they are present.\n\n\
 - `run/effective-config.yaml`: submit-time effective config, when recorded.\n\
 - `run/submitted.sbatch`: submitted batch script, when readable.\n\
 - `run/checkpoint-history.json`: local attempt/requeue history.\n\
+- `run/evidence/`: validated manifest, input lock, events, and rebuilt view, when available.\n\
 - `provenance/provenance.json`: submit-time provenance, when recorded.\n\
 - `artifacts/manifest.json`: tracked artifact manifest, when present.\n\
 - `artifacts/payload/`: copied artifact payload, when requested.\n\n\
 Artifact payload: {artifact_payload}.\n\n\
+Run evidence: {run_evidence}.\n\n\
 ## Warnings\n\n\
 {warnings_block}",
         job_id = record.job_id
@@ -484,25 +542,28 @@ fn bundle_methods(
     record: &SubmissionRecord,
     include_artifacts: bool,
     selected_bundles: &[String],
-    config_written: bool,
-    script_written: bool,
-    provenance_written: bool,
+    evidence_availability: &BundleEvidenceAvailability,
     warnings: &[String],
 ) -> String {
-    let config_source = if config_written {
+    let config_source = if evidence_availability.config {
         "`run/effective-config.yaml` is the submit-time effective config snapshot."
     } else {
         "No submit-time effective config snapshot was available."
     };
-    let script_source = if script_written {
+    let script_source = if evidence_availability.script {
         "`run/submitted.sbatch` was copied from the persisted script path."
     } else {
         "The persisted submitted script path was unavailable or unreadable."
     };
-    let provenance_source = if provenance_written {
+    let provenance_source = if evidence_availability.provenance {
         "`provenance/provenance.json` contains the submit-time tool/git/image provenance."
     } else {
         "No submit-time provenance was recorded in the tracked record."
+    };
+    let run_evidence_source = if evidence_availability.run_evidence {
+        "`run/evidence/` is a validated snapshot of the immutable manifest and input lock, the append-only event stream, and a view rebuilt from those events."
+    } else {
+        "No validated additive run-evidence snapshot was included; see bundle warnings."
     };
     let artifact_source = if include_artifacts {
         if selected_bundles.is_empty() {
@@ -535,6 +596,7 @@ current compose file was not copied as submit-time source.\n\n\
 {config_source}\n\n\
 {script_source}\n\n\
 {provenance_source}\n\n\
+{run_evidence_source}\n\n\
 {artifact_source}\n\n\
 Checkpoint history was reconstructed from local tracked state only; it does not\n\
 query Slurm or cluster storage.\n\n\
@@ -825,6 +887,100 @@ mod tests {
     }
 
     #[test]
+    fn exports_validated_run_evidence_without_breaking_the_input_lock_digest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut record = record_for(tmp.path(), "12345");
+        record.batch_log_managed = false;
+        write_submission_record(&record).expect("track submission");
+        let record = update_submission_record(&record.compose_file, &record.job_id, |record| {
+            apply_tag_changes(&mut record.tags, &["baseline".to_string()], &[])?;
+            append_job_note(record, "stable loss")
+        })
+        .expect("annotate submission");
+
+        let manifest = write_experiment_bundle(
+            &record,
+            &show_json(&record.job_id),
+            &checkpoint_history(&record),
+            &ExperimentBundleOptions {
+                into_dir: tmp.path().join("out"),
+                ..ExperimentBundleOptions::default()
+            },
+        )
+        .expect("bundle");
+
+        let evidence_root = manifest.bundle_root.join("run/evidence");
+        for relative in [
+            "manifest.json",
+            "inputs.lock.json",
+            "events.jsonl",
+            "view.json",
+        ] {
+            assert!(
+                evidence_root.join(relative).is_file(),
+                "bundle must include validated {relative}"
+            );
+            manifest_file(&manifest, &format!("run/evidence/{relative}"));
+        }
+
+        let run_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(evidence_root.join("manifest.json")).expect("run manifest"),
+        )
+        .expect("parse run manifest");
+        let inputs_lock = fs::read(evidence_root.join("inputs.lock.json")).expect("inputs lock");
+        assert_eq!(
+            run_manifest["inputs_lock_sha256"].as_str(),
+            Some(hex::encode(Sha256::digest(&inputs_lock)).as_str()),
+            "the bundle must preserve the exact immutable input-lock bytes"
+        );
+
+        let view: serde_json::Value =
+            serde_json::from_slice(&fs::read(evidence_root.join("view.json")).expect("run view"))
+                .expect("parse run view");
+        assert_eq!(view["tags"], serde_json::json!(["baseline"]));
+        assert_eq!(view["notes"][0]["text"], "stable loss");
+    }
+
+    #[test]
+    fn stale_record_cannot_export_evidence_from_a_reused_scheduler_job_id() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut stale = record_for(tmp.path(), "12345");
+        stale.batch_log_managed = false;
+        write_submission_record(&stale).expect("old tracked submission");
+        remove_submission_record(&stale).expect("remove old tracked submission");
+
+        let mut replacement = stale.clone();
+        replacement.submitted_at = stale.submitted_at + 1;
+        replacement.config_snapshot_yaml = Some("name: replacement\nservices: {}\n".to_string());
+        write_submission_record(&replacement).expect("reused scheduler id");
+
+        let manifest = write_experiment_bundle(
+            &stale,
+            &show_json(&stale.job_id),
+            &checkpoint_history(&stale),
+            &ExperimentBundleOptions {
+                into_dir: tmp.path().join("out"),
+                ..ExperimentBundleOptions::default()
+            },
+        )
+        .expect("legacy bundle remains available");
+
+        assert!(
+            !manifest.bundle_root.join("run/evidence").exists(),
+            "evidence belonging to the replacement run must not be packaged"
+        );
+        assert!(
+            manifest.warnings.iter().any(|warning| {
+                warning.contains("run evidence")
+                    && warning.contains("submission record identity")
+                    && warning.contains("omitted")
+            }),
+            "warnings: {:?}",
+            manifest.warnings
+        );
+    }
+
+    #[test]
     fn warns_for_legacy_missing_provenance_and_config() {
         let tmp = tempfile::tempdir().expect("tmp");
         let mut record = record_for(tmp.path(), "12345");
@@ -847,10 +1003,46 @@ mod tests {
         assert!(warnings.contains("no submit-time effective config snapshot"));
         assert!(warnings.contains("submitted script was not readable"));
         assert!(warnings.contains("no submit-time provenance"));
+        assert!(warnings.contains("no run evidence"));
         let root = tmp.path().join("out").join("hpc-compose-bundle-12345");
         assert!(!root.join("run/effective-config.yaml").exists());
         assert!(!root.join("run/submitted.sbatch").exists());
         assert!(!root.join("provenance/provenance.json").exists());
+    }
+
+    #[test]
+    fn corrupt_run_evidence_is_omitted_with_a_warning() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut record = record_for(tmp.path(), "12345");
+        record.batch_log_managed = false;
+        write_submission_record(&record).expect("track submission");
+        let evidence_root =
+            crate::tracked_paths::run_evidence_dir_for(&record.compose_file, &record.job_id);
+        fs::write(evidence_root.join("inputs.lock.json"), b"{}\n").expect("corrupt input lock");
+
+        let manifest = write_experiment_bundle(
+            &record,
+            &show_json(&record.job_id),
+            &checkpoint_history(&record),
+            &ExperimentBundleOptions {
+                into_dir: tmp.path().join("out"),
+                ..ExperimentBundleOptions::default()
+            },
+        )
+        .expect("bundle should preserve legacy behavior");
+
+        assert!(
+            manifest
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("run evidence") && warning.contains("omitted")),
+            "warnings: {:?}",
+            manifest.warnings
+        );
+        assert!(
+            !manifest.bundle_root.join("run/evidence").exists(),
+            "invalid evidence must fail closed instead of being copied"
+        );
     }
 
     #[test]

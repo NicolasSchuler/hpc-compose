@@ -122,20 +122,37 @@ pub(crate) fn collect_experiment_show_output(
     gpu_tdp_w: f64,
     cpu_watts_per_core: f64,
 ) -> Result<ExperimentShowOutput> {
-    let runtime_plan =
-        load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-            &record.compose_file,
-            &context.interpolation_vars,
-            Some(&context.cache_dir.value),
-            &context.resource_profiles,
-        )
-        .with_context(|| {
-            format!(
-                "failed to load runtime plan for tracked job {} from {}",
+    let runtime_plan = match record.config_snapshot_yaml.as_deref() {
+        Some(snapshot) => {
+            load::load_runtime_plan_from_effective_snapshot(&record.compose_file, snapshot)
+                .with_context(|| {
+                    format!(
+                        "failed to reconstruct tracked job {} from its submit-time config snapshot",
+                        record.job_id
+                    )
+                })?
+        }
+        None => {
+            hpc_compose::diagnostics::warn(format!(
+                "tracked job {} predates config snapshots; reconstructing its experiment view from the current compose file {}",
                 record.job_id,
                 record.compose_file.display()
+            ));
+            load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
+                &record.compose_file,
+                &context.interpolation_vars,
+                Some(&context.cache_dir.value),
+                &context.resource_profiles,
             )
-        })?;
+            .with_context(|| {
+                format!(
+                    "failed to load legacy runtime plan for tracked job {} from {}",
+                    record.job_id,
+                    record.compose_file.display()
+                )
+            })?
+        }
+    };
 
     let scheduler_options = SchedulerOptions {
         squeue_bin: context.binaries.squeue.value.clone(),

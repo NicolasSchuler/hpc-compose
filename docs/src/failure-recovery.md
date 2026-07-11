@@ -84,7 +84,7 @@ x-slurm:
 | Fix | Allocate or locate approved shared storage, create the directory, persist it through the selected profile, and restore `cache_dir: ${CACHE_DIR}`. |
 | Expected next signal | Strict preflight reports no cache policy failure. With explicit quota approval, `preflight --fs-probes` confirms compute-node visibility. |
 
-The filesystem probe submits a tiny job. The ordinary strict check does not.
+The filesystem probe submits a tiny job. The ordinary strict check does not. The active probe has a 120-second client deadline by default (`HPC_COMPOSE_FS_PROBE_TIMEOUT_MS` overrides it); on timeout hpc-compose cancels the tracked Slurm job and retains the probe directory named in the error.
 
 ## Stage 3: The Job Is Pending
 

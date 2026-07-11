@@ -46,25 +46,19 @@ fn homebrew_formula_version() -> String {
         .to_string()
 }
 
-fn parse_version_triplet(version: &str) -> (u64, u64, u64) {
+fn parse_published_release_marker(raw: &str) -> Option<&str> {
+    let marker = raw.strip_suffix('\n').unwrap_or(raw);
+    if marker.is_empty() || marker.trim() != marker || marker.contains(['\n', '\r']) {
+        return None;
+    }
+    let version = marker.strip_prefix('v')?;
     let mut parts = version.split('.');
-    let major = parts
-        .next()
-        .and_then(|part| part.parse::<u64>().ok())
-        .unwrap_or_else(|| panic!("invalid major version in {version}"));
-    let minor = parts
-        .next()
-        .and_then(|part| part.parse::<u64>().ok())
-        .unwrap_or_else(|| panic!("invalid minor version in {version}"));
-    let patch = parts
-        .next()
-        .and_then(|part| part.parse::<u64>().ok())
-        .unwrap_or_else(|| panic!("invalid patch version in {version}"));
-    assert!(
-        parts.next().is_none(),
-        "version {version} should have exactly three components"
-    );
-    (major, minor, patch)
+    let valid = (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+    });
+    (valid && parts.next().is_none()).then_some(version)
 }
 
 fn rust_string_array_const(source: &str, name: &str) -> BTreeSet<String> {
@@ -173,23 +167,19 @@ fn release_metadata_matches_cargo_package_version() {
 }
 
 #[test]
-fn homebrew_formula_tracks_published_release_or_pending_refresh() {
-    let version = cargo_package_string("version");
+fn homebrew_formula_tracks_latest_published_release() {
+    let marker = fs::read_to_string(repo_root().join(".github/latest-published-release"))
+        .expect("read latest-published release marker");
+    let version = parse_published_release_marker(&marker).unwrap_or_else(|| {
+        panic!("latest-published release marker must be one vMAJOR.MINOR.PATCH line")
+    });
     let formula_version = homebrew_formula_version();
     let formula =
         fs::read_to_string(repo_root().join("Formula/hpc-compose.rb")).expect("read formula");
 
-    let cargo_triplet = parse_version_triplet(&version);
-    let formula_triplet = parse_version_triplet(&formula_version);
-    let formula_is_current = formula_version == version;
-    // The formula is refreshed by a PR opened AFTER the release tag is pushed, so
-    // on `main` it legitimately lags the just-bumped Cargo version. Accept any
-    // earlier release (not only patch+1) so a minor/major bump is not wedged; the
-    // URL/asset assertions below still tie the formula to its own declared version.
-    let formula_is_behind = formula_triplet < cargo_triplet;
-    assert!(
-        formula_is_current || formula_is_behind,
-        "Homebrew formula version {formula_version} should match Cargo.toml {version} or be an earlier release while the post-tag checksum-refresh PR is pending"
+    assert_eq!(
+        formula_version, version,
+        "Homebrew formula must match .github/latest-published-release; Cargo.toml may be ahead while main contains unreleased work"
     );
     assert!(
         formula.contains(&format!("/releases/download/v{formula_version}/")),
@@ -207,6 +197,25 @@ fn homebrew_formula_tracks_published_release_or_pending_refresh() {
         )),
         "Homebrew formula should reference the x86_64 macOS tarball for its declared version"
     );
+}
+
+#[test]
+fn latest_published_release_marker_rejects_ambiguous_versions() {
+    for invalid in [
+        "0.1.52\n",
+        "v0.1\n",
+        "v0.1.52.0\n",
+        "v0.1.x\n",
+        " v0.1.52\n",
+        "v0.1.52 \n",
+        "v0.1.52\nextra\n",
+    ] {
+        assert!(
+            parse_published_release_marker(invalid).is_none(),
+            "marker {invalid:?} must be rejected"
+        );
+    }
+    assert_eq!(parse_published_release_marker("v0.1.52\n"), Some("0.1.52"));
 }
 
 #[test]
@@ -642,9 +651,13 @@ fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
         "release workflow should refresh the Homebrew formula after publishing assets"
     );
     assert!(
-        workflow.contains("Unable to create Homebrew formula PR")
-            && workflow.contains("/pull/new/${branch}"),
-        "Homebrew formula refresh should degrade gracefully when Actions cannot create PRs"
+        workflow.contains(".github/latest-published-release")
+            && workflow.contains("printf '%s\\n' \"${RELEASE_TAG}\""),
+        "formula refresh should advance the canonical published-release marker only after assets exist"
+    );
+    assert!(
+        !workflow.contains("::warning::Unable to") && !workflow.contains("/pull/new/${branch}"),
+        "Homebrew formula refresh must fail visibly when it cannot establish or update its PR"
     );
     assert!(
         workflow.contains("hpc-compose-up.1"),
@@ -677,6 +690,80 @@ fn release_workflow_publishes_checksum_manifest_and_rendered_notes() {
     assert!(
         !workflow.contains("hpc-compose-submit.1"),
         "release workflow should not reference removed submit manpages"
+    );
+}
+
+#[test]
+fn release_formula_refresh_rejects_stale_or_rollback_tags() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release workflow");
+
+    for expected in [
+        "repos/${GITHUB_REPOSITORY}/releases/latest",
+        ".github/latest-published-release",
+        "sort -V",
+        "refusing to roll back published release metadata",
+        "headRefName",
+        "gh pr close",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "formula refresh must guard its canonical latest-release state with {expected:?}"
+        );
+    }
+
+    let parsed: serde_norway::Value =
+        serde_norway::from_str(&workflow).expect("parse release workflow");
+    assert_eq!(
+        parsed["concurrency"]["group"].as_str(),
+        Some("release-pipeline"),
+        "the complete publish-and-formula pipeline must serialize across tags so a newer publish cannot race an older formula refresh"
+    );
+    assert_eq!(
+        parsed["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(false),
+        "a newer tag must wait for the active release pipeline instead of canceling it"
+    );
+    let formula_job = &parsed["jobs"]["homebrew-formula-refresh"];
+    assert_eq!(
+        formula_job["concurrency"]["group"].as_str(),
+        Some("release-homebrew-formula-refresh"),
+        "every release tag must serialize formula/marker updates through one shared job group"
+    );
+    assert_eq!(
+        formula_job["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(false),
+        "a newer tag must wait rather than cancel a formula refresh during its critical section"
+    );
+
+    let open_step = workflow
+        .split("- name: Open formula refresh pull request")
+        .nth(1)
+        .expect("formula PR step");
+    let latest_recheck = open_step
+        .find("repos/${GITHUB_REPOSITORY}/releases/latest")
+        .expect("formula PR step must recheck GitHub latest immediately before mutation");
+    let stale_pr_close = open_step
+        .find("stale_pr_numbers=")
+        .expect("stale PR closure seam");
+    let push = open_step.find("git push").expect("formula branch push");
+    assert!(
+        latest_recheck < stale_pr_close && latest_recheck < push,
+        "latest-release recheck must precede stale-PR closure and branch push"
+    );
+}
+
+#[test]
+fn release_formula_refresh_uses_an_explicit_remote_branch_lease() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release workflow");
+
+    assert!(
+        workflow.contains("git ls-remote --heads origin")
+            && workflow.contains("refs/remotes/origin/${branch}")
+            && workflow.contains("--force-with-lease=refs/heads/${branch}:${remote_branch_oid}")
+            && workflow.contains("HEAD:refs/heads/${branch}"),
+        "formula refresh reruns must fetch the existing PR branch and push with an explicit lease"
     );
 }
 
@@ -890,6 +977,103 @@ fn devcluster_e2e_cleanup_preserves_repo_runtime_state() {
 }
 
 #[test]
+fn devcluster_ci_collects_redacted_failure_evidence_before_teardown() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    let collector_name = "Collect redacted dev-cluster failure evidence";
+    let upload_name = "Upload dev-cluster failure evidence";
+    let teardown_name = "Tear down the dev cluster";
+    let collector_index = workflow
+        .find(collector_name)
+        .unwrap_or_else(|| panic!("CI should contain '{collector_name}'"));
+    let upload_index = workflow
+        .find(upload_name)
+        .unwrap_or_else(|| panic!("CI should contain '{upload_name}'"));
+    let teardown_index = workflow
+        .find(teardown_name)
+        .unwrap_or_else(|| panic!("CI should contain '{teardown_name}'"));
+    assert!(
+        collector_index < upload_index && upload_index < teardown_index,
+        "failure evidence must be collected and uploaded before cluster teardown"
+    );
+
+    let collector_step = &workflow[collector_index..upload_index];
+    assert!(
+        collector_step.contains("if: failure()")
+            && collector_step.contains("scripts/devcluster_collect_evidence.sh"),
+        "collector step must run only on failure through the redacting helper"
+    );
+    let upload_step = &workflow[upload_index..teardown_index];
+    assert!(
+        upload_step.contains("if: failure()")
+            && upload_step.contains("actions/upload-artifact@")
+            && upload_step.contains(".tmp/devcluster-failure-evidence"),
+        "failure evidence must be uploaded before teardown"
+    );
+
+    let helper = fs::read_to_string(repo_root().join("scripts/devcluster_collect_evidence.sh"))
+        .expect("read dev-cluster evidence collector");
+    for required in [
+        "umask 077",
+        "--tail",
+        "HPC_COMPOSE_REDACTED",
+        "Bearer",
+        "sk-",
+        "gh[pousr]_",
+    ] {
+        assert!(
+            helper.contains(required),
+            "evidence collector should contain redaction/scope guard {required:?}"
+        );
+    }
+    for forbidden in ["docker inspect", "printenv", " env ", ".hpc-compose/jobs"] {
+        assert!(
+            !helper.contains(forbidden),
+            "evidence collector must not capture broad or secret-bearing source {forbidden:?}"
+        );
+    }
+    assert!(
+        helper.contains("mktemp \"${TMPDIR:-/tmp}/hpc-compose-devcluster-evidence.")
+            && !helper.contains("$output_dir/.unredacted-capture"),
+        "raw pre-redaction bytes must live outside the uploaded artifact directory even if the collector is interrupted"
+    );
+}
+
+#[test]
+fn devcluster_evidence_redactor_scrubs_common_credential_shapes() {
+    let mut child = Command::new("bash")
+        .arg(repo_root().join("scripts/devcluster_collect_evidence.sh"))
+        .arg("--redact-stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn dev-cluster evidence redactor");
+    let input = b"Authorization: Bearer abc.def_123\n\
+GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz\n\
+OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\n\
+remote=https://user:password@example.test/path\n\
+safe scheduler diagnostic\n";
+    std::io::Write::write_all(child.stdin.as_mut().expect("redactor stdin"), input)
+        .expect("write redactor input");
+    let output = child.wait_with_output().expect("wait for redactor");
+    assert!(output.status.success(), "redactor should succeed");
+    let redacted = String::from_utf8(output.stdout).expect("redactor UTF-8 output");
+    for secret in [
+        "abc.def_123",
+        "ghp_abcdefghijklmnopqrstuvwxyz",
+        "sk-abcdefghijklmnopqrstuvwxyz",
+        "user:password",
+    ] {
+        assert!(
+            !redacted.contains(secret),
+            "redacted evidence must not retain {secret:?}: {redacted}"
+        );
+    }
+    assert!(redacted.contains("HPC_COMPOSE_REDACTED"));
+    assert!(redacted.contains("safe scheduler diagnostic"));
+}
+
+#[test]
 fn devcluster_help_does_not_require_a_container_engine() {
     let output = Command::new("bash")
         .arg(repo_root().join("scripts/devcluster.sh"))
@@ -1017,6 +1201,25 @@ fn reusable_lint_workflow_exists_and_is_sha_pinned() {
     assert!(
         workflow.contains("hpc-compose validate") && workflow.contains("hpc-compose lint"),
         "reusable workflow must run validate and lint"
+    );
+    let parsed: serde_norway::Value =
+        serde_norway::from_str(&workflow).expect("parse reusable lint workflow");
+    let version_input = parsed
+        .get("on")
+        .and_then(|on| on.get("workflow_call"))
+        .and_then(|call| call.get("inputs"))
+        .and_then(|inputs| inputs.get("version"))
+        .unwrap_or_else(|| panic!("reusable workflow should declare a version input"));
+    assert_eq!(
+        version_input
+            .get("required")
+            .and_then(serde_norway::Value::as_bool),
+        Some(true),
+        "reusable workflow must require callers to choose the release version"
+    );
+    assert!(
+        version_input.get("default").is_none(),
+        "reusable workflow must not silently install a stale default release"
     );
     // Reuse the same SHA-pinning rule as every other workflow.
     for (line_index, line) in workflow.lines().enumerate() {

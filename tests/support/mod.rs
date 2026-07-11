@@ -706,8 +706,8 @@ echo "Submitted batch job 12345"
     path
 }
 
-pub(crate) fn write_fake_sbatch_wait_runs_script(tmpdir: &Path) -> PathBuf {
-    let path = tmpdir.join("sbatch-wait-run-script");
+pub(crate) fn write_fake_sbatch_parsable_runs_script(tmpdir: &Path) -> PathBuf {
+    let path = tmpdir.join("sbatch-parsable-run-script");
     let bash = shell_quote(&test_bash_path().display().to_string());
     write_script(
         &path,
@@ -717,7 +717,7 @@ set -euo pipefail
 script_path=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --wait)
+    --parsable)
       shift
       ;;
     --*)
@@ -737,8 +737,8 @@ PATH="{}:$PATH"
 export SLURM_JOB_ID=12345
 export SLURM_JOB_NODELIST=node01
 export SLURM_SUBMIT_DIR="$PWD"
-{} "$script_path" >/dev/null 2>&1
-echo "Submitted batch job 12345"
+{} "$script_path" >/dev/null 2>&1 &
+echo "12345;test-cluster"
 "#,
             tmpdir.display(),
             bash

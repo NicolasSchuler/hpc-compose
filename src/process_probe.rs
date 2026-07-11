@@ -50,11 +50,27 @@ pub(crate) enum ProbeError {
         command_name: String,
         binary: String,
         timeout: Duration,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
     },
     OutputLimitExceeded {
         command_name: String,
         binary: String,
         max_output_bytes: usize,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    },
+    PostSpawnIo {
+        command_name: String,
+        binary: String,
+        operation: &'static str,
+        source: io::Error,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
         stdout_truncated: bool,
         stderr_truncated: bool,
     },
@@ -73,6 +89,7 @@ impl ProbeError {
                 command_name,
                 binary,
                 timeout,
+                ..
             } => format!(
                 "{command_name} timed out after {:.1}s at '{binary}'",
                 timeout.as_secs_f64()
@@ -83,6 +100,7 @@ impl ProbeError {
                 max_output_bytes,
                 stdout_truncated,
                 stderr_truncated,
+                ..
             } => {
                 let streams = match (*stdout_truncated, *stderr_truncated) {
                     (true, true) => "stdout and stderr",
@@ -94,7 +112,53 @@ impl ProbeError {
                     "{command_name} exceeded the {max_output_bytes}-byte {streams} capture limit at '{binary}'"
                 )
             }
+            Self::PostSpawnIo {
+                command_name,
+                binary,
+                operation,
+                source,
+                ..
+            } => format!("{command_name} failed while {operation} at '{binary}': {source}"),
             Self::Io(err) => err.to_string(),
+        }
+    }
+
+    pub(crate) fn captured_stdout(&self) -> &[u8] {
+        match self {
+            Self::TimedOut { stdout, .. }
+            | Self::OutputLimitExceeded { stdout, .. }
+            | Self::PostSpawnIo { stdout, .. } => stdout,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn captured_stderr(&self) -> &[u8] {
+        match self {
+            Self::TimedOut { stderr, .. }
+            | Self::OutputLimitExceeded { stderr, .. }
+            | Self::PostSpawnIo { stderr, .. } => stderr,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn captured_output_truncated(&self) -> (bool, bool) {
+        match self {
+            Self::TimedOut {
+                stdout_truncated,
+                stderr_truncated,
+                ..
+            }
+            | Self::OutputLimitExceeded {
+                stdout_truncated,
+                stderr_truncated,
+                ..
+            }
+            | Self::PostSpawnIo {
+                stdout_truncated,
+                stderr_truncated,
+                ..
+            } => (*stdout_truncated, *stderr_truncated),
+            _ => (false, false),
         }
     }
 }
@@ -108,7 +172,9 @@ impl fmt::Display for ProbeError {
 impl std::error::Error for ProbeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Unavailable { source, .. } | Self::Io(source) => Some(source),
+            Self::Unavailable { source, .. }
+            | Self::PostSpawnIo { source, .. }
+            | Self::Io(source) => Some(source),
             Self::TimedOut { .. } | Self::OutputLimitExceeded { .. } => None,
         }
     }
@@ -119,6 +185,20 @@ pub(crate) fn run(
     command: &mut Command,
     command_name: &str,
     options: ProbeOptions,
+) -> Result<ProbeOutput, ProbeError> {
+    run_with_poller(
+        command,
+        command_name,
+        options,
+        std::process::Child::try_wait,
+    )
+}
+
+fn run_with_poller(
+    command: &mut Command,
+    command_name: &str,
+    options: ProbeOptions,
+    mut poll_child: impl FnMut(&mut std::process::Child) -> io::Result<Option<ExitStatus>>,
 ) -> Result<ProbeOutput, ProbeError> {
     let binary = command.get_program().to_string_lossy().into_owned();
     configure_process_group(command);
@@ -148,19 +228,38 @@ pub(crate) fn run(
         .map(|pipe| read_pipe_thread(pipe, options.max_output_bytes));
     let started = Instant::now();
     let status = loop {
-        match child.try_wait().map_err(ProbeError::Io)? {
-            Some(status) => break status,
-            None if started.elapsed() >= options.timeout => {
+        match poll_child(&mut child) {
+            Ok(Some(status)) => break status,
+            Err(source) => {
                 terminate_process_group(&mut child);
                 let _ = child.wait();
-                finish_timed_out_pipe_readers(stdout_handle, stderr_handle);
+                let (stdout, stderr) = finish_timed_out_pipe_readers(stdout_handle, stderr_handle);
+                return Err(ProbeError::PostSpawnIo {
+                    command_name: command_name.to_string(),
+                    binary,
+                    operation: "polling child status",
+                    source,
+                    stdout: stdout.bytes,
+                    stderr: stderr.bytes,
+                    stdout_truncated: stdout.truncated,
+                    stderr_truncated: stderr.truncated,
+                });
+            }
+            Ok(None) if started.elapsed() >= options.timeout => {
+                terminate_process_group(&mut child);
+                let _ = child.wait();
+                let (stdout, stderr) = finish_timed_out_pipe_readers(stdout_handle, stderr_handle);
                 return Err(ProbeError::TimedOut {
                     command_name: command_name.to_string(),
                     binary,
                     timeout: options.timeout,
+                    stdout: stdout.bytes,
+                    stderr: stderr.bytes,
+                    stdout_truncated: stdout.truncated,
+                    stderr_truncated: stderr.truncated,
                 });
             }
-            None => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => std::thread::sleep(POLL_INTERVAL),
         }
     };
 
@@ -168,18 +267,42 @@ pub(crate) fn run(
         if started.elapsed() >= options.timeout {
             terminate_process_group(&mut child);
             let _ = child.wait();
-            finish_timed_out_pipe_readers(stdout_handle, stderr_handle);
+            let (stdout, stderr) = finish_timed_out_pipe_readers(stdout_handle, stderr_handle);
             return Err(ProbeError::TimedOut {
                 command_name: command_name.to_string(),
                 binary,
                 timeout: options.timeout,
+                stdout: stdout.bytes,
+                stderr: stderr.bytes,
+                stdout_truncated: stdout.truncated,
+                stderr_truncated: stderr.truncated,
             });
         }
         std::thread::sleep(POLL_INTERVAL);
     }
 
-    let stdout = join_pipe(stdout_handle).map_err(ProbeError::Io)?;
-    let stderr = join_pipe(stderr_handle).map_err(ProbeError::Io)?;
+    let mut stdout_capture = join_pipe(stdout_handle, "stdout");
+    let mut stderr_capture = join_pipe(stderr_handle, "stderr");
+    if let Some(source) = stdout_capture
+        .error
+        .take()
+        .or_else(|| stderr_capture.error.take())
+    {
+        terminate_process_group(&mut child);
+        let _ = child.wait();
+        return Err(ProbeError::PostSpawnIo {
+            command_name: command_name.to_string(),
+            binary,
+            operation: "capturing child output",
+            source,
+            stdout: stdout_capture.output.bytes,
+            stderr: stderr_capture.output.bytes,
+            stdout_truncated: stdout_capture.output.truncated,
+            stderr_truncated: stderr_capture.output.truncated,
+        });
+    }
+    let stdout = stdout_capture.output;
+    let stderr = stderr_capture.output;
     if stdout.truncated || stderr.truncated {
         return Err(ProbeError::OutputLimitExceeded {
             command_name: command_name.to_string(),
@@ -187,6 +310,8 @@ pub(crate) fn run(
             max_output_bytes: options.max_output_bytes,
             stdout_truncated: stdout.truncated,
             stderr_truncated: stderr.truncated,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
         });
     }
     Ok(ProbeOutput {
@@ -216,20 +341,23 @@ fn pipes_finished<T, U>(
 /// readers until the descendant exits rather than blocking the probe caller.
 #[cfg(unix)]
 fn finish_timed_out_pipe_readers(
-    stdout: Option<std::thread::JoinHandle<io::Result<BoundedBytes>>>,
-    stderr: Option<std::thread::JoinHandle<io::Result<BoundedBytes>>>,
-) {
-    let _ = join_pipe(stdout);
-    let _ = join_pipe(stderr);
+    stdout: Option<std::thread::JoinHandle<PipeCapture>>,
+    stderr: Option<std::thread::JoinHandle<PipeCapture>>,
+) -> (BoundedBytes, BoundedBytes) {
+    (
+        join_pipe(stdout, "stdout").output,
+        join_pipe(stderr, "stderr").output,
+    )
 }
 
 #[cfg(not(unix))]
 fn finish_timed_out_pipe_readers(
-    stdout: Option<std::thread::JoinHandle<io::Result<BoundedBytes>>>,
-    stderr: Option<std::thread::JoinHandle<io::Result<BoundedBytes>>>,
-) {
+    stdout: Option<std::thread::JoinHandle<PipeCapture>>,
+    stderr: Option<std::thread::JoinHandle<PipeCapture>>,
+) -> (BoundedBytes, BoundedBytes) {
     drop(stdout);
     drop(stderr);
+    (BoundedBytes::empty(), BoundedBytes::empty())
 }
 
 #[cfg(unix)]
@@ -273,16 +401,46 @@ struct BoundedBytes {
     truncated: bool,
 }
 
+struct PipeCapture {
+    output: BoundedBytes,
+    error: Option<io::Error>,
+}
+
+impl PipeCapture {
+    fn empty() -> Self {
+        Self {
+            output: BoundedBytes::empty(),
+            error: None,
+        }
+    }
+}
+
+impl BoundedBytes {
+    fn empty() -> Self {
+        Self {
+            bytes: Vec::new(),
+            truncated: false,
+        }
+    }
+}
+
 fn read_pipe_thread(
     mut pipe: impl Read + Send + 'static,
     max_output_bytes: usize,
-) -> std::thread::JoinHandle<io::Result<BoundedBytes>> {
+) -> std::thread::JoinHandle<PipeCapture> {
     std::thread::spawn(move || {
         let mut bytes = Vec::with_capacity(max_output_bytes.min(16 * 1024));
         let mut truncated = false;
+        let mut error = None;
         let mut buffer = [0_u8; 8192];
         loop {
-            let read = pipe.read(&mut buffer)?;
+            let read = match pipe.read(&mut buffer) {
+                Ok(read) => read,
+                Err(source) => {
+                    error = Some(source);
+                    break;
+                }
+            };
             if read == 0 {
                 break;
             }
@@ -291,21 +449,36 @@ fn read_pipe_thread(
             bytes.extend_from_slice(&buffer[..retained]);
             truncated |= retained < read;
         }
-        Ok(BoundedBytes { bytes, truncated })
+        PipeCapture {
+            output: BoundedBytes { bytes, truncated },
+            error,
+        }
     })
 }
 
 fn join_pipe(
-    handle: Option<std::thread::JoinHandle<io::Result<BoundedBytes>>>,
-) -> io::Result<BoundedBytes> {
+    handle: Option<std::thread::JoinHandle<PipeCapture>>,
+    stream: &'static str,
+) -> PipeCapture {
     match handle {
-        Some(handle) => handle
-            .join()
-            .unwrap_or_else(|_| Err(io::Error::other("probe output reader thread panicked"))),
-        None => Ok(BoundedBytes {
-            bytes: Vec::new(),
-            truncated: false,
-        }),
+        Some(handle) => match handle.join() {
+            Ok(mut capture) => {
+                if let Some(source) = capture.error.take() {
+                    capture.error = Some(io::Error::new(
+                        source.kind(),
+                        format!("failed to read probe {stream}: {source}"),
+                    ));
+                }
+                capture
+            }
+            Err(_) => PipeCapture {
+                output: BoundedBytes::empty(),
+                error: Some(io::Error::other(format!(
+                    "probe {stream} reader thread panicked"
+                ))),
+            },
+        },
+        None => PipeCapture::empty(),
     }
 }
 
@@ -438,6 +611,36 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn run_after_child_ready(
+        command: &mut Command,
+        command_name: &str,
+        options: ProbeOptions,
+        ready_path: &Path,
+    ) -> (Result<ProbeOutput, ProbeError>, Option<Instant>) {
+        let readiness_deadline = Instant::now() + Duration::from_secs(10);
+        let mut ready_at = None;
+        let result = run_with_poller(command, command_name, options, |child| {
+            if ready_at.is_none() {
+                while !ready_path.exists() {
+                    if let Some(status) = child.try_wait()? {
+                        return Ok(Some(status));
+                    }
+                    if Instant::now() >= readiness_deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "probe fixture did not publish output readiness",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                ready_at = Some(Instant::now());
+            }
+            child.try_wait()
+        });
+        (result, ready_at)
+    }
+
+    #[cfg(unix)]
     #[test]
     fn probe_captures_success_and_failure() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -463,62 +666,234 @@ mod tests {
     #[test]
     fn probe_timeout_returns_promptly() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let script = write_script(temp.path(), "slow", "#!/bin/sh\nsleep 2 &\nwait\n", true);
+        let published = temp.path().join("published");
+        let script = write_script(
+            temp.path(),
+            "slow",
+            &format!(
+                "#!/bin/sh\nprintf '123;cluster\\n'\nprintf 'accepted\\n' >&2\n: > {}\nsleep 10\n",
+                crate::shell_quote::quote(&published.display().to_string())
+            ),
+            true,
+        );
         let mut command = Command::new(script);
-        let started = Instant::now();
-        let error = run(
+        let (result, ready_at) = run_after_child_ready(
             &mut command,
             "slow",
             ProbeOptions {
                 timeout: Duration::from_millis(50),
                 ..ProbeOptions::default()
             },
-        )
-        .expect_err("timeout");
+            &published,
+        );
+        let error = result.expect_err("timeout");
         assert!(matches!(error, ProbeError::TimedOut { .. }));
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(error.captured_stdout(), b"123;cluster\n");
+        assert_eq!(error.captured_stderr(), b"accepted\n");
+        assert_eq!(error.captured_output_truncated(), (false, false));
+        assert!(
+            ready_at.expect("child readiness").elapsed() < Duration::from_secs(1),
+            "probe did not return promptly after its child published readiness"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_timeout_marks_bounded_partial_output_as_truncated() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let published = temp.path().join("published");
+        let script = write_script(
+            temp.path(),
+            "verbose-timeout",
+            &format!(
+                "#!/bin/sh\nprintf '123456'\nprintf 'abcdef' >&2\n: > {}\nsleep 10\n",
+                crate::shell_quote::quote(&published.display().to_string())
+            ),
+            true,
+        );
+        let mut command = Command::new(script);
+        let (result, _ready_at) = run_after_child_ready(
+            &mut command,
+            "verbose timeout",
+            ProbeOptions {
+                timeout: Duration::from_millis(50),
+                max_output_bytes: 3,
+            },
+            &published,
+        );
+        let error = result.expect_err("timeout");
+
+        assert!(
+            matches!(error, ProbeError::TimedOut { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(error.captured_stdout(), b"123");
+        assert_eq!(error.captured_stderr(), b"abc");
+        assert_eq!(error.captured_output_truncated(), (true, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_limit_error_retains_bounded_output_for_cleanup_protocols() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = write_script(
+            temp.path(),
+            "verbose-success",
+            "#!/bin/sh\nprintf '999;cluster\\nextra'\nprintf 'stderr-data' >&2\n",
+            true,
+        );
+        let mut command = Command::new(script);
+        let error = run(
+            &mut command,
+            "verbose success",
+            ProbeOptions {
+                timeout: Duration::from_secs(10),
+                max_output_bytes: 12,
+            },
+        )
+        .expect_err("bounded output overflow");
+
+        assert!(matches!(error, ProbeError::OutputLimitExceeded { .. }));
+        assert_eq!(error.captured_stdout(), b"999;cluster\n");
+        assert_eq!(error.captured_stderr(), b"stderr-data");
+        assert_eq!(error.captured_output_truncated(), (true, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn injected_post_spawn_poll_error_cleans_process_group_and_keeps_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let published = temp.path().join("published");
+        let descendant_survived = temp.path().join("descendant-survived");
+        let script = write_script(
+            temp.path(),
+            "poll-error",
+            &format!(
+                "#!/bin/sh\nprintf '777;cluster\\n'\n(sleep 1; : > {}) &\n: > {}\nsleep 10\n",
+                crate::shell_quote::quote(&descendant_survived.display().to_string()),
+                crate::shell_quote::quote(&published.display().to_string())
+            ),
+            true,
+        );
+        let mut command = Command::new(script);
+        let mut ready_at = None;
+        let error = run_with_poller(
+            &mut command,
+            "injected poll error",
+            ProbeOptions {
+                timeout: Duration::from_secs(10),
+                max_output_bytes: 64,
+            },
+            |_| {
+                if published.exists() {
+                    ready_at = Some(Instant::now());
+                    Err(io::Error::other("injected child-status poll failure"))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .expect_err("injected post-spawn failure");
+
+        assert!(matches!(error, ProbeError::PostSpawnIo { .. }));
+        assert_eq!(error.captured_stdout(), b"777;cluster\n");
+        assert!(
+            ready_at.expect("child readiness").elapsed() < Duration::from_secs(1),
+            "post-spawn cleanup did not return promptly after child readiness"
+        );
+        std::thread::sleep(Duration::from_millis(1_200));
+        assert!(
+            !descendant_survived.exists(),
+            "post-spawn I/O failure left a probe descendant alive"
+        );
+    }
+
+    #[test]
+    fn pipe_read_error_retains_bytes_read_before_failure() {
+        struct PartialThenError {
+            emitted: bool,
+        }
+
+        impl Read for PartialThenError {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.emitted {
+                    return Err(io::Error::other("injected pipe read failure"));
+                }
+                self.emitted = true;
+                let bytes = b"888;cluster\n";
+                buffer[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+        }
+
+        let capture = join_pipe(
+            Some(read_pipe_thread(PartialThenError { emitted: false }, 64)),
+            "stdout",
+        );
+        assert_eq!(capture.output.bytes, b"888;cluster\n");
+        assert!(capture.error.is_some());
+    }
+
+    #[test]
+    fn pipe_reader_join_failure_becomes_captured_io_error() {
+        let reader = std::thread::spawn(|| -> PipeCapture {
+            panic!("injected pipe reader panic");
+        });
+        let capture = join_pipe(Some(reader), "stderr");
+        assert!(capture.output.bytes.is_empty());
+        assert!(
+            capture
+                .error
+                .expect("join failure")
+                .to_string()
+                .contains("reader thread panicked")
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn probe_timeout_kills_background_descendant_holding_pipes() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let published = temp.path().join("published");
         let script = write_script(
             temp.path(),
             "background",
-            "#!/bin/sh\nsleep 2 &\nexit 0\n",
+            &format!(
+                "#!/bin/sh\nsleep 2 &\n: > {}\nexit 0\n",
+                crate::shell_quote::quote(&published.display().to_string())
+            ),
             true,
         );
         let mut command = Command::new(script);
-        let started = Instant::now();
-        let error = run(
+        let (result, ready_at) = run_after_child_ready(
             &mut command,
             "background",
             ProbeOptions {
                 timeout: Duration::from_millis(50),
                 ..ProbeOptions::default()
             },
-        )
-        .expect_err("background process must not extend the probe indefinitely");
+            &published,
+        );
+        let error = result.expect_err("background process must not extend the probe indefinitely");
         assert!(matches!(error, ProbeError::TimedOut { .. }));
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(ready_at.expect("child readiness").elapsed() < Duration::from_secs(1));
     }
 
     #[cfg(not(unix))]
     #[test]
     fn timeout_cleanup_detaches_pipe_readers_that_cannot_reach_eof() {
-        fn blocked_reader() -> std::thread::JoinHandle<io::Result<BoundedBytes>> {
+        fn blocked_reader() -> std::thread::JoinHandle<PipeCapture> {
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_secs(2));
-                Ok(BoundedBytes {
-                    bytes: Vec::new(),
-                    truncated: false,
-                })
+                PipeCapture::empty()
             })
         }
 
         let started = Instant::now();
-        finish_timed_out_pipe_readers(Some(blocked_reader()), Some(blocked_reader()));
+        let captured =
+            finish_timed_out_pipe_readers(Some(blocked_reader()), Some(blocked_reader()));
+        assert!(captured.0.bytes.is_empty());
+        assert!(captured.1.bytes.is_empty());
         assert!(started.elapsed() < Duration::from_millis(250));
     }
 

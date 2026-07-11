@@ -96,7 +96,7 @@ docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "typos" "markdownlint-c
 examples-check: (_require-tools "shellcheck")
     cargo build --locked
     for f in examples/*.yaml; do echo "Validating $f"; env -u CACHE_DIR cargo run --locked -- validate -f "$f"; done
-    shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_case.sh scripts/devcluster_local_case.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh scripts/devcluster_otp_e2e.sh scripts/remote_gpu_e2e.sh dev-cluster/otp-sim.sh
+    shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_collect_evidence.sh scripts/devcluster_case.sh scripts/devcluster_local_case.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh scripts/devcluster_otp_e2e.sh scripts/remote_gpu_e2e.sh dev-cluster/otp-sim.sh
     tmpdir="$(mktemp -d)"; trap 'rm -rf "$tmpdir"' EXIT; for f in examples/*.yaml; do echo "Shellchecking rendered $f"; out="$tmpdir/$(basename "$f" .yaml).sbatch"; env -u CACHE_DIR cargo run --locked -- render -f "$f" --output "$out"; shellcheck -e SC2034 -x -s bash "$out"; done
 
 # Boot the local single-node Slurm dev cluster and run the real

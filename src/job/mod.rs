@@ -27,6 +27,7 @@ mod bundle;
 mod checkpoints;
 mod deep_clean;
 mod diff;
+mod evidence;
 mod logs;
 mod metrics_probe;
 mod model;

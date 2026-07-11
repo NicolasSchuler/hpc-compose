@@ -469,7 +469,7 @@ summary = "Check submission-host prerequisites without submitting by default."
 [[commands.overrides]]
 flags = ["--fs-probes"]
 authorization_tier = "explicit-quota"
-add_effects = ["local-write", "executes-user-code", "scheduler-submit", "polls"]
+add_effects = ["local-write", "executes-user-code", "scheduler-submit", "scheduler-cancel", "polls"]
 description = "Submits a tiny Slurm job to probe shared filesystem behavior."
 
 [[commands]]

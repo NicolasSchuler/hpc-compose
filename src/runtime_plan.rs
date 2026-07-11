@@ -1,9 +1,12 @@
 //! Runtime-ready plan model and deterministic artifact path derivation.
 
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::domain::{artifact_cache_key, short_digest_prefix};
 use crate::planner::{
@@ -167,6 +170,7 @@ fn prepared_image_cache_key_parts(
     match source {
         ImageSource::LocalSqsh(path) | ImageSource::LocalSif(path) => {
             parts.push(path.to_string_lossy().into_owned());
+            parts.push(local_image_content_fingerprint(path));
         }
         ImageSource::Remote(remote) => parts.push(remote.clone()),
         ImageSource::Host => parts.push("host".to_string()),
@@ -181,6 +185,27 @@ fn prepared_image_cache_key_parts(
     );
     parts.push(format!("root={}", prepare.root));
     artifact_cache_key(&parts.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// Returns an exact, streaming content fingerprint for a local image.
+///
+/// Prepared-image paths are derived before prepare performs its normal source
+/// validation, so this helper stays infallible. A missing/unreadable path gets a
+/// stable sentinel and prepare later reports the actionable filesystem error.
+fn local_image_content_fingerprint(path: &Path) -> String {
+    let Ok(mut file) = File::open(path) else {
+        return "sha256:unavailable".to_string();
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(_) => return "sha256:unavailable".to_string(),
+        }
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 pub(crate) fn base_image_cache_key(service: &RuntimeService) -> String {

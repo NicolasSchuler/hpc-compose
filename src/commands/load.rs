@@ -83,6 +83,31 @@ pub(crate) fn load_runtime_plan_with_interpolation_vars_cache_default_and_resour
     Ok(build_runtime_plan(&plan))
 }
 
+/// Rebuilds a runtime plan from the effective configuration persisted with a
+/// submission record. The snapshot is already interpolated and has resource
+/// profile/cache defaults resolved, so it must not be combined with today's
+/// context values.
+pub(crate) fn load_runtime_plan_from_effective_snapshot(
+    original_path: &Path,
+    snapshot_yaml: &str,
+) -> Result<RuntimePlan> {
+    let spec = ComposeSpec::load_effective_snapshot_from_str(original_path, snapshot_yaml)?;
+    let project_dir = original_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let plan = build_plan_with_options(
+        original_path,
+        spec,
+        PlanOptions {
+            allow_missing_spec_path: true,
+            project_dir_override: Some(project_dir),
+            ..PlanOptions::default()
+        },
+    )?;
+    Ok(build_runtime_plan(&plan))
+}
+
 #[allow(dead_code)]
 pub(crate) fn load_effective_config_with_interpolation_vars_and_cache_default(
     path: &Path,
@@ -147,4 +172,61 @@ pub(crate) fn load_plan_and_runtime_with_interpolation_vars_cache_default_and_re
     )?;
     let runtime_plan = build_runtime_plan(&plan);
     Ok((plan, runtime_plan))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn effective_snapshot(cache_dir: &Path, service_suffix: &str) -> String {
+        format!(
+            r#"name: historical
+x-slurm:
+  cache_dir: {:?}
+services:
+  app:
+    image: docker://alpine:3.20
+    command: ["true"]
+{}
+"#,
+            cache_dir.display().to_string(),
+            service_suffix
+        )
+    }
+
+    #[test]
+    fn effective_snapshot_preserves_literal_dollar_expressions() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let original_path = tmpdir.path().join("compose.yaml");
+        std::fs::write(&original_path, "services: {}\n").expect("placeholder compose");
+        let snapshot = effective_snapshot(
+            tmpdir.path(),
+            "    environment:\n      HISTORICAL_LITERAL: $HOME",
+        );
+
+        let plan = load_runtime_plan_from_effective_snapshot(&original_path, &snapshot)
+            .expect("an already-interpolated snapshot must not be interpolated again");
+
+        assert_eq!(plan.name, "historical");
+        assert_eq!(plan.ordered_services.len(), 1);
+        assert!(
+            plan.ordered_services[0]
+                .environment
+                .iter()
+                .any(|(name, value)| name == "HISTORICAL_LITERAL" && value == "$HOME")
+        );
+    }
+
+    #[test]
+    fn effective_snapshot_does_not_require_original_compose_file() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let missing_path = tmpdir.path().join("deleted-compose.yaml");
+        let snapshot = effective_snapshot(tmpdir.path(), "");
+
+        let plan = load_runtime_plan_from_effective_snapshot(&missing_path, &snapshot)
+            .expect("persisted snapshot must survive removal of the original compose file");
+
+        assert_eq!(plan.name, "historical");
+        assert_eq!(plan.ordered_services[0].name, "app");
+    }
 }

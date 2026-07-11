@@ -55,7 +55,9 @@ pub(crate) fn resolved_rank_count(service: &RuntimeService) -> u32 {
             service
                 .placement
                 .ntasks_per_node
-                .map(|per_node| per_node * service.placement.nodes)
+                // Planning rejects an overflowing geometry. Saturation keeps
+                // diagnostics total for manually constructed RuntimePlans.
+                .map(|per_node| per_node.saturating_mul(service.placement.nodes))
         })
         .unwrap_or(1)
 }

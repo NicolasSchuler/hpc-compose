@@ -114,6 +114,14 @@ fn runtime_plan_conversion_preserves_planned_service_contract() {
 }
 
 fn write_fake_enroot(tmpdir: &Path, log_path: &Path) -> PathBuf {
+    write_fake_enroot_with_export_body(tmpdir, log_path, "touch \"$output\"")
+}
+
+fn write_fake_enroot_with_export_body(
+    tmpdir: &Path,
+    log_path: &Path,
+    export_body: &str,
+) -> PathBuf {
     let script = tmpdir.join("fake-enroot.sh");
     let template = r#"#!/bin/bash
 set -euo pipefail
@@ -183,7 +191,7 @@ case "$cmd" in
       esac
     done
     mkdir -p "$(dirname "$output")"
-    touch "$output"
+    __EXPORT_BODY__
     ;;
   remove)
     while (($#)); do
@@ -200,11 +208,71 @@ case "$cmd" in
     ;;
 esac
 "#;
-    let content = template.replace(
-        "__LOG_PATH__",
-        &shell_quote_for_test(&log_path.display().to_string()),
-    );
+    let content = template
+        .replace(
+            "__LOG_PATH__",
+            &shell_quote_for_test(&log_path.display().to_string()),
+        )
+        .replace("__EXPORT_BODY__", export_body);
     fs::write(&script, content).expect("write fake enroot");
+    let mut perms = fs::metadata(&script).expect("meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+    script
+}
+
+fn write_fake_import_failure(
+    tmpdir: &Path,
+    counter_path: &Path,
+    marker: &str,
+    succeeds_on_retry: bool,
+) -> PathBuf {
+    let script = tmpdir.join("fake-importer.sh");
+    let template = r#"#!/bin/bash
+set -euo pipefail
+count=0
+if [[ -f __COUNTER__ ]]; then
+  count="$(cat __COUNTER__)"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > __COUNTER__
+
+output=""
+while (($#)); do
+  case "$1" in
+    -o|--output)
+      output="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ __SUCCEEDS_ON_RETRY__ == 1 && "$count" -ge 2 ]]; then
+  mkdir -p "$(dirname "$output")"
+  printf 'complete' > "$output"
+  exit 0
+fi
+
+printf '%s\n' __MARKER__ >&2
+for ((i=0; i<2500; i++)); do
+  printf 'filler-%05d-abcdefghijklmnopqrstuvwxyz0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ\n' "$i" >&2
+done
+exit 41
+"#;
+    let content = template
+        .replace(
+            "__COUNTER__",
+            &shell_quote_for_test(&counter_path.display().to_string()),
+        )
+        .replace("__MARKER__", &shell_quote_for_test(marker))
+        .replace(
+            "__SUCCEEDS_ON_RETRY__",
+            if succeeds_on_retry { "1" } else { "0" },
+        );
+    fs::write(&script, content).expect("write fake importer");
     let mut perms = fs::metadata(&script).expect("meta").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).expect("chmod");
@@ -335,6 +403,344 @@ fn cached_prepared_image_skips_rebuild_without_mounts() {
     prepare_runtime_plan(&plan, &options).expect("prepare twice");
     let log_content = fs::read_to_string(log).expect("log");
     assert!(!log_content.contains("create --force"));
+}
+
+#[test]
+fn failed_export_target_is_not_reused_without_committed_manifest() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let log = tmpdir.path().join("enroot.log");
+    let first_attempt = tmpdir.path().join("first-export-attempted");
+    let export_body = format!(
+        r#"if [[ ! -e {attempt} ]]; then
+      touch {attempt}
+      printf 'partial' > "$output"
+      exit 41
+    fi
+    printf 'complete' > "$output""#,
+        attempt = shell_quote_for_test(&first_attempt.display().to_string()),
+    );
+    let fake = write_fake_enroot_with_export_body(tmpdir.path(), &log, &export_body);
+    let service = fake_service(tmpdir.path());
+    let runtime_image = service.runtime_image.clone();
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+    let options = PrepareOptions {
+        enroot_bin: fake.display().to_string(),
+        ..PrepareOptions::default()
+    };
+
+    prepare_runtime_plan(&plan, &options).expect_err("first export fails after writing output");
+    let second = prepare_runtime_plan(&plan, &options).expect("second prepare rebuilds");
+
+    assert_eq!(
+        second.services[0].runtime_image.action,
+        ArtifactAction::Built,
+        "an artifact without its matching manifest is not committed cache state"
+    );
+    assert_eq!(
+        fs::read_to_string(&runtime_image).expect("committed runtime image"),
+        "complete"
+    );
+    let manifest = crate::cache::read_manifest(&runtime_image).expect("committed manifest");
+    assert_eq!(manifest.kind, crate::cache::CacheEntryKind::Prepared);
+}
+
+#[test]
+fn concurrent_same_key_prepares_wait_for_one_committed_artifact() {
+    use std::sync::Arc;
+    use std::sync::mpsc::TryRecvError;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let log = tmpdir.path().join("enroot.log");
+    let export_started = tmpdir.path().join("export-started");
+    let export_calls = tmpdir.path().join("export-calls");
+    let release_export = tmpdir.path().join("release-export");
+    let export_body = format!(
+        r#"printf 'start\n' >> {calls}
+    printf 'partial' > "$output"
+    touch {started}
+    while [[ ! -e {release} ]]; do sleep 0.02; done
+    printf 'complete' > "$output""#,
+        calls = shell_quote_for_test(&export_calls.display().to_string()),
+        started = shell_quote_for_test(&export_started.display().to_string()),
+        release = shell_quote_for_test(&release_export.display().to_string()),
+    );
+    let fake = write_fake_enroot_with_export_body(tmpdir.path(), &log, &export_body);
+    let service = fake_service(tmpdir.path());
+    let runtime_image = service.runtime_image.clone();
+    let plan = Arc::new(RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    });
+    let options = Arc::new(PrepareOptions {
+        enroot_bin: fake.display().to_string(),
+        ..PrepareOptions::default()
+    });
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+
+    let first_plan = Arc::clone(&plan);
+    let first_options = Arc::clone(&options);
+    let first = thread::spawn(move || prepare_runtime_plan(&first_plan, &first_options));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !export_started.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(export_started.exists(), "first export did not start");
+
+    let second_plan = Arc::clone(&plan);
+    let second_options = Arc::clone(&options);
+    let second = thread::spawn(move || {
+        let result = prepare_runtime_plan(&second_plan, &second_options);
+        let _ = finished_tx.send(());
+        result
+    });
+    thread::sleep(Duration::from_millis(250));
+    let second_waited = matches!(finished_rx.try_recv(), Err(TryRecvError::Empty));
+    let export_count_before_release = fs::read_to_string(&export_calls)
+        .expect("export calls")
+        .lines()
+        .count();
+
+    fs::write(&release_export, "go").expect("release export");
+    let first_result = first.join().expect("first thread").expect("first prepare");
+    let second_result = second
+        .join()
+        .expect("second thread")
+        .expect("second prepare");
+
+    assert!(second_waited, "a same-key prepare observed in-flight state");
+    assert_eq!(
+        export_count_before_release, 1,
+        "only the lock holder may build before the artifact is committed"
+    );
+    assert_eq!(
+        first_result.services[0].runtime_image.action,
+        ArtifactAction::Built
+    );
+    assert_eq!(
+        second_result.services[0].runtime_image.action,
+        ArtifactAction::Reused
+    );
+    assert_eq!(
+        fs::read_to_string(runtime_image).expect("runtime image"),
+        "complete"
+    );
+}
+
+#[test]
+fn replacing_local_image_bytes_invalidates_prepared_reuse() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let log = tmpdir.path().join("enroot.log");
+    let fake = write_fake_enroot(tmpdir.path(), &log);
+    let local_base = tmpdir.path().join("local-base.sqsh");
+    fs::write(&local_base, "first image bytes").expect("local base");
+    let mut service = fake_service(tmpdir.path());
+    service.source = ImageSource::LocalSqsh(local_base.clone());
+    let plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: tmpdir.path().join("cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![service],
+    };
+    let options = PrepareOptions {
+        enroot_bin: fake.display().to_string(),
+        ..PrepareOptions::default()
+    };
+
+    prepare_runtime_plan(&plan, &options).expect("first prepare");
+    let first_key = crate::cache::read_manifest(&plan.ordered_services[0].runtime_image)
+        .expect("first manifest")
+        .cache_key;
+    fs::write(&log, "").expect("clear log");
+    fs::write(&local_base, "replacement image bytes").expect("replace local base");
+
+    let second = prepare_runtime_plan(&plan, &options).expect("second prepare");
+    let second_key = crate::cache::read_manifest(&plan.ordered_services[0].runtime_image)
+        .expect("second manifest")
+        .cache_key;
+    assert_eq!(
+        second.services[0].runtime_image.action,
+        ArtifactAction::Built
+    );
+    assert_ne!(
+        first_key, second_key,
+        "the source byte identity is part of the key"
+    );
+    assert!(
+        fs::read_to_string(log)
+            .expect("log")
+            .contains("create --force --name")
+    );
+}
+
+#[test]
+fn failing_prepare_retains_only_a_bounded_stderr_tail() {
+    const EXPECTED_STDERR_TAIL_BYTES: usize = 64 * 1024;
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let helper = tmpdir.path().join("chatty-failure.sh");
+    fs::write(
+        &helper,
+        r#"#!/bin/bash
+set -euo pipefail
+for ((i=0; i<12000; i++)); do
+  printf 'diagnostic-%05d-abcdefghijklmnopqrstuvwxyz0123456789\n' "$i" >&2
+done
+printf 'FINAL-DIAGNOSTIC-MARKER\n' >&2
+exit 47
+"#,
+    )
+    .expect("helper");
+    let mut perms = fs::metadata(&helper).expect("meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&helper, perms).expect("chmod");
+
+    let error = run_enroot(
+        helper.to_str().expect("helper path"),
+        &[],
+        Vec::new(),
+        "run chatty failing prepare",
+        &StreamCtx::quiet(&NoopPrepareReporter, "test"),
+    )
+    .expect_err("helper fails");
+    let message = error.to_string();
+    assert!(message.contains("FINAL-DIAGNOSTIC-MARKER"));
+    assert!(
+        message.len() <= EXPECTED_STDERR_TAIL_BYTES + 1024,
+        "retained diagnostic was {} bytes",
+        message.len()
+    );
+}
+
+#[test]
+fn newline_free_prepare_output_is_split_into_byte_bounded_chunks() {
+    use std::io::Cursor;
+
+    const EXPECTED_OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+    let input = vec![b'x'; EXPECTED_OUTPUT_CHUNK_BYTES * 3 + 17];
+    let mut chunks = Vec::new();
+    for_each_line_lossy(BufReader::new(Cursor::new(&input)), |chunk| {
+        chunks.push(chunk);
+    });
+
+    assert!(chunks.len() > 1, "an unterminated line must be chunked");
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.len() <= EXPECTED_OUTPUT_CHUNK_BYTES),
+        "every queued ASCII chunk must obey the byte bound"
+    );
+    assert_eq!(chunks.concat().as_bytes(), input);
+}
+
+#[test]
+fn byte_bounded_output_preserves_utf8_split_at_the_chunk_boundary() {
+    use std::io::Cursor;
+
+    const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+    let mut input = vec![b'x'; OUTPUT_CHUNK_BYTES - 1];
+    input.extend_from_slice("€".as_bytes());
+    input.push(b'\n');
+    let mut chunks = Vec::new();
+    for_each_line_lossy(BufReader::new(Cursor::new(&input)), |chunk| {
+        chunks.push(chunk);
+    });
+
+    let decoded = chunks.concat();
+    assert_eq!(decoded.as_bytes(), &input[..input.len() - 1]);
+    assert!(!decoded.contains('\u{fffd}'), "valid UTF-8 was corrupted");
+}
+
+#[test]
+fn byte_bounded_output_preserves_crlf_at_the_chunk_boundary() {
+    use std::io::Cursor;
+
+    const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+    let mut input = vec![b'x'; OUTPUT_CHUNK_BYTES - 1];
+    input.extend_from_slice(b"\r\nnext\r\n");
+    let mut chunks = Vec::new();
+    for_each_line_lossy(BufReader::new(Cursor::new(input)), |chunk| {
+        chunks.push(chunk);
+    });
+
+    assert_eq!(
+        chunks,
+        vec!["x".repeat(OUTPUT_CHUNK_BYTES - 1), "next".to_string()]
+    );
+}
+
+#[test]
+fn stale_handle_marker_survives_tail_eviction_and_triggers_retry() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let counter = tmpdir.path().join("attempts");
+    let importer = write_fake_import_failure(
+        tmpdir.path(),
+        &counter,
+        "Read failed because Stale file handle",
+        true,
+    );
+    let target = tmpdir.path().join("base.sqsh");
+    let temp_dir = tmpdir.path().join("scratch");
+
+    import_base_image(
+        importer.to_str().expect("importer path"),
+        &[],
+        "docker://example.invalid/image:missing",
+        &target,
+        &temp_dir,
+        "svc",
+        &NoopPrepareReporter,
+    )
+    .expect("early stale marker must trigger one retry");
+
+    assert_eq!(fs::read_to_string(counter).expect("attempt count"), "2\n");
+    assert_eq!(
+        fs::read_to_string(target).expect("imported image"),
+        "complete"
+    );
+}
+
+#[test]
+fn missing_image_marker_survives_tail_eviction_and_adds_remediation() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let counter = tmpdir.path().join("attempts");
+    let importer = write_fake_import_failure(
+        tmpdir.path(),
+        &counter,
+        "manifest unknown: manifest not found",
+        false,
+    );
+    let target = tmpdir.path().join("base.sqsh");
+    let temp_dir = tmpdir.path().join("scratch");
+
+    let error = import_base_image(
+        importer.to_str().expect("importer path"),
+        &[],
+        "docker://example.invalid/image:missing",
+        &target,
+        &temp_dir,
+        "svc",
+        &NoopPrepareReporter,
+    )
+    .expect_err("import must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("the container image could not be pulled"),
+        "early registry marker was lost: {error:#}"
+    );
+    assert_eq!(fs::read_to_string(counter).expect("attempt count"), "1\n");
 }
 
 #[test]
@@ -1111,7 +1517,10 @@ fn sif_prepare_sequence_uses_sandbox_flags_and_backend_cache_key() {
     assert!(log_content.contains("exec --writable --fakeroot"));
     assert!(log_content.contains("--bind /host:/mnt"));
     assert!(log_content.contains("--env KEY=VALUE"));
-    assert!(log_content.contains(&service.runtime_image.display().to_string()));
+    assert!(
+        log_content.contains(".hpc-compose-stage-"),
+        "the image tool writes a sibling staging artifact before publication"
+    );
     assert!(
         !fs::read_dir(runtime_plan.cache_dir.join("prepared"))
             .expect("prepared dir")

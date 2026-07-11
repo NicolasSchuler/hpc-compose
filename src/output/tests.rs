@@ -1586,6 +1586,7 @@ fn run_command_covers_success_and_error_arms() {
         apptainer_bin: "apptainer".into(),
         singularity_bin: "singularity".into(),
         sbatch_bin: sbatch_ok.display().to_string(),
+        scancel_bin: "scancel".into(),
         srun_bin: srun.display().to_string(),
         scontrol_bin: "scontrol".into(),
     })
@@ -1600,6 +1601,7 @@ fn run_command_covers_success_and_error_arms() {
         apptainer_bin: "apptainer".into(),
         singularity_bin: "singularity".into(),
         sbatch_bin: sbatch_ok.display().to_string(),
+        scancel_bin: "scancel".into(),
         srun_bin: srun.display().to_string(),
         scontrol_bin: "scontrol".into(),
     })

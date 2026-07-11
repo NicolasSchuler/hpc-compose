@@ -16,6 +16,8 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 - `prepare`: import base images and rebuild prepared runtime artifacts described by a runtime plan
 - `render`: generate the final `sbatch` script and service launch commands
 - `job`: track submissions, logs, metrics, replay, status, and artifact export
+- `job::evidence`: persist the additive immutable manifest/input lock, typed
+  append-only annotation events, and rebuildable materialized run view
 - `tracked_paths`: centralize the `.hpc-compose/` layout used by render and job tracking
 - `cache`: persist cache manifests for imported and prepared images
 - `init`: expose the shipped example templates for `hpc-compose new` plus the legacy `init` alias
@@ -39,7 +41,7 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 6. `preflight::run` checks cluster prerequisites before submission.
 7. `prepare::prepare_runtime_plan` imports or rebuilds artifacts when needed.
 8. `render::render_script` emits the batch script consumed by `sbatch`.
-9. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `ps`, `watch`, `replay`, `stats`, `logs`, `cancel`, and artifact export. `job::replay` reconstructs a best-effort timeline from existing state, service-exit, metrics, and log artifacts while reusing the watch renderer for playback.
+9. `job` persists tracked metadata under `.hpc-compose/` and powers `status`, `ps`, `watch`, `replay`, `stats`, `logs`, `cancel`, and artifact export. New submissions also initialize additive run evidence under `.hpc-compose/evidence/<job-id>/`; explicit note and tag mutations append evidence events, while scheduler observation commands remain read-only. During the additive migration, the legacy record remains the commit boundary: evidence failures emit `run_evidence_degraded` and retry on a later write instead of misreporting an already-tracked operation as failed. `job::replay` reconstructs a best-effort timeline from existing state, service-exit, metrics, and log artifacts while reusing the watch renderer for playback.
 10. `commands/*` turns CLI variants into library calls, and `output` formats the final presentation.
 
 ## Tracked Runtime Layout
@@ -47,6 +49,12 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 `tracked_paths` is the single source of truth for the tracked-job layout shared by `render` and `job`.
 
 - Compose-level metadata lives under `.hpc-compose/` next to the compose file.
+- Additive run evidence lives under `.hpc-compose/evidence/<job-id>/`. Its
+  immutable manifest and input lock are authoritative protocol inputs;
+  `events.jsonl` is append-only under `events.lock`, and `view.json` is an
+  atomically published, rebuildable projection. See
+  [Run Evidence Architecture](run-evidence.md) for the identity, migration,
+  concurrency, and privacy contracts.
 - Per-job runtime state lives under `<runtime-root>/<job-id>/`, where `<runtime-root>` defaults to `<submit-dir>/.hpc-compose` and can be overridden with `x-slurm.runtime_root`. The renderer resolves this to an absolute path at submit time and bakes it into `JOB_ROOT`, so a running job does not depend on `$SLURM_SUBMIT_DIR`. Records persist an explicit override so later lookups address the same directory.
 - Root-level `logs/`, `metrics/`, `artifacts/`, and `state.json` are the latest-view paths used by status and export commands.
 - Resume-aware runs still write attempt-specific state under `attempts/<attempt>/...`.
@@ -68,6 +76,10 @@ cargo run --features manpage-bin --bin gen-manpages -- --check
 - Treat `src/spec/mod.rs` as high risk for broad refactors until parser and semantic-validation behavior has more focused coverage. Prefer adding behavior-first tests in `tests/cli_spec.rs` or spec unit tests before moving large validation blocks.
 - Render changes should keep generated-script assertions close to `src/render.rs`. `just examples-check` shellchecks rendered batch scripts, while local launchers are produced through `up/run --local`, so local launcher syntax needs focused render or local dry-run coverage.
 - Runtime command refactors should start with pure helpers that have deterministic unit tests and existing CLI integration filters. Submission, tracking, watching, and process orchestration should stay together until a narrower harness makes a larger move low risk.
+- Run-evidence changes must preserve immutable-document publication,
+  monotonically sequenced locked appends, deterministic view rebuilding, and
+  legacy-record fallback. Add filesystem-level regression coverage; an
+  in-memory fold alone does not verify the crash and concurrency contract.
 
 ## Documentation split
 
@@ -78,5 +90,6 @@ cargo run --features manpage-bin --bin gen-manpages -- --check
 ## Related Docs
 
 - [Execution Model](execution-model.md)
+- [Run Evidence Architecture](run-evidence.md)
 - [Spec Reference](spec-reference.md)
 - [Roadmap](roadmap.md)

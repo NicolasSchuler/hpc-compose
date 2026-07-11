@@ -1308,7 +1308,8 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
     let enroot = write_fake_enroot(tmpdir.path());
     let srun = write_fake_srun(tmpdir.path());
     let sbatch = write_fake_sbatch(tmpdir.path());
-    let sbatch_wait = write_fake_sbatch_wait_runs_script(tmpdir.path());
+    let sbatch_wait = write_fake_sbatch_parsable_runs_script(tmpdir.path());
+    let scancel = write_fake_scancel(tmpdir.path(), &tmpdir.path().join("scancel.log"), true);
 
     let inspect = run_cli(
         tmpdir.path(),
@@ -1355,6 +1356,8 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
             srun.to_str().expect("path"),
             "--sbatch-bin",
             sbatch_wait.to_str().expect("path"),
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
         ],
     );
     assert_success(&active_preflight);
@@ -1422,6 +1425,8 @@ fn inspect_and_preflight_commands_cover_dev_workflow() {
             srun.to_str().expect("path"),
             "--sbatch-bin",
             sbatch_wait.to_str().expect("path"),
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
         ],
     );
     assert_success(&active_preflight_json);
@@ -1492,6 +1497,60 @@ services:
     let quiet_stderr = stderr_text(&quiet);
     assert!(quiet_stderr.contains("Summary:"));
     assert!(quiet_stderr.contains("preflight failed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn filesystem_probe_timeout_uses_resolved_settings_scancel_binary() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_mount_prepare_compose(tmpdir.path(), cache_root.path());
+    let enroot = write_fake_enroot(tmpdir.path());
+    let srun = write_fake_srun(tmpdir.path());
+    let sbatch = tmpdir.path().join("sbatch-probe-hang");
+    write_script(
+        &sbatch,
+        "#!/bin/bash\nset -euo pipefail\necho '4242;test-cluster'\nsleep 30\n",
+    );
+    let scancel_log = tmpdir.path().join("probe-scancel.log");
+    let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
+    fs::create_dir_all(tmpdir.path().join(".hpc-compose")).expect("settings directory");
+    fs::write(
+        tmpdir.path().join(".hpc-compose/settings.toml"),
+        format!(
+            "version = 1\n\n[defaults.binaries]\nscancel = {:?}\n",
+            scancel.display().to_string()
+        ),
+    )
+    .expect("settings");
+
+    let output = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "preflight",
+            "-f",
+            compose.to_str().expect("path"),
+            "--fs-probes",
+            "--enroot-bin",
+            enroot.to_str().expect("path"),
+            "--srun-bin",
+            srun.to_str().expect("path"),
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+        &[("HPC_COMPOSE_FS_PROBE_TIMEOUT_MS", "1500")],
+    );
+
+    assert_failure(&output);
+    assert!(
+        stderr_text(&output).contains("canceled submitted job 4242"),
+        "unexpected stderr: {}",
+        stderr_text(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(scancel_log).expect("resolved scancel invocation"),
+        "4242\n"
+    );
 }
 
 #[test]

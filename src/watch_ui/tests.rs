@@ -1260,9 +1260,10 @@ fn env_and_terminal_helpers_cover_force_and_fallback_paths() {
     assert!(!force_watch_ui_from_value(Some(OsStr::new("0"))));
     assert!(!force_watch_ui_from_value(None));
 
-    assert!(watch_ui_available(true, false, false));
-    assert!(watch_ui_available(false, true, true));
-    assert!(!watch_ui_available(false, true, false));
+    assert!(watch_ui_available(true, false, false, false));
+    assert!(watch_ui_available(false, false, true, true));
+    assert!(!watch_ui_available(false, false, true, false));
+    assert!(!watch_ui_available(true, true, true, true));
 
     assert_eq!(fallback_terminal_size(Some("101"), Some("33")), (101, 33));
     assert_eq!(

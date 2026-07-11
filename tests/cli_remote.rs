@@ -99,12 +99,22 @@ fn up_remote_stages_project_over_ssh_and_rsync() {
         ssh_recorded.contains("ControlPath=~/.ssh/cm-%r@%h:%p"),
         "ssh must carry the ControlPath spelling; log:\n{ssh_recorded}"
     );
+    assert!(
+        ssh_recorded
+            .lines()
+            .all(|line| line.contains(" -- fakehost ")),
+        "every ssh invocation must terminate option parsing before the destination; log:\n{ssh_recorded}"
+    );
 
     let rsync_recorded = fs::read_to_string(&rsync_log).expect("rsync log");
     // rsync mirrors the local project into the host's stage dir with --delete...
     assert!(
         rsync_recorded.contains("--delete"),
         "rsync should mirror with --delete; log:\n{rsync_recorded}"
+    );
+    assert!(
+        rsync_recorded.contains(&format!(" -- {}/", root.display())),
+        "rsync must terminate option parsing before local and remote operands; log:\n{rsync_recorded}"
     );
     assert!(
         rsync_recorded.contains(&format!("{}/", root.display())),
@@ -158,6 +168,49 @@ fn up_remote_dry_run_is_static_and_does_not_ssh_or_rsync() {
         !rsync_log.exists(),
         "remote dry-run must not run rsync; log:\n{}",
         fs::read_to_string(&rsync_log).unwrap_or_default()
+    );
+}
+
+#[test]
+fn up_remote_rejects_option_like_configured_user_before_ssh() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let root = &fs::canonicalize(tmpdir.path()).expect("canonicalize tmpdir");
+    let root = root.as_path();
+    let compose = write_remote_compose(root);
+
+    let ssh_log = root.join("ssh.log");
+    let rsync_log = root.join("rsync.log");
+    let rules = root.join("ssh-rules");
+    let ssh = write_fake_ssh(root, &ssh_log, &rules);
+    let rsync = write_fake_rsync(root, &rsync_log);
+    write_remote_settings(root, &ssh, &rsync);
+
+    let output = run_cli_with_env(
+        root,
+        &[
+            "up",
+            "--remote=fakehost",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+        &[
+            ("HOME", root.to_str().expect("home")),
+            ("HPC_COMPOSE_REMOTE_USER", "-oProxyCommand=touch"),
+        ],
+    );
+    assert_failure(&output);
+    assert!(
+        stderr_text(&output).contains("invalid SSH destination"),
+        "invalid configured user should be diagnosed: {}",
+        stderr_text(&output)
+    );
+    assert!(
+        !ssh_log.exists(),
+        "invalid user must be rejected before ssh"
+    );
+    assert!(
+        !rsync_log.exists(),
+        "invalid user must be rejected before rsync"
     );
 }
 

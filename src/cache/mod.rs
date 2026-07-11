@@ -81,6 +81,11 @@ pub struct CachePruneResult {
 /// to a lock-free read-modify-write (so a dead holder can never wedge the CLI).
 const MANIFEST_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Maximum time a second prepare waits for the process currently materializing
+/// the same image artifact. Image imports/builds can legitimately take several
+/// minutes; a crashed process releases `flock` automatically.
+const ARTIFACT_BUILD_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// Returns the JSON manifest path stored next to an artifact file.
 #[must_use]
 pub fn manifest_path_for(artifact_path: &Path) -> PathBuf {
@@ -103,6 +108,88 @@ fn manifest_lock_path_for(artifact_path: &Path) -> PathBuf {
         .unwrap_or_default();
     name.push(".lock");
     manifest_path.with_file_name(name)
+}
+
+/// Path of the persistent, per-artifact build lock. This is intentionally
+/// distinct from the short-lived manifest read-modify-write lock: prepare holds
+/// it across the external image build and the subsequent manifest commit.
+fn artifact_build_lock_path_for(artifact_path: &Path) -> PathBuf {
+    let mut name = artifact_path
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".build.lock");
+    artifact_path.with_file_name(name)
+}
+
+/// Strictly serializes builders of one concrete image artifact.
+///
+/// Unlike manifest timestamp/service-name refreshes, image publication must not
+/// degrade to an unlocked operation: an unlocked second writer could expose or
+/// overwrite the first writer's in-flight output.
+pub(crate) fn acquire_image_artifact_build_lock(
+    artifact_path: &Path,
+) -> Result<crate::secure_io::StrictFlockGuard> {
+    let lock_path = artifact_build_lock_path_for(artifact_path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    crate::secure_io::acquire_flock_strict(
+        &lock_path,
+        crate::secure_io::LockKind::Exclusive,
+        ARTIFACT_BUILD_LOCK_TIMEOUT,
+    )
+    .with_context(|| format!("failed to acquire image build lock {}", lock_path.display()))
+}
+
+/// Whether an image artifact and its sidecar form a committed cache entry for
+/// the requested kind/key.
+///
+/// A bare artifact file is never sufficient: external tools can create their
+/// output before failing, and a killed process may leave that output partial.
+/// The manifest is written only after a staged artifact is atomically published,
+/// so the matching sidecar acts as the cache commit marker.
+pub(crate) fn image_artifact_is_committed(
+    artifact_path: &Path,
+    kind: CacheEntryKind,
+    cache_key: &str,
+) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(artifact_path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    matches!(
+        read_manifest(artifact_path),
+        Ok(manifest) if image_manifest_matches(&manifest, artifact_path, &kind, cache_key)
+    )
+}
+
+fn image_manifest_matches(
+    manifest: &CacheEntryManifest,
+    artifact_path: &Path,
+    kind: &CacheEntryKind,
+    cache_key: &str,
+) -> bool {
+    manifest.kind == *kind
+        && manifest.cache_key == cache_key
+        && Path::new(&manifest.artifact_path) == artifact_path
+}
+
+/// Loads metadata that can safely be refreshed for the just-committed image.
+///
+/// A malformed or incompatible sidecar is not a committed cache entry. Once the
+/// external image build has succeeded, its manifest upsert is the recovery
+/// boundary: start fresh instead of letting stale metadata wedge every retry.
+fn load_compatible_image_manifest(
+    artifact_path: &Path,
+    kind: &CacheEntryKind,
+    cache_key: &str,
+) -> Option<CacheEntryManifest> {
+    let manifest = load_manifest_if_exists(artifact_path).ok().flatten()?;
+    image_manifest_matches(&manifest, artifact_path, kind, cache_key).then_some(manifest)
 }
 
 /// Runs a manifest read-modify-write `f` under an exclusive advisory lock on the
@@ -134,8 +221,9 @@ fn with_manifest_lock<T>(artifact_path: &Path, f: impl FnOnce() -> Result<T>) ->
 ///
 /// # Errors
 ///
-/// Returns an error when an existing manifest cannot be read, the updated
-/// manifest cannot be serialized, or the manifest file cannot be written.
+/// Returns an error when the updated manifest cannot be serialized or written.
+/// A corrupt or incompatible existing sidecar is replaced because it does not
+/// represent committed cache state.
 pub fn upsert_base_manifest(
     artifact_path: &Path,
     service_name: &str,
@@ -153,8 +241,10 @@ fn upsert_base_manifest_locked(
     source: &ImageSource,
     cache_key: &str,
 ) -> Result<CacheEntryManifest> {
-    let mut manifest = load_manifest_if_exists(artifact_path)?
-        .unwrap_or_else(|| new_base_manifest(artifact_path, source, cache_key));
+    let mut manifest =
+        load_compatible_image_manifest(artifact_path, &CacheEntryKind::Base, cache_key)
+            .unwrap_or_else(|| new_base_manifest(artifact_path, source, cache_key));
+    manifest.kind = CacheEntryKind::Base;
     refresh_manifest_common(
         &mut manifest,
         artifact_path,
@@ -170,8 +260,9 @@ fn upsert_base_manifest_locked(
 ///
 /// # Errors
 ///
-/// Returns an error when an existing manifest cannot be read, the updated
-/// manifest cannot be serialized, or the manifest file cannot be written.
+/// Returns an error when the updated manifest cannot be serialized or written.
+/// A corrupt or incompatible existing sidecar is replaced because it does not
+/// represent committed cache state.
 pub fn upsert_prepared_manifest(
     artifact_path: &Path,
     service_name: &str,
@@ -180,8 +271,12 @@ pub fn upsert_prepared_manifest(
     prepare: &PreparedImageSpec,
 ) -> Result<CacheEntryManifest> {
     with_manifest_lock(artifact_path, || {
-        let mut manifest = load_manifest_if_exists(artifact_path)?
-            .unwrap_or_else(|| new_prepared_manifest(artifact_path, source, cache_key, prepare));
+        let mut manifest =
+            load_compatible_image_manifest(artifact_path, &CacheEntryKind::Prepared, cache_key)
+                .unwrap_or_else(|| {
+                    new_prepared_manifest(artifact_path, source, cache_key, prepare)
+                });
+        manifest.kind = CacheEntryKind::Prepared;
         refresh_manifest_common(
             &mut manifest,
             artifact_path,
@@ -584,6 +679,16 @@ fn remove_manifest_and_artifact_if(
     should_remove: impl FnOnce(&CacheEntryManifest) -> bool,
 ) -> Result<bool> {
     let artifact = PathBuf::from(&selected.artifact_path);
+    // Image prepare publishes under the strict build lock and then commits its
+    // sidecar under the manifest lock. Destructive cache operations must take
+    // those locks in the same order so prune cannot remove the freshly renamed
+    // artifact in the short artifact->manifest commit window.
+    let _build_lock = matches!(
+        &selected.kind,
+        CacheEntryKind::Base | CacheEntryKind::Prepared | CacheEntryKind::Unknown
+    )
+    .then(|| acquire_image_artifact_build_lock(&artifact))
+    .transpose()?;
     with_manifest_lock(&artifact, || {
         let manifest_path = sidecar_manifest_path_for_kind(&artifact, &selected.kind);
         let mut current = match read_staged_manifest_if_exists(&manifest_path)? {
@@ -1195,6 +1300,123 @@ mod tests {
                 .contains(&"fresh-service".to_string())
         );
         assert!(manifest.last_used_at > 0);
+    }
+
+    #[test]
+    fn prune_waits_for_an_in_flight_image_build_before_revalidating() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cache_dir = tmpdir.path().to_path_buf();
+        let artifact = cache_dir.join("old.sqsh");
+        fs::write(&artifact, "old artifact").expect("artifact");
+        let source = ImageSource::Remote("docker://redis:7".into());
+        upsert_base_manifest(&artifact, "old-service", &source, "same-key").expect("seed");
+        let mut stale = read_manifest(&artifact).expect("seed manifest");
+        stale.created_at = 0;
+        stale.last_used_at = 0;
+        write_manifest(&stale).expect("age manifest");
+
+        let build_lock = acquire_image_artifact_build_lock(&artifact).expect("build lock");
+        let (selected_tx, selected_rx) = mpsc::channel();
+        let (allow_prune_tx, allow_prune_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let prune_cache = cache_dir.clone();
+        let pruner = thread::spawn(move || {
+            let result = prune_by_age_with_hook(&prune_cache, 1, |_| {
+                selected_tx.send(()).expect("selected");
+                allow_prune_rx.recv().expect("allow prune");
+            });
+            finished_tx.send(()).expect("finished");
+            result
+        });
+
+        selected_rx.recv().expect("prune selected stale entry");
+        allow_prune_tx.send(()).expect("release prune hook");
+        let completed_while_build_locked =
+            finished_rx.recv_timeout(Duration::from_millis(250)).is_ok();
+
+        fs::write(&artifact, "fresh artifact").expect("publish fresh artifact");
+        let mut refreshed = upsert_base_manifest(&artifact, "fresh-service", &source, "same-key")
+            .expect("refresh manifest");
+        refreshed.created_at = unix_timestamp_now().saturating_add(60);
+        refreshed.last_used_at = refreshed.created_at;
+        write_manifest(&refreshed).expect("publish refreshed manifest");
+        drop(build_lock);
+
+        let result = pruner.join().expect("pruner thread").expect("prune");
+        assert!(
+            !completed_while_build_locked,
+            "prune must wait for the artifact build lock"
+        );
+        assert!(
+            result.removed.is_empty(),
+            "prune must revalidate after the builder commits"
+        );
+        assert_eq!(
+            fs::read_to_string(&artifact).expect("artifact remains"),
+            "fresh artifact"
+        );
+        assert_eq!(
+            read_manifest(&artifact)
+                .expect("manifest remains")
+                .service_names,
+            vec!["fresh-service".to_string(), "old-service".to_string()]
+        );
+    }
+
+    #[test]
+    fn prepared_manifest_upsert_self_heals_a_corrupt_sidecar() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let artifact = tmpdir.path().join("prepared.sqsh");
+        fs::write(&artifact, "complete artifact").expect("artifact");
+        fs::write(manifest_path_for(&artifact), "{not json").expect("corrupt manifest");
+        let service = runtime_service();
+
+        let manifest = upsert_prepared_manifest(
+            &artifact,
+            &service.name,
+            &service.source,
+            "prepared-key",
+            service.prepare.as_ref().expect("prepare"),
+        )
+        .expect("replace corrupt sidecar after a successful build");
+
+        assert_eq!(manifest.kind, CacheEntryKind::Prepared);
+        assert_eq!(manifest.cache_key, "prepared-key");
+        assert_eq!(manifest.artifact_path, artifact.display().to_string());
+        assert_eq!(
+            read_manifest(&artifact).expect("repaired sidecar").kind,
+            CacheEntryKind::Prepared
+        );
+    }
+
+    #[test]
+    fn prepared_manifest_upsert_resets_an_incompatible_kind() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let artifact = tmpdir.path().join("prepared.sqsh");
+        fs::write(&artifact, "complete artifact").expect("artifact");
+        let service = runtime_service();
+        upsert_base_manifest(&artifact, "stale-base", &service.source, "prepared-key")
+            .expect("wrong-kind sidecar");
+
+        let manifest = upsert_prepared_manifest(
+            &artifact,
+            &service.name,
+            &service.source,
+            "prepared-key",
+            service.prepare.as_ref().expect("prepare"),
+        )
+        .expect("replace incompatible sidecar after a successful build");
+
+        assert_eq!(manifest.kind, CacheEntryKind::Prepared);
+        assert_eq!(manifest.service_names, vec![service.name]);
+        assert_eq!(
+            read_manifest(&artifact).expect("repaired sidecar").kind,
+            CacheEntryKind::Prepared
+        );
     }
 
     #[test]

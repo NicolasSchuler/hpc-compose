@@ -5,7 +5,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -56,11 +57,13 @@ pub struct Options {
     pub apptainer_bin: String,
     pub singularity_bin: String,
     pub sbatch_bin: String,
+    pub scancel_bin: String,
     pub srun_bin: String,
     pub scontrol_bin: String,
     pub require_submit_tools: bool,
     pub skip_prepare: bool,
     pub fs_probes: bool,
+    pub fs_probe_timeout: Duration,
     pub cluster_profile: Option<ClusterProfile>,
 }
 
@@ -71,17 +74,42 @@ impl Default for Options {
             apptainer_bin: "apptainer".to_string(),
             singularity_bin: "singularity".to_string(),
             sbatch_bin: "sbatch".to_string(),
+            scancel_bin: "scancel".to_string(),
             srun_bin: "srun".to_string(),
             scontrol_bin: "scontrol".to_string(),
             require_submit_tools: true,
             skip_prepare: false,
             fs_probes: false,
+            fs_probe_timeout: fs_probe_timeout_from_env(),
             cluster_profile: None,
         }
     }
 }
 
 const LOW_SPACE_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+const DEFAULT_FS_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_FS_PROBE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const FS_PROBE_TIMEOUT_ENV: &str = "HPC_COMPOSE_FS_PROBE_TIMEOUT_MS";
+const FS_PROBE_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+const FS_PROBE_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
+const FS_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+fn fs_probe_timeout_from_env() -> Duration {
+    env::var(FS_PROBE_TIMEOUT_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_fs_probe_timeout_ms)
+        .unwrap_or(DEFAULT_FS_PROBE_TIMEOUT)
+}
+
+fn parse_fs_probe_timeout_ms(raw: &str) -> Option<Duration> {
+    let millis = raw.trim().parse::<u64>().ok()?;
+    validate_fs_probe_timeout(Duration::from_millis(millis))
+}
+
+fn validate_fs_probe_timeout(timeout: Duration) -> Option<Duration> {
+    (!timeout.is_zero() && timeout <= MAX_FS_PROBE_TIMEOUT).then_some(timeout)
+}
 
 impl Report {
     /// Returns `true` when the report contains at least one blocking error.
@@ -1005,6 +1033,12 @@ struct SharedFsProbeOutcome {
     available_bytes: Option<u64>,
 }
 
+#[derive(Debug)]
+struct SharedFsProbeSubmitError {
+    detail: String,
+    submitted_job_id: Option<String>,
+}
+
 fn check_shared_fs_probes(report: &mut Report, plan: &RuntimePlan, options: &Options) {
     let targets = shared_fs_probe_targets(plan);
     if targets.is_empty() {
@@ -1018,9 +1052,22 @@ fn check_shared_fs_probes(report: &mut Report, plan: &RuntimePlan, options: &Opt
         });
         return;
     }
+    if !check_binary(
+        report,
+        &options.scancel_bin,
+        "scancel is available for filesystem probe cleanup",
+        "Active filesystem probes need scancel for bounded cleanup; install Slurm client tools or pass --scancel-bin.",
+    ) {
+        return;
+    }
 
     for target in targets {
-        match run_shared_fs_probe(&target, &options.sbatch_bin) {
+        match run_shared_fs_probe(
+            &target,
+            &options.sbatch_bin,
+            &options.scancel_bin,
+            options.fs_probe_timeout,
+        ) {
             Ok(outcome) => {
                 report.items.push(Item {
                     level: Level::Ok,
@@ -1131,6 +1178,8 @@ fn format_probe_headroom(available_bytes: Option<u64>) -> Option<String> {
 fn run_shared_fs_probe(
     target: &SharedFsProbeTarget,
     sbatch_bin: &str,
+    scancel_bin: &str,
+    timeout: Duration,
 ) -> std::result::Result<SharedFsProbeOutcome, String> {
     fs::create_dir_all(&target.path).map_err(|err| {
         format!(
@@ -1171,47 +1220,199 @@ fn run_shared_fs_probe(
         )
     })?;
 
-    let output = Command::new(sbatch_bin)
-        .arg("--wait")
-        .arg(&script_path)
-        .output()
-        .map_err(|err| format!("failed to execute sbatch probe command '{sbatch_bin}': {err}"))?;
+    let result_path = probe_root.join("result.env");
+    let started = Instant::now();
+    let Some(deadline) = started.checked_add(timeout) else {
+        return Err(format!(
+            "shared filesystem probe timeout is too large; probe files left at {}",
+            probe_root.display()
+        ));
+    };
+    let job_id = match submit_shared_fs_probe(sbatch_bin, &script_path, deadline, timeout) {
+        Ok(job_id) => job_id,
+        Err(submit_error) => {
+            let mut message = submit_error.detail;
+            if let Some(job_id) = submit_error.submitted_job_id {
+                append_probe_cancellation(&mut message, scancel_bin, &job_id);
+            }
+            if let Some(probe_message) = read_failed_probe_message(&probe_root) {
+                message.push_str(&format!("; probe reported: {probe_message}"));
+            }
+            message.push_str(&format!("; probe files left at {}", probe_root.display()));
+            return Err(message);
+        }
+    };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
-        let mut message = format!("sbatch --wait exited with {}", output.status);
-        if !detail.is_empty() {
-            message.push_str(&format!(": {detail}"));
+    while !result_path.exists() {
+        if Instant::now() >= deadline {
+            let mut message = format!(
+                "shared filesystem probe job {job_id} timed out after {:.1}s",
+                timeout.as_secs_f64()
+            );
+            append_probe_cancellation(&mut message, scancel_bin, &job_id);
+            message.push_str(&format!("; probe files left at {}", probe_root.display()));
+            return Err(message);
         }
-        if let Some(probe_message) = read_failed_probe_message(&probe_root) {
-            message.push_str(&format!("; probe reported: {probe_message}"));
-        }
-        message.push_str(&format!("; probe files left at {}", probe_root.display()));
-        return Err(message);
+        thread::sleep(
+            FS_PROBE_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
 
-    let result_path = probe_root.join("result.env");
-    let raw = fs::read_to_string(&result_path)
-        .map_err(|err| format!("probe did not publish {}: {err}", result_path.display()))?;
-    let outcome = parse_shared_fs_probe_result(&raw)?;
+    let raw = fs::read_to_string(&result_path).map_err(|err| {
+        format!(
+            "failed to read probe result {}: {err}; probe files left at {}",
+            result_path.display(),
+            probe_root.display()
+        )
+    })?;
+    let outcome = parse_shared_fs_probe_result(&raw).map_err(|err| {
+        format!(
+            "probe reported: {err}; probe files left at {}",
+            probe_root.display()
+        )
+    })?;
 
     let compute_sentinel = probe_root.join("compute-sentinel");
     let compute_payload = fs::read_to_string(&compute_sentinel).map_err(|err| {
         format!(
-            "login node could not read compute sentinel {}: {err}",
-            compute_sentinel.display()
+            "login node could not read compute sentinel {}: {err}; probe files left at {}",
+            compute_sentinel.display(),
+            probe_root.display()
         )
     })?;
     if !compute_payload.starts_with("compute:") {
         return Err(format!(
-            "compute sentinel had unexpected contents in {}",
-            compute_sentinel.display()
+            "compute sentinel had unexpected contents in {}; probe files left at {}",
+            compute_sentinel.display(),
+            probe_root.display()
         ));
     }
 
     let _ = fs::remove_dir_all(&probe_root);
     Ok(outcome)
+}
+
+fn submit_shared_fs_probe(
+    sbatch_bin: &str,
+    script_path: &Path,
+    deadline: Instant,
+    timeout: Duration,
+) -> std::result::Result<String, SharedFsProbeSubmitError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(SharedFsProbeSubmitError {
+            detail: format!(
+                "shared filesystem sbatch probe timed out after {:.1}s at '{sbatch_bin}'",
+                timeout.as_secs_f64()
+            ),
+            submitted_job_id: None,
+        });
+    }
+
+    // Keep acceptance separate from result polling so the scheduler job ID is
+    // available for bounded cleanup instead of delegating the wait to sbatch.
+    let mut command = Command::new(sbatch_bin);
+    command.arg("--parsable").arg(script_path);
+    match process_probe::run(
+        &mut command,
+        "shared filesystem sbatch probe",
+        process_probe::ProbeOptions {
+            timeout: remaining,
+            max_output_bytes: FS_PROBE_MAX_OUTPUT_BYTES,
+        },
+    ) {
+        Ok(output) => {
+            let submitted_job_id = parse_sbatch_job_id(&output.stdout);
+            if !output.status.success() {
+                return Err(SharedFsProbeSubmitError {
+                    detail: format!(
+                        "sbatch --parsable exited with {}{}",
+                        output.status,
+                        format_probe_output_detail("stderr", &output.stderr)
+                    ),
+                    submitted_job_id,
+                });
+            }
+            submitted_job_id.ok_or_else(|| SharedFsProbeSubmitError {
+                detail: format!(
+                    "sbatch --parsable did not publish a numeric job ID{}",
+                    format_probe_output_detail("stdout", &output.stdout)
+                ),
+                submitted_job_id: None,
+            })
+        }
+        Err(err) => {
+            let submitted_job_id = parse_sbatch_job_id(err.captured_stdout());
+            let mut detail = err.detail();
+            let stderr = format_probe_output_detail("stderr", err.captured_stderr());
+            if !stderr.is_empty() {
+                detail.push_str(&stderr);
+            }
+            let (stdout_truncated, stderr_truncated) = err.captured_output_truncated();
+            if stdout_truncated || stderr_truncated {
+                detail.push_str("; captured output was truncated");
+            }
+            Err(SharedFsProbeSubmitError {
+                detail,
+                submitted_job_id,
+            })
+        }
+    }
+}
+
+fn append_probe_cancellation(message: &mut String, scancel_bin: &str, job_id: &str) {
+    let mut command = Command::new(scancel_bin);
+    command.arg(job_id);
+    match process_probe::run(
+        &mut command,
+        "shared filesystem probe cancellation",
+        process_probe::ProbeOptions {
+            timeout: FS_PROBE_CANCEL_TIMEOUT,
+            max_output_bytes: FS_PROBE_MAX_OUTPUT_BYTES,
+        },
+    ) {
+        Ok(output) if output.status.success() => {
+            message.push_str(&format!("; canceled submitted job {job_id}"));
+        }
+        Ok(output) => {
+            message.push_str(&format!(
+                "; failed to cancel submitted job {job_id}: scancel exited with {}{}",
+                output.status,
+                format_probe_output_detail("stderr", &output.stderr)
+            ));
+        }
+        Err(err) => {
+            message.push_str(&format!(
+                "; failed to cancel submitted job {job_id}: {}",
+                err.detail()
+            ));
+        }
+    }
+}
+
+fn format_probe_output_detail(label: &str, bytes: &[u8]) -> String {
+    let detail = String::from_utf8_lossy(bytes);
+    let detail = detail.trim();
+    if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {label}: {detail}")
+    }
+}
+
+fn parse_sbatch_job_id(stdout: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .find_map(parse_sbatch_job_id_line)
+}
+
+fn parse_sbatch_job_id_line(line: &str) -> Option<String> {
+    let candidate = line
+        .trim()
+        .split_once(';')
+        .map_or(line.trim(), |(id, _)| id);
+    (!candidate.is_empty() && candidate.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| candidate.to_string())
 }
 
 fn read_failed_probe_message(probe_root: &Path) -> Option<String> {
@@ -1246,7 +1447,9 @@ LOGIN_TOKEN={login_token}
 RESULT="$PROBE_ROOT/result.env"
 
 fail() {{
-  printf 'status=error\nmessage=%s\n' "$1" > "$RESULT"
+  tmp_result="$RESULT.tmp.$$"
+  printf 'status=error\nmessage=%s\n' "$1" > "$tmp_result"
+  mv "$tmp_result" "$RESULT"
   exit 1
 }}
 
@@ -1904,6 +2107,8 @@ mod tests {
         ResumeConfig, ScratchConfig, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
     };
 
+    const PROBE_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
     fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
         RuntimePlan {
             name: "demo".into(),
@@ -1942,7 +2147,7 @@ mod tests {
         fs::set_permissions(path, perms).expect("chmod");
     }
 
-    fn write_fake_sbatch_wait(path: &Path) {
+    fn write_fake_sbatch_submit(path: &Path) {
         write_fake_binary(
             path,
             r#"#!/bin/bash
@@ -1950,7 +2155,7 @@ set -euo pipefail
 script_path=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --wait)
+    --parsable)
       shift
       ;;
     --*)
@@ -1967,8 +2172,8 @@ if [[ -z "$script_path" ]]; then
   exit 2
 fi
 export SLURM_JOB_ID=999
-bash "$script_path" >/dev/null 2>&1
-echo "Submitted batch job 999"
+bash "$script_path" >/dev/null 2>&1 &
+echo "999;test-cluster"
 "#,
         );
     }
@@ -2000,17 +2205,22 @@ echo "Submitted batch job 999"
     }
 
     #[test]
-    fn shared_fs_probe_runner_submits_waiting_probe_and_cleans_success() {
+    fn shared_fs_probe_runner_submits_parsable_probe_and_cleans_success() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let target = SharedFsProbeTarget {
             label: "cache directory",
             path: tmpdir.path().join("cache"),
         };
         let sbatch = tmpdir.path().join("sbatch");
-        write_fake_sbatch_wait(&sbatch);
+        write_fake_sbatch_submit(&sbatch);
 
-        let outcome = run_shared_fs_probe(&target, sbatch.to_str().expect("path"))
-            .expect("probe should pass");
+        let outcome = run_shared_fs_probe(
+            &target,
+            sbatch.to_str().expect("path"),
+            "scancel",
+            PROBE_TEST_TIMEOUT,
+        )
+        .expect("probe should pass");
 
         assert!(
             outcome.available_bytes.is_some_and(|bytes| bytes > 0),
@@ -2037,10 +2247,12 @@ echo "Submitted batch job 999"
             path: tmpdir.path().join("cache"),
         };
         let sbatch = tmpdir.path().join("sbatch-fail");
+        let scancel = tmpdir.path().join("scancel");
         write_fake_binary(
             &sbatch,
             "#!/bin/bash\necho scheduler rejected probe >&2\nexit 7\n",
         );
+        write_fake_binary(&scancel, "#!/bin/bash\nexit 0\n");
         let mut plan = runtime_plan(tmpdir.path());
         plan.cache_dir = target.path.clone();
 
@@ -2050,6 +2262,7 @@ echo "Submitted batch job 999"
             &plan,
             &Options {
                 sbatch_bin: sbatch.display().to_string(),
+                scancel_bin: scancel.display().to_string(),
                 fs_probes: true,
                 ..Options::default()
             },
@@ -2064,6 +2277,160 @@ echo "Submitted batch job 999"
         }));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn shared_fs_probe_preserves_compute_report_and_evidence_on_failure() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let target = SharedFsProbeTarget {
+            label: "cache directory",
+            path: tmpdir.path().join("cache"),
+        };
+        let sbatch = tmpdir.path().join("sbatch-compute-fail");
+        write_fake_binary(
+            &sbatch,
+            r#"#!/bin/bash
+set -euo pipefail
+script_path="${@: -1}"
+rm -f "$(dirname "$script_path")/login-sentinel"
+export SLURM_JOB_ID=777
+bash "$script_path" >/dev/null 2>&1 &
+echo "777;test-cluster"
+"#,
+        );
+
+        let err = run_shared_fs_probe(
+            &target,
+            sbatch.to_str().expect("path"),
+            "scancel",
+            PROBE_TEST_TIMEOUT,
+        )
+        .expect_err("compute-side probe failure must be reported");
+
+        assert!(
+            err.contains("login sentinel is not visible on the compute node"),
+            "missing compute diagnostic: {err}"
+        );
+        assert!(
+            err.contains("probe files left at"),
+            "missing evidence: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_fs_probe_deadline_cancels_published_job_and_kills_submit_descendants() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let target = SharedFsProbeTarget {
+            label: "cache directory",
+            path: tmpdir.path().join("cache"),
+        };
+        let sbatch = tmpdir.path().join("sbatch-hang");
+        let scancel = tmpdir.path().join("scancel");
+        let scancel_log = tmpdir.path().join("scancel.log");
+        let descendant_heartbeat = tmpdir.path().join("descendant-heartbeat");
+        write_fake_binary(
+            &sbatch,
+            &format!(
+                "#!/bin/bash\nset -euo pipefail\n(while true; do printf x >> {heartbeat}; sleep 0.05; done) &\nwhile [[ ! -s {heartbeat} ]]; do sleep 0.01; done\necho '999;test-cluster'\nsleep 30\n",
+                heartbeat = crate::shell_quote::quote(&descendant_heartbeat.display().to_string())
+            ),
+        );
+        write_fake_binary(
+            &scancel,
+            &format!(
+                "#!/bin/bash\nprintf '%s\\n' \"$*\" > {}\n",
+                crate::shell_quote::quote(&scancel_log.display().to_string())
+            ),
+        );
+
+        let started = std::time::Instant::now();
+        let err = run_shared_fs_probe(
+            &target,
+            sbatch.to_str().expect("path"),
+            scancel.to_str().expect("path"),
+            PROBE_TEST_TIMEOUT,
+        )
+        .expect_err("hung scheduler probe must time out");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < PROBE_TEST_TIMEOUT + Duration::from_secs(2),
+            "probe ignored its client deadline and ran for {elapsed:?}"
+        );
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+        assert_eq!(
+            fs::read_to_string(&scancel_log).unwrap_or_else(|read_err| panic!(
+                "scancel invocation missing ({read_err}); {err}"
+            )),
+            "999\n",
+            "the accepted allocation must be canceled by its parsed job ID"
+        );
+        let heartbeat_before = fs::metadata(&descendant_heartbeat)
+            .expect("descendant heartbeat")
+            .len();
+        std::thread::sleep(Duration::from_millis(300));
+        let heartbeat_after = fs::metadata(&descendant_heartbeat)
+            .expect("descendant heartbeat after cleanup")
+            .len();
+        assert_eq!(
+            heartbeat_after, heartbeat_before,
+            "the timed-out sbatch process group left a heartbeat descendant alive"
+        );
+        assert!(
+            err.contains("probe files left at"),
+            "missing evidence path: {err}"
+        );
+        assert!(
+            fs::read_dir(&target.path)
+                .expect("probe target")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hpc-compose-fs-probe-")),
+            "timed-out probe should retain its evidence directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_fs_probe_cancels_published_job_after_submit_output_limit() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let target = SharedFsProbeTarget {
+            label: "cache directory",
+            path: tmpdir.path().join("cache"),
+        };
+        let sbatch = tmpdir.path().join("sbatch-verbose");
+        let scancel = tmpdir.path().join("scancel");
+        let scancel_log = tmpdir.path().join("scancel.log");
+        write_fake_binary(
+            &sbatch,
+            "#!/bin/bash\nset -euo pipefail\nprintf '999;test-cluster\\n'\nhead -c 1048576 /dev/zero\n",
+        );
+        write_fake_binary(
+            &scancel,
+            &format!(
+                "#!/bin/bash\nprintf '%s\\n' \"$*\" > {}\n",
+                crate::shell_quote::quote(&scancel_log.display().to_string())
+            ),
+        );
+
+        let err = run_shared_fs_probe(
+            &target,
+            sbatch.to_str().expect("path"),
+            scancel.to_str().expect("path"),
+            PROBE_TEST_TIMEOUT,
+        )
+        .expect_err("oversized submit output must fail safely");
+
+        assert!(err.contains("capture limit"), "unexpected error: {err}");
+        assert_eq!(
+            fs::read_to_string(scancel_log).expect("scancel invocation"),
+            "999\n",
+            "accepted probe allocation must be canceled even when submit output is oversized"
+        );
+    }
+
     #[test]
     fn parse_shared_fs_probe_result_reports_status_and_headroom() {
         let outcome =
@@ -2073,6 +2440,28 @@ echo "Submitted batch job 999"
         let err = parse_shared_fs_probe_result("status=error\nmessage=not visible\n")
             .expect_err("error result");
         assert_eq!(err, "not visible");
+    }
+
+    #[test]
+    fn filesystem_probe_timeout_parsers_require_bounded_nonzero_values() {
+        assert_eq!(
+            parse_fs_probe_timeout_ms("250"),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(parse_fs_probe_timeout_ms("0"), None);
+        assert_eq!(parse_fs_probe_timeout_ms("not-a-number"), None);
+        assert_eq!(
+            parse_fs_probe_timeout_ms(&(MAX_FS_PROBE_TIMEOUT.as_millis() + 1).to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn parsable_sbatch_output_accepts_job_id_and_optional_cluster_only() {
+        assert_eq!(parse_sbatch_job_id(b"12345\n"), Some("12345".into()));
+        assert_eq!(parse_sbatch_job_id(b"12345;site-a\n"), Some("12345".into()));
+        assert_eq!(parse_sbatch_job_id(b"Submitted batch job 12345\n"), None);
+        assert_eq!(parse_sbatch_job_id(b"--other-option\n"), None);
     }
 
     #[test]

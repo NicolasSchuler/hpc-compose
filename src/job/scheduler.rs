@@ -96,6 +96,9 @@ fn run_scheduler_command_with_timeout(
         err @ ProbeError::OutputLimitExceeded { .. } => SchedulerCommandError::Io(
             std::io::Error::new(std::io::ErrorKind::InvalidData, err.detail()),
         ),
+        err @ ProbeError::PostSpawnIo { .. } => {
+            SchedulerCommandError::Io(std::io::Error::other(err.detail()))
+        }
         ProbeError::Io(err) => SchedulerCommandError::Io(err),
     })?;
     Ok(Output {

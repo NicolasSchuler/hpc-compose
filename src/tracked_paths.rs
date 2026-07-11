@@ -11,6 +11,12 @@ pub(crate) const CANARY_LATEST_RECORD_FILE_NAME: &str = "latest-canary.json";
 pub(crate) const NOTEBOOK_LATEST_RECORD_FILE_NAME: &str = "latest-notebook.json";
 pub(crate) const SWEEP_LATEST_RECORD_FILE_NAME: &str = "latest.json";
 pub(crate) const SWEEP_MANIFEST_FILE_NAME: &str = "sweep.json";
+pub(crate) const RUN_EVIDENCE_DIR_NAME: &str = "evidence";
+pub(crate) const RUN_MANIFEST_FILE_NAME: &str = "manifest.json";
+pub(crate) const INPUTS_LOCK_FILE_NAME: &str = "inputs.lock.json";
+pub(crate) const RUN_EVENTS_FILE_NAME: &str = "events.jsonl";
+pub(crate) const RUN_VIEW_FILE_NAME: &str = "view.json";
+pub(crate) const RUN_EVENTS_LOCK_FILE_NAME: &str = "events.lock";
 pub(crate) const ATTEMPTS_DIR_NAME: &str = "attempts";
 pub(crate) const LOGS_DIR_NAME: &str = "logs";
 pub(crate) const DEFAULT_BATCH_LOG_FILE_PATTERN: &str = "hpc-compose-%j.out";
@@ -128,6 +134,42 @@ pub(crate) fn latest_canary_record_path_for(spec_path: &Path) -> PathBuf {
 #[must_use]
 pub(crate) fn latest_notebook_record_path_for(spec_path: &Path) -> PathBuf {
     metadata_root_for(spec_path).join(NOTEBOOK_LATEST_RECORD_FILE_NAME)
+}
+
+/// Returns the evidence directory for a validated, single-component job id.
+///
+/// Callers must validate `job_id` before using the resulting path. Keeping the
+/// join here makes the on-disk evidence layout a single shared contract.
+#[must_use]
+pub(crate) fn run_evidence_dir_for(spec_path: &Path, job_id: &str) -> PathBuf {
+    metadata_root_for(spec_path)
+        .join(RUN_EVIDENCE_DIR_NAME)
+        .join(job_id)
+}
+
+#[must_use]
+pub(crate) fn run_manifest_path(evidence_dir: &Path) -> PathBuf {
+    evidence_dir.join(RUN_MANIFEST_FILE_NAME)
+}
+
+#[must_use]
+pub(crate) fn inputs_lock_path(evidence_dir: &Path) -> PathBuf {
+    evidence_dir.join(INPUTS_LOCK_FILE_NAME)
+}
+
+#[must_use]
+pub(crate) fn run_events_path(evidence_dir: &Path) -> PathBuf {
+    evidence_dir.join(RUN_EVENTS_FILE_NAME)
+}
+
+#[must_use]
+pub(crate) fn run_view_path(evidence_dir: &Path) -> PathBuf {
+    evidence_dir.join(RUN_VIEW_FILE_NAME)
+}
+
+#[must_use]
+pub(crate) fn run_events_lock_path(evidence_dir: &Path) -> PathBuf {
+    evidence_dir.join(RUN_EVENTS_LOCK_FILE_NAME)
 }
 
 /// Returns the directory that holds per-job runtime roots for `submit_dir`:

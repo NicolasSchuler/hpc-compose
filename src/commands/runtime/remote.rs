@@ -54,15 +54,82 @@ const DEFAULT_INSTALL_URL: &str =
 pub(crate) fn resolve_remote_host(flag_value: &str, login_host: Option<&str>) -> Result<String> {
     let trimmed = flag_value.trim();
     if !trimmed.is_empty() {
+        validate_remote_destination(trimmed)?;
         return Ok(trimmed.to_string());
     }
     match login_host.map(str::trim) {
-        Some(host) if !host.is_empty() => Ok(host.to_string()),
+        Some(host) if !host.is_empty() => {
+            validate_remote_destination(host)?;
+            Ok(host.to_string())
+        }
         _ => bail!(
             "up --remote needs a destination: pass --remote=<host> or set login_host in settings \
              (the host's port, identity, and user belong in your ~/.ssh/config)"
         ),
     }
+}
+
+/// Keeps an SSH/rsync destination on the operand side of their command-line
+/// grammars. `Command` avoids shell expansion, but both clients still parse a
+/// leading dash as a local option; rsync also splits `user@host:path` itself.
+/// Ports belong in SSH config, while IPv6 literals use the bracketed spelling
+/// required by rsync's remote-destination syntax.
+fn validate_remote_destination(destination: &str) -> Result<()> {
+    let invalid = |reason: &str| {
+        anyhow!(
+            "invalid SSH destination {destination:?}: {reason}; use a host alias, user@host, or \
+             bracketed IPv6 literal, and put ports/options in ~/.ssh/config or \
+             {REMOTE_SSH_OPTS_ENV}"
+        )
+    };
+
+    if destination.starts_with('-') {
+        return Err(invalid("it must not begin with '-'"));
+    }
+    if destination
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return Err(invalid("whitespace and control characters are not allowed"));
+    }
+    if destination.contains(['/', '\\']) {
+        return Err(invalid("path separators are not allowed"));
+    }
+
+    let (user, host) = match destination.split_once('@') {
+        Some((user, host)) => {
+            if user.is_empty() || host.is_empty() || host.contains('@') {
+                return Err(invalid(
+                    "user@host must contain exactly one non-empty '@' pair",
+                ));
+            }
+            (Some(user), host)
+        }
+        None => (None, destination),
+    };
+    if host.starts_with('-') {
+        return Err(invalid("the host component must not begin with '-'"));
+    }
+    if user.is_some_and(|user| user.contains(['[', ']', ':'])) {
+        return Err(invalid("the user component contains destination syntax"));
+    }
+
+    if let Some(inner) = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        if inner.is_empty() || !inner.contains(':') || inner.contains(['[', ']']) {
+            return Err(invalid(
+                "brackets are reserved for a non-empty IPv6 literal",
+            ));
+        }
+    } else if host.contains(['[', ']', ':']) {
+        return Err(invalid(
+            "ports are not accepted here and IPv6 literals must be enclosed in brackets",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Remote staging directory (relative to the login node's home), derived from
@@ -404,6 +471,7 @@ pub(crate) fn remote_followup(context: &ResolvedContext, remote_flag: &str) -> R
         context.login_user.as_deref(),
         env_user.as_deref(),
     );
+    validate_remote_destination(&host)?;
     let compose_file = context.compose_file.value.clone();
     let project_dir = remote_stage_root(context, &compose_file)?;
     let spec_rel = compose_file
@@ -471,6 +539,7 @@ pub(crate) fn remote_followup(context: &ResolvedContext, remote_flag: &str) -> R
     eprintln!("{}", term::styled_dim(OTP_MULTIPLEX_NOTE));
 
     let mut args = base_ssh_args;
+    args.push("--".to_string());
     args.push(host.clone());
     args.push(remote_cmd);
     let status = Command::new(ssh_bin)
@@ -526,6 +595,7 @@ pub(crate) fn build_rsync_args(
         args.push("--exclude-from".to_string());
         args.push(ignore.to_string_lossy().to_string());
     }
+    args.push("--".to_string());
     args.push(format!("{}/", project_dir.display()));
     args.push(format!("{host}:{stage}/"));
     args
@@ -768,6 +838,7 @@ fn probe_remote_binary_with_preference(
     required: (u64, u64, u64),
 ) -> Result<Option<RemoteBinary>> {
     let mut args = base_ssh_args.to_vec();
+    args.push("--".to_string());
     args.push(host.to_string());
     args.push(posix_sh(&build_probe_command(preference)));
     let output = Command::new(ssh_bin)
@@ -815,6 +886,7 @@ fn install_remote_binary(ssh_bin: &str, base_ssh_args: &[String], host: &str) ->
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_INSTALL_URL.to_string());
     let mut args = base_ssh_args.to_vec();
+    args.push("--".to_string());
     args.push(host.to_string());
     args.push(posix_sh(&build_install_command(&url)));
     let status = Command::new(ssh_bin)
@@ -1038,6 +1110,7 @@ pub(crate) fn remote_up(
         context.login_user.as_deref(),
         env_user.as_deref(),
     );
+    validate_remote_destination(&host)?;
     let compose_file = context.compose_file.value.clone();
     let project_dir = remote_stage_root(context, &compose_file)?;
     // Warn when only a compose subdir is staged: without a repo-root
@@ -1103,6 +1176,7 @@ pub(crate) fn remote_up(
     // 1. Create the remote stage dir (rsync does not portably create the
     // intermediate parent), then mirror the project into it.
     let mut mkdir_args = base_ssh_args.clone();
+    mkdir_args.push("--".to_string());
     mkdir_args.push(host.clone());
     mkdir_args.push(format!("mkdir -p {}", shell_quote::quote(&stage)));
     let mkdir_status = Command::new(ssh_bin)
@@ -1141,6 +1215,7 @@ pub(crate) fn remote_up(
         build_remote_command(&remote_bin, &stage, &spec_rel, &global_flags, &up_flags);
     eprintln!("  delegating: ssh {host} '{remote_command}'");
     let mut ssh_args = base_ssh_args.clone();
+    ssh_args.push("--".to_string());
     ssh_args.push(host.clone());
     ssh_args.push(remote_command);
     let (ssh_status, submitted_job_id) = run_delegate_capturing_job_id(ssh_bin, &ssh_args)?;
@@ -1253,6 +1328,46 @@ mod tests {
         assert!(err.contains("--remote=<host>"));
         assert!(err.contains("login_host"));
         assert!(resolve_remote_host("", Some("   ")).is_err());
+    }
+
+    #[test]
+    fn resolve_remote_host_rejects_values_that_are_not_safe_ssh_operands() {
+        for destination in [
+            "-oProxyCommand=touch /tmp/pwned",
+            "user@-oProxyCommand=touch",
+            "login node",
+            "login\nnode",
+            "host/path",
+            r"host\path",
+            "user@@host",
+            "@host",
+            "user@",
+            "host:2222",
+            "[localhost]",
+            "[]",
+        ] {
+            assert!(
+                resolve_remote_host(destination, None).is_err(),
+                "destination {destination:?} must be rejected before ssh/rsync"
+            );
+            assert!(
+                resolve_remote_host("", Some(destination)).is_err(),
+                "configured destination {destination:?} must be rejected before ssh/rsync"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_remote_host_accepts_host_user_and_bracketed_ipv6_operands() {
+        for destination in [
+            "login01",
+            "login-alias.example",
+            "nicolas@login01",
+            "[2001:db8::1]",
+            "nicolas@[fe80::1%en0]",
+        ] {
+            assert_eq!(resolve_remote_host(destination, None).unwrap(), destination);
+        }
     }
 
     #[test]
@@ -1905,6 +2020,7 @@ mod tests {
         assert!(args.contains(&".hpc-compose/[0-9]*/".to_string()));
         assert!(args.contains(&".hpc-compose/local-*/".to_string()));
         // Source has a trailing slash; destination is host:stage/.
+        assert_eq!(args[args.len() - 3], "--");
         assert_eq!(args[args.len() - 2], "/home/me/specs/");
         assert_eq!(args[args.len() - 1], "login01:.hpc-compose-remote/specs/");
     }

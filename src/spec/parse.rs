@@ -18,17 +18,49 @@ pub(super) fn load_raw_spec_from_str(path: &Path, raw: &str) -> Result<ComposeSp
     load_raw_spec_with_root_text(path, Some(raw))
 }
 
+/// Parses a self-contained persisted config document without consulting the
+/// filesystem for `extends` targets. Historical effective snapshots have
+/// already resolved those inputs and must not acquire new dependencies on the
+/// current checkout.
+pub(super) fn load_standalone_raw_spec_from_str(path: &Path, raw: &str) -> Result<ComposeSpec> {
+    let mut value: Value = serde_norway::from_str(raw)
+        .with_context(|| format!("failed to parse YAML at {}", path.display()))?;
+    validate_root(&value)?;
+    reject_unresolved_extends(&value, "persisted effective config snapshot")?;
+    normalize_raw_spec(&mut value)?;
+    deserialize_spec(path, value)
+}
+
+fn reject_unresolved_extends(value: &Value, document: &str) -> Result<()> {
+    let Some(root) = value.as_mapping() else {
+        return Ok(());
+    };
+    if root.contains_key(string_key("extends")) {
+        bail!("{document} must not contain root extends");
+    }
+    for collection in ["services", "steps"] {
+        let Some(services) = root.get(string_key(collection)).and_then(Value::as_mapping) else {
+            continue;
+        };
+        for (name, service) in services {
+            if service
+                .as_mapping()
+                .is_some_and(|service| service.contains_key(string_key("extends")))
+            {
+                let name = name.as_str().unwrap_or("<unknown>");
+                bail!("{document} service '{name}' must not contain extends");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "fuzzing")]
 pub(super) fn load_fuzz_raw_spec_from_str(raw: &str) -> Result<ComposeSpec> {
     let mut value: Value =
         serde_norway::from_str(raw).context("failed to parse YAML from fuzz input")?;
     validate_root(&value)?;
-    if value
-        .as_mapping()
-        .is_some_and(|root| root.contains_key(string_key("extends")))
-    {
-        bail!("fuzz parser does not resolve root extends");
-    }
+    reject_unresolved_extends(&value, "fuzz parser")?;
     normalize_raw_spec(&mut value)?;
     serde_norway::from_value(value).context("failed to deserialize fuzz spec")
 }
@@ -38,6 +70,10 @@ fn load_raw_spec_with_root_text(path: &Path, root_text: Option<&str>) -> Result<
     let mut value = load_resolved_value(path, &mut stack, root_text)?;
     validate_root(&value)?;
     normalize_raw_spec(&mut value)?;
+    deserialize_spec(path, value)
+}
+
+fn deserialize_spec(path: &Path, value: Value) -> Result<ComposeSpec> {
     // Deserialize through a path tracker so a type mismatch names the exact
     // field (e.g. `services.app.x-slurm.nodes`), not just the file.
     serde_path_to_error::deserialize(value).map_err(|err| {

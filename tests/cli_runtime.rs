@@ -15,12 +15,23 @@ use hpc_compose::job::{
     SweepTrialMetadata, artifact_manifest_path_for_record, artifact_payload_dir_for_record,
     build_submission_record, build_submission_record_with_backend_and_options,
     build_submission_record_with_options, latest_record_path_for, load_submission_record,
-    state_path_for_record, sweep_manifest_path_for, write_submission_record, write_sweep_manifest,
+    remove_submission_record, state_path_for_record, sweep_manifest_path_for,
+    write_submission_record, write_sweep_manifest,
 };
 use hpc_compose::render::log_file_name_for_service;
 use hpc_compose::rendezvous::{RendezvousRegisterRequest, build_record, register};
 use serde_json::Value;
 use support::*;
+
+fn replace_submission_record_for_test(
+    mut record: SubmissionRecord,
+    update: impl FnOnce(&mut SubmissionRecord),
+) -> SubmissionRecord {
+    remove_submission_record(&record).expect("remove original test record");
+    update(&mut record);
+    write_submission_record(&record).expect("write replacement test record");
+    record
+}
 
 fn write_failing_tool(tmpdir: &Path, name: &str, log_path: &Path) -> PathBuf {
     let path = tmpdir.join(name);
@@ -759,9 +770,8 @@ services:
     );
     assert_success(&submit);
 
-    let mut record = load_submission_record(&compose, Some("12345")).expect("record");
-    record.submitted_at = 1;
-    write_submission_record(&record).expect("rewrite old record");
+    let record = load_submission_record(&compose, Some("12345")).expect("record");
+    replace_submission_record_for_test(record, |record| record.submitted_at = 1);
 
     let metrics_dir = tmpdir.path().join(".hpc-compose/12345/metrics");
     fs::create_dir_all(&metrics_dir).expect("metrics dir");
@@ -2550,7 +2560,10 @@ fn watch_command_falls_back_to_line_mode_on_non_tty() {
     assert!(stdout.contains("scheduler state: COMPLETED (sacct)"));
 }
 
-fn write_replay_fixture(tmpdir: &tempfile::TempDir) -> (std::path::PathBuf, SubmissionRecord) {
+fn write_replay_fixture_with_sidecar(
+    tmpdir: &tempfile::TempDir,
+    include_sidecar: bool,
+) -> (std::path::PathBuf, SubmissionRecord) {
     let cache_root = safe_cache_dir();
     let cache_dir = cache_root.path().to_path_buf();
     let compose = write_prepare_compose(tmpdir.path(), &cache_dir);
@@ -2564,10 +2577,18 @@ fn write_replay_fixture(tmpdir: &tempfile::TempDir) -> (std::path::PathBuf, Subm
     )
     .expect("record");
     record.submitted_at = 100;
-    write_submission_record(&record).expect("write record");
     let job_root = tmpdir.path().join(".hpc-compose/12345");
+    if include_sidecar {
+        record
+            .service_logs
+            .insert("sidecar".into(), job_root.join("logs/sidecar.log"));
+    }
+    write_submission_record(&record).expect("write record");
     fs::create_dir_all(job_root.join("logs")).expect("logs");
     fs::write(job_root.join("logs/app.log"), "booting\nboom\n").expect("log");
+    if include_sidecar {
+        fs::write(job_root.join("logs/sidecar.log"), "sidecar boot\n").expect("sidecar log");
+    }
     fs::write(
         job_root.join("state.json"),
         r#"{"services":[{"service_name":"app","started_at":101,"finished_at":120,"last_exit_code":7,"step_name":"hpc-compose:app"}]}"#,
@@ -2591,6 +2612,10 @@ fn write_replay_fixture(tmpdir: &tempfile::TempDir) -> (std::path::PathBuf, Subm
     )
     .expect("slurm metrics");
     (compose, record)
+}
+
+fn write_replay_fixture(tmpdir: &tempfile::TempDir) -> (std::path::PathBuf, SubmissionRecord) {
+    write_replay_fixture_with_sidecar(tmpdir, false)
 }
 
 #[test]
@@ -2663,7 +2688,7 @@ fn replay_explicit_tui_mode_fails_when_ui_cannot_start() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let (compose, _record) = write_replay_fixture(&tmpdir);
 
-    let replay = run_cli(
+    let replay = run_cli_with_env(
         tmpdir.path(),
         &[
             "replay",
@@ -2672,6 +2697,7 @@ fn replay_explicit_tui_mode_fails_when_ui_cannot_start() {
             "--watch-mode",
             "tui",
         ],
+        &[("HPC_COMPOSE_DISABLE_WATCH_UI", "1")],
     );
     assert_failure(&replay);
     assert!(stdout_text(&replay).trim().is_empty());
@@ -2894,12 +2920,8 @@ fn checkpoints_command_degrades_gracefully_without_attempts() {
 #[test]
 fn replay_service_filter_excludes_other_service_events_and_frames() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let (compose, mut record) = write_replay_fixture(&tmpdir);
+    let (compose, _record) = write_replay_fixture_with_sidecar(&tmpdir, true);
     let job_root = tmpdir.path().join(".hpc-compose/12345");
-    let sidecar_log = job_root.join("logs/sidecar.log");
-    fs::write(&sidecar_log, "sidecar boot\n").expect("sidecar log");
-    record.service_logs.insert("sidecar".into(), sidecar_log);
-    write_submission_record(&record).expect("rewrite record");
     fs::write(
         job_root.join("state.json"),
         r#"{"services":[{"service_name":"app","started_at":101,"finished_at":120,"last_exit_code":7,"step_name":"hpc-compose:app"},{"service_name":"sidecar","started_at":102,"finished_at":130,"last_exit_code":0,"step_name":"hpc-compose:sidecar"}]}"#,
@@ -3042,7 +3064,10 @@ fn submit_watch_falls_back_when_ui_initialization_fails() {
             "--sacct-bin",
             sacct.to_str().expect("path"),
         ],
-        &[("HPC_COMPOSE_FORCE_WATCH_UI", "1")],
+        &[
+            ("HPC_COMPOSE_FORCE_WATCH_UI", "1"),
+            ("HPC_COMPOSE_DISABLE_WATCH_UI", "1"),
+        ],
     );
     assert_success(&submit);
     let stdout = stdout_text(&submit);
@@ -7947,6 +7972,87 @@ services:
     assert!(!project.join("results").exists());
 }
 
+#[test]
+fn experiment_show_uses_submit_time_config_after_compose_changes() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let project = tmpdir.path().to_path_buf();
+    let compose = project.join("experiment-history.yaml");
+    let submitted_yaml = format!(
+        r#"name: submitted-name
+x-slurm:
+  cache_dir: {}
+services:
+  submitted-service:
+    image: docker://python:3.12
+    command: ["true"]
+    readiness:
+      type: tcp
+      port: 8123
+"#,
+        cache_root.path().display()
+    );
+    fs::write(&compose, &submitted_yaml).expect("submitted compose");
+    let plan = runtime_plan(&compose);
+    let script = project.join("experiment-history.sbatch");
+    fs::write(&script, "#!/bin/bash\n").expect("script");
+    let record = build_submission_record_with_backend_and_options(
+        &compose,
+        &project,
+        &script,
+        &plan,
+        "45454",
+        SubmissionBackend::Slurm,
+        &SubmissionRecordBuildOptions {
+            config_snapshot_yaml: Some(submitted_yaml),
+            ..SubmissionRecordBuildOptions::default()
+        },
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+
+    fs::write(
+        &compose,
+        format!(
+            r#"name: changed-name
+x-slurm:
+  cache_dir: {}
+services:
+  replacement-service:
+    image: docker://alpine:3.20
+    command: ["true"]
+"#,
+            cache_root.path().display()
+        ),
+    )
+    .expect("changed compose");
+
+    let out = run_cli(
+        &project,
+        &[
+            "experiment",
+            "show",
+            "45454",
+            "-f",
+            compose.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&out);
+    let value: Value = serde_json::from_str(&stdout_text(&out)).expect("experiment json");
+    assert_eq!(value["name"], "submitted-name");
+    assert_eq!(
+        value["services"]
+            .as_array()
+            .expect("services")
+            .iter()
+            .map(|service| service["name"].as_str().expect("service name"))
+            .collect::<Vec<_>>(),
+        vec!["submitted-service"]
+    );
+}
+
 /// Writes one tracked main-kind record for `job_id` under the compose file's
 /// metadata root, pinning `submitted_at` so "latest" ordering is deterministic.
 fn write_tag_note_record(
@@ -12140,9 +12246,8 @@ fn clean_command_removes_old_job_directories() {
         ],
     );
     assert_success(&submit);
-    let mut record = load_submission_record(&compose, Some("12345")).expect("record");
-    record.submitted_at = 1;
-    write_submission_record(&record).expect("rewrite record");
+    let record = load_submission_record(&compose, Some("12345")).expect("record");
+    replace_submission_record_for_test(record, |record| record.submitted_at = 1);
     let runtime_dir = tmpdir.path().join(".hpc-compose/12345");
     fs::create_dir_all(runtime_dir.join("logs")).expect("job runtime dir");
     fs::write(runtime_dir.join("logs/app.log"), "hello\n").expect("job log");
@@ -12381,9 +12486,8 @@ fn clean_dry_run_does_not_remove_state_and_reports_json_contract() {
         ],
     );
     assert_success(&submit);
-    let mut record = load_submission_record(&compose, Some("12345")).expect("record");
-    record.submitted_at = 1;
-    write_submission_record(&record).expect("rewrite record");
+    let record = load_submission_record(&compose, Some("12345")).expect("record");
+    replace_submission_record_for_test(record, |record| record.submitted_at = 1);
 
     let runtime_dir = tmpdir.path().join(".hpc-compose/12345");
     fs::create_dir_all(runtime_dir.join("logs")).expect("runtime dir");
@@ -12558,9 +12662,8 @@ fn clean_uses_recorded_submit_dir_for_runtime_cleanup() {
         ],
     );
     assert_success(&submit);
-    let mut record = load_submission_record(&compose, Some("12345")).expect("record");
-    record.submitted_at = 1;
-    write_submission_record(&record).expect("rewrite record");
+    let record = load_submission_record(&compose, Some("12345")).expect("record");
+    replace_submission_record_for_test(record, |record| record.submitted_at = 1);
 
     let submit_runtime_dir = submit_root.join(".hpc-compose/12345");
     fs::create_dir_all(submit_runtime_dir.join("logs")).expect("runtime dir");
@@ -12717,8 +12820,15 @@ fn clean_reports_missing_latest_pointer_separately_from_effective_latest() {
     new_record.submitted_at = now.saturating_sub(1);
     write_submission_record(&new_record).expect("write new");
 
-    let mut missing_pointer = old_record.clone();
-    missing_pointer.job_id = "99999".into();
+    let mut missing_pointer = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("submit-missing.sbatch"),
+        &plan,
+        "99999",
+    )
+    .expect("missing pointer record");
+    missing_pointer.submitted_at = old_record.submitted_at;
     fs::write(
         latest_record_path_for(&compose),
         serde_json::to_vec_pretty(&missing_pointer).expect("missing latest"),

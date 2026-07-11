@@ -421,6 +421,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
             enroot_bin,
             sbatch_bin,
+            scancel_bin,
             srun_bin,
             scontrol_bin,
             apptainer_bin,
@@ -432,6 +433,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 &[
                     ("--enroot-bin", &enroot_bin),
                     ("--sbatch-bin", &sbatch_bin),
+                    ("--scancel-bin", &scancel_bin),
                     ("--srun-bin", &srun_bin),
                     ("--scontrol-bin", &scontrol_bin),
                     ("--apptainer-bin", &apptainer_bin),

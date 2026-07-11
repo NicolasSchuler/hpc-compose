@@ -71,4 +71,5 @@
 - [Roadmap and Non-Goals](roadmap.md)
 - [Living Product Backlog](backlog.md)
 - [Architecture for Contributors](architecture.md)
+- [Run Evidence Architecture](run-evidence.md)
 - [Brand Assets](brand-assets.md)

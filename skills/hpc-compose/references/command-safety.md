@@ -66,7 +66,7 @@ Apply every matching row in policy order. An unchanged tier does not remove an i
 | `notebook` | `--local` | `explicit-runtime-or-external-mutation` | removes `scheduler-read`, `scheduler-submit`, `scheduler-cancel` | Runs the interactive service through the local supervisor instead of Slurm. |
 | `notebook` | `--script-out` | `scoped-local-mutation` | adds `local-write` | Writes the rendered script to the requested path. |
 | `plan` | `--show-script` | unchanged | adds `sensitive-output` | Prints the generated script, which can contain commands, paths, and expanded values. Prefer explain; do not ingest unredacted script output. |
-| `preflight` | `--fs-probes` | `explicit-quota` | adds `local-write`, `executes-user-code`, `scheduler-submit`, `polls` | Submits a tiny Slurm job to probe shared filesystem behavior. |
+| `preflight` | `--fs-probes` | `explicit-quota` | adds `local-write`, `executes-user-code`, `scheduler-submit`, `scheduler-cancel`, `polls` | Submits a tiny Slurm job to probe shared filesystem behavior. |
 | `ps` | `--remote` | unchanged | adds `network-or-ssh` | Delegates the read over SSH. |
 | `pull` | `--remote` | unchanged | adds `network-or-ssh` | Delegates command resolution over SSH. |
 | `reach` | `--open` | `explicit-runtime-or-external-mutation` | adds `network-or-ssh`, `polls` | Opens the SSH tunnel in the foreground. |

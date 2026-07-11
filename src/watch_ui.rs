@@ -13,7 +13,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use crossterm::cursor::MoveTo;
 #[cfg(not(test))]
 use crossterm::event::EnableMouseCapture;
@@ -37,6 +37,7 @@ const DEFAULT_WIDTH: usize = 120;
 const DEFAULT_HEIGHT: usize = 30;
 const MIN_TABLE_WIDTH: usize = 58;
 const FORCE_WATCH_UI_ENV: &str = "HPC_COMPOSE_FORCE_WATCH_UI";
+const DISABLE_WATCH_UI_ENV: &str = "HPC_COMPOSE_DISABLE_WATCH_UI";
 const METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DATA_REFRESH_ENV: &str = "HPC_COMPOSE_WATCH_REFRESH_MS";
 const METRICS_REFRESH_ENV: &str = "HPC_COMPOSE_WATCH_METRICS_REFRESH_MS";
@@ -541,9 +542,14 @@ impl SelectedLogBuffer {
 pub(crate) fn can_use_watch_ui() -> bool {
     watch_ui_available(
         force_watch_ui(),
+        disable_watch_ui(),
         io::stdin().is_terminal(),
         io::stdout().is_terminal(),
     )
+}
+
+pub(crate) fn watch_ui_disabled() -> bool {
+    disable_watch_ui()
 }
 
 pub(crate) fn run_watch_ui(
@@ -554,6 +560,9 @@ pub(crate) fn run_watch_ui(
     hold_on_exit: HoldOnExit,
     prefs: WatchPrefs,
 ) -> Result<WatchOutcome> {
+    if disable_watch_ui() {
+        bail!("watch UI disabled by {DISABLE_WATCH_UI_ENV}");
+    }
     let guard = TerminalGuard::enter(prefs.mouse)?;
     let mut events = TerminalEventSource;
     let result = run_watch_ui_loop(
@@ -580,6 +589,9 @@ pub(crate) fn run_replay_ui(
     speed: f64,
     prefs: WatchPrefs,
 ) -> Result<()> {
+    if disable_watch_ui() {
+        bail!("watch UI disabled by {DISABLE_WATCH_UI_ENV}");
+    }
     let guard = TerminalGuard::enter(prefs.mouse)?;
     let mut events = TerminalEventSource;
     let result = run_replay_ui_loop(report, initial_service, lines, speed, &mut events, prefs);
@@ -1475,12 +1487,21 @@ fn force_watch_ui() -> bool {
     force_watch_ui_from_value(std::env::var_os(FORCE_WATCH_UI_ENV).as_deref())
 }
 
+fn disable_watch_ui() -> bool {
+    force_watch_ui_from_value(std::env::var_os(DISABLE_WATCH_UI_ENV).as_deref())
+}
+
 fn force_watch_ui_from_value(value: Option<&OsStr>) -> bool {
     value.is_some_and(|value| value != OsStr::new("0"))
 }
 
-fn watch_ui_available(force: bool, stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
-    force || (stdin_is_terminal && stdout_is_terminal)
+fn watch_ui_available(
+    force: bool,
+    disabled: bool,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    !disabled && (force || (stdin_is_terminal && stdout_is_terminal))
 }
 
 pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: WatchKey) -> usize {

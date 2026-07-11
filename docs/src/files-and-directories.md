@@ -6,7 +6,7 @@
 
 | Root | Default location | Set with | Scope | Holds |
 | --- | --- | --- | --- | --- |
-| Metadata directory | `<compose-file-dir>/.hpc-compose/` | (always next to the compose file) | Per compose file | Tracked job records, latest pointers, sweep manifests |
+| Metadata directory | `<compose-file-dir>/.hpc-compose/` | (always next to the compose file) | Per compose file | Tracked job records, additive run evidence, latest pointers, sweep manifests |
 | Per-job runtime root | `<submit-dir>/.hpc-compose/<job-id>/` | `x-slurm.runtime_root` | Per job | Logs, metrics, artifacts, allocation files, state |
 | Cache directory | `$HOME/.cache/hpc-compose/` | `x-slurm.cache_dir` | Shared across jobs | Content-addressed images, enroot caches, rendezvous records |
 
@@ -14,7 +14,7 @@ The metadata directory and the *default* per-job runtime root share the same `.h
 
 ## Metadata directory
 
-The metadata directory sits next to the compose file (`metadata_root_for` joins `.hpc-compose` onto the compose file's parent). It holds the durable record of every submission plus the latest-pointers that let follow-up commands reconnect without resubmitting.
+The metadata directory sits next to the compose file (`metadata_root_for` joins `.hpc-compose` onto the compose file's parent). It holds the compatible record of every submission, additive run evidence for new records, and the latest-pointers that let follow-up commands reconnect without resubmitting.
 
 ```text
 <compose-file-dir>/.hpc-compose/
@@ -22,8 +22,17 @@ The metadata directory sits next to the compose file (`metadata_root_for` joins 
 ├── latest-run.json          # most recent `run` submission record
 ├── latest-canary.json       # most recent `germinate` canary record
 ├── latest-notebook.json     # most recent `notebook` server record
+├── latest*.json.lock        # persistent per-kind pointer coordination locks
 ├── jobs/
-│   └── <job-id>.json        # one tracked SubmissionRecord per submitted job
+│   ├── <job-id>.json        # one tracked SubmissionRecord per submitted job
+│   └── <job-id>.json.lock   # persistent per-record coordination lock
+├── evidence/
+│   └── <job-id>/
+│       ├── manifest.json     # immutable run identity and submit-time evidence
+│       ├── inputs.lock.json  # immutable input identities and digest strategies
+│       ├── events.jsonl      # logically append-only typed events
+│       ├── view.json         # rebuildable projection of the event stream
+│       └── events.lock       # persistent event-stream coordination lock
 └── sweeps/
     ├── latest.json          # most recent sweep manifest pointer
     └── <sweep-id>/
@@ -36,7 +45,10 @@ The metadata directory sits next to the compose file (`metadata_root_for` joins 
 | `latest-run.json` | file | `SubmissionRecord` for the most recent `run` submission. |
 | `latest-canary.json` | file | `SubmissionRecord` for the most recent `germinate` canary submission. |
 | `latest-notebook.json` | file | `SubmissionRecord` for the most recent tracked `notebook` submission. |
+| `latest*.json.lock` | file | Persistent per-kind locks that serialize pointer publication, synchronization, repair, and removal. |
 | `jobs/<job-id>.json` | file | The authoritative `SubmissionRecord` for one job, keyed by Slurm job id. |
+| `jobs/<job-id>.json.lock` | file | Persistent lock that serializes creation, mutation, validation, and destructive use of one canonical record. |
+| `evidence/<job-id>/` | directory | Additive run manifest, input lock, typed events, rebuildable view, and persistent event lock for a new tracked run. See [Run Evidence Architecture](run-evidence.md). |
 | `sweeps/latest.json` | file | Pointer to the most recent sweep manifest. |
 | `sweeps/<sweep-id>/sweep.json` | file | Manifest describing one sweep and its trials. |
 
@@ -113,10 +125,13 @@ The cache directory defaults to `$HOME/.cache/hpc-compose/` and is set with `x-s
 ├── base/
 │   ├── <hash>-<label>.sqsh        # imported base image
 │   ├── <hash>-<label>.sqsh.json   # manifest sidecar
-│   └── <hash>-<label>.sqsh.json.lock  # advisory-lock sidecar
+│   ├── <hash>-<label>.sqsh.json.lock  # manifest advisory-lock sidecar
+│   └── <hash>-<label>.sqsh.build.lock # strict build/prune coordination lock
 ├── prepared/
 │   ├── <hash>-<name>.sqsh         # prepared runtime image
-│   └── <hash>-<name>.sqsh.json    # manifest sidecar
+│   ├── <hash>-<name>.sqsh.json    # manifest sidecar
+│   ├── <hash>-<name>.sqsh.json.lock  # manifest advisory-lock sidecar
+│   └── <hash>-<name>.sqsh.build.lock # strict build/prune coordination lock
 ├── enroot/                        # login-node shared enroot store
 │   ├── cache/
 │   ├── data/
@@ -137,14 +152,17 @@ The cache directory defaults to `$HOME/.cache/hpc-compose/` and is set with `x-s
 | `base/<hash>-<label>.sqsh` | file | A base image imported from a remote reference, named by `<short-hash>-<label>`. |
 | `base/<hash>-<label>.sqsh.json` | file | Manifest tracking the cache entry. |
 | `base/<hash>-<label>.sqsh.json.lock` | file | Advisory-lock sidecar that serializes concurrent manifest read-modify-write. |
+| `base/<hash>-<label>.sqsh.build.lock` | file | Strict persistent lock shared by image publication and destructive pruning. |
 | `prepared/<hash>-<name>.sqsh` | file | A prepared runtime image derived from a base image plus prepare steps, named by `<short-hash>-<service-name>`. |
 | `prepared/<hash>-<name>.sqsh.json` | file | Manifest tracking the prepared entry. |
+| `prepared/<hash>-<name>.sqsh.json.lock` | file | Advisory-lock sidecar that serializes concurrent prepared-manifest updates. |
+| `prepared/<hash>-<name>.sqsh.build.lock` | file | Strict persistent lock shared by prepared-image publication and destructive pruning. |
 | `enroot/cache/`, `enroot/data/`, `enroot/tmp/` | dir | The shared login-node enroot store used during host-side prepare. `enroot/tmp` is the default extraction scratch; redirect it to node-local storage with `x-slurm.enroot_temp_dir` (or `cache.enroot_temp_dir` / `HPC_COMPOSE_ENROOT_TEMP_DIR`) to avoid `Stale file handle` on shared filesystems. |
 | `runtime/<job-id>/{cache,data,tmp}/` | dir | The per-job compute-node enroot runtime cache; the renderer exports `ENROOT_CACHE_PATH`/`ENROOT_DATA_PATH`/`ENROOT_TEMP_PATH` at these paths (`enroot_runtime_job_dir`). Namespaced by job id so removing it never touches the shared cache root. |
 | `rendezvous/<name>/latest.json` | file | The current provider record for one rendezvous name (atomic latest pointer). |
 | `rendezvous/<name>/<token>.json` | file | Historical per-registration records, retained until TTL expiry or owner cleanup. |
 
-Manifest `.lock` sidecars carry no data and only serialize writers; the manifest JSON next to each artifact is the persisted record. See [Connect Jobs Across Allocations](cross-job-rendezvous.md) for how rendezvous records are produced and resolved.
+Lock sidecars carry no data and remain persistent so every process coordinates through the same inode. Builders and pruners take the strict build lock before the manifest lock; the manifest JSON next to each artifact is the persisted commit record. See [Connect Jobs Across Allocations](cross-job-rendezvous.md) for how rendezvous records are produced and resolved.
 
 ## Repo staging vs cluster workspace provisioning
 
@@ -162,7 +180,7 @@ Staging copies your **repo**. It does **not** allocate cluster workspaces (for e
 
 Preflight remediation reflects this boundary. For a relative or in-repo missing path it tells you to create the directory; for an absolute missing path it notes that the path may be a cluster workspace or site storage location and should be provisioned with your site's allocation command (for example `ws_allocate`) or an `x-slurm.setup` step, because `hpc-compose` stages your repo but does not allocate workspaces or create site storage directories.
 
-For storage that must be visible from both the login node and compute nodes, `hpc-compose preflight -f compose.yaml --fs-probes` submits a tiny Slurm job with `sbatch --wait`. The probe checks the cache directory, explicit runtime root, resume directory, and shared scratch path for login-to-compute visibility, compute-to-login visibility, atomic rename behavior, and compute-node filesystem headroom. The default `preflight` command stays a cheap login-node check; use `--fs-probes` only when you are on a Slurm login node and want active evidence about a shared filesystem.
+For storage that must be visible from both the login node and compute nodes, `hpc-compose preflight -f compose.yaml --fs-probes` submits a tiny Slurm job with `sbatch --parsable`, tracks the returned job ID, and polls an atomic result file. The probe checks the cache directory, explicit runtime root, resume directory, and shared scratch path for login-to-compute visibility, compute-to-login visibility, atomic rename behavior, and compute-node filesystem headroom. The default `preflight` command stays a cheap login-node check; use `--fs-probes` only when you are on a Slurm login node and want active evidence about a shared filesystem. If the client deadline expires, hpc-compose terminates a stalled local submit process, cancels the accepted job through the resolved `scancel` binary, and retains the probe directory for diagnosis.
 
 ### Bootstrapping required directories
 
@@ -208,10 +226,12 @@ A repo-root `.hpcignore` adds extra excludes on top of `.gitignore` when the sou
 | `HPC_COMPOSE_REMOTE_INSTALL_URL` | Read from environment | Points remote auto-install at a custom installer or mirror URL. |
 | `HPC_COMPOSE_REMOTE_SSH_OPTS` | Read from environment | Whitespace-split extra SSH flags for `up --remote`, such as a one-off port or identity file. Prefer `~/.ssh/config` for persistent settings. |
 | `HPC_COMPOSE_SCHEDULER_COMMAND_TIMEOUT_MS` | Read from environment | Timeout for Slurm scheduler helper commands such as queue/status probes. |
+| `HPC_COMPOSE_FS_PROBE_TIMEOUT_MS` | Read from environment | Client-side deadline for the opt-in `preflight --fs-probes` Slurm allocation (default 120000 ms; valid range 1-86400000 ms). On timeout a published job ID is canceled with `scancel`, a stalled local submit process group is terminated, and the probe evidence directory is retained. |
 | `HPC_COMPOSE_WATCH_REFRESH_MS` | Read from environment | Scheduler/log refresh cadence for the watch UI (default 1000 ms, clamped). |
 | `HPC_COMPOSE_WATCH_METRICS_REFRESH_MS` | Read from environment | Metrics refresh cadence for the watch UI (default 5000 ms, clamped). |
 | `HPC_COMPOSE_WATCH_MOUSE` | Read from environment | Enables watch UI mouse capture when set to a non-zero value. |
 | `HPC_COMPOSE_FORCE_WATCH_UI` | Read from environment | Forces the alternate-screen watch UI even when terminal detection would normally fall back to line mode; intended for debugging terminal detection. |
+| `HPC_COMPOSE_DISABLE_WATCH_UI` | Read from environment | Disables alternate-screen watch/replay UI initialization even on a terminal. This takes precedence over `HPC_COMPOSE_FORCE_WATCH_UI` and makes line fallback deterministic in automation. |
 | `HPC_COMPOSE_BACKEND_OVERRIDE` | Read from environment | Selects the runtime backend used by the batch script (defaults to `slurm`). |
 | `HPC_COMPOSE_DEV_CONTROL_DIR` | Read from environment | When set, enables the dev control directory used for live restart requests during local smoke-tests. |
 | `HPC_COMPOSE_DEBUG_STAGING` | Read from environment | When truthy, lists every path excluded from the source snapshot by `.hpcignore` during staging (a staged-file manifest aid for debugging ignore rules). |
@@ -227,8 +247,8 @@ Different commands reap different subsets of these roots. The table is precise a
 
 | Command / mechanism | Deletes | Preserves |
 | --- | --- | --- |
-| `down` (a.k.a. `cancel`) | The job's tracked record `jobs/<job-id>.json`, the per-job runtime root `<runtime-root>/<job-id>/`, the hpc-compose-managed default batch log when `x-slurm.output` was not set, the per-job enroot dir `<cache_dir>/runtime/<job-id>/`, and this job's owned rendezvous records. Repairs the latest pointers afterward. | Other jobs' records and runtime roots, user-pinned `x-slurm.output` files, the shared cache root, `base/`/`prepared/` artifacts, and other jobs' rendezvous records. |
-| `clean` | The same per-job state as `down` for each reaped record (tracked record, per-job runtime root, managed default batch log, per-job enroot dir, owned rendezvous records), selected by `--age DAYS` or `--all` (all except the latest). | The retained records and their runtime roots, user-pinned `x-slurm.output` files, the shared cache root, and content-addressed artifacts. |
+| `down` (a.k.a. `cancel`) | The job's tracked record `jobs/<job-id>.json`, additive `evidence/<job-id>/` directory, per-job runtime root `<runtime-root>/<job-id>/`, hpc-compose-managed default batch log when `x-slurm.output` was not set, per-job enroot dir `<cache_dir>/runtime/<job-id>/`, and this job's owned rendezvous records. Repairs the latest pointers afterward. | Other jobs' records, evidence, and runtime roots; user-pinned `x-slurm.output` files; the shared cache root; `base/`/`prepared/` artifacts; and other jobs' rendezvous records. |
+| `clean` | The same per-job state as `down` for each reaped record (tracked record, additive run evidence, per-job runtime root, managed default batch log, per-job enroot dir, owned rendezvous records), selected by `--age DAYS` or `--all` (all except the latest). | The retained records, evidence, and runtime roots; user-pinned `x-slurm.output` files; the shared cache root; and content-addressed artifacts. |
 | `clean --deep` | Everything ordinary `clean` selects, plus expired rendezvous records and unreferenced per-job enroot runtime dirs under `<cache_dir>/runtime/<job-id>`. Use `--dry-run` to inspect the unified report before deletion. | The retained records and their runtime roots, user-pinned `x-slurm.output` files, the shared cache root, content-addressed artifacts, and per-job enroot runtime dirs still referenced by tracked records. |
 | Batch teardown trap (`x-slurm.cleanup.runtime_cache`) | Only the per-job enroot runtime cache (`ENROOT_CACHE_PATH`/`DATA_PATH`/`TEMP_PATH` under `runtime/<job-id>/`), and only when the policy opts in. Default is `never`; `on_success` runs only on exit code 0; `always` runs on every clean exit. | Everything else. Because cancelled or crashed jobs never run the trap, host-side `down`/`clean` are the reliable reapers of `runtime/<job-id>`. |
 | `cache prune` (`--age DAYS` or `--all-unused`) | Content-addressed artifacts (`base/` and `prepared/` entries plus their manifest/lock sidecars) that are expired or no longer referenced, and now-empty parent directories left behind. | The cache root itself (never removed), still-referenced artifacts, and non-empty parent directories. |

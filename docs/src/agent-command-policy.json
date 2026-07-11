@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "policy_version": "1.0.0",
-  "cli_version": "0.2.1",
+  "cli_version": "0.2.2",
   "title": "hpc-compose agent command policy",
   "description": "Flag-aware effects and authorization requirements for every public hpc-compose command path.",
   "effect_tags": {
@@ -783,6 +783,7 @@
             "local-write",
             "executes-user-code",
             "scheduler-submit",
+            "scheduler-cancel",
             "polls"
           ],
           "description": "Submits a tiny Slurm job to probe shared filesystem behavior."

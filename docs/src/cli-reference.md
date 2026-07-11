@@ -160,7 +160,7 @@ below omits `Content-Length` headers and most `initialize` fields for brevity:
 | `config` | Show the fully interpolated effective config | Use `--format json` when you need stable machine-readable snapshots or resume diffs. `config --variables` reports only interpolation variables referenced by the compose file and redacts sensitive-looking names unless `--show-values` is passed. |
 | `schema` | Print the checked-in JSON Schema | Use it for editor integration and authoring tools. Defaults to the compose schema; pass `--kind settings` for the `settings.toml` authoring schema. The compose schema is also published with the docs site for YAML Language Server and SchemaStore consumption. JSON Schema remains useful for shape and key completion; `hpc-compose lsp` provides real semantic diagnostics from Rust validation, planning, lint rules, and cluster-profile warnings. |
 | `inspect` | View the normalized runtime plan | `--verbose` shows resolved argv and final mount mappings with secret values redacted. Add `--dependencies` for a service DAG in text, DOT, or JSON form. |
-| `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. Add `--fs-probes` on a Slurm login node to submit a tiny active shared-filesystem probe. |
+| `preflight` | Check host and cluster prerequisites | Use `--strict` when warnings should block a later run. Add `--fs-probes` on a Slurm login node to submit a tiny active shared-filesystem probe; accepted probes are tracked by job ID and canceled through `scancel` if the client deadline expires. |
 | `doctor cluster-report` | Generate a best-effort cluster capability profile | Writes `.hpc-compose/cluster.toml` by default; use `--out -` to print the TOML profile. |
 | `doctor readiness` | Explain or run one service readiness probe from the current host | Does not start services or submit jobs. Use `--run` only against an already reachable endpoint, tracked log, tunnel, or login-node-visible service. |
 | `doctor mpi-smoke` | Render or run a small MPI probe for one service | Reports requested/advertised MPI types, MPI profile metadata, discovered MPI installs, host MPI binds/env, and rendered `srun`; add `--submit` to consume a Slurm allocation. |
@@ -327,7 +327,7 @@ Commands that interact with Slurm or container runtimes accept `--<tool>-bin <PA
 | `--salloc-bin` | `salloc` | `alloc` |
 | `--scontrol-bin` | `scontrol` | `alloc`, `test`, `sweep submit`, `preflight`, `debug`, `doctor` |
 | `--sinfo-bin` | `sinfo` | `when`, `weather` |
-| `--scancel-bin` | `scancel` | `test`, `cancel`, `down`, `sweep observe`, `sweep stop` |
+| `--scancel-bin` | `scancel` | `test`, `cancel`, `down`, `preflight`, `sweep observe`, `sweep stop` |
 | `--sstat-bin` | `sstat` | `germinate`, `stats`, `inspect`, `score`, `experiment show`, `sweep results` |
 | `--sshare-bin` | `sshare` | `weather` |
 | `--sprio-bin` | `sprio` | `weather` |

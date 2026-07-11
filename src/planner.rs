@@ -450,6 +450,7 @@ fn assign_service_placements(
         service.placement = placement;
     }
 
+    validate_rank_count_ranges(services)?;
     validate_service_resource_fit(slurm, services)?;
     validate_service_placement_readiness(allocation_nodes, services)?;
     validate_service_placement_overlaps(allocation_nodes, services)?;
@@ -759,7 +760,7 @@ fn validate_service_resource_fit(
 
     for service in services.values() {
         if let Some(capacity) = allocation_tasks {
-            let requested = resolved_rank_count(&service.placement);
+            let requested = resolved_rank_count(&service.placement)?;
             if requested > capacity {
                 bail!(
                     "service '{}' resolves to {} task(s), but the allocation requests only {} task(s)",
@@ -805,6 +806,15 @@ fn validate_service_resource_fit(
     Ok(())
 }
 
+fn validate_rank_count_ranges(services: &BTreeMap<String, PlannedService>) -> Result<()> {
+    for service in services.values() {
+        resolved_rank_count(&service.placement).with_context(|| {
+            format!("service '{}' has invalid Slurm task geometry", service.name)
+        })?;
+    }
+    Ok(())
+}
+
 fn total_gpu_count(gpus: Option<u32>, gres: Option<&str>, nodes: u32) -> Option<u32> {
     gpus.or_else(|| {
         gres.and_then(gres_gpu_count)
@@ -836,7 +846,7 @@ fn validate_mpi_expected_ranks(services: &BTreeMap<String, PlannedService>) -> R
         let Some(expected) = mpi.expected_ranks else {
             continue;
         };
-        let resolved = resolved_rank_count(&service.placement);
+        let resolved = resolved_rank_count(&service.placement)?;
         if resolved != expected {
             bail!(
                 "service '{}' sets x-slurm.mpi.expected_ranks={}, but resolved Slurm task geometry launches {} rank(s)",
@@ -849,15 +859,20 @@ fn validate_mpi_expected_ranks(services: &BTreeMap<String, PlannedService>) -> R
     Ok(())
 }
 
-fn resolved_rank_count(placement: &ServicePlacement) -> u32 {
-    placement
-        .ntasks
-        .or_else(|| {
-            placement
-                .ntasks_per_node
-                .map(|per_node| per_node * placement.nodes)
-        })
-        .unwrap_or(1)
+fn resolved_rank_count(placement: &ServicePlacement) -> Result<u32> {
+    if let Some(ntasks) = placement.ntasks {
+        return Ok(ntasks);
+    }
+    if let Some(per_node) = placement.ntasks_per_node {
+        let Some(total) = per_node.checked_mul(placement.nodes) else {
+            bail!(
+                "resolved rank count exceeds the supported u32 range: nodes({}) * ntasks_per_node({per_node})",
+                placement.nodes
+            );
+        };
+        return Ok(total);
+    }
+    Ok(1)
 }
 
 fn ensure_service_nodes_match(service: &PlannedService, resolved_nodes: u32) -> Result<()> {

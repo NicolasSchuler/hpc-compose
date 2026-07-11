@@ -624,11 +624,13 @@ fn submit_sweep_trial(
                         apptainer_bin: context.binaries.apptainer.value.clone(),
                         singularity_bin: context.binaries.singularity.value.clone(),
                         sbatch_bin: context.binaries.sbatch.value.clone(),
+                        scancel_bin: context.binaries.scancel.value.clone(),
                         srun_bin: context.binaries.srun.value.clone(),
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: true,
                         skip_prepare,
                         fs_probes: false,
+                        fs_probe_timeout: PreflightOptions::default().fs_probe_timeout,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))

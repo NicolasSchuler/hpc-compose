@@ -100,11 +100,13 @@ pub(crate) fn debug(
                 apptainer_bin: preflight_context.binaries.apptainer.value.clone(),
                 singularity_bin: preflight_context.binaries.singularity.value.clone(),
                 sbatch_bin: preflight_context.binaries.sbatch.value.clone(),
+                scancel_bin: preflight_context.binaries.scancel.value.clone(),
                 srun_bin: preflight_context.binaries.srun.value.clone(),
                 scontrol_bin: preflight_context.binaries.scontrol.value.clone(),
                 require_submit_tools: true,
                 skip_prepare: false,
                 fs_probes: false,
+                fs_probe_timeout: PreflightOptions::default().fs_probe_timeout,
                 cluster_profile,
             },
         );

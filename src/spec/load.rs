@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::interpolate::interpolation_vars;
-use super::parse::{load_raw_spec, load_raw_spec_from_str};
+use super::parse::{load_raw_spec, load_raw_spec_from_str, load_standalone_raw_spec_from_str};
 use super::{ComposeSpec, SecretSpec, SweepConfig, interpolate_optional_string};
 use crate::spec_error::{SpecError, SpecValidationError};
 
@@ -128,6 +128,35 @@ impl ComposeSpec {
         (|| {
             let spec = load_raw_spec_from_str(path, raw)?;
             Self::finish_load_with_interpolation_vars(path, spec, vars)
+        })()
+        .map_err(mark_spec_validation_error)
+    }
+
+    /// Loads and validates a persisted effective-config snapshot without
+    /// interpolation or filesystem-backed `extends`/`env_file` resolution.
+    ///
+    /// Effective snapshots have already resolved those dynamic inputs at submit
+    /// time. Reapplying them would make historical reads depend on today's
+    /// environment and checkout rather than the persisted document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the document cannot be parsed, contains unresolved
+    /// external config references, or fails semantic validation.
+    pub(crate) fn load_effective_snapshot_from_str(path: &Path, raw: &str) -> Result<Self> {
+        (|| {
+            let mut spec = load_standalone_raw_spec_from_str(path, raw)?;
+            if let Some((service, _)) = spec
+                .services
+                .iter()
+                .find(|(_, service)| service.env_file.is_some())
+            {
+                anyhow::bail!(
+                    "persisted effective config snapshot service '{service}' must not contain env_file"
+                );
+            }
+            spec.validate()?;
+            Ok(spec)
         })()
         .map_err(mark_spec_validation_error)
     }

@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use anyhow::ensure;
 
 use crate::context::repo_root_or_cwd;
 
@@ -278,13 +280,61 @@ pub fn build_submission_record_with_backend_and_options(
 
 /// Writes a submission record to the jobs directory and latest pointer.
 pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
-    let jobs_dir = jobs_dir_for(&record.compose_file);
-    fs::create_dir_all(&jobs_dir).context(format!("failed to create {}", jobs_dir.display()))?;
-    write_json(&jobs_dir.join(format!("{}.json", record.job_id)), record)?;
-    let Some(latest_path) = latest_pointer_path_for_kind(&record.compose_file, record.kind) else {
-        return Ok(());
+    let metadata_root = metadata_root_for(&record.compose_file);
+    let record_path = checked_record_path_for_job_id(&record.compose_file, &record.job_id)?;
+    validate_submission_record_location(record, &record_path, &metadata_root, true)?;
+    ensure_managed_record_directories(&record.compose_file)?;
+    let _record_lock = lock_submission_record(&record_path)?;
+
+    let record_exists = match fs::symlink_metadata(&record_path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+                "canonical submission record {} is not a regular file",
+                record_path.display()
+            );
+            let existing = validate_submission_record_for_metadata_root(
+                read_json(&record_path)?,
+                &record_path,
+                &metadata_root,
+                true,
+            )?;
+            ensure!(
+                submission_records_equal(&existing, record)?,
+                "scheduler job id {} is already tracked by a different canonical submission record; refusing to overwrite it",
+                record.job_id
+            );
+            true
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect {}", record_path.display()));
+        }
     };
-    write_json(&latest_path, record)?;
+    if !record_exists {
+        reject_orphaned_run_evidence(record)?;
+    }
+
+    {
+        let _latest_lock = latest_pointer_path_for_kind(&record.compose_file, record.kind)
+            .as_deref()
+            .map(lock_latest_pointer)
+            .transpose()?;
+        write_json(&record_path, record)?;
+        if let Some(latest_path) = latest_pointer_path_for_kind(&record.compose_file, record.kind) {
+            write_json(&latest_path, record)?;
+        }
+    }
+    if let Err(error) = initialize_record_run_evidence(record) {
+        crate::diagnostics::warn_with_code(
+            "run_evidence_degraded",
+            format!(
+                "tracked job {} was persisted, but its additive run evidence could not be initialized: {error:#}",
+                record.job_id
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -294,6 +344,112 @@ pub const MAX_TAGS_PER_RECORD: usize = 32;
 pub const MAX_TAG_LEN: usize = 64;
 /// Maximum length of one note text, in characters (after trimming).
 pub const MAX_NOTE_LEN: usize = 4096;
+
+const SUBMISSION_RECORD_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const RUN_EVIDENCE_FILE_HASH_LIMIT: u64 = 16 * 1024 * 1024;
+
+fn initialize_record_run_evidence(
+    record: &SubmissionRecord,
+) -> Result<super::evidence::RunEvidenceState> {
+    use super::evidence::{
+        ContentDigest, Evidence, InputDigestStrategy, InputEvidence, InputKind, RunEvidenceSeed,
+    };
+
+    let config = match record.config_snapshot_yaml.as_deref() {
+        Some(snapshot) => Evidence::available(ContentDigest::from_bytes(snapshot.as_bytes())),
+        None => Evidence::missing("submission record has no effective config snapshot")?,
+    };
+    let script = super::evidence::attest_bounded_file(
+        "submitted_script",
+        InputKind::File,
+        &record.script_path,
+        RUN_EVIDENCE_FILE_HASH_LIMIT,
+    )?
+    .content;
+    let provenance = match record.provenance.clone() {
+        Some(provenance) => Evidence::available(provenance),
+        None => Evidence::missing("submission record has no submit-time provenance")?,
+    };
+
+    let mut inputs = Vec::new();
+    if let Some(provenance) = record.provenance.as_ref() {
+        if let Some(source_hash) = provenance.source_content_hash.as_ref() {
+            inputs.push(InputEvidence {
+                name: "source_snapshot".to_string(),
+                kind: InputKind::SourceSnapshot,
+                source: record.submit_dir.display().to_string(),
+                identity: Evidence::available(format!("sha256:{source_hash}")),
+                digest_strategy: InputDigestStrategy::SourceCas,
+                materialized_path: None,
+                content: Evidence::unsupported(
+                    "source CAS identity is preserved without recursively re-hashing the snapshot",
+                )?,
+            });
+        }
+        for (service, image_ref) in &provenance.image_refs {
+            inputs.push(InputEvidence {
+                name: format!("image_{service}"),
+                kind: InputKind::ContainerImage,
+                source: image_ref.clone(),
+                identity: Evidence::available(image_ref.clone()),
+                digest_strategy: InputDigestStrategy::ImageReference,
+                materialized_path: None,
+                content: Evidence::unsupported(
+                    "container reference is preserved without hashing provider-managed bytes",
+                )?,
+            });
+        }
+    }
+    for (index, path) in record.cached_artifacts.iter().enumerate() {
+        inputs.push(super::evidence::attest_bounded_file(
+            format!("cached_artifact_{index:04}"),
+            InputKind::Other,
+            path,
+            RUN_EVIDENCE_FILE_HASH_LIMIT,
+        )?);
+    }
+
+    super::evidence::initialize_run_evidence(
+        &record.compose_file,
+        &RunEvidenceSeed {
+            scheduler_job_id: record.job_id.clone(),
+            submission_record_sha256: submission_record_identity_sha256(record)?,
+            backend: record.backend,
+            kind: record.kind,
+            submitted_at: record.submitted_at,
+            config,
+            script,
+            provenance,
+            inputs,
+        },
+    )
+    .with_context(|| {
+        format!(
+            "failed to initialize run evidence for job {}",
+            record.job_id
+        )
+    })
+}
+
+fn sync_record_run_evidence(record: &SubmissionRecord) -> Result<()> {
+    if super::evidence::load_run_evidence(&record.compose_file, &record.job_id)?.is_none() {
+        initialize_record_run_evidence(record)?;
+    }
+    super::evidence::sync_record_annotations(
+        &record.compose_file,
+        &record.job_id,
+        unix_timestamp_now(),
+        &record.tags,
+        &record.notes,
+    )
+    .with_context(|| {
+        format!(
+            "failed to synchronize run evidence for job {}",
+            record.job_id
+        )
+    })?;
+    Ok(())
+}
 
 /// Returns the per-kind latest pointer file for a compose file, or `None` for
 /// kinds without a pointer (sweep trials).
@@ -322,26 +478,64 @@ pub fn update_submission_record(
     mutate: impl FnOnce(&mut SubmissionRecord) -> Result<()>,
 ) -> Result<SubmissionRecord> {
     let compose_file = absolute_path(spec_path)?;
-    let record_path = jobs_dir_for(&compose_file).join(format!("{job_id}.json"));
-    if !record_path.exists() {
+    let record_path = checked_record_path_for_job_id(&compose_file, job_id)?;
+    if !managed_record_directories_exist(&compose_file)? {
         bail!(
             "no tracked submission metadata exists for job '{}' under {}",
             job_id,
             metadata_root_for(&compose_file).display()
         );
     }
-    let mut record = validate_submission_record(read_json(&record_path)?, &record_path)?;
+    if !path_is_regular_file(&record_path)? {
+        bail!(
+            "no tracked submission metadata exists for job '{}' under {}",
+            job_id,
+            metadata_root_for(&compose_file).display()
+        );
+    }
+    let _record_lock = lock_submission_record(&record_path)?;
+    if !path_is_regular_file(&record_path)? {
+        bail!(
+            "no tracked submission metadata exists for job '{}' under {}",
+            job_id,
+            metadata_root_for(&compose_file).display()
+        );
+    }
+    let metadata_root = metadata_root_for(&compose_file);
+    let mut record = validate_submission_record_for_metadata_root(
+        read_json(&record_path)?,
+        &record_path,
+        &metadata_root,
+        true,
+    )?;
+    let immutable_identity_before = submission_record_identity_sha256(&record)?;
     mutate(&mut record)?;
+    validate_submission_record_location(&record, &record_path, &metadata_root, true)?;
+    ensure!(
+        submission_record_identity_sha256(&record)? == immutable_identity_before,
+        "post-submit mutation changed immutable submission-record identity; only tags and notes may be updated"
+    );
     write_json(&record_path, &record)?;
     // Sync (never repoint) the per-kind latest pointer duplicate: rewrite it
     // only when it currently names this job, so mutating an old job can never
     // repoint "latest" at it, while readers of the pointer file (the no-id
     // default paths) never observe a stale copy.
-    if let Some(latest_path) = latest_pointer_path_for_kind(&compose_file, record.kind)
-        && read_latest_pointer_job_id(&metadata_root_for(&compose_file), record.kind).as_deref()
+    if let Some(latest_path) = latest_pointer_path_for_kind(&compose_file, record.kind) {
+        let _latest_lock = lock_latest_pointer(&latest_path)?;
+        if read_latest_pointer_job_id(&metadata_root_for(&compose_file), record.kind)?.as_deref()
             == Some(job_id)
-    {
-        write_json(&latest_path, &record)?;
+        {
+            write_json(&latest_path, &record)?;
+        }
+    }
+    if let Err(error) = sync_record_run_evidence(&record) {
+        crate::diagnostics::warn_with_code(
+            "run_evidence_degraded",
+            format!(
+                "tracked job {} was updated, but its additive run evidence could not be synchronized: {error:#}",
+                record.job_id
+            ),
+        );
     }
     Ok(record)
 }
@@ -425,19 +619,61 @@ pub fn append_job_note(record: &mut SubmissionRecord, text: &str) -> Result<()> 
 /// (cancelled/crashed jobs never run it): the per-job enroot runtime cache and
 /// this job's owned rendezvous records. Both are job-namespaced / owner-guarded.
 pub fn remove_submission_record(record: &SubmissionRecord) -> Result<()> {
-    let record_path = jobs_dir_for(&record.compose_file).join(format!("{}.json", record.job_id));
-    remove_path_if_present(&record_path)?;
-    remove_path_if_present(&runtime_job_root_for_record(record))?;
+    let record_path = checked_record_path_for_job_id(&record.compose_file, &record.job_id)?;
+    let metadata_root = metadata_root_for(&record.compose_file);
+    validate_submission_record_location(record, &record_path, &metadata_root, true)?;
+    validate_managed_record_directories(&record.compose_file)?;
+    let _record_lock = lock_submission_record(&record_path)?;
+    ensure!(
+        path_is_regular_file(&record_path)?,
+        "canonical submission record {} is missing or is not a regular file",
+        record_path.display()
+    );
+    let canonical = validate_submission_record_for_metadata_root(
+        read_json(&record_path)?,
+        &record_path,
+        &metadata_root,
+        true,
+    )?;
+    ensure!(
+        submission_records_equal(&canonical, record)?,
+        "the supplied submission record does not match the canonical record {}; refusing destructive removal",
+        record_path.display()
+    );
+    validate_owned_removal_parents(&canonical, &record_path)?;
+    let _evidence_lock =
+        super::evidence::lock_run_evidence_for_removal(&canonical.compose_file, &canonical.job_id)?;
+    validate_owned_removal_parents(&canonical, &record_path)?;
+    remove_path_if_present(&runtime_job_root_for_record(&canonical))?;
     remove_path_if_present(&tracked_paths::enroot_runtime_job_dir(
-        &record.cache_dir,
-        &record.job_id,
+        &canonical.cache_dir,
+        &canonical.job_id,
     ))?;
-    if record.batch_log_managed {
-        remove_path_if_present(&record.batch_log)?;
+    remove_path_if_present(&tracked_paths::run_evidence_dir_for(
+        &canonical.compose_file,
+        &canonical.job_id,
+    ))?;
+    if canonical.batch_log_managed {
+        remove_path_if_present(&canonical.batch_log)?;
     }
     // Best-effort: never block teardown on a stale/unreadable rendezvous file.
-    let _ = crate::rendezvous::reap_job_records(&record.cache_dir, &record.job_id);
-    repair_latest_records(&record.compose_file)
+    let _ = crate::rendezvous::reap_job_records(&canonical.cache_dir, &canonical.job_id);
+    // The canonical record is the retry authority for every owned path above.
+    // Commit its deletion, and the matching pointer repair, only after those
+    // removals succeed.
+    if let Some(latest_path) = latest_pointer_path_for_kind(&canonical.compose_file, canonical.kind)
+    {
+        let _latest_lock = lock_latest_pointer(&latest_path)?;
+        remove_path_if_present(&record_path)?;
+        repair_latest_record_for_kind_locked(
+            &canonical.compose_file,
+            canonical.kind,
+            &latest_path,
+        )?;
+    } else {
+        remove_path_if_present(&record_path)?;
+    }
+    Ok(())
 }
 
 /// Loads every tracked job record for the given compose file.
@@ -506,7 +742,12 @@ pub fn find_submission_record_in_repo(scan_start: &Path, job_id: &str) -> Result
             job_id,
             inventory.scan_root.display()
         ),
-        [entry] => validate_submission_record(read_json(&entry.record_path)?, &entry.record_path),
+        [entry] => validate_submission_record_for_metadata_root(
+            read_json(&entry.record_path)?,
+            &entry.record_path,
+            &entry.compose_metadata_root,
+            true,
+        ),
         _ => bail!(
             "multiple tracked submissions with job id '{}' were found under {}; pass -f/--file to disambiguate",
             job_id,
@@ -526,7 +767,7 @@ pub fn build_cleanup_report(
     let metadata_root = metadata_root_for(&compose_file);
     let now = unix_timestamp_now();
     let latest_pointer_job_id_before =
-        read_latest_pointer_job_id(&metadata_root, SubmissionKind::Main);
+        read_latest_pointer_job_id(&metadata_root, SubmissionKind::Main)?;
     let inventory =
         build_inventory_entries_for_metadata_root(&metadata_root, include_disk_usage, now)?;
     let latest_job_id_before = inventory
@@ -602,10 +843,76 @@ pub fn build_cleanup_report(
 
 /// Executes the tracked-job cleanup report generated by [`build_cleanup_report`].
 pub fn run_cleanup_report(report: &CleanupReport) -> Result<()> {
+    if report.jobs.iter().any(|job| job.selected) {
+        validate_managed_record_directories(&report.compose_file)?;
+    }
+    // Validate the entire destructive plan before removing its first path. The
+    // skipped serde field is intentionally not trusted here: library callers
+    // can still construct or mutate a report in memory.
+    let mut plans = Vec::new();
     for job in report.jobs.iter().filter(|job| job.selected) {
-        for path in &job.removable_paths {
+        let claimed_paths = validate_cleanup_job(report, job)?;
+        let record_path = job.inventory.record_path.clone();
+        let record_lock = lock_submission_record(&record_path)?;
+        let metadata = fs::symlink_metadata(&record_path).with_context(|| {
+            format!("failed to inspect cleanup record {}", record_path.display())
+        })?;
+        if !metadata.file_type().is_file() {
+            bail!(
+                "unsafe cleanup plan for job {:?}: record {} is not a regular file",
+                job.inventory.job_id,
+                record_path.display()
+            );
+        }
+        let metadata_root = metadata_root_for(&report.compose_file);
+        let record = validate_submission_record_for_metadata_root(
+            read_json(&record_path)?,
+            &record_path,
+            &metadata_root,
+            true,
+        )?;
+        validate_owned_removal_parents(&record, &record_path)?;
+        let evidence_lock =
+            super::evidence::lock_run_evidence_for_removal(&record.compose_file, &record.job_id)?;
+        let persisted_paths = removable_paths_from_paths(
+            &record_path,
+            &runtime_job_root_for_record(&record),
+            &metadata_root.join(&record.job_id),
+            &tracked_paths::enroot_runtime_job_dir(&record.cache_dir, &record.job_id),
+            &tracked_paths::run_evidence_dir_for(&record.compose_file, &record.job_id),
+            record
+                .batch_log_managed
+                .then_some(record.batch_log.as_path()),
+        );
+        if claimed_paths != persisted_paths {
+            bail!(
+                "unsafe cleanup plan for job {:?}: inventory paths do not match the persisted submission record",
+                job.inventory.job_id
+            );
+        }
+        plans.push((record_lock, evidence_lock, record, persisted_paths));
+    }
+    // Phase one removes only owned payload paths. Keep every canonical record,
+    // record lock, and evidence lock alive until all payload removals succeed,
+    // so any failure remains retryable and pointer repair follows the global
+    // record -> evidence -> latest lock order.
+    for (_record_lock, _evidence_lock, record, paths) in &plans {
+        let record_path = checked_record_path_for_job_id(&record.compose_file, &record.job_id)?;
+        validate_owned_removal_parents(record, &record_path)?;
+        let normalized_record_path = normalized(&record_path);
+        for path in paths {
+            if normalized(path) == normalized_record_path {
+                continue;
+            }
             remove_path_if_present(path)?;
         }
+    }
+    // Phase two commits canonical-record deletion only after every selected
+    // job's owned paths are gone. The guards in `plans` intentionally remain
+    // live through latest-pointer repair.
+    for (_record_lock, _evidence_lock, record, _paths) in &plans {
+        let record_path = checked_record_path_for_job_id(&record.compose_file, &record.job_id)?;
+        remove_path_if_present(&record_path)?;
     }
     repair_latest_records(&report.compose_file)
 }
@@ -613,8 +920,9 @@ pub fn run_cleanup_report(report: &CleanupReport) -> Result<()> {
 /// Loads one tracked submission record, defaulting to the latest job.
 pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<SubmissionRecord> {
     let compose_file = absolute_path(spec_path)?;
+    let _ = managed_record_directories_exist(&compose_file)?;
     let path = match job_id {
-        Some(job_id) => jobs_dir_for(&compose_file).join(format!("{job_id}.json")),
+        Some(job_id) => checked_record_path_for_job_id(&compose_file, job_id)?,
         None => latest_record_path_for(&compose_file),
     };
     if !path.exists() {
@@ -631,7 +939,12 @@ pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<
             compose_file.display()
         );
     }
-    validate_submission_record(read_json(&path)?, &path)
+    validate_submission_record_for_metadata_root(
+        read_json(&path)?,
+        &path,
+        &metadata_root_for(&compose_file),
+        job_id.is_some(),
+    )
 }
 
 /// Like [`load_submission_record`], but a legitimately absent record is a silent
@@ -646,15 +959,27 @@ pub fn load_submission_record_optional(
     job_id: Option<&str>,
 ) -> Option<SubmissionRecord> {
     let compose_file = absolute_path(spec_path).ok()?;
+    if let Err(error) = managed_record_directories_exist(&compose_file) {
+        crate::diagnostics::warn_with_code(
+            "corrupt_submission_record",
+            format!("{}: {error:#}", metadata_root_for(&compose_file).display()),
+        );
+        return None;
+    }
     let path = match job_id {
-        Some(job_id) => jobs_dir_for(&compose_file).join(format!("{job_id}.json")),
+        Some(job_id) => checked_record_path_for_job_id(&compose_file, job_id).ok()?,
         None => latest_record_path_for(&compose_file),
     };
     if !path.exists() {
         return None;
     }
     let record = read_json_optional::<SubmissionRecord>(&path)?;
-    match validate_submission_record(record, &path) {
+    match validate_submission_record_for_metadata_root(
+        record,
+        &path,
+        &metadata_root_for(&compose_file),
+        job_id.is_some(),
+    ) {
         Ok(record) => Some(record),
         Err(err) => {
             crate::diagnostics::warn_with_code(
@@ -666,7 +991,13 @@ pub fn load_submission_record_optional(
     }
 }
 
+#[cfg(test)]
 fn validate_submission_record(record: SubmissionRecord, path: &Path) -> Result<SubmissionRecord> {
+    validate_submission_record_fields(&record, path)?;
+    Ok(record)
+}
+
+fn validate_submission_record_fields(record: &SubmissionRecord, path: &Path) -> Result<()> {
     // Guard teardown/cleanup against a corrupt or hand-tampered record: an empty
     // job id would collapse the per-job runtime/enroot paths to their shared
     // parents (e.g. `<cache_dir>/runtime/`), so refuse to use such a record.
@@ -676,6 +1007,7 @@ fn validate_submission_record(record: SubmissionRecord, path: &Path) -> Result<S
             path.display()
         );
     }
+    validate_job_id_component(&record.job_id, path)?;
     if record.schema_version > SUBMISSION_SCHEMA_VERSION {
         bail!(
             "submission record {} uses schema version {} but this version of hpc-compose only supports up to {}; please upgrade hpc-compose",
@@ -684,7 +1016,412 @@ fn validate_submission_record(record: SubmissionRecord, path: &Path) -> Result<S
             SUBMISSION_SCHEMA_VERSION
         );
     }
+    Ok(())
+}
+
+fn validate_job_id_component(job_id: &str, path: &Path) -> Result<()> {
+    let mut components = Path::new(job_id).components();
+    let is_one_normal_component = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(component)), None)
+            if component == std::ffi::OsStr::new(job_id)
+    );
+    if job_id.trim() != job_id || !is_one_normal_component {
+        bail!(
+            "submission record {} has job id {:?}, which is not a safe path component; refusing to use it for tracking/cleanup",
+            path.display(),
+            job_id
+        );
+    }
+    Ok(())
+}
+
+fn checked_record_path_for_job_id(compose_file: &Path, job_id: &str) -> Result<PathBuf> {
+    let jobs_dir = jobs_dir_for(compose_file);
+    validate_job_id_component(job_id, &jobs_dir)?;
+    Ok(jobs_dir.join(format!("{job_id}.json")))
+}
+
+fn managed_directory_exists(path: &Path, label: &str) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect {label} {}", path.display()));
+        }
+    };
+    ensure!(
+        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+        "managed {label} {} must be a real directory, not a symlink or another file type",
+        path.display()
+    );
+    Ok(true)
+}
+
+fn create_managed_directory(path: &Path, label: &str) -> Result<()> {
+    if managed_directory_exists(path, label)? {
+        return Ok(());
+    }
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to create managed {label} {}", path.display()));
+        }
+    }
+    ensure!(
+        managed_directory_exists(path, label)?,
+        "managed {label} {} disappeared after creation",
+        path.display()
+    );
+    Ok(())
+}
+
+fn ensure_managed_record_directories(compose_file: &Path) -> Result<()> {
+    let metadata_root = metadata_root_for(compose_file);
+    create_managed_directory(&metadata_root, "metadata directory")?;
+    create_managed_directory(
+        &metadata_root.join(tracked_paths::JOBS_DIR_NAME),
+        "jobs directory",
+    )
+}
+
+fn validate_managed_record_directories(compose_file: &Path) -> Result<()> {
+    ensure!(
+        managed_record_directories_exist(compose_file)?,
+        "managed record directories for {} do not exist",
+        compose_file.display()
+    );
+    Ok(())
+}
+
+fn managed_record_directories_exist(compose_file: &Path) -> Result<bool> {
+    let metadata_root = metadata_root_for(compose_file);
+    if !managed_directory_exists(&metadata_root, "metadata directory")? {
+        return Ok(false);
+    }
+    let jobs_dir = metadata_root.join(tracked_paths::JOBS_DIR_NAME);
+    managed_directory_exists(&jobs_dir, "jobs directory")
+}
+
+fn path_is_regular_file(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+                "managed record {} is not a regular file",
+                path.display()
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect managed record {}", path.display())),
+    }
+}
+
+fn submission_records_equal(left: &SubmissionRecord, right: &SubmissionRecord) -> Result<bool> {
+    let left =
+        serde_json::to_value(left).context("failed to compare canonical submission record")?;
+    let right =
+        serde_json::to_value(right).context("failed to compare candidate submission record")?;
+    Ok(left == right)
+}
+
+#[derive(Serialize)]
+struct SubmissionRecordIdentityV1<'a> {
+    identity_schema_version: u32,
+    record_schema_version: u32,
+    backend: SubmissionBackend,
+    kind: SubmissionKind,
+    job_id: &'a str,
+    submitted_at: u64,
+    compose_file: &'a Path,
+    submit_dir: &'a Path,
+    script_path: &'a Path,
+    cache_dir: &'a Path,
+    runtime_root: Option<&'a Path>,
+    batch_log: &'a Path,
+    batch_log_managed: bool,
+    service_logs: &'a BTreeMap<String, PathBuf>,
+    artifact_export_dir: Option<&'a str>,
+    resume_dir: Option<&'a Path>,
+    service_name: Option<&'a str>,
+    command_override: Option<&'a [String]>,
+    requested_walltime: Option<&'a RequestedWalltime>,
+    slurm_array: Option<&'a str>,
+    sweep: Option<&'a SweepTrialMetadata>,
+    config_snapshot_yaml: Option<&'a str>,
+    cached_artifacts: &'a [PathBuf],
+    provenance: Option<&'a JobProvenance>,
+}
+
+pub(super) fn submission_record_identity_sha256(record: &SubmissionRecord) -> Result<String> {
+    // This is an intentionally frozen v1 projection. Future additive record
+    // fields cannot silently change an existing protocol identity; incorporating
+    // one requires an explicit projection/schema decision. Tags and notes are
+    // excluded because they are represented by post-submit evidence events.
+    let identity = SubmissionRecordIdentityV1 {
+        identity_schema_version: 1,
+        record_schema_version: record.schema_version,
+        backend: record.backend,
+        kind: record.kind,
+        job_id: &record.job_id,
+        submitted_at: record.submitted_at,
+        compose_file: &record.compose_file,
+        submit_dir: &record.submit_dir,
+        script_path: &record.script_path,
+        cache_dir: &record.cache_dir,
+        runtime_root: record.runtime_root.as_deref(),
+        batch_log: &record.batch_log,
+        batch_log_managed: record.batch_log_managed,
+        service_logs: &record.service_logs,
+        artifact_export_dir: record.artifact_export_dir.as_deref(),
+        resume_dir: record.resume_dir.as_deref(),
+        service_name: record.service_name.as_deref(),
+        command_override: record.command_override.as_deref(),
+        requested_walltime: record.requested_walltime.as_ref(),
+        slurm_array: record.slurm_array.as_deref(),
+        sweep: record.sweep.as_ref(),
+        config_snapshot_yaml: record.config_snapshot_yaml.as_deref(),
+        cached_artifacts: &record.cached_artifacts,
+        provenance: record.provenance.as_ref(),
+    };
+    let bytes = serde_json::to_vec(&identity)
+        .context("failed to serialize immutable submission-record identity")?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn reject_orphaned_run_evidence(record: &SubmissionRecord) -> Result<()> {
+    let evidence_root = tracked_paths::run_evidence_dir_for(&record.compose_file, &record.job_id);
+    match fs::symlink_metadata(&evidence_root) {
+        Ok(_) => bail!(
+            "run evidence {} exists for scheduler job id {} but no canonical submission record exists; refusing to pair a new record with orphaned evidence",
+            evidence_root.display(),
+            record.job_id
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect run evidence {}", evidence_root.display())),
+    }
+}
+
+fn submission_record_lock_path(record_path: &Path) -> PathBuf {
+    record_path.with_extension("json.lock")
+}
+
+fn lock_submission_record(record_path: &Path) -> Result<crate::secure_io::StrictFlockGuard> {
+    let lock_path = submission_record_lock_path(record_path);
+    crate::secure_io::acquire_flock_strict(
+        &lock_path,
+        crate::secure_io::LockKind::Exclusive,
+        SUBMISSION_RECORD_LOCK_TIMEOUT,
+    )
+    .with_context(|| format!("failed to lock submission record {}", record_path.display()))
+}
+
+fn latest_pointer_lock_path(latest_path: &Path) -> PathBuf {
+    latest_path.with_extension("json.lock")
+}
+
+fn lock_latest_pointer(latest_path: &Path) -> Result<crate::secure_io::StrictFlockGuard> {
+    let lock_path = latest_pointer_lock_path(latest_path);
+    if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
+        ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "latest-pointer lock {} is not a regular file",
+            lock_path.display()
+        );
+    }
+    crate::secure_io::acquire_flock_strict(
+        &lock_path,
+        crate::secure_io::LockKind::Exclusive,
+        SUBMISSION_RECORD_LOCK_TIMEOUT,
+    )
+    .with_context(|| format!("failed to lock latest pointer {}", latest_path.display()))
+}
+
+fn normalized(path: &Path) -> PathBuf {
+    crate::path_util::normalize_path(path.to_path_buf())
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    normalized(left) == normalized(right)
+        || match (fs::canonicalize(left), fs::canonicalize(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+}
+
+fn validate_direct_job_child(
+    label: &str,
+    candidate: &Path,
+    parent: &Path,
+    job_id: &str,
+    record_path: &Path,
+) -> Result<()> {
+    let parent = normalized(parent);
+    let candidate = normalized(candidate);
+    if !parent.is_absolute()
+        || !candidate.is_absolute()
+        || candidate.parent() != Some(parent.as_path())
+        || candidate.file_name() != Some(std::ffi::OsStr::new(job_id))
+    {
+        bail!(
+            "submission record {} has unsafe {label} {}; expected a direct per-job child named {:?} under {}",
+            record_path.display(),
+            candidate.display(),
+            job_id,
+            parent.display()
+        );
+    }
+    Ok(())
+}
+
+fn runtime_root_parent_for_record(record: &SubmissionRecord) -> PathBuf {
+    record
+        .runtime_root
+        .clone()
+        .unwrap_or_else(|| tracked_paths::runtime_root_for(&record.submit_dir))
+}
+
+fn expected_managed_batch_log(record: &SubmissionRecord) -> PathBuf {
+    let filename = tracked_paths::DEFAULT_BATCH_LOG_FILE_PATTERN.replace("%j", &record.job_id);
+    runtime_root_parent_for_record(record)
+        .join(tracked_paths::LOGS_DIR_NAME)
+        .join(filename)
+}
+
+fn validate_submission_record_location(
+    record: &SubmissionRecord,
+    record_path: &Path,
+    metadata_root: &Path,
+    require_job_filename: bool,
+) -> Result<()> {
+    validate_submission_record_fields(record, record_path)?;
+    let metadata_root = normalized(metadata_root);
+    let record_metadata_root = normalized(&metadata_root_for(&record.compose_file));
+    if !paths_equivalent(&record_metadata_root, &metadata_root) {
+        bail!(
+            "submission record {} belongs to metadata root {}, not {}",
+            record_path.display(),
+            record_metadata_root.display(),
+            metadata_root.display()
+        );
+    }
+    if require_job_filename {
+        let expected_record_path = metadata_root
+            .join(tracked_paths::JOBS_DIR_NAME)
+            .join(format!("{}.json", record.job_id));
+        if normalized(record_path) != expected_record_path {
+            bail!(
+                "submission record {} names job {:?}, but its tracked filename must be {}",
+                record_path.display(),
+                record.job_id,
+                expected_record_path.display()
+            );
+        }
+    }
+
+    let runtime_parent = runtime_root_parent_for_record(record);
+    validate_direct_job_child(
+        "runtime root",
+        &runtime_job_root_for_record(record),
+        &runtime_parent,
+        &record.job_id,
+        record_path,
+    )?;
+    validate_direct_job_child(
+        "legacy runtime root",
+        &metadata_root.join(&record.job_id),
+        &metadata_root,
+        &record.job_id,
+        record_path,
+    )?;
+    let runtime_cache_parent = record
+        .cache_dir
+        .join(tracked_paths::ENROOT_RUNTIME_DIR_NAME);
+    validate_direct_job_child(
+        "runtime cache directory",
+        &tracked_paths::enroot_runtime_job_dir(&record.cache_dir, &record.job_id),
+        &runtime_cache_parent,
+        &record.job_id,
+        record_path,
+    )?;
+    if record.batch_log_managed {
+        let expected = normalized(&expected_managed_batch_log(record));
+        if normalized(&record.batch_log) != expected {
+            bail!(
+                "submission record {} marks batch log {} as managed, but the owned path is {}",
+                record_path.display(),
+                record.batch_log.display(),
+                expected.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_submission_record_for_metadata_root(
+    record: SubmissionRecord,
+    record_path: &Path,
+    metadata_root: &Path,
+    require_job_filename: bool,
+) -> Result<SubmissionRecord> {
+    validate_submission_record_location(&record, record_path, metadata_root, require_job_filename)?;
     Ok(record)
+}
+
+fn validate_managed_removal_parent(label: &str, parent: &Path) -> Result<()> {
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+                "managed {label} parent {} must be a real directory; refusing destructive removal through a symlink or another file type",
+                parent.display()
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to inspect managed {label} parent {}",
+                parent.display()
+            )
+        }),
+    }
+}
+
+fn validate_owned_removal_parents(record: &SubmissionRecord, record_path: &Path) -> Result<()> {
+    let record_parent = record_path
+        .parent()
+        .context("canonical submission record has no parent")?;
+    validate_managed_removal_parent("record", record_parent)?;
+
+    let runtime_parent = runtime_root_parent_for_record(record);
+    validate_managed_removal_parent("runtime", &runtime_parent)?;
+
+    let metadata_root = metadata_root_for(&record.compose_file);
+    validate_managed_removal_parent("legacy runtime", &metadata_root)?;
+
+    let runtime_cache_parent = record
+        .cache_dir
+        .join(tracked_paths::ENROOT_RUNTIME_DIR_NAME);
+    validate_managed_removal_parent("runtime cache", &runtime_cache_parent)?;
+
+    let evidence_parent = metadata_root.join(tracked_paths::RUN_EVIDENCE_DIR_NAME);
+    validate_managed_removal_parent("run evidence", &evidence_parent)?;
+
+    if record.batch_log_managed {
+        let batch_parent = record
+            .batch_log
+            .parent()
+            .context("managed batch log has no parent")?;
+        validate_managed_removal_parent("batch log", batch_parent)?;
+    }
+    Ok(())
 }
 
 /// Returns the tracked log directory for a submission record.
@@ -811,6 +1548,7 @@ fn build_inventory_entries_for_metadata_root(
             &runtime_job_root,
             &legacy_runtime_job_root,
             &runtime_cache_dir,
+            &tracked_paths::run_evidence_dir_for(&record.compose_file, &record.job_id),
             record.batch_log_managed.then_some(batch_log.as_path()),
         );
         let disk_usage_bytes = if include_disk_usage {
@@ -858,8 +1596,11 @@ fn build_inventory_entries_for_metadata_root(
 }
 
 fn scan_job_records_with_paths(metadata_root: &Path) -> Result<Vec<(PathBuf, SubmissionRecord)>> {
+    if !managed_directory_exists(metadata_root, "metadata directory")? {
+        return Ok(Vec::new());
+    }
     let jobs_dir = metadata_root.join(tracked_paths::JOBS_DIR_NAME);
-    if !jobs_dir.is_dir() {
+    if !managed_directory_exists(&jobs_dir, "jobs directory")? {
         return Ok(Vec::new());
     }
 
@@ -872,7 +1613,19 @@ fn scan_job_records_with_paths(metadata_root: &Path) -> Result<Vec<(PathBuf, Sub
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        match read_json::<SubmissionRecord>(&path) {
+        if !entry.file_type()?.is_file() {
+            crate::diagnostics::warn_with_code(
+                "corrupt_job_record",
+                format!(
+                    "ignoring job record {} because it is not a regular file",
+                    path.display()
+                ),
+            );
+            continue;
+        }
+        match read_json::<SubmissionRecord>(&path).and_then(|record| {
+            validate_submission_record_for_metadata_root(record, &path, metadata_root, true)
+        }) {
             Ok(record) => records.push((path, record)),
             Err(err) => crate::diagnostics::warn_with_code(
                 "corrupt_job_record",
@@ -883,7 +1636,10 @@ fn scan_job_records_with_paths(metadata_root: &Path) -> Result<Vec<(PathBuf, Sub
     Ok(records)
 }
 
-fn read_latest_pointer_job_id(metadata_root: &Path, kind: SubmissionKind) -> Option<String> {
+fn read_latest_pointer_job_id(
+    metadata_root: &Path,
+    kind: SubmissionKind,
+) -> Result<Option<String>> {
     let latest_path = match kind {
         SubmissionKind::Main => metadata_root.join(tracked_paths::LATEST_RECORD_FILE_NAME),
         SubmissionKind::Run => metadata_root.join(tracked_paths::RUN_LATEST_RECORD_FILE_NAME),
@@ -891,9 +1647,18 @@ fn read_latest_pointer_job_id(metadata_root: &Path, kind: SubmissionKind) -> Opt
         SubmissionKind::Notebook => {
             metadata_root.join(tracked_paths::NOTEBOOK_LATEST_RECORD_FILE_NAME)
         }
-        SubmissionKind::SweepTrial => return None,
+        SubmissionKind::SweepTrial => return Ok(None),
     };
-    read_json_optional::<SubmissionRecord>(&latest_path).map(|record| record.job_id)
+    if !path_is_regular_file(&latest_path)? {
+        return Ok(None);
+    }
+    let record = validate_submission_record_for_metadata_root(
+        read_json(&latest_path)?,
+        &latest_path,
+        metadata_root,
+        false,
+    )?;
+    Ok(Some(record.job_id))
 }
 
 fn resolved_latest_job_id(
@@ -955,8 +1720,118 @@ fn removable_paths_for_job(job: &JobInventoryEntry) -> Vec<PathBuf> {
         &job.runtime_job_root,
         &job.legacy_runtime_job_root,
         &job.runtime_cache_dir,
+        &tracked_paths::run_evidence_dir_for(&job.compose_file, &job.job_id),
         job.batch_log_managed.then_some(job.batch_log.as_path()),
     )
+}
+
+fn validate_cleanup_job(report: &CleanupReport, job: &CleanupJobReport) -> Result<Vec<PathBuf>> {
+    let inventory = &job.inventory;
+    let fail = |message: String| {
+        anyhow::anyhow!(
+            "unsafe cleanup plan for job {:?}: {message}",
+            inventory.job_id
+        )
+    };
+    validate_job_id_component(&inventory.job_id, &inventory.record_path)
+        .map_err(|err| fail(err.to_string()))?;
+
+    let compose_file = normalized(&report.compose_file);
+    if normalized(&inventory.compose_file) != compose_file {
+        return Err(fail(format!(
+            "record compose file {} does not match report compose file {}",
+            inventory.compose_file.display(),
+            report.compose_file.display()
+        )));
+    }
+    let metadata_root = normalized(&metadata_root_for(&compose_file));
+    if normalized(&inventory.compose_metadata_root) != metadata_root {
+        return Err(fail(format!(
+            "metadata root {} does not match {}",
+            inventory.compose_metadata_root.display(),
+            metadata_root.display()
+        )));
+    }
+    let expected_record_path = metadata_root
+        .join(tracked_paths::JOBS_DIR_NAME)
+        .join(format!("{}.json", inventory.job_id));
+    if normalized(&inventory.record_path) != expected_record_path {
+        return Err(fail(format!(
+            "record path {} does not match {}",
+            inventory.record_path.display(),
+            expected_record_path.display()
+        )));
+    }
+
+    let runtime_parent = inventory.runtime_job_root.parent().ok_or_else(|| {
+        fail(format!(
+            "runtime root {} has no parent",
+            inventory.runtime_job_root.display()
+        ))
+    })?;
+    validate_direct_job_child(
+        "runtime root",
+        &inventory.runtime_job_root,
+        runtime_parent,
+        &inventory.job_id,
+        &inventory.record_path,
+    )
+    .map_err(|err| fail(err.to_string()))?;
+    let expected_legacy_root = metadata_root.join(&inventory.job_id);
+    if normalized(&inventory.legacy_runtime_job_root) != expected_legacy_root {
+        return Err(fail(format!(
+            "legacy runtime root {} does not match {}",
+            inventory.legacy_runtime_job_root.display(),
+            expected_legacy_root.display()
+        )));
+    }
+    let runtime_cache_parent = inventory.runtime_cache_dir.parent().ok_or_else(|| {
+        fail(format!(
+            "runtime cache directory {} has no parent",
+            inventory.runtime_cache_dir.display()
+        ))
+    })?;
+    if runtime_cache_parent.file_name()
+        != Some(std::ffi::OsStr::new(tracked_paths::ENROOT_RUNTIME_DIR_NAME))
+    {
+        return Err(fail(format!(
+            "runtime cache directory {} is not under a managed '{}' directory",
+            inventory.runtime_cache_dir.display(),
+            tracked_paths::ENROOT_RUNTIME_DIR_NAME
+        )));
+    }
+    validate_direct_job_child(
+        "runtime cache directory",
+        &inventory.runtime_cache_dir,
+        runtime_cache_parent,
+        &inventory.job_id,
+        &inventory.record_path,
+    )
+    .map_err(|err| fail(err.to_string()))?;
+    if inventory.batch_log_managed {
+        let filename =
+            tracked_paths::DEFAULT_BATCH_LOG_FILE_PATTERN.replace("%j", &inventory.job_id);
+        let expected_batch_log = normalized(
+            &runtime_parent
+                .join(tracked_paths::LOGS_DIR_NAME)
+                .join(filename),
+        );
+        if normalized(&inventory.batch_log) != expected_batch_log {
+            return Err(fail(format!(
+                "managed batch log {} does not match {}",
+                inventory.batch_log.display(),
+                expected_batch_log.display()
+            )));
+        }
+    }
+
+    let expected_paths = removable_paths_for_job(inventory);
+    if job.removable_paths != expected_paths {
+        return Err(fail(
+            "removable paths differ from the paths derived from validated inventory".into(),
+        ));
+    }
+    Ok(expected_paths)
 }
 
 fn removable_paths_from_paths(
@@ -964,18 +1839,20 @@ fn removable_paths_from_paths(
     runtime_job_root: &Path,
     legacy_runtime_job_root: &Path,
     runtime_cache_dir: &Path,
+    run_evidence_dir: &Path,
     managed_batch_log: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for path in [
-        record_path,
         runtime_job_root,
         legacy_runtime_job_root,
         runtime_cache_dir,
+        run_evidence_dir,
     ]
     .into_iter()
     .chain(managed_batch_log)
+    .chain(std::iter::once(record_path))
     {
         // Tolerate an empty path (e.g. the serde default for an inventory entry
         // persisted before this field existed) so we never `rm` a bare/relative path.
@@ -1050,29 +1927,40 @@ fn remove_path_if_present(path: &Path) -> Result<()> {
 }
 
 fn repair_latest_records(compose_file: &Path) -> Result<()> {
-    let records = scan_job_records(compose_file)?;
-    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Main)?;
-    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Run)?;
-    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Canary)?;
-    repair_latest_record_for_kind(compose_file, &records, SubmissionKind::Notebook)
+    if !managed_record_directories_exist(compose_file)? {
+        return Ok(());
+    }
+    repair_latest_record_for_kind(compose_file, SubmissionKind::Main)?;
+    repair_latest_record_for_kind(compose_file, SubmissionKind::Run)?;
+    repair_latest_record_for_kind(compose_file, SubmissionKind::Canary)?;
+    repair_latest_record_for_kind(compose_file, SubmissionKind::Notebook)
 }
 
-fn repair_latest_record_for_kind(
-    compose_file: &Path,
-    records: &[SubmissionRecord],
-    kind: SubmissionKind,
-) -> Result<()> {
+fn repair_latest_record_for_kind(compose_file: &Path, kind: SubmissionKind) -> Result<()> {
     let Some(latest_path) = latest_pointer_path_for_kind(compose_file, kind) else {
         return Ok(());
     };
+    let _latest_lock = lock_latest_pointer(&latest_path)?;
+    repair_latest_record_for_kind_locked(compose_file, kind, &latest_path)
+}
+
+fn repair_latest_record_for_kind_locked(
+    compose_file: &Path,
+    kind: SubmissionKind,
+    latest_path: &Path,
+) -> Result<()> {
+    // The scan belongs inside the stable pointer transaction. Otherwise a
+    // concurrent submission can publish a newer record after the scan and be
+    // overwritten by a repair based on stale input.
+    let records = scan_job_records(compose_file)?;
     if let Some(latest) = records
         .iter()
         .filter(|record| record.kind == kind)
         .max_by(|left, right| compare_submission_records(left, right))
     {
-        write_json(&latest_path, latest)
+        write_json(latest_path, latest)
     } else if latest_path.exists() {
-        fs::remove_file(&latest_path).context(format!("failed to remove {}", latest_path.display()))
+        fs::remove_file(latest_path).context(format!("failed to remove {}", latest_path.display()))
     } else {
         Ok(())
     }
@@ -1088,7 +1976,8 @@ mod tests {
         let runtime = PathBuf::from("/tmp/job/42");
         let legacy = PathBuf::from("/tmp/job/42");
         let cache = PathBuf::from("/tmp/job/42");
-        let paths = removable_paths_from_paths(&record, &runtime, &legacy, &cache, Some(&cache));
+        let paths =
+            removable_paths_from_paths(&record, &runtime, &legacy, &cache, &cache, Some(&cache));
         assert_eq!(paths.len(), 2);
     }
 
@@ -1098,9 +1987,11 @@ mod tests {
         let runtime = PathBuf::from("/tmp/b/42");
         let legacy = PathBuf::from("/tmp/c/42");
         let cache = PathBuf::from("/tmp/d/42");
-        let batch = PathBuf::from("/tmp/e/42.out");
-        let paths = removable_paths_from_paths(&record, &runtime, &legacy, &cache, Some(&batch));
-        assert_eq!(paths.len(), 5);
+        let evidence = PathBuf::from("/tmp/e/42");
+        let batch = PathBuf::from("/tmp/f/42.out");
+        let paths =
+            removable_paths_from_paths(&record, &runtime, &legacy, &cache, &evidence, Some(&batch));
+        assert_eq!(paths.len(), 6);
     }
 
     #[test]
@@ -1109,7 +2000,7 @@ mod tests {
         let runtime = PathBuf::from("/tmp/b/42");
         let legacy = PathBuf::from("/tmp/c/42");
         let cache = PathBuf::new();
-        let paths = removable_paths_from_paths(&record, &runtime, &legacy, &cache, None);
+        let paths = removable_paths_from_paths(&record, &runtime, &legacy, &cache, &cache, None);
         assert_eq!(paths.len(), 3);
     }
 
@@ -1244,6 +2135,21 @@ mod tests {
             err.to_string().contains("has an empty job id"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_submission_record_rejects_non_component_job_ids() {
+        for job_id in ["../outside", "nested/job", ".", ".."] {
+            let record: SubmissionRecord =
+                serde_json::from_value(record_json(job_id, SUBMISSION_SCHEMA_VERSION))
+                    .expect("deserialize record");
+            let err = validate_submission_record(record, Path::new("/tmp/p/x.json"))
+                .expect_err("unsafe job id must be rejected");
+            assert!(
+                err.to_string().contains("safe path component"),
+                "job id {job_id:?}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1392,6 +2298,137 @@ mod tests {
     }
 
     #[test]
+    fn writing_a_record_initializes_idempotent_run_evidence() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let record = tracked_record(&compose, "11111", 10, "main");
+
+        write_submission_record(&record).expect("first write");
+        let first = crate::job::evidence::load_run_evidence(&compose, "11111")
+            .expect("load evidence")
+            .expect("new records must have evidence");
+        let paths = crate::job::evidence::RunEvidencePaths::for_job(&compose, "11111")
+            .expect("evidence paths");
+        let manifest_bytes = fs::read(&paths.manifest).expect("manifest bytes");
+
+        write_submission_record(&record).expect("idempotent rewrite");
+        let second = crate::job::evidence::load_run_evidence(&compose, "11111")
+            .expect("reload evidence")
+            .expect("evidence remains present");
+        assert_eq!(second.manifest.run_id, first.manifest.run_id);
+        assert_eq!(second.events.len(), 1, "submitted event must not duplicate");
+        assert_eq!(
+            fs::read(&paths.manifest).expect("manifest bytes"),
+            manifest_bytes
+        );
+    }
+
+    #[test]
+    fn scheduler_job_id_reuse_never_replaces_a_different_canonical_record() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let original = tracked_record(&compose, "11111", 10, "main");
+        write_submission_record(&original).expect("original record");
+
+        let record_path = jobs_dir_for(&compose).join("11111.json");
+        let record_before = fs::read(&record_path).expect("record before");
+        let evidence_paths = crate::job::evidence::RunEvidencePaths::for_job(&compose, "11111")
+            .expect("evidence paths");
+        let manifest_before = fs::read(&evidence_paths.manifest).expect("manifest before");
+        let events_before = fs::read(&evidence_paths.events).expect("events before");
+
+        let mut reused = original.clone();
+        reused.submitted_at = 20;
+        reused.config_snapshot_yaml = Some("services:\n  changed: {}\n".to_string());
+        let error = write_submission_record(&reused)
+            .expect_err("a reused scheduler id must not overwrite its canonical record");
+        assert!(
+            error.to_string().contains("already tracked"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(fs::read(&record_path).expect("record after"), record_before);
+        assert_eq!(
+            fs::read(&evidence_paths.manifest).expect("manifest after"),
+            manifest_before
+        );
+        assert_eq!(
+            fs::read(&evidence_paths.events).expect("events after"),
+            events_before
+        );
+
+        let update_error = update_submission_record(&compose, "11111", |record| {
+            append_job_note(record, "belongs to the original run")
+        });
+        assert!(update_error.is_ok(), "original record remains usable");
+        let canonical = load_submission_record(&compose, Some("11111")).expect("canonical record");
+        assert_eq!(canonical.submitted_at, 10);
+    }
+
+    #[test]
+    fn new_record_rejects_orphaned_evidence_for_the_same_scheduler_id() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let orphan = tracked_record(&compose, "11111", 10, "main");
+        initialize_record_run_evidence(&orphan).expect("orphan evidence fixture");
+
+        let error = write_submission_record(&orphan)
+            .expect_err("orphaned immutable evidence must not be adopted by a new record");
+        assert!(
+            error.to_string().contains("run evidence")
+                && error.to_string().contains("canonical submission record"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!jobs_dir_for(&compose).join("11111.json").exists());
+    }
+
+    #[test]
+    fn record_mutations_project_typed_annotation_events() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("record");
+        fs::write(
+            tmpdir.path().join("run.sbatch"),
+            "changed after submission\n",
+        )
+        .expect("changed script");
+
+        update_submission_record(&compose, "11111", |record| {
+            apply_tag_changes(&mut record.tags, &strings(&["baseline"]), &[])?;
+            append_job_note(record, "stable loss")
+        })
+        .expect("mutate record");
+
+        let evidence = crate::job::evidence::load_run_evidence(&compose, "11111")
+            .expect("load evidence")
+            .expect("evidence");
+        assert_eq!(evidence.view.tags, strings(&["baseline"]));
+        assert_eq!(evidence.view.notes.len(), 1);
+        assert_eq!(evidence.view.notes[0].text, "stable loss");
+        assert_eq!(evidence.events.len(), 3, "submitted + tags + note");
+    }
+
+    #[test]
+    fn cleanup_removes_the_per_job_run_evidence_directory() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        write_submission_record(&tracked_record(&compose, "11111", 0, "main")).expect("record");
+        let evidence_root = crate::job::evidence::RunEvidencePaths::for_job(&compose, "11111")
+            .expect("evidence paths")
+            .root;
+        assert!(evidence_root.is_dir(), "write must initialize evidence");
+
+        let report = build_cleanup_report(&compose, CleanupMode::Age { age_days: 0 }, false, false)
+            .expect("cleanup report");
+        run_cleanup_report(&report).expect("cleanup");
+        assert!(!evidence_root.exists(), "cleanup must remove run evidence");
+    }
+
+    #[test]
     fn update_submission_record_on_non_latest_leaves_pointer_byte_identical() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let compose = tmpdir.path().join("compose.yaml");
@@ -1435,6 +2472,139 @@ mod tests {
             read_json(&latest_record_path_for(&compose)).expect("latest pointer");
         assert_eq!(pointer.job_id, "22222");
         assert_eq!(pointer.tags, strings(&["baseline"]));
+    }
+
+    #[test]
+    fn latest_pointer_transactions_use_the_stable_per_kind_lock() {
+        use std::sync::mpsc;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        let first = tracked_record(&compose, "11111", 10, "main");
+        write_submission_record(&first).expect("first record");
+
+        let latest_path = latest_record_path_for(&compose);
+        let latest_lock_path = latest_path.with_extension("json.lock");
+        let latest_guard = crate::secure_io::acquire_flock_strict(
+            &latest_lock_path,
+            crate::secure_io::LockKind::Exclusive,
+            Duration::from_secs(1),
+        )
+        .expect("hold latest lock");
+
+        let (update_entered_tx, update_entered_rx) = mpsc::channel();
+        let (update_done_tx, update_done_rx) = mpsc::channel();
+        let update_compose = compose.clone();
+        let update = std::thread::spawn(move || {
+            let result = update_submission_record(&update_compose, "11111", |record| {
+                update_entered_tx.send(()).expect("update entered");
+                apply_tag_changes(&mut record.tags, &strings(&["updated"]), &[])
+            });
+            update_done_tx.send(result).expect("update result");
+        });
+        update_entered_rx.recv().expect("update mutation entered");
+
+        let (submit_done_tx, submit_done_rx) = mpsc::channel();
+        let second = tracked_record(&compose, "22222", 20, "main");
+        let submit = std::thread::spawn(move || {
+            submit_done_tx
+                .send(write_submission_record(&second))
+                .expect("submit result");
+        });
+
+        assert!(
+            update_done_rx
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "record update must wait for the stable latest-pointer lock"
+        );
+        assert!(
+            submit_done_rx
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "record submission must wait for the stable latest-pointer lock"
+        );
+
+        drop(latest_guard);
+        let update_result = update_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("update completed");
+        update_result.expect("update result");
+        let submit_result = submit_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("submit completed");
+        submit_result.expect("submit result");
+        update.join().expect("update thread");
+        submit.join().expect("submit thread");
+
+        let latest = load_submission_record(&compose, None).expect("latest pointer");
+        assert_eq!(latest.job_id, "22222");
+    }
+
+    #[test]
+    fn latest_pointer_repair_and_direct_removal_share_the_stable_lock() {
+        use std::sync::mpsc;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("older");
+        let newer = tracked_record(&compose, "22222", 20, "main");
+        write_submission_record(&newer).expect("newer");
+        let latest_path = latest_record_path_for(&compose);
+        let latest_lock_path = latest_pointer_lock_path(&latest_path);
+
+        let repair_guard = crate::secure_io::acquire_flock_strict(
+            &latest_lock_path,
+            crate::secure_io::LockKind::Exclusive,
+            Duration::from_secs(1),
+        )
+        .expect("hold repair lock");
+        let (repair_tx, repair_rx) = mpsc::channel();
+        let repair_compose = compose.clone();
+        let repair = std::thread::spawn(move || {
+            repair_tx
+                .send(repair_latest_records(&repair_compose))
+                .expect("repair result");
+        });
+        assert!(
+            repair_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "latest-pointer repair must wait for the stable lock"
+        );
+        drop(repair_guard);
+        repair_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("repair completed")
+            .expect("repair result");
+        repair.join().expect("repair thread");
+
+        let removal_guard = crate::secure_io::acquire_flock_strict(
+            &latest_lock_path,
+            crate::secure_io::LockKind::Exclusive,
+            Duration::from_secs(1),
+        )
+        .expect("hold removal lock");
+        let (remove_tx, remove_rx) = mpsc::channel();
+        let remove = std::thread::spawn(move || {
+            remove_tx
+                .send(remove_submission_record(&newer))
+                .expect("remove result");
+        });
+        assert!(
+            remove_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "direct removal must wait for the stable latest-pointer lock"
+        );
+        assert!(
+            jobs_dir_for(&compose).join("22222.json").exists(),
+            "the canonical record must remain until pointer repair can commit"
+        );
+        drop(removal_guard);
+        remove_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("remove completed")
+            .expect("remove result");
+        remove.join().expect("remove thread");
+        let latest = load_submission_record(&compose, None).expect("repaired latest");
+        assert_eq!(latest.job_id, "11111");
     }
 
     #[test]
@@ -1482,5 +2652,581 @@ mod tests {
             fs::read(&record_path).expect("record after"),
             "a failed mutation must not rewrite the record"
         );
+    }
+
+    #[test]
+    fn update_rejects_immutable_identity_changes_without_touching_record_or_evidence() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let mut original = tracked_record(&compose, "11111", 10, "main");
+        original.config_snapshot_yaml = Some("services: {}\n".to_string());
+        write_submission_record(&original).expect("record");
+        let record_path = jobs_dir_for(&compose).join("11111.json");
+        let evidence_paths = crate::job::evidence::RunEvidencePaths::for_job(&compose, "11111")
+            .expect("evidence paths");
+        let record_before = fs::read(&record_path).expect("record before");
+        let manifest_before = fs::read(&evidence_paths.manifest).expect("manifest before");
+        let events_before = fs::read(&evidence_paths.events).expect("events before");
+
+        let error = update_submission_record(&compose, "11111", |record| {
+            record.submitted_at += 1;
+            record.config_snapshot_yaml = Some("services:\n  changed: {}\n".to_string());
+            Ok(())
+        })
+        .expect_err("post-submit immutable identity changes must be rejected");
+        assert!(error.to_string().contains("immutable"), "got: {error:#}");
+        assert_eq!(fs::read(&record_path).expect("record after"), record_before);
+        assert_eq!(
+            fs::read(&evidence_paths.manifest).expect("manifest after"),
+            manifest_before
+        );
+        assert_eq!(
+            fs::read(&evidence_paths.events).expect("events after"),
+            events_before
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_unsafe_records_without_touching_outside_sentinels() {
+        struct Case {
+            name: &'static str,
+            file_id: &'static str,
+            record_id: &'static str,
+            configure: fn(&mut SubmissionRecord, &Path) -> PathBuf,
+        }
+
+        let cases = [
+            Case {
+                name: "empty id",
+                file_id: "empty",
+                record_id: "",
+                configure: |record, root| {
+                    record.submit_dir = root.to_path_buf();
+                    metadata_root_for(&record.compose_file).join("sentinel-empty")
+                },
+            },
+            Case {
+                name: "traversal id",
+                file_id: "escape",
+                record_id: "../outside",
+                configure: |record, root| {
+                    record.submit_dir = root.to_path_buf();
+                    root.join("outside/sentinel-traversal")
+                },
+            },
+            Case {
+                name: "mismatched file id",
+                file_id: "alias",
+                record_id: "victim",
+                configure: |record, root| {
+                    record.submit_dir = root.to_path_buf();
+                    metadata_root_for(&record.compose_file).join("victim/sentinel-mismatch")
+                },
+            },
+            Case {
+                name: "unowned managed batch log",
+                file_id: "owned",
+                record_id: "owned",
+                configure: |record, root| {
+                    record.batch_log_managed = true;
+                    record.batch_log = root.join("sentinel-batch.log");
+                    record.batch_log.clone()
+                },
+            },
+        ];
+
+        for case in cases {
+            let tmpdir = tempfile::tempdir().expect("tmpdir");
+            let compose = tmpdir.path().join("compose.yaml");
+            fs::write(&compose, "").expect("compose");
+            let mut record = tracked_record(&compose, case.record_id, 0, "main");
+            let sentinel = (case.configure)(&mut record, tmpdir.path());
+            if let Some(parent) = sentinel.parent() {
+                fs::create_dir_all(parent).expect("sentinel parent");
+            }
+            fs::write(&sentinel, case.name).expect("sentinel");
+
+            let jobs_dir = jobs_dir_for(&compose);
+            fs::create_dir_all(&jobs_dir).expect("jobs dir");
+            let record_path = jobs_dir.join(format!("{}.json", case.file_id));
+            write_json(&record_path, &record).expect("unsafe record fixture");
+
+            let report =
+                build_cleanup_report(&compose, CleanupMode::Age { age_days: 0 }, false, false)
+                    .expect("cleanup planning should degrade past an unsafe record");
+            run_cleanup_report(&report).expect("unsafe records must not break cleanup");
+            assert!(
+                sentinel.exists(),
+                "{} must not remove {}",
+                case.name,
+                sentinel.display()
+            );
+            assert!(
+                report.jobs.is_empty(),
+                "{} should not enter a destructive cleanup plan",
+                case.name
+            );
+            assert!(
+                record_path.exists(),
+                "the skipped record should remain available for diagnosis"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_rejects_a_tampered_plan_before_removing_anything() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "").expect("compose");
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("older");
+        write_submission_record(&tracked_record(&compose, "22222", 20, "main")).expect("newer");
+
+        let outside = tmpdir.path().join("outside/sentinel");
+        fs::create_dir_all(outside.parent().expect("outside parent")).expect("outside parent");
+        fs::write(&outside, "keep").expect("outside sentinel");
+
+        let mut report = build_cleanup_report(&compose, CleanupMode::AllExceptLatest, false, false)
+            .expect("cleanup report");
+        let selected = report
+            .jobs
+            .iter_mut()
+            .find(|job| job.selected)
+            .expect("selected old job");
+        selected.removable_paths.push(outside.clone());
+
+        let err = run_cleanup_report(&report).expect_err("tampered cleanup plan must be rejected");
+        assert!(err.to_string().contains("cleanup plan"), "got: {err}");
+        assert!(outside.exists(), "outside sentinel must survive");
+        assert!(
+            jobs_dir_for(&compose).join("11111.json").exists(),
+            "validation must happen before the first removal"
+        );
+    }
+
+    #[test]
+    fn cleanup_rejects_tampered_inventory_even_when_removal_paths_match_it() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "").expect("compose");
+        let mut older = tracked_record(&compose, "11111", 10, "main");
+        older.runtime_root = Some(tmpdir.path().join("owned-runtime"));
+        write_submission_record(&older).expect("older");
+        write_submission_record(&tracked_record(&compose, "22222", 20, "main")).expect("newer");
+
+        let outside_root = tmpdir.path().join("unowned/11111");
+        fs::create_dir_all(&outside_root).expect("outside root");
+        let sentinel = outside_root.join("sentinel");
+        fs::write(&sentinel, "keep").expect("outside sentinel");
+
+        let mut report = build_cleanup_report(&compose, CleanupMode::AllExceptLatest, false, false)
+            .expect("cleanup report");
+        let selected = report
+            .jobs
+            .iter_mut()
+            .find(|job| job.selected)
+            .expect("selected old job");
+        let original_runtime_root = selected.inventory.runtime_job_root.clone();
+        selected.inventory.runtime_job_root = outside_root.clone();
+        selected.removable_paths = selected
+            .removable_paths
+            .iter()
+            .map(|path| {
+                if *path == original_runtime_root {
+                    outside_root.clone()
+                } else {
+                    path.clone()
+                }
+            })
+            .collect();
+
+        let err = run_cleanup_report(&report)
+            .expect_err("cleanup inventory must be checked against the persisted record");
+        assert!(err.to_string().contains("cleanup plan"), "got: {err}");
+        assert!(
+            sentinel.exists(),
+            "unowned job-shaped directory must survive"
+        );
+        assert!(
+            jobs_dir_for(&compose).join("11111.json").exists(),
+            "all selected records must be validated before any removal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_keeps_the_canonical_record_when_owned_path_removal_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("older");
+        write_submission_record(&tracked_record(&compose, "22222", 20, "main")).expect("newer");
+        let report = build_cleanup_report(&compose, CleanupMode::AllExceptLatest, false, false)
+            .expect("cleanup report");
+        let evidence_base = metadata_root_for(&compose).join(tracked_paths::RUN_EVIDENCE_DIR_NAME);
+        fs::set_permissions(&evidence_base, fs::Permissions::from_mode(0o500))
+            .expect("make evidence base read-only");
+
+        let error = run_cleanup_report(&report).expect_err("owned path removal must fail");
+        let record_survived = jobs_dir_for(&compose).join("11111.json").exists();
+        fs::set_permissions(&evidence_base, fs::Permissions::from_mode(0o700))
+            .expect("restore evidence base");
+        assert!(error.to_string().contains("remove"), "got: {error:#}");
+        assert!(
+            record_survived,
+            "cleanup must retain the canonical record as its retry authority"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_rejects_a_symlinked_evidence_parent_before_external_deletion() {
+        use std::os::unix::fs::symlink;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("older");
+        write_submission_record(&tracked_record(&compose, "22222", 20, "main")).expect("newer");
+        let report = build_cleanup_report(&compose, CleanupMode::AllExceptLatest, false, false)
+            .expect("cleanup report");
+
+        let evidence_parent =
+            metadata_root_for(&compose).join(tracked_paths::RUN_EVIDENCE_DIR_NAME);
+        let original_evidence = metadata_root_for(&compose).join("evidence-original");
+        fs::rename(&evidence_parent, &original_evidence).expect("move real evidence");
+        let outside_parent = tmpdir.path().join("outside-evidence");
+        let outside_job = outside_parent.join("11111");
+        fs::create_dir_all(&outside_job).expect("outside job");
+        let sentinel = outside_job.join("keep");
+        fs::write(&sentinel, "keep").expect("outside sentinel");
+        symlink(&outside_parent, &evidence_parent).expect("evidence parent symlink");
+
+        let error = run_cleanup_report(&report)
+            .expect_err("a managed evidence-parent symlink must fail closed");
+        assert!(error.to_string().contains("evidence"), "got: {error:#}");
+        assert!(
+            sentinel.exists(),
+            "cleanup must not follow the parent symlink"
+        );
+        assert!(
+            jobs_dir_for(&compose).join("11111.json").exists(),
+            "canonical record must remain retryable"
+        );
+    }
+
+    #[test]
+    fn cleanup_waits_for_the_persistent_evidence_lock_before_any_deletion() {
+        use std::sync::mpsc;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let older = tracked_record(&compose, "11111", 10, "main");
+        write_submission_record(&older).expect("older");
+        write_submission_record(&tracked_record(&compose, "22222", 20, "main")).expect("newer");
+        let runtime_root = runtime_job_root_for_record(&older);
+        fs::create_dir_all(&runtime_root).expect("runtime root");
+        let sentinel = runtime_root.join("keep");
+        fs::write(&sentinel, "keep").expect("runtime sentinel");
+        let report = build_cleanup_report(&compose, CleanupMode::AllExceptLatest, false, false)
+            .expect("cleanup report");
+        let evidence_paths = crate::job::evidence::RunEvidencePaths::for_job(&compose, "11111")
+            .expect("evidence paths");
+        let evidence_guard = crate::secure_io::acquire_flock_strict(
+            &evidence_paths.lock,
+            crate::secure_io::LockKind::Exclusive,
+            Duration::from_secs(1),
+        )
+        .expect("hold evidence lock");
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            started_tx.send(()).expect("cleanup started");
+            done_tx
+                .send(run_cleanup_report(&report))
+                .expect("cleanup result");
+        });
+        started_rx.recv().expect("cleanup started");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "cleanup must wait for the evidence lock"
+        );
+        assert!(
+            sentinel.exists(),
+            "no owned path may be deleted before the evidence lock is acquired"
+        );
+        drop(evidence_guard);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cleanup completed")
+            .expect("cleanup result");
+        cleanup.join().expect("cleanup thread");
+    }
+
+    #[test]
+    fn write_and_direct_remove_reject_unsafe_job_identity() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        let mut record = tracked_record(&compose, "../outside", 10, "main");
+        record.submit_dir = tmpdir.path().to_path_buf();
+
+        let err = write_submission_record(&record).expect_err("unsafe id must not be written");
+        assert!(
+            err.to_string().contains("safe path component"),
+            "got: {err}"
+        );
+        assert!(
+            !metadata_root_for(&compose).join("outside.json").exists(),
+            "an unsafe id must not escape the jobs directory"
+        );
+
+        let sentinel = tmpdir.path().join("outside/sentinel");
+        fs::create_dir_all(sentinel.parent().expect("sentinel parent")).expect("sentinel parent");
+        fs::write(&sentinel, "keep").expect("sentinel");
+        let err = remove_submission_record(&record)
+            .expect_err("unsafe id must be rejected at the destructive boundary");
+        assert!(
+            err.to_string().contains("safe path component"),
+            "got: {err}"
+        );
+        assert!(sentinel.exists(), "outside sentinel must survive");
+    }
+
+    #[test]
+    fn direct_remove_rejects_a_stale_or_fabricated_record_before_deleting_anything() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let original = tracked_record(&compose, "11111", 10, "main");
+        write_submission_record(&original).expect("record");
+        let canonical = update_submission_record(&compose, "11111", |record| {
+            apply_tag_changes(&mut record.tags, &strings(&["canonical"]), &[])
+        })
+        .expect("canonical update");
+
+        let runtime_root = runtime_job_root_for_record(&canonical);
+        fs::create_dir_all(&runtime_root).expect("runtime root");
+        let runtime_sentinel = runtime_root.join("keep");
+        fs::write(&runtime_sentinel, "keep").expect("runtime sentinel");
+        let record_path = jobs_dir_for(&compose).join("11111.json");
+        let evidence_root = crate::tracked_paths::run_evidence_dir_for(&compose, "11111");
+
+        let error = remove_submission_record(&original)
+            .expect_err("a stale caller snapshot must not authorize deletion");
+        assert!(error.to_string().contains("canonical"), "got: {error:#}");
+        assert!(record_path.exists());
+        assert!(evidence_root.exists());
+        assert!(runtime_sentinel.exists());
+
+        let mut fabricated = canonical.clone();
+        fabricated.cache_dir = tmpdir.path().join("fabricated-cache");
+        let fabricated_runtime =
+            crate::tracked_paths::enroot_runtime_job_dir(&fabricated.cache_dir, "11111");
+        fs::create_dir_all(&fabricated_runtime).expect("fabricated runtime");
+        let fabricated_sentinel = fabricated_runtime.join("keep");
+        fs::write(&fabricated_sentinel, "keep").expect("fabricated sentinel");
+        let error = remove_submission_record(&fabricated)
+            .expect_err("a fabricated caller snapshot must not authorize deletion");
+        assert!(error.to_string().contains("canonical"), "got: {error:#}");
+        assert!(record_path.exists());
+        assert!(evidence_root.exists());
+        assert!(runtime_sentinel.exists());
+        assert!(fabricated_sentinel.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_remove_commits_the_record_only_after_owned_paths_are_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let record = tracked_record(&compose, "11111", 10, "main");
+        write_submission_record(&record).expect("record");
+        let record_path = jobs_dir_for(&compose).join("11111.json");
+        let evidence_base = metadata_root_for(&compose).join(tracked_paths::RUN_EVIDENCE_DIR_NAME);
+        fs::set_permissions(&evidence_base, fs::Permissions::from_mode(0o500))
+            .expect("make evidence base read-only");
+
+        let error = remove_submission_record(&record).expect_err("owned path removal must fail");
+        let record_survived = record_path.exists();
+        let latest_survived = latest_record_path_for(&compose).exists();
+        fs::set_permissions(&evidence_base, fs::Permissions::from_mode(0o700))
+            .expect("restore evidence base");
+        assert!(error.to_string().contains("remove"), "got: {error:#}");
+        assert!(record_survived, "canonical record must remain retryable");
+        assert!(latest_survived, "latest pointer must remain retryable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_remove_rejects_a_symlinked_cache_runtime_parent() {
+        use std::os::unix::fs::symlink;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let mut record = tracked_record(&compose, "11111", 10, "main");
+        record.cache_dir = tmpdir.path().join("cache");
+        write_submission_record(&record).expect("record");
+
+        fs::create_dir(&record.cache_dir).expect("cache root");
+        let outside_runtime = tmpdir.path().join("outside-runtime");
+        let outside_job = outside_runtime.join("11111");
+        fs::create_dir_all(&outside_job).expect("outside job");
+        let sentinel = outside_job.join("keep");
+        fs::write(&sentinel, "keep").expect("outside sentinel");
+        symlink(
+            &outside_runtime,
+            record
+                .cache_dir
+                .join(tracked_paths::ENROOT_RUNTIME_DIR_NAME),
+        )
+        .expect("runtime parent symlink");
+
+        let error = remove_submission_record(&record)
+            .expect_err("a managed runtime-parent symlink must fail closed");
+        assert!(error.to_string().contains("runtime"), "got: {error:#}");
+        assert!(
+            sentinel.exists(),
+            "removal must not follow the parent symlink"
+        );
+        assert!(jobs_dir_for(&compose).join("11111.json").exists());
+    }
+
+    #[test]
+    fn direct_remove_waits_for_evidence_lock_before_owned_path_deletion() {
+        use std::sync::mpsc;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let record = tracked_record(&compose, "11111", 10, "main");
+        write_submission_record(&record).expect("record");
+        let runtime_root = runtime_job_root_for_record(&record);
+        fs::create_dir_all(&runtime_root).expect("runtime root");
+        let sentinel = runtime_root.join("keep");
+        fs::write(&sentinel, "keep").expect("runtime sentinel");
+        let evidence_paths = crate::job::evidence::RunEvidencePaths::for_job(&compose, "11111")
+            .expect("evidence paths");
+        let evidence_guard = crate::secure_io::acquire_flock_strict(
+            &evidence_paths.lock,
+            crate::secure_io::LockKind::Exclusive,
+            Duration::from_secs(1),
+        )
+        .expect("hold evidence lock");
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let remove = std::thread::spawn(move || {
+            started_tx.send(()).expect("remove started");
+            done_tx
+                .send(remove_submission_record(&record))
+                .expect("remove result");
+        });
+        started_rx.recv().expect("remove started");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "direct removal must wait for the evidence lock"
+        );
+        assert!(
+            sentinel.exists(),
+            "no owned path may be deleted before the evidence lock is acquired"
+        );
+        drop(evidence_guard);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("remove completed")
+            .expect("remove result");
+        remove.join().expect("remove thread");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_metadata_and_jobs_directory_symlinks_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let metadata_case = tempfile::tempdir().expect("metadata case");
+        let compose = metadata_case.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let outside_metadata = metadata_case.path().join("outside-metadata");
+        fs::create_dir(&outside_metadata).expect("outside metadata");
+        symlink(&outside_metadata, metadata_root_for(&compose)).expect("metadata symlink");
+        let error = write_submission_record(&tracked_record(&compose, "11111", 10, "main"))
+            .expect_err("metadata symlink must be rejected");
+        assert!(
+            error.to_string().contains("real directory"),
+            "got: {error:#}"
+        );
+        assert!(!outside_metadata.join("jobs/11111.json").exists());
+
+        let jobs_case = tempfile::tempdir().expect("jobs case");
+        let compose = jobs_case.path().join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let metadata_root = metadata_root_for(&compose);
+        fs::create_dir(&metadata_root).expect("metadata root");
+        let outside_jobs = jobs_case.path().join("outside-jobs");
+        fs::create_dir(&outside_jobs).expect("outside jobs");
+        symlink(&outside_jobs, jobs_dir_for(&compose)).expect("jobs symlink");
+        let error = write_submission_record(&tracked_record(&compose, "22222", 20, "main"))
+            .expect_err("jobs symlink must be rejected");
+        assert!(
+            error.to_string().contains("real directory"),
+            "got: {error:#}"
+        );
+        assert!(!outside_jobs.join("22222.json").exists());
+    }
+
+    #[test]
+    fn concurrent_record_updates_are_serialized_without_lost_changes() {
+        use std::sync::mpsc;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let compose = tmpdir.path().join("compose.yaml");
+        write_submission_record(&tracked_record(&compose, "11111", 10, "main")).expect("record");
+
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let first_compose = compose.clone();
+        let first = std::thread::spawn(move || {
+            update_submission_record(&first_compose, "11111", |record| {
+                first_entered_tx.send(()).expect("signal first entered");
+                release_first_rx.recv().expect("release first");
+                apply_tag_changes(&mut record.tags, &strings(&["first"]), &[])
+            })
+            .expect("first update");
+        });
+        first_entered_rx.recv().expect("first mutation entered");
+
+        let (second_done_tx, second_done_rx) = mpsc::channel();
+        let second_compose = compose.clone();
+        let second = std::thread::spawn(move || {
+            update_submission_record(&second_compose, "11111", |record| {
+                apply_tag_changes(&mut record.tags, &strings(&["second"]), &[])
+            })
+            .expect("second update");
+            second_done_tx.send(()).expect("signal second done");
+        });
+
+        let second_completed_while_first_was_open = second_done_rx
+            .recv_timeout(Duration::from_millis(250))
+            .is_ok();
+        release_first_tx.send(()).expect("release first update");
+        first.join().expect("first thread");
+        second.join().expect("second thread");
+
+        assert!(
+            !second_completed_while_first_was_open,
+            "the second read-mutate-write must wait for the first transaction"
+        );
+        let record = load_submission_record(&compose, Some("11111")).expect("updated record");
+        assert_eq!(record.tags, strings(&["first", "second"]));
+        let latest = load_submission_record(&compose, None).expect("latest pointer");
+        assert_eq!(latest.tags, record.tags);
     }
 }

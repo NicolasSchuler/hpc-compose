@@ -201,6 +201,12 @@ fn watch_with_fallback(
         }
         WatchMode::Auto => {}
     }
+    if watch_ui::watch_ui_disabled() {
+        hpc_compose::diagnostics::warn(
+            "watch UI disabled by HPC_COMPOSE_DISABLE_WATCH_UI; falling back to line mode",
+        );
+        return watch_submission(record, service, options, lines);
+    }
     if watch_ui::can_use_watch_ui() {
         match watch_ui::run_watch_ui(record, options, service, lines, hold_on_exit, prefs) {
             Ok(outcome) => return Ok(outcome),
@@ -1254,11 +1260,13 @@ where
                         apptainer_bin: context.binaries.apptainer.value.clone(),
                         singularity_bin: context.binaries.singularity.value.clone(),
                         sbatch_bin: context.binaries.sbatch.value.clone(),
+                        scancel_bin: context.binaries.scancel.value.clone(),
                         srun_bin: context.binaries.srun.value.clone(),
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: false,
                         skip_prepare,
                         fs_probes: false,
+                        fs_probe_timeout: PreflightOptions::default().fs_probe_timeout,
                         cluster_profile: None,
                     },
                 ))
@@ -1703,11 +1711,13 @@ where
                         apptainer_bin: context.binaries.apptainer.value.clone(),
                         singularity_bin: context.binaries.singularity.value.clone(),
                         sbatch_bin: context.binaries.sbatch.value.clone(),
+                        scancel_bin: context.binaries.scancel.value.clone(),
                         srun_bin: context.binaries.srun.value.clone(),
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: true,
                         skip_prepare,
                         fs_probes: false,
+                        fs_probe_timeout: PreflightOptions::default().fs_probe_timeout,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))
@@ -2027,11 +2037,13 @@ pub(crate) fn launch(
                         apptainer_bin: context.binaries.apptainer.value.clone(),
                         singularity_bin: context.binaries.singularity.value.clone(),
                         sbatch_bin: context.binaries.sbatch.value.clone(),
+                        scancel_bin: context.binaries.scancel.value.clone(),
                         srun_bin: context.binaries.srun.value.clone(),
                         scontrol_bin: context.binaries.scontrol.value.clone(),
                         require_submit_tools: !local,
                         skip_prepare,
                         fs_probes: false,
+                        fs_probe_timeout: PreflightOptions::default().fs_probe_timeout,
                         cluster_profile: cluster_profile.clone(),
                     },
                 ))

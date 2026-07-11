@@ -1483,6 +1483,25 @@ fn plan_rejects_service_nodes_mismatch_and_mpi_expected_rank_mismatch() {
 }
 
 #[test]
+fn rank_geometry_overflow_is_reported_instead_of_panicking_or_wrapping() {
+    let result = std::panic::catch_unwind(|| {
+        resolved_rank_count(&ServicePlacement {
+            nodes: u32::MAX,
+            ntasks: None,
+            ntasks_per_node: Some(2),
+            ..ServicePlacement::default()
+        })
+    });
+
+    let result = result.expect("rank geometry validation must not panic");
+    let err = result.expect_err("overflowing rank geometry must be rejected");
+    assert!(
+        err.to_string().contains("rank count") && err.to_string().contains("exceeds"),
+        "{err:#}"
+    );
+}
+
+#[test]
 fn plan_normalizes_host_mpi_bind_paths_env_and_rejects_backend_prepare_conflicts() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = tmpdir.path().join("compose.yaml");
