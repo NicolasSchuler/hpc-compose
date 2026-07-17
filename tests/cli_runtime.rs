@@ -10217,9 +10217,13 @@ services:
         ],
     );
     assert_failure(&output);
-    assert!(stderr_text(&output).contains(
-        "--local currently supports only runtime.backend=pyxis or runtime.backend=apptainer"
-    ));
+    let stderr = stderr_text(&output);
+    assert!(
+        stderr.contains(
+            "--local currently supports only runtime.backend=pyxis or runtime.backend=apptainer"
+        ),
+        "unexpected stderr:\n{stderr}"
+    );
 }
 
 fn write_fake_devcluster_checkout(tmpdir: &Path, exec_status: i32) -> PathBuf {
