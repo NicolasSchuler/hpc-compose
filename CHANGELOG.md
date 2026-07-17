@@ -26,6 +26,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 - Kept `AGENTS.md` typo and link checks consistent between the local
   documentation gate and pull-request CI.
+- Restored Linux release verification by isolating watchdog status coverage
+  from temporary-cache preflight checks and making diagnostic assertions
+  insensitive to renderer line wrapping. CI now surfaces per-test failure
+  details as check annotations.
 
 ## [0.2.2] - 2026-07-11
 
