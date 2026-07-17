@@ -21,7 +21,7 @@ just release-check
 just ci
 ```
 
-The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`actionlint`, `mdbook`, `lychee`, `pa11y-ci`, `typos`, `markdownlint-cli2`, `shellcheck`, `cargo-deny`, and `cargo-llvm-cov`) to be installed locally. `just bootstrap` installs everything cargo/npm-installable — the pinned docs tools (via `just bootstrap-docs-tools`: `mdbook`, `lychee`, `typos`, `pa11y-ci`, `markdownlint-cli2`) plus the pinned `cargo-deny` and `cargo-llvm-cov` — and prints package-manager hints for `actionlint` and `shellcheck`, the only tools you install through your platform package manager.
+The `just` recipes mirror the main CI gates. They expect the same external QA tools used in CI (`actionlint`, `mdbook`, `lychee`, `pa11y-ci`, `typos`, `markdownlint-cli2`, `shellcheck`, `cargo-deny`, `cargo-llvm-cov`, and `cargo-sweep`) to be installed locally. `just bootstrap` installs everything cargo/npm-installable — the pinned docs tools (via `just bootstrap-docs-tools`: `mdbook`, `lychee`, `typos`, `pa11y-ci`, `markdownlint-cli2`) plus the pinned Cargo subcommands — and prints package-manager hints for `actionlint` and `shellcheck`, the only tools you install through your platform package manager.
 
 Quality gates:
 
@@ -37,11 +37,38 @@ Equivalent raw commands:
 
 ```bash
 actionlint -color
-cargo test --locked
 cargo fmt --all -- --check
-cargo clippy --all-targets --locked -- -D warnings
+CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --locked -- -D warnings
+CARGO_INCREMENTAL=0 cargo test --workspace --locked
 mdbook build docs
 cargo run --locked --features manpage-bin --bin gen-manpages -- --check
+```
+
+Focused commands such as `cargo check`, a single filtered test, or a normal development build keep Cargo's default incremental compilation. The comprehensive `just` and CI gates set `CARGO_INCREMENTAL=0` because their artifacts are unlikely to be reused interactively.
+
+## Build artifact budget
+
+The development profile keeps line tables for useful panic source locations without forcing a cross-platform split-debug format. To inspect the main artifact categories before changing the policy:
+
+```bash
+du -sh target/debug/deps target/debug/incremental target/debug/build
+cargo tree -d
+```
+
+After CI or another comprehensive local gate, preview and apply the default 8 GB cache budget with:
+
+```bash
+just cache-sweep-preview
+just cache-sweep
+```
+
+`just ci` applies the sweep only after all gates pass. Before adopting a different budget, preview it explicitly, for example `just cache-sweep-preview 10GB`; then apply it with `just cache-sweep 3 10GB`. Do not sweep after focused builds where the artifacts are likely to be reused.
+
+Integration-test source files under `tests/` are registered through the explicit targets in `Cargo.toml` and the shared harnesses under `tests/harnesses/`. Add each new source to exactly one harness unless it needs process isolation; `release_metadata` enforces both that rule and the nine-binary budget. Run a grouped source with its module filter, for example:
+
+```bash
+cargo test --locked --test cli_spec
+cargo test --locked --test project_contracts docs_examples::
 ```
 
 Release/distribution helpers:
@@ -59,7 +86,7 @@ python3 scripts/update_homebrew_formula.py \
 - Prefer small, coherent changes over broad refactors.
 - Add or update tests when parser, planner, prepare, render, cache, or tracked-job behavior changes.
 - If a user-facing workflow changes, update the relevant docs in `README.md`, `docs/src/`, and `examples/` together.
-- In docs, describe deliberate limits as present-tense design choices, not version-coupled "v1" limitations. Give every `docs/src/` page a `## Related Docs` (or `## Read Next`) footer, and use `<job-id>` for tracked-job placeholders. `cargo test --test docs_examples` enforces these conventions.
+- In docs, describe deliberate limits as present-tense design choices, not version-coupled "v1" limitations. Give every `docs/src/` page a `## Related Docs` (or `## Read Next`) footer, and use `<job-id>` for tracked-job placeholders. `cargo test --test project_contracts docs_examples::` enforces these conventions.
 - When release-facing docs or CLI help change, regenerate checked-in manpages with `cargo run --features manpage-bin --bin gen-manpages` and keep `tests/release_metadata.rs` passing.
 
 ## Examples

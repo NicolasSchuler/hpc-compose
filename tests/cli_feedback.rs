@@ -1,7 +1,5 @@
-mod support;
-
+use crate::support::*;
 use serde_json::Value;
-use support::*;
 
 #[test]
 fn feedback_text_prints_local_report_and_issue_url() {

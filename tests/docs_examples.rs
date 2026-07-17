@@ -429,7 +429,9 @@ fn rustdoc_gate_denies_documentation_warnings() {
         "CI must deny rustdoc warnings with RUSTDOCFLAGS"
     );
     assert!(
-        justfile.contains("RUSTDOCFLAGS=\"-D warnings\" cargo doc --locked --no-deps"),
+        justfile.contains(
+            "CARGO_INCREMENTAL=0 RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --locked --no-deps"
+        ),
         "local docs-check must deny rustdoc warnings with RUSTDOCFLAGS"
     );
 }

@@ -7,6 +7,26 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-17
+
+### Changed
+
+- Consolidated integration coverage into nine explicit test binaries backed by
+  shared harnesses, while retaining isolated targets for timeout-sensitive and
+  process-global suites. A release-metadata guard now requires every top-level
+  integration-test source to be registered exactly once within that budget.
+- Comprehensive local and CI gates now use workspace-aware Cargo commands with
+  incremental compilation disabled, while focused development commands keep
+  incremental builds. Local artifact maintenance adds a required `cargo-sweep`
+  preview and a default 8 GB cache budget.
+- Refreshed contributor and architecture guidance for the shared test harnesses,
+  build artifact policy, repository structure, and supported allocation scope.
+
+### Fixed
+
+- Kept `AGENTS.md` typo and link checks consistent between the local
+  documentation gate and pull-request CI.
+
 ## [0.2.2] - 2026-07-11
 
 ### Added

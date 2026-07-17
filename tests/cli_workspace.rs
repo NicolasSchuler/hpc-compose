@@ -1,10 +1,8 @@
-mod support;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::support::*;
 use serde_json::Value;
-use support::*;
 
 const WS_NAME: &str = "wstest";
 

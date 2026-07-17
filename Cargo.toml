@@ -1,9 +1,10 @@
 [package]
 name = "hpc-compose"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.88"
 autobins = false
+autotests = false
 default-run = "hpc-compose"
 license = "MIT"
 repository = "https://github.com/NicolasSchuler/hpc-compose"
@@ -26,6 +27,42 @@ path = "src/main.rs"
 name = "gen-manpages"
 path = "src/bin/gen-manpages.rs"
 required-features = ["manpage-bin"]
+
+[[test]]
+name = "cli_authoring"
+path = "tests/harnesses/cli_authoring.rs"
+
+[[test]]
+name = "cli_execution"
+path = "tests/harnesses/cli_execution.rs"
+
+[[test]]
+name = "cli_runtime"
+path = "tests/cli_runtime.rs"
+
+[[test]]
+name = "cli_spec"
+path = "tests/cli_spec.rs"
+
+[[test]]
+name = "cli_state"
+path = "tests/harnesses/cli_state.rs"
+
+[[test]]
+name = "cli_sweep"
+path = "tests/cli_sweep.rs"
+
+[[test]]
+name = "project_contracts"
+path = "tests/harnesses/project_contracts.rs"
+
+[[test]]
+name = "public_api"
+path = "tests/public_api.rs"
+
+[[test]]
+name = "release_metadata"
+path = "tests/release_metadata.rs"
 
 [[bench]]
 name = "plan_render"

@@ -8,6 +8,7 @@ TYPOS_VERSION := "1.28.4"
 MARKDOWNLINT_CLI2_VERSION := "0.14.0"
 CARGO_DENY_VERSION := "0.19.9"
 CARGO_LLVM_COV_VERSION := "0.8.7"
+CARGO_SWEEP_VERSION := "0.8.0"
 
 _require-tools *tools:
     @missing=0; for tool in {{tools}}; do if ! command -v "$tool" >/dev/null 2>&1; then echo "missing required tool: $tool" >&2; missing=1; fi; done; exit "$missing"
@@ -16,6 +17,9 @@ _require-cargo-subcommands:
     @cargo deny --version >/dev/null 2>&1 || { echo "missing required cargo subcommand: cargo-deny" >&2; exit 1; }
     @cargo llvm-cov --version >/dev/null 2>&1 || { echo "missing required cargo subcommand: cargo-llvm-cov" >&2; exit 1; }
 
+_require-cargo-sweep:
+    @cargo sweep --version >/dev/null 2>&1 || { echo "missing required cargo subcommand: cargo-sweep" >&2; exit 1; }
+
 bootstrap-docs-tools: (_require-tools "cargo" "npm")
     cargo install mdbook --locked --version "{{MDBOOK_VERSION}}"
     cargo install lychee --locked --version "{{LYCHEE_VERSION}}"
@@ -23,11 +27,13 @@ bootstrap-docs-tools: (_require-tools "cargo" "npm")
     npm install --global "pa11y-ci@{{PA11Y_CI_VERSION}}" "markdownlint-cli2@{{MARKDOWNLINT_CLI2_VERSION}}"
 
 # Install every cargo/npm-installable tool `just ci` needs: the docs tools plus
-# the merge-gating cargo subcommands (cargo-deny, cargo-llvm-cov). Prints hints
+# the merge-gating cargo subcommands (cargo-deny, cargo-llvm-cov) and the local
+# artifact-budget tool (cargo-sweep). Prints hints
 # for the two system tools you install via your package manager.
 bootstrap: bootstrap-docs-tools
     cargo install cargo-deny --locked --version "{{CARGO_DENY_VERSION}}"
     cargo install cargo-llvm-cov --locked --version "{{CARGO_LLVM_COV_VERSION}}"
+    cargo install cargo-sweep --locked --version "{{CARGO_SWEEP_VERSION}}"
     @echo "Next, install actionlint and shellcheck via your package manager:"
     @echo "  macOS:  brew install actionlint shellcheck"
     @echo "  Linux:  see https://github.com/rhysd/actionlint and https://www.shellcheck.net"
@@ -46,35 +52,31 @@ bump-version VERSION:
 clean:
     rm -rf target .tmp coverage htmlcov tarpaulin-report.html lcov.info *.profraw *.profdata
 
-# Trim stale build artifacts without a full `cargo clean` (keeps the warm debug cache).
-# Drops the duplicate coverage/mutants target trees unconditionally (a `cargo llvm-cov`
-# run rebuilds the whole workspace into target/llvm-cov-target), then sweeps main-tree
-# artifacts untouched for >N days via cargo-sweep when it is installed.
-cache-sweep days="3":
+# Preview the size-budget policy before changing its default or applying a new budget.
+cache-sweep-preview max_size="8GB": _require-cargo-sweep
+    cargo sweep --dry-run --maxsize {{max_size}}
+
+# Trim stale build artifacts without a full `cargo clean` (keeps a bounded warm
+# debug cache). Run after comprehensive gates, not focused builds. Coverage and
+# mutants use disposable duplicate target trees; the main tree loses artifacts
+# older than N days first, then its oldest artifacts until it fits max_size.
+cache-sweep days="3" max_size="8GB": _require-cargo-sweep
     rm -rf target/llvm-cov-target target/mutants
-    @if command -v cargo-sweep >/dev/null 2>&1; then \
-        cargo sweep --time {{days}}; \
-    else \
-        echo "cargo-sweep not installed; removed duplicate trees only."; \
-        echo "Install with: cargo install cargo-sweep"; \
-    fi
+    cargo sweep --time {{days}}
+    cargo sweep --maxsize {{max_size}}
 
 # Drop artifacts not built by a currently-installed toolchain. Run after `rustup update`,
 # which orphans the entire previous toolchain's artifacts that `--time` alone won't catch.
-cache-sweep-installed:
-    @if command -v cargo-sweep >/dev/null 2>&1; then \
-        cargo sweep --installed; \
-    else \
-        echo "cargo-sweep not installed. Install with: cargo install cargo-sweep"; \
-    fi
+cache-sweep-installed: _require-cargo-sweep
+    cargo sweep --installed
 
 workflow-check: (_require-tools "actionlint")
     actionlint -color
 
 check: workflow-check
     cargo fmt --all -- --check
-    cargo clippy --all-targets --locked -- -D warnings
-    cargo test --locked
+    CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --locked -- -D warnings
+    CARGO_INCREMENTAL=0 cargo test --workspace --locked
 
 docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "typos" "markdownlint-cli2" "curl" "python3")
     python3 scripts/generate_site_guides.py --check
@@ -85,19 +87,19 @@ docs-check: (_require-tools "mdbook" "lychee" "pa11y-ci" "typos" "markdownlint-c
     mdbook build docs
     python3 scripts/generate_agent_assets.py --site-dir target/mdbook
     python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-    cargo run --locked --features manpage-bin --bin gen-manpages -- --check
-    typos docs/src docs/brand docs/plans/2026-07-feature-brainstorm.md examples dev-cluster/README.md skills/hpc-compose llms.txt README.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md
+    CARGO_INCREMENTAL=0 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps
+    CARGO_INCREMENTAL=0 cargo run --locked --features manpage-bin --bin gen-manpages -- --check
+    typos docs/src docs/brand docs/plans/2026-07-feature-brainstorm.md examples dev-cluster/README.md skills/hpc-compose llms.txt README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md
     markdownlint-cli2
-    shopt -s globstar nullglob; lychee --no-progress --include-fragments=anchor-only --fallback-extensions md --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' --exclude '^https://nicolasschuler\.github\.io/hpc-compose/(raw/|llms-ctx(-full)?\.txt$|agent-command-policy(-v[0-9.]+)?\.json$|schema/)' --exclude '^https://nicolasschuler\.github\.io/hpc-compose/[^#]+\.html#' --exclude-path 'target/mdbook/404\.html$' README.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md llms.txt dev-cluster/README.md docs/brand/README.md docs/plans/2026-07-feature-brainstorm.md docs/src/**/*.md examples/**/*.md skills/hpc-compose/**/*.md target/mdbook/**/*.html
+    shopt -s globstar nullglob; lychee --no-progress --include-fragments=anchor-only --fallback-extensions md --exclude '^https://github\.com/NicolasSchuler/hpc-compose/edit/main/' --exclude '^https://nicolasschuler\.github\.io/hpc-compose/(raw/|llms-ctx(-full)?\.txt$|agent-command-policy(-v[0-9.]+)?\.json$|schema/)' --exclude '^https://nicolasschuler\.github\.io/hpc-compose/[^#]+\.html#' --exclude-path 'target/mdbook/404\.html$' README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md llms.txt dev-cluster/README.md docs/brand/README.md docs/plans/2026-07-feature-brainstorm.md docs/src/**/*.md examples/**/*.md skills/hpc-compose/**/*.md target/mdbook/**/*.html
     python3 scripts/gen_pa11y_urls.py --output target/pa11y-ci.json
     python3 -m http.server 3000 --directory target/mdbook >/tmp/hpc-compose-docs-http.log 2>&1 & server_pid=$!; trap 'kill "$server_pid"' EXIT; for _ in $(seq 1 30); do if curl -fsS http://127.0.0.1:3000/ >/dev/null; then break; fi; sleep 1; done; python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook --base-url http://127.0.0.1:3000; pa11y-ci --config target/pa11y-ci.json
 
 examples-check: (_require-tools "shellcheck")
-    cargo build --locked
-    for f in examples/*.yaml; do echo "Validating $f"; env -u CACHE_DIR cargo run --locked -- validate -f "$f"; done
+    CARGO_INCREMENTAL=0 cargo build --workspace --locked
+    for f in examples/*.yaml; do echo "Validating $f"; env -u CACHE_DIR CARGO_INCREMENTAL=0 cargo run --locked -- validate -f "$f"; done
     shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_collect_evidence.sh scripts/devcluster_case.sh scripts/devcluster_local_case.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh scripts/devcluster_otp_e2e.sh scripts/remote_gpu_e2e.sh dev-cluster/otp-sim.sh
-    tmpdir="$(mktemp -d)"; trap 'rm -rf "$tmpdir"' EXIT; for f in examples/*.yaml; do echo "Shellchecking rendered $f"; out="$tmpdir/$(basename "$f" .yaml).sbatch"; env -u CACHE_DIR cargo run --locked -- render -f "$f" --output "$out"; shellcheck -e SC2034 -x -s bash "$out"; done
+    tmpdir="$(mktemp -d)"; trap 'rm -rf "$tmpdir"' EXIT; for f in examples/*.yaml; do echo "Shellchecking rendered $f"; out="$tmpdir/$(basename "$f" .yaml).sbatch"; env -u CACHE_DIR CARGO_INCREMENTAL=0 cargo run --locked -- render -f "$f" --output "$out"; shellcheck -e SC2034 -x -s bash "$out"; done
 
 # Boot the local single-node Slurm dev cluster and run the real
 # up -> sbatch -> slurmd -> sacct path end to end against every spec under
@@ -147,9 +149,9 @@ fuzz-check:
     cargo fuzz check spec_parser
 
 release-check: _require-cargo-subcommands
-    cargo test --locked --test release_metadata
+    CARGO_INCREMENTAL=0 cargo test --workspace --locked --test release_metadata
     cargo deny check
-    cargo llvm-cov --workspace --locked --no-report
+    CARGO_INCREMENTAL=0 cargo llvm-cov --workspace --locked --no-report
     # Broad core-logic gate (mirrors the CI Coverage job): excludes presentation
     # surfaces so a regression in core planner/runtime/job logic trips here first.
     cargo llvm-cov report --json --summary-only --locked --ignore-filename-regex 'commands/|output/mod\.rs|watch_ui\.rs|term\.rs|progress\.rs|manpages\.rs|main\.rs|cli/|job/model\.rs' --fail-under-lines 92 --fail-under-regions 91 --fail-under-functions 88

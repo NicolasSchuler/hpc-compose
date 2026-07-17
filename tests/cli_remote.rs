@@ -6,11 +6,9 @@
 //! that follow-ups forward the right delegated command line, and that a failing
 //! ssh surfaces an actionable error instead of a silent success.
 
-mod support;
-
 use std::fs;
 
-use support::*;
+use crate::support::*;
 
 /// Minimal compose spec; the remote path never parses services beyond volume
 /// checks, so a single trivial service is enough.

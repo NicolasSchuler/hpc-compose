@@ -1,5 +1,3 @@
-mod support;
-
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -8,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use support::bin_path;
+use crate::support::bin_path;
 
 #[test]
 fn lsp_stdio_publishes_diagnostics_for_did_open() {

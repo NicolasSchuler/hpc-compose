@@ -9,11 +9,9 @@
 //! actually runs inside the allocation, and (3) that a nonzero salloc status is
 //! propagated verbatim as the CLI's own exit code.
 
-mod support;
-
 use std::fs;
 
-use support::*;
+use crate::support::*;
 
 /// Compose file with a rich `x-slurm` resource block so we can assert the full
 /// set of derived `salloc` flags. `submit_args` carries an unmodeled

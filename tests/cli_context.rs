@@ -1,10 +1,8 @@
-mod support;
-
 use std::fs;
 
+use crate::support::*;
 use hpc_compose::context::Settings;
 use serde_json::Value;
-use support::*;
 
 fn write_profile_settings(
     root: &std::path::Path,

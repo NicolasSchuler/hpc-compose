@@ -1,9 +1,7 @@
-mod support;
-
 use std::fs;
 
+use crate::support::*;
 use serde_json::Value;
-use support::*;
 
 #[test]
 fn inspect_json_preflight_json_and_init_cover_new_modes() {

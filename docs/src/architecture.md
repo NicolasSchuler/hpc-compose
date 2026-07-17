@@ -63,13 +63,16 @@ The library crate owns the core staged pipeline. The binary entrypoint delegates
 ## Contributor commands
 
 ```bash
-cargo test
+CARGO_INCREMENTAL=0 cargo test --workspace --locked
 cargo test --test cli_runtime
 cargo test --test release_metadata
+cargo test --test cli_spec
 cargo doc --no-deps
 mdbook build docs
 cargo run --features manpage-bin --bin gen-manpages -- --check
 ```
+
+The full suite uses nine explicit integration-test binaries. Source suites are grouped by the harnesses in `tests/harnesses/`; `cli_spec` stays separate because its timeout probes contend with other CLI suites, and `public_api` remains isolated because it temporarily changes the process working directory.
 
 ## Coverage Notes
 

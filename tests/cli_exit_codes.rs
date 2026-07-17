@@ -7,9 +7,7 @@
 //! - `4` (lint findings): `cli_spec.rs` (the opinionated-findings lint test).
 //! - child pass-through: `cli_exec.rs` (a child's status is surfaced verbatim).
 
-mod support;
-
-use support::*;
+use crate::support::*;
 
 /// An invalid spec is a validation error: code 2.
 #[test]

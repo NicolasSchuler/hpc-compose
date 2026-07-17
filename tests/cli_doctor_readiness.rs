@@ -1,12 +1,10 @@
-mod support;
-
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
+use crate::support::*;
 use serde_json::Value;
-use support::*;
 
 fn write_compose(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
     let path = dir.join("compose.yaml");

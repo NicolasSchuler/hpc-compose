@@ -114,11 +114,101 @@ fn workflow_files() -> Vec<PathBuf> {
     files
 }
 
+fn top_level_integration_test_sources() -> Vec<String> {
+    let mut files = fs::read_dir(repo_root().join("tests"))
+        .expect("read tests directory")
+        .map(|entry| entry.expect("test entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .expect("UTF-8 test source name")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
 fn is_sha_pinned_action_reference(reference: &str) -> bool {
     let Some((_, revision)) = reference.rsplit_once('@') else {
         return false;
     };
     revision.len() == 40 && revision.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+#[test]
+fn integration_test_sources_are_registered_once_within_binary_budget() {
+    let manifest = cargo_manifest();
+    assert_eq!(
+        manifest["package"]
+            .get("autotests")
+            .and_then(Value::as_bool),
+        Some(false),
+        "automatic integration-test discovery must stay disabled"
+    );
+
+    let sources = top_level_integration_test_sources();
+    let targets = manifest["test"].as_array().expect("[[test]] targets");
+    assert!(
+        targets.len() <= 9,
+        "integration-test binary budget exceeded: found {} explicit targets; group new suites in an existing harness unless they require process isolation",
+        targets.len()
+    );
+
+    let mut owners = sources
+        .iter()
+        .cloned()
+        .map(|source| (source, Vec::<String>::new()))
+        .collect::<BTreeMap<_, _>>();
+
+    for target in targets {
+        let target = target.as_table().expect("[[test]] target table");
+        let name = target["name"].as_str().expect("test target name");
+        let relative_path = Path::new(target["path"].as_str().expect("test target path"));
+        let absolute_path = repo_root().join(relative_path);
+        assert!(
+            absolute_path.is_file(),
+            "test target {name} points to missing path {}",
+            relative_path.display()
+        );
+
+        if relative_path.parent() == Some(Path::new("tests")) {
+            let source = relative_path
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .expect("UTF-8 direct test source");
+            owners
+                .get_mut(source)
+                .unwrap_or_else(|| panic!("test target {name} uses unexpected source {source}"))
+                .push(name.to_string());
+            continue;
+        }
+
+        assert_eq!(
+            relative_path.parent(),
+            Some(Path::new("tests/harnesses")),
+            "test target {name} should use a top-level source or a shared harness"
+        );
+        let harness = fs::read_to_string(&absolute_path).expect("read test harness");
+        for source in &sources {
+            let marker = format!("#[path = \"../{source}\"]");
+            for _ in harness.match_indices(&marker) {
+                owners
+                    .get_mut(source)
+                    .expect("known integration source")
+                    .push(name.to_string());
+            }
+        }
+    }
+
+    for (source, source_owners) in owners {
+        assert_eq!(
+            source_owners.len(),
+            1,
+            "tests/{source} must be referenced exactly once, found owners {source_owners:?}"
+        );
+    }
 }
 
 fn has_deb_asset(assets: &[Value], source: &str, dest: &str, mode: &str) -> bool {
@@ -852,6 +942,30 @@ fn ci_docs_qa_tools_are_version_pinned() {
             && workflow.contains("markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"),
         "CI should pin markdownlint-cli2 so markdown lint remains reproducible"
     );
+}
+
+#[test]
+fn ci_docs_qa_covers_agent_guidance() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    for (step, next_step) in [
+        ("Spell check docs", "Lint markdown"),
+        ("Check docs links", "Check docs accessibility"),
+    ] {
+        let marker = format!("- name: {step}");
+        let next_marker = format!("- name: {next_step}");
+        let block = workflow
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("CI should define the {step} step"))
+            .1
+            .split_once(&next_marker)
+            .unwrap_or_else(|| panic!("CI should define {next_step} after {step}"))
+            .0;
+        assert!(
+            block.contains("AGENTS.md"),
+            "CI {step} must include AGENTS.md so PR checks match the local docs gate"
+        );
+    }
 }
 
 #[test]

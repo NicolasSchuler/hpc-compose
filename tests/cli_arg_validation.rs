@@ -10,9 +10,7 @@
 //! All of these fire during argument parsing, before any file access, so no
 //! compose fixture or fake tooling is required.
 
-mod support;
-
-use support::*;
+use crate::support::*;
 
 fn arg_error(args: &[&str]) -> String {
     let tmp = tempfile::tempdir().expect("tmpdir");

@@ -1,9 +1,7 @@
-mod support;
-
 use std::fs;
 
+use crate::support::*;
 use serde_json::Value;
-use support::*;
 
 #[test]
 fn germinate_dry_run_renders_minimized_canary_script() {

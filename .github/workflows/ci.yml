@@ -14,6 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # CI jobs are one-shot builds; keep incremental compilation available for
+  # developers' focused local commands instead of caching CI-only state.
+  CARGO_INCREMENTAL: "0"
   MDBOOK_VERSION: "0.5.2"
   LYCHEE_VERSION: "0.23.0"
   PA11Y_CI_VERSION: "4.0.1"
@@ -95,13 +98,13 @@ jobs:
           python3 scripts/generate_agent_assets.py --check --site-dir target/mdbook
 
       - name: Spell check docs
-        run: typos docs/src docs/brand docs/plans/2026-07-feature-brainstorm.md examples dev-cluster/README.md skills/hpc-compose llms.txt README.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md
+        run: typos docs/src docs/brand docs/plans/2026-07-feature-brainstorm.md examples dev-cluster/README.md skills/hpc-compose llms.txt README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md
 
       - name: Lint markdown
         run: markdownlint-cli2
 
       - name: Build rustdoc
-        run: cargo doc --locked --no-deps
+        run: cargo doc --workspace --locked --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -120,7 +123,7 @@ jobs:
             --exclude '^https://nicolasschuler\.github\.io/hpc-compose/(raw/|llms-ctx(-full)?\.txt$|agent-command-policy(-v[0-9.]+)?\.json$|schema/)' \
             --exclude '^https://nicolasschuler\.github\.io/hpc-compose/[^#]+\.html#' \
             --exclude-path 'target/mdbook/404\.html$' \
-            README.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md llms.txt dev-cluster/README.md docs/brand/README.md docs/plans/2026-07-feature-brainstorm.md docs/src/**/*.md examples/**/*.md skills/hpc-compose/**/*.md target/mdbook/**/*.html
+            README.md AGENTS.md CHANGELOG.md CONTRIBUTING.md GOVERNANCE.md SECURITY.md CODE_OF_CONDUCT.md llms.txt dev-cluster/README.md docs/brand/README.md docs/plans/2026-07-feature-brainstorm.md docs/src/**/*.md examples/**/*.md skills/hpc-compose/**/*.md target/mdbook/**/*.html
 
       - name: Check docs accessibility
         shell: bash
@@ -175,7 +178,7 @@ jobs:
           cache-bin: false
 
       - name: Run clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   msrv:
     name: MSRV
@@ -193,7 +196,7 @@ jobs:
           cache-bin: false
 
       - name: Build with MSRV toolchain
-        run: cargo build --locked
+        run: cargo build --workspace --locked
 
   test:
     name: Test
@@ -211,7 +214,7 @@ jobs:
           cache-bin: false
 
       - name: Run test suite
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
       - name: Smoke test cargo install surface
         shell: bash
@@ -225,7 +228,7 @@ jobs:
 
       - name: Validate all shipped examples
         run: |
-          cargo build --locked
+          cargo build --workspace --locked
           for f in examples/*.yaml; do
             echo "Validating $f"
             env -u CACHE_DIR cargo run -- validate -f "$f"
@@ -257,7 +260,7 @@ jobs:
           set -euo pipefail
           shellcheck install.sh scripts/cluster_smoke.sh scripts/devcluster.sh scripts/devcluster_collect_evidence.sh scripts/devcluster_e2e.sh scripts/devcluster_remote_e2e.sh scripts/devcluster_otp_e2e.sh dev-cluster/otp-sim.sh
 
-          cargo build --locked
+          cargo build --workspace --locked
           tmpdir="$(mktemp -d)"
           trap 'rm -rf "$tmpdir"' EXIT
           for f in examples/*.yaml; do
@@ -287,7 +290,7 @@ jobs:
           cache-bin: false
 
       - name: Run authoring-focused tests
-        run: cargo test --locked --test cli_context --test cli_init --test cli_spec --test public_api --test release_metadata
+        run: cargo test --workspace --locked --test cli_authoring --test cli_spec --test public_api --test release_metadata
 
       - name: Smoke test authoring commands
         shell: bash
@@ -314,7 +317,7 @@ jobs:
           cache-bin: false
 
       - name: Run authoring-focused tests
-        run: cargo test --locked --test cli_context --test cli_init --test cli_spec --test public_api --test release_metadata
+        run: cargo test --workspace --locked --test cli_authoring --test cli_spec --test public_api --test release_metadata
 
       - name: Smoke test authoring commands
         shell: bash

@@ -1,9 +1,7 @@
-mod support;
-
 use std::fs;
 
+use crate::support::*;
 use serde_json::Value;
-use support::*;
 
 #[test]
 fn prepare_rejects_removed_force_alias() {

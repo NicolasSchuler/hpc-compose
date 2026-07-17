@@ -1,14 +1,12 @@
-mod support;
-
 use std::fs;
 
+use crate::support::*;
 use hpc_compose::job::{
     SubmissionKind, SubmissionRecordBuildOptions, apply_tag_changes, build_submission_record,
     build_submission_record_with_options, jobs_dir_for, latest_record_path_for,
     load_submission_record, update_submission_record, write_submission_record,
 };
 use serde_json::Value;
-use support::*;
 
 fn write_record(
     compose: &std::path::Path,

@@ -1,14 +1,12 @@
-mod support;
-
 use std::fs;
 use std::time::Duration;
 
+use crate::support::*;
 use hpc_compose::job::{
     SubmissionBackend, build_submission_record_with_backend, load_submission_record,
     write_submission_record,
 };
 use serde_json::Value;
-use support::*;
 
 #[test]
 fn test_command_requires_explicit_execution_mode() {

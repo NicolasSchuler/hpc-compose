@@ -15,6 +15,7 @@ permissions:
   contents: read
 
 env:
+  CARGO_INCREMENTAL: "0"
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
   CARGO_DEB_VERSION: "3.6.3"
   CARGO_GENERATE_RPM_VERSION: "0.20.0"
@@ -69,7 +70,7 @@ jobs:
           fi
 
       - name: Run test suite
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
   build:
     name: Build ${{ matrix.label }}

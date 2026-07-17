@@ -21,6 +21,7 @@ globs:
   - "skills/hpc-compose/**/*.md"
   - "llms.txt"
   - "README.md"
+  - "AGENTS.md"
   - "CHANGELOG.md"
   - "CONTRIBUTING.md"
   - "GOVERNANCE.md"
