@@ -154,9 +154,7 @@ pub fn build_record(
     if request.ttl_seconds == 0 {
         bail!("rendezvous ttl must be at least 1 second");
     }
-    let path = request
-        .path
-        .and_then(|path| if path.is_empty() { None } else { Some(path) });
+    let path = request.path.filter(|path| !path.is_empty());
     if let Some(path) = path.as_deref()
         && !path.starts_with('/')
     {
