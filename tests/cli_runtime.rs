@@ -758,6 +758,7 @@ services:
         &[
             "up",
             "--detach",
+            "--no-preflight",
             "-f",
             compose.to_str().expect("path"),
             "--enroot-bin",

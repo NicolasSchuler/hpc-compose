@@ -226,11 +226,28 @@ jobs:
           if [[ ! -s "$RUNNER_TEMP/cargo-test.log" ]]; then
             exit 0
           fi
-          failure_tail="$(tail -n 120 "$RUNNER_TEMP/cargo-test.log")"
-          failure_tail="${failure_tail//'%'/'%25'}"
-          failure_tail="${failure_tail//$'\r'/'%0D'}"
-          failure_tail="${failure_tail//$'\n'/'%0A'}"
-          printf '::error title=Rust test suite failure::%s\n' "$failure_tail"
+          python3 - "$RUNNER_TEMP/cargo-test.log" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          output = Path(sys.argv[1]).read_text(errors="replace")
+          failed = set(re.findall(r"^test (.+) \.\.\. FAILED$", output, re.MULTILINE))
+          headers = list(
+              re.finditer(r"^---- (.+) stdout ----\n", output, re.MULTILINE)
+          )
+          details = {}
+          for index, header in enumerate(headers):
+              end = headers[index + 1].start() if index + 1 < len(headers) else len(output)
+              body = output[header.end() : end].split("\nfailures:\n", 1)[0].strip()
+              details[header.group(1)] = body
+
+          for name in sorted(failed | details.keys()):
+              message = f"{name}\n{details.get(name, '')}".strip()[-7000:]
+              message = message.replace("%", "%25").replace("\r", "%0D")
+              message = message.replace("\n", "%0A")
+              print(f"::error title=Failed Rust test::{message}")
+          PY
 
       - name: Smoke test cargo install surface
         shell: bash
