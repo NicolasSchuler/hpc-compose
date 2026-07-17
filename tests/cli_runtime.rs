@@ -10218,11 +10218,9 @@ services:
     );
     assert_failure(&output);
     let stderr = stderr_text(&output);
-    let normalized_stderr = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        normalized_stderr.contains(
-            "--local currently supports only runtime.backend=pyxis or runtime.backend=apptainer; got runtime.backend=singularity"
-        ),
+        stderr.contains("--local currently supports only runtime.backend=pyxis or")
+            && stderr.contains("runtime.backend=apptainer; got runtime.backend=singularity"),
         "unexpected stderr:\n{stderr}"
     );
 }
