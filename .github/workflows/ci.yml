@@ -214,7 +214,23 @@ jobs:
           cache-bin: false
 
       - name: Run test suite
-        run: cargo test --workspace --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+
+      - name: Surface Rust test failure
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          if [[ ! -s "$RUNNER_TEMP/cargo-test.log" ]]; then
+            exit 0
+          fi
+          failure_tail="$(tail -n 120 "$RUNNER_TEMP/cargo-test.log")"
+          failure_tail="${failure_tail//'%'/'%25'}"
+          failure_tail="${failure_tail//$'\r'/'%0D'}"
+          failure_tail="${failure_tail//$'\n'/'%0A'}"
+          printf '::error title=Rust test suite failure::%s\n' "$failure_tail"
 
       - name: Smoke test cargo install surface
         shell: bash
