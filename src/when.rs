@@ -1,5 +1,5 @@
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -525,11 +525,7 @@ fn current_local_minutes_since_midnight() -> u16 {
 }
 
 fn current_utc_minutes_since_midnight() -> u16 {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        % SECONDS_PER_DAY;
+    let seconds = crate::time_util::unix_timestamp_now() % SECONDS_PER_DAY;
     u16::try_from(seconds / SECONDS_PER_MINUTE).unwrap_or(0)
 }
 
@@ -851,6 +847,11 @@ mod tests {
         assert_eq!(format_minutes(0), "00:00");
         assert_eq!(format_minutes(9 * 60 + 5), "09:05");
         assert_eq!(format_minutes(23 * 60 + 59), "23:59");
+    }
+
+    #[test]
+    fn current_utc_minutes_is_in_daily_range() {
+        assert!(current_utc_minutes_since_midnight() < 24 * 60);
     }
 
     #[test]

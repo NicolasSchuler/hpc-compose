@@ -1,7 +1,8 @@
-//! Compose-file pipeline loaders shared across commands.
+//! Input-loading adapters shared across commands.
 //!
-//! These helpers turn a compose file on disk into a [`Plan`], [`RuntimePlan`],
-//! or [`EffectiveComposeConfig`] via the planner/prepare pipeline. They are
+//! These helpers discover cluster metadata from a resolved compose-file
+//! location or turn a compose file on disk into a [`Plan`], [`RuntimePlan`], or
+//! [`EffectiveComposeConfig`] via the planner/prepare pipeline. They are
 //! orchestration concerns (not presentation), so they live in the commands
 //! layer rather than the output module.
 
@@ -9,10 +10,22 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
-use hpc_compose::context::ResourceProfile;
+use hpc_compose::cluster::ClusterProfile;
+use hpc_compose::context::{ResolvedContext, ResourceProfile};
 use hpc_compose::planner::{Plan, PlanOptions, build_plan_with_options};
 use hpc_compose::runtime_plan::{RuntimePlan, build_runtime_plan};
 use hpc_compose::spec::{ComposeSpec, EffectiveComposeConfig};
+
+pub(crate) fn load_discovered_cluster_profile(
+    context: &ResolvedContext,
+) -> Result<Option<ClusterProfile>> {
+    let start = context
+        .compose_file
+        .value
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    hpc_compose::cluster::load_discovered_cluster_profile(start)
+}
 
 #[cfg(test)]
 pub(crate) fn load_plan(path: &Path) -> Result<Plan> {

@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::OutputFormat;
@@ -342,10 +341,7 @@ fn validate_candidate(output_path: &Path, rendered: &str) -> Result<EvolveValida
     let temp_path = parent.join(format!(
         ".hpc-compose-evolve-{}-{}.tmp.yaml",
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
+        crate::time_util::unix_timestamp_nanos()
     ));
     fs::write(&temp_path, rendered).context(format!(
         "failed to write validation temp {}",
@@ -563,6 +559,19 @@ mod tests {
 }"#;
         assert_eq!(actual, expected);
         assert!(!actual.ends_with('\n'));
+    }
+
+    #[test]
+    fn evolve_placement_vocabulary_preserves_primary_label() {
+        assert_eq!(
+            [
+                ServicePlacementMode::PrimaryNode,
+                ServicePlacementMode::Partitioned,
+                ServicePlacementMode::Distributed,
+            ]
+            .map(placement_mode_label),
+            ["primary", "partitioned", "distributed"]
+        );
     }
 
     #[test]

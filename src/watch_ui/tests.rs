@@ -902,21 +902,31 @@ fn request_service_restart_writes_named_request() {
     let mut record = sample_snapshot().record;
     record.submit_dir = tmpdir.path().to_path_buf();
     let path = request_service_restart(&record, "api").expect("write request");
+    let request_dir = runtime_job_root_for_record(&record)
+        .join("dev-control")
+        .join("restart");
+    assert_eq!(path.parent(), Some(request_dir.as_path()));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("request filename");
+    let timestamp = filename
+        .strip_prefix(&format!("restart-{}-", std::process::id()))
+        .and_then(|value| value.strip_suffix(".request"))
+        .expect("restart request filename format");
+    timestamp.parse::<u128>().expect("millisecond timestamp");
     assert!(path.exists());
     assert_eq!(
-        std::fs::read_to_string(&path).expect("read request").trim(),
-        "api"
+        std::fs::read_to_string(&path).expect("read request"),
+        "api\n"
     );
     assert!(
-        std::fs::read_dir(path.parent().expect("request parent"))
+        std::fs::read_dir(&request_dir)
             .expect("read request dir")
             .filter_map(Result::ok)
             .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp.")),
         "restart request writes should not leave visible temp files"
     );
-    let display = path.to_string_lossy();
-    assert!(display.contains("dev-control"));
-    assert!(display.ends_with(".request"));
 }
 
 #[test]

@@ -26,7 +26,7 @@ use hpc_compose::render::{
 use hpc_compose::runtime_plan::{RuntimePlan, RuntimeService, build_runtime_plan};
 use hpc_compose::spec::{MpiProfile, ServiceFailurePolicy, SlurmConfig};
 
-use crate::commands::load;
+use crate::commands::load::{self, load_discovered_cluster_profile};
 use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description, resolved_rank_count};
 use crate::output;
 pub(crate) use crate::output::{ClusterReportJsonOutput, ReadinessDoctorOutput};
@@ -706,15 +706,6 @@ fn doctor_cluster_report(
         }
     }
     Ok(())
-}
-
-fn load_discovered_cluster_profile(context: &ResolvedContext) -> Result<Option<ClusterProfile>> {
-    let start = context
-        .compose_file
-        .value
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    hpc_compose::cluster::load_discovered_cluster_profile(start)
 }
 
 fn mpi_profile_warnings(
@@ -1502,10 +1493,7 @@ impl SmokeScriptFile {
         let mut last_collision = None;
         for _ in 0..16 {
             let counter = SMOKE_SCRIPT_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default();
+            let nanos = crate::time_util::unix_timestamp_nanos();
             let path = temp_dir.join(format!(
                 "hpc-compose-{kind}-smoke-{}-{nanos}-{counter}.sbatch",
                 std::process::id()
@@ -2423,6 +2411,20 @@ x-slurm:
         let error = create_then_fail(&mut created_path).expect_err("failure must propagate");
         assert!(error.to_string().contains("simulated submission failure"));
         let created_path = created_path.expect("temporary path recorded");
+        let filename = created_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("temporary smoke filename");
+        let unique = filename
+            .strip_prefix(&format!(
+                "hpc-compose-cleanup-test-smoke-{}-",
+                std::process::id()
+            ))
+            .and_then(|value| value.strip_suffix(".sbatch"))
+            .expect("temporary smoke filename format");
+        let (nanos, counter) = unique.rsplit_once('-').expect("nanos and counter");
+        nanos.parse::<u128>().expect("nanosecond timestamp");
+        counter.parse::<u64>().expect("collision counter");
         assert!(
             !created_path.exists(),
             "temporary script guard must clean up during error unwinding"

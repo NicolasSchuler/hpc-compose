@@ -73,6 +73,7 @@ pub(crate) mod readiness_util;
 pub(crate) mod redaction;
 pub mod render;
 pub mod rendezvous;
+pub(crate) mod runtime_control;
 pub mod runtime_plan;
 pub(crate) mod schema;
 pub(crate) mod secure_io;

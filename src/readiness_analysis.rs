@@ -15,6 +15,72 @@ pub(crate) struct ReadinessEndpoint {
     pub(crate) url: Option<String>,
 }
 
+/// Readiness behavior after applying the shared host and timeout defaults.
+///
+/// Values borrow directly from the source spec where possible. Presentation
+/// adapters remain responsible for their own labels, paths, quoting, and
+/// serialization contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EffectiveReadiness<'a> {
+    Sleep {
+        configured_seconds: u64,
+        effective_seconds: u64,
+    },
+    Tcp {
+        host: &'a str,
+        port: u16,
+        timeout_seconds: u64,
+    },
+    Log {
+        pattern: &'a str,
+        timeout_seconds: u64,
+    },
+    Http {
+        url: &'a str,
+        status_code: u16,
+        timeout_seconds: u64,
+    },
+}
+
+/// Applies the established readiness defaults and an optional command-level
+/// timeout override without adding presentation or execution policy.
+pub(crate) fn effective_readiness(
+    readiness: &ReadinessSpec,
+    timeout_override: Option<u64>,
+) -> EffectiveReadiness<'_> {
+    match readiness {
+        ReadinessSpec::Sleep { seconds } => EffectiveReadiness::Sleep {
+            configured_seconds: *seconds,
+            effective_seconds: timeout_override.unwrap_or(*seconds),
+        },
+        ReadinessSpec::Tcp {
+            host,
+            port,
+            timeout_seconds,
+        } => EffectiveReadiness::Tcp {
+            host: host.as_deref().unwrap_or("127.0.0.1"),
+            port: *port,
+            timeout_seconds: timeout_override.or(*timeout_seconds).unwrap_or(60),
+        },
+        ReadinessSpec::Log {
+            pattern,
+            timeout_seconds,
+        } => EffectiveReadiness::Log {
+            pattern,
+            timeout_seconds: timeout_override.or(*timeout_seconds).unwrap_or(60),
+        },
+        ReadinessSpec::Http {
+            url,
+            status_code,
+            timeout_seconds,
+        } => EffectiveReadiness::Http {
+            url,
+            status_code: *status_code,
+            timeout_seconds: timeout_override.or(*timeout_seconds).unwrap_or(60),
+        },
+    }
+}
+
 /// Returns `true` when the host string matches a localhost address.
 pub(crate) fn is_localhost_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")

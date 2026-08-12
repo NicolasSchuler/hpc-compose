@@ -34,7 +34,7 @@ pub struct ProvenanceSpan {
 /// With comments disabled the wrappers are behaviorally inert: they call the
 /// emit closure and record spans, leaving the rendered bytes untouched.
 #[derive(Debug)]
-pub(crate) struct Annotations {
+pub(super) struct Annotations {
     comments: bool,
     spans: Vec<ProvenanceSpan>,
     scanned_len: usize,
@@ -44,7 +44,7 @@ pub(crate) struct Annotations {
 impl Annotations {
     /// Creates a recorder; `comments` controls whether provenance comment
     /// lines are interleaved into the rendered output.
-    pub(crate) fn new(comments: bool) -> Self {
+    pub(super) fn new(comments: bool) -> Self {
         Self {
             comments,
             spans: Vec::new(),
@@ -54,12 +54,12 @@ impl Annotations {
     }
 
     /// Consumes the recorder, returning every recorded span in emit order.
-    pub(crate) fn into_spans(self) -> Vec<ProvenanceSpan> {
+    pub(super) fn into_spans(self) -> Vec<ProvenanceSpan> {
         self.spans
     }
 
     /// Annotates a single-field emit site: `# <- {source}` above the content.
-    pub(crate) fn field(&mut self, out: &mut String, source: &str, emit: impl FnOnce(&mut String)) {
+    pub(super) fn field(&mut self, out: &mut String, source: &str, emit: impl FnOnce(&mut String)) {
         self.record(out, &[source], None, emit);
     }
 
@@ -67,7 +67,7 @@ impl Annotations {
     /// and the spec field(s) that enabled it:
     /// `# --- {title} ({sources}) ---`. One span is recorded per source, all
     /// covering the same line range.
-    pub(crate) fn section(
+    pub(super) fn section(
         &mut self,
         out: &mut String,
         title: &str,

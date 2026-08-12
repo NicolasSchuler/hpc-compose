@@ -291,17 +291,13 @@ pub(super) fn render_hf_stage_in(out: &mut String, plan: &RuntimePlan, huggingfa
     out.push_str("stage_in_huggingface_artifacts() {\n");
     for entry in hf_entries {
         let hf = entry.hf.as_ref().expect("filtered to hf entries");
-        let kind = hf.as_staged_input_kind();
-        let spec = hf.uri();
-        let staged_spec =
-            crate::cache::dataset::StagedInputSpec::new(kind, spec, Some(hf.revision.clone()));
-        let key = crate::cache::dataset::dataset_cache_key(&staged_spec);
-        let cas_dir = staged_input_dir(&plan.cache_dir, kind, &key);
         let reference = HfArtifactRef {
             repo: hf.repo.clone(),
             revision: hf.revision.clone(),
-            kind,
+            kind: hf.as_staged_input_kind(),
         };
+        let key = crate::cache::dataset::dataset_cache_key(&reference.staged_input_spec());
+        let cas_dir = staged_input_dir(&plan.cache_dir, reference.kind, &key);
         let command =
             render_hf_stage_command(&reference, &cas_dir.to_string_lossy(), huggingface_cli_bin);
         for line in command.lines() {

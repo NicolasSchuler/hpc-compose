@@ -79,6 +79,17 @@ pub enum ServicePlacementMode {
     Distributed,
 }
 
+impl ServicePlacementMode {
+    /// Returns the stable label used in rendered scripts and runtime output.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::PrimaryNode => "primary_node",
+            Self::Partitioned => "partitioned",
+            Self::Distributed => "distributed",
+        }
+    }
+}
+
 /// The effective `srun` placement geometry for one service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServicePlacement {

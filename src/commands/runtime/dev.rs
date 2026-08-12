@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{HoldOnExit, OutputFormat};
@@ -180,18 +180,7 @@ pub(super) fn write_dev_restart_request(
     control_dir: &Path,
     services: &BTreeSet<String>,
 ) -> Result<PathBuf> {
-    let request_dir = control_dir.join("restart");
-    fs::create_dir_all(&request_dir)
-        .with_context(|| format!("failed to create {}", request_dir.display()))?;
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let path = request_dir.join(format!("restart-{}-{millis}.request", std::process::id()));
-    let body = services.iter().cloned().collect::<Vec<_>>().join("\n");
-    crate::secure_io::write_atomic(&path, format!("{body}\n").as_bytes(), false)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(path)
+    crate::runtime_control::write_restart_request(control_dir, services)
 }
 
 /// Detects changes across all dev watch targets once, returning the services to

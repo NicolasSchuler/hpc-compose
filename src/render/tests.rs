@@ -7,16 +7,16 @@ use std::sync::OnceLock;
 
 use super::*;
 use crate::cluster::{ClusterProfile, DistributedProfile, RuntimeAvailability};
-use crate::planner::ServicePlacement;
+use crate::planner::{ServicePlacement, ServicePlacementMode};
 use crate::spec::{
     ComposeSpec, DependencyCondition, DependsOnSpec, EnvironmentSpec, MpiConfig, MpiProfile,
     MpiType, ParallelismConfig, ReadinessSpec, RendezvousRegisterConfig, ResumeConfig,
     RuntimeConfig, RuntimeGpuPolicy, ScratchCleanupPolicy, ScratchConfig, ServiceAssertSpec,
-    ServiceDependency, ServiceEnrootConfig, ServiceEventHookSpec, ServiceFailurePolicy,
-    ServiceHookContext, ServiceHookEvent, ServiceHookSpec, ServiceRendezvousConfig,
-    ServiceRuntimeConfig, ServiceScratchConfig, ServiceSlurmConfig, ServiceSpec, SignalConfig,
-    SignalName, SignalShellTarget, SlurmConfig, StageInConfig, StageMode, StageOutConfig,
-    StageOutWhen,
+    ServiceDependency, ServiceEnrootConfig, ServiceEventHookSpec, ServiceFailureMode,
+    ServiceFailurePolicy, ServiceHookContext, ServiceHookEvent, ServiceHookSpec,
+    ServiceRendezvousConfig, ServiceRuntimeConfig, ServiceScratchConfig, ServiceSlurmConfig,
+    ServiceSpec, SignalConfig, SignalName, SignalShellTarget, SlurmConfig, StageInConfig,
+    StageMode, StageOutConfig, StageOutWhen,
 };
 
 fn runtime_service() -> RuntimeService {
@@ -983,6 +983,91 @@ fn hf_stage_in_renders_cluster_side_download_not_a_mount() {
 }
 
 #[test]
+fn hf_stage_in_preserves_exact_cache_paths_and_commands_for_each_kind() {
+    let plan = RuntimePlan {
+        name: "hf-command-contract".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            stage_in: vec![
+                StageInConfig {
+                    from: None,
+                    to: "/models/llama".into(),
+                    mode: StageMode::Rsync,
+                    hf: Some(crate::spec::HfStageSource {
+                        repo: "meta-llama/Llama-3.1-8B".into(),
+                        revision: "abc1234def".into(),
+                        kind: crate::spec::HfStageKind::Model,
+                    }),
+                },
+                StageInConfig {
+                    from: None,
+                    to: "/datasets/cifar10".into(),
+                    mode: StageMode::Rsync,
+                    hf: Some(crate::spec::HfStageSource {
+                        repo: "org/cifar10".into(),
+                        revision: "v1".into(),
+                        kind: crate::spec::HfStageKind::Dataset,
+                    }),
+                },
+            ],
+            ..SlurmConfig::default()
+        },
+        ordered_services: Vec::new(),
+    };
+    let mut rendered = String::new();
+
+    stage::render_hf_stage_in(&mut rendered, &plan, "/opt/hf/huggingface-cli");
+
+    assert_eq!(
+        rendered,
+        concat!(
+            "# Stage in HuggingFace artifacts (downloaded inside the allocation).\n",
+            "stage_in_huggingface_artifacts() {\n",
+            "  echo 'Staging in HuggingFace model' 'meta-llama/Llama-3.1-8B'@'abc1234def' '->' '/shared/cache/models/a6095d1e1fcefd51'\n",
+            "  HF_STAGE_TARGET='/shared/cache/models/a6095d1e1fcefd51'\n",
+            "  HF_STAGE_MARKER=\"$HF_STAGE_TARGET/\"'.hpc-compose-hf-complete'\n",
+            "  if [ ! -e \"$HF_STAGE_MARKER\" ]; then\n",
+            "    mkdir -p \"$(dirname \"$HF_STAGE_TARGET\")\"\n",
+            "    (\n",
+            "      if command -v flock >/dev/null 2>&1; then flock 9; fi\n",
+            "      if [ ! -e \"$HF_STAGE_MARKER\" ]; then\n",
+            "        hf_tmp=\"$(mktemp -d \"$(dirname \"$HF_STAGE_TARGET\")/.hf-stage.XXXXXX\")\"\n",
+            "        '/opt/hf/huggingface-cli' download 'meta-llama/Llama-3.1-8B' --revision 'abc1234def' --local-dir \"$hf_tmp\"\n",
+            "        rm -rf \"$HF_STAGE_TARGET\"\n",
+            "        mv \"$hf_tmp\" \"$HF_STAGE_TARGET\"\n",
+            "        touch \"$HF_STAGE_MARKER\"\n",
+            "      fi\n",
+            "    ) 9>\"$HF_STAGE_TARGET.lock\"\n",
+            "  fi\n",
+            "  local hf_stage_to\n",
+            "  hf_stage_to=$(scratch_host_path_for '/models/llama')\n",
+            "  stage_copy_path \"$HF_STAGE_TARGET\"/. \"$hf_stage_to\" copy\n",
+            "  echo 'Staging in HuggingFace dataset' 'org/cifar10'@'v1' '->' '/shared/cache/datasets/b54f97fdbdbf08d0'\n",
+            "  HF_STAGE_TARGET='/shared/cache/datasets/b54f97fdbdbf08d0'\n",
+            "  HF_STAGE_MARKER=\"$HF_STAGE_TARGET/\"'.hpc-compose-hf-complete'\n",
+            "  if [ ! -e \"$HF_STAGE_MARKER\" ]; then\n",
+            "    mkdir -p \"$(dirname \"$HF_STAGE_TARGET\")\"\n",
+            "    (\n",
+            "      if command -v flock >/dev/null 2>&1; then flock 9; fi\n",
+            "      if [ ! -e \"$HF_STAGE_MARKER\" ]; then\n",
+            "        hf_tmp=\"$(mktemp -d \"$(dirname \"$HF_STAGE_TARGET\")/.hf-stage.XXXXXX\")\"\n",
+            "        '/opt/hf/huggingface-cli' download 'org/cifar10' --repo-type dataset --revision 'v1' --local-dir \"$hf_tmp\"\n",
+            "        rm -rf \"$HF_STAGE_TARGET\"\n",
+            "        mv \"$hf_tmp\" \"$HF_STAGE_TARGET\"\n",
+            "        touch \"$HF_STAGE_MARKER\"\n",
+            "      fi\n",
+            "    ) 9>\"$HF_STAGE_TARGET.lock\"\n",
+            "  fi\n",
+            "  local hf_stage_to\n",
+            "  hf_stage_to=$(scratch_host_path_for '/datasets/cifar10')\n",
+            "  stage_copy_path \"$HF_STAGE_TARGET\"/. \"$hf_stage_to\" copy\n",
+            "}\n\n",
+        )
+    );
+}
+
+#[test]
 fn hf_stage_in_resolves_scratch_destination_before_copying() {
     let plan = RuntimePlan {
         name: "hf-scratch-demo".into(),
@@ -1721,6 +1806,96 @@ fn readiness_and_argv_helpers_cover_remaining_branches() {
 }
 
 #[test]
+fn readiness_render_matrix_preserves_exact_wait_function_bytes() {
+    let mut service = runtime_service();
+    service.name = "api worker".into();
+    let cases = [
+        (
+            None,
+            concat!(
+                "wait_until_api_x20_worker_ready() {\n",
+                "  local pid=$1\n",
+                "  local name=$2\n",
+                "  :\n",
+                "}\n",
+            ),
+        ),
+        (
+            Some(ReadinessSpec::Sleep { seconds: 5 }),
+            concat!(
+                "wait_until_api_x20_worker_ready() {\n",
+                "  local pid=$1\n",
+                "  local name=$2\n",
+                "  wait_for_sleep \"$pid\" \"$name\" 5\n",
+                "}\n",
+            ),
+        ),
+        (
+            Some(ReadinessSpec::Tcp {
+                host: None,
+                port: 7001,
+                timeout_seconds: None,
+            }),
+            concat!(
+                "wait_until_api_x20_worker_ready() {\n",
+                "  local pid=$1\n",
+                "  local name=$2\n",
+                "  wait_for_tcp \"$pid\" \"$name\" '127.0.0.1' 7001 60\n",
+                "}\n",
+            ),
+        ),
+        (
+            Some(ReadinessSpec::Tcp {
+                host: Some("node '02'".into()),
+                port: 7002,
+                timeout_seconds: Some(17),
+            }),
+            concat!(
+                "wait_until_api_x20_worker_ready() {\n",
+                "  local pid=$1\n",
+                "  local name=$2\n",
+                "  wait_for_tcp \"$pid\" \"$name\" 'node '\"'\"'02'\"'\"'' 7002 17\n",
+                "}\n",
+            ),
+        ),
+        (
+            Some(ReadinessSpec::Log {
+                pattern: "ready 'now'".into(),
+                timeout_seconds: None,
+            }),
+            concat!(
+                "wait_until_api_x20_worker_ready() {\n",
+                "  local pid=$1\n",
+                "  local name=$2\n",
+                "  wait_for_log \"$pid\" \"$name\" \"$LOG_DIR/api_x20_worker.log\" 'ready '\"'\"'now'\"'\"'' 60\n",
+                "}\n",
+            ),
+        ),
+        (
+            Some(ReadinessSpec::Http {
+                url: "https://node.test/health?message=it'works".into(),
+                status_code: 204,
+                timeout_seconds: Some(23),
+            }),
+            concat!(
+                "wait_until_api_x20_worker_ready() {\n",
+                "  local pid=$1\n",
+                "  local name=$2\n",
+                "  wait_for_http \"$pid\" \"$name\" 'https://node.test/health?message=it'\"'\"'works' 204 23\n",
+                "}\n",
+            ),
+        ),
+    ];
+
+    for (readiness, expected) in cases {
+        service.readiness = readiness;
+        let mut rendered = String::new();
+        render_readiness_wait(&mut rendered, &service);
+        assert_eq!(rendered, expected);
+    }
+}
+
+#[test]
 fn build_srun_command_and_string_helpers_cover_remaining_cases() {
     let service = RuntimeService {
         name: "redis/service".into(),
@@ -1814,30 +1989,15 @@ fn rendered_service_identity_and_runtime_state_labels_are_stable() {
     assert!(script.contains("launch_api_x2e_worker_x2d_1()"));
     assert!(script.contains("'--job-name=hpc-compose:api_x2e_worker_x2d_1'"));
 
+    assert_eq!(ServiceFailureMode::FailJob.label(), "fail_job");
+    assert_eq!(ServiceFailureMode::Ignore.label(), "ignore");
     assert_eq!(
-        failure_policy_mode_label(ServiceFailureMode::FailJob),
-        "fail_job"
-    );
-    assert_eq!(
-        failure_policy_mode_label(ServiceFailureMode::Ignore),
-        "ignore"
-    );
-    assert_eq!(
-        failure_policy_mode_label(ServiceFailureMode::RestartOnFailure),
+        ServiceFailureMode::RestartOnFailure.label(),
         "restart_on_failure"
     );
-    assert_eq!(
-        placement_mode_label(ServicePlacementMode::PrimaryNode),
-        "primary_node"
-    );
-    assert_eq!(
-        placement_mode_label(ServicePlacementMode::Distributed),
-        "distributed"
-    );
-    assert_eq!(
-        placement_mode_label(ServicePlacementMode::Partitioned),
-        "partitioned"
-    );
+    assert_eq!(ServicePlacementMode::PrimaryNode.label(), "primary_node");
+    assert_eq!(ServicePlacementMode::Distributed.label(), "distributed");
+    assert_eq!(ServicePlacementMode::Partitioned.label(), "partitioned");
 
     let registration_lines = script
         .lines()
@@ -2065,6 +2225,88 @@ fn render_distributed_service_emits_helpers_and_profile_env() {
     assert!(env_names.contains(&"FI_PROVIDER".to_string()));
     assert!(env_names.contains(&"UCX_TLS".to_string()));
     assert!(!env_names.contains(&"NCCL_DEBUG".to_string()));
+}
+
+#[test]
+fn distributed_rendezvous_profile_values_preserve_rendered_shell_bytes() {
+    let mut service = runtime_service();
+    service.name = "trainer".into();
+    service.placement = ServicePlacement {
+        mode: ServicePlacementMode::Distributed,
+        nodes: 2,
+        ntasks: None,
+        ntasks_per_node: Some(1),
+        pin_to_primary_node: false,
+        node_indices: None,
+        exclude_indices: Vec::new(),
+        allow_overlap: false,
+    };
+    let plan = RuntimePlan {
+        name: "dist-rendezvous-contract".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![service],
+    };
+    let cases = [
+        (None, "hpc_compose_dist_port '' 29500 1000 0"),
+        (
+            Some(DistributedProfile {
+                rdzv_port: Some(31_337),
+                ..DistributedProfile::default()
+            }),
+            "hpc_compose_dist_port '31337' 29500 1000 0",
+        ),
+        (
+            Some(DistributedProfile {
+                rdzv_port_base: Some(31_000),
+                ..DistributedProfile::default()
+            }),
+            "hpc_compose_dist_port '' 31000 1000 0",
+        ),
+        (
+            Some(DistributedProfile {
+                rdzv_port_span: Some(17),
+                ..DistributedProfile::default()
+            }),
+            "hpc_compose_dist_port '' 29500 17 0",
+        ),
+        (
+            Some(DistributedProfile {
+                rdzv_port_base: Some(32_000),
+                rdzv_port_span: Some(23),
+                ..DistributedProfile::default()
+            }),
+            "hpc_compose_dist_port '' 32000 23 0",
+        ),
+    ];
+
+    for (distributed, expected_call) in cases {
+        let profile = distributed.map(|distributed| ClusterProfile {
+            distributed,
+            ..ClusterProfile::default()
+        });
+        let script = render_script_with_options(
+            &plan,
+            &RenderOptions {
+                cluster_profile: profile,
+                ..RenderOptions::default()
+            },
+        )
+        .expect("script");
+        assert!(script.contains(expected_call), "missing {expected_call:?}");
+        assert!(script.contains("  local base=${2:-29500}\n"));
+        assert!(script.contains("  local span=${3:-1000}\n"));
+        assert!(
+            script.contains("  launch_env+=(\"HPC_COMPOSE_DIST_MASTER_PORT=$dist_master_port\")\n")
+        );
+        assert!(script.contains(
+            "  launch_env+=(\"HPC_COMPOSE_DIST_RDZV_ENDPOINT=$service_primary_node:$dist_master_port\")\n"
+        ));
+    }
 }
 
 #[test]

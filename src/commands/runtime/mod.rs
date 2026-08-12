@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{HoldOnExit, OutputFormat, WatchMode};
@@ -31,13 +31,13 @@ use hpc_compose::render::{
 };
 use hpc_compose::runtime_plan::{RuntimePlan, base_image_path_for_backend};
 use hpc_compose::spec::{
-    MetricsCollector, MetricsConfig, ServiceFailureMode, SignalShellTarget, parse_slurm_time_limit,
+    MetricsCollector, MetricsConfig, SignalShellTarget, parse_slurm_time_limit,
 };
 use hpc_compose::when::{MonitorOptions, RealMonitorRuntime, WhenConditions, monitor_until_ready};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::commands::load;
+use crate::commands::load::{self, load_discovered_cluster_profile};
 use crate::domain::{extract_human_sbatch_job_id, service_step_name, service_token};
 use crate::output;
 pub(crate) use crate::output::runtime::WhenSubmitOutput;
@@ -508,10 +508,7 @@ fn acquire_up_invocation_lock(compose_file: &Path) -> Result<UpInvocationLock> {
         "host": current_up_invocation_host(),
         "command": command,
         "compose_path": canonical,
-        "created_at_unix": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        "created_at_unix": crate::time_util::unix_timestamp_now(),
     });
     // Try once; if a lock already exists for a dead process, reclaim it and try
     // again exactly once. A second `AlreadyExists` means a live competitor won
@@ -828,17 +825,6 @@ fn is_missing_tracked_record_error(err: &anyhow::Error) -> bool {
         .contains("no tracked submission metadata exists")
 }
 
-fn load_discovered_cluster_profile(
-    context: &ResolvedContext,
-) -> Result<Option<hpc_compose::cluster::ClusterProfile>> {
-    let start = context
-        .compose_file
-        .value
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    hpc_compose::cluster::load_discovered_cluster_profile(start)
-}
-
 fn purge_cached_artifacts(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
     for path in paths {
@@ -871,10 +857,7 @@ fn cached_artifacts_for_teardown(record: Option<&SubmissionRecord>) -> Result<Ve
 }
 
 fn generate_local_job_id() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let timestamp = crate::time_util::unix_timestamp_now();
     format!("local-{timestamp}-{}", std::process::id())
 }
 
@@ -907,7 +890,7 @@ fn ensure_local_plan_supported(plan: &RuntimePlan) -> Result<()> {
             bail!(
                 "--local does not support distributed or partitioned placement; service '{}' uses {} placement",
                 service.name,
-                local_placement_mode_label(service.placement.mode)
+                service.placement.mode.label()
             );
         }
         if !service.slurm.extra_srun_args.is_empty() {
@@ -972,22 +955,6 @@ fn local_render_options(
     }
 }
 
-fn local_failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
-    match mode {
-        ServiceFailureMode::FailJob => "fail_job",
-        ServiceFailureMode::Ignore => "ignore",
-        ServiceFailureMode::RestartOnFailure => "restart_on_failure",
-    }
-}
-
-fn local_placement_mode_label(mode: ServicePlacementMode) -> &'static str {
-    match mode {
-        ServicePlacementMode::PrimaryNode => "primary_node",
-        ServicePlacementMode::Partitioned => "partitioned",
-        ServicePlacementMode::Distributed => "distributed",
-    }
-}
-
 fn write_local_runtime_state_stub(
     record: &SubmissionRecord,
     plan: &RuntimePlan,
@@ -1024,13 +991,13 @@ fn write_local_runtime_state_stub(
                 "healthy": false,
                 "completed_successfully": false,
                 "readiness_configured": service.readiness.is_some(),
-                "failure_policy_mode": local_failure_policy_mode_label(service.failure_policy.mode),
+                "failure_policy_mode": service.failure_policy.mode.label(),
                 "restart_count": 0,
                 "max_restarts": service.failure_policy.max_restarts,
                 "window_seconds": service.failure_policy.window_seconds,
                 "max_restarts_in_window": service.failure_policy.max_restarts_in_window,
                 "last_exit_code": serde_json::Value::Null,
-                "placement_mode": local_placement_mode_label(service.placement.mode),
+                "placement_mode": service.placement.mode.label(),
                 "nodes": service.placement.nodes,
                 "ntasks": service.placement.ntasks,
                 "ntasks_per_node": service.placement.ntasks_per_node,

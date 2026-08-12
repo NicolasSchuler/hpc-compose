@@ -5,17 +5,18 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
-use crate::cluster::ClusterProfile;
+use crate::cluster::{ClusterProfile, DistributedProfile};
 use crate::domain::{
     rendezvous_env_token, rendezvous_env_token_collision, service_step_name, service_token,
 };
-use crate::planner::{ExecutionSpec, ServicePlacementMode};
+use crate::planner::ExecutionSpec;
+use crate::readiness_analysis::{EffectiveReadiness, effective_readiness};
 use crate::runtime_plan::{RuntimePlan, RuntimeService, service_allows_configured_scratch};
 use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
     RendezvousRegisterConfig, RuntimeBackend, RuntimeCacheCleanupPolicy, RuntimeGpuPolicy,
-    ScratchCleanupPolicy, ScratchScope, ServiceFailureMode, ServiceHookContext, ServiceHookEvent,
-    SignalConfig, SlurmConfig, SoftwareEnvConfig, gres_gpu_count, gres_requests_gpu,
+    ScratchCleanupPolicy, ScratchScope, ServiceHookContext, ServiceHookEvent, SignalConfig,
+    SlurmConfig, SoftwareEnvConfig, gres_gpu_count, gres_requests_gpu,
 };
 use crate::tracked_paths;
 
@@ -78,9 +79,6 @@ const DIST_SLURM_RANK_ENV_NAMES: &[&str] = &[
     "SLURM_STEP_TASKS_PER_NODE",
     "SLURM_TASKS_PER_NODE",
 ];
-
-const DEFAULT_RDZV_PORT_BASE: u16 = 29_500;
-const DEFAULT_RDZV_PORT_SPAN: u16 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DistributedRenderEnv {
@@ -212,18 +210,15 @@ fn distributed_render_env(
     cluster_profile: Option<&ClusterProfile>,
 ) -> DistributedRenderEnv {
     let enabled = distributed_helpers_enabled(service);
-    let profile = cluster_profile.map(|profile| &profile.distributed);
+    let default_profile = DistributedProfile::default();
+    let profile = cluster_profile.map_or(&default_profile, |profile| &profile.distributed);
     DistributedRenderEnv {
         enabled,
         nproc_per_node: derive_nproc_per_node(service, slurm),
         profile_env: distributed_profile_env_for_service(cluster_profile, service),
-        rdzv_port: profile.and_then(|distributed| distributed.rdzv_port),
-        rdzv_port_base: profile
-            .and_then(|distributed| distributed.rdzv_port_base)
-            .unwrap_or(DEFAULT_RDZV_PORT_BASE),
-        rdzv_port_span: profile
-            .and_then(|distributed| distributed.rdzv_port_span)
-            .unwrap_or(DEFAULT_RDZV_PORT_SPAN),
+        rdzv_port: profile.rdzv_port,
+        rdzv_port_base: profile.effective_rdzv_port_base(),
+        rdzv_port_span: profile.effective_rdzv_port_span(),
     }
 }
 
@@ -1285,10 +1280,17 @@ pub fn render_script_annotated(
     out.push_str("}\n\n");
 
     if distributed_env_enabled {
+        let defaults = DistributedProfile::default();
         out.push_str("hpc_compose_dist_port() {\n");
         out.push_str("  local fixed=${1:-}\n");
-        out.push_str("  local base=${2:-29500}\n");
-        out.push_str("  local span=${3:-1000}\n");
+        out.push_str(&format!(
+            "  local base=${{2:-{}}}\n",
+            defaults.effective_rdzv_port_base()
+        ));
+        out.push_str(&format!(
+            "  local span=${{3:-{}}}\n",
+            defaults.effective_rdzv_port_span()
+        ));
         out.push_str("  local offset=${4:-0}\n");
         out.push_str("  if [[ -n \"$fixed\" ]]; then\n");
         out.push_str("    printf '%s' \"$fixed\"\n");
@@ -3024,14 +3026,14 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
         "  register_service {} \"$pid\" {} \"$logfile\" {} {} {} {} {} {} {} {} {} {} {} {} {} \"$host_epilogue_script\" \"$event_hooks_manifest\"\n",
         shell_quote(&service.name),
         shell_quote(&step_name),
-        shell_quote(failure_policy_mode_label(service.failure_policy.mode)),
+        shell_quote(service.failure_policy.mode.label()),
         service.failure_policy.max_restarts,
         service.failure_policy.backoff_seconds,
         service.failure_policy.window_seconds,
         service.failure_policy.max_restarts_in_window,
         shell_quote(&fn_name),
         shell_quote(&dependents_csv),
-        shell_quote(placement_mode_label(service.placement.mode)),
+        shell_quote(service.placement.mode.label()),
         service.placement.nodes,
         shell_quote(
             &service
@@ -3175,47 +3177,47 @@ fn render_readiness_wait(out: &mut String, service: &RuntimeService) {
     out.push_str("  local pid=$1\n");
     out.push_str("  local name=$2\n");
     if let Some(readiness) = &service.readiness {
-        match readiness {
-            ReadinessSpec::Sleep { seconds } => {
-                out.push_str(&format!("  wait_for_sleep \"$pid\" \"$name\" {seconds}\n"));
+        match effective_readiness(readiness, None) {
+            EffectiveReadiness::Sleep {
+                configured_seconds, ..
+            } => {
+                out.push_str(&format!(
+                    "  wait_for_sleep \"$pid\" \"$name\" {configured_seconds}\n"
+                ));
             }
-            ReadinessSpec::Tcp {
+            EffectiveReadiness::Tcp {
                 host,
                 port,
                 timeout_seconds,
             } => {
-                let host = host.as_deref().unwrap_or("127.0.0.1");
-                let timeout = timeout_seconds.unwrap_or(60);
                 out.push_str(&format!(
                     "  wait_for_tcp \"$pid\" \"$name\" {} {} {}\n",
                     shell_quote(host),
                     port,
-                    timeout
+                    timeout_seconds
                 ));
             }
-            ReadinessSpec::Log {
+            EffectiveReadiness::Log {
                 pattern,
                 timeout_seconds,
             } => {
-                let timeout = timeout_seconds.unwrap_or(60);
                 out.push_str(&format!(
                     "  wait_for_log \"$pid\" \"$name\" \"$LOG_DIR/{}\" {} {}\n",
                     log_file_name_for_service(&service.name),
                     shell_quote(pattern),
-                    timeout
+                    timeout_seconds
                 ));
             }
-            ReadinessSpec::Http {
+            EffectiveReadiness::Http {
                 url,
                 status_code,
                 timeout_seconds,
             } => {
-                let timeout = timeout_seconds.unwrap_or(60);
                 out.push_str(&format!(
                     "  wait_for_http \"$pid\" \"$name\" {} {} {}\n",
                     shell_quote(url),
                     status_code,
-                    timeout
+                    timeout_seconds
                 ));
             }
         }
@@ -3410,14 +3412,6 @@ printf 'export HPC_COMPOSE_DIST_GLOBAL_RANK=%s\n' "${HPC_COMPOSE_DIST_GLOBAL_RAN
     .to_string()
 }
 
-fn failure_policy_mode_label(mode: ServiceFailureMode) -> &'static str {
-    match mode {
-        ServiceFailureMode::FailJob => "fail_job",
-        ServiceFailureMode::Ignore => "ignore",
-        ServiceFailureMode::RestartOnFailure => "restart_on_failure",
-    }
-}
-
 fn hook_event_label(event: ServiceHookEvent) -> &'static str {
     match event {
         ServiceHookEvent::Restart => "restart",
@@ -3425,13 +3419,6 @@ fn hook_event_label(event: ServiceHookEvent) -> &'static str {
     }
 }
 
-fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
-    match mode {
-        ServicePlacementMode::PrimaryNode => "primary_node",
-        ServicePlacementMode::Partitioned => "partitioned",
-        ServicePlacementMode::Distributed => "distributed",
-    }
-}
 fn mpi_hostfile_slots(service: &RuntimeService) -> Option<u32> {
     if let Some(ntasks_per_node) = service.placement.ntasks_per_node {
         return Some(ntasks_per_node);

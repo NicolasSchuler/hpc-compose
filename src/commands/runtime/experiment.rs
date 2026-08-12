@@ -16,7 +16,6 @@
 //! names the job) via [`update_submission_record`].
 
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::OutputFormat;
@@ -371,10 +370,7 @@ fn print_experiment_show_output(output: &ExperimentShowOutput) {
         println!("Artifacts: {files} collected file(s)");
     }
     if !output.notes.is_empty() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or(0);
+        let now = crate::time_util::unix_timestamp_now();
         println!();
         println!("Notes:");
         for note in &output.notes {

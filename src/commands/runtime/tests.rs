@@ -7,6 +7,8 @@ use std::time::Duration;
 use super::*;
 use hpc_compose::cli::StatsOutputFormat;
 use hpc_compose::context::{ResolvedBinaries, ResolvedValue, ValueSource};
+use hpc_compose::planner::ServicePlacementMode;
+use hpc_compose::spec::ServiceFailureMode;
 
 fn write_compose(root: &Path) -> PathBuf {
     let compose = root.join("compose.yaml");
@@ -136,13 +138,23 @@ fn dev_restart_request_is_published_atomically() {
 
     let path = write_dev_restart_request(tmpdir.path(), &services).expect("write request");
 
-    assert!(path.parent().expect("request parent").ends_with("restart"));
+    let request_dir = tmpdir.path().join("restart");
+    assert_eq!(path.parent(), Some(request_dir.as_path()));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("request filename");
+    let timestamp = filename
+        .strip_prefix(&format!("restart-{}-", std::process::id()))
+        .and_then(|value| value.strip_suffix(".request"))
+        .expect("restart request filename format");
+    timestamp.parse::<u128>().expect("millisecond timestamp");
     assert_eq!(
         fs::read_to_string(&path).expect("read request"),
         "api\nworker\n"
     );
     assert!(
-        fs::read_dir(tmpdir.path().join("restart"))
+        fs::read_dir(&request_dir)
             .expect("read request dir")
             .filter_map(Result::ok)
             .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp.")),
@@ -657,31 +669,22 @@ fn local_helper_functions_cover_labels_ids_and_stub_state_paths() {
     )
     .expect("record");
 
-    assert!(generate_local_job_id().starts_with("local-"));
+    let local_job_id = generate_local_job_id();
+    let (timestamp, pid) = local_job_id
+        .strip_prefix("local-")
+        .and_then(|value| value.rsplit_once('-'))
+        .expect("local job id format");
+    timestamp.parse::<u64>().expect("Unix timestamp");
+    assert_eq!(pid, std::process::id().to_string());
+    assert_eq!(ServiceFailureMode::FailJob.label(), "fail_job");
+    assert_eq!(ServiceFailureMode::Ignore.label(), "ignore");
     assert_eq!(
-        local_failure_policy_mode_label(ServiceFailureMode::FailJob),
-        "fail_job"
-    );
-    assert_eq!(
-        local_failure_policy_mode_label(ServiceFailureMode::Ignore),
-        "ignore"
-    );
-    assert_eq!(
-        local_failure_policy_mode_label(ServiceFailureMode::RestartOnFailure),
+        ServiceFailureMode::RestartOnFailure.label(),
         "restart_on_failure"
     );
-    assert_eq!(
-        local_placement_mode_label(ServicePlacementMode::PrimaryNode),
-        "primary_node"
-    );
-    assert_eq!(
-        local_placement_mode_label(ServicePlacementMode::Distributed),
-        "distributed"
-    );
-    assert_eq!(
-        local_placement_mode_label(ServicePlacementMode::Partitioned),
-        "partitioned"
-    );
+    assert_eq!(ServicePlacementMode::PrimaryNode.label(), "primary_node");
+    assert_eq!(ServicePlacementMode::Distributed.label(), "distributed");
+    assert_eq!(ServicePlacementMode::Partitioned.label(), "partitioned");
     assert_eq!(service_step_name("api"), "hpc-compose:api");
     assert_eq!(
         service_step_name("api.worker-1"),
@@ -943,10 +946,9 @@ fn local_submit_support_and_warning_helpers_cover_non_linux_paths() {
     let distributed_plan = load::load_runtime_plan(&distributed).expect("distributed plan");
     let distributed_err =
         ensure_local_plan_supported(&distributed_plan).expect_err("distributed unsupported");
-    assert!(
-        distributed_err
-            .to_string()
-            .contains("does not support distributed or partitioned placement")
+    assert_eq!(
+        distributed_err.to_string(),
+        "--local does not support distributed or partitioned placement; service 'app' uses distributed placement"
     );
 
     let extra_args = tmpdir.path().join("extra-args.yaml");
@@ -1336,6 +1338,12 @@ fn acquire_up_invocation_lock_reclaims_stale_pid() {
     assert_eq!(
         written["host"],
         serde_json::Value::from(current_up_invocation_host().expect("test host"))
+    );
+    assert!(
+        written["created_at_unix"]
+            .as_u64()
+            .is_some_and(|timestamp| timestamp > 0),
+        "lock timestamp must remain Unix seconds: {written}"
     );
     drop(guard);
     assert!(

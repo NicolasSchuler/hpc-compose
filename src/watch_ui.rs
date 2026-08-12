@@ -12,7 +12,7 @@ use std::sync::{
     mpsc,
 };
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use crossterm::cursor::MoveTo;
@@ -1180,7 +1180,7 @@ fn run_watch_ui_loop(
             &snapshot.record,
             &snapshot.scheduler,
             snapshot.queue_diagnostics.as_ref(),
-            current_unix_timestamp(),
+            crate::time_util::unix_timestamp_now(),
         );
         // The walltime bar advances once per second; treat any change to it as a
         // reason to repaint even when no other input arrived.
@@ -2564,19 +2564,8 @@ fn restart_supported(record: &SubmissionRecord) -> bool {
 /// mechanism `hpc-compose dev` uses for file-watch reloads. Returns the request
 /// path on success.
 fn request_service_restart(record: &SubmissionRecord, service: &str) -> Result<PathBuf> {
-    let request_dir = runtime_job_root_for_record(record)
-        .join("dev-control")
-        .join("restart");
-    fs::create_dir_all(&request_dir)
-        .with_context(|| format!("failed to create {}", request_dir.display()))?;
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let path = request_dir.join(format!("restart-{}-{millis}.request", std::process::id()));
-    crate::secure_io::write_atomic(&path, format!("{service}\n").as_bytes(), false)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(path)
+    let control_dir = runtime_job_root_for_record(record).join("dev-control");
+    crate::runtime_control::write_restart_request(&control_dir, [service])
 }
 
 fn build_all_log_lines(snapshot: &PsSnapshot, lines: usize, capacity: usize) -> Vec<String> {
@@ -3008,14 +2997,6 @@ fn parse_search_keys(buffer: &mut Vec<u8>) -> Vec<SearchKey> {
 
 fn log_capacity(height: usize) -> usize {
     height.saturating_sub(6).max(4)
-}
-
-fn current_unix_timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 fn render_walltime_bar(progress: &WalltimeProgress, width: usize) -> String {
