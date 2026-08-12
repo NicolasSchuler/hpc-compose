@@ -750,7 +750,7 @@ echo "777;test-cluster"
         let elapsed = started.elapsed();
 
         assert!(
-            elapsed < PROBE_TEST_TIMEOUT + Duration::from_secs(2),
+            elapsed < PROBE_TEST_TIMEOUT + FS_PROBE_CANCEL_TIMEOUT + Duration::from_secs(2),
             "probe ignored its client deadline and ran for {elapsed:?}"
         );
         assert!(err.contains("timed out"), "unexpected error: {err}");
